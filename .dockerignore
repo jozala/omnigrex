@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+.env
+bin
+coverage
+dist
+docs
+*.local

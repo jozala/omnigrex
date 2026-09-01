@@ -1,0 +1,45 @@
+[tools]
+go = "1.27.0"
+
+[tasks.format]
+description = "Format Go source files"
+run = "gofmt -w ."
+
+[tasks.format-check]
+description = "Check Go source formatting"
+run = '''
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then
+  printf '%s\n' "$unformatted"
+  exit 1
+fi
+'''
+
+[tasks.lint]
+description = "Run static analysis"
+run = "go vet ./..."
+
+[tasks.test]
+description = "Run unit tests"
+run = "go test -race ./..."
+
+[tasks.test-integration]
+description = "Run Docker-backed integration tests"
+depends = ["agent-image"]
+run = "go test -race -tags=integration ./internal/runtime/acp"
+
+[tasks.compose-check]
+description = "Validate the Docker Compose configuration"
+run = "docker compose config --quiet"
+
+[tasks.image]
+description = "Build the orchestrator image"
+run = "docker build --tag omnigrex/orchestrator:dev ."
+
+[tasks.agent-image]
+description = "Build the pinned OpenCode Runtime Process image"
+run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.19 ."
+
+[tasks.check]
+description = "Run all local verification checks"
+depends = ["format-check", "lint", "test", "compose-check"]
