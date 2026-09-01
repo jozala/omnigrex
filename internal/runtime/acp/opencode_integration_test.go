@@ -37,6 +37,9 @@ const (
 	recoveryPrompt     = "VERIFY_AFTER_INTERRUPTION"
 	recoveryMarker     = "INTERRUPTION_RECOVERED"
 	mcpProtocolVersion = "2025-11-25"
+	localToolPrompt    = "RUN_LOCAL_TOOL"
+	localToolCommand   = "printf LOCAL_TOOL_STARTED; sleep 120"
+	localToolMarker    = "LOCAL_TOOL_STARTED"
 )
 
 func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
@@ -167,18 +170,83 @@ func TestOpenCodePromptCancellationReturnsTerminalResult(t *testing.T) {
 	process.stop(t)
 }
 
+func TestOpenCodeSessionContinuesAfterProviderStreamInterruption(t *testing.T) {
+	testOpenCodeSessionContinuesAfterInterruption(t, interruptionTestCase{
+		purpose: "provider-stream",
+		prompt:  blockingPrompt,
+		wait: func(t *testing.T, updates <-chan acp.SessionUpdate) {
+			waitForAgentText(t, updates, workingMarker)
+		},
+	})
+}
+
+func TestOpenCodeSessionContinuesAfterLocalToolInterruption(t *testing.T) {
+	testOpenCodeSessionContinuesAfterInterruption(t, interruptionTestCase{
+		purpose: "local-tool",
+		prompt:  localToolPrompt,
+		wait: func(t *testing.T, updates <-chan acp.SessionUpdate) {
+			waitForToolOutput(t, updates, localToolMarker)
+		},
+	})
+}
+
+func TestOpenCodeSessionContinuesAfterMCPCallInterruption(t *testing.T) {
+	testOpenCodeSessionContinuesAfterMCPInterruption(t, mcpBlockBeforeSideEffect)
+}
+
 func TestOpenCodeSessionContinuesAfterMCPResultInterruption(t *testing.T) {
-	image := localOpenCodeImage(t)
-	providerConfig := startFakeProvider(t)
-	mcp := startBlockingTestMCPServer(t)
+	testOpenCodeSessionContinuesAfterMCPInterruption(t, mcpBlockAfterSideEffect)
+}
+
+func testOpenCodeSessionContinuesAfterMCPInterruption(t *testing.T, blockPoint mcpBlockPoint) {
+	t.Helper()
+
+	mcp := startMCPServer(t, blockPoint)
 	mcpServers := []acp.MCPServer{{
 		Type: "http",
 		Name: "compat",
 		URL:  mcp.URL,
 	}}
-	workspaceVolume := uniqueDockerName("interrupted-workspace")
-	runtimeStateVolume := uniqueDockerName("interrupted-runtime-state")
-	miseVolume := uniqueDockerName("interrupted-mise")
+	purpose := "mcp-call"
+	if blockPoint == mcpBlockAfterSideEffect {
+		purpose = "mcp-result"
+	}
+	testOpenCodeSessionContinuesAfterInterruption(t, interruptionTestCase{
+		purpose:    purpose,
+		prompt:     mcpPrompt,
+		mcpServers: mcpServers,
+		wait: func(t *testing.T, _ <-chan acp.SessionUpdate) {
+			call := mcp.waitForCall(t)
+			if call.Name != "echo" || !mapsEqual(call.Arguments, map[string]any{"value": "phase-2"}) {
+				t.Fatalf("MCP tool call = %+v, want echo with phase-2", call)
+			}
+		},
+		verify: func(t *testing.T) {
+			if blockPoint == mcpBlockAfterSideEffect {
+				mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
+			} else {
+				mcp.assertNoCalls(t)
+			}
+		},
+	})
+}
+
+type interruptionTestCase struct {
+	purpose    string
+	prompt     string
+	mcpServers []acp.MCPServer
+	wait       func(*testing.T, <-chan acp.SessionUpdate)
+	verify     func(*testing.T)
+}
+
+func testOpenCodeSessionContinuesAfterInterruption(t *testing.T, testCase interruptionTestCase) {
+	t.Helper()
+
+	image := localOpenCodeImage(t)
+	providerConfig := startFakeProvider(t)
+	workspaceVolume := uniqueDockerName(testCase.purpose + "-workspace")
+	runtimeStateVolume := uniqueDockerName(testCase.purpose + "-runtime-state")
+	miseVolume := uniqueDockerName(testCase.purpose + "-mise")
 	createDockerVolume(t, workspaceVolume)
 	createDockerVolume(t, runtimeStateVolume)
 	createDockerVolume(t, miseVolume)
@@ -189,7 +257,7 @@ func TestOpenCodeSessionContinuesAfterMCPResultInterruption(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	session, err := first.client.CreateSession(ctx, acp.CreateSessionRequest{
 		CWD:        acp.WorkspacePath,
-		MCPServers: mcpServers,
+		MCPServers: testCase.mcpServers,
 	})
 	cancel()
 	if err != nil {
@@ -200,21 +268,18 @@ func TestOpenCodeSessionContinuesAfterMCPResultInterruption(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, err := first.client.Prompt(ctx, session.ID, []acp.ContentBlock{acp.TextContent(mcpPrompt)})
+		_, err := first.client.Prompt(ctx, session.ID, []acp.ContentBlock{acp.TextContent(testCase.prompt)})
 		promptCompleted <- err
 	}()
-	call := mcp.waitForCall(t)
-	if call.Name != "echo" || !mapsEqual(call.Arguments, map[string]any{"value": "phase-2"}) {
-		t.Fatalf("MCP tool call = %+v, want echo with phase-2", call)
-	}
+	testCase.wait(t, firstUpdates)
 	first.kill(t)
 	select {
 	case err := <-promptCompleted:
 		if err == nil {
-			t.Fatal("interrupted MCP prompt unexpectedly completed")
+			t.Fatalf("interrupted %s prompt unexpectedly completed", testCase.purpose)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("interrupted MCP prompt did not return")
+		t.Fatalf("interrupted %s prompt did not return", testCase.purpose)
 	}
 
 	secondUpdates := make(chan acp.SessionUpdate, 16)
@@ -224,15 +289,17 @@ func TestOpenCodeSessionContinuesAfterMCPResultInterruption(t *testing.T) {
 	err = second.client.ContinueSession(ctx, acp.ContinueSessionRequest{
 		SessionID:  session.ID,
 		CWD:        acp.WorkspacePath,
-		MCPServers: mcpServers,
+		MCPServers: testCase.mcpServers,
 	})
 	cancel()
 	if err != nil {
-		t.Fatalf("ContinueSession() after MCP interruption error = %v\nOpenCode stderr:\n%s", err, second.stderr.String())
+		t.Fatalf("ContinueSession() after %s interruption error = %v\nOpenCode stderr:\n%s", testCase.purpose, err, second.stderr.String())
 	}
 	prompt(t, second, session.ID, recoveryPrompt)
 	waitForAgentText(t, secondUpdates, recoveryMarker)
-	mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
+	if testCase.verify != nil {
+		testCase.verify(t)
+	}
 	second.stop(t)
 }
 
@@ -343,7 +410,7 @@ func startOpenCode(
 		OnUpdate: func(_ context.Context, update acp.SessionUpdate) {
 			updates <- update
 		},
-		DecidePermission: allowCompatibilityMCPTool,
+		DecidePermission: compatibilityPermissionDecision,
 	})
 	t.Cleanup(func() {
 		process.stop(t)
@@ -395,6 +462,33 @@ func waitForAgentText(t *testing.T, updates <-chan acp.SessionUpdate, want strin
 			}
 		case <-timer.C:
 			t.Fatalf("agent did not emit text %q", want)
+		}
+	}
+}
+
+func waitForToolOutput(t *testing.T, updates <-chan acp.SessionUpdate, want string) {
+	t.Helper()
+
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case update := <-updates:
+			var event struct {
+				Kind    string          `json:"sessionUpdate"`
+				Status  string          `json:"status"`
+				Content json.RawMessage `json:"content"`
+			}
+			if err := json.Unmarshal(update.Update, &event); err != nil {
+				t.Fatalf("decode session update: %v", err)
+			}
+			if event.Kind == "tool_call_update" &&
+				event.Status == "in_progress" &&
+				strings.Contains(string(event.Content), want) {
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("tool did not emit output %q", want)
 		}
 	}
 }
@@ -476,7 +570,8 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		texts = append(texts, message.Role+":"+messageText(message.Content))
 	}
 	transcript := strings.Join(texts, "\n")
-	if strings.Contains(transcript, blockingPrompt) {
+	activePrompt := latestUserMessage(chat)
+	if strings.Contains(activePrompt, blockingPrompt) {
 		response.Header().Set("Content-Type", "text/event-stream")
 		writeSSE(response, map[string]any{
 			"id":     "chatcmpl-fake",
@@ -495,7 +590,7 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 	switch {
 	case strings.Contains(transcript, "Generate a title for this conversation"):
 		reply = "History continuation test"
-	case strings.Contains(transcript, continuationPrompt):
+	case strings.Contains(activePrompt, continuationPrompt):
 		seed := strings.Index(transcript, "user:"+seedPrompt)
 		marker := strings.Index(transcript, "assistant:"+firstMarker)
 		continuation := strings.LastIndex(transcript, "user:"+continuationPrompt)
@@ -504,18 +599,29 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		} else {
 			reply = "HISTORY_MISSING"
 		}
-	case strings.Contains(transcript, recoveryPrompt):
+	case strings.Contains(activePrompt, recoveryPrompt):
 		reply = recoveryMarker
+	case strings.Contains(activePrompt, localToolPrompt):
+		if !hasFakeTool(chat, "bash") {
+			reply = "LOCAL_TOOL_MISSING"
+			break
+		}
+		writeFakeToolCall(response, "bash", map[string]any{
+			"command": localToolCommand,
+			"timeout": 180_000,
+			"workdir": acp.WorkspacePath,
+		})
+		return
 	case strings.Contains(transcript, mcpSideEffect):
 		reply = mcpResultMarker
-	case strings.Contains(transcript, mcpPrompt):
+	case strings.Contains(activePrompt, mcpPrompt):
 		if !hasFakeTool(chat, "compat_echo") {
 			reply = "MCP_TOOL_MISSING"
 			break
 		}
 		writeFakeToolCall(response, "compat_echo", map[string]any{"value": "phase-2"})
 		return
-	case strings.Contains(transcript, seedPrompt):
+	case strings.Contains(activePrompt, seedPrompt):
 		reply = firstMarker
 	}
 
@@ -593,6 +699,15 @@ func hasFakeTool(request fakeChatRequest, name string) bool {
 	return false
 }
 
+func latestUserMessage(request fakeChatRequest) string {
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role == "user" {
+			return messageText(request.Messages[index].Content)
+		}
+	}
+	return ""
+}
+
 func messageText(content json.RawMessage) string {
 	var text string
 	if json.Unmarshal(content, &text) == nil {
@@ -618,14 +733,23 @@ func messageText(content json.RawMessage) string {
 }
 
 type testMCPServer struct {
-	URL                  string
-	blockAfterSideEffect bool
-	callObserved         chan mcpToolCall
-	mutex                sync.Mutex
-	calls                []mcpToolCall
-	initializing         bool
-	initialized          bool
+	URL           string
+	blockPoint    mcpBlockPoint
+	blockConsumed bool
+	callObserved  chan mcpToolCall
+	mutex         sync.Mutex
+	calls         []mcpToolCall
+	initializing  bool
+	initialized   bool
 }
+
+type mcpBlockPoint uint8
+
+const (
+	mcpBlockNone mcpBlockPoint = iota
+	mcpBlockBeforeSideEffect
+	mcpBlockAfterSideEffect
+)
 
 type mcpToolCall struct {
 	Name      string
@@ -640,14 +764,10 @@ type mcpRPCRequest struct {
 }
 
 func startTestMCPServer(t *testing.T) *testMCPServer {
-	return startMCPServer(t, false)
+	return startMCPServer(t, mcpBlockNone)
 }
 
-func startBlockingTestMCPServer(t *testing.T) *testMCPServer {
-	return startMCPServer(t, true)
-}
-
-func startMCPServer(t *testing.T, blockAfterSideEffect bool) *testMCPServer {
+func startMCPServer(t *testing.T, blockPoint mcpBlockPoint) *testMCPServer {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
@@ -655,8 +775,8 @@ func startMCPServer(t *testing.T, blockAfterSideEffect bool) *testMCPServer {
 		t.Fatalf("start test MCP listener: %v", err)
 	}
 	fixture := &testMCPServer{
-		blockAfterSideEffect: blockAfterSideEffect,
-		callObserved:         make(chan mcpToolCall, 1),
+		blockPoint:   blockPoint,
+		callObserved: make(chan mcpToolCall, 1),
 	}
 	server := &http.Server{Handler: http.HandlerFunc(fixture.handle)}
 	go func() {
@@ -795,15 +915,17 @@ func (fixture *testMCPServer) handle(response http.ResponseWriter, request *http
 			writeMCPError(response, rpcRequest.ID, -32602, "invalid tool call")
 			return
 		}
-		fixture.mutex.Lock()
 		call := mcpToolCall{Name: params.Name, Arguments: params.Arguments}
+		if fixture.takeBlock(mcpBlockBeforeSideEffect) {
+			fixture.observeCall(call)
+			<-request.Context().Done()
+			return
+		}
+		fixture.mutex.Lock()
 		fixture.calls = append(fixture.calls, call)
 		fixture.mutex.Unlock()
-		select {
-		case fixture.callObserved <- call:
-		default:
-		}
-		if fixture.blockAfterSideEffect {
+		fixture.observeCall(call)
+		if fixture.takeBlock(mcpBlockAfterSideEffect) {
 			<-request.Context().Done()
 			return
 		}
@@ -824,6 +946,23 @@ func (fixture *testMCPServer) handle(response http.ResponseWriter, request *http
 		}
 		writeMCPError(response, rpcRequest.ID, -32601, "method not found")
 	}
+}
+
+func (fixture *testMCPServer) observeCall(call mcpToolCall) {
+	select {
+	case fixture.callObserved <- call:
+	default:
+	}
+}
+
+func (fixture *testMCPServer) takeBlock(point mcpBlockPoint) bool {
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	if fixture.blockPoint != point || fixture.blockConsumed {
+		return false
+	}
+	fixture.blockConsumed = true
+	return true
 }
 
 func acceptsMediaType(header, mediaType string) bool {
@@ -906,6 +1045,16 @@ func (fixture *testMCPServer) assertSingleCall(t *testing.T, name string, argume
 	}
 }
 
+func (fixture *testMCPServer) assertNoCalls(t *testing.T) {
+	t.Helper()
+
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	if len(fixture.calls) != 0 {
+		t.Fatalf("MCP tool calls = %+v, want none", fixture.calls)
+	}
+}
+
 func (fixture *testMCPServer) waitForCall(t *testing.T) mcpToolCall {
 	t.Helper()
 
@@ -924,11 +1073,24 @@ func mapsEqual(left, right map[string]any) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
-func allowCompatibilityMCPTool(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
+func compatibilityPermissionDecision(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
 	var toolCall struct {
-		Title string `json:"title"`
+		ID       string         `json:"toolCallId"`
+		Title    string         `json:"title"`
+		Kind     string         `json:"kind"`
+		Status   string         `json:"status"`
+		RawInput map[string]any `json:"rawInput"`
 	}
-	if json.Unmarshal(request.ToolCall, &toolCall) != nil || toolCall.Title != "compat_echo" {
+	if json.Unmarshal(request.ToolCall, &toolCall) != nil || toolCall.ID == "" || toolCall.Status != "pending" {
+		return acp.PermissionDecision{}
+	}
+	authorized := toolCall.Title == "compat_echo" && toolCall.Kind == "other" && len(toolCall.RawInput) == 0
+	if toolCall.Title == localToolCommand &&
+		toolCall.Kind == "execute" &&
+		toolCall.RawInput["command"] == localToolCommand {
+		authorized = true
+	}
+	if !authorized {
 		return acp.PermissionDecision{}
 	}
 	for _, option := range request.Options {

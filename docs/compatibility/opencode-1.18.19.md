@@ -30,6 +30,9 @@ The following behavior passes against the real OpenCode binary through the Moby 
 - A persisted conversation marker is included in the resumed model history and changes the response of a stateless fake provider.
 - An ACP-provided Streamable HTTP MCP `2025-11-25` server is registered, advertises a tool to the model, and executes the requested side effect exactly once.
 - After interruption between an MCP side effect and result delivery, a fresh Runtime Process can continue the same Agent Session and accept another prompt without repeating the side effect.
+- After interruption during an MCP call before its side effect, a fresh Runtime Process can continue the same Agent Session and accept another prompt with no side effect recorded.
+- After interruption during provider streaming, a fresh Runtime Process can continue the same Agent Session and accept another prompt.
+- After interruption during a local shell tool call that has emitted output, a fresh Runtime Process can continue the same Agent Session and accept another prompt.
 - Prompt cancellation aborts an active provider stream and returns terminal stop reason `cancelled`.
 - ACP standard output is demultiplexed from Runtime Process standard error.
 - The image and live process use UID and GID `10001` with all Linux capabilities dropped and `no-new-privileges` enabled.
@@ -46,5 +49,5 @@ mise run test-integration
 
 This is the first candidate, so no previous-stable to candidate upgrade result exists yet.
 A future candidate must be tested from a copied `1.18.19` state directory without mutating the original.
-The compatibility suite does not yet cover replacing workspace contents between Runtime Processes, actual loss of the `session/new` response after state persistence, interruption during provider streaming, a local tool call, or an MCP call before its side effect, or the complete Reviewer project-configuration isolation matrix.
+The compatibility suite does not yet cover replacing workspace contents between Runtime Processes, actual loss of the `session/new` response after state persistence, or the complete Reviewer project-configuration isolation matrix.
 OpenCode `1.18.19` can still discover nested `AGENTS.md` and `CONTEXT.md` files when reading files, so pure mode is not treated as a complete instruction sandbox.
