@@ -3,6 +3,7 @@
 package acp_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -40,6 +41,11 @@ const (
 	localToolPrompt    = "RUN_LOCAL_TOOL"
 	localToolCommand   = "printf LOCAL_TOOL_STARTED; sleep 120"
 	localToolMarker    = "LOCAL_TOOL_STARTED"
+	workspacePrompt    = "VERIFY_REPLACED_WORKSPACE"
+	workspaceCommand   = "read -r value < /workspace/generation.txt && printf '%s' \"$value\""
+	workspaceInitial   = "WORKSPACE_GENERATION_INITIAL"
+	workspaceOutput    = "WORKSPACE_GENERATION_REPLACED"
+	workspaceMarker    = "REPLACED_WORKSPACE_CONFIRMED"
 )
 
 func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
@@ -57,6 +63,7 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	createDockerVolume(t, workspaceVolume)
 	createDockerVolume(t, runtimeStateVolume)
 	createDockerVolume(t, miseVolume)
+	replaceWorkspaceContents(t, workspaceVolume, workspaceInitial)
 
 	firstUpdates := make(chan acp.SessionUpdate, 16)
 	first := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, firstUpdates)
@@ -76,6 +83,7 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	waitForAgentText(t, firstUpdates, mcpResultMarker)
 	mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
 	first.stop(t)
+	replaceWorkspaceContents(t, workspaceVolume, workspaceOutput)
 
 	secondUpdates := make(chan acp.SessionUpdate, 16)
 	second := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, secondUpdates)
@@ -115,10 +123,68 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ContinueSession() error = %v\nOpenCode stderr:\n%s", err, third.stderr.String())
 	}
+	prompt(t, third, session.ID, workspacePrompt)
+	waitForAgentText(t, thirdUpdates, workspaceMarker)
 	prompt(t, third, session.ID, continuationPrompt)
 	waitForAgentText(t, thirdUpdates, continuedMarker)
 	third.stop(t)
 	assertRuntimeStateExcludes(t, runtimeStateVolume, "not-a-real-secret")
+}
+
+func TestOpenCodeRecoversSessionAfterCreateResponseLoss(t *testing.T) {
+	image := localOpenCodeImage(t)
+	providerConfig := startFakeProvider(t)
+	workspaceVolume := uniqueDockerName("lost-create-workspace")
+	runtimeStateVolume := uniqueDockerName("lost-create-runtime-state")
+	miseVolume := uniqueDockerName("lost-create-mise")
+	createDockerVolume(t, workspaceVolume)
+	createDockerVolume(t, runtimeStateVolume)
+	createDockerVolume(t, miseVolume)
+
+	updates := make(chan acp.SessionUpdate, 16)
+	var droppingTransport *sessionNewResponseDroppingTransport
+	first := startOpenCodeWithTransport(
+		t,
+		image,
+		workspaceVolume,
+		runtimeStateVolume,
+		miseVolume,
+		providerConfig,
+		updates,
+		func(transport io.ReadWriteCloser) io.ReadWriteCloser {
+			droppingTransport = newSessionNewResponseDroppingTransport(transport)
+			return droppingTransport
+		},
+	)
+	initializeOpenCode(t, first.client)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_, err := first.client.CreateSession(ctx, acp.CreateSessionRequest{CWD: acp.WorkspacePath})
+	cancel()
+	if err == nil {
+		t.Fatal("CreateSession() unexpectedly received the discarded response")
+	}
+	select {
+	case <-droppingTransport.dropped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session/new response was not discarded")
+	}
+	first.kill(t)
+
+	second := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, updates)
+	initializeOpenCode(t, second.client)
+	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+	recovered, err := second.client.RecoverCreatedSession(ctx, acp.WorkspacePath)
+	cancel()
+	if err != nil {
+		t.Fatalf("RecoverCreatedSession() after response loss error = %v\nOpenCode stderr:\n%s", err, second.stderr.String())
+	}
+	if recovered.ID == "" {
+		t.Fatal("RecoverCreatedSession() returned an empty session ID")
+	}
+	if recovered.ID != droppingTransport.droppedSessionIDValue() {
+		t.Fatalf("recovered session ID = %q, want discarded response session ID %q", recovered.ID, droppingTransport.droppedSessionIDValue())
+	}
+	second.stop(t)
 }
 
 func TestOpenCodePromptCancellationReturnsTerminalResult(t *testing.T) {
@@ -311,6 +377,119 @@ type openCodeProcess struct {
 	once    sync.Once
 }
 
+type sessionNewResponseDroppingTransport struct {
+	transport        io.ReadWriteCloser
+	reader           *bufio.Reader
+	dropped          chan struct{}
+	readMutex        sync.Mutex
+	readBuffer       []byte
+	writeMutex       sync.Mutex
+	writeBuffer      []byte
+	targetID         string
+	droppedSessionID string
+	dropOnce         sync.Once
+}
+
+func newSessionNewResponseDroppingTransport(transport io.ReadWriteCloser) *sessionNewResponseDroppingTransport {
+	return &sessionNewResponseDroppingTransport{
+		transport: transport,
+		reader:    bufio.NewReader(transport),
+		dropped:   make(chan struct{}),
+	}
+}
+
+func (transport *sessionNewResponseDroppingTransport) Read(data []byte) (int, error) {
+	transport.readMutex.Lock()
+	defer transport.readMutex.Unlock()
+
+	if len(transport.readBuffer) > 0 {
+		read := copy(data, transport.readBuffer)
+		transport.readBuffer = transport.readBuffer[read:]
+		return read, nil
+	}
+	for {
+		line, err := transport.reader.ReadBytes('\n')
+		if transport.shouldDrop(line) {
+			transport.dropOnce.Do(func() {
+				close(transport.dropped)
+			})
+			_ = transport.transport.Close()
+			return 0, io.EOF
+		}
+		if len(line) > 0 {
+			read := copy(data, line)
+			transport.readBuffer = append(transport.readBuffer[:0], line[read:]...)
+			return read, nil
+		}
+		return 0, err
+	}
+}
+
+func (transport *sessionNewResponseDroppingTransport) Write(data []byte) (int, error) {
+	transport.writeMutex.Lock()
+	defer transport.writeMutex.Unlock()
+	written, err := transport.transport.Write(data)
+	transport.writeBuffer = append(transport.writeBuffer, data[:written]...)
+	for {
+		end := bytes.IndexByte(transport.writeBuffer, '\n')
+		if end < 0 {
+			break
+		}
+		line := transport.writeBuffer[:end]
+		transport.writeBuffer = transport.writeBuffer[end+1:]
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(line, &request) == nil && request.Method == "session/new" && len(request.ID) > 0 {
+			transport.targetID = string(bytes.TrimSpace(request.ID))
+		}
+	}
+	return written, err
+}
+
+func (transport *sessionNewResponseDroppingTransport) Close() error {
+	return transport.transport.Close()
+}
+
+func (transport *sessionNewResponseDroppingTransport) shouldDrop(line []byte) bool {
+	transport.writeMutex.Lock()
+	targetID := transport.targetID
+	transport.writeMutex.Unlock()
+	if targetID == "" {
+		return false
+	}
+	var response struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Result  struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(line), &response) != nil {
+		return false
+	}
+	matched := response.JSONRPC == "2.0" &&
+		response.Method == "" &&
+		string(bytes.TrimSpace(response.ID)) == targetID &&
+		response.Result.SessionID != "" &&
+		len(response.Error) == 0
+	if matched {
+		transport.writeMutex.Lock()
+		transport.droppedSessionID = response.Result.SessionID
+		transport.writeMutex.Unlock()
+	}
+	return matched
+}
+
+func (transport *sessionNewResponseDroppingTransport) droppedSessionIDValue() string {
+	transport.writeMutex.Lock()
+	defer transport.writeMutex.Unlock()
+	return transport.droppedSessionID
+}
+
 func startOpenCode(
 	t *testing.T,
 	image string,
@@ -319,6 +498,28 @@ func startOpenCode(
 	miseVolume string,
 	providerConfig string,
 	updates chan<- acp.SessionUpdate,
+) *openCodeProcess {
+	return startOpenCodeWithTransport(
+		t,
+		image,
+		workspaceVolume,
+		runtimeStateVolume,
+		miseVolume,
+		providerConfig,
+		updates,
+		nil,
+	)
+}
+
+func startOpenCodeWithTransport(
+	t *testing.T,
+	image string,
+	workspaceVolume string,
+	runtimeStateVolume string,
+	miseVolume string,
+	providerConfig string,
+	updates chan<- acp.SessionUpdate,
+	wrapTransport func(io.ReadWriteCloser) io.ReadWriteCloser,
 ) *openCodeProcess {
 	t.Helper()
 
@@ -401,7 +602,11 @@ func startOpenCode(
 		_ = engine.Close()
 		t.Fatalf("start OpenCode Runtime Process: %v\nOpenCode stderr:\n%s", err, process.stderr.String())
 	}
-	process.client = acp.NewClient(process.process.Transport(), acp.ClientOptions{
+	transport := process.process.Transport()
+	if wrapTransport != nil {
+		transport = wrapTransport(transport)
+	}
+	process.client = acp.NewClient(transport, acp.ClientOptions{
 		RequiredCapabilities: acp.RequiredCapabilities{
 			SessionList:   true,
 			SessionResume: true,
@@ -601,6 +806,19 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		}
 	case strings.Contains(activePrompt, recoveryPrompt):
 		reply = recoveryMarker
+	case strings.Contains(activePrompt, workspacePrompt) && strings.Contains(latestToolMessage(chat), workspaceOutput):
+		reply = workspaceMarker
+	case strings.Contains(activePrompt, workspacePrompt):
+		if !hasFakeTool(chat, "bash") {
+			reply = "WORKSPACE_TOOL_MISSING"
+			break
+		}
+		writeFakeToolCall(response, "bash", map[string]any{
+			"command": workspaceCommand,
+			"timeout": 15_000,
+			"workdir": acp.WorkspacePath,
+		})
+		return
 	case strings.Contains(activePrompt, localToolPrompt):
 		if !hasFakeTool(chat, "bash") {
 			reply = "LOCAL_TOOL_MISSING"
@@ -702,6 +920,15 @@ func hasFakeTool(request fakeChatRequest, name string) bool {
 func latestUserMessage(request fakeChatRequest) string {
 	for index := len(request.Messages) - 1; index >= 0; index-- {
 		if request.Messages[index].Role == "user" {
+			return messageText(request.Messages[index].Content)
+		}
+	}
+	return ""
+}
+
+func latestToolMessage(request fakeChatRequest) string {
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role == "tool" {
 			return messageText(request.Messages[index].Content)
 		}
 	}
@@ -1085,9 +1312,9 @@ func compatibilityPermissionDecision(_ context.Context, request acp.PermissionRe
 		return acp.PermissionDecision{}
 	}
 	authorized := toolCall.Title == "compat_echo" && toolCall.Kind == "other" && len(toolCall.RawInput) == 0
-	if toolCall.Title == localToolCommand &&
+	if (toolCall.Title == localToolCommand || toolCall.Title == workspaceCommand) &&
 		toolCall.Kind == "execute" &&
-		toolCall.RawInput["command"] == localToolCommand {
+		toolCall.RawInput["command"] == toolCall.Title {
 		authorized = true
 	}
 	if !authorized {
@@ -1188,6 +1415,25 @@ func createDockerVolume(t *testing.T, name string) {
 			t.Errorf("remove Docker volume %q: %v\n%s", name, err, output)
 		}
 	})
+}
+
+func replaceWorkspaceContents(t *testing.T, volume, generation string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(
+		ctx,
+		"docker", "run", "--rm",
+		"--mount", "type=volume,src="+volume+",dst=/volume",
+		"alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+		"sh", "-c",
+		"rm -rf /volume/assignment && mkdir -p /volume/assignment && printf '%s\n' \"$1\" > /volume/assignment/generation.txt && chown -R 10001:10001 /volume/assignment",
+		"sh", generation,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("replace workspace contents in Docker volume %q: %v\n%s", volume, err, output)
+	}
 }
 
 func localOpenCodeImage(t *testing.T) string {

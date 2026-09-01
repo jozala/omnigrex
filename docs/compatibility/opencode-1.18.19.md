@@ -25,9 +25,11 @@ The following behavior passes against the real OpenCode binary through the Moby 
 - Session creation at `/workspace`.
 - Assignment-isolated discovery across a fresh Runtime Process.
 - Ambiguous creation recovery through paginated `session/list` with exactly-one enforcement.
+- When the persisted `session/new` response is discarded, a fresh Runtime Process recovers exactly one session through `session/list` without creating a duplicate.
 - History Replay through `session/load` in a fresh Runtime Process.
 - Session Continuation through `session/resume` in another fresh Runtime Process.
 - A persisted conversation marker is included in the resumed model history and changes the response of a stateless fake provider.
+- Workspace contents are deleted and recreated between Runtime Processes, and the continued Agent Session observes the replacement at the stable `/workspace` path.
 - An ACP-provided Streamable HTTP MCP `2025-11-25` server is registered, advertises a tool to the model, and executes the requested side effect exactly once.
 - After interruption between an MCP side effect and result delivery, a fresh Runtime Process can continue the same Agent Session and accept another prompt without repeating the side effect.
 - After interruption during an MCP call before its side effect, a fresh Runtime Process can continue the same Agent Session and accept another prompt with no side effect recorded.
@@ -49,5 +51,5 @@ mise run test-integration
 
 This is the first candidate, so no previous-stable to candidate upgrade result exists yet.
 A future candidate must be tested from a copied `1.18.19` state directory without mutating the original.
-The compatibility suite does not yet cover replacing workspace contents between Runtime Processes, actual loss of the `session/new` response after state persistence, or the complete Reviewer project-configuration isolation matrix.
+The compatibility suite does not yet cover the complete Reviewer project-configuration isolation matrix.
 OpenCode `1.18.19` can still discover nested `AGENTS.md` and `CONTEXT.md` files when reading files, so pure mode is not treated as a complete instruction sandbox.
