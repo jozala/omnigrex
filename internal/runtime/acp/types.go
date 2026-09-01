@@ -18,10 +18,35 @@ type Implementation struct {
 }
 
 type InitializeResponse struct {
-	ProtocolVersion   int               `json:"protocolVersion"`
-	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
-	AgentInfo         *Implementation   `json:"agentInfo,omitempty"`
-	AuthMethods       []json.RawMessage `json:"authMethods,omitempty"`
+	ProtocolVersion      int               `json:"protocolVersion"`
+	AgentCapabilities    AgentCapabilities `json:"agentCapabilities"`
+	RawAgentCapabilities json.RawMessage   `json:"-"`
+	AgentInfo            *Implementation   `json:"agentInfo,omitempty"`
+	AuthMethods          []json.RawMessage `json:"authMethods,omitempty"`
+}
+
+func (response *InitializeResponse) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		ProtocolVersion   int               `json:"protocolVersion"`
+		AgentCapabilities json.RawMessage   `json:"agentCapabilities"`
+		AgentInfo         *Implementation   `json:"agentInfo,omitempty"`
+		AuthMethods       []json.RawMessage `json:"authMethods,omitempty"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	var capabilities AgentCapabilities
+	if len(payload.AgentCapabilities) != 0 {
+		if err := json.Unmarshal(payload.AgentCapabilities, &capabilities); err != nil {
+			return err
+		}
+	}
+	response.ProtocolVersion = payload.ProtocolVersion
+	response.AgentCapabilities = capabilities
+	response.RawAgentCapabilities = append(response.RawAgentCapabilities[:0], payload.AgentCapabilities...)
+	response.AgentInfo = payload.AgentInfo
+	response.AuthMethods = payload.AuthMethods
+	return nil
 }
 
 type AgentCapabilities struct {

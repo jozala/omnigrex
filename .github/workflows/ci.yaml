@@ -48,6 +48,9 @@ jobs:
       - name: Build OpenCode Runtime Process image
         run: docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.19 .
 
+      - name: Build previous OpenCode compatibility image
+        run: docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.18 --tag omnigrex/opencode:1.18.18 .
+
       - name: Verify hardened OpenCode image
         run: |
           docker run --rm --read-only \

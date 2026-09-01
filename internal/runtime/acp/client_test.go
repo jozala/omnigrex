@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,7 +59,8 @@ func TestClientInitializesAndRecordsCapabilities(t *testing.T) {
 		"result": map[string]any{
 			"protocolVersion": 1,
 			"agentCapabilities": map[string]any{
-				"loadSession": true,
+				"futureCapability": map[string]any{"enabled": true},
+				"loadSession":      true,
 				"sessionCapabilities": map[string]any{
 					"list":   map[string]any{},
 					"resume": map[string]any{},
@@ -77,6 +79,9 @@ func TestClientInitializesAndRecordsCapabilities(t *testing.T) {
 	}
 	if !got.response.AgentCapabilities.SupportsSessionResume() {
 		t.Error("session/resume capability was not recorded")
+	}
+	if !strings.Contains(string(got.response.RawAgentCapabilities), `"futureCapability":{"enabled":true}`) {
+		t.Errorf("raw agent capabilities do not preserve unknown fields: %s", got.response.RawAgentCapabilities)
 	}
 	if !got.response.AgentCapabilities.SupportsSessionLoad() {
 		t.Error("session/load capability was not recorded")

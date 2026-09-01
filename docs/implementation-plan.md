@@ -83,7 +83,7 @@ This phase must pass before webhook or workflow implementation begins.
 - Identify and document the exact OpenCode/XDG state paths, database files, sidecar files, and environment variables required for Session Continuation.
 - Mount those OpenCode runtime-state paths from a separate persistent assignment directory.
 - Keep provider credentials out of the persistent runtime-state directory.
-- Run Reviewer sessions in pure mode with feature-branch project plugins, MCP servers, agents, and instruction discovery disabled while preserving those files for direct review.
+- Run Reviewer sessions in pure mode with feature-branch project configuration disabled while preserving those files for direct review, and record any version-specific plugin or nested-instruction exposure as an explicitly accepted compatibility limitation.
 - Attach ACP through the Docker Engine API and demultiplex standard error from protocol output.
 - Label every Runtime Process with assignment, session, turn, and Runtime Profile identifiers.
 
@@ -127,7 +127,7 @@ The first iteration does not migrate existing sessions even after a pair passes;
 - Loss of the initial session response recovers one session rather than creating a duplicate.
 - The exact previous-stable to candidate version pair has a documented compatibility result.
 - The candidate passes its own same-version create, dispose, continue, replay, and creation-recovery gate.
-- Feature-branch OpenCode configuration cannot add Reviewer instructions, agents, plugins, MCP servers, or capabilities.
+- Feature-branch OpenCode configuration cannot add Reviewer agents, MCP servers, capabilities, skills, or configured instructions; any project-plugin execution or nested-instruction exposure must be pinned to the exact version, tested or source-verified, and explicitly accepted before qualification.
 
 ## Phase 3: Docker Compose and PostgreSQL
 

@@ -5,21 +5,25 @@ ARG TARGETARCH
 ARG OPENCODE_VERSION=1.18.19
 ARG MISE_VERSION=2026.8.10
 
-RUN apk add --no-cache ca-certificates=20260611-r0
 RUN case "$TARGETARCH" in \
       amd64) \
         opencode_arch="x64"; \
-        opencode_sha="71eaeb20f2dc55a6d22ea1dabf659db513d02cd65f58b4a29e4c9f45b0d529ac"; \
         mise_arch="x64"; \
         mise_sha="2af841603ad2981529f230add15c601c64e3a81a79f4f41e9860eb38b7672771" \
         ;; \
       arm64) \
         opencode_arch="arm64"; \
-        opencode_sha="cf5732a2665da6db7331fd4bff37a32eed71d684fef5e0956c0e29254600136b"; \
         mise_arch="arm64"; \
         mise_sha="a2f1321f1189f2e1e62b1bd0d20fc59ba3c6a0b38b2c64fcfd29296ca44d2905" \
         ;; \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    case "${OPENCODE_VERSION}:${TARGETARCH}" in \
+      1.18.18:amd64) opencode_sha="60279c62d2182aa4279cea4d5a84d23437f8074042cbbed4a2bfa70e5acbd193" ;; \
+      1.18.18:arm64) opencode_sha="38a7504dab35007c70d2cdf89870b4be63faa60667318a90338798d34f53eab1" ;; \
+      1.18.19:amd64) opencode_sha="71eaeb20f2dc55a6d22ea1dabf659db513d02cd65f58b4a29e4c9f45b0d529ac" ;; \
+      1.18.19:arm64) opencode_sha="cf5732a2665da6db7331fd4bff37a32eed71d684fef5e0956c0e29254600136b" ;; \
+      *) echo "unsupported OpenCode version and architecture: ${OPENCODE_VERSION}:${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     wget -q "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${opencode_arch}-musl.tar.gz" -O /tmp/opencode.tar.gz && \
     echo "${opencode_sha}  /tmp/opencode.tar.gz" | sha256sum -c - && \
@@ -32,16 +36,25 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 
 ARG OPENCODE_VERSION=1.18.19
 ARG MISE_VERSION=2026.8.10
+ARG TARGETARCH
 
-RUN apk add --no-cache \
-      bash=5.3.9-r1 \
-      ca-certificates=20260611-r0 \
-      curl=8.21.0-r0 \
-      git=2.54.0-r0 \
-      jq=1.8.1-r0 \
-      libstdc++=15.2.0-r5 \
-      openssh-client-default=10.3_p1-r0 \
-      ripgrep=15.1.0-r0 && \
+RUN --mount=type=bind,source=agent/opencode/apk-packages.sha256,target=/tmp/apk-packages.sha256,readonly \
+    case "$TARGETARCH" in \
+      amd64) apk_arch="x86_64" ;; \
+      arm64) apk_arch="aarch64" ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /tmp/apks && \
+    installed=0 && \
+    while read -r architecture checksum repository package; do \
+      [ "$architecture" = "$TARGETARCH" ] || continue; \
+      wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.24/${repository}/${apk_arch}/${package}.apk" -O "/tmp/apks/${package}.apk" || exit 1; \
+      echo "${checksum}  /tmp/apks/${package}.apk" | sha256sum -c - || exit 1; \
+      installed=$((installed + 1)); \
+    done < /tmp/apk-packages.sha256 && \
+    [ "$installed" -eq 27 ] && \
+    apk add --no-cache --no-network /tmp/apks/*.apk && \
+    rm -rf /tmp/apks && \
     addgroup -g 10001 opencode && \
     adduser -D -u 10001 -G opencode -h /home/opencode opencode && \
     mkdir -p \
