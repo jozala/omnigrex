@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,11 +31,23 @@ const (
 	continuedMarker    = "CONTINUED"
 	blockingPrompt     = "BLOCK_UNTIL_CANCELLED"
 	workingMarker      = "WORKING"
+	mcpPrompt          = "RUN_MCP_TOOL"
+	mcpResultMarker    = "MCP_RESULT_CONFIRMED"
+	mcpSideEffect      = "MCP_SIDE_EFFECT"
+	recoveryPrompt     = "VERIFY_AFTER_INTERRUPTION"
+	recoveryMarker     = "INTERRUPTION_RECOVERED"
+	mcpProtocolVersion = "2025-11-25"
 )
 
 func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	image := localOpenCodeImage(t)
 	providerConfig := startFakeProvider(t)
+	mcp := startTestMCPServer(t)
+	mcpServers := []acp.MCPServer{{
+		Type: "http",
+		Name: "compat",
+		URL:  mcp.URL,
+	}}
 	workspaceVolume := uniqueDockerName("workspace")
 	runtimeStateVolume := uniqueDockerName("runtime-state")
 	miseVolume := uniqueDockerName("mise")
@@ -45,13 +59,19 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	first := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, firstUpdates)
 	initializeOpenCode(t, first.client)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	session, err := first.client.CreateSession(ctx, acp.CreateSessionRequest{CWD: acp.WorkspacePath})
+	session, err := first.client.CreateSession(ctx, acp.CreateSessionRequest{
+		CWD:        acp.WorkspacePath,
+		MCPServers: mcpServers,
+	})
 	cancel()
 	if err != nil {
 		t.Fatalf("CreateSession() error = %v\nOpenCode stderr:\n%s", err, first.stderr.String())
 	}
 	prompt(t, first, session.ID, seedPrompt)
 	waitForAgentText(t, firstUpdates, firstMarker)
+	prompt(t, first, session.ID, mcpPrompt)
+	waitForAgentText(t, firstUpdates, mcpResultMarker)
+	mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
 	first.stop(t)
 
 	secondUpdates := make(chan acp.SessionUpdate, 16)
@@ -68,8 +88,9 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
 	err = second.client.ReplayHistory(ctx, acp.ContinueSessionRequest{
-		SessionID: session.ID,
-		CWD:       acp.WorkspacePath,
+		SessionID:  session.ID,
+		CWD:        acp.WorkspacePath,
+		MCPServers: mcpServers,
 	})
 	cancel()
 	if err != nil {
@@ -83,8 +104,9 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	initializeOpenCode(t, third.client)
 	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
 	err = third.client.ContinueSession(ctx, acp.ContinueSessionRequest{
-		SessionID: session.ID,
-		CWD:       acp.WorkspacePath,
+		SessionID:  session.ID,
+		CWD:        acp.WorkspacePath,
+		MCPServers: mcpServers,
 	})
 	cancel()
 	if err != nil {
@@ -143,6 +165,75 @@ func TestOpenCodePromptCancellationReturnsTerminalResult(t *testing.T) {
 		t.Fatal("cancelled Prompt() did not return a terminal result")
 	}
 	process.stop(t)
+}
+
+func TestOpenCodeSessionContinuesAfterMCPResultInterruption(t *testing.T) {
+	image := localOpenCodeImage(t)
+	providerConfig := startFakeProvider(t)
+	mcp := startBlockingTestMCPServer(t)
+	mcpServers := []acp.MCPServer{{
+		Type: "http",
+		Name: "compat",
+		URL:  mcp.URL,
+	}}
+	workspaceVolume := uniqueDockerName("interrupted-workspace")
+	runtimeStateVolume := uniqueDockerName("interrupted-runtime-state")
+	miseVolume := uniqueDockerName("interrupted-mise")
+	createDockerVolume(t, workspaceVolume)
+	createDockerVolume(t, runtimeStateVolume)
+	createDockerVolume(t, miseVolume)
+
+	firstUpdates := make(chan acp.SessionUpdate, 16)
+	first := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, firstUpdates)
+	initializeOpenCode(t, first.client)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	session, err := first.client.CreateSession(ctx, acp.CreateSessionRequest{
+		CWD:        acp.WorkspacePath,
+		MCPServers: mcpServers,
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v\nOpenCode stderr:\n%s", err, first.stderr.String())
+	}
+
+	promptCompleted := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := first.client.Prompt(ctx, session.ID, []acp.ContentBlock{acp.TextContent(mcpPrompt)})
+		promptCompleted <- err
+	}()
+	call := mcp.waitForCall(t)
+	if call.Name != "echo" || !mapsEqual(call.Arguments, map[string]any{"value": "phase-2"}) {
+		t.Fatalf("MCP tool call = %+v, want echo with phase-2", call)
+	}
+	first.kill(t)
+	select {
+	case err := <-promptCompleted:
+		if err == nil {
+			t.Fatal("interrupted MCP prompt unexpectedly completed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("interrupted MCP prompt did not return")
+	}
+
+	secondUpdates := make(chan acp.SessionUpdate, 16)
+	second := startOpenCode(t, image, workspaceVolume, runtimeStateVolume, miseVolume, providerConfig, secondUpdates)
+	initializeOpenCode(t, second.client)
+	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+	err = second.client.ContinueSession(ctx, acp.ContinueSessionRequest{
+		SessionID:  session.ID,
+		CWD:        acp.WorkspacePath,
+		MCPServers: mcpServers,
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("ContinueSession() after MCP interruption error = %v\nOpenCode stderr:\n%s", err, second.stderr.String())
+	}
+	prompt(t, second, session.ID, recoveryPrompt)
+	waitForAgentText(t, secondUpdates, recoveryMarker)
+	mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
+	second.stop(t)
 }
 
 type openCodeProcess struct {
@@ -252,6 +343,7 @@ func startOpenCode(
 		OnUpdate: func(_ context.Context, update acp.SessionUpdate) {
 			updates <- update
 		},
+		DecidePermission: allowCompatibilityMCPTool,
 	})
 	t.Cleanup(func() {
 		process.stop(t)
@@ -282,16 +374,23 @@ func waitForAgentText(t *testing.T, updates <-chan acp.SessionUpdate, want strin
 		select {
 		case update := <-updates:
 			var event struct {
-				Kind    string `json:"sessionUpdate"`
-				Content struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
+				Kind    string          `json:"sessionUpdate"`
+				Content json.RawMessage `json:"content"`
 			}
 			if err := json.Unmarshal(update.Update, &event); err != nil {
 				t.Fatalf("decode session update: %v", err)
 			}
-			if event.Kind == "agent_message_chunk" && event.Content.Type == "text" && strings.Contains(event.Content.Text, want) {
+			if event.Kind != "agent_message_chunk" {
+				continue
+			}
+			var content struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(event.Content, &content); err != nil {
+				t.Fatalf("decode agent message content: %v", err)
+			}
+			if content.Type == "text" && strings.Contains(content.Text, want) {
 				return
 			}
 		case <-timer.C:
@@ -349,6 +448,11 @@ type fakeChatRequest struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
+	Tools []struct {
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	} `json:"tools"`
 }
 
 func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
@@ -400,6 +504,17 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		} else {
 			reply = "HISTORY_MISSING"
 		}
+	case strings.Contains(transcript, recoveryPrompt):
+		reply = recoveryMarker
+	case strings.Contains(transcript, mcpSideEffect):
+		reply = mcpResultMarker
+	case strings.Contains(transcript, mcpPrompt):
+		if !hasFakeTool(chat, "compat_echo") {
+			reply = "MCP_TOOL_MISSING"
+			break
+		}
+		writeFakeToolCall(response, "compat_echo", map[string]any{"value": "phase-2"})
+		return
 	case strings.Contains(transcript, seedPrompt):
 		reply = firstMarker
 	}
@@ -435,6 +550,49 @@ func writeSSE(response io.Writer, event any) {
 	_, _ = fmt.Fprintf(response, "data: %s\n\n", data)
 }
 
+func writeFakeToolCall(response http.ResponseWriter, name string, arguments map[string]any) {
+	encodedArguments, _ := json.Marshal(arguments)
+	response.Header().Set("Content-Type", "text/event-stream")
+	writeSSE(response, map[string]any{
+		"id":     "chatcmpl-fake-tool",
+		"object": "chat.completion.chunk",
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"role": "assistant",
+				"tool_calls": []map[string]any{{
+					"index": 0,
+					"id":    "call_compat_echo",
+					"type":  "function",
+					"function": map[string]string{
+						"name":      name,
+						"arguments": string(encodedArguments),
+					},
+				}},
+			},
+		}},
+	})
+	writeSSE(response, map[string]any{
+		"id":     "chatcmpl-fake-tool",
+		"object": "chat.completion.chunk",
+		"choices": []map[string]any{{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": "tool_calls",
+		}},
+	})
+	_, _ = io.WriteString(response, "data: [DONE]\n\n")
+}
+
+func hasFakeTool(request fakeChatRequest, name string) bool {
+	for _, tool := range request.Tools {
+		if tool.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func messageText(content json.RawMessage) string {
 	var text string
 	if json.Unmarshal(content, &text) == nil {
@@ -445,7 +603,7 @@ func messageText(content json.RawMessage) string {
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(content, &parts) != nil {
-		return ""
+		return string(content)
 	}
 	var result strings.Builder
 	for _, part := range parts {
@@ -453,20 +611,362 @@ func messageText(content json.RawMessage) string {
 			result.WriteString(part.Text)
 		}
 	}
-	return result.String()
+	if result.Len() > 0 {
+		return result.String()
+	}
+	return string(content)
+}
+
+type testMCPServer struct {
+	URL                  string
+	blockAfterSideEffect bool
+	callObserved         chan mcpToolCall
+	mutex                sync.Mutex
+	calls                []mcpToolCall
+	initializing         bool
+	initialized          bool
+}
+
+type mcpToolCall struct {
+	Name      string
+	Arguments map[string]any
+}
+
+type mcpRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
+}
+
+func startTestMCPServer(t *testing.T) *testMCPServer {
+	return startMCPServer(t, false)
+}
+
+func startBlockingTestMCPServer(t *testing.T) *testMCPServer {
+	return startMCPServer(t, true)
+}
+
+func startMCPServer(t *testing.T, blockAfterSideEffect bool) *testMCPServer {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("start test MCP listener: %v", err)
+	}
+	fixture := &testMCPServer{
+		blockAfterSideEffect: blockAfterSideEffect,
+		callObserved:         make(chan mcpToolCall, 1),
+	}
+	server := &http.Server{Handler: http.HandlerFunc(fixture.handle)}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	})
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	fixture.URL = fmt.Sprintf("http://host.docker.internal:%d/mcp", port)
+	return fixture
+}
+
+func (fixture *testMCPServer) handle(response http.ResponseWriter, request *http.Request) {
+	if request.Header.Get("Origin") != "" {
+		http.Error(response, "origin is not allowed", http.StatusForbidden)
+		return
+	}
+	if request.URL.Path != "/mcp" {
+		http.NotFound(response, request)
+		return
+	}
+	if request.Method == http.MethodGet {
+		if !fixture.ready(request) {
+			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+			return
+		}
+		if !acceptsMediaType(request.Header.Get("Accept"), "text/event-stream") {
+			http.Error(response, "Accept must include text/event-stream", http.StatusNotAcceptable)
+			return
+		}
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if request.Method == http.MethodDelete {
+		if !fixture.ready(request) {
+			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+			return
+		}
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if request.Method != http.MethodPost {
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !acceptsMediaType(request.Header.Get("Accept"), "application/json") ||
+		!acceptsMediaType(request.Header.Get("Accept"), "text/event-stream") {
+		http.Error(response, "Accept must include application/json and text/event-stream", http.StatusNotAcceptable)
+		return
+	}
+	if !hasMediaType(request.Header.Get("Content-Type"), "application/json") {
+		http.Error(response, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		http.Error(response, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var rpcRequest mcpRPCRequest
+	if err := json.Unmarshal(body, &rpcRequest); err != nil || rpcRequest.JSONRPC != "2.0" {
+		http.Error(response, "invalid JSON-RPC request", http.StatusBadRequest)
+		return
+	}
+
+	switch rpcRequest.Method {
+	case "initialize":
+		var params struct {
+			ProtocolVersion string                     `json:"protocolVersion"`
+			Capabilities    map[string]json.RawMessage `json:"capabilities"`
+			ClientInfo      struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"clientInfo"`
+		}
+		if json.Unmarshal(rpcRequest.Params, &params) != nil ||
+			params.ProtocolVersion == "" ||
+			params.Capabilities == nil ||
+			params.ClientInfo.Name == "" ||
+			params.ClientInfo.Version == "" {
+			writeMCPError(response, rpcRequest.ID, -32602, "invalid initialize params")
+			return
+		}
+		fixture.mutex.Lock()
+		fixture.initializing = true
+		fixture.initialized = false
+		fixture.mutex.Unlock()
+		writeMCPResult(response, rpcRequest.ID, map[string]any{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities": map[string]any{
+				"tools": map[string]bool{"listChanged": false},
+			},
+			"serverInfo": map[string]string{
+				"name":    "omnigrex-compatibility-fixture",
+				"version": "1.0.0",
+			},
+		})
+	case "notifications/initialized":
+		if !fixture.completeInitialization(request) {
+			http.Error(response, "MCP initialization is invalid", http.StatusBadRequest)
+			return
+		}
+		response.WriteHeader(http.StatusAccepted)
+	case "tools/list":
+		if !fixture.ready(request) {
+			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+			return
+		}
+		writeMCPResult(response, rpcRequest.ID, map[string]any{
+			"tools": []map[string]any{{
+				"name":        "echo",
+				"description": "Records and returns one compatibility side effect",
+				"inputSchema": map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{"value": map[string]string{"type": "string"}},
+					"required":             []string{"value"},
+					"additionalProperties": false,
+				},
+			}},
+		})
+	case "tools/call":
+		if !fixture.ready(request) {
+			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+			return
+		}
+		var params struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if json.Unmarshal(rpcRequest.Params, &params) != nil || params.Name != "echo" {
+			writeMCPError(response, rpcRequest.ID, -32602, "invalid tool call")
+			return
+		}
+		fixture.mutex.Lock()
+		call := mcpToolCall{Name: params.Name, Arguments: params.Arguments}
+		fixture.calls = append(fixture.calls, call)
+		fixture.mutex.Unlock()
+		select {
+		case fixture.callObserved <- call:
+		default:
+		}
+		if fixture.blockAfterSideEffect {
+			<-request.Context().Done()
+			return
+		}
+		writeMCPResult(response, rpcRequest.ID, map[string]any{
+			"content": []map[string]string{{
+				"type": "text",
+				"text": fmt.Sprintf("%s:%v", mcpSideEffect, params.Arguments["value"]),
+			}},
+		})
+	default:
+		if !fixture.ready(request) {
+			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+			return
+		}
+		if len(rpcRequest.ID) == 0 {
+			response.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeMCPError(response, rpcRequest.ID, -32601, "method not found")
+	}
+}
+
+func acceptsMediaType(header, mediaType string) bool {
+	for value := range strings.SplitSeq(header, ",") {
+		parsed, parameters, err := mime.ParseMediaType(strings.TrimSpace(value))
+		if err != nil || !strings.EqualFold(parsed, mediaType) {
+			continue
+		}
+		quality := 1.0
+		if text, present := parameters["q"]; present {
+			quality, err = strconv.ParseFloat(text, 64)
+			if err != nil {
+				continue
+			}
+		}
+		if quality > 0 && quality <= 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMediaType(header, mediaType string) bool {
+	parsed, _, err := mime.ParseMediaType(header)
+	return err == nil && strings.EqualFold(parsed, mediaType)
+}
+
+func (fixture *testMCPServer) completeInitialization(request *http.Request) bool {
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	if !fixture.initializing || request.Header.Get("MCP-Protocol-Version") != mcpProtocolVersion {
+		return false
+	}
+	fixture.initializing = false
+	fixture.initialized = true
+	return true
+}
+
+func (fixture *testMCPServer) ready(request *http.Request) bool {
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	return fixture.initialized && request.Header.Get("MCP-Protocol-Version") == mcpProtocolVersion
+}
+
+func writeMCPResult(response http.ResponseWriter, id json.RawMessage, result any) {
+	writeMCPJSON(response, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	})
+}
+
+func writeMCPError(response http.ResponseWriter, id json.RawMessage, code int, message string) {
+	writeMCPJSON(response, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+func writeMCPJSON(response http.ResponseWriter, payload any) {
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(payload)
+}
+
+func (fixture *testMCPServer) assertSingleCall(t *testing.T, name string, arguments map[string]any) {
+	t.Helper()
+
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	if len(fixture.calls) != 1 {
+		t.Fatalf("MCP tool calls = %+v, want exactly one", fixture.calls)
+	}
+	call := fixture.calls[0]
+	if call.Name != name || !mapsEqual(call.Arguments, arguments) {
+		t.Fatalf("MCP tool call = %+v, want name %q and arguments %+v", call, name, arguments)
+	}
+}
+
+func (fixture *testMCPServer) waitForCall(t *testing.T) mcpToolCall {
+	t.Helper()
+
+	select {
+	case call := <-fixture.callObserved:
+		return call
+	case <-time.After(15 * time.Second):
+		t.Fatal("MCP tool was not called")
+		return mcpToolCall{}
+	}
+}
+
+func mapsEqual(left, right map[string]any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func allowCompatibilityMCPTool(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
+	var toolCall struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal(request.ToolCall, &toolCall) != nil || toolCall.Title != "compat_echo" {
+		return acp.PermissionDecision{}
+	}
+	for _, option := range request.Options {
+		if option.Kind == "allow_once" {
+			return acp.PermissionDecision{OptionID: option.ID}
+		}
+	}
+	return acp.PermissionDecision{}
 }
 
 func (process *openCodeProcess) stop(t *testing.T) {
+	process.finish(t, false)
+}
+
+func (process *openCodeProcess) kill(t *testing.T) {
+	process.finish(t, true)
+}
+
+func (process *openCodeProcess) finish(t *testing.T, abrupt bool) {
 	t.Helper()
 
 	process.once.Do(func() {
+		if abrupt {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := process.process.Stop(stopCtx, 0); err != nil {
+				t.Errorf("kill OpenCode Runtime Process: %v", err)
+			}
+			stopCancel()
+		}
 		_ = process.client.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if _, err := process.process.Wait(ctx); err != nil {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = process.process.Stop(stopCtx, 0)
-			stopCancel()
-			t.Errorf("OpenCode Runtime Process exited with error: %v\nstderr:\n%s", err, process.stderr.String())
+			if !abrupt {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = process.process.Stop(stopCtx, 0)
+				stopCancel()
+				t.Errorf("OpenCode Runtime Process exited with error: %v\nstderr:\n%s", err, process.stderr.String())
+			}
 		}
 		cancel()
 		removeCtx, removeCancel := context.WithTimeout(context.Background(), 5*time.Second)
