@@ -62,12 +62,15 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 2 {
-		t.Errorf("schema_migrations rows = %d, want 2", count)
+	if count != 5 {
+		t.Errorf("schema_migrations rows = %d, want 5", count)
 	}
 	for version, filename := range map[int]string{
 		1: "000001_bootstrap.sql",
 		2: "000002_normalized_events.sql",
+		3: "000003_durable_jobs_and_turn_fencing.sql",
+		4: "000004_phase_five_acknowledgement_barriers.sql",
+		5: "000005_single_live_workflow_successor.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -93,6 +96,10 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		"change_proposals",
 		"tool_invocations",
 		"jobs",
+		"job_attempts",
+		"agent_turn_slots",
+		"job_normalized_events",
+		"workflow_closure_barriers",
 	} {
 		var exists bool
 		err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists)
@@ -134,8 +141,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 2 {
-		t.Errorf("migrations applied by Open() = %d, want 2", migrationCount)
+	if migrationCount != 5 {
+		t.Errorf("migrations applied by Open() = %d, want 5", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

@@ -23,6 +23,8 @@ const (
 	defaultShutdownTimeout            = 10 * time.Second
 	defaultWebhookLeaseDuration       = 30 * time.Second
 	defaultWebhookPollInterval        = 250 * time.Millisecond
+	defaultAssignmentRetention        = 30 * 24 * time.Hour
+	defaultAgentTurnConcurrencyLimit  = 2
 	minimumWebhookLeaseDuration       = 5 * time.Second
 )
 
@@ -42,6 +44,8 @@ type Config struct {
 	GitHubWebhookSecretFile       string
 	WebhookLeaseDuration          time.Duration
 	WebhookPollInterval           time.Duration
+	AssignmentRetentionDuration   time.Duration
+	AgentTurnConcurrencyLimit     int
 	HTTPAddr                      string
 	ReadinessTimeout              time.Duration
 	ShutdownTimeout               time.Duration
@@ -62,6 +66,8 @@ func Load(getenv func(string) string) (Config, error) {
 		GitHubWebhookSecretFile:       getenv("OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"),
 		WebhookLeaseDuration:          defaultWebhookLeaseDuration,
 		WebhookPollInterval:           defaultWebhookPollInterval,
+		AssignmentRetentionDuration:   defaultAssignmentRetention,
+		AgentTurnConcurrencyLimit:     defaultAgentTurnConcurrencyLimit,
 		HTTPAddr:                      valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
 		ReadinessTimeout:              defaultReadinessTimeout,
 		ShutdownTimeout:               defaultShutdownTimeout,
@@ -152,6 +158,25 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("OMNIGREX_WEBHOOK_POLL_INTERVAL must be positive")
 		}
 		config.WebhookPollInterval = duration
+	}
+
+	if value := getenv("OMNIGREX_ASSIGNMENT_RETENTION_DURATION"); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse OMNIGREX_ASSIGNMENT_RETENTION_DURATION: %w", err)
+		}
+		if duration <= 0 {
+			return Config{}, fmt.Errorf("OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be positive")
+		}
+		config.AssignmentRetentionDuration = duration
+	}
+
+	if value := getenv("OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil || limit <= 0 || strconv.Itoa(limit) != value {
+			return Config{}, fmt.Errorf("OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT must be a positive integer")
+		}
+		config.AgentTurnConcurrencyLimit = limit
 	}
 
 	return config, nil

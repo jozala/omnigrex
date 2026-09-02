@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	githubapi "github.com/jozala/omnigrex/internal/github"
 )
 
 // ErrMalformedPayload identifies an event-specific GitHub payload that cannot be normalized.
@@ -74,13 +76,15 @@ type Issue struct {
 
 // PullRequest is a durable GitHub Pull Request identity and revision.
 type PullRequest struct {
-	ID      int64  `json:"id"`
-	Number  int64  `json:"number"`
-	NodeID  string `json:"node_id,omitempty"`
-	BaseRef string `json:"base_ref"`
-	BaseSHA string `json:"base_sha"`
-	HeadRef string `json:"head_ref"`
-	HeadSHA string `json:"head_sha"`
+	ID               int64  `json:"id"`
+	Number           int64  `json:"number"`
+	NodeID           string `json:"node_id,omitempty"`
+	BaseRef          string `json:"base_ref"`
+	BaseSHA          string `json:"base_sha"`
+	HeadRef          string `json:"head_ref"`
+	HeadSHA          string `json:"head_sha"`
+	BeforeSHA        string `json:"before_sha,omitempty"`
+	WorkflowMarkerID string `json:"workflow_marker_id,omitempty"`
 }
 
 // Review is a durable GitHub Pull Request review identity and revision.
@@ -101,6 +105,7 @@ func Normalize(delivery Delivery) (Normalization, error) {
 		return Normalization{Outcome: NormalizationIgnored}, nil
 	}
 	var payload struct {
+		Before     string `json:"before"`
 		Action     string `json:"action"`
 		Repository struct {
 			ID    int64  `json:"id"`
@@ -127,6 +132,7 @@ func Normalize(delivery Delivery) (Normalization, error) {
 			ID     int64  `json:"id"`
 			Number int64  `json:"number"`
 			NodeID string `json:"node_id"`
+			Body   string `json:"body"`
 			Base   struct {
 				Ref string `json:"ref"`
 				SHA string `json:"sha"`
@@ -173,6 +179,9 @@ func Normalize(delivery Delivery) (Normalization, error) {
 	case "pull_request":
 		if delivery.Action != "opened" && delivery.Action != "synchronize" {
 			return Normalization{Outcome: NormalizationIgnored}, nil
+		}
+		if delivery.Action == "synchronize" && strings.TrimSpace(payload.Before) == "" {
+			return Normalization{}, malformed("pull_request.synchronize has no previous head SHA")
 		}
 	case "pull_request_review":
 		if delivery.Action != "submitted" {
@@ -237,8 +246,21 @@ func Normalize(delivery Delivery) (Normalization, error) {
 			HeadRef: payload.PullRequest.Head.Ref,
 			HeadSHA: payload.PullRequest.Head.SHA,
 		}
+		if delivery.Action == "synchronize" {
+			event.PullRequest.BeforeSHA = payload.Before
+		}
+		for _, marker := range githubapi.ParseMarkers(payload.PullRequest.Body) {
+			workflowID, ok := canonicalUUID(marker.WorkflowID)
+			if !ok {
+				return Normalization{}, malformed("Pull Request has invalid Workflow marker")
+			}
+			if event.PullRequest.WorkflowMarkerID != "" && event.PullRequest.WorkflowMarkerID != workflowID {
+				return Normalization{}, malformed("Pull Request has conflicting Workflow markers")
+			}
+			event.PullRequest.WorkflowMarkerID = workflowID
+		}
 		if delivery.EventName == "pull_request_review" {
-			if payload.Review.ID <= 0 || strings.TrimSpace(payload.Review.CommitID) == "" {
+			if payload.Review.ID <= 0 || strings.TrimSpace(payload.Review.NodeID) == "" || strings.TrimSpace(payload.Review.CommitID) == "" || payload.Review.User == nil {
 				return Normalization{}, malformed("pull_request_review.submitted has no complete review identity")
 			}
 			event.Review = &Review{
@@ -247,12 +269,10 @@ func Normalize(delivery Delivery) (Normalization, error) {
 				State:    payload.Review.State,
 				CommitID: payload.Review.CommitID,
 			}
-			if payload.Review.User != nil {
-				if payload.Review.User.ID <= 0 || strings.TrimSpace(payload.Review.User.Login) == "" {
-					return Normalization{}, malformed("invalid review user identity")
-				}
-				event.Review.User = &Actor{ID: payload.Review.User.ID, Login: payload.Review.User.Login}
+			if payload.Review.User.ID <= 0 || strings.TrimSpace(payload.Review.User.Login) == "" {
+				return Normalization{}, malformed("invalid review user identity")
 			}
+			event.Review.User = &Actor{ID: payload.Review.User.ID, Login: payload.Review.User.Login}
 		}
 	}
 	return Normalization{Outcome: NormalizationSupported, Event: event}, nil

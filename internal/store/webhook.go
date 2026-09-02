@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 // ErrWebhookDeliveryNotFound means the requested durable delivery does not exist.
@@ -21,6 +22,9 @@ var ErrWebhookClaimLost = errors.New("webhook delivery claim lost")
 
 // ErrNormalizedEventNotFound means no normalized transition exists for a delivery.
 var ErrNormalizedEventNotFound = errors.New("normalized event not found")
+
+// ErrNormalizedEventDeliveryMismatch means normalized JSON does not identify its delivery row.
+var ErrNormalizedEventDeliveryMismatch = errors.New("normalized event delivery ID mismatch")
 
 // WebhookStatus is the durable processing state of a webhook delivery.
 type WebhookStatus string
@@ -69,6 +73,7 @@ type WebhookClaim struct {
 	AttemptCount   int
 	ClaimedAt      time.Time
 	LeaseExpiresAt time.Time
+	ReceivedAt     time.Time
 }
 
 // WebhookOutcome is the durable result of normalizing a claimed delivery.
@@ -88,14 +93,24 @@ type WebhookCompletion struct {
 // NormalizedEventStatus is the durable transition queue state.
 type NormalizedEventStatus string
 
-const NormalizedEventPending NormalizedEventStatus = "PENDING"
+const (
+	NormalizedEventPending   NormalizedEventStatus = "PENDING"
+	NormalizedEventDeferred  NormalizedEventStatus = "DEFERRED"
+	NormalizedEventCompleted NormalizedEventStatus = "COMPLETED"
+)
 
 // NormalizedEventRecord is a queued normalized transition.
 type NormalizedEventRecord struct {
-	DeliveryID string
-	Payload    json.RawMessage
-	Status     NormalizedEventStatus
-	CreatedAt  time.Time
+	DeliveryID        string
+	Payload           json.RawMessage
+	Status            NormalizedEventStatus
+	WorkflowID        string
+	Disposition       workflow.Disposition
+	Reason            workflow.Reason
+	AppliedRevision   uint64
+	DeferredForTurnID string
+	CreatedAt         time.Time
+	ProcessedAt       *time.Time
 }
 
 // InsertWebhookDelivery writes an authenticated delivery once, deduplicated by delivery ID.
@@ -211,8 +226,8 @@ RETURNING delivery.delivery_id::text, delivery.event_name, COALESCE(delivery.act
           COALESCE(delivery.repository_id, 0), COALESCE(delivery.repository_owner, ''), COALESCE(delivery.repository_name, ''),
           COALESCE(delivery.issue_id, 0), COALESCE(delivery.issue_number, 0),
           delivery.headers, delivery.payload, delivery.claim_owner,
-          delivery.claim_token::text, delivery.attempt_count, delivery.claimed_at,
-          delivery.lease_expires_at`, owner, claimToken, lease.Microseconds()).Scan(
+	          delivery.claim_token::text, delivery.attempt_count, delivery.claimed_at,
+	          delivery.lease_expires_at, delivery.received_at`, owner, claimToken, lease.Microseconds()).Scan(
 		&claim.DeliveryID,
 		&claim.EventName,
 		&claim.Action,
@@ -228,6 +243,7 @@ RETURNING delivery.delivery_id::text, delivery.event_name, COALESCE(delivery.act
 		&claim.AttemptCount,
 		&claim.ClaimedAt,
 		&claim.LeaseExpiresAt,
+		&claim.ReceivedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -274,6 +290,9 @@ func (store *Store) CompleteWebhookDelivery(ctx context.Context, deliveryID, cla
 	case WebhookOutcomeProcessed:
 		if !json.Valid(completion.NormalizedPayload) {
 			return errors.New("complete webhook delivery: normalized payload is not valid JSON")
+		}
+		if err := validateNormalizedDeliveryID(completion.NormalizedPayload, deliveryID); err != nil {
+			return fmt.Errorf("complete webhook delivery: %w", err)
 		}
 	case WebhookOutcomeIgnored:
 		if len(completion.NormalizedPayload) != 0 {
@@ -344,9 +363,15 @@ WHERE delivery_id = $1
 func (store *Store) GetNormalizedEvent(ctx context.Context, deliveryID string) (NormalizedEventRecord, error) {
 	var event NormalizedEventRecord
 	err := store.pool.QueryRow(ctx, `
-SELECT delivery_id::text, payload, status, created_at
+SELECT delivery_id::text, payload, status, COALESCE(workflow_id::text, ''),
+       COALESCE(disposition, ''), COALESCE(reason, ''), COALESCE(applied_revision, 0),
+       COALESCE(deferred_for_turn_id::text, ''), created_at, processed_at
 FROM normalized_events
-WHERE delivery_id = $1`, deliveryID).Scan(&event.DeliveryID, &event.Payload, &event.Status, &event.CreatedAt)
+WHERE delivery_id = $1`, deliveryID).Scan(
+		&event.DeliveryID, &event.Payload, &event.Status, &event.WorkflowID,
+		&event.Disposition, &event.Reason, &event.AppliedRevision,
+		&event.DeferredForTurnID, &event.CreatedAt, &event.ProcessedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NormalizedEventRecord{}, ErrNormalizedEventNotFound
 	}
@@ -410,4 +435,17 @@ func validUUID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validateNormalizedDeliveryID(payload []byte, deliveryID string) error {
+	var identity struct {
+		DeliveryID string `json:"delivery_id"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return fmt.Errorf("decode normalized event identity: %w", err)
+	}
+	if identity.DeliveryID == "" || identity.DeliveryID != deliveryID {
+		return ErrNormalizedEventDeliveryMismatch
+	}
+	return nil
 }

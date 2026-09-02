@@ -46,6 +46,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.WebhookLeaseDuration != 30*time.Second || got.WebhookPollInterval != 250*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (30s, 250ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
 	}
+	if got.AssignmentRetentionDuration != 30*24*time.Hour || got.AgentTurnConcurrencyLimit != 2 {
+		t.Errorf("workflow limits = (%s, %d), want (720h, 2)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
+	}
 	if got.HTTPAddr != ":8080" {
 		t.Errorf("HTTPAddr = %q, want %q", got.HTTPAddr, ":8080")
 	}
@@ -74,6 +77,8 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/custom-webhook",
 		"OMNIGREX_WEBHOOK_LEASE_DURATION":            "45s",
 		"OMNIGREX_WEBHOOK_POLL_INTERVAL":             "500ms",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":     "48h",
+		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":      "7",
 		"OMNIGREX_HTTP_ADDR":                         "127.0.0.1:9000",
 		"OMNIGREX_READINESS_TIMEOUT":                 "3s",
 		"OMNIGREX_SHUTDOWN_TIMEOUT":                  "20s",
@@ -114,6 +119,9 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.WebhookLeaseDuration != 45*time.Second || got.WebhookPollInterval != 500*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (45s, 500ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
 	}
+	if got.AssignmentRetentionDuration != 48*time.Hour || got.AgentTurnConcurrencyLimit != 7 {
+		t.Errorf("workflow limits = (%s, %d), want (48h, 7)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
+	}
 	if got.HTTPAddr != values["OMNIGREX_HTTP_ADDR"] {
 		t.Errorf("HTTPAddr = %q, want %q", got.HTTPAddr, values["OMNIGREX_HTTP_ADDR"])
 	}
@@ -149,6 +157,10 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "webhook lease value", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "1s"},
 		{name: "webhook poll syntax", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "often"},
 		{name: "webhook poll value", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "-1s"},
+		{name: "assignment retention syntax", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "later"},
+		{name: "assignment retention value", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "0s"},
+		{name: "Agent Turn concurrency syntax", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "many"},
+		{name: "Agent Turn concurrency value", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "0"},
 		{name: "readiness timeout syntax", key: "OMNIGREX_READINESS_TIMEOUT", value: "eventually"},
 		{name: "readiness timeout value", key: "OMNIGREX_READINESS_TIMEOUT", value: "0s"},
 		{name: "shutdown timeout syntax", key: "OMNIGREX_SHUTDOWN_TIMEOUT", value: "eventually"},

@@ -123,9 +123,10 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 		return nil, nil, fmt.Errorf("identify webhook processor: %w", err)
 	}
 	processor, err := webhook.NewProcessor(database, webhook.ProcessorConfig{
-		ClaimOwner:       claimOwner,
-		LeaseDuration:    settings.WebhookLeaseDuration,
-		IdlePollInterval: settings.WebhookPollInterval,
+		ClaimOwner:                  claimOwner,
+		LeaseDuration:               settings.WebhookLeaseDuration,
+		IdlePollInterval:            settings.WebhookPollInterval,
+		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
 		OnError: func(err error) {
 			logger.Error("process GitHub webhook delivery", "error", err)
 		},

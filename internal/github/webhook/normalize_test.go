@@ -1,7 +1,10 @@
 package webhook_test
 
 import (
+	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/github/webhook"
@@ -96,9 +99,11 @@ func TestNormalizePullRequestRevisionEvents(t *testing.T) {
 				Action:     action,
 				Payload: []byte(`{
 					"action":"` + action + `",
+					"before":"before123",
 					"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},
 					"pull_request":{
 						"id":654,"number":21,"node_id":"PR_node",
+						"body":"visible text\n<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->",
 						"base":{"ref":"main","sha":"base123"},
 						"head":{"ref":"feature","sha":"head456"}
 					}
@@ -119,10 +124,52 @@ func TestNormalizePullRequestRevisionEvents(t *testing.T) {
 			if pullRequest.BaseRef != "main" || pullRequest.BaseSHA != "base123" || pullRequest.HeadRef != "feature" || pullRequest.HeadSHA != "head456" {
 				t.Errorf("Pull Request revision = %#v, want main/base123 and feature/head456", pullRequest)
 			}
+			if pullRequest.WorkflowMarkerID != "40000000-0000-4000-8000-000000000001" {
+				t.Errorf("Workflow marker = %q, want marker Workflow UUID", pullRequest.WorkflowMarkerID)
+			}
+			if action == "synchronize" && pullRequest.BeforeSHA != "before123" {
+				t.Errorf("synchronize before SHA = %q, want before123", pullRequest.BeforeSHA)
+			}
+			if action == "opened" && pullRequest.BeforeSHA != "" {
+				t.Errorf("opened before SHA = %q, want omitted", pullRequest.BeforeSHA)
+			}
+			encoded, err := json.Marshal(result.Event)
+			if err != nil {
+				t.Fatalf("marshal normalized event: %v", err)
+			}
+			if strings.Contains(string(encoded), "visible text") || strings.Contains(string(encoded), "body") {
+				t.Errorf("normalized payload retained Pull Request body: %s", encoded)
+			}
 			if result.Event.Issue != nil || result.Event.Review != nil {
 				t.Errorf("unrelated identities set: Issue %#v, review %#v", result.Event.Issue, result.Event.Review)
 			}
 		})
+	}
+}
+
+func TestNormalizeRejectsSynchronizeWithoutBeforeSHA(t *testing.T) {
+	delivery := pullRequestDelivery("synchronize", `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->`)
+
+	if _, err := webhook.Normalize(delivery); !errors.Is(err, webhook.ErrMalformedPayload) {
+		t.Fatalf("Normalize() error = %v, want ErrMalformedPayload", err)
+	}
+}
+
+func TestNormalizeRejectsConflictingWorkflowMarkers(t *testing.T) {
+	body := `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->
+<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000002 -->`
+	delivery := pullRequestDelivery("opened", body)
+
+	if _, err := webhook.Normalize(delivery); !errors.Is(err, webhook.ErrMalformedPayload) {
+		t.Fatalf("Normalize() error = %v, want ErrMalformedPayload", err)
+	}
+}
+
+func TestNormalizeRejectsNonUUIDWorkflowMarker(t *testing.T) {
+	delivery := pullRequestDelivery("opened", `<!-- omnigrex:v1 workflow=not-a-uuid -->`)
+
+	if _, err := webhook.Normalize(delivery); !errors.Is(err, webhook.ErrMalformedPayload) {
+		t.Fatalf("Normalize() error = %v, want ErrMalformedPayload", err)
 	}
 }
 
@@ -214,6 +261,8 @@ func TestNormalizeReturnsExplicitFailureForMalformedSupportedEvent(t *testing.T)
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,"issue":{"id":456,"number":12}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "opened", Payload: []byte(`{"action":"opened",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature"}}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"state":"approved","commit_id":"head456"}}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"id":987,"node_id":"PRR_node","state":"approved","commit_id":"head456"}}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"id":987,"state":"approved","commit_id":"head456","user":{"id":77,"login":"reviewer"}}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "closed", Payload: []byte(`{"action":"closed",` + repository + `,"issue":{"id":456,"number":12},"sender":{"id":0,"login":""}}`)},
 	}
 
@@ -225,6 +274,22 @@ func TestNormalizeReturnsExplicitFailureForMalformedSupportedEvent(t *testing.T)
 		if result.Event != nil {
 			t.Errorf("Normalize(%s.%s) event = %#v, want nil after malformed input", delivery.EventName, delivery.Action, result.Event)
 		}
+	}
+}
+
+func pullRequestDelivery(action, body string) webhook.Delivery {
+	before := ""
+	if action == "synchronize" {
+		before = `,"before":""`
+	}
+	return webhook.Delivery{
+		DeliveryID: validDeliveryID(),
+		EventName:  "pull_request",
+		Action:     action,
+		Payload: []byte(`{"action":"` + action + `"` + before + `,
+			"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},
+			"pull_request":{"id":654,"number":21,"body":` + strconv.Quote(body) + `,
+				"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}}}`),
 	}
 }
 
