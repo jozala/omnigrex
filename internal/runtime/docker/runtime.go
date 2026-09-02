@@ -20,7 +20,13 @@ import (
 	mobyclient "github.com/moby/moby/client"
 )
 
-const minimumDockerAPIVersion = "1.45"
+const (
+	minimumDockerAPIVersion   = "1.45"
+	defaultRuntimeMemoryBytes = 512 << 20
+	defaultRuntimePIDsLimit   = 128
+	subpathHelperMemoryBytes  = 128 << 20
+	subpathHelperPIDsLimit    = 32
+)
 
 var ErrInvalidSpec = errors.New("invalid Runtime Process specification")
 
@@ -84,6 +90,8 @@ type RuntimePolicy struct {
 	RequireVolumeSubpaths         bool
 	RequiredEnvironment           map[string]string
 	MaxTmpfsBytes                 int64
+	MaxMemoryBytes                int64
+	MaxPIDsLimit                  int64
 }
 
 func NewEngine(options EngineOptions) (*Engine, error) {
@@ -115,6 +123,9 @@ func (engine *Engine) Start(ctx context.Context, spec Spec, stderr io.Writer) (*
 		return nil, err
 	}
 	if err := engine.validateAPI(ctx); err != nil {
+		return nil, err
+	}
+	if err := prepareVolumeSubpaths(ctx, engine.client, spec); err != nil {
 		return nil, err
 	}
 	return start(ctx, engine.client, spec, stderr)
@@ -269,6 +280,68 @@ func start(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Pr
 	return process, nil
 }
 
+func prepareVolumeSubpaths(ctx context.Context, api dockerAPI, spec Spec) error {
+	options, err := buildSubpathCreateOptions(spec)
+	if err != nil || options.Config == nil {
+		return err
+	}
+	if err := runOneShotContainer(ctx, api, options, "assignment subpath initializer"); err != nil {
+		return fmt.Errorf("initialize assignment volume subpaths: %w", err)
+	}
+	return nil
+}
+
+func buildSubpathCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
+	uid, gid, err := validateSpec(spec)
+	if err != nil {
+		return mobyclient.ContainerCreateOptions{}, err
+	}
+	mounts := make([]mount.Mount, 0, len(spec.Volumes))
+	paths := make([]string, 0, len(spec.Volumes)+1)
+	paths = append(paths, "sh")
+	for _, volume := range spec.Volumes {
+		if volume.Subpath == "" {
+			continue
+		}
+		root := "/volumes/" + strconv.Itoa(len(mounts))
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: volume.Name, Target: root})
+		paths = append(paths, root+"/"+volume.Subpath)
+	}
+	if len(mounts) == 0 {
+		return mobyclient.ContainerCreateOptions{}, nil
+	}
+	pids := int64(subpathHelperPIDsLimit)
+	script := `set -eu
+uid="$1"
+gid="$2"
+shift 2
+for path do
+  mkdir -p "$path"
+  test "$(stat -c %u "$path")" = "$uid"
+  test "$(stat -c %g "$path")" = "$gid"
+done`
+	return mobyclient.ContainerCreateOptions{
+		Config: &container.Config{
+			Image:      spec.Image,
+			User:       spec.User,
+			Entrypoint: []string{"sh", "-c"},
+			Cmd:        append([]string{script, paths[0], uid, gid}, paths[1:]...),
+			Labels:     map[string]string{"io.omnigrex.assignment-subpath-initializer": "true"},
+		},
+		HostConfig: &container.HostConfig{
+			NetworkMode:    "none",
+			ReadonlyRootfs: true,
+			CapDrop:        []string{"ALL"},
+			SecurityOpt:    []string{"no-new-privileges"},
+			Mounts:         mounts,
+			Resources: container.Resources{
+				Memory:    subpathHelperMemoryBytes,
+				PidsLimit: &pids,
+			},
+		},
+	}, nil
+}
+
 func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 	uid, gid, err := validateSpec(spec)
 	if err != nil {
@@ -278,10 +351,10 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 		spec.Network = "none"
 	}
 	if spec.MemoryBytes <= 0 {
-		spec.MemoryBytes = 512 << 20
+		spec.MemoryBytes = defaultRuntimeMemoryBytes
 	}
 	if spec.PIDsLimit <= 0 {
-		spec.PIDsLimit = 128
+		spec.PIDsLimit = defaultRuntimePIDsLimit
 	}
 	initProcess := true
 	stopTimeout := 10
@@ -481,6 +554,20 @@ func validateResources(options EngineOptions, spec Spec) error {
 		if environment[name] != requiredValue {
 			return fmt.Errorf("%w: required environment %s is missing or invalid", ErrInvalidSpec, name)
 		}
+	}
+	memoryBytes := spec.MemoryBytes
+	if memoryBytes <= 0 {
+		memoryBytes = defaultRuntimeMemoryBytes
+	}
+	if policy.MaxMemoryBytes > 0 && memoryBytes > policy.MaxMemoryBytes {
+		return fmt.Errorf("%w: memory limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
+	}
+	pidsLimit := spec.PIDsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = defaultRuntimePIDsLimit
+	}
+	if policy.MaxPIDsLimit > 0 && pidsLimit > policy.MaxPIDsLimit {
+		return fmt.Errorf("%w: PID limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
 	}
 	return nil
 }

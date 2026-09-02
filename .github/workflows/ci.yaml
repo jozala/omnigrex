@@ -37,13 +37,22 @@ jobs:
         run: go test -race ./...
 
       - name: Validate Docker Compose
+        env:
+          OMNIGREX_DOCKER_GID: "0"
+          OMNIGREX_SECRET_GID: "1"
+          OMNIGREX_DATABASE_PASSWORD_FILE: /dev/null
+          OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /dev/null
+          OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /dev/null
+          OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /dev/null
+          OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE: /dev/null
+          OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE: /dev/null
         run: docker compose config --quiet
 
       - name: Build image
-        run: docker build --tag omnigrex/orchestrator:ci .
+        run: docker build --tag omnigrex/orchestrator:dev .
 
       - name: Verify non-root image user
-        run: test "$(docker image inspect --format '{{.Config.User}}' omnigrex/orchestrator:ci)" = "10001:10001"
+        run: test "$(docker image inspect --format '{{.Config.User}}' omnigrex/orchestrator:dev)" = "10001:10001"
 
       - name: Build OpenCode Runtime Process image
         run: docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.19 .
@@ -63,5 +72,12 @@ jobs:
             --entrypoint sh omnigrex/opencode:1.18.19 \
             -c 'test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && opencode --version && mise --version && git --version'
 
-      - name: Run OpenCode compatibility tests
-        run: go test -race -tags=integration ./internal/runtime/acp
+      - name: Run Docker-backed integration tests
+        run: go test -race -tags=integration ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+
+      - name: Run full-stack Docker Compose test
+        env:
+          OMNIGREX_COMPOSE_INTEGRATION: "1"
+        run: |
+          OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
+          go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v

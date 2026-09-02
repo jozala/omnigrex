@@ -3,4 +3,5 @@
 bin/
 coverage/
 dist/
+secrets/
 *.local

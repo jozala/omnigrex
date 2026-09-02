@@ -80,6 +80,41 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 	}
 }
 
+func TestBuildSubpathCreateOptionsUsesAssignmentIdentityAndVolumeRoots(t *testing.T) {
+	options, err := buildSubpathCreateOptions(Spec{
+		Image:      testImage,
+		User:       "10001:10001",
+		WorkingDir: testWorkspacePath,
+		Volumes: []VolumeMount{
+			{Name: "omnigrex-workspaces", Subpath: "assignment-1/workspace", Target: testWorkspacePath},
+			{Name: "omnigrex-runtime-state", Subpath: "assignment-1/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildSubpathCreateOptions() error = %v", err)
+	}
+	if options.Config.User != "10001:10001" || options.HostConfig.NetworkMode != "none" {
+		t.Errorf("subpath initializer identity/network = user %q network %q", options.Config.User, options.HostConfig.NetworkMode)
+	}
+	if !options.HostConfig.ReadonlyRootfs || len(options.HostConfig.CapDrop) != 1 || options.HostConfig.CapDrop[0] != "ALL" {
+		t.Errorf("subpath initializer hardening = %+v", options.HostConfig)
+	}
+	if len(options.HostConfig.Mounts) != 2 {
+		t.Fatalf("subpath initializer mounts = %d, want 2", len(options.HostConfig.Mounts))
+	}
+	for _, volume := range options.HostConfig.Mounts {
+		if volume.VolumeOptions != nil && volume.VolumeOptions.Subpath != "" {
+			t.Errorf("subpath initializer unexpectedly mounts a subpath: %+v", volume)
+		}
+	}
+	command := strings.Join(options.Config.Cmd, " ")
+	for _, expected := range []string{"10001 10001", "/volumes/0/assignment-1/workspace", "/volumes/1/assignment-1/runtime-state"} {
+		if !strings.Contains(command, expected) {
+			t.Errorf("subpath initializer command = %q, missing %q", command, expected)
+		}
+	}
+}
+
 func TestBuildCreateOptionsRejectsUnsafeSpec(t *testing.T) {
 	tests := []struct {
 		name string
@@ -140,6 +175,8 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 			RequiredWritableVolumeTargets: []string{testWorkspacePath, "/home/opencode/.local/share/opencode"},
 			RequireVolumeSubpaths:         true,
 			RequiredEnvironment:           map[string]string{"OPENCODE_AUTH_CONTENT": "{}"},
+			MaxMemoryBytes:                512 << 20,
+			MaxPIDsLimit:                  128,
 		},
 	}
 	base := Spec{
@@ -157,15 +194,17 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 	}
 
 	tests := []Spec{
-		{Network: "bridge", Volumes: base.Volumes},
-		{Network: base.Network, Volumes: []VolumeMount{
+		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: "bridge", Volumes: base.Volumes},
+		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: []VolumeMount{
 			{Name: "workspaces", Subpath: "assignment/workspace", Target: testWorkspacePath},
 			{Name: "workspaces", Subpath: "assignment/runtime-state", Target: "/home/opencode/.local/share/opencode"},
 		}},
-		{Network: base.Network, Volumes: []VolumeMount{
+		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: []VolumeMount{
 			{Name: "workspaces", Subpath: "assignment/workspace", Target: testWorkspacePath},
 			{Name: "unknown", Subpath: "assignment/runtime-state", Target: "/home/opencode/.local/share/opencode"},
 		}},
+		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: base.Volumes, MemoryBytes: 513 << 20},
+		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: base.Volumes, PIDsLimit: 129},
 	}
 	for _, spec := range tests {
 		if err := validateResources(options, spec); !errors.Is(err, ErrInvalidSpec) {

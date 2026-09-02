@@ -1,26 +1,144 @@
 name: omnigrex
 
 services:
+  postgres:
+    image: postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545
+    user: "70:70"
+    group_add:
+      - "${OMNIGREX_SECRET_GID:?set OMNIGREX_SECRET_GID to the host secret-file group ID}"
+    environment:
+      POSTGRES_DB: omnigrex
+      POSTGRES_USER: omnigrex
+      POSTGRES_PASSWORD_FILE: /run/secrets/omnigrex-database-password
+    secrets:
+      - omnigrex-database-password
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnigrex -d omnigrex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0700
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0750
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    init: true
+    restart: unless-stopped
+
+  opencode-image:
+    build:
+      context: .
+      dockerfile: agent/opencode/Dockerfile
+    image: omnigrex/opencode:1.18.19
+    user: "10001:10001"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        test "$$(id -u)" = 10001
+        test "$$(id -g)" = 10001
+        test "$$(opencode --version)" = 1.18.19
+        mise --version
+        git --version
+        for path in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do
+          touch "$$path/.omnigrex-volume-root"
+          rm "$$path/.omnigrex-volume-root"
+        done
+    volumes:
+      - type: volume
+        source: workspaces
+        target: /workspace
+      - type: volume
+        source: runtime-state
+        target: /home/opencode/.local/share/opencode
+      - type: volume
+        source: mise-data
+        target: /home/opencode/.local/share/mise
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /home/opencode/.cache:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+      - /home/opencode/.config:rw,noexec,nosuid,nodev,size=8m,uid=10001,gid=10001,mode=0700
+      - /home/opencode/.local/state:rw,noexec,nosuid,nodev,size=8m,uid=10001,gid=10001,mode=0700
+      - /home/opencode/.opencode:rw,noexec,nosuid,nodev,size=8m,uid=10001,gid=10001,mode=0700
+      - /tmp/opencode:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    init: true
+    restart: "no"
+
   orchestrator:
     build:
       context: .
     image: omnigrex/orchestrator:dev
     user: "10001:10001"
+    group_add:
+      - "${OMNIGREX_DOCKER_GID:?set OMNIGREX_DOCKER_GID to the Docker socket group ID}"
+      - "${OMNIGREX_SECRET_GID:?set OMNIGREX_SECRET_GID to the host secret-file group ID}"
     environment:
-      OMNIGREX_HTTP_ADDR: "${OMNIGREX_HTTP_ADDR:-:8080}"
-      OMNIGREX_HEALTHCHECK_URL: "${OMNIGREX_HEALTHCHECK_URL:-http://127.0.0.1:8080/healthz}"
+      OMNIGREX_HTTP_ADDR: ":8080"
+      OMNIGREX_HEALTHCHECK_URL: "http://127.0.0.1:8080/readyz"
       OMNIGREX_SHUTDOWN_TIMEOUT: "${OMNIGREX_SHUTDOWN_TIMEOUT:-10s}"
+      OMNIGREX_READINESS_TIMEOUT: "${OMNIGREX_READINESS_TIMEOUT:-15s}"
+      OMNIGREX_DATABASE_URL: "postgres://omnigrex@postgres:5432/omnigrex?sslmode=disable"
+      OMNIGREX_DATABASE_PASSWORD_SECRET_FILE: /run/secrets/omnigrex-database-password
+      OMNIGREX_DOCKER_AGENT_NETWORK: omnigrex-agent
+      OMNIGREX_WORKSPACE_VOLUME: omnigrex-workspaces
+      OMNIGREX_RUNTIME_STATE_VOLUME: omnigrex-runtime-state
+      OMNIGREX_MISE_VOLUME: omnigrex-mise
+      OMNIGREX_AGENT_IMAGE_REFERENCE: omnigrex/opencode:1.18.19
+      OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-developer-private-key
+      OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-reviewer-private-key
+      OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/omnigrex-github-webhook-secret
+      OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-developer-provider-credentials
+      OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-reviewer-provider-credentials
+    secrets:
+      - omnigrex-database-password
+      - omnigrex-github-developer-private-key
+      - omnigrex-github-reviewer-private-key
+      - omnigrex-github-webhook-secret
+      - omnigrex-developer-provider-credentials
+      - omnigrex-reviewer-provider-credentials
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+    networks:
+      - backend
+      - agent
     ports:
       - "${OMNIGREX_HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opencode-image:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/usr/local/bin/omnigrex", "healthcheck"]
-      interval: 5s
-      timeout: 3s
+      interval: 15s
+      timeout: 25s
       retries: 5
-      start_period: 2s
+      start_period: 10s
     read_only: true
     tmpfs:
-      - /tmp:mode=1777,uid=10001,gid=10001
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
     cap_drop:
       - ALL
     security_opt:
@@ -29,3 +147,34 @@ services:
     mem_limit: 256m
     init: true
     restart: unless-stopped
+
+networks:
+  backend:
+    name: omnigrex-backend
+    internal: true
+  agent:
+    name: omnigrex-agent
+
+volumes:
+  postgres-data:
+    name: omnigrex-postgres
+  workspaces:
+    name: omnigrex-workspaces
+  runtime-state:
+    name: omnigrex-runtime-state
+  mise-data:
+    name: omnigrex-mise
+
+secrets:
+  omnigrex-database-password:
+    file: "${OMNIGREX_DATABASE_PASSWORD_FILE:?set OMNIGREX_DATABASE_PASSWORD_FILE to a secret file}"
+  omnigrex-github-developer-private-key:
+    file: "${OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE:?set OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE to a secret file}"
+  omnigrex-github-reviewer-private-key:
+    file: "${OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE:?set OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE to a secret file}"
+  omnigrex-github-webhook-secret:
+    file: "${OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE:?set OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE to a secret file}"
+  omnigrex-developer-provider-credentials:
+    file: "${OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE:?set OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE to a secret file}"
+  omnigrex-reviewer-provider-credentials:
+    file: "${OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE:?set OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE to a secret file}"

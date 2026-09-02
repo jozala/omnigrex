@@ -10,17 +10,33 @@ import (
 	"time"
 )
 
-func Handler() http.Handler {
+type ReadinessChecker interface {
+	Check(context.Context) error
+}
+
+type ReadinessFunc func(context.Context) error
+
+func (check ReadinessFunc) Check(ctx context.Context) error {
+	return check(ctx)
+}
+
+func Handler(readiness ReadinessChecker) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
-	mux.HandleFunc("GET /readyz", health)
+	mux.HandleFunc("GET /readyz", func(response http.ResponseWriter, request *http.Request) {
+		if err := readiness.Check(request.Context()); err != nil {
+			notReady(response)
+			return
+		}
+		health(response, request)
+	})
 	return mux
 }
 
-func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger) error {
+func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, readiness ReadinessChecker) error {
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           Handler(),
+		Handler:           Handler(readiness),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -57,4 +73,10 @@ func health(response http.ResponseWriter, _ *http.Request) {
 	response.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	response.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(response, "ok\n")
+}
+
+func notReady(response http.ResponseWriter) {
+	response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	response.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(response, "not ready\n")
 }

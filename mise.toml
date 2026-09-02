@@ -26,11 +26,30 @@ run = "go test -race ./..."
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
 depends = ["agent-images"]
-run = "go test -race -tags=integration ./internal/runtime/acp"
+run = "go test -race -tags=integration ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment"
+
+[tasks.test-compose]
+description = "Run the destructive full-stack Docker Compose integration test"
+depends = ["image", "agent-image"]
+run = '''
+OMNIGREX_COMPOSE_INTEGRATION=1 \
+OMNIGREX_DOCKER_GID="${OMNIGREX_DOCKER_GID:-0}" \
+go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
+'''
 
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
-run = "docker compose config --quiet"
+run = '''
+OMNIGREX_DOCKER_GID=0 \
+OMNIGREX_SECRET_GID=1 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
+OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE=/dev/null \
+OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE=/dev/null \
+docker compose config --quiet
+'''
 
 [tasks.image]
 description = "Build the orchestrator image"
