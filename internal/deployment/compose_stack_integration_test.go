@@ -3,6 +3,14 @@
 package deployment
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -20,18 +28,35 @@ func TestComposeFullStack(t *testing.T) {
 		t.Skip("set OMNIGREX_COMPOSE_INTEGRATION=1 to allow destructive use of stable Compose resources")
 	}
 
-	secretFile := filepath.Join(t.TempDir(), "compose-secret")
-	if err := os.WriteFile(secretFile, []byte("compose-integration-secret\n"), 0o640); err != nil {
-		t.Fatalf("write Compose test secret: %v", err)
+	secretDirectory := t.TempDir()
+	databaseSecret := writeTestSecret(t, secretDirectory, "database-password", []byte("compose-integration-secret\n"))
+	webhookSecret := writeTestSecret(t, secretDirectory, "webhook-secret", []byte("compose-webhook-secret\n"))
+	developerPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate Developer GitHub App test key: %v", err)
 	}
+	reviewerPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate Reviewer GitHub App test key: %v", err)
+	}
+	developerPrivateKeyFile := writeTestSecret(t, secretDirectory, "github-developer-app.pem", pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(developerPrivateKey),
+	}))
+	reviewerPrivateKeyFile := writeTestSecret(t, secretDirectory, "github-reviewer-app.pem", pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(reviewerPrivateKey),
+	}))
 	dockerGID := os.Getenv("OMNIGREX_DOCKER_GID")
 	if dockerGID == "" {
 		dockerGID = "0"
 	}
 	httpPort := freeHTTPPort(t)
 	fixture := composeFixture{
-		root:        repositoryRoot(t),
-		environment: composeEnvironment(secretFile, dockerGID, strconv.Itoa(os.Getgid()), httpPort),
+		root: repositoryRoot(t),
+		environment: composeEnvironment(databaseSecret, dockerGID, strconv.Itoa(os.Getgid()), httpPort, map[string]string{
+			"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": developerPrivateKeyFile,
+			"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  reviewerPrivateKeyFile,
+			"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        webhookSecret,
+		}),
 	}
 	t.Cleanup(func() { fixture.captureLogsAndClean(t) })
 
@@ -41,6 +66,7 @@ func TestComposeFullStack(t *testing.T) {
 	baseURL := "http://127.0.0.1:" + httpPort
 	waitForHTTPStatus(t, baseURL+"/healthz", http.StatusOK, 30*time.Second)
 	waitForHTTPStatus(t, baseURL+"/readyz", http.StatusOK, 30*time.Second)
+	fixture.verifyDurableWebhook(t, baseURL)
 	fixture.agentVolumes(t, `set -eu
 for path in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do
   printf persistent > "$path/.omnigrex-compose-marker"
@@ -78,6 +104,15 @@ done`)
 	waitForHTTPStatus(t, baseURL+"/readyz", http.StatusOK, 90*time.Second)
 }
 
+func writeTestSecret(t *testing.T, directory, name string, contents []byte) string {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, contents, 0o640); err != nil {
+		t.Fatalf("write Compose test secret %q: %v", name, err)
+	}
+	return path
+}
+
 type composeFixture struct {
 	root        string
 	environment []string
@@ -100,6 +135,87 @@ func (fixture composeFixture) psql(t *testing.T, query string) string {
 		"--set", "ON_ERROR_STOP=1", "--username", "omnigrex", "--dbname", "omnigrex",
 		"--command", query,
 	)
+}
+
+func (fixture composeFixture) verifyDurableWebhook(t *testing.T, baseURL string) {
+	t.Helper()
+	const (
+		deliveryID = "123e4567-e89b-42d3-a456-426614174000"
+		secret     = "compose-webhook-secret"
+	)
+	body := []byte(`{"action":"closed","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"issue":{"id":456,"number":12}}`)
+	for range 2 {
+		if status := postWebhook(t, baseURL, deliveryID, "issues", secret, body); status != http.StatusAccepted {
+			t.Fatalf("valid webhook status = %d, want %d", status, http.StatusAccepted)
+		}
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		state := fixture.psql(t, fmt.Sprintf(`
+SELECT delivery.status || ':' || count(event.delivery_id)::text
+FROM webhook_deliveries AS delivery
+LEFT JOIN normalized_events AS event ON event.delivery_id = delivery.delivery_id
+WHERE delivery.delivery_id = '%s'
+GROUP BY delivery.status`, deliveryID))
+		if state == "PROCESSED:1" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if state := fixture.psql(t, fmt.Sprintf(`
+SELECT delivery.status || ':' || count(event.delivery_id)::text
+FROM webhook_deliveries AS delivery
+LEFT JOIN normalized_events AS event ON event.delivery_id = delivery.delivery_id
+WHERE delivery.delivery_id = '%s'
+GROUP BY delivery.status`, deliveryID)); state != "PROCESSED:1" {
+		t.Fatalf("durable webhook state = %q, want PROCESSED:1", state)
+	}
+	const unsupportedID = "323e4567-e89b-42d3-a456-426614174000"
+	if status := postWebhook(t, baseURL, unsupportedID, "ping", secret, []byte(`not JSON`)); status != http.StatusAccepted {
+		t.Fatalf("unsupported webhook status = %d, want %d", status, http.StatusAccepted)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if state := fixture.psql(t, fmt.Sprintf(`SELECT status FROM webhook_deliveries WHERE delivery_id = '%s'`, unsupportedID)); state == "IGNORED" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if state := fixture.psql(t, fmt.Sprintf(`SELECT status FROM webhook_deliveries WHERE delivery_id = '%s'`, unsupportedID)); state != "IGNORED" {
+		t.Fatalf("unsupported webhook state = %q, want IGNORED", state)
+	}
+	if count := fixture.psql(t, fmt.Sprintf(`SELECT count(*) FROM normalized_events WHERE delivery_id = '%s'`, unsupportedID)); count != "0" {
+		t.Fatalf("unsupported normalized events = %q, want 0", count)
+	}
+
+	if status := postWebhook(t, baseURL, "223e4567-e89b-42d3-a456-426614174000", "issues", "wrong-secret", body); status != http.StatusUnauthorized {
+		t.Fatalf("invalid webhook status = %d, want %d", status, http.StatusUnauthorized)
+	}
+	if count := fixture.psql(t, `SELECT count(*) FROM webhook_deliveries WHERE delivery_id = '223e4567-e89b-42d3-a456-426614174000'`); count != "0" {
+		t.Fatalf("invalid webhook rows = %q, want 0", count)
+	}
+}
+
+func postWebhook(t *testing.T, baseURL, deliveryID, eventName, secret string, body []byte) int {
+	t.Helper()
+	digest := hmac.New(sha256.New, []byte(secret))
+	_, _ = digest.Write(body)
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/webhooks/github", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create webhook request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Delivery", deliveryID)
+	request.Header.Set("X-GitHub-Event", eventName)
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(digest.Sum(nil)))
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("send webhook request: %v", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	return response.StatusCode
 }
 
 func (fixture composeFixture) agentVolumes(t *testing.T, script string) {

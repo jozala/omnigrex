@@ -58,21 +58,29 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var count int
-	var checksum []byte
-	err := pool.QueryRow(ctx, `SELECT count(*), min(checksum) FROM schema_migrations`).Scan(&count, &checksum)
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count)
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("schema_migrations rows = %d, want 1", count)
+	if count != 2 {
+		t.Errorf("schema_migrations rows = %d, want 2", count)
 	}
-	bootstrap, err := migrations.Files.ReadFile("000001_bootstrap.sql")
-	if err != nil {
-		t.Fatalf("read embedded bootstrap migration: %v", err)
-	}
-	wantChecksum := sha256.Sum256(bootstrap)
-	if string(checksum) != string(wantChecksum[:]) {
-		t.Errorf("stored checksum = %x, want SHA-256 %x", checksum, wantChecksum)
+	for version, filename := range map[int]string{
+		1: "000001_bootstrap.sql",
+		2: "000002_normalized_events.sql",
+	} {
+		contents, err := migrations.Files.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read embedded migration %q: %v", filename, err)
+		}
+		wantChecksum := sha256.Sum256(contents)
+		var checksum []byte
+		if err := pool.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version = $1`, version).Scan(&checksum); err != nil {
+			t.Fatalf("query migration %d checksum: %v", version, err)
+		}
+		if string(checksum) != string(wantChecksum[:]) {
+			t.Errorf("migration %d checksum = %x, want SHA-256 %x", version, checksum, wantChecksum)
+		}
 	}
 
 	for _, table := range []string{
@@ -126,8 +134,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 1 {
-		t.Errorf("migrations applied by Open() = %d, want 1", migrationCount)
+	if migrationCount != 2 {
+		t.Errorf("migrations applied by Open() = %d, want 2", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

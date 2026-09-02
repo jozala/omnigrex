@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/config"
+	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/github/webhook"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/store"
@@ -50,6 +53,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("initialize database: %w", err)
 	}
 	defer database.Close()
+	githubWebhook, webhookProcessor, err := configureGitHub(settings, database, logger)
+	if err != nil {
+		return err
+	}
 
 	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
 		AgentNetwork:       settings.DockerAgentNetwork,
@@ -72,7 +79,97 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		defer cancel()
 		return errors.Join(database.Ready(probeCtx), dockerProbe.Check(probeCtx))
 	})
-	return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness)
+	return runServices(ctx,
+		func(ctx context.Context) error {
+			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubWebhook)
+		},
+		webhookProcessor.Run,
+	)
+}
+
+func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*webhook.Handler, *webhook.Processor, error) {
+	developerKey, err := os.ReadFile(settings.GitHubDeveloperPrivateKeyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read Developer GitHub App private key: %w", err)
+	}
+	developerSigner, err := githubapi.NewAppJWTSigner(settings.GitHubDeveloperAppID, developerKey, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure Developer GitHub App: %w", err)
+	}
+	reviewerKey, err := os.ReadFile(settings.GitHubReviewerPrivateKeyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read Reviewer GitHub App private key: %w", err)
+	}
+	reviewerSigner, err := githubapi.NewAppJWTSigner(settings.GitHubReviewerAppID, reviewerKey, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure Reviewer GitHub App: %w", err)
+	}
+	if developerSigner.PublicKeyFingerprint() == reviewerSigner.PublicKeyFingerprint() {
+		return nil, nil, errors.New("Developer and Reviewer GitHub Apps must use distinct private keys")
+	}
+	if _, err := githubapi.NewAPIClient(&http.Client{Timeout: 15 * time.Second}, settings.GitHubAPIURL); err != nil {
+		return nil, nil, fmt.Errorf("configure GitHub API: %w", err)
+	}
+	webhookSecret, err := readSecret(settings.GitHubWebhookSecretFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read GitHub webhook secret: %w", err)
+	}
+	handler, err := webhook.NewHandler(webhookSecret, database)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure GitHub webhook handler: %w", err)
+	}
+	claimOwner, err := os.Hostname()
+	if err != nil {
+		return nil, nil, fmt.Errorf("identify webhook processor: %w", err)
+	}
+	processor, err := webhook.NewProcessor(database, webhook.ProcessorConfig{
+		ClaimOwner:       claimOwner,
+		LeaseDuration:    settings.WebhookLeaseDuration,
+		IdlePollInterval: settings.WebhookPollInterval,
+		OnError: func(err error) {
+			logger.Error("process GitHub webhook delivery", "error", err)
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure GitHub webhook processor: %w", err)
+	}
+	return handler, processor, nil
+}
+
+func readSecret(path string) ([]byte, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	secret := strings.TrimRight(string(contents), "\r\n")
+	if secret == "" {
+		return nil, errors.New("secret is empty")
+	}
+	return []byte(secret), nil
+}
+
+func runServices(ctx context.Context, services ...func(context.Context) error) error {
+	serviceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errorsFound := make(chan error, len(services))
+	for _, service := range services {
+		go func() { errorsFound <- service(serviceCtx) }()
+	}
+
+	first := <-errorsFound
+	cancel()
+	results := []error{serviceError(first)}
+	for range len(services) - 1 {
+		results = append(results, serviceError(<-errorsFound))
+	}
+	return errors.Join(results...)
+}
+
+func serviceError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 func healthcheck() int {

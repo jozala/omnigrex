@@ -15,7 +15,7 @@ func TestHealthEndpointsReportReady(t *testing.T) {
 	handler := server.Handler(server.ReadinessFunc(func(context.Context) error {
 		readinessChecked = true
 		return nil
-	}))
+	}), nil)
 	for _, path := range []string{"/healthz", "/readyz"} {
 		t.Run(path, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -40,7 +40,7 @@ func TestLivenessDoesNotCheckReadiness(t *testing.T) {
 	handler := server.Handler(server.ReadinessFunc(func(context.Context) error {
 		readinessChecked = true
 		return errors.New("dependency unavailable")
-	}))
+	}), nil)
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 
@@ -60,7 +60,7 @@ func TestLivenessDoesNotCheckReadiness(t *testing.T) {
 func TestReadinessFailureReturnsUnavailableWithoutLeakingError(t *testing.T) {
 	handler := server.Handler(server.ReadinessFunc(func(context.Context) error {
 		return errors.New("database password was secret")
-	}))
+	}), nil)
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	response := httptest.NewRecorder()
 
@@ -82,7 +82,7 @@ func TestReadinessReceivesRequestContext(t *testing.T) {
 	handler := server.Handler(server.ReadinessFunc(func(ctx context.Context) error {
 		got = ctx.Value(contextKey{})
 		return nil
-	}))
+	}), nil)
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	request = request.WithContext(context.WithValue(request.Context(), contextKey{}, contextValue))
 	response := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestHealthEndpointsRejectPost(t *testing.T) {
 	handler := server.Handler(server.ReadinessFunc(func(context.Context) error {
 		readinessChecked = true
 		return nil
-	}))
+	}), nil)
 
 	for _, path := range []string{"/healthz", "/readyz"} {
 		t.Run(path, func(t *testing.T) {
@@ -117,5 +117,28 @@ func TestHealthEndpointsRejectPost(t *testing.T) {
 	}
 	if readinessChecked {
 		t.Error("readiness checker was called for POST request")
+	}
+}
+
+func TestGitHubWebhookRouteDelegatesOnlyPost(t *testing.T) {
+	calls := 0
+	webhook := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		if request.Method != http.MethodPost || request.URL.Path != "/webhooks/github" {
+			t.Errorf("webhook request = %s %s", request.Method, request.URL.Path)
+		}
+		response.WriteHeader(http.StatusAccepted)
+	})
+	handler := server.Handler(server.ReadinessFunc(func(context.Context) error { return nil }), webhook)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/webhooks/github", nil))
+	if response.Code != http.StatusAccepted || calls != 1 {
+		t.Errorf("POST webhook = status %d, calls %d; want 202, 1", response.Code, calls)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/webhooks/github", nil))
+	if response.Code != http.StatusMethodNotAllowed || calls != 1 {
+		t.Errorf("GET webhook = status %d, calls %d; want 405, 1", response.Code, calls)
 	}
 }

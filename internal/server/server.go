@@ -20,7 +20,7 @@ func (check ReadinessFunc) Check(ctx context.Context) error {
 	return check(ctx)
 }
 
-func Handler(readiness ReadinessChecker) http.Handler {
+func Handler(readiness ReadinessChecker, githubWebhook http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
 	mux.HandleFunc("GET /readyz", func(response http.ResponseWriter, request *http.Request) {
@@ -30,14 +30,18 @@ func Handler(readiness ReadinessChecker) http.Handler {
 		}
 		health(response, request)
 	})
+	if githubWebhook != nil {
+		mux.Handle("POST /webhooks/github", githubWebhook)
+	}
 	return mux
 }
 
-func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, readiness ReadinessChecker) error {
+func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, readiness ReadinessChecker, githubWebhook http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           Handler(readiness),
+		Handler:           Handler(readiness, githubWebhook),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 

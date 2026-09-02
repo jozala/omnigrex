@@ -167,7 +167,7 @@ func loadComposeConfig(t *testing.T) composeConfig {
 	t.Helper()
 	output, err := executeCompose(
 		repositoryRoot(t),
-		composeEnvironment("/dev/null", "123", "456", "8080"),
+		composeEnvironment("/dev/null", "123", "456", "8080", nil),
 		30*time.Second,
 		"config", "--format", "json",
 	)

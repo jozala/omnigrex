@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadUsesDefaults(t *testing.T) {
-	got, err := config.Load(func(string) string { return "" })
+	got, err := config.Load(environment(nil))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -34,6 +34,18 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.AgentImageReference != "omnigrex/opencode:1.18.19" {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.19")
 	}
+	if got.GitHubAPIURL != "https://api.github.com" {
+		t.Errorf("GitHubAPIURL = %q, want %q", got.GitHubAPIURL, "https://api.github.com")
+	}
+	if got.GitHubDeveloperAppID != 101 || got.GitHubReviewerAppID != 202 {
+		t.Errorf("GitHub App IDs = (%d, %d), want (101, 202)", got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
+	}
+	if got.GitHubDeveloperPrivateKeyFile != "/secrets/developer.pem" || got.GitHubReviewerPrivateKeyFile != "/secrets/reviewer.pem" || got.GitHubWebhookSecretFile != "/secrets/webhook" {
+		t.Errorf("GitHub secret files = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
+	}
+	if got.WebhookLeaseDuration != 30*time.Second || got.WebhookPollInterval != 250*time.Millisecond {
+		t.Errorf("webhook timing = (%s, %s), want (30s, 250ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
+	}
 	if got.HTTPAddr != ":8080" {
 		t.Errorf("HTTPAddr = %q, want %q", got.HTTPAddr, ":8080")
 	}
@@ -47,16 +59,24 @@ func TestLoadUsesDefaults(t *testing.T) {
 
 func TestLoadUsesEnvironment(t *testing.T) {
 	values := map[string]string{
-		"OMNIGREX_DATABASE_URL":                  "postgres://app@database/app",
-		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE": "/secrets/database-password",
-		"OMNIGREX_DOCKER_AGENT_NETWORK":          "agents",
-		"OMNIGREX_WORKSPACE_VOLUME":              "workspaces",
-		"OMNIGREX_RUNTIME_STATE_VOLUME":          "runtime-state",
-		"OMNIGREX_MISE_VOLUME":                   "mise",
-		"OMNIGREX_AGENT_IMAGE_REFERENCE":         "registry.example/agent:v2",
-		"OMNIGREX_HTTP_ADDR":                     "127.0.0.1:9000",
-		"OMNIGREX_READINESS_TIMEOUT":             "3s",
-		"OMNIGREX_SHUTDOWN_TIMEOUT":              "20s",
+		"OMNIGREX_DATABASE_URL":                      "postgres://app@database/app",
+		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":     "/secrets/database-password",
+		"OMNIGREX_DOCKER_AGENT_NETWORK":              "agents",
+		"OMNIGREX_WORKSPACE_VOLUME":                  "workspaces",
+		"OMNIGREX_RUNTIME_STATE_VOLUME":              "runtime-state",
+		"OMNIGREX_MISE_VOLUME":                       "mise",
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":             "registry.example/agent:v2",
+		"OMNIGREX_GITHUB_API_URL":                    "https://github.example/api/v3",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "303",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "404",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/custom-developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/secrets/custom-reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/custom-webhook",
+		"OMNIGREX_WEBHOOK_LEASE_DURATION":            "45s",
+		"OMNIGREX_WEBHOOK_POLL_INTERVAL":             "500ms",
+		"OMNIGREX_HTTP_ADDR":                         "127.0.0.1:9000",
+		"OMNIGREX_READINESS_TIMEOUT":                 "3s",
+		"OMNIGREX_SHUTDOWN_TIMEOUT":                  "20s",
 	}
 
 	got, err := config.Load(func(key string) string { return values[key] })
@@ -85,6 +105,15 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.AgentImageReference != values["OMNIGREX_AGENT_IMAGE_REFERENCE"] {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, values["OMNIGREX_AGENT_IMAGE_REFERENCE"])
 	}
+	if got.GitHubAPIURL != values["OMNIGREX_GITHUB_API_URL"] || got.GitHubDeveloperAppID != 303 || got.GitHubReviewerAppID != 404 {
+		t.Errorf("GitHub API/App config = (%q, %d, %d)", got.GitHubAPIURL, got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
+	}
+	if got.GitHubDeveloperPrivateKeyFile != values["OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"] || got.GitHubReviewerPrivateKeyFile != values["OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"] || got.GitHubWebhookSecretFile != values["OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"] {
+		t.Errorf("GitHub secret file config = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
+	}
+	if got.WebhookLeaseDuration != 45*time.Second || got.WebhookPollInterval != 500*time.Millisecond {
+		t.Errorf("webhook timing = (%s, %s), want (45s, 500ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
+	}
 	if got.HTTPAddr != values["OMNIGREX_HTTP_ADDR"] {
 		t.Errorf("HTTPAddr = %q, want %q", got.HTTPAddr, values["OMNIGREX_HTTP_ADDR"])
 	}
@@ -109,6 +138,17 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "runtime-state volume", key: "OMNIGREX_RUNTIME_STATE_VOLUME", value: "   "},
 		{name: "mise volume", key: "OMNIGREX_MISE_VOLUME", value: "   "},
 		{name: "agent image reference", key: "OMNIGREX_AGENT_IMAGE_REFERENCE", value: "   "},
+		{name: "GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "://invalid"},
+		{name: "insecure GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "http://github.example"},
+		{name: "Developer App ID", key: "OMNIGREX_GITHUB_DEVELOPER_APP_ID", value: "0"},
+		{name: "Reviewer App ID", key: "OMNIGREX_GITHUB_REVIEWER_APP_ID", value: "not-an-id"},
+		{name: "Developer private key file", key: "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE", value: "relative.pem"},
+		{name: "Reviewer private key file", key: "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE", value: "relative.pem"},
+		{name: "webhook secret file", key: "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE", value: "relative"},
+		{name: "webhook lease syntax", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "later"},
+		{name: "webhook lease value", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "1s"},
+		{name: "webhook poll syntax", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "often"},
+		{name: "webhook poll value", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "-1s"},
 		{name: "readiness timeout syntax", key: "OMNIGREX_READINESS_TIMEOUT", value: "eventually"},
 		{name: "readiness timeout value", key: "OMNIGREX_READINESS_TIMEOUT", value: "0s"},
 		{name: "shutdown timeout syntax", key: "OMNIGREX_SHUTDOWN_TIMEOUT", value: "eventually"},
@@ -117,15 +157,31 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := config.Load(func(key string) string {
-				if key == test.key {
-					return test.value
-				}
-				return ""
-			})
+			_, err := config.Load(environment(map[string]string{test.key: test.value}))
 			if err == nil {
 				t.Fatal("Load() error = nil, want validation error")
 			}
 		})
 	}
+}
+
+func TestLoadRejectsSameGitHubAppIdentity(t *testing.T) {
+	_, err := config.Load(environment(map[string]string{"OMNIGREX_GITHUB_REVIEWER_APP_ID": "101"}))
+	if err == nil {
+		t.Fatal("Load() error = nil, want distinct Developer and Reviewer App IDs")
+	}
+}
+
+func environment(overrides map[string]string) func(string) string {
+	values := map[string]string{
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "101",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "202",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/secrets/reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/webhook",
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	return func(key string) string { return values[key] }
 }

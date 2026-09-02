@@ -32,34 +32,37 @@ func repositoryRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func composeEnvironment(secretFile, dockerGID, secretGID, httpPort string) []string {
-	overrides := []string{
-		"COMPOSE_ANSI=never",
-		"COMPOSE_FILE=compose.yaml",
-		"COMPOSE_PROJECT_NAME=omnigrex",
-		"OMNIGREX_DOCKER_GID=" + dockerGID,
-		"OMNIGREX_SECRET_GID=" + secretGID,
-		"OMNIGREX_HTTP_PORT=" + httpPort,
-		"OMNIGREX_READINESS_TIMEOUT=15s",
-		"OMNIGREX_SHUTDOWN_TIMEOUT=10s",
+func composeEnvironment(secretFile, dockerGID, secretGID, httpPort string, additional map[string]string) []string {
+	overrides := map[string]string{
+		"COMPOSE_ANSI":                     "never",
+		"COMPOSE_FILE":                     "compose.yaml",
+		"COMPOSE_PROJECT_NAME":             "omnigrex",
+		"OMNIGREX_DOCKER_GID":              dockerGID,
+		"OMNIGREX_SECRET_GID":              secretGID,
+		"OMNIGREX_HTTP_PORT":               httpPort,
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID": "1",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":  "2",
+		"OMNIGREX_READINESS_TIMEOUT":       "15s",
+		"OMNIGREX_SHUTDOWN_TIMEOUT":        "10s",
 	}
 	for _, name := range composeSecretEnvironment {
-		overrides = append(overrides, name+"="+secretFile)
+		overrides[name] = secretFile
+	}
+	for name, value := range additional {
+		overrides[name] = value
 	}
 
-	replaced := make(map[string]struct{}, len(overrides))
-	for _, entry := range overrides {
-		name, _, _ := strings.Cut(entry, "=")
-		replaced[name] = struct{}{}
-	}
 	environment := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if _, replace := replaced[name]; !replace {
+		if _, replace := overrides[name]; !replace {
 			environment = append(environment, entry)
 		}
 	}
-	return append(environment, overrides...)
+	for name, value := range overrides {
+		environment = append(environment, name+"="+value)
+	}
+	return environment
 }
 
 func executeCompose(root string, environment []string, timeout time.Duration, arguments ...string) ([]byte, error) {

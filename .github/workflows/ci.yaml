@@ -40,6 +40,8 @@ jobs:
         env:
           OMNIGREX_DOCKER_GID: "0"
           OMNIGREX_SECRET_GID: "1"
+          OMNIGREX_GITHUB_DEVELOPER_APP_ID: "1"
+          OMNIGREX_GITHUB_REVIEWER_APP_ID: "2"
           OMNIGREX_DATABASE_PASSWORD_FILE: /dev/null
           OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /dev/null
           OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /dev/null
@@ -74,6 +76,9 @@ jobs:
 
       - name: Run Docker-backed integration tests
         run: go test -race -tags=integration ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+
+      - name: Compile live GitHub App gate
+        run: go test -tags=live ./internal/github -run '^$'
 
       - name: Run full-stack Docker Compose test
         env:
