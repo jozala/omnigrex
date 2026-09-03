@@ -10,23 +10,35 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 )
 
 var (
-	ErrCapabilityUnsupported = errors.New("ACP capability is unsupported")
-	ErrPromptActive          = errors.New("ACP session already has an active prompt")
-	ErrProtocolVersion       = errors.New("unsupported ACP protocol version")
-	ErrSessionAmbiguous      = errors.New("multiple ACP sessions match the assignment")
-	ErrSessionNotFound       = errors.New("no ACP session matches the assignment")
-	ErrRequiredCapability    = errors.New("required ACP capability is unsupported")
-	ErrUnknownStopReason     = errors.New("unknown ACP stop reason")
-	ErrUnknownSession        = errors.New("unknown ACP session")
-	ErrWorkspacePath         = errors.New("ACP session must use the stable workspace path")
+	ErrCapabilityUnsupported    = errors.New("ACP capability is unsupported")
+	ErrPromptActive             = errors.New("ACP session already has an active prompt")
+	ErrProtocolVersion          = errors.New("unsupported ACP protocol version")
+	ErrSessionAmbiguous         = errors.New("multiple ACP sessions match the assignment")
+	ErrSessionDiscoveryMismatch = errors.New("ACP session discovery result does not match the assignment")
+	ErrSessionNotFound          = errors.New("no ACP session matches the assignment")
+	ErrRequiredCapability       = errors.New("required ACP capability is unsupported")
+	ErrUnknownStopReason        = errors.New("unknown ACP stop reason")
+	ErrUnknownSession           = errors.New("unknown ACP session")
+	ErrWorkspacePath            = errors.New("ACP session must use the stable workspace path")
+	ErrSessionIDEmpty           = errors.New("ACP session id is empty")
+	ErrSessionDiscoveryLimit    = errors.New("ACP session discovery limit exceeded")
+)
+
+const (
+	maxSessionDiscoveryPages   = 100
+	maxSessionDiscoveryResults = 1000
+	maxSessionsPerPage         = 100
 )
 
 type ClientOptions struct {
 	ClientInfo              Implementation
 	RequiredCapabilities    RequiredCapabilities
+	AgentEventSink          agentevent.Sink
 	OnUpdate                func(context.Context, SessionUpdate)
 	DecidePermission        func(context.Context, PermissionRequest) PermissionDecision
 	CancellationGracePeriod time.Duration
@@ -45,6 +57,7 @@ type Client struct {
 	mutex               sync.Mutex
 	initialized         bool
 	capabilities        AgentCapabilities
+	agentEventContext   agentevent.Context
 	sessions            map[string]struct{}
 	activePrompts       map[string]struct{}
 	promptContexts      map[string]context.Context
@@ -57,6 +70,9 @@ func NewClient(transport io.ReadWriteCloser, options ClientOptions) *Client {
 	}
 	if options.CancellationGracePeriod <= 0 {
 		options.CancellationGracePeriod = 5 * time.Second
+	}
+	if options.AgentEventSink == nil {
+		options.AgentEventSink = agentevent.NoopSink{}
 	}
 	client := &Client{
 		options:             options,
@@ -120,46 +136,62 @@ func (client *Client) CreateSession(ctx context.Context, request CreateSessionRe
 		return Session{}, err
 	}
 	if session.ID == "" {
-		return Session{}, errors.New("session/new returned an empty session id")
+		return Session{}, ErrSessionIDEmpty
 	}
 	client.recordSession(session.ID)
 	return session, nil
 }
 
 func (client *Client) ContinueSession(ctx context.Context, request ContinueSessionRequest) error {
+	_, err := client.ContinueSessionWithOptions(ctx, request)
+	return err
+}
+
+func (client *Client) ContinueSessionWithOptions(ctx context.Context, request ContinueSessionRequest) ([]json.RawMessage, error) {
 	if err := client.requireCapability("session/resume"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateContinuation(request); err != nil {
-		return err
+		return nil, err
 	}
 	params, err := client.continuationParams(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := client.connection.Call(ctx, "session/resume", params, &struct{}{}); err != nil {
-		return err
+	var response struct {
+		ConfigOptions []json.RawMessage `json:"configOptions"`
+	}
+	if err := client.connection.Call(ctx, "session/resume", params, &response); err != nil {
+		return nil, err
 	}
 	client.recordSession(request.SessionID)
-	return nil
+	return response.ConfigOptions, nil
 }
 
 func (client *Client) ReplayHistory(ctx context.Context, request ContinueSessionRequest) error {
+	_, err := client.ReplayHistoryWithOptions(ctx, request)
+	return err
+}
+
+func (client *Client) ReplayHistoryWithOptions(ctx context.Context, request ContinueSessionRequest) ([]json.RawMessage, error) {
 	if err := client.requireCapability("session/load"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateContinuation(request); err != nil {
-		return err
+		return nil, err
 	}
 	params, err := client.continuationParams(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := client.connection.Call(ctx, "session/load", params, &struct{}{}); err != nil {
-		return err
+	var response struct {
+		ConfigOptions []json.RawMessage `json:"configOptions"`
+	}
+	if err := client.connection.Call(ctx, "session/load", params, &response); err != nil {
+		return nil, err
 	}
 	client.recordSession(request.SessionID)
-	return nil
+	return response.ConfigOptions, nil
 }
 
 func (client *Client) DiscoverSessions(ctx context.Context, cwd, cursor string) (ListSessionsResponse, error) {
@@ -182,14 +214,26 @@ func (client *Client) DiscoverSessions(ctx context.Context, cwd, cursor string) 
 	if err := client.connection.Call(ctx, "session/list", params, &response); err != nil {
 		return ListSessionsResponse{}, err
 	}
+	if len(response.Sessions) > maxSessionsPerPage {
+		return ListSessionsResponse{}, ErrSessionDiscoveryLimit
+	}
+	for _, session := range response.Sessions {
+		if session.ID == "" {
+			return ListSessionsResponse{}, ErrSessionIDEmpty
+		}
+	}
 	return response, nil
 }
 
 func (client *Client) RecoverCreatedSession(ctx context.Context, cwd string) (SessionInfo, error) {
+	if err := validateWorkspace(cwd); err != nil {
+		return SessionInfo{}, err
+	}
 	var recovered *SessionInfo
 	cursor := ""
 	seenCursors := make(map[string]struct{})
-	for {
+	resultCount := 0
+	for pageNumber := 0; pageNumber < maxSessionDiscoveryPages; pageNumber++ {
 		if _, seen := seenCursors[cursor]; seen {
 			return SessionInfo{}, errors.New("session/list returned a repeated cursor")
 		}
@@ -198,9 +242,13 @@ func (client *Client) RecoverCreatedSession(ctx context.Context, cwd string) (Se
 		if err != nil {
 			return SessionInfo{}, err
 		}
+		resultCount += len(page.Sessions)
+		if resultCount > maxSessionDiscoveryResults {
+			return SessionInfo{}, ErrSessionDiscoveryLimit
+		}
 		for index := range page.Sessions {
 			if filepath.Clean(page.Sessions[index].CWD) != filepath.Clean(cwd) {
-				return SessionInfo{}, fmt.Errorf("%w: agent returned cwd %q", ErrSessionNotFound, page.Sessions[index].CWD)
+				return SessionInfo{}, fmt.Errorf("%w: agent returned cwd %q", ErrSessionDiscoveryMismatch, page.Sessions[index].CWD)
 			}
 			if recovered != nil {
 				return SessionInfo{}, ErrSessionAmbiguous
@@ -209,15 +257,14 @@ func (client *Client) RecoverCreatedSession(ctx context.Context, cwd string) (Se
 			recovered = &session
 		}
 		if page.NextCursor == "" {
-			break
+			if recovered == nil {
+				return SessionInfo{}, ErrSessionNotFound
+			}
+			return *recovered, nil
 		}
 		cursor = page.NextCursor
 	}
-	if recovered == nil {
-		return SessionInfo{}, ErrSessionNotFound
-	}
-	client.recordSession(recovered.ID)
-	return *recovered, nil
+	return SessionInfo{}, ErrSessionDiscoveryLimit
 }
 
 func (client *Client) SetConfigOption(ctx context.Context, sessionID, configID string, value any) ([]json.RawMessage, error) {
@@ -312,15 +359,30 @@ func (client *Client) Close() error {
 	return client.connection.Close()
 }
 
+// SetAgentEventContext supplies durable execution context for subsequent ACP updates.
+func (client *Client) SetAgentEventContext(eventContext agentevent.Context) {
+	client.mutex.Lock()
+	client.agentEventContext = eventContext
+	client.mutex.Unlock()
+}
+
 func (client *Client) HandleNotification(ctx context.Context, method string, params json.RawMessage) {
-	if method != "session/update" || client.options.OnUpdate == nil {
+	if method != "session/update" {
 		return
 	}
 	var update SessionUpdate
 	if err := json.Unmarshal(params, &update); err != nil || update.SessionID == "" || len(update.Update) == 0 {
 		return
 	}
-	client.options.OnUpdate(ctx, update)
+	client.mutex.Lock()
+	eventContext := client.agentEventContext
+	client.mutex.Unlock()
+	if eventContext.AssignmentID != "" && eventContext.ACPSessionID == update.SessionID {
+		_ = EmitAgentEvent(ctx, client.options.AgentEventSink, eventContext, time.Now(), update)
+	}
+	if client.options.OnUpdate != nil {
+		client.options.OnUpdate(ctx, update)
+	}
 }
 
 func (client *Client) HandleRequest(ctx context.Context, method string, params json.RawMessage) (any, *RPCError) {
@@ -394,12 +456,18 @@ func (client *Client) requireCapability(method string) error {
 }
 
 func (client *Client) recordSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
 	client.mutex.Lock()
 	client.sessions[sessionID] = struct{}{}
 	client.mutex.Unlock()
 }
 
 func (client *Client) requireSession(sessionID string) error {
+	if sessionID == "" {
+		return ErrSessionIDEmpty
+	}
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
 	if _, ok := client.sessions[sessionID]; !ok {
@@ -409,6 +477,9 @@ func (client *Client) requireSession(sessionID string) error {
 }
 
 func (client *Client) beginPrompt(sessionID string) error {
+	if sessionID == "" {
+		return ErrSessionIDEmpty
+	}
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
 	if _, ok := client.sessions[sessionID]; !ok {
@@ -502,7 +573,7 @@ func (client *Client) continuationParams(request ContinueSessionRequest) (map[st
 
 func validateContinuation(request ContinueSessionRequest) error {
 	if request.SessionID == "" {
-		return errors.New("ACP session id is empty")
+		return ErrSessionIDEmpty
 	}
 	return validateWorkspace(request.CWD)
 }

@@ -16,9 +16,12 @@ var (
 )
 
 type InstallationToken struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Token       string                  `json:"token"`
+	ExpiresAt   time.Time               `json:"expires_at"`
+	Permissions InstallationPermissions `json:"permissions"`
 }
+
+type InstallationPermissions map[string]string
 
 type InstallationTokenRequester interface {
 	CreateInstallationToken(context.Context, string, int64) (InstallationToken, error)

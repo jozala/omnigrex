@@ -1,11 +1,15 @@
 package config_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/config"
+	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
+
+const deploymentImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestLoadUsesDefaults(t *testing.T) {
 	got, err := config.Load(environment(nil))
@@ -34,6 +38,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.AgentImageReference != "omnigrex/opencode:1.18.19" {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.19")
 	}
+	if got.OpenCodeACPV1Image != deploymentImage {
+		t.Errorf("OpenCodeACPV1Image = %q, want %q", got.OpenCodeACPV1Image, deploymentImage)
+	}
+	if want := (profile.Platform{OS: "linux", Arch: "arm64"}); !reflect.DeepEqual(got.OpenCodeACPV1Platform, want) {
+		t.Errorf("OpenCodeACPV1Platform = %#v, want %#v", got.OpenCodeACPV1Platform, want)
+	}
 	if got.GitHubAPIURL != "https://api.github.com" {
 		t.Errorf("GitHubAPIURL = %q, want %q", got.GitHubAPIURL, "https://api.github.com")
 	}
@@ -43,8 +53,14 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.GitHubDeveloperPrivateKeyFile != "/secrets/developer.pem" || got.GitHubReviewerPrivateKeyFile != "/secrets/reviewer.pem" || got.GitHubWebhookSecretFile != "/secrets/webhook" {
 		t.Errorf("GitHub secret files = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
 	}
+	if got.DeveloperProviderCredentialsFile != "/secrets/developer-provider.json" || got.ReviewerProviderCredentialsFile != "/secrets/reviewer-provider.json" {
+		t.Errorf("provider credential files = (%q, %q)", got.DeveloperProviderCredentialsFile, got.ReviewerProviderCredentialsFile)
+	}
 	if got.WebhookLeaseDuration != 30*time.Second || got.WebhookPollInterval != 250*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (30s, 250ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
+	}
+	if got.AgentTurnPreparationLeaseDuration != 30*time.Second || got.AgentTurnPreparationHeartbeatInterval != 10*time.Second || got.AgentTurnPreparationPollInterval != 250*time.Millisecond || got.AgentTurnPreparationRetryDelay != 5*time.Second {
+		t.Errorf("Agent Turn preparation timing = (%s, %s, %s, %s), want (30s, 10s, 250ms, 5s)", got.AgentTurnPreparationLeaseDuration, got.AgentTurnPreparationHeartbeatInterval, got.AgentTurnPreparationPollInterval, got.AgentTurnPreparationRetryDelay)
 	}
 	if got.AssignmentRetentionDuration != 30*24*time.Hour || got.AgentTurnConcurrencyLimit != 2 {
 		t.Errorf("workflow limits = (%s, %d), want (720h, 2)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
@@ -62,26 +78,34 @@ func TestLoadUsesDefaults(t *testing.T) {
 
 func TestLoadUsesEnvironment(t *testing.T) {
 	values := map[string]string{
-		"OMNIGREX_DATABASE_URL":                      "postgres://app@database/app",
-		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":     "/secrets/database-password",
-		"OMNIGREX_DOCKER_AGENT_NETWORK":              "agents",
-		"OMNIGREX_WORKSPACE_VOLUME":                  "workspaces",
-		"OMNIGREX_RUNTIME_STATE_VOLUME":              "runtime-state",
-		"OMNIGREX_MISE_VOLUME":                       "mise",
-		"OMNIGREX_AGENT_IMAGE_REFERENCE":             "registry.example/agent:v2",
-		"OMNIGREX_GITHUB_API_URL":                    "https://github.example/api/v3",
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "303",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "404",
-		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/custom-developer.pem",
-		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/secrets/custom-reviewer.pem",
-		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/custom-webhook",
-		"OMNIGREX_WEBHOOK_LEASE_DURATION":            "45s",
-		"OMNIGREX_WEBHOOK_POLL_INTERVAL":             "500ms",
-		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":     "48h",
-		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":      "7",
-		"OMNIGREX_HTTP_ADDR":                         "127.0.0.1:9000",
-		"OMNIGREX_READINESS_TIMEOUT":                 "3s",
-		"OMNIGREX_SHUTDOWN_TIMEOUT":                  "20s",
+		"OMNIGREX_DATABASE_URL":                              "postgres://app@database/app",
+		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":             "/secrets/database-password",
+		"OMNIGREX_DOCKER_AGENT_NETWORK":                      "agents",
+		"OMNIGREX_WORKSPACE_VOLUME":                          "workspaces",
+		"OMNIGREX_RUNTIME_STATE_VOLUME":                      "runtime-state",
+		"OMNIGREX_MISE_VOLUME":                               "mise",
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":                     "registry.example/agent:v2",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":                     "registry.example/agent/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":                  "linux/amd64",
+		"OMNIGREX_GITHUB_API_URL":                            "https://github.example/api/v3",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                   "303",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                    "404",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":         "/secrets/custom-developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":          "/secrets/custom-reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":                "/secrets/custom-webhook",
+		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE":       "/secrets/custom-developer-provider.json",
+		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":        "/secrets/custom-reviewer-provider.json",
+		"OMNIGREX_WEBHOOK_LEASE_DURATION":                    "45s",
+		"OMNIGREX_WEBHOOK_POLL_INTERVAL":                     "500ms",
+		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "1m",
+		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "15s",
+		"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "750ms",
+		"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "3s",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":             "48h",
+		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":              "7",
+		"OMNIGREX_HTTP_ADDR":                                 "127.0.0.1:9000",
+		"OMNIGREX_READINESS_TIMEOUT":                         "3s",
+		"OMNIGREX_SHUTDOWN_TIMEOUT":                          "20s",
 	}
 
 	got, err := config.Load(func(key string) string { return values[key] })
@@ -110,14 +134,23 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.AgentImageReference != values["OMNIGREX_AGENT_IMAGE_REFERENCE"] {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, values["OMNIGREX_AGENT_IMAGE_REFERENCE"])
 	}
+	if got.OpenCodeACPV1Image != values["OMNIGREX_OPENCODE_ACP_V1_IMAGE"] || got.OpenCodeACPV1Platform != (profile.Platform{OS: "linux", Arch: "amd64"}) {
+		t.Errorf("OpenCode ACP v1 deployment = (%q, %#v)", got.OpenCodeACPV1Image, got.OpenCodeACPV1Platform)
+	}
 	if got.GitHubAPIURL != values["OMNIGREX_GITHUB_API_URL"] || got.GitHubDeveloperAppID != 303 || got.GitHubReviewerAppID != 404 {
 		t.Errorf("GitHub API/App config = (%q, %d, %d)", got.GitHubAPIURL, got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
 	}
 	if got.GitHubDeveloperPrivateKeyFile != values["OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"] || got.GitHubReviewerPrivateKeyFile != values["OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"] || got.GitHubWebhookSecretFile != values["OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"] {
 		t.Errorf("GitHub secret file config = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
 	}
+	if got.DeveloperProviderCredentialsFile != values["OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"] || got.ReviewerProviderCredentialsFile != values["OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"] {
+		t.Errorf("provider credential file config = (%q, %q)", got.DeveloperProviderCredentialsFile, got.ReviewerProviderCredentialsFile)
+	}
 	if got.WebhookLeaseDuration != 45*time.Second || got.WebhookPollInterval != 500*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (45s, 500ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
+	}
+	if got.AgentTurnPreparationLeaseDuration != time.Minute || got.AgentTurnPreparationHeartbeatInterval != 15*time.Second || got.AgentTurnPreparationPollInterval != 750*time.Millisecond || got.AgentTurnPreparationRetryDelay != 3*time.Second {
+		t.Errorf("Agent Turn preparation timing = (%s, %s, %s, %s)", got.AgentTurnPreparationLeaseDuration, got.AgentTurnPreparationHeartbeatInterval, got.AgentTurnPreparationPollInterval, got.AgentTurnPreparationRetryDelay)
 	}
 	if got.AssignmentRetentionDuration != 48*time.Hour || got.AgentTurnConcurrencyLimit != 7 {
 		t.Errorf("workflow limits = (%s, %d), want (48h, 7)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
@@ -146,6 +179,13 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "runtime-state volume", key: "OMNIGREX_RUNTIME_STATE_VOLUME", value: "   "},
 		{name: "mise volume", key: "OMNIGREX_MISE_VOLUME", value: "   "},
 		{name: "agent image reference", key: "OMNIGREX_AGENT_IMAGE_REFERENCE", value: "   "},
+		{name: "missing deployment image", key: "OMNIGREX_OPENCODE_ACP_V1_IMAGE", value: ""},
+		{name: "mutable deployment image", key: "OMNIGREX_OPENCODE_ACP_V1_IMAGE", value: "registry.example/agent/opencode:1.18.19"},
+		{name: "local deployment image ID", key: "OMNIGREX_OPENCODE_ACP_V1_IMAGE", value: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "unsupported deployment OS", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "darwin/arm64"},
+		{name: "unsupported deployment architecture", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "linux/s390x"},
+		{name: "missing deployment platform", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: ""},
+		{name: "malformed deployment platform", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "linux"},
 		{name: "GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "://invalid"},
 		{name: "insecure GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "http://github.example"},
 		{name: "Developer App ID", key: "OMNIGREX_GITHUB_DEVELOPER_APP_ID", value: "0"},
@@ -153,10 +193,29 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "Developer private key file", key: "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE", value: "relative.pem"},
 		{name: "Reviewer private key file", key: "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE", value: "relative.pem"},
 		{name: "webhook secret file", key: "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE", value: "relative"},
+		{name: "Developer provider credentials file", key: "OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE", value: "relative.json"},
+		{name: "Reviewer provider credentials file", key: "OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE", value: "relative.json"},
 		{name: "webhook lease syntax", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "later"},
 		{name: "webhook lease value", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "1s"},
 		{name: "webhook poll syntax", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "often"},
 		{name: "webhook poll value", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "-1s"},
+		{name: "preparation lease syntax", key: "OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION", value: "later"},
+		{name: "preparation lease value", key: "OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION", value: "0s"},
+		{name: "preparation lease below Store precision", key: "OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION", value: "1ns"},
+		{name: "preparation lease above Store maximum", key: "OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION", value: "8760h1us"},
+		{name: "preparation heartbeat syntax", key: "OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL", value: "often"},
+		{name: "preparation heartbeat value", key: "OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL", value: "0s"},
+		{name: "preparation heartbeat below Store precision", key: "OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL", value: "1ns"},
+		{name: "preparation heartbeat above Store maximum", key: "OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL", value: "8760h1us"},
+		{name: "preparation heartbeat reaches lease", key: "OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL", value: "30s"},
+		{name: "preparation poll syntax", key: "OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL", value: "often"},
+		{name: "preparation poll value", key: "OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL", value: "0s"},
+		{name: "preparation poll below Store precision", key: "OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL", value: "1ns"},
+		{name: "preparation poll above Worker maximum", key: "OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL", value: "8760h1us"},
+		{name: "preparation retry syntax", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "later"},
+		{name: "preparation retry value", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "0s"},
+		{name: "preparation retry below Store precision", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "1ns"},
+		{name: "preparation retry above Store maximum", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "8760h1us"},
 		{name: "assignment retention syntax", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "later"},
 		{name: "assignment retention value", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "0s"},
 		{name: "Agent Turn concurrency syntax", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "many"},
@@ -177,6 +236,32 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsAgentTurnPreparationDurationBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "minimum", overrides: map[string]string{
+			"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "2us",
+			"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "1us",
+			"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "1us",
+			"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "1us",
+		}},
+		{name: "maximum", overrides: map[string]string{
+			"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "8760h",
+			"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "8759h59m59.999999s",
+			"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "8760h",
+			"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "8760h",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := config.Load(environment(test.overrides)); err != nil {
+				t.Fatalf("Load() boundary error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsSameGitHubAppIdentity(t *testing.T) {
 	_, err := config.Load(environment(map[string]string{"OMNIGREX_GITHUB_REVIEWER_APP_ID": "101"}))
 	if err == nil {
@@ -186,11 +271,15 @@ func TestLoadRejectsSameGitHubAppIdentity(t *testing.T) {
 
 func environment(overrides map[string]string) func(string) string {
 	values := map[string]string{
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "101",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "202",
-		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/developer.pem",
-		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/secrets/reviewer.pem",
-		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/webhook",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":               deploymentImage,
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":            "linux/arm64",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":             "101",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":              "202",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":   "/secrets/developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":    "/secrets/reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":          "/secrets/webhook",
+		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE": "/secrets/developer-provider.json",
+		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":  "/secrets/reviewer-provider.json",
 	}
 	for key, value := range overrides {
 		values[key] = value

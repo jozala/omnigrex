@@ -53,6 +53,14 @@ func TestStateEventLegalityIsExhaustive(t *testing.T) {
 			workflow.DispositionUnrelated, workflow.DispositionStale, workflow.DispositionIllegal, workflow.DispositionIllegal,
 			workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionApplied,
 		)},
+		{name: "Assignment configuration conflict", make: matrixAssignmentConfigurationConflict, want: dispositions(
+			workflow.DispositionUnrelated, workflow.DispositionIllegal, workflow.DispositionStale, workflow.DispositionStale,
+			workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal,
+		)},
+		{name: "Agent Turn preparation failed", make: matrixAgentTurnPreparationFailed, want: dispositions(
+			workflow.DispositionUnrelated, workflow.DispositionIllegal, workflow.DispositionStale, workflow.DispositionStale,
+			workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal,
+		)},
 	}
 
 	for _, test := range tests {
@@ -322,5 +330,28 @@ func matrixAssignmentsCollected(snapshot workflow.Snapshot) workflow.Event {
 	}
 	return workflow.AssignmentsCollectedEvent{
 		EventMetadata: matrixMetadata(snapshot, "matrix-collect"), RetentionToken: token, RetainUntil: deadline, CollectedAt: deadline.Add(time.Minute),
+	}
+}
+
+func matrixAssignmentConfigurationConflict(snapshot workflow.Snapshot) workflow.Event {
+	role := workflow.RoleDeveloper
+	if snapshot.State == workflow.StateReviewing {
+		role = workflow.RoleReviewer
+	}
+	return workflow.AssignmentConfigurationConflictEvent{
+		EventMetadata: matrixMetadata(snapshot, "matrix-assignment-configuration-conflict"),
+		Role:          role,
+	}
+}
+
+func matrixAgentTurnPreparationFailed(snapshot workflow.Snapshot) workflow.Event {
+	role := workflow.RoleDeveloper
+	if snapshot.State == workflow.StateReviewing {
+		role = workflow.RoleReviewer
+	}
+	return workflow.AgentTurnPreparationFailedEvent{
+		EventMetadata: matrixMetadata(snapshot, "matrix-agent-turn-preparation-failed"),
+		Role:          role,
+		Diagnostic:    "preparation failed",
 	}
 }

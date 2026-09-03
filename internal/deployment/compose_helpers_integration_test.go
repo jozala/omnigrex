@@ -23,6 +23,8 @@ var composeSecretEnvironment = []string{
 	"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE",
 }
 
+const testDeploymentImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -34,16 +36,19 @@ func repositoryRoot(t *testing.T) string {
 
 func composeEnvironment(secretFile, dockerGID, secretGID, httpPort string, additional map[string]string) []string {
 	overrides := map[string]string{
-		"COMPOSE_ANSI":                     "never",
-		"COMPOSE_FILE":                     "compose.yaml",
-		"COMPOSE_PROJECT_NAME":             "omnigrex",
-		"OMNIGREX_DOCKER_GID":              dockerGID,
-		"OMNIGREX_SECRET_GID":              secretGID,
-		"OMNIGREX_HTTP_PORT":               httpPort,
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID": "1",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":  "2",
-		"OMNIGREX_READINESS_TIMEOUT":       "15s",
-		"OMNIGREX_SHUTDOWN_TIMEOUT":        "10s",
+		"COMPOSE_ANSI":                      "never",
+		"COMPOSE_FILE":                      "compose.yaml",
+		"COMPOSE_PROJECT_NAME":              "omnigrex",
+		"OMNIGREX_DOCKER_GID":               dockerGID,
+		"OMNIGREX_SECRET_GID":               secretGID,
+		"OMNIGREX_HTTP_PORT":                httpPort,
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":    "omnigrex/opencode:1.18.19",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":  "1",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":   "2",
+		"OMNIGREX_READINESS_TIMEOUT":        "15s",
+		"OMNIGREX_SHUTDOWN_TIMEOUT":         "10s",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":    testDeploymentImage,
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM": "linux/amd64",
 	}
 	for _, name := range composeSecretEnvironment {
 		overrides[name] = secretFile

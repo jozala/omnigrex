@@ -1,9 +1,61 @@
 package github
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
+
+// SafeErrorMetadata contains the credential-free error properties needed for retry decisions.
+type SafeErrorMetadata struct {
+	Permanent      bool
+	Transient      bool
+	APIClientError bool
+	APIRetryable   bool
+	RetryAfter     time.Duration
+	ResetAt        time.Time
+}
+
+// SafeErrorMetadataProvider exposes retry properties without exposing an underlying error.
+type SafeErrorMetadataProvider interface {
+	SafeErrorMetadata() SafeErrorMetadata
+}
+
+// ExtractSafeErrorMetadata copies only allowlisted retry properties from an error chain.
+func ExtractSafeErrorMetadata(err error) SafeErrorMetadata {
+	var metadata SafeErrorMetadata
+	var provider SafeErrorMetadataProvider
+	if errors.As(err, &provider) {
+		metadata = provider.SafeErrorMetadata()
+	}
+	var permanent interface{ Permanent() bool }
+	if errors.As(err, &permanent) && permanent.Permanent() {
+		metadata.Permanent = true
+	}
+	var transient interface{ Transient() bool }
+	if errors.As(err, &transient) && transient.Transient() {
+		metadata.Transient = true
+	}
+	var apiError *APIError
+	if errors.As(err, &apiError) && apiError.StatusCode >= http.StatusBadRequest && apiError.StatusCode < http.StatusInternalServerError {
+		metadata.APIClientError = true
+		metadata.APIRetryable = apiError.StatusCode == http.StatusRequestTimeout || apiError.StatusCode == http.StatusTooManyRequests
+	}
+	var rateLimit *RateLimitError
+	if errors.As(err, &rateLimit) {
+		if rateLimit.APIError != nil && rateLimit.StatusCode >= http.StatusBadRequest && rateLimit.StatusCode < http.StatusInternalServerError {
+			metadata.APIClientError = true
+			metadata.APIRetryable = rateLimit.StatusCode == http.StatusRequestTimeout || rateLimit.StatusCode == http.StatusTooManyRequests
+		}
+		metadata.RetryAfter = rateLimit.RetryAfter
+		metadata.ResetAt = rateLimit.ResetAt.UTC()
+	}
+	if !metadata.ResetAt.IsZero() {
+		metadata.ResetAt = metadata.ResetAt.UTC()
+	}
+	return metadata
+}
 
 type ConfigurationError struct {
 	Cause error

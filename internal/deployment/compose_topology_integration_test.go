@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	postgresImage = "postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545"
-	agentImage    = "omnigrex/opencode:1.18.19"
-	dockerSocket  = "/var/run/docker.sock"
+	postgresImage  = "postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545"
+	readinessImage = "omnigrex/opencode:1.18.19"
+	dockerSocket   = "/var/run/docker.sock"
 )
 
 var composeSecretNames = []string{
@@ -97,11 +97,26 @@ func TestComposeTopology(t *testing.T) {
 	if postgres.Image != postgresImage {
 		t.Errorf("postgres image = %q, want pinned %q", postgres.Image, postgresImage)
 	}
-	if validator.Image != agentImage {
-		t.Errorf("opencode-image image = %q, want pinned %q", validator.Image, agentImage)
+	if validator.Image != readinessImage {
+		t.Errorf("opencode-image image = %q, want local readiness image %q", validator.Image, readinessImage)
 	}
-	if got := orchestrator.Environment["OMNIGREX_AGENT_IMAGE_REFERENCE"]; got != agentImage {
-		t.Errorf("orchestrator agent image reference = %q, want %q", got, agentImage)
+	if got := orchestrator.Environment["OMNIGREX_AGENT_IMAGE_REFERENCE"]; got != readinessImage {
+		t.Errorf("orchestrator readiness image reference = %q, want %q", got, readinessImage)
+	}
+	if got := orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_IMAGE"]; got != testDeploymentImage {
+		t.Errorf("orchestrator opencode-acp/v1 image = %q, want exact registry digest %q", got, testDeploymentImage)
+	}
+	if got := orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_PLATFORM"]; got != "linux/amd64" {
+		t.Errorf("orchestrator opencode-acp/v1 platform = %q, want linux/amd64", got)
+	}
+	if readinessImage == testDeploymentImage {
+		t.Fatal("local readiness image and deployment Runtime Profile image must be separate settings")
+	}
+	if got := orchestrator.Environment["OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-developer-provider-credentials" {
+		t.Errorf("Developer provider credentials path = %q", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-reviewer-provider-credentials" {
+		t.Errorf("Reviewer provider credentials path = %q", got)
 	}
 
 	assertExactKeys(t, "postgres networks", postgres.Networks, "backend")

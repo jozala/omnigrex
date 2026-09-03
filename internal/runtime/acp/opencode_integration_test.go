@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -736,6 +737,7 @@ func startOpenCodeWithTransport(
 		AgentNetwork:     "bridge",
 		AllowHostGateway: true,
 		RuntimePolicy: dockerruntime.RuntimePolicy{
+			Platform:   dockerruntime.Platform{OS: "linux", Architecture: runtime.GOARCH},
 			User:       "10001:10001",
 			WorkingDir: acp.WorkspacePath,
 			VolumeBindings: map[string]string{
@@ -753,18 +755,17 @@ func startOpenCodeWithTransport(
 				"/home/opencode/.local/share/opencode",
 				"/home/opencode/.local/share/mise",
 			},
-			AllowedTmpfsTargets: []string{
-				"/home/opencode/.cache",
-				"/home/opencode/.config",
-				"/home/opencode/.local/state",
-				"/home/opencode/.opencode",
-				"/tmp/opencode",
+			Tmpfs: []dockerruntime.TmpfsMount{
+				{Target: "/home/opencode/.cache", SizeBytes: 64 << 20},
+				{Target: "/home/opencode/.config", SizeBytes: 16 << 20},
+				{Target: "/home/opencode/.local/state", SizeBytes: 16 << 20},
+				{Target: "/home/opencode/.opencode", SizeBytes: 16 << 20},
+				{Target: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
 			},
 			RequireVolumeSubpaths: true,
 			RequiredEnvironment: map[string]string{
 				"OPENCODE_AUTH_CONTENT": "{}",
 			},
-			MaxTmpfsBytes: 128 << 20,
 		},
 	})
 	if err != nil {
@@ -779,6 +780,7 @@ func startOpenCodeWithTransport(
 	process.process, err = engine.Start(ctx, dockerruntime.Spec{
 		Name:       uniqueDockerName("process"),
 		Image:      image,
+		Platform:   dockerruntime.Platform{OS: "linux", Architecture: runtime.GOARCH},
 		User:       "10001:10001",
 		WorkingDir: acp.WorkspacePath,
 		Command:    []string{"acp"},

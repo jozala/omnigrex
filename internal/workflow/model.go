@@ -73,6 +73,10 @@ const (
 	ReasonCorroborationWithoutActiveTurn Reason = "corroboration_without_active_turn"
 )
 
+const ReasonAssignmentConfigurationConflict Reason = "assignment_configuration_conflict"
+
+const ReasonAgentTurnPreparationFailed Reason = "agent_turn_preparation_failed"
+
 type WorkItem struct {
 	RepositoryID int64
 	IssueID      int64
@@ -297,6 +301,22 @@ type AssignmentsCollectedEvent struct {
 
 func (AssignmentsCollectedEvent) isWorkflowEvent() {}
 
+type AssignmentConfigurationConflictEvent struct {
+	EventMetadata
+	Role Role
+}
+
+func (AssignmentConfigurationConflictEvent) isWorkflowEvent() {}
+
+type AgentTurnPreparationFailedEvent struct {
+	EventMetadata
+	Role             Role
+	Diagnostic       string
+	AssignmentsExist bool
+}
+
+func (AgentTurnPreparationFailedEvent) isWorkflowEvent() {}
+
 type EventKind string
 
 const (
@@ -310,6 +330,10 @@ const (
 	EventKindIssueReopened          EventKind = "ISSUE_REOPENED"
 	EventKindAssignmentsCollected   EventKind = "ASSIGNMENTS_COLLECTED"
 )
+
+const EventKindAssignmentConfigurationConflict EventKind = "ASSIGNMENT_CONFIGURATION_CONFLICT"
+
+const EventKindAgentTurnPreparationFailed EventKind = "AGENT_TURN_PREPARATION_FAILED"
 
 type TurnPurpose string
 

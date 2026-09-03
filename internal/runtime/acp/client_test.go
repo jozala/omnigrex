@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 )
 
 func TestClientInitializesAndRecordsCapabilities(t *testing.T) {
@@ -256,6 +259,43 @@ func TestClientRejectsUnstableWorkspaceForContinuationAndReplay(t *testing.T) {
 	}
 }
 
+func TestClientReturnsConfigurationOptionsAfterContinuation(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{
+		"sessionCapabilities": map[string]any{"resume": map[string]any{}},
+	})
+
+	continued := make(chan struct {
+		options []json.RawMessage
+		err     error
+	}, 1)
+	go func() {
+		options, err := client.ContinueSessionWithOptions(context.Background(), acp.ContinueSessionRequest{
+			SessionID: "session-1",
+			CWD:       acp.WorkspacePath,
+		})
+		continued <- struct {
+			options []json.RawMessage
+			err     error
+		}{options: options, err: err}
+	}()
+	request := readWireMessage(t, reader)
+	options := []json.RawMessage{json.RawMessage(`{"id":"model","type":"select","currentValue":"provider/model","options":[{"value":"provider/model"}]}`)}
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      request.ID,
+		"result":  map[string]any{"configOptions": options},
+	})
+	result := <-continued
+	if result.err != nil {
+		t.Fatalf("ContinueSessionWithOptions() error = %v", result.err)
+	}
+	if !reflect.DeepEqual(result.options, options) {
+		t.Fatalf("configuration options = %s, want %s", result.options, options)
+	}
+}
+
 func TestClientSetsBooleanConfigOption(t *testing.T) {
 	client, agent := newPipeClient(t, acp.ClientOptions{})
 	reader := bufio.NewReader(agent)
@@ -354,6 +394,90 @@ func TestClientPromptForwardsUpdatesRejectsConcurrencyAndCancels(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("session update was not forwarded")
+	}
+}
+
+func TestClientEmitsAgentEventFromMatchingSessionUpdateAndPreservesOnUpdate(t *testing.T) {
+	const secret = "reasoning-and-transcript-sentinel"
+	events := make(chan agentevent.AgentEvent, 1)
+	updates := make(chan acp.SessionUpdate, 1)
+	client, agent := newPipeClient(t, acp.ClientOptions{
+		AgentEventSink: channelAgentEventSink(events),
+		OnUpdate: func(_ context.Context, update acp.SessionUpdate) {
+			updates <- update
+		},
+	})
+	client.SetAgentEventContext(agentevent.Context{
+		AssignmentID: "assignment-1", AgentSessionID: "durable-session-1", TurnID: "turn-1",
+		ACPSessionID: "opaque-bound-session", ExecutionEpoch: 4, ControlRevision: 7,
+	})
+	rawUpdate := json.RawMessage(`{"sessionUpdate":"agent_thought_chunk","messageId":"message-1","content":{"type":"text","text":"` + secret + `"}}`)
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": "opaque-bound-session",
+			"update":    rawUpdate,
+		},
+	})
+
+	select {
+	case event := <-events:
+		if event.AssignmentID != "assignment-1" || event.AgentSessionID != "durable-session-1" || event.TurnID != "turn-1" ||
+			event.ExecutionEpoch != 4 || event.ControlRevision != 7 || event.ObservedAt.IsZero() {
+			t.Fatalf("Agent Event context = %#v", event)
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("encode Agent Event: %v", err)
+		}
+		if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "opaque-bound-session") {
+			t.Fatalf("Agent Event exposed content or opaque ACP identity: %s", encoded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session update did not emit an Agent Event")
+	}
+	select {
+	case update := <-updates:
+		if update.SessionID != "opaque-bound-session" || string(update.Update) != string(rawUpdate) {
+			t.Fatalf("OnUpdate received %#v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session update was not forwarded to OnUpdate")
+	}
+}
+
+func TestClientSuppressesMismatchedSessionAgentEventAndPreservesOnUpdate(t *testing.T) {
+	events := make(chan agentevent.AgentEvent, 1)
+	updates := make(chan acp.SessionUpdate, 1)
+	client, _ := newPipeClient(t, acp.ClientOptions{
+		AgentEventSink: channelAgentEventSink(events),
+		OnUpdate: func(_ context.Context, update acp.SessionUpdate) {
+			updates <- update
+		},
+	})
+	client.SetAgentEventContext(agentevent.Context{
+		AssignmentID: "assignment-1", AgentSessionID: "durable-session-1", TurnID: "turn-1",
+		ACPSessionID: "opaque-session-a", ExecutionEpoch: 4, ControlRevision: 7,
+	})
+	rawUpdate := json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"wrong session"}}`)
+	client.HandleNotification(context.Background(), "session/update", json.RawMessage(`{
+		"sessionId":"opaque-session-b",
+		"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"wrong session"}}
+	}`))
+
+	select {
+	case event := <-events:
+		t.Fatalf("mismatched update emitted Agent Event %#v", event)
+	default:
+	}
+	select {
+	case update := <-updates:
+		if update.SessionID != "opaque-session-b" || string(update.Update) != string(rawUpdate) {
+			t.Fatalf("OnUpdate received %#v", update)
+		}
+	default:
+		t.Fatal("mismatched session update was not forwarded to OnUpdate")
 	}
 }
 
@@ -696,6 +820,117 @@ func TestClientRecoversExactlyOneCreatedSession(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotPromptRecoveredSessionBeforeContinuation(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{
+		"sessionCapabilities": map[string]any{"list": map[string]any{}},
+	})
+
+	recovered := make(chan error, 1)
+	go func() {
+		_, err := client.RecoverCreatedSession(context.Background(), acp.WorkspacePath)
+		recovered <- err
+	}()
+	request := readWireMessage(t, reader)
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      request.ID,
+		"result": map[string]any{
+			"sessions": []map[string]string{{"sessionId": "session-1", "cwd": acp.WorkspacePath}},
+		},
+	})
+	if err := <-recovered; err != nil {
+		t.Fatalf("RecoverCreatedSession() error = %v", err)
+	}
+	if _, err := client.Prompt(context.Background(), "session-1", []acp.ContentBlock{acp.TextContent("must not send")}); !errors.Is(err, acp.ErrUnknownSession) {
+		t.Fatalf("Prompt() after discovery error = %v, want ErrUnknownSession", err)
+	}
+}
+
+func TestClientRejectsEmptySessionIDFromDiscovery(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{
+		"sessionCapabilities": map[string]any{"list": map[string]any{}},
+	})
+
+	recovered := make(chan error, 1)
+	go func() {
+		_, err := client.RecoverCreatedSession(context.Background(), acp.WorkspacePath)
+		recovered <- err
+	}()
+	request := readWireMessage(t, reader)
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      request.ID,
+		"result": map[string]any{
+			"sessions": []map[string]string{{"sessionId": "", "cwd": acp.WorkspacePath}},
+		},
+	})
+	if err := <-recovered; !errors.Is(err, acp.ErrSessionIDEmpty) {
+		t.Fatalf("RecoverCreatedSession() error = %v, want ErrSessionIDEmpty", err)
+	}
+}
+
+func TestClientBoundsSessionDiscoveryResults(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{
+		"sessionCapabilities": map[string]any{"list": map[string]any{}},
+	})
+
+	discovered := make(chan error, 1)
+	go func() {
+		_, err := client.DiscoverSessions(context.Background(), acp.WorkspacePath, "")
+		discovered <- err
+	}()
+	request := readWireMessage(t, reader)
+	sessions := make([]map[string]string, 101)
+	for index := range sessions {
+		sessions[index] = map[string]string{
+			"sessionId": fmt.Sprintf("session-%d", index),
+			"cwd":       acp.WorkspacePath,
+		}
+	}
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      request.ID,
+		"result":  map[string]any{"sessions": sessions},
+	})
+	if err := <-discovered; !errors.Is(err, acp.ErrSessionDiscoveryLimit) {
+		t.Fatalf("DiscoverSessions() error = %v, want ErrSessionDiscoveryLimit", err)
+	}
+}
+
+func TestClientBoundsSessionDiscoveryPagination(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{
+		"sessionCapabilities": map[string]any{"list": map[string]any{}},
+	})
+
+	recovered := make(chan error, 1)
+	go func() {
+		_, err := client.RecoverCreatedSession(context.Background(), acp.WorkspacePath)
+		recovered <- err
+	}()
+	for page := range 100 {
+		request := readWireMessage(t, reader)
+		writeWireMessage(t, agent, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      request.ID,
+			"result": map[string]any{
+				"sessions":   []any{},
+				"nextCursor": fmt.Sprintf("page-%d", page+1),
+			},
+		})
+	}
+	if err := <-recovered; !errors.Is(err, acp.ErrSessionDiscoveryLimit) {
+		t.Fatalf("RecoverCreatedSession() error = %v, want ErrSessionDiscoveryLimit", err)
+	}
+}
+
 func TestClientRejectsAmbiguousCreatedSessionRecovery(t *testing.T) {
 	client, agent := newPipeClient(t, acp.ClientOptions{})
 	reader := bufio.NewReader(agent)
@@ -767,8 +1002,8 @@ func TestClientRejectsCreatedSessionFromForeignWorkingDirectory(t *testing.T) {
 			"sessions": []map[string]string{{"sessionId": "foreign", "cwd": "/somewhere/else"}},
 		},
 	})
-	if err := <-recovered; !errors.Is(err, acp.ErrSessionNotFound) {
-		t.Fatalf("RecoverCreatedSession() error = %v, want ErrSessionNotFound", err)
+	if err := <-recovered; !errors.Is(err, acp.ErrSessionDiscoveryMismatch) || errors.Is(err, acp.ErrSessionNotFound) {
+		t.Fatalf("RecoverCreatedSession() error = %v, want only ErrSessionDiscoveryMismatch", err)
 	}
 }
 
@@ -782,6 +1017,13 @@ func newPipeClient(t *testing.T, options acp.ClientOptions) (*acp.Client, net.Co
 		_ = agentSide.Close()
 	})
 	return client, agentSide
+}
+
+type channelAgentEventSink chan<- agentevent.AgentEvent
+
+func (sink channelAgentEventSink) Emit(_ context.Context, event agentevent.AgentEvent) error {
+	sink <- event
+	return nil
 }
 
 type blockableTransport struct {

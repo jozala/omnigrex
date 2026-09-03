@@ -25,6 +25,8 @@ var (
 	ErrClosureSettlementUnsettled = errors.New("closure settlement is unsettled")
 	// ErrWorkflowSuccessorConflict means reconciliation found another live successor path.
 	ErrWorkflowSuccessorConflict = errors.New("workflow already has a live successor")
+	// ErrWorkflowNotFound means the requested Workflow does not exist.
+	ErrWorkflowNotFound = errors.New("workflow not found")
 )
 
 const (
@@ -44,6 +46,28 @@ type WorkflowLocator struct {
 	IssueNumber   int64
 	PullRequestID int64
 	WorkflowID    string
+}
+
+// WorkflowRepository is the immutable repository identity captured when a Workflow is created.
+type WorkflowRepository struct {
+	Owner string
+	Name  string
+}
+
+// GetWorkflowRepository returns the immutable repository owner and name for a Workflow.
+func (store *Store) GetWorkflowRepository(ctx context.Context, workflowID string) (WorkflowRepository, error) {
+	if !validUUID(workflowID) {
+		return WorkflowRepository{}, ErrWorkflowNotFound
+	}
+	var repository WorkflowRepository
+	err := store.pool.QueryRow(ctx, `SELECT repository_owner, repository_name FROM workflows WHERE id = $1`, workflowID).Scan(&repository.Owner, &repository.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WorkflowRepository{}, ErrWorkflowNotFound
+	}
+	if err != nil {
+		return WorkflowRepository{}, fmt.Errorf("get Workflow repository: %w", err)
+	}
+	return repository, nil
 }
 
 // WorkflowTransition applies a pure reducer transition to a relationally rehydrated Snapshot.
@@ -260,7 +284,7 @@ func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedE
 				return WorkflowApplication{}, err
 			}
 		}
-		if err := persistAppliedDecision(ctx, tx, event.DeliveryID, workflowID, snapshot, decision); err != nil {
+		if err := persistAppliedDecision(ctx, tx, event.DeliveryID, workflowID, snapshot, decision, ""); err != nil {
 			return WorkflowApplication{}, err
 		}
 	}
@@ -451,7 +475,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, workflowID,
 	return nil
 }
 
-func persistAppliedDecision(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, current workflow.Snapshot, decision workflow.Decision) error {
+func persistAppliedDecision(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
 	if decision.Reason == workflow.ReasonClosureSettled {
 		if err := requireClosureSettlementBarrier(ctx, tx, workflowID, current); err != nil {
 			return err
@@ -501,7 +525,7 @@ WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
-	if err := persistWorkflowActions(ctx, tx, deliveryID, workflowID, decision); err != nil {
+	if err := persistWorkflowActions(ctx, tx, deliveryID, workflowID, decision, actionNamespace); err != nil {
 		return err
 	}
 	return nil
@@ -599,7 +623,7 @@ type preparedTurnIntent struct {
 	set  bool
 }
 
-func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, decision workflow.Decision) error {
+func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, decision workflow.Decision, actionNamespace string) error {
 	intent := preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 	labels := false
 	consumeRun := false
@@ -626,7 +650,7 @@ func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflow
 					return fmt.Errorf("mark attempt human handoff: %w", err)
 				}
 			}
-			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), "publish-human-handoff", "PUBLISH_HUMAN_HANDOFF", map[string]any{"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision}, nil); err != nil {
+			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", map[string]any{"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision}, nil); err != nil {
 				return err
 			}
 		case workflow.CloseMutationAdmissionAction:
@@ -693,7 +717,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		if labelAction.State == "" {
 			labelAction.State = decision.Snapshot.State
 		}
-		if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), "reconcile-github-labels", "RECONCILE_GITHUB_LABELS", map[string]any{
+		if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
 			"state": labelAction.State, "ready_for_sha": labelAction.ReadyForSHA,
 			"consume_run": consumeRun, "revision": decision.Snapshot.Revision,
 		}, nil); err != nil {
@@ -701,6 +725,13 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		}
 	}
 	return nil
+}
+
+func namespacedWorkflowActionKey(namespace, action string) string {
+	if namespace == "" {
+		return action
+	}
+	return namespace + ":" + action
 }
 
 func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, attemptID string, revision uint64, action workflow.ReconcilePendingEventsAction) error {

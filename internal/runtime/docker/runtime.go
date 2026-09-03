@@ -18,6 +18,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	mobyclient "github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
@@ -30,9 +31,12 @@ const (
 
 var ErrInvalidSpec = errors.New("invalid Runtime Process specification")
 
+type Platform = ocispec.Platform
+
 type Spec struct {
 	Name        string
 	Image       string
+	Platform    Platform
 	User        string
 	WorkingDir  string
 	Command     []string
@@ -81,15 +85,23 @@ type EngineOptions struct {
 }
 
 type RuntimePolicy struct {
+	Image                         string
+	Platform                      Platform
 	User                          string
 	WorkingDir                    string
+	Command                       []string
+	Volumes                       []VolumeMount
+	Tmpfs                         []TmpfsMount
+	Environment                   map[string]string
+	Labels                        map[string]string
+	Network                       string
+	MemoryBytes                   int64
+	PIDsLimit                     int64
 	VolumeBindings                map[string]string
 	RequiredVolumeTargets         []string
 	RequiredWritableVolumeTargets []string
-	AllowedTmpfsTargets           []string
 	RequireVolumeSubpaths         bool
 	RequiredEnvironment           map[string]string
-	MaxTmpfsBytes                 int64
 	MaxMemoryBytes                int64
 	MaxPIDsLimit                  int64
 }
@@ -103,10 +115,15 @@ func NewEngine(options EngineOptions) (*Engine, error) {
 }
 
 func cloneEngineOptions(options EngineOptions) EngineOptions {
+	options.RuntimePolicy.Platform.OSFeatures = slices.Clone(options.RuntimePolicy.Platform.OSFeatures)
+	options.RuntimePolicy.Command = slices.Clone(options.RuntimePolicy.Command)
+	options.RuntimePolicy.Volumes = slices.Clone(options.RuntimePolicy.Volumes)
+	options.RuntimePolicy.Tmpfs = slices.Clone(options.RuntimePolicy.Tmpfs)
+	options.RuntimePolicy.Environment = maps.Clone(options.RuntimePolicy.Environment)
+	options.RuntimePolicy.Labels = maps.Clone(options.RuntimePolicy.Labels)
 	options.RuntimePolicy.VolumeBindings = maps.Clone(options.RuntimePolicy.VolumeBindings)
 	options.RuntimePolicy.RequiredVolumeTargets = slices.Clone(options.RuntimePolicy.RequiredVolumeTargets)
 	options.RuntimePolicy.RequiredWritableVolumeTargets = slices.Clone(options.RuntimePolicy.RequiredWritableVolumeTargets)
-	options.RuntimePolicy.AllowedTmpfsTargets = slices.Clone(options.RuntimePolicy.AllowedTmpfsTargets)
 	options.RuntimePolicy.RequiredEnvironment = maps.Clone(options.RuntimePolicy.RequiredEnvironment)
 	return options
 }
@@ -321,6 +338,7 @@ for path do
   test "$(stat -c %g "$path")" = "$gid"
 done`
 	return mobyclient.ContainerCreateOptions{
+		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
 		Config: &container.Config{
 			Image:      spec.Image,
 			User:       spec.User,
@@ -392,7 +410,8 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 	}
 
 	return mobyclient.ContainerCreateOptions{
-		Name: spec.Name,
+		Name:     spec.Name,
+		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
 		Config: &container.Config{
 			User:         spec.User,
 			AttachStdin:  true,
@@ -428,6 +447,9 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 func validateSpec(spec Spec) (string, string, error) {
 	if !validImageDigest(spec.Image) {
 		return "", "", fmt.Errorf("%w: image must be digest-qualified", ErrInvalidSpec)
+	}
+	if !validPlatform(spec.Platform) {
+		return "", "", fmt.Errorf("%w: platform must be exactly linux/amd64 or linux/arm64", ErrInvalidSpec)
 	}
 	if !filepath.IsAbs(spec.WorkingDir) || filepath.Clean(spec.WorkingDir) != spec.WorkingDir {
 		return "", "", fmt.Errorf("%w: working directory must be an absolute clean path", ErrInvalidSpec)
@@ -484,11 +506,20 @@ func validateSpec(spec Spec) (string, string, error) {
 
 func validateResources(options EngineOptions, spec Spec) error {
 	policy := options.RuntimePolicy
+	if policy.Image != "" && spec.Image != policy.Image {
+		return fmt.Errorf("%w: image does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	if !validPlatform(policy.Platform) || spec.Platform.OS != policy.Platform.OS || spec.Platform.Architecture != policy.Platform.Architecture {
+		return fmt.Errorf("%w: platform does not match the Runtime Policy", ErrInvalidSpec)
+	}
 	if spec.User != policy.User {
 		return fmt.Errorf("%w: user %q does not match the Runtime Policy", ErrInvalidSpec, spec.User)
 	}
 	if spec.WorkingDir != policy.WorkingDir {
 		return fmt.Errorf("%w: working directory %q does not match the Runtime Policy", ErrInvalidSpec, spec.WorkingDir)
+	}
+	if policy.Command != nil && !slices.Equal(spec.Command, policy.Command) {
+		return fmt.Errorf("%w: command does not match the Runtime Policy", ErrInvalidSpec)
 	}
 	network := spec.Network
 	if network == "" {
@@ -497,16 +528,39 @@ func validateResources(options EngineOptions, spec Spec) error {
 	if network != "none" && network != options.AgentNetwork {
 		return fmt.Errorf("%w: network %q is not the configured agent network", ErrInvalidSpec, network)
 	}
+	if policy.Network != "" && network != policy.Network {
+		return fmt.Errorf("%w: network does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	exactVolumes := make(map[string]VolumeMount, len(policy.Volumes))
+	for _, volume := range policy.Volumes {
+		if _, duplicate := exactVolumes[volume.Target]; duplicate {
+			return fmt.Errorf("%w: Runtime Policy has duplicate volume targets", ErrInvalidSpec)
+		}
+		exactVolumes[volume.Target] = volume
+	}
 	volumeTargets := make(map[string]VolumeMount, len(spec.Volumes))
 	for _, volume := range spec.Volumes {
-		expectedSource, allowed := policy.VolumeBindings[volume.Target]
-		if !allowed || volume.Name != expectedSource {
-			return fmt.Errorf("%w: volume %q is not allowed at %q", ErrInvalidSpec, volume.Name, volume.Target)
+		if _, duplicate := volumeTargets[volume.Target]; duplicate {
+			return fmt.Errorf("%w: duplicate volume target", ErrInvalidSpec)
+		}
+		if policy.Volumes != nil {
+			expected, allowed := exactVolumes[volume.Target]
+			if !allowed || volume != expected {
+				return fmt.Errorf("%w: volume mount does not match the Runtime Policy", ErrInvalidSpec)
+			}
+		} else {
+			expectedSource, allowed := policy.VolumeBindings[volume.Target]
+			if !allowed || volume.Name != expectedSource {
+				return fmt.Errorf("%w: volume %q is not allowed at %q", ErrInvalidSpec, volume.Name, volume.Target)
+			}
 		}
 		if policy.RequireVolumeSubpaths && volume.Subpath == "" {
 			return fmt.Errorf("%w: assignment subpath is required for %q", ErrInvalidSpec, volume.Target)
 		}
 		volumeTargets[volume.Target] = volume
+	}
+	if policy.Volumes != nil && len(volumeTargets) != len(exactVolumes) {
+		return fmt.Errorf("%w: volume mounts do not match the Runtime Policy", ErrInvalidSpec)
 	}
 	for index, volume := range spec.Volumes {
 		for otherIndex := index + 1; otherIndex < len(spec.Volumes); otherIndex++ {
@@ -527,17 +581,21 @@ func validateResources(options EngineOptions, spec Spec) error {
 			return fmt.Errorf("%w: volume target %q must be present and writable", ErrInvalidSpec, target)
 		}
 	}
-	allowedTmpfs := make(map[string]struct{}, len(policy.AllowedTmpfsTargets))
-	for _, target := range policy.AllowedTmpfsTargets {
-		allowedTmpfs[target] = struct{}{}
+	exactTmpfs := make(map[string]TmpfsMount, len(policy.Tmpfs))
+	for _, temporary := range policy.Tmpfs {
+		if _, duplicate := exactTmpfs[temporary.Target]; duplicate {
+			return fmt.Errorf("%w: Runtime Policy has duplicate tmpfs targets", ErrInvalidSpec)
+		}
+		exactTmpfs[temporary.Target] = temporary
 	}
 	for _, temporary := range spec.Tmpfs {
-		if _, allowed := allowedTmpfs[temporary.Target]; !allowed {
-			return fmt.Errorf("%w: tmpfs target %q is not allowed", ErrInvalidSpec, temporary.Target)
+		expected, allowed := exactTmpfs[temporary.Target]
+		if !allowed || temporary != expected {
+			return fmt.Errorf("%w: tmpfs mount does not match the Runtime Policy", ErrInvalidSpec)
 		}
-		if policy.MaxTmpfsBytes > 0 && temporary.SizeBytes > policy.MaxTmpfsBytes {
-			return fmt.Errorf("%w: tmpfs at %q exceeds the Runtime Policy limit", ErrInvalidSpec, temporary.Target)
-		}
+	}
+	if len(spec.Tmpfs) != len(exactTmpfs) {
+		return fmt.Errorf("%w: tmpfs mounts do not match the Runtime Policy", ErrInvalidSpec)
 	}
 	if len(spec.ExtraHosts) > 0 && !options.AllowHostGateway {
 		return fmt.Errorf("%w: host gateway is not allowed", ErrInvalidSpec)
@@ -548,12 +606,21 @@ func validateResources(options EngineOptions, spec Spec) error {
 		if !found || name == "" {
 			return fmt.Errorf("%w: invalid environment entry", ErrInvalidSpec)
 		}
+		if _, duplicate := environment[name]; duplicate {
+			return fmt.Errorf("%w: duplicate environment name", ErrInvalidSpec)
+		}
 		environment[name] = value
+	}
+	if policy.Environment != nil && !maps.Equal(environment, policy.Environment) {
+		return fmt.Errorf("%w: environment does not match the Runtime Policy", ErrInvalidSpec)
 	}
 	for name, requiredValue := range policy.RequiredEnvironment {
 		if environment[name] != requiredValue {
 			return fmt.Errorf("%w: required environment %s is missing or invalid", ErrInvalidSpec, name)
 		}
+	}
+	if policy.Labels != nil && !maps.Equal(spec.Labels, policy.Labels) {
+		return fmt.Errorf("%w: labels do not match the Runtime Policy", ErrInvalidSpec)
 	}
 	memoryBytes := spec.MemoryBytes
 	if memoryBytes <= 0 {
@@ -562,6 +629,9 @@ func validateResources(options EngineOptions, spec Spec) error {
 	if policy.MaxMemoryBytes > 0 && memoryBytes > policy.MaxMemoryBytes {
 		return fmt.Errorf("%w: memory limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
 	}
+	if policy.MemoryBytes > 0 && spec.MemoryBytes != policy.MemoryBytes {
+		return fmt.Errorf("%w: memory limit does not match the Runtime Policy", ErrInvalidSpec)
+	}
 	pidsLimit := spec.PIDsLimit
 	if pidsLimit <= 0 {
 		pidsLimit = defaultRuntimePIDsLimit
@@ -569,7 +639,16 @@ func validateResources(options EngineOptions, spec Spec) error {
 	if policy.MaxPIDsLimit > 0 && pidsLimit > policy.MaxPIDsLimit {
 		return fmt.Errorf("%w: PID limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
 	}
+	if policy.PIDsLimit > 0 && spec.PIDsLimit != policy.PIDsLimit {
+		return fmt.Errorf("%w: PID limit does not match the Runtime Policy", ErrInvalidSpec)
+	}
 	return nil
+}
+
+func validPlatform(platform Platform) bool {
+	return platform.OS == "linux" &&
+		(platform.Architecture == "amd64" || platform.Architecture == "arm64") &&
+		platform.OSVersion == "" && platform.OSFeatures == nil && platform.Variant == ""
 }
 
 func validImageDigest(image string) bool {

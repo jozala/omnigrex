@@ -353,6 +353,102 @@ func TestAgentBlockerCreatesHumanHandoff(t *testing.T) {
 	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 1)
 }
 
+func TestAssignmentConfigurationConflictCreatesHumanHandoff(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		snapshot workflow.Snapshot
+		role     workflow.Role
+	}{
+		{name: "Developer", snapshot: developingSnapshot(nil), role: workflow.RoleDeveloper},
+		{name: "Reviewer", snapshot: reviewingSnapshot(1, "review-head"), role: workflow.RoleReviewer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.snapshot.ActiveTurn = nil
+			event := workflow.AssignmentConfigurationConflictEvent{
+				EventMetadata: metadata(test.snapshot, "assignment-configuration-conflict"),
+				Role:          test.role,
+			}
+
+			decision := workflow.Reduce(test.snapshot, event)
+
+			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAssignmentConfigurationConflict, workflow.StateNeedsHuman, test.snapshot.Revision+1)
+			if decision.Snapshot.ResumeRole != test.role || decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman {
+				t.Errorf("configuration handoff state = %#v", decision.Snapshot)
+			}
+			handoff := onlyAction[workflow.MarkHumanHandoffAction](t, decision.Actions)
+			if handoff.Reason != workflow.ReasonAssignmentConfigurationConflict || handoff.Diagnostic != "" {
+				t.Errorf("configuration handoff action = %#v", handoff)
+			}
+			labels := onlyAction[workflow.ReconcileLabelsAction](t, decision.Actions)
+			if labels.State != workflow.StateNeedsHuman {
+				t.Errorf("label reconciliation = %#v", labels)
+			}
+			assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+		})
+	}
+}
+
+func TestAgentTurnPreparationFailureCreatesHumanHandoffWithoutFabricatingTurn(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		snapshot workflow.Snapshot
+		role     workflow.Role
+	}{
+		{name: "Developer", snapshot: developingSnapshot(nil), role: workflow.RoleDeveloper},
+		{name: "Reviewer", snapshot: reviewingSnapshot(1, "review-head"), role: workflow.RoleReviewer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.snapshot.ActiveTurn = nil
+			event := workflow.AgentTurnPreparationFailedEvent{
+				EventMetadata:    metadata(test.snapshot, "agent-turn-preparation-failed"),
+				Role:             test.role,
+				Diagnostic:       "GitHub App installation is missing",
+				AssignmentsExist: true,
+			}
+
+			decision := workflow.Reduce(test.snapshot, event)
+
+			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentTurnPreparationFailed, workflow.StateNeedsHuman, test.snapshot.Revision+1)
+			if decision.Snapshot.ActiveTurn != nil || decision.Snapshot.ResumeRole != test.role ||
+				decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman ||
+				decision.Snapshot.CurrentAttempt.ID != test.snapshot.CurrentAttempt.ID {
+				t.Errorf("preparation failure handoff state = %#v", decision.Snapshot)
+			}
+			handoff := onlyAction[workflow.MarkHumanHandoffAction](t, decision.Actions)
+			if handoff.Reason != workflow.ReasonAgentTurnPreparationFailed || handoff.Diagnostic != event.Diagnostic {
+				t.Errorf("preparation failure handoff = %#v", handoff)
+			}
+			if labels := onlyAction[workflow.ReconcileLabelsAction](t, decision.Actions); labels.State != workflow.StateNeedsHuman {
+				t.Errorf("label reconciliation = %#v", labels)
+			}
+			assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+		})
+	}
+}
+
+func TestIssueCanCloseAfterInitialPreparationFailureWithoutAssignments(t *testing.T) {
+	snapshot := developingSnapshot(nil)
+	snapshot.ActiveTurn = nil
+	failure := workflow.Reduce(snapshot, workflow.AgentTurnPreparationFailedEvent{
+		EventMetadata: metadata(snapshot, "initial-preparation-failed"),
+		Role:          workflow.RoleDeveloper,
+		Diagnostic:    "Reviewer GitHub App is not installed",
+	})
+	if failure.Disposition != workflow.DispositionApplied || failure.Snapshot.Assignments.RuntimeState != workflow.RuntimeStateCollected {
+		t.Fatalf("preparation failure = %#v, want collected Human Handoff", failure)
+	}
+
+	closed := workflow.Reduce(failure.Snapshot, workflow.IssueClosedEvent{
+		EventMetadata:  metadata(failure.Snapshot, "close-after-preparation-failure"),
+		ClosureID:      "closure-after-preparation-failure",
+		RetainUntil:    observedAt.Add(24 * time.Hour),
+		RetentionToken: "retention-after-preparation-failure",
+	})
+	if closed.Disposition != workflow.DispositionApplied || closed.Snapshot.State != workflow.StateClosing {
+		t.Fatalf("Issue close = %#v, want applied closing transition", closed)
+	}
+}
+
 func TestInfrastructureFailureRetriesOnceWithoutReviewBudget(t *testing.T) {
 	snapshot := reviewingSnapshot(2, "head-1")
 	event := settledEvent(snapshot, "infrastructure-first", workflow.TurnOutcomeInfrastructureFailed)

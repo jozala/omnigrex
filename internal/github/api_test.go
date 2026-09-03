@@ -50,7 +50,7 @@ func TestAPIClientResolvesRepositoryInstallationAndCreatesToken(t *testing.T) {
 			if contentType := request.Header.Get("Content-Type"); contentType != "application/json" {
 				t.Errorf("Content-Type = %q, want application/json", contentType)
 			}
-			_, _ = fmt.Fprintf(writer, `{"token":"installation-token","expires_at":%q}`, expiresAt.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(writer, `{"token":"installation-token","expires_at":%q,"permissions":{"metadata":"read","pull_requests":"write"}}`, expiresAt.Format(time.RFC3339))
 		default:
 			t.Errorf("unexpected request %d", requests)
 		}
@@ -72,7 +72,8 @@ func TestAPIClientResolvesRepositoryInstallationAndCreatesToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateInstallationToken() error = %v", err)
 	}
-	if token.Token != "installation-token" || !token.ExpiresAt.Equal(expiresAt) {
+	if token.Token != "installation-token" || !token.ExpiresAt.Equal(expiresAt) ||
+		token.Permissions["metadata"] != "read" || token.Permissions["pull_requests"] != "write" {
 		t.Errorf("installation token = %#v", token)
 	}
 }
@@ -167,6 +168,16 @@ func TestAPIClientClassifiesGitHubFailures(t *testing.T) {
 				var target *githubapi.RateLimitError
 				if !errors.As(err, &target) {
 					t.Errorf("error = %T %v, want RateLimitError", err, err)
+				}
+			},
+		},
+		{
+			name:   "request timeout",
+			status: http.StatusRequestTimeout,
+			assertions: func(t *testing.T, err error) {
+				var target *githubapi.TransientError
+				if !errors.As(err, &target) || !target.Transient() {
+					t.Errorf("error = %T %v, want transient request timeout", err, err)
 				}
 			},
 		},

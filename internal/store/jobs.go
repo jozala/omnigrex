@@ -154,6 +154,18 @@ func (store *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 
 // ClaimJob first reconciles a bounded set of expired attempts, then leases the next available job.
 func (store *Store) ClaimJob(ctx context.Context, queue, owner string, lease time.Duration) (*JobLease, error) {
+	return store.claimJob(ctx, queue, "", owner, lease)
+}
+
+// ClaimJobKind leases only jobs of one kind from a queue, without reclaiming or consuming other kinds.
+func (store *Store) ClaimJobKind(ctx context.Context, queue, kind, owner string, lease time.Duration) (*JobLease, error) {
+	if strings.TrimSpace(kind) == "" {
+		return nil, errors.New("claim job: kind is empty")
+	}
+	return store.claimJob(ctx, queue, kind, owner, lease)
+}
+
+func (store *Store) claimJob(ctx context.Context, queue, kind, owner string, lease time.Duration) (*JobLease, error) {
 	if strings.TrimSpace(queue) == "" {
 		return nil, errors.New("claim job: queue is empty")
 	}
@@ -172,7 +184,7 @@ func (store *Store) ClaimJob(ctx context.Context, queue, owner string, lease tim
 		return nil, fmt.Errorf("begin job claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := reclaimExpiredJobsTx(ctx, tx, jobClaimReclaimLimit, queue); err != nil {
+	if _, err := reclaimExpiredJobsTx(ctx, tx, jobClaimReclaimLimit, queue, kind); err != nil {
 		return nil, fmt.Errorf("reclaim before job claim: %w", err)
 	}
 
@@ -181,12 +193,13 @@ func (store *Store) ClaimJob(ctx context.Context, queue, owner string, lease tim
 SELECT id::text
 FROM jobs
 WHERE queue = $1
+  AND ($2 = '' OR kind = $2)
   AND status = 'AVAILABLE'
   AND available_at <= clock_timestamp()
   AND attempt_count < max_attempts
 ORDER BY priority DESC, available_at, id
 FOR UPDATE SKIP LOCKED
-LIMIT 1`, queue).Scan(&jobID)
+LIMIT 1`, queue, kind).Scan(&jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit empty job claim: %w", err)
@@ -355,7 +368,7 @@ func (store *Store) ReclaimExpiredJobs(ctx context.Context, limit int) (int, err
 		return 0, fmt.Errorf("begin expired job reclaim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	count, err := reclaimExpiredJobsTx(ctx, tx, limit, "")
+	count, err := reclaimExpiredJobsTx(ctx, tx, limit, "", "")
 	if err != nil {
 		return 0, fmt.Errorf("reclaim expired jobs: %w", err)
 	}
@@ -365,7 +378,7 @@ func (store *Store) ReclaimExpiredJobs(ctx context.Context, limit int) (int, err
 	return count, nil
 }
 
-func reclaimExpiredJobsTx(ctx context.Context, tx pgx.Tx, limit int, queue string) (int, error) {
+func reclaimExpiredJobsTx(ctx context.Context, tx pgx.Tx, limit int, queue, kind string) (int, error) {
 	rows, err := tx.Query(ctx, `
 SELECT id::text, attempt_count, max_attempts, lease_token::text
 FROM jobs
@@ -373,9 +386,10 @@ WHERE status = 'LEASED'
   AND kind <> 'RUN_AGENT_TURN'
   AND lease_expires_at <= clock_timestamp()
   AND ($2 = '' OR queue = $2)
+  AND ($3 = '' OR kind = $3)
 ORDER BY lease_expires_at, id
 FOR UPDATE SKIP LOCKED
-LIMIT $1`, limit, queue)
+LIMIT $1`, limit, queue, kind)
 	if err != nil {
 		return 0, err
 	}

@@ -148,6 +148,63 @@ func TestJobClaimsAreDistinctAndPriorityOrderedUnderConcurrency(t *testing.T) {
 	}
 }
 
+func TestClaimJobKindLeavesOtherQueueKindsAvailable(t *testing.T) {
+	database, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, spec := range []store.JobSpec{
+		{Queue: "workflow", Kind: "OTHER_ACTION", Payload: json.RawMessage(`{}`), Priority: 100, MaxAttempts: 1, IdempotencyKey: "other-action"},
+		{Queue: "workflow", Kind: "TARGET_ACTION", Payload: json.RawMessage(`{}`), Priority: 1, MaxAttempts: 1, IdempotencyKey: "target-action"},
+	} {
+		if _, _, err := database[0].EnqueueJob(ctx, spec); err != nil {
+			t.Fatalf("EnqueueJob(%s) error = %v", spec.Kind, err)
+		}
+	}
+
+	target, err := database[0].ClaimJobKind(ctx, "workflow", "TARGET_ACTION", "target-worker", time.Second)
+	if err != nil || target == nil || target.Kind != "TARGET_ACTION" {
+		t.Fatalf("ClaimJobKind() = (%#v, %v), want TARGET_ACTION", target, err)
+	}
+	other, err := database[0].ClaimJob(ctx, "workflow", "other-worker", time.Second)
+	if err != nil || other == nil || other.Kind != "OTHER_ACTION" {
+		t.Fatalf("ClaimJob() after filtered claim = (%#v, %v), want OTHER_ACTION", other, err)
+	}
+}
+
+func TestClaimJobKindOnlyReclaimsMatchingExpiredKinds(t *testing.T) {
+	database, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, kind := range []string{"TARGET_ACTION", "OTHER_ACTION"} {
+		if _, _, err := database[0].EnqueueJob(ctx, store.JobSpec{
+			Queue: "workflow", Kind: kind, Payload: json.RawMessage(`{}`), MaxAttempts: 2, IdempotencyKey: "expired-" + kind,
+		}); err != nil {
+			t.Fatalf("EnqueueJob(%s) error = %v", kind, err)
+		}
+	}
+	first, err := database[0].ClaimJobKind(ctx, "workflow", "TARGET_ACTION", "dead-target", 50*time.Millisecond)
+	if err != nil || first == nil {
+		t.Fatalf("ClaimJobKind(TARGET_ACTION) = (%#v, %v)", first, err)
+	}
+	other, err := database[0].ClaimJobKind(ctx, "workflow", "OTHER_ACTION", "dead-other", 50*time.Millisecond)
+	if err != nil || other == nil {
+		t.Fatalf("ClaimJobKind(OTHER_ACTION) = (%#v, %v)", other, err)
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	reclaimed, err := database[0].ClaimJobKind(ctx, "workflow", "TARGET_ACTION", "replacement", time.Second)
+	if err != nil || reclaimed == nil || reclaimed.ID != first.ID || reclaimed.Attempt != 2 {
+		t.Fatalf("replacement ClaimJobKind() = (%#v, %v), want TARGET_ACTION attempt 2", reclaimed, err)
+	}
+	storedOther, err := database[0].GetJob(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("GetJob(OTHER_ACTION) error = %v", err)
+	}
+	if storedOther.Status != store.JobLeased || storedOther.AttemptCount != 1 {
+		t.Errorf("nonmatching expired job = (%s, attempt %d), want untouched LEASED attempt 1", storedOther.Status, storedOther.AttemptCount)
+	}
+}
+
 func TestJobFailureRetriesThenExhaustsAttempts(t *testing.T) {
 	database, _ := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

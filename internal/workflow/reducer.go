@@ -78,8 +78,65 @@ func dispatch(snapshot Snapshot, event Event) Decision {
 		return reduceIssueReopened(snapshot, event)
 	case AssignmentsCollectedEvent:
 		return reduceAssignmentsCollected(snapshot, event)
+	case AssignmentConfigurationConflictEvent:
+		return reduceAssignmentConfigurationConflict(snapshot, event)
+	case AgentTurnPreparationFailedEvent:
+		return reduceAgentTurnPreparationFailed(snapshot, event)
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
+	}
+}
+
+func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparationFailedEvent) Decision {
+	if snapshot.ActiveTurn != nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
+	}
+	expectedRole := RoleDeveloper
+	if snapshot.State == StateReviewing {
+		expectedRole = RoleReviewer
+	}
+	if event.Role != expectedRole {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
+	}
+	next := cloneSnapshot(snapshot)
+	next.State = StateNeedsHuman
+	next.ResumeRole = event.Role
+	next.Assignments.Status = AssignmentWaitingForHuman
+	if !event.AssignmentsExist {
+		next.Assignments.RuntimeState = RuntimeStateCollected
+	}
+	next.Revision++
+	return Decision{
+		Snapshot: next, Disposition: DispositionApplied, Reason: ReasonAgentTurnPreparationFailed,
+		Actions: []Action{
+			MarkHumanHandoffAction{Reason: ReasonAgentTurnPreparationFailed, Diagnostic: event.Diagnostic},
+			ReconcileLabelsAction{State: StateNeedsHuman},
+		},
+	}
+}
+
+func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentConfigurationConflictEvent) Decision {
+	if snapshot.ActiveTurn != nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
+	}
+	expectedRole := RoleDeveloper
+	if snapshot.State == StateReviewing {
+		expectedRole = RoleReviewer
+	}
+	if event.Role != expectedRole {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
+	}
+	next := cloneSnapshot(snapshot)
+	next.State = StateNeedsHuman
+	next.ResumeRole = event.Role
+	next.Assignments.Status = AssignmentWaitingForHuman
+	next.Revision++
+	return Decision{
+		Snapshot: next, Disposition: DispositionApplied, Reason: ReasonAssignmentConfigurationConflict,
+		Actions: []Action{
+			MarkHumanHandoffAction{Reason: ReasonAssignmentConfigurationConflict},
+			ReconcileLabelsAction{State: StateNeedsHuman},
+		},
 	}
 }
 

@@ -51,6 +51,29 @@ func TestCompleteWebhookTransitionCreatesFirstWorkflowWithoutConcreteAssignments
 	assertWorkflowApplicationRows(t, pool, claim.DeliveryID, application.WorkflowID)
 }
 
+func TestGetWorkflowRepositoryReturnsImmutableOwnerAndName(t *testing.T) {
+	databases, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	claim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000019"))
+	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), triggerTransition(claim.DeliveryID, "50000000-0000-4000-8000-000000000019"))
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() error = %v", err)
+	}
+
+	repository, err := databases[0].GetWorkflowRepository(ctx, application.WorkflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflowRepository() error = %v", err)
+	}
+	if repository.Owner != "jozala" || repository.Name != "omnigrex" {
+		t.Errorf("GetWorkflowRepository() = %#v, want jozala/omnigrex", repository)
+	}
+	if _, err := databases[0].GetWorkflowRepository(ctx, "not-a-workflow"); !errors.Is(err, store.ErrWorkflowNotFound) {
+		t.Errorf("GetWorkflowRepository(invalid) error = %v, want ErrWorkflowNotFound", err)
+	}
+}
+
 func TestCompleteWebhookTransitionRollsBackEveryWriteAndLeavesInboxReclaimable(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

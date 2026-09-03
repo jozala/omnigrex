@@ -153,7 +153,7 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 			} else if !workflowStateAllowsSuccessor(decision.Snapshot.State) {
 				intent = preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 			}
-			if err := persistAppliedDecision(ctx, tx, linked.record.DeliveryID, job.WorkflowID, snapshot, persistedDecision); err != nil {
+			if err := persistAppliedDecision(ctx, tx, linked.record.DeliveryID, job.WorkflowID, snapshot, persistedDecision, ""); err != nil {
 				return PendingEventReconciliation{}, err
 			}
 		}
@@ -787,5 +787,6 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 }
 
 func isFencedWorkflowJob(kind string) bool {
-	return kind == ReconcilePendingEventsJobKind || kind == StopAgentTurnJobKind || kind == SettleClosureJobKind
+	return kind == ReconcilePendingEventsJobKind || kind == StopAgentTurnJobKind ||
+		kind == SettleClosureJobKind || kind == PrepareAgentTurnJobKind
 }

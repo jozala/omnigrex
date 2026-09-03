@@ -20,6 +20,10 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 		return event.EventMetadata, EventKindIssueReopened, true
 	case AssignmentsCollectedEvent:
 		return event.EventMetadata, EventKindAssignmentsCollected, true
+	case AssignmentConfigurationConflictEvent:
+		return event.EventMetadata, EventKindAssignmentConfigurationConflict, true
+	case AgentTurnPreparationFailedEvent:
+		return event.EventMetadata, EventKindAgentTurnPreparationFailed, true
 	default:
 		return EventMetadata{}, "", false
 	}
@@ -60,6 +64,10 @@ func validEvent(event Event, metadata EventMetadata) bool {
 		return true
 	case AssignmentsCollectedEvent:
 		return event.RetentionToken != "" && !event.RetainUntil.IsZero() && !event.CollectedAt.IsZero()
+	case AssignmentConfigurationConflictEvent:
+		return validRole(event.Role)
+	case AgentTurnPreparationFailedEvent:
+		return validRole(event.Role) && event.Diagnostic != ""
 	default:
 		return false
 	}
@@ -90,10 +98,15 @@ func validAssignments(snapshot Snapshot) bool {
 	case StateDeveloping, StateReviewing, StatePRReady:
 		return assignments.Status == AssignmentActive && assignments.RuntimeState == RuntimeStateActive && assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
 	case StateNeedsHuman:
-		return assignments.Status == AssignmentWaitingForHuman && assignments.RuntimeState == RuntimeStateActive && assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
+		return assignments.Status == AssignmentWaitingForHuman &&
+			(assignments.RuntimeState == RuntimeStateActive || assignments.RuntimeState == RuntimeStateCollected) &&
+			assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
 	case StateClosing:
 		if assignments.Status == AssignmentActive || assignments.Status == AssignmentWaitingForHuman {
-			return snapshot.CurrentAttempt != nil && assignments.RuntimeState == RuntimeStateActive && assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
+			return snapshot.CurrentAttempt != nil &&
+				(assignments.RuntimeState == RuntimeStateActive ||
+					assignments.Status == AssignmentWaitingForHuman && assignments.RuntimeState == RuntimeStateCollected) &&
+				assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
 		}
 		return assignments.Status == AssignmentCompleted && snapshot.CurrentAttempt == nil && (assignments.RuntimeState == RuntimeStateRetained || assignments.RuntimeState == RuntimeStateCollected) && assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
 	case StateClosed:
@@ -184,6 +197,10 @@ func legalInState(state State, kind EventKind) bool {
 		return state == StateDeveloping || state == StateReviewing || state == StateClosing || state == StateClosed
 	case EventKindAssignmentsCollected:
 		return state == StateClosed || state == StateDormant
+	case EventKindAssignmentConfigurationConflict:
+		return state == StateDeveloping || state == StateReviewing
+	case EventKindAgentTurnPreparationFailed:
+		return state == StateDeveloping || state == StateReviewing
 	default:
 		return false
 	}

@@ -73,6 +73,8 @@ type API interface {
 	AddIssueLabels(context.Context, string, string, string, int, []string) ([]Label, error)
 	RemoveIssueLabel(context.Context, string, string, string, int, string) error
 	SubmitReview(context.Context, string, string, string, int, ReviewRequest) (Review, error)
+	ResolveDefaultBranchCommit(context.Context, string, string, string) (string, error)
+	FetchRepositoryFile(context.Context, string, string, string, string, string) ([]byte, error)
 }
 
 type APIClient struct {
@@ -438,7 +440,7 @@ func classifyAPIError(response *http.Response, method, path string) error {
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return &PermissionError{APIError: apiError}
 	}
-	if response.StatusCode >= http.StatusInternalServerError {
+	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode >= http.StatusInternalServerError {
 		return &TransientError{Cause: apiError}
 	}
 	return apiError

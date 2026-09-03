@@ -12,10 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/store"
 )
@@ -53,9 +56,43 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("initialize database: %w", err)
 	}
 	defer database.Close()
-	githubWebhook, webhookProcessor, err := configureGitHub(settings, database, logger)
+	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
+	}
+	openCodeV1, err := runtimeprofile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
+	if err != nil {
+		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
+	}
+	runtimeRegistry, err := runtimeprofile.NewRegistry(openCodeV1)
+	if err != nil {
+		return fmt.Errorf("configure Runtime Profile Registry: %w", err)
+	}
+	developerRepositoryCredentials, err := githubapi.NewRepositoryInstallationCredentialProvider(
+		githubServices.developerSigner, githubServices.api, githubapi.DeveloperAppPermissions(), nil,
+	)
+	if err != nil {
+		return fmt.Errorf("configure Developer repository credentials: %w", err)
+	}
+	reviewerRepositoryCredentials, err := githubapi.NewRepositoryInstallationCredentialProvider(
+		githubServices.reviewerSigner, githubServices.api, githubapi.ReviewerAppPermissions(), nil,
+	)
+	if err != nil {
+		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
+	}
+	preparer := agentturn.NewPreparer(agentprofile.NewLoader(githubServices.api), runtimeRegistry, database)
+	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, reviewerRepositoryCredentials, preparer, agentturn.WorkerConfig{
+		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
+		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,
+		HeartbeatInterval: settings.AgentTurnPreparationHeartbeatInterval,
+		IdlePollInterval:  settings.AgentTurnPreparationPollInterval,
+		RetryDelay:        settings.AgentTurnPreparationRetryDelay,
+		OnError: func(err error) {
+			logger.Error("prepare Agent Turn", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
 
 	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
@@ -81,46 +118,57 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	})
 	return runServices(ctx,
 		func(ctx context.Context) error {
-			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubWebhook)
+			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubServices.webhookHandler)
 		},
-		webhookProcessor.Run,
+		githubServices.webhookProcessor.Run,
+		preparationWorker.Run,
 	)
 }
 
-func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*webhook.Handler, *webhook.Processor, error) {
+type configuredGitHub struct {
+	api              *githubapi.APIClient
+	developerSigner  *githubapi.AppJWTSigner
+	reviewerSigner   *githubapi.AppJWTSigner
+	webhookHandler   *webhook.Handler
+	webhookProcessor *webhook.Processor
+	claimOwner       string
+}
+
+func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*configuredGitHub, error) {
 	developerKey, err := os.ReadFile(settings.GitHubDeveloperPrivateKeyFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read Developer GitHub App private key: %w", err)
+		return nil, fmt.Errorf("read Developer GitHub App private key: %w", err)
 	}
 	developerSigner, err := githubapi.NewAppJWTSigner(settings.GitHubDeveloperAppID, developerKey, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("configure Developer GitHub App: %w", err)
+		return nil, fmt.Errorf("configure Developer GitHub App: %w", err)
 	}
 	reviewerKey, err := os.ReadFile(settings.GitHubReviewerPrivateKeyFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read Reviewer GitHub App private key: %w", err)
+		return nil, fmt.Errorf("read Reviewer GitHub App private key: %w", err)
 	}
 	reviewerSigner, err := githubapi.NewAppJWTSigner(settings.GitHubReviewerAppID, reviewerKey, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("configure Reviewer GitHub App: %w", err)
+		return nil, fmt.Errorf("configure Reviewer GitHub App: %w", err)
 	}
 	if developerSigner.PublicKeyFingerprint() == reviewerSigner.PublicKeyFingerprint() {
-		return nil, nil, errors.New("Developer and Reviewer GitHub Apps must use distinct private keys")
+		return nil, errors.New("Developer and Reviewer GitHub Apps must use distinct private keys")
 	}
-	if _, err := githubapi.NewAPIClient(&http.Client{Timeout: 15 * time.Second}, settings.GitHubAPIURL); err != nil {
-		return nil, nil, fmt.Errorf("configure GitHub API: %w", err)
+	api, err := githubapi.NewAPIClient(&http.Client{Timeout: 15 * time.Second}, settings.GitHubAPIURL)
+	if err != nil {
+		return nil, fmt.Errorf("configure GitHub API: %w", err)
 	}
 	webhookSecret, err := readSecret(settings.GitHubWebhookSecretFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read GitHub webhook secret: %w", err)
+		return nil, fmt.Errorf("read GitHub webhook secret: %w", err)
 	}
 	handler, err := webhook.NewHandler(webhookSecret, database)
 	if err != nil {
-		return nil, nil, fmt.Errorf("configure GitHub webhook handler: %w", err)
+		return nil, fmt.Errorf("configure GitHub webhook handler: %w", err)
 	}
 	claimOwner, err := os.Hostname()
 	if err != nil {
-		return nil, nil, fmt.Errorf("identify webhook processor: %w", err)
+		return nil, fmt.Errorf("identify webhook processor: %w", err)
 	}
 	processor, err := webhook.NewProcessor(database, webhook.ProcessorConfig{
 		ClaimOwner:                  claimOwner,
@@ -132,9 +180,12 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 		},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("configure GitHub webhook processor: %w", err)
+		return nil, fmt.Errorf("configure GitHub webhook processor: %w", err)
 	}
-	return handler, processor, nil
+	return &configuredGitHub{
+		api: api, developerSigner: developerSigner, reviewerSigner: reviewerSigner,
+		webhookHandler: handler, webhookProcessor: processor, claimOwner: claimOwner,
+	}, nil
 }
 
 func readSecret(path string) ([]byte, error) {

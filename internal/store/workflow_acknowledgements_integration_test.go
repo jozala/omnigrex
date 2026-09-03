@@ -166,7 +166,7 @@ UPDATE workflows SET status = 'REVIEWING', desired_assignment_status = 'ACTIVE',
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare reviewing Workflow Attempt: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER' WHERE id = $1`, fixture.assignmentID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER', agent_profile_name = 'reviewer' WHERE id = $1`, fixture.assignmentID); err != nil {
 		t.Fatalf("prepare Reviewer Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -178,14 +178,14 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 		proposalRowID, fixture.workflowID); err != nil {
 		t.Fatalf("seed synchronized Change Proposal: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turnSpec := fixture.turnSpec()
+	turnSpec.Purpose = workflow.TurnPurposeReview
+	turnSpec.ChangeProposalID = proposalRowID
+	turnSpec.ExpectedHeadSHA = "head-old"
+	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
+	turn, err := databases[0].AllocateAgentTurn(ctx, turnSpec)
 	if err != nil {
 		t.Fatalf("AllocateAgentTurn() error = %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-UPDATE agent_turns SET change_proposal_id = $2, expected_head_sha = 'head-old'
-WHERE id = $1`, turn.ID, proposalRowID); err != nil {
-		t.Fatalf("bind Reviewer turn to Change Proposal: %v", err)
 	}
 	executionJob := claimAgentTurnJob(t, databases[0], ctx, turn, 10*time.Second)
 	turnLease, err := databases[0].AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "review-runtime", 10*time.Second, 1)

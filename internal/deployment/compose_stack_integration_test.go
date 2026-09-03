@@ -234,7 +234,7 @@ func (fixture composeFixture) assertPostgresIsolatedFromAgentNetwork(t *testing.
 	fixture.mustRunDocker(t, time.Minute,
 		"run", "--rm", "--network", "omnigrex-agent", "--user", "10001:10001",
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--entrypoint", "sh", agentImage, "-c",
+		"--entrypoint", "sh", readinessImage, "-c",
 		`if nc -z -w 2 "$1" 5432; then exit 1; fi`, "sh", postgresIP,
 	)
 }
