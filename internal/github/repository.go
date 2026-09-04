@@ -19,19 +19,30 @@ var (
 	ErrInvalidRepositoryPath = errors.New("invalid repository file path")
 )
 
+// DefaultBranch identifies the repository's current default branch and exact head commit.
+type DefaultBranch struct {
+	Name      string
+	CommitSHA string
+}
+
 func (client *APIClient) ResolveDefaultBranchCommit(ctx context.Context, installationToken, owner, repository string) (string, error) {
+	branch, err := client.ResolveDefaultBranch(ctx, installationToken, owner, repository)
+	return branch.CommitSHA, err
+}
+
+func (client *APIClient) ResolveDefaultBranch(ctx context.Context, installationToken, owner, repository string) (DefaultBranch, error) {
 	if err := validateRepository(owner, repository); err != nil {
-		return "", err
+		return DefaultBranch{}, err
 	}
 	var metadata struct {
 		DefaultBranch string `json:"default_branch"`
 	}
 	repositoryPath := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repository)
 	if err := client.doJSON(ctx, http.MethodGet, repositoryPath, installationToken, nil, &metadata); err != nil {
-		return "", err
+		return DefaultBranch{}, err
 	}
 	if !validGitRefName(metadata.DefaultBranch) {
-		return "", fmt.Errorf("%w: repository default branch is invalid", ErrInvalidAPIResponse)
+		return DefaultBranch{}, fmt.Errorf("%w: repository default branch is invalid", ErrInvalidAPIResponse)
 	}
 
 	var commit struct {
@@ -39,12 +50,12 @@ func (client *APIClient) ResolveDefaultBranchCommit(ctx context.Context, install
 	}
 	commitPath := repositoryPath + "/commits/" + url.PathEscape(metadata.DefaultBranch)
 	if err := client.doJSON(ctx, http.MethodGet, commitPath, installationToken, nil, &commit); err != nil {
-		return "", err
+		return DefaultBranch{}, err
 	}
 	if !validCommitSHA(commit.SHA) {
-		return "", fmt.Errorf("%w: default branch commit SHA is invalid", ErrInvalidAPIResponse)
+		return DefaultBranch{}, fmt.Errorf("%w: default branch commit SHA is invalid", ErrInvalidAPIResponse)
 	}
-	return commit.SHA, nil
+	return DefaultBranch{Name: metadata.DefaultBranch, CommitSHA: commit.SHA}, nil
 }
 
 func (client *APIClient) FetchRepositoryFile(ctx context.Context, installationToken, owner, repository, filePath, commitSHA string) ([]byte, error) {

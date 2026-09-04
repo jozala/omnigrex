@@ -61,6 +61,10 @@ func TestStateEventLegalityIsExhaustive(t *testing.T) {
 			workflow.DispositionUnrelated, workflow.DispositionIllegal, workflow.DispositionStale, workflow.DispositionStale,
 			workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal,
 		)},
+		{name: "Agent Turn mutation reconciliation exhausted", make: matrixAgentTurnMutationReconciliationExhausted, want: dispositions(
+			workflow.DispositionUnrelated, workflow.DispositionIllegal, workflow.DispositionStale, workflow.DispositionStale,
+			workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal,
+		)},
 	}
 
 	for _, test := range tests {
@@ -353,5 +357,17 @@ func matrixAgentTurnPreparationFailed(snapshot workflow.Snapshot) workflow.Event
 		EventMetadata: matrixMetadata(snapshot, "matrix-agent-turn-preparation-failed"),
 		Role:          role,
 		Diagnostic:    "preparation failed",
+	}
+}
+
+func matrixAgentTurnMutationReconciliationExhausted(snapshot workflow.Snapshot) workflow.Event {
+	role := workflow.RoleDeveloper
+	if snapshot.State == workflow.StateReviewing {
+		role = workflow.RoleReviewer
+	}
+	return workflow.AgentTurnMutationReconciliationExhaustedEvent{
+		EventMetadata: matrixMetadata(snapshot, "matrix-agent-turn-mutation-reconciliation-exhausted"),
+		Role:          role,
+		Diagnostic:    "outcome unknowable; escalated",
 	}
 }

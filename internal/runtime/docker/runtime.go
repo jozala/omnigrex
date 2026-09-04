@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -29,7 +30,10 @@ const (
 	subpathHelperPIDsLimit    = 32
 )
 
-var ErrInvalidSpec = errors.New("invalid Runtime Process specification")
+var (
+	ErrInvalidSpec           = errors.New("invalid Runtime Process specification")
+	ErrProcessAlreadyStarted = errors.New("Runtime Process start already attempted")
+)
 
 type Platform = ocispec.Platform
 
@@ -132,7 +136,8 @@ func (engine *Engine) Close() error {
 	return engine.client.Close()
 }
 
-func (engine *Engine) Start(ctx context.Context, spec Spec, stderr io.Writer) (*Process, error) {
+// Create prepares volume subpaths, creates and attaches a container, but does not start it.
+func (engine *Engine) Create(ctx context.Context, spec Spec, stderr io.Writer) (*Process, error) {
 	if _, _, err := validateSpec(spec); err != nil {
 		return nil, err
 	}
@@ -145,7 +150,26 @@ func (engine *Engine) Start(ctx context.Context, spec Spec, stderr io.Writer) (*
 	if err := prepareVolumeSubpaths(ctx, engine.client, spec); err != nil {
 		return nil, err
 	}
-	return start(ctx, engine.client, spec, stderr)
+	return create(ctx, engine.client, spec, stderr)
+}
+
+// Start preserves the concrete Engine's all-in-one API for existing callers.
+func (engine *Engine) Start(ctx context.Context, spec Spec, stderr io.Writer) (*Process, error) {
+	process, err := engine.Create(ctx, spec, stderr)
+	if err != nil {
+		if process != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, process.Remove(cleanupCtx))
+		}
+		return nil, err
+	}
+	if err := process.Start(ctx); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return nil, errors.Join(err, process.Remove(cleanupCtx))
+	}
+	return process, nil
 }
 
 func (engine *Engine) validateAPI(ctx context.Context) error {
@@ -165,18 +189,38 @@ func (engine *Engine) validateAPI(ctx context.Context) error {
 }
 
 type Process struct {
-	ID         string
-	api        dockerAPI
-	transport  *attachTransport
-	demuxDone  chan struct{}
-	demuxLock  sync.Mutex
-	demuxErr   error
-	removeLock sync.Mutex
-	removed    bool
+	ID             string
+	api            dockerAPI
+	transport      *attachTransport
+	demuxDone      chan struct{}
+	demuxLock      sync.Mutex
+	demuxErr       error
+	lifecycleLock  sync.Mutex
+	startAttempted bool
+	started        bool
+	removed        bool
 }
 
 func (process *Process) Transport() io.ReadWriteCloser {
 	return process.transport
+}
+
+// Start starts a created Runtime Process exactly once.
+func (process *Process) Start(ctx context.Context) error {
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
+	if process.startAttempted {
+		return ErrProcessAlreadyStarted
+	}
+	process.startAttempted = true
+	if process.removed {
+		return errors.New("start Runtime Process: process was removed")
+	}
+	if _, err := process.api.ContainerStart(ctx, process.ID, mobyclient.ContainerStartOptions{}); err != nil && !errdefs.IsNotModified(err) {
+		return fmt.Errorf("start Runtime Process: %w", err)
+	}
+	process.started = true
+	return nil
 }
 
 func (process *Process) Wait(ctx context.Context) (int64, error) {
@@ -214,32 +258,41 @@ func (process *Process) Wait(ctx context.Context) (int64, error) {
 }
 
 func (process *Process) Stop(ctx context.Context, timeout time.Duration) error {
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
+	if process.removed || !process.started {
+		return nil
+	}
 	seconds := int(timeout.Round(time.Second) / time.Second)
 	if timeout > 0 && seconds == 0 {
 		seconds = 1
 	}
 	_, err := process.api.ContainerStop(ctx, process.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
-	if err != nil {
+	if err != nil && !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
 		return fmt.Errorf("stop Runtime Process: %w", err)
 	}
+	process.started = false
 	return nil
 }
 
 func (process *Process) Remove(ctx context.Context) error {
-	process.removeLock.Lock()
-	defer process.removeLock.Unlock()
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
 	if process.removed {
 		return nil
 	}
-	_ = process.transport.Close()
-	if _, err := process.api.ContainerRemove(ctx, process.ID, mobyclient.ContainerRemoveOptions{Force: true}); err != nil {
+	if process.transport != nil {
+		_ = process.transport.Close()
+	}
+	if _, err := process.api.ContainerRemove(ctx, process.ID, mobyclient.ContainerRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("remove Runtime Process: %w", err)
 	}
 	process.removed = true
+	process.started = false
 	return nil
 }
 
-func start(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Process, error) {
+func create(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Process, error) {
 	options, err := buildCreateOptions(spec)
 	if err != nil {
 		return nil, err
@@ -248,10 +301,8 @@ func start(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Pr
 	if err != nil {
 		return nil, fmt.Errorf("create Runtime Process: %w", err)
 	}
-	cleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = api.ContainerRemove(cleanupCtx, created.ID, mobyclient.ContainerRemoveOptions{Force: true})
+	process := &Process{
+		ID: created.ID, api: api, demuxDone: make(chan struct{}),
 	}
 
 	attached, err := api.ContainerAttach(ctx, created.ID, mobyclient.ContainerAttachOptions{
@@ -261,21 +312,15 @@ func start(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Pr
 		Stderr: true,
 	})
 	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("attach Runtime Process: %w", err)
+		close(process.demuxDone)
+		return process, fmt.Errorf("attach Runtime Process: %w", err)
 	}
 	stdoutReader, stdoutWriter := io.Pipe()
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	stderrSink := newAsyncWriter(stderr)
-	demuxDone := make(chan struct{})
-	process := &Process{
-		ID:        created.ID,
-		api:       api,
-		transport: &attachTransport{reader: stdoutReader, attach: &attached.HijackedResponse},
-		demuxDone: demuxDone,
-	}
+	process.transport = &attachTransport{reader: stdoutReader, attach: &attached.HijackedResponse}
 	go func() {
 		_, copyErr := stdcopy.StdCopy(stdoutWriter, stderrSink, attached.Reader)
 		_ = stdoutWriter.CloseWithError(copyErr)
@@ -283,17 +328,8 @@ func start(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Pr
 		process.demuxLock.Lock()
 		process.demuxErr = copyErr
 		process.demuxLock.Unlock()
-		close(demuxDone)
+		close(process.demuxDone)
 	}()
-
-	if _, err := api.ContainerStart(ctx, created.ID, mobyclient.ContainerStartOptions{}); err != nil {
-		attached.Close()
-		_ = stdoutReader.Close()
-		stderrSink.Close()
-		cleanup()
-		return nil, fmt.Errorf("start Runtime Process: %w", err)
-	}
-
 	return process, nil
 }
 

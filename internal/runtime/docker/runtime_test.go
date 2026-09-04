@@ -1,13 +1,21 @@
 package docker
 
 import (
+	"bufio"
+	"context"
 	"errors"
+	"io"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	mobyclient "github.com/moby/moby/client"
 )
 
 const testImage = "omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -310,6 +318,87 @@ func TestValidateResourcesEnforcesExactProcessPolicy(t *testing.T) {
 	}
 }
 
+func TestCreateDoesNotStartUntilExplicitOneShotStart(t *testing.T) {
+	api := newRuntimeAPIFake()
+	process, err := create(context.Background(), api, runtimeProcessSpec(), io.Discard)
+	if err != nil {
+		t.Fatalf("create() error = %v", err)
+	}
+	t.Cleanup(func() { _ = process.Remove(context.Background()) })
+	if api.startCalls != 0 {
+		t.Fatalf("ContainerStart() calls after create = %d, want 0", api.startCalls)
+	}
+
+	const callers = 16
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	var wait sync.WaitGroup
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			results <- process.Start(context.Background())
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	succeeded := 0
+	alreadyStarted := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrProcessAlreadyStarted):
+			alreadyStarted++
+		default:
+			t.Errorf("Process.Start() error = %v", err)
+		}
+	}
+	if succeeded != 1 || alreadyStarted != callers-1 || api.startCalls != 1 {
+		t.Fatalf("concurrent starts = %d succeeded, %d one-shot errors, %d Docker calls", succeeded, alreadyStarted, api.startCalls)
+	}
+}
+
+func TestProcessCleanupIsSafeBeforeStartAndAcrossDockerRemovalRaces(t *testing.T) {
+	api := newRuntimeAPIFake()
+	process, err := create(context.Background(), api, runtimeProcessSpec(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Stop(context.Background(), time.Second); err != nil {
+		t.Fatalf("Stop() before Start error = %v", err)
+	}
+	if api.stopCalls != 0 {
+		t.Fatalf("ContainerStop() calls before Start = %d, want 0", api.stopCalls)
+	}
+	api.removeErr = errdefs.ErrNotFound
+	if err := process.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove() after external removal error = %v", err)
+	}
+	if err := process.Remove(context.Background()); err != nil || api.removeCalls != 1 {
+		t.Fatalf("repeated Remove() = (%v, %d calls), want nil and one call", err, api.removeCalls)
+	}
+
+	startedAPI := newRuntimeAPIFake()
+	started, err := create(context.Background(), startedAPI, runtimeProcessSpec(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := started.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	startedAPI.stopErr = errdefs.ErrNotModified
+	startedAPI.removeErr = errdefs.ErrNotFound
+	if err := started.Stop(context.Background(), time.Second); err != nil {
+		t.Fatalf("Stop() after external stop error = %v", err)
+	}
+	if err := started.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove() after external removal error = %v", err)
+	}
+}
+
 func TestAsyncWriterDoesNotBlockRuntimeOutput(t *testing.T) {
 	target := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
 	writer := newAsyncWriter(target)
@@ -353,6 +442,68 @@ type blockingWriter struct {
 	once    sync.Once
 	mutex   sync.Mutex
 	output  strings.Builder
+}
+
+type runtimeAPIFake struct {
+	mutex       sync.Mutex
+	peer        net.Conn
+	startCalls  int
+	stopCalls   int
+	removeCalls int
+	startErr    error
+	stopErr     error
+	removeErr   error
+}
+
+func newRuntimeAPIFake() *runtimeAPIFake { return &runtimeAPIFake{} }
+
+func (*runtimeAPIFake) ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
+	return mobyclient.ContainerCreateResult{ID: "runtime-container"}, nil
+}
+
+func (api *runtimeAPIFake) ContainerAttach(context.Context, string, mobyclient.ContainerAttachOptions) (mobyclient.ContainerAttachResult, error) {
+	connection, peer := net.Pipe()
+	api.peer = peer
+	return mobyclient.ContainerAttachResult{HijackedResponse: mobyclient.HijackedResponse{
+		Conn: connection, Reader: bufio.NewReader(connection),
+	}}, nil
+}
+
+func (api *runtimeAPIFake) ContainerStart(context.Context, string, mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error) {
+	api.mutex.Lock()
+	defer api.mutex.Unlock()
+	api.startCalls++
+	return mobyclient.ContainerStartResult{}, api.startErr
+}
+
+func (api *runtimeAPIFake) ContainerStop(context.Context, string, mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error) {
+	api.mutex.Lock()
+	defer api.mutex.Unlock()
+	api.stopCalls++
+	return mobyclient.ContainerStopResult{}, api.stopErr
+}
+
+func (*runtimeAPIFake) ContainerWait(context.Context, string, mobyclient.ContainerWaitOptions) mobyclient.ContainerWaitResult {
+	return mobyclient.ContainerWaitResult{
+		Result: make(chan container.WaitResponse), Error: make(chan error),
+	}
+}
+
+func (api *runtimeAPIFake) ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
+	api.mutex.Lock()
+	defer api.mutex.Unlock()
+	api.removeCalls++
+	if api.peer != nil {
+		_ = api.peer.Close()
+	}
+	return mobyclient.ContainerRemoveResult{}, api.removeErr
+}
+
+func runtimeProcessSpec() Spec {
+	return Spec{
+		Name: "runtime", Image: testImage, Platform: Platform{OS: "linux", Architecture: "arm64"},
+		User: "10001:10001", WorkingDir: testWorkspacePath, Command: []string{"acp"},
+	}
 }
 
 func (writer *blockingWriter) Write(data []byte) (int, error) {

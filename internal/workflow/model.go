@@ -77,6 +77,8 @@ const ReasonAssignmentConfigurationConflict Reason = "assignment_configuration_c
 
 const ReasonAgentTurnPreparationFailed Reason = "agent_turn_preparation_failed"
 
+const ReasonAgentTurnMutationReconciliationExhausted Reason = "agent_turn_mutation_reconciliation_exhausted"
+
 type WorkItem struct {
 	RepositoryID int64
 	IssueID      int64
@@ -317,6 +319,14 @@ type AgentTurnPreparationFailedEvent struct {
 
 func (AgentTurnPreparationFailedEvent) isWorkflowEvent() {}
 
+type AgentTurnMutationReconciliationExhaustedEvent struct {
+	EventMetadata
+	Role       Role
+	Diagnostic string
+}
+
+func (AgentTurnMutationReconciliationExhaustedEvent) isWorkflowEvent() {}
+
 type EventKind string
 
 const (
@@ -334,6 +344,8 @@ const (
 const EventKindAssignmentConfigurationConflict EventKind = "ASSIGNMENT_CONFIGURATION_CONFLICT"
 
 const EventKindAgentTurnPreparationFailed EventKind = "AGENT_TURN_PREPARATION_FAILED"
+
+const EventKindAgentTurnMutationReconciliationExhausted EventKind = "AGENT_TURN_MUTATION_RECONCILIATION_EXHAUSTED"
 
 type TurnPurpose string
 

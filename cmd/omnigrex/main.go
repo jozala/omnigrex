@@ -17,10 +17,14 @@ import (
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/github/webhook"
+	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/runtime/acp"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 var version = "dev"
@@ -94,6 +98,90 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
+	workspaces, err := workspace.New(workspace.Options{
+		WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: settings.WorkspaceRoot, MiseRoot: settings.MiseRoot,
+	})
+	if err != nil {
+		return fmt.Errorf("configure Assignment workspaces: %w", err)
+	}
+	readLedger, err := mcp.NewStoreReadLedger(database)
+	if err != nil {
+		return fmt.Errorf("configure MCP read ledger: %w", err)
+	}
+	repositoryCredentials := roleRepositoryCredentials{
+		developer: developerRepositoryCredentials,
+		reviewer:  reviewerRepositoryCredentials,
+	}
+	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub:      githubServices.api,
+		Credentials: repositoryCredentials,
+		Publisher:   workspaces,
+		Workflow:    mcp.LedgerWorkflowMutations{},
+	})
+	if err != nil {
+		return fmt.Errorf("configure MCP tool backend: %w", err)
+	}
+	toolGateway, err := mcp.New(mcp.Config{
+		EndpointURL: settings.MCPEndpointURL, Store: database, Backend: toolBackend,
+		Ledger: readLedger, LifecycleContext: ctx,
+	})
+	if err != nil {
+		return fmt.Errorf("configure MCP Tool Gateway: %w", err)
+	}
+	mutationReconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
+		GitHub: githubServices.api, Credentials: repositoryCredentials, Publications: workspaces,
+	})
+	if err != nil {
+		return fmt.Errorf("configure MCP mutation reconciler: %w", err)
+	}
+	mutationRecoveryWorker, err := mcp.NewRecoveryWorker(database, mutationReconciler, mcp.RecoveryWorkerConfig{
+		ClaimOwner:        githubServices.claimOwner + ":reconcile-agent-turn-mutations",
+		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,
+		HeartbeatInterval: settings.AgentTurnPreparationHeartbeatInterval,
+		IdlePollInterval:  settings.AgentTurnPreparationPollInterval,
+		RetryDelay:        settings.AgentTurnPreparationRetryDelay,
+		OnError: func(err error) {
+			logger.Error("reconcile Agent Turn mutations", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure Agent Turn mutation recovery Worker: %w", err)
+	}
+	runtimeCleaner, err := dockerruntime.NewExactLabelCleaner(dockerruntime.ExactLabelCleanerOptions{
+		StopTimeout: settings.ShutdownTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("configure stale Runtime Process cleanup: %w", err)
+	}
+	defer func() {
+		if err := runtimeCleaner.Close(); err != nil {
+			logger.Error("close stale Runtime Process cleanup", "error", err)
+		}
+	}()
+	runtimeStopWorker, err := agentturn.NewStopWorker(database, runtimeCleaner, workspaces, agentturn.StopWorkerConfig{
+		ClaimOwner:           githubServices.claimOwner + ":stop-stale-runtime",
+		LeaseDuration:        settings.AgentTurnPreparationLeaseDuration,
+		HeartbeatInterval:    settings.AgentTurnPreparationHeartbeatInterval,
+		IdlePollInterval:     settings.AgentTurnPreparationPollInterval,
+		CleanupRetryInterval: settings.AgentTurnPreparationRetryDelay,
+		OnError: func(err error) {
+			logger.Error("stop stale Runtime Process", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure stale Runtime Process stop Worker: %w", err)
+	}
+	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
+		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
+		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
+		Sessions: runtimesession.NewCoordinator(database), Network: settings.DockerAgentNetwork,
+		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
+		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{},
+	})
+	if err != nil {
+		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
+	}
+	_ = runtimeLauncher // Phase 8's execution Worker owns launch and prompt lifecycle.
 
 	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
 		AgentNetwork:       settings.DockerAgentNetwork,
@@ -120,9 +208,27 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		func(ctx context.Context) error {
 			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubServices.webhookHandler)
 		},
+		func(ctx context.Context) error {
+			return server.RunHandler(ctx, settings.MCPAddr, settings.ShutdownTimeout, logger, "mcp", toolGateway)
+		},
 		githubServices.webhookProcessor.Run,
 		preparationWorker.Run,
+		runtimeStopWorker.Run,
+		mutationRecoveryWorker.Run,
 	)
+}
+
+type roleRepositoryCredentials struct {
+	developer *githubapi.RepositoryInstallationCredentialProvider
+	reviewer  *githubapi.RepositoryInstallationCredentialProvider
+}
+
+func (credentials roleRepositoryCredentials) DeveloperCredential(ctx context.Context, repository mcp.RepositoryScope) (string, error) {
+	return credentials.developer.RepositoryCredential(ctx, repository.Owner, repository.Name)
+}
+
+func (credentials roleRepositoryCredentials) ReviewerCredential(ctx context.Context, repository mcp.RepositoryScope) (string, error) {
+	return credentials.reviewer.RepositoryCredential(ctx, repository.Owner, repository.Name)
 }
 
 type configuredGitHub struct {

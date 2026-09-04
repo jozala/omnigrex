@@ -33,28 +33,32 @@ type composeConfig struct {
 }
 
 type composeService struct {
-	Image       string                       `json:"image"`
-	User        string                       `json:"user"`
-	ReadOnly    bool                         `json:"read_only"`
-	CapDrop     []string                     `json:"cap_drop"`
-	SecurityOpt []string                     `json:"security_opt"`
-	Init        bool                         `json:"init"`
-	MemoryLimit string                       `json:"mem_limit"`
-	PIDsLimit   int64                        `json:"pids_limit"`
-	GroupAdd    []string                     `json:"group_add"`
-	NetworkMode string                       `json:"network_mode"`
-	Networks    map[string]json.RawMessage   `json:"networks"`
-	Ports       []composePort                `json:"ports"`
-	Volumes     []composeMount               `json:"volumes"`
-	DependsOn   map[string]composeDependency `json:"depends_on"`
-	Secrets     []composeSecret              `json:"secrets"`
-	Environment map[string]string            `json:"environment"`
+	Image       string                           `json:"image"`
+	User        string                           `json:"user"`
+	ReadOnly    bool                             `json:"read_only"`
+	CapDrop     []string                         `json:"cap_drop"`
+	SecurityOpt []string                         `json:"security_opt"`
+	Init        bool                             `json:"init"`
+	MemoryLimit string                           `json:"mem_limit"`
+	PIDsLimit   int64                            `json:"pids_limit"`
+	GroupAdd    []string                         `json:"group_add"`
+	NetworkMode string                           `json:"network_mode"`
+	Networks    map[string]composeServiceNetwork `json:"networks"`
+	Ports       []composePort                    `json:"ports"`
+	Volumes     []composeMount                   `json:"volumes"`
+	DependsOn   map[string]composeDependency     `json:"depends_on"`
+	Secrets     []composeSecret                  `json:"secrets"`
+	Environment map[string]string                `json:"environment"`
 }
 
 type composePort struct {
 	Target    int    `json:"target"`
 	Published string `json:"published"`
 	Protocol  string `json:"protocol"`
+}
+
+type composeServiceNetwork struct {
+	Aliases []string `json:"aliases"`
 }
 
 type composeMount struct {
@@ -150,6 +154,21 @@ func TestComposeTopology(t *testing.T) {
 	)
 
 	assertExactKeys(t, "orchestrator networks", orchestrator.Networks, "agent", "backend")
+	if got := orchestrator.Networks["agent"].Aliases; !slices.Equal(got, []string{"omnigrex-mcp"}) {
+		t.Errorf("orchestrator agent-network aliases = %v, want [omnigrex-mcp]", got)
+	}
+	if got := orchestrator.Networks["backend"].Aliases; len(got) != 0 {
+		t.Errorf("orchestrator backend-network aliases = %v, want none", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_MCP_ADDR"]; got != "omnigrex-mcp:8081" {
+		t.Errorf("orchestrator MCP bind address = %q, want agent-network-only alias omnigrex-mcp:8081", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_MCP_ENDPOINT_URL"]; got != "http://omnigrex-mcp:8081/mcp" {
+		t.Errorf("orchestrator MCP endpoint URL = %q, want agent-network alias URL", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_HTTP_ADDR"]; got != ":8080" {
+		t.Errorf("orchestrator public HTTP bind address = %q, want :8080", got)
+	}
 	if len(orchestrator.Ports) != 1 {
 		t.Errorf("orchestrator published ports = %+v, want only host 8080 to app 8080/tcp", orchestrator.Ports)
 	} else {
@@ -158,9 +177,11 @@ func TestComposeTopology(t *testing.T) {
 			t.Errorf("orchestrator published port = %+v, want host 8080 to app 8080/tcp", port)
 		}
 	}
-	assertMounts(t, "orchestrator", orchestrator.Volumes, composeMount{
-		Type: "bind", Source: dockerSocket, Target: dockerSocket, ReadOnly: true,
-	})
+	assertMounts(t, "orchestrator", orchestrator.Volumes,
+		composeMount{Type: "bind", Source: dockerSocket, Target: dockerSocket, ReadOnly: true},
+		composeMount{Type: "volume", Source: "workspaces", Target: "/var/lib/omnigrex/workspaces"},
+		composeMount{Type: "volume", Source: "mise-data", Target: "/var/lib/omnigrex/mise"},
+	)
 	assertSecretSources(t, "orchestrator", orchestrator.Secrets, composeSecretNames...)
 	if !slices.Contains(orchestrator.GroupAdd, "123") || !slices.Contains(orchestrator.GroupAdd, "456") {
 		t.Errorf("orchestrator supplementary groups = %v, want Docker group 123 and secret-file group 456", orchestrator.GroupAdd)

@@ -273,12 +273,16 @@ WHERE id = $1 AND status = 'RETAINED'`, session.ID); err != nil {
 	if active {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnActive
 	}
+	operationLineageID := ""
 	if preparation.RetryOfTurnID != "" {
 		var retrySession, retryStatus string
 		var retryActive, recoverySettled bool
 		err := tx.QueryRow(ctx, `
-SELECT agent_session_id::text, status, active, recovery_settled_at IS NOT NULL
-FROM agent_turns WHERE id = $1 FOR UPDATE`, preparation.RetryOfTurnID).Scan(&retrySession, &retryStatus, &retryActive, &recoverySettled)
+SELECT agent_session_id::text, status, active, recovery_settled_at IS NOT NULL,
+       operation_lineage_id::text
+FROM agent_turns WHERE id = $1 FOR UPDATE`, preparation.RetryOfTurnID).Scan(
+			&retrySession, &retryStatus, &retryActive, &recoverySettled, &operationLineageID,
+		)
 		if err != nil || retrySession != session.ID || retryActive || !retryableTurnStatus(AgentTurnStatus(retryStatus), recoverySettled) {
 			return AgentTurnPreparationCommit{}, ErrAgentTurnPreparationFenceLost
 		}
@@ -287,8 +291,8 @@ FROM agent_turns WHERE id = $1 FOR UPDATE`, preparation.RetryOfTurnID).Scan(&ret
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM agent_turns
-    WHERE agent_session_id = $1 AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL
-)`, session.ID).Scan(&recoveryUnsettled); err != nil {
+    WHERE workflow_id = $1 AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL
+)`, preparation.WorkflowID).Scan(&recoveryUnsettled); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("check Agent Turn preparation recovery barrier: %w", err)
 	}
 	if recoveryUnsettled {
@@ -303,6 +307,9 @@ SELECT EXISTS (
 	turnID, err := randomUUID()
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
+	}
+	if operationLineageID == "" {
+		operationLineageID = turnID
 	}
 	executionJobID, err := randomUUID()
 	if err != nil {
@@ -322,19 +329,20 @@ SELECT EXISTS (
 			AgentProfileContentSHA256: append([]byte(nil), profile.ContentSHA256...), AgentProfileConfig: profileConfig,
 		},
 		ID: turnID, AgentAssignmentID: assignment.ID, TurnNumber: turnNumber,
-		ExecutionEpoch: executionEpoch, Status: AgentTurnQueued,
+		operationLineageID: operationLineageID,
+		ExecutionEpoch:     executionEpoch, Status: AgentTurnQueued,
 	}
 	if err := tx.QueryRow(ctx, `
 INSERT INTO agent_turns (
-    id, workflow_id, preparation_job_id, agent_session_id, workflow_attempt_id,
-    turn_number, execution_epoch, retry_of_turn_id, status, active, control_revision,
-    agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config,
-    purpose, change_proposal_id, expected_head_sha
+	    id, workflow_id, preparation_job_id, agent_session_id, workflow_attempt_id,
+	    turn_number, execution_epoch, retry_of_turn_id, operation_lineage_id, status, active, control_revision,
+	    agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config,
+	    purpose, change_proposal_id, expected_head_sha
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', TRUE, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'QUEUED', TRUE, $10, $11, $12, $13, $14, $15, $16)
 RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		preparation.WorkflowAttemptID, turn.TurnNumber, turn.ExecutionEpoch,
-		nullableString(turn.RetryOfTurnID), turn.ControlRevision, turn.AgentProfileCommitSHA,
+		nullableString(turn.RetryOfTurnID), turn.operationLineageID, turn.ControlRevision, turn.AgentProfileCommitSHA,
 		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.Purpose,
 		nullableString(turn.ChangeProposalID), nullableString(turn.ExpectedHeadSHA)).Scan(&turn.CreatedAt); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("insert prepared Agent Turn: %w", err)

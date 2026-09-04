@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ var (
 	ErrMutationAdmissionClosed     = errors.New("mutation admission is closed")
 	ErrMutationOperationConflict   = errors.New("mutation operation identity conflict")
 	ErrMutationStateConflict       = errors.New("mutation state conflict")
+	ErrReviewerActorConflict       = errors.New("reviewer actor identity conflict")
 )
 
 const (
@@ -39,10 +41,10 @@ const (
 	stopStaleRuntimeJobPriority        = 100
 	reconcileTurnMutationsJobPriority  = 90
 
-	RuntimeLabelAssignmentID = "omnigrex.agent_assignment_id"
-	RuntimeLabelSessionID    = "omnigrex.agent_session_id"
-	RuntimeLabelTurnID       = "omnigrex.agent_turn_id"
-	RuntimeLabelEpoch        = "omnigrex.execution_epoch"
+	RuntimeLabelAssignmentID = "io.omnigrex.assignment"
+	RuntimeLabelSessionID    = "io.omnigrex.agent-session"
+	RuntimeLabelTurnID       = "io.omnigrex.agent-turn"
+	RuntimeLabelEpoch        = "io.omnigrex.execution-epoch"
 
 	agentTurnSlotsLockID = int64(0x4f4d4e49534c4f54)
 )
@@ -82,6 +84,7 @@ type AgentTurn struct {
 	AgentTurnSpec
 	ID                    string
 	AgentAssignmentID     string
+	operationLineageID    string
 	TurnNumber            int64
 	ExecutionEpoch        int64
 	Status                AgentTurnStatus
@@ -98,6 +101,40 @@ type AgentTurnLease struct {
 	LeaseExpiresAt time.Time
 }
 
+// AgentTurnRepository is the immutable repository and Work Item scope of an acquired Agent Turn.
+type AgentTurnRepository struct {
+	ID    int64
+	Owner string
+	Name  string
+}
+
+type AgentTurnIssue struct {
+	ID     int64
+	Number int64
+}
+
+// AgentTurnChangeProposal is the active GitHub Pull Request scope of an acquired Agent Turn.
+type AgentTurnChangeProposal struct {
+	ID                string
+	PullRequestID     int64
+	PullRequestNumber int64
+	BaseRef           string
+	BaseSHA           string
+	HeadRef           string
+	HeadSHA           string
+}
+
+// AgentTurnExecutionContext contains only durable launch inputs read under the live turn fence.
+type AgentTurnExecutionContext struct {
+	WorkflowID     string
+	Repository     AgentTurnRepository
+	Issue          AgentTurnIssue
+	ChangeProposal *AgentTurnChangeProposal
+	Assignment     AgentAssignment
+	Session        AgentSession
+	Turn           AgentTurn
+}
+
 // AgentTurnCompletion describes the guarded terminal state of an Agent Turn.
 type AgentTurnCompletion struct {
 	Status    AgentTurnStatus
@@ -105,7 +142,7 @@ type AgentTurnCompletion struct {
 	LastError string
 }
 
-// AgentTurnRecovery is the durable result of fencing expired execution ownership.
+// AgentTurnRecovery is the durable result of fencing execution ownership.
 type AgentTurnRecovery struct {
 	TurnID                  string
 	JobID                   string
@@ -170,6 +207,30 @@ type MutationReservation struct {
 	FinishedAt         *time.Time
 }
 
+// ReadInvocation is the credential-free result metadata for one synchronous read tool call.
+type ReadInvocation struct {
+	ToolName   string
+	Request    json.RawMessage
+	Result     json.RawMessage
+	LastError  string
+	StartedAt  time.Time
+	FinishedAt time.Time
+}
+
+type ReadInvocationRecord struct {
+	ID               string
+	AgentTurnID      string
+	ExecutionEpoch   int64
+	InvocationNumber int64
+	ToolName         string
+	Request          json.RawMessage
+	Result           json.RawMessage
+	Succeeded        bool
+	Duration         time.Duration
+	StartedAt        time.Time
+	FinishedAt       time.Time
+}
+
 // AllocateAgentTurn locks the active hierarchy and allocates monotonic turn and epoch identities.
 func (store *Store) AllocateAgentTurn(ctx context.Context, spec AgentTurnSpec) (AgentTurn, error) {
 	config, err := validateAgentTurnSpec(spec)
@@ -219,8 +280,8 @@ func (store *Store) AllocateAgentTurn(ctx context.Context, spec AgentTurnSpec) (
 	var active, unsettled bool
 	var recoveryUnsettled bool
 	if err := tx.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM agent_turns WHERE agent_session_id = $1
-AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL)`, hierarchy.sessionID).Scan(&recoveryUnsettled); err != nil {
+SELECT EXISTS (SELECT 1 FROM agent_turns WHERE workflow_id = $1
+AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL)`, hierarchy.workflowID).Scan(&recoveryUnsettled); err != nil {
 		return AgentTurn{}, fmt.Errorf("check Agent Turn recovery barrier: %w", err)
 	}
 	if recoveryUnsettled {
@@ -262,12 +323,16 @@ WHERE workflow_id = $1 AND active FOR UPDATE`, hierarchy.workflowID).Scan(&propo
 	if unsettled {
 		return AgentTurn{}, ErrAgentTurnMutationsUnsettled
 	}
+	operationLineageID := turnID
 	if spec.RetryOfTurnID != "" {
 		var retrySession, retryStatus string
 		var retryActive, retryRecoverySettled bool
 		err := tx.QueryRow(ctx, `
-SELECT agent_session_id::text, status, active, recovery_settled_at IS NOT NULL
-FROM agent_turns WHERE id = $1 FOR UPDATE`, spec.RetryOfTurnID).Scan(&retrySession, &retryStatus, &retryActive, &retryRecoverySettled)
+SELECT agent_session_id::text, status, active, recovery_settled_at IS NOT NULL,
+       operation_lineage_id::text
+FROM agent_turns WHERE id = $1 FOR UPDATE`, spec.RetryOfTurnID).Scan(
+			&retrySession, &retryStatus, &retryActive, &retryRecoverySettled, &operationLineageID,
+		)
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && (retrySession != hierarchy.sessionID || retryActive || !retryableTurnStatus(AgentTurnStatus(retryStatus), retryRecoverySettled)) {
 			return AgentTurn{}, errors.New("allocate agent turn: retry target is not an inactive retryable turn in this session")
 		}
@@ -280,12 +345,12 @@ FROM agent_turns WHERE id = $1 FOR UPDATE`, spec.RetryOfTurnID).Scan(&retrySessi
 	err = tx.QueryRow(ctx, `
 	INSERT INTO agent_turns (
 	    id, workflow_id, agent_session_id, workflow_attempt_id, turn_number, execution_epoch,
-	    retry_of_turn_id, status, active, control_revision, agent_profile_commit_sha,
+	    retry_of_turn_id, operation_lineage_id, status, active, control_revision, agent_profile_commit_sha,
 	    agent_profile_content_sha256, agent_profile_config, purpose, change_proposal_id, expected_head_sha
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, 'QUEUED', TRUE, $8, $9, $10, $11, $12, $13, $14)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', TRUE, $9, $10, $11, $12, $13, $14, $15)
 	RETURNING created_at`, turnID, hierarchy.workflowID, hierarchy.sessionID, spec.WorkflowAttemptID, locked.nextTurnNumber,
-		locked.nextExecutionEpoch, nullableString(spec.RetryOfTurnID), spec.ControlRevision,
+		locked.nextExecutionEpoch, nullableString(spec.RetryOfTurnID), operationLineageID, spec.ControlRevision,
 		spec.AgentProfileCommitSHA, spec.AgentProfileContentSHA256, spec.AgentProfileConfig,
 		spec.Purpose, nullableString(spec.ChangeProposalID), nullableString(spec.ExpectedHeadSHA)).Scan(&createdAt)
 	if err != nil {
@@ -323,7 +388,8 @@ VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 1,
 	}
 	return AgentTurn{
 		AgentTurnSpec: spec, ID: turnID, AgentAssignmentID: hierarchy.assignmentID,
-		TurnNumber: locked.nextTurnNumber, ExecutionEpoch: locked.nextExecutionEpoch,
+		operationLineageID: operationLineageID,
+		TurnNumber:         locked.nextTurnNumber, ExecutionEpoch: locked.nextExecutionEpoch,
 		Status: AgentTurnQueued, CreatedAt: createdAt,
 	}, nil
 }
@@ -473,6 +539,210 @@ func (store *Store) HeartbeatAgentTurn(ctx context.Context, lease AgentTurnLease
 	})
 }
 
+// BeginAgentTurnMutationRecovery transfers a live, MCP-drained Turn to durable recovery workers.
+// A retry with the exact original lease returns the live barrier. After an ambiguous commit that
+// cannot be authenticated, callers can use GetAgentTurnRecovery with the Turn identity and epoch.
+func (store *Store) BeginAgentTurnMutationRecovery(ctx context.Context, lease AgentTurnLease) (AgentTurnRecovery, error) {
+	if !validUUID(lease.ID) || !validUUID(lease.AgentAssignmentID) || !validUUID(lease.AgentSessionID) ||
+		!validUUID(lease.JobLease.ID) || !validUUID(lease.JobLease.LeaseToken) || !validUUID(lease.OwnerToken) ||
+		lease.ExecutionEpoch <= 0 || lease.ControlRevision <= 0 || lease.JobLease.Attempt <= 0 ||
+		strings.TrimSpace(lease.JobLease.LeaseOwner) == "" || strings.TrimSpace(lease.OwnerID) == "" {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("begin live Agent Turn mutation recovery: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.JobLease.ID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("lock live Agent Turn recovery job: %w", err)
+	}
+	if !sameAgentTurnExecutionIdentity(job, lease) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if job.Status == JobSucceeded {
+		recovery, err := lockRepeatedLiveMutationRecovery(ctx, tx, job, lease)
+		if err != nil {
+			return AgentTurnRecovery{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("commit repeated live Agent Turn mutation recovery: %w", err)
+		}
+		return recovery, nil
+	}
+	if job.Status != JobLeased || job.LeaseOwner != lease.JobLease.LeaseOwner ||
+		job.LeaseToken != lease.JobLease.LeaseToken || job.AttemptCount != lease.JobLease.Attempt ||
+		job.LeaseExpiresAt == nil {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var attemptStatus, attemptOwner, attemptToken string
+	var attemptLive bool
+	err = tx.QueryRow(ctx, `
+SELECT status, lease_owner, lease_token::text, lease_expires_at > clock_timestamp()
+FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
+		job.ID, lease.JobLease.Attempt).Scan(&attemptStatus, &attemptOwner, &attemptToken, &attemptLive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("lock live Agent Turn execution attempt: %w", err)
+	}
+	if attemptStatus != string(JobLeased) || attemptOwner != lease.JobLease.LeaseOwner ||
+		attemptToken != lease.JobLease.LeaseToken || !attemptLive {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var jobLive bool
+	if err := tx.QueryRow(ctx, `SELECT lease_expires_at > clock_timestamp() FROM jobs WHERE id = $1`, job.ID).Scan(&jobLive); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("check live Agent Turn execution job lease: %w", err)
+	}
+	if !jobLive {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if !hierarchy.allowsActiveTurn() || hierarchy.controlRevision != lease.ControlRevision {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	turn, err := lockAgentTurn(ctx, tx, lease.ID)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	turn.AgentAssignmentID = job.AgentAssignmentID
+	if !turn.active || turn.Status != AgentTurnReconciling || turn.MutationAdmissionOpen || !turn.leaseLive ||
+		turn.AgentAssignmentID != lease.AgentAssignmentID || turn.AgentSessionID != lease.AgentSessionID ||
+		turn.WorkflowAttemptID != lease.WorkflowAttemptID || turn.ExecutionEpoch != lease.ExecutionEpoch ||
+		turn.ControlRevision != lease.ControlRevision || turn.ownerID != lease.OwnerID || turn.ownerToken != lease.OwnerToken {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var admissionClosed, recoveryAbsent bool
+	if err := tx.QueryRow(ctx, `
+SELECT mutation_admission_closed_at IS NOT NULL,
+       recovery_started_at IS NULL AND NOT runtime_stop_required
+           AND runtime_stopped_at IS NULL AND recovery_settled_at IS NULL
+           AND stop_runtime_job_id IS NULL AND reconcile_mutations_job_id IS NULL
+FROM agent_turns WHERE id = $1`, lease.ID).Scan(&admissionClosed, &recoveryAbsent); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("inspect live Agent Turn recovery state: %w", err)
+	}
+	if !admissionClosed || !recoveryAbsent {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err := lockAgentTurnSlots(ctx, tx); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	var slotLive bool
+	err = tx.QueryRow(ctx, `
+SELECT lease_expires_at > clock_timestamp() FROM agent_turn_slots
+WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
+  AND control_revision = $4 AND owner_id = $5 AND owner_token = $6 FOR UPDATE`,
+		lease.ID, lease.AgentSessionID, lease.ExecutionEpoch, lease.ControlRevision,
+		lease.OwnerID, lease.OwnerToken).Scan(&slotLive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("lock controlled-handoff Agent Turn slot: %w", err)
+	}
+	if !slotLive {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var recoveryMutations, residualMutations int
+	if err := tx.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING')),
+       count(*) FILTER (WHERE state IN ('RESERVED', 'IN_FLIGHT'))
+FROM tool_invocations
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'`,
+		lease.ID, lease.ExecutionEpoch).Scan(&recoveryMutations, &residualMutations); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("inspect live Agent Turn recovery mutations: %w", err)
+	}
+	if recoveryMutations == 0 || residualMutations != 0 {
+		return AgentTurnRecovery{}, ErrAgentTurnMutationsUnsettled
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE tool_invocations SET state = 'RECONCILING', updated_at = clock_timestamp()
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION' AND state = 'UNKNOWN'`,
+		lease.ID, lease.ExecutionEpoch); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("begin live Agent Turn mutation reconciliation: %w", err)
+	}
+	stopJobID, err := enqueueAgentTurnRecoveryJob(ctx, tx, job, turn, StopStaleRuntimeJobKind, stopStaleRuntimeJobPriority)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	reconcileJobID, err := enqueueAgentTurnRecoveryJob(ctx, tx, job, turn, ReconcileAgentTurnMutationsJobKind, reconcileTurnMutationsJobPriority)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	jobResult := json.RawMessage(`{"controlled_handoff":true}`)
+	attemptResult, err := tx.Exec(ctx, `
+UPDATE job_attempts
+SET status = 'SUCCEEDED', finished_at = clock_timestamp(), result = $4
+WHERE job_id = $1 AND lease_token = $2 AND attempt_number = $3 AND status = 'LEASED'`,
+		job.ID, job.LeaseToken, job.AttemptCount, jobResult)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("complete controlled-handoff execution attempt: %w", err)
+	}
+	if attemptResult.RowsAffected() != 1 {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	jobUpdate, err := tx.Exec(ctx, `
+UPDATE jobs
+SET status = 'SUCCEEDED', lease_owner = NULL, lease_token = NULL, leased_at = NULL,
+    lease_expires_at = NULL, heartbeat_at = NULL, updated_at = clock_timestamp(),
+    completed_at = clock_timestamp(), result = $4, last_error = NULL
+WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`,
+		job.ID, job.LeaseToken, job.AttemptCount, jobResult)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("complete controlled-handoff execution job: %w", err)
+	}
+	if jobUpdate.RowsAffected() != 1 {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	slotDelete, err := tx.Exec(ctx, `
+DELETE FROM agent_turn_slots
+WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
+  AND control_revision = $4 AND owner_id = $5 AND owner_token = $6`,
+		lease.ID, lease.AgentSessionID, lease.ExecutionEpoch, lease.ControlRevision,
+		lease.OwnerID, lease.OwnerToken)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("release controlled-handoff Agent Turn slot: %w", err)
+	}
+	if slotDelete.RowsAffected() != 1 {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	turnUpdate, err := tx.Exec(ctx, `
+UPDATE agent_turns
+SET status = 'RECONCILING', active = FALSE, mutation_admission_open = FALSE,
+    owner_id = NULL, owner_token = NULL, leased_at = NULL, lease_expires_at = NULL,
+    heartbeat_at = NULL, completed_at = clock_timestamp(), last_error = NULL,
+    recovery_started_at = clock_timestamp(), runtime_stop_required = TRUE,
+    runtime_stopped_at = NULL, recovery_settled_at = NULL,
+    stop_runtime_job_id = $5, reconcile_mutations_job_id = $6
+WHERE id = $1 AND execution_epoch = $2 AND control_revision = $3 AND owner_token = $4
+  AND active AND status = 'RECONCILING' AND NOT mutation_admission_open
+  AND mutation_admission_closed_at IS NOT NULL AND recovery_started_at IS NULL`,
+		lease.ID, lease.ExecutionEpoch, lease.ControlRevision, lease.OwnerToken, stopJobID, reconcileJobID)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("fence controlled-handoff Agent Turn: %w", err)
+	}
+	if turnUpdate.RowsAffected() != 1 {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	recovery, err := readAgentTurnRecovery(ctx, tx, lease.ID, lease.ExecutionEpoch)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("read controlled-handoff recovery: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("commit live Agent Turn mutation recovery: %w", err)
+	}
+	return recovery, nil
+}
+
 // RecoverExpiredAgentTurn terminally fences an expired job/turn ownership without reusing its epoch.
 func (store *Store) RecoverExpiredAgentTurn(ctx context.Context, turnID string, executionEpoch int64) (AgentTurnRecovery, error) {
 	if !validUUID(turnID) || executionEpoch <= 0 {
@@ -503,10 +773,11 @@ WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2`, 
 		return AgentTurnRecovery{}, err
 	}
 	if !turn.active || turn.ExecutionEpoch != executionEpoch ||
-		turn.Status != AgentTurnQueued && turn.Status != AgentTurnStarting && turn.Status != AgentTurnRunning {
+		turn.Status != AgentTurnQueued && turn.Status != AgentTurnStarting && turn.Status != AgentTurnRunning &&
+			turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
 	}
-	if turn.Status == AgentTurnRunning && turn.leaseLive {
+	if turn.leaseLive {
 		return AgentTurnRecovery{}, ErrAgentTurnNotExpired
 	}
 	if err := lockAgentTurnSlots(ctx, tx); err != nil {
@@ -647,6 +918,9 @@ WHERE id = $1 AND agent_session_id = $2 AND execution_epoch = $3
 	if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"runtime_stopped":true}`)); err != nil {
 		return AgentTurnRecovery{}, err
 	}
+	if _, err := settleAgentTurnRecoveryTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch); err != nil {
+		return AgentTurnRecovery{}, err
+	}
 	recovery, err := readAgentTurnRecovery(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)
 	if err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("read acknowledged recovery: %w", err)
@@ -708,6 +982,11 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 	if err != nil {
 		return MutationReservation{}, fmt.Errorf("read reconciled mutation: %w", err)
 	}
+	if outcome.State == MutationSucceeded {
+		if err := bindReviewerActorForSubmitReview(ctx, tx, job.AgentAssignmentID, mutation.ToolName, result); err != nil {
+			return MutationReservation{}, err
+		}
+	}
 	var unsettled bool
 	if err := tx.QueryRow(ctx, unsettledMutationsForTurnSQL, job.AgentTurnID, job.ExecutionEpoch).Scan(&unsettled); err != nil {
 		return MutationReservation{}, fmt.Errorf("check remaining recovered mutations: %w", err)
@@ -715,6 +994,13 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 	if !unsettled {
 		if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"mutations_reconciled":true}`)); err != nil {
 			return MutationReservation{}, err
+		}
+		settled, err := settleAgentTurnRecoveryTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)
+		if err != nil {
+			return MutationReservation{}, err
+		}
+		if !settled {
+			return MutationReservation{}, ErrAgentTurnRecoveryUnsettled
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -841,6 +1127,74 @@ func (store *Store) ValidateTurnFence(ctx context.Context, lease AgentTurnLease)
 	return store.withLockedAgentTurnLeaseStatus(ctx, lease, "validate agent turn fence", true, func(pgx.Tx, lockedTurn) error { return nil })
 }
 
+// WithAgentTurnFence holds the exact live RUNNING Agent Turn authority while operation executes.
+// The callback receives the transaction-scoped context and must not call Store methods.
+func (store *Store) WithAgentTurnFence(ctx context.Context, lease AgentTurnLease, operation func(context.Context) error) error {
+	if operation == nil {
+		return errors.New("hold Agent Turn fence: operation is nil")
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return store.withLockedAgentTurnLeaseOptions(ctx, lease, "hold Agent Turn fence", true, true, func(_ pgx.Tx, turn lockedTurn) error {
+		if turn.Status != AgentTurnRunning {
+			return ErrAgentTurnFenceLost
+		}
+		return operation(operationCtx)
+	})
+}
+
+// GetAgentTurnExecutionContext returns launch inputs only while the exact acquired epoch remains live.
+func (store *Store) GetAgentTurnExecutionContext(ctx context.Context, lease AgentTurnLease) (AgentTurnExecutionContext, error) {
+	var execution AgentTurnExecutionContext
+	err := store.withLockedAgentTurnLeaseStatus(ctx, lease, "get Agent Turn execution context", true, func(tx pgx.Tx, turn lockedTurn) error {
+		if err := tx.QueryRow(ctx, `
+SELECT id::text, repository_id, repository_owner, repository_name, issue_id, issue_number
+FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
+			&execution.WorkflowID, &execution.Repository.ID, &execution.Repository.Owner,
+			&execution.Repository.Name, &execution.Issue.ID, &execution.Issue.Number,
+		); err != nil {
+			return err
+		}
+		assignment, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+		if err != nil {
+			return err
+		}
+		session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1`, lease.AgentSessionID))
+		if err != nil {
+			return err
+		}
+		execution.Assignment = assignment
+		execution.Session = session
+		execution.Turn = turn.AgentTurn
+
+		if lease.ChangeProposalID == "" {
+			return nil
+		}
+		proposal := &AgentTurnChangeProposal{}
+		if err := tx.QueryRow(ctx, `
+SELECT id::text, pull_request_id, pull_request_number, base_ref, base_sha, head_ref, head_sha
+FROM change_proposals
+WHERE id = $1 AND workflow_id = $2 AND repository_id = $3 AND active`,
+			lease.ChangeProposalID, execution.WorkflowID, execution.Repository.ID,
+		).Scan(&proposal.ID, &proposal.PullRequestID, &proposal.PullRequestNumber,
+			&proposal.BaseRef, &proposal.BaseSHA, &proposal.HeadRef, &proposal.HeadSHA); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrAgentTurnFenceLost
+			}
+			return err
+		}
+		if proposal.HeadSHA != lease.ExpectedHeadSHA {
+			return ErrAgentTurnFenceLost
+		}
+		execution.ChangeProposal = proposal
+		return nil
+	})
+	if err != nil {
+		return AgentTurnExecutionContext{}, err
+	}
+	return execution, nil
+}
+
 // ValidateAgentSessionPromptFence checks a live Agent Turn lease and its exact durable ACP Session identity.
 func (store *Store) ValidateAgentSessionPromptFence(ctx context.Context, lease AgentTurnLease, acpSessionID string) error {
 	return store.withLockedAgentTurnLease(ctx, lease, "validate Agent Session prompt fence", func(tx pgx.Tx, _ lockedTurn) error {
@@ -868,12 +1222,12 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 	}
 	var reservation MutationReservation
 	err = store.withLockedAgentTurnLease(ctx, lease, "reserve mutation", func(tx pgx.Tx, turn lockedTurn) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, spec.OperationID); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`, turn.operationLineageID, spec.OperationID); err != nil {
 			return err
 		}
-		existing, err := getMutationByOperation(ctx, tx, spec.OperationID)
+		existing, err := getMutationByOperation(ctx, tx, turn.operationLineageID, spec.OperationID)
 		if err == nil {
-			if !sameMutationDefinition(existing, lease, spec) {
+			if !sameMutationDefinition(existing, spec) {
 				return ErrMutationOperationConflict
 			}
 			reservation = existing
@@ -897,15 +1251,74 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		}
 		return tx.QueryRow(ctx, `
 INSERT INTO tool_invocations (
-    id, agent_turn_id, execution_epoch, invocation_number, tool_name, kind, state,
-    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha
+	    id, agent_turn_id, execution_epoch, operation_lineage_id, invocation_number, tool_name, kind, state,
+	    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha
 )
-VALUES ($1, $2, $3, $4, $5, 'MUTATION', 'RESERVED', $6, $6, $7, $8, $9, $10)
-RETURNING admitted_at`, invocationID, lease.ID, lease.ExecutionEpoch, number, spec.ToolName,
+VALUES ($1, $2, $3, $4, $5, $6, 'MUTATION', 'RESERVED', $7, $7, $8, $9, $10, $11)
+RETURNING admitted_at`, invocationID, lease.ID, lease.ExecutionEpoch, turn.operationLineageID, number, spec.ToolName,
 			spec.OperationID, spec.Request, nullableString(spec.ExternalService),
 			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA)).Scan(&reservation.AdmittedAt)
 	})
 	return reservation, err
+}
+
+// RecordReadInvocation appends one terminal read-tool record under the live Agent Turn fence.
+func (store *Store) RecordReadInvocation(ctx context.Context, lease AgentTurnLease, invocation ReadInvocation) (ReadInvocationRecord, error) {
+	if strings.TrimSpace(invocation.ToolName) == "" || invocation.StartedAt.IsZero() || invocation.FinishedAt.Before(invocation.StartedAt) {
+		return ReadInvocationRecord{}, errors.New("record read invocation: invalid metadata")
+	}
+	request, err := canonicalJSON(invocation.Request)
+	if err != nil {
+		return ReadInvocationRecord{}, fmt.Errorf("record read invocation: request: %w", err)
+	}
+	succeeded := invocation.LastError == ""
+	var result json.RawMessage
+	if succeeded {
+		result, err = canonicalJSON(invocation.Result)
+		if err != nil {
+			return ReadInvocationRecord{}, fmt.Errorf("record read invocation: result: %w", err)
+		}
+	} else if strings.TrimSpace(invocation.LastError) == "" || len(invocation.Result) != 0 {
+		return ReadInvocationRecord{}, errors.New("record read invocation: failed read requires only an error")
+	}
+	id, err := randomUUID()
+	if err != nil {
+		return ReadInvocationRecord{}, fmt.Errorf("record read invocation: %w", err)
+	}
+	duration := invocation.FinishedAt.Sub(invocation.StartedAt).Round(time.Millisecond)
+	var record ReadInvocationRecord
+	err = store.withLockedAgentTurnLease(ctx, lease, "record read invocation", func(tx pgx.Tx, turn lockedTurn) error {
+		if turn.Status != AgentTurnRunning {
+			return ErrAgentTurnFenceLost
+		}
+		var number int64
+		if err := tx.QueryRow(ctx, `UPDATE agent_turns SET next_invocation_number = next_invocation_number + 1 WHERE id = $1 RETURNING next_invocation_number - 1`, lease.ID).Scan(&number); err != nil {
+			return err
+		}
+		state := MutationSucceeded
+		if !succeeded {
+			state = MutationFailed
+		}
+		_, err := tx.Exec(ctx, `
+INSERT INTO tool_invocations (
+	    id, agent_turn_id, execution_epoch, operation_lineage_id, invocation_number, tool_name, kind, state,
+	    request, result, started_at, finished_at, duration_ms, last_error
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'READ', $7, $8, $9, $10, $11, $12, NULLIF($13, ''))`,
+			id, lease.ID, lease.ExecutionEpoch, turn.operationLineageID, number, invocation.ToolName, state, request,
+			nullableJSON(result), invocation.StartedAt, invocation.FinishedAt, duration.Milliseconds(), invocation.LastError)
+		if err != nil {
+			return err
+		}
+		record = ReadInvocationRecord{
+			ID: id, AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
+			InvocationNumber: number, ToolName: invocation.ToolName, Request: request,
+			Result: result, Succeeded: succeeded, Duration: duration,
+			StartedAt: invocation.StartedAt, FinishedAt: invocation.FinishedAt,
+		}
+		return nil
+	})
+	return record, err
 }
 
 // StartMutation moves one reservation to IN_FLIGHT using a fenced compare-and-swap.
@@ -1149,10 +1562,11 @@ func lockAgentTurnJob(ctx context.Context, tx pgx.Tx, lease JobLease, requireLiv
 		return Job{}, ErrAgentTurnFenceLost
 	}
 	var attemptLive bool
+	var attemptOwner string
 	err = tx.QueryRow(ctx, `
-SELECT status = 'LEASED' AND lease_token = $3 AND lease_expires_at > clock_timestamp()
+SELECT status = 'LEASED' AND lease_token = $3 AND lease_expires_at > clock_timestamp(), lease_owner
 FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
-		job.ID, lease.Attempt, lease.LeaseToken).Scan(&attemptLive)
+		job.ID, lease.Attempt, lease.LeaseToken).Scan(&attemptLive, &attemptOwner)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && requireLive && (!attemptLive || job.LeaseExpiresAt == nil) {
 		return Job{}, ErrAgentTurnFenceLost
 	}
@@ -1160,6 +1574,9 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 		return Job{}, fmt.Errorf("lock agent turn job attempt: %w", err)
 	}
 	if requireLive {
+		if lease.LeaseOwner != "" && attemptOwner != lease.LeaseOwner {
+			return Job{}, ErrAgentTurnFenceLost
+		}
 		var jobLive bool
 		if err := tx.QueryRow(ctx, `SELECT lease_expires_at > clock_timestamp() FROM jobs WHERE id = $1`, job.ID).Scan(&jobLive); err != nil || !jobLive {
 			return Job{}, ErrAgentTurnFenceLost
@@ -1203,6 +1620,78 @@ func hierarchyFromJob(job Job) hierarchyIdentity {
 	}
 }
 
+func sameAgentTurnExecutionIdentity(job Job, lease AgentTurnLease) bool {
+	return job.ID == lease.JobLease.ID && job.Queue == AgentTurnQueue && job.Kind == RunAgentTurnJobKind &&
+		job.MaxAttempts == 1 && job.AttemptCount == lease.JobLease.Attempt &&
+		job.IdempotencyKey == lease.JobLease.IdempotencyKey && job.WorkflowID == lease.JobLease.WorkflowID &&
+		job.WorkflowAttemptID == lease.JobLease.WorkflowAttemptID &&
+		job.AgentAssignmentID == lease.JobLease.AgentAssignmentID &&
+		job.AgentSessionID == lease.JobLease.AgentSessionID && job.AgentTurnID == lease.JobLease.AgentTurnID &&
+		job.ExecutionEpoch == lease.JobLease.ExecutionEpoch && bytes.Equal(job.Payload, lease.JobLease.Payload) &&
+		job.WorkflowAttemptID == lease.WorkflowAttemptID && job.AgentAssignmentID == lease.AgentAssignmentID &&
+		job.AgentSessionID == lease.AgentSessionID && job.AgentTurnID == lease.ID &&
+		job.ExecutionEpoch == lease.ExecutionEpoch
+}
+
+func lockRepeatedLiveMutationRecovery(ctx context.Context, tx pgx.Tx, job Job, lease AgentTurnLease) (AgentTurnRecovery, error) {
+	if !controlledHandoffResult(job.Result) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var attemptStatus, attemptOwner, attemptToken string
+	var attemptResult []byte
+	if err := tx.QueryRow(ctx, `
+SELECT status, lease_owner, lease_token::text, result
+FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
+		job.ID, lease.JobLease.Attempt).Scan(&attemptStatus, &attemptOwner, &attemptToken, &attemptResult); err != nil ||
+		attemptStatus != string(JobSucceeded) || attemptOwner != lease.JobLease.LeaseOwner ||
+		attemptToken != lease.JobLease.LeaseToken || !controlledHandoffResult(attemptResult) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	turn, err := lockAgentTurn(ctx, tx, lease.ID)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if turn.active || turn.Status != AgentTurnReconciling || turn.MutationAdmissionOpen || turn.leasePresent ||
+		turn.AgentSessionID != lease.AgentSessionID || turn.WorkflowAttemptID != lease.WorkflowAttemptID ||
+		turn.ExecutionEpoch != lease.ExecutionEpoch || turn.ControlRevision != lease.ControlRevision ||
+		turn.ownerID != "" || turn.ownerToken != "" {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	recovery, err := readAgentTurnRecovery(ctx, tx, lease.ID, lease.ExecutionEpoch)
+	if err != nil || recovery.RecoverySettledAt != nil || recovery.JobID != job.ID ||
+		recovery.Status != AgentTurnReconciling || recovery.StopRuntimeJobID == "" || recovery.ReconcileMutationsJobID == "" {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	var identity recoveryJobIdentity
+	var payload []byte
+	if err := tx.QueryRow(ctx, `SELECT payload FROM jobs WHERE id = $1 AND kind = $2`,
+		recovery.StopRuntimeJobID, StopStaleRuntimeJobKind).Scan(&payload); err != nil ||
+		json.Unmarshal(payload, &identity) != nil || identity.WorkflowID != job.WorkflowID ||
+		identity.WorkflowAttemptID != job.WorkflowAttemptID || identity.AgentAssignmentID != job.AgentAssignmentID ||
+		identity.AgentSessionID != job.AgentSessionID || identity.AgentTurnID != job.AgentTurnID ||
+		identity.ExecutionEpoch != job.ExecutionEpoch || identity.ControlRevision != lease.ControlRevision ||
+		identity.ExecutionJobID != job.ID || identity.OwnerID != lease.OwnerID ||
+		identity.OwnerTokenSHA256 != ownerTokenProof(lease.OwnerToken) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	return recovery, nil
+}
+
+func controlledHandoffResult(result json.RawMessage) bool {
+	canonical, err := canonicalJSON(result)
+	return err == nil && bytes.Equal(canonical, json.RawMessage(`{"controlled_handoff":true}`))
+}
+
+func ownerTokenProof(token string) string {
+	if token == "" {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+}
+
 type recoveryJobIdentity struct {
 	WorkflowID        string `json:"workflow_id"`
 	WorkflowAttemptID string `json:"workflow_attempt_id"`
@@ -1212,6 +1701,8 @@ type recoveryJobIdentity struct {
 	ExecutionEpoch    int64  `json:"execution_epoch"`
 	ControlRevision   int64  `json:"control_revision"`
 	ExecutionJobID    string `json:"execution_job_id"`
+	OwnerID           string `json:"owner_id,omitempty"`
+	OwnerTokenSHA256  string `json:"owner_token_sha256,omitempty"`
 }
 
 func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Job, turn lockedTurn, kind string, priority int) (string, error) {
@@ -1224,6 +1715,7 @@ func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Jo
 		AgentAssignmentID: executionJob.AgentAssignmentID, AgentSessionID: executionJob.AgentSessionID,
 		AgentTurnID: executionJob.AgentTurnID, ExecutionEpoch: executionJob.ExecutionEpoch,
 		ControlRevision: turn.ControlRevision, ExecutionJobID: executionJob.ID,
+		OwnerID: turn.ownerID, OwnerTokenSHA256: ownerTokenProof(turn.ownerToken),
 	}
 	payload, err := json.Marshal(identity)
 	if err != nil {
@@ -1263,7 +1755,7 @@ ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
 }
 
 func lockAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, lease JobLease, expectedKind string) (Job, lockedTurn, error) {
-	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 {
+	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 || strings.TrimSpace(lease.LeaseOwner) == "" {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
 	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.ID))
@@ -1271,10 +1763,11 @@ func lockAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, lease JobLease, ex
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
 	if job.Kind != expectedKind || job.Queue != AgentTurnRecoveryQueue || job.Status != JobLeased ||
-		job.LeaseToken != lease.LeaseToken || job.AttemptCount != lease.Attempt ||
+		job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken || job.AttemptCount != lease.Attempt ||
 		job.WorkflowID != lease.WorkflowID || job.WorkflowAttemptID != lease.WorkflowAttemptID ||
 		job.AgentAssignmentID != lease.AgentAssignmentID || job.AgentSessionID != lease.AgentSessionID ||
-		job.AgentTurnID != lease.AgentTurnID || job.ExecutionEpoch != lease.ExecutionEpoch {
+		job.AgentTurnID != lease.AgentTurnID || job.ExecutionEpoch != lease.ExecutionEpoch ||
+		!bytes.Equal(job.Payload, lease.Payload) {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
 	var jobLive bool
@@ -1353,6 +1846,28 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 	return nil
 }
 
+func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, turnID string, executionEpoch int64) (bool, error) {
+	result, err := tx.Exec(ctx, `
+UPDATE agent_turns AS turn
+SET recovery_settled_at = clock_timestamp()
+WHERE turn.id = $1 AND turn.execution_epoch = $2
+  AND turn.recovery_started_at IS NOT NULL AND turn.recovery_settled_at IS NULL
+  AND turn.runtime_stopped_at IS NOT NULL
+  AND EXISTS (SELECT 1 FROM jobs WHERE id = turn.stop_runtime_job_id AND status = 'SUCCEEDED')
+  AND (turn.reconcile_mutations_job_id IS NULL OR EXISTS (
+      SELECT 1 FROM jobs WHERE id = turn.reconcile_mutations_job_id AND status = 'SUCCEEDED'
+  ))
+  AND NOT EXISTS (
+      SELECT 1 FROM tool_invocations
+      WHERE agent_turn_id = turn.id AND execution_epoch = turn.execution_epoch
+        AND kind = 'MUTATION' AND state IN ('RESERVED', 'IN_FLIGHT', 'UNKNOWN', 'RECONCILING')
+  )`, turnID, executionEpoch)
+	if err != nil {
+		return false, fmt.Errorf("settle Agent Turn recovery: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
 type recoveryQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
@@ -1391,14 +1906,14 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	var turn lockedTurn
 	var profileConfig []byte
 	err := tx.QueryRow(ctx, `
-	SELECT id::text, agent_session_id::text, workflow_attempt_id::text, turn_number,
-	execution_epoch, control_revision, status, mutation_admission_open, active,
+	SELECT id::text, agent_session_id::text, workflow_attempt_id::text, operation_lineage_id::text,
+	turn_number, execution_epoch, control_revision, status, mutation_admission_open, active,
 	COALESCE(owner_id, ''), COALESCE(owner_token::text, ''), lease_expires_at IS NOT NULL,
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
 	COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
 	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, created_at
 FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
-		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.TurnNumber,
+		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,
 		&turn.ExecutionEpoch, &turn.ControlRevision, &turn.Status, &turn.MutationAdmissionOpen,
 		&turn.active, &turn.ownerID, &turn.ownerToken, &turn.leasePresent, &turn.leaseLive,
 		&turn.RetryOfTurnID, &turn.Purpose, &turn.ChangeProposalID, &turn.ExpectedHeadSHA,
@@ -1427,6 +1942,10 @@ func (store *Store) withLockedAgentTurnLease(ctx context.Context, lease AgentTur
 }
 
 func (store *Store) withLockedAgentTurnLeaseStatus(ctx context.Context, lease AgentTurnLease, action string, allowCreating bool, operation func(pgx.Tx, lockedTurn) error) error {
+	return store.withLockedAgentTurnLeaseOptions(ctx, lease, action, allowCreating, false, operation)
+}
+
+func (store *Store) withLockedAgentTurnLeaseOptions(ctx context.Context, lease AgentTurnLease, action string, allowCreating, requireExact bool, operation func(pgx.Tx, lockedTurn) error) error {
 	if !validUUID(lease.ID) || !validUUID(lease.AgentSessionID) || !validUUID(lease.OwnerToken) ||
 		lease.ExecutionEpoch <= 0 || lease.ControlRevision <= 0 || strings.TrimSpace(lease.OwnerID) == "" {
 		return ErrAgentTurnFenceLost
@@ -1438,6 +1957,9 @@ func (store *Store) withLockedAgentTurnLeaseStatus(ctx context.Context, lease Ag
 	defer func() { _ = tx.Rollback(ctx) }()
 	job, err := lockAgentTurnJob(ctx, tx, lease.JobLease, true)
 	if err != nil {
+		return ErrAgentTurnFenceLost
+	}
+	if requireExact && (job.LeaseOwner != lease.JobLease.LeaseOwner || !sameAgentTurnExecutionIdentity(job, lease)) {
 		return ErrAgentTurnFenceLost
 	}
 	if job.AgentTurnID != lease.ID || job.AgentSessionID != lease.AgentSessionID || job.ExecutionEpoch != lease.ExecutionEpoch {
@@ -1452,6 +1974,9 @@ func (store *Store) withLockedAgentTurnLeaseStatus(ctx context.Context, lease Ag
 		return err
 	}
 	turn.AgentAssignmentID = job.AgentAssignmentID
+	if requireExact && (turn.AgentAssignmentID != lease.AgentAssignmentID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
+		return ErrAgentTurnFenceLost
+	}
 	if !lockedHierarchy.allowsActiveTurn() && !(allowCreating && lockedHierarchy.allowsAcquisition(turn.AgentTurn)) {
 		return ErrAgentTurnFenceLost
 	}
@@ -1490,28 +2015,56 @@ func (store *Store) mutateMutationState(ctx context.Context, lease AgentTurnLeas
 	if !validUUID(mutationID) {
 		return ErrMutationStateConflict
 	}
-	return store.withLockedAgentTurnLease(ctx, lease, action, func(tx pgx.Tx, _ lockedTurn) error {
+	return store.withLockedAgentTurnLease(ctx, lease, action, func(tx pgx.Tx, turn lockedTurn) error {
 		resultValue := nullableJSON(result)
 		lastError := ""
 		if cause != nil {
 			lastError = cause.Error()
 		}
-		resultTag, err := tx.Exec(ctx, `
+		var toolName string
+		err := tx.QueryRow(ctx, `
 UPDATE tool_invocations
 SET state = $4, result = $5, last_error = NULLIF($6, ''), updated_at = clock_timestamp(),
 finished_at = CASE WHEN $4 IN ('SUCCEEDED', 'FAILED') THEN clock_timestamp() ELSE NULL END,
 duration_ms = CASE WHEN $4 IN ('SUCCEEDED', 'FAILED') AND started_at IS NOT NULL
 THEN GREATEST(0, (EXTRACT(EPOCH FROM (clock_timestamp() - started_at)) * 1000)::bigint) ELSE NULL END
-WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATION' AND state = ANY($7)`,
-			mutationID, lease.ID, lease.ExecutionEpoch, to, resultValue, lastError, mutationStates(from))
+WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATION' AND state = ANY($7)
+RETURNING tool_name`, mutationID, lease.ID, lease.ExecutionEpoch, to, resultValue, lastError, mutationStates(from)).Scan(&toolName)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMutationStateConflict
+		}
 		if err != nil {
 			return err
 		}
-		if resultTag.RowsAffected() != 1 {
-			return ErrMutationStateConflict
+		if to == MutationSucceeded {
+			return bindReviewerActorForSubmitReview(ctx, tx, turn.AgentAssignmentID, toolName, result)
 		}
 		return nil
 	})
+}
+
+func bindReviewerActorForSubmitReview(ctx context.Context, tx pgx.Tx, assignmentID, toolName string, result json.RawMessage) error {
+	if toolName != "submit_review" {
+		return nil
+	}
+	var review struct {
+		ActorID int64 `json:"actor_id"`
+	}
+	if err := json.Unmarshal(result, &review); err != nil || review.ActorID <= 0 {
+		return errors.New("bind reviewer actor: submit_review result has no valid actor_id")
+	}
+	updated, err := tx.Exec(ctx, `
+UPDATE agent_assignments
+SET github_app_actor_id = COALESCE(github_app_actor_id, $2), updated_at = clock_timestamp()
+WHERE id = $1 AND role = 'REVIEWER' AND status = 'ACTIVE' AND state_deleted_at IS NULL
+  AND (github_app_actor_id IS NULL OR github_app_actor_id = $2)`, assignmentID, review.ActorID)
+	if err != nil {
+		return fmt.Errorf("bind reviewer actor: %w", err)
+	}
+	if updated.RowsAffected() != 1 {
+		return ErrReviewerActorConflict
+	}
+	return nil
 }
 
 const mutationSelect = `
@@ -1521,8 +2074,9 @@ COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(exp
 result, COALESCE(last_error, ''), admitted_at, started_at, finished_at
 FROM tool_invocations`
 
-func getMutationByOperation(ctx context.Context, tx pgx.Tx, operationID string) (MutationReservation, error) {
-	return scanMutation(tx.QueryRow(ctx, mutationSelect+` WHERE operation_id = $1`, operationID))
+func getMutationByOperation(ctx context.Context, tx pgx.Tx, operationLineageID, operationID string) (MutationReservation, error) {
+	return scanMutation(tx.QueryRow(ctx, mutationSelect+`
+WHERE operation_lineage_id = $1 AND operation_id = $2 AND kind = 'MUTATION'`, operationLineageID, operationID))
 }
 
 func getMutationByID(ctx context.Context, tx pgx.Tx, mutationID string) (MutationReservation, error) {
@@ -1549,9 +2103,8 @@ func scanMutation(row rowScanner) (MutationReservation, error) {
 	return mutation, nil
 }
 
-func sameMutationDefinition(existing MutationReservation, lease AgentTurnLease, spec MutationSpec) bool {
-	return existing.AgentTurnID == lease.ID && existing.ExecutionEpoch == lease.ExecutionEpoch &&
-		existing.ToolName == spec.ToolName && bytes.Equal(existing.Request, spec.Request) &&
+func sameMutationDefinition(existing MutationReservation, spec MutationSpec) bool {
+	return existing.ToolName == spec.ToolName && bytes.Equal(existing.Request, spec.Request) &&
 		existing.ExternalService == spec.ExternalService && existing.ExternalResourceID == spec.ExternalResourceID &&
 		existing.ExpectedSHA == spec.ExpectedSHA
 }

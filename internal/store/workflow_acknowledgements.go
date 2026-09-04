@@ -400,6 +400,9 @@ SELECT EXISTS (
 ) OR EXISTS (
     SELECT 1 FROM jobs
     WHERE workflow_id = $1 AND kind = $2 AND status IN ('AVAILABLE', 'LEASED')
+) OR EXISTS (
+    SELECT 1 FROM agent_turns
+    WHERE workflow_id = $1 AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL
 )`, workflowID, PrepareAgentTurnJobKind).Scan(&live)
 	if err != nil {
 		return false, fmt.Errorf("check live Workflow successor: %w", err)

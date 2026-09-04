@@ -441,6 +441,98 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE
 	}
 }
 
+func TestPendingEventReconciliationTreatsUnsettledTurnRecoveryAsLiveSuccessor(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	fixture := seedAgentSession(t, pool, 45)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET status = 'DEVELOPING', state_revision = 1,
+    desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
+	lease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime-pending-recovery", 5*time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "pending-event-recovery", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkMutationUnknown(ctx, lease, mutation.ID, errors.New("unknown")); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginAgentTurnMutationRecovery(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciliationJobID := "44000000-0000-4000-8000-000000000045"
+	payload, err := json.Marshal(map[string]any{
+		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID,
+		"count": 1, "latest_observed_head_sha": "", "fallback_role": workflow.RoleDeveloper,
+		"fallback_purpose": workflow.TurnPurposeRetry, "fallback_expected_head_sha": "",
+		"retry_of_turn_id": turn.ID, "revision": 1, "source_turn_id": turn.ID,
+		"source_execution_epoch": turn.ExecutionEpoch, "source_control_revision": turn.ControlRevision,
+		"deferred_normalized_event_ids": []string{"44000000-0000-4000-8000-000000000046"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, max_attempts, idempotency_key, workflow_id,
+    workflow_attempt_id, agent_assignment_id, agent_session_id, agent_turn_id, execution_epoch
+)
+VALUES ($1, $2, $3, $4, 3, 'pending-event-unsettled-recovery', $5, $6, $7, $8, $9, $10)`,
+		reconciliationJobID, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, payload,
+		fixture.workflowID, fixture.attemptID, fixture.assignmentID, fixture.sessionID, turn.ID, turn.ExecutionEpoch); err != nil {
+		t.Fatal(err)
+	}
+	reconciliationJob, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "pending-reconciler", 5*time.Second)
+	if err != nil || reconciliationJob == nil {
+		t.Fatalf("ClaimJobKind() = (%#v, %v)", reconciliationJob, err)
+	}
+	factoryCalled := false
+	if _, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationJob, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		factoryCalled = true
+		return store.WorkflowLocator{}, nil, errors.New("must not replay while recovery is unsettled")
+	}); !errors.Is(err, store.ErrWorkflowSuccessorConflict) {
+		t.Fatalf("AcknowledgePendingEventReconciliation() error = %v, want ErrWorkflowSuccessorConflict", err)
+	}
+	if factoryCalled {
+		t.Error("transition factory called while recovery barrier was unsettled")
+	}
+	var status string
+	var successors int
+	if err := pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1`, reconciliationJobID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(store.JobLeased) || successors != 0 {
+		t.Errorf("blocked reconciliation left job=%s successors=%d; want LEASED and 0", status, successors)
+	}
+}
+
 func TestClosureSettlementWaitsForStopAndMutationAcknowledgements(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 21)

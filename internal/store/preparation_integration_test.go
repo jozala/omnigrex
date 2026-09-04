@@ -155,6 +155,75 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 	}
 }
 
+func TestPrepareAgentTurnBlocksReviewerWhileDeveloperRecoveryIsUnsettled(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000042", "62000000-0000-4000-8000-000000000042")
+	developer := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovery-profile", "openai/developer")
+	lease := acquireAndBindTurn(t, database, ctx, developer, "developer-recovery-session")
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "developer-recovery-before-review", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkMutationUnknown(ctx, lease, mutation.ID, errors.New("unknown")); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginAgentTurnMutationRecovery(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	proposalID := "63000000-0000-4000-8000-000000000042"
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING', state_revision = 2 WHERE id = $1`, application.WorkflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ($2, $1, 9123, 'owner', 'repo', 42, 42, 'OPEN', 'main', 'base', 'feature', 'review-head')`,
+		application.WorkflowID, proposalID); err != nil {
+		t.Fatal(err)
+	}
+	insertPreparationJob(t, pool, application.WorkflowID, developer.Turn.WorkflowAttemptID, 2,
+		workflow.AssignmentGenerationCurrent, workflow.RoleReviewer, workflow.TurnPurposeReview, "review-head", "")
+	reviewerJob := claimPreparationJob(t, database, ctx)
+	if _, err := database.PrepareAgentTurn(ctx, reviewerJob, preparationSpec("reviewer-after-recovery", "openai/developer")); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Fatalf("PrepareAgentTurn() Reviewer successor error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	}
+	var reviewerSessions, reviewerTurns int
+	var preparationStatus string
+	if err := pool.QueryRow(ctx, `
+SELECT count(session.id),
+       (SELECT count(*) FROM agent_turns WHERE workflow_id = $1 AND id <> $2)
+FROM agent_assignments AS assignment
+LEFT JOIN agent_sessions AS session ON session.agent_assignment_id = assignment.id
+WHERE assignment.workflow_id = $1 AND assignment.role = 'REVIEWER'`,
+		application.WorkflowID, developer.Turn.ID).Scan(&reviewerSessions, &reviewerTurns); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1`, reviewerJob.ID).Scan(&preparationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if reviewerSessions != 0 || reviewerTurns != 0 || preparationStatus != string(store.JobLeased) {
+		t.Errorf("blocked Reviewer preparation left sessions=%d turns=%d job=%s; want 0, 0, LEASED", reviewerSessions, reviewerTurns, preparationStatus)
+	}
+}
+
 func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
@@ -706,6 +775,47 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
 	if err != nil || len(assignments) != 4 {
 		t.Fatalf("all Assignment generations = (%#v, %v), want four records", assignments, err)
+	}
+}
+
+func TestPrepareAgentTurnInheritsOperationLineageAcrossRetryChain(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000043", "62000000-0000-4000-8000-000000000043")
+	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "lineage-root", "openai/root")
+	rootLease := acquireAndBindTurn(t, database, ctx, root, "lineage-session")
+	settleAcquiredTurn(t, database, ctx, rootLease, store.AgentTurnFailed)
+
+	prepareRetry := func(revision int64, target store.AgentTurn, profile string) store.AgentTurnPreparationCommit {
+		t.Helper()
+		setWorkflowRevision(t, pool, application.WorkflowID, revision)
+		insertPreparationJob(t, pool, application.WorkflowID, root.Turn.WorkflowAttemptID, revision,
+			workflow.AssignmentGenerationCurrent, workflow.RoleDeveloper, workflow.TurnPurposeRetry, "", target.ID)
+		return prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), profile, "openai/retry")
+	}
+
+	firstRetry := prepareRetry(2, root.Turn, "lineage-retry-1")
+	firstRetryLease := acquireAndBindTurn(t, database, ctx, firstRetry, "lineage-session")
+	settleAcquiredTurn(t, database, ctx, firstRetryLease, store.AgentTurnFailed)
+	secondRetry := prepareRetry(3, firstRetry.Turn, "lineage-retry-2")
+
+	var rootLineage, firstRetryLineage, secondRetryLineage string
+	if err := pool.QueryRow(ctx, `
+SELECT root.operation_lineage_id::text, first_retry.operation_lineage_id::text,
+       second_retry.operation_lineage_id::text
+FROM agent_turns AS root
+JOIN agent_turns AS first_retry ON first_retry.id = $2
+JOIN agent_turns AS second_retry ON second_retry.id = $3
+WHERE root.id = $1`, root.Turn.ID, firstRetry.Turn.ID, secondRetry.Turn.ID).Scan(
+		&rootLineage, &firstRetryLineage, &secondRetryLineage,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if rootLineage != root.Turn.ID || firstRetryLineage != root.Turn.ID || secondRetryLineage != root.Turn.ID {
+		t.Errorf("prepared operation lineages = root %s, first retry %s, second retry %s; want %s", rootLineage, firstRetryLineage, secondRetryLineage, root.Turn.ID)
 	}
 }
 

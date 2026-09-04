@@ -18,6 +18,10 @@ const (
 	defaultWorkspaceVolume              = "omnigrex-workspaces"
 	defaultRuntimeStateVolume           = "omnigrex-runtime-state"
 	defaultMiseVolume                   = "omnigrex-mise"
+	defaultWorkspaceRoot                = "/var/lib/omnigrex/workspaces"
+	defaultMiseRoot                     = "/var/lib/omnigrex/mise"
+	defaultMCPAddr                      = "omnigrex-mcp:8081"
+	defaultMCPEndpointURL               = "http://omnigrex-mcp:8081/mcp"
 	defaultAgentImageReference          = "omnigrex/opencode:1.18.19"
 	defaultGitHubAPIURL                 = "https://api.github.com"
 	defaultHTTPAddr                     = ":8080"
@@ -42,6 +46,10 @@ type Config struct {
 	WorkspaceVolume            string
 	RuntimeStateVolume         string
 	MiseVolume                 string
+	WorkspaceRoot              string
+	MiseRoot                   string
+	MCPAddr                    string
+	MCPEndpointURL             string
 	// AgentImageReference is the mutable local image used by deployment readiness checks.
 	AgentImageReference string
 	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
@@ -76,6 +84,10 @@ func Load(getenv func(string) string) (Config, error) {
 		WorkspaceVolume:                       valueOrDefault(getenv("OMNIGREX_WORKSPACE_VOLUME"), defaultWorkspaceVolume),
 		RuntimeStateVolume:                    valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_VOLUME"), defaultRuntimeStateVolume),
 		MiseVolume:                            valueOrDefault(getenv("OMNIGREX_MISE_VOLUME"), defaultMiseVolume),
+		WorkspaceRoot:                         valueOrDefault(getenv("OMNIGREX_WORKSPACE_ROOT"), defaultWorkspaceRoot),
+		MiseRoot:                              valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
+		MCPAddr:                               valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
+		MCPEndpointURL:                        valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
 		AgentImageReference:                   valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
 		OpenCodeACPV1Image:                    getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
 		GitHubAPIURL:                          valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
@@ -103,6 +115,22 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if !filepath.IsAbs(config.DatabasePasswordSecretFile) {
 		return Config{}, fmt.Errorf("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE must be an absolute path")
+	}
+	for name, root := range map[string]string{
+		"OMNIGREX_WORKSPACE_ROOT": config.WorkspaceRoot,
+		"OMNIGREX_MISE_ROOT":      config.MiseRoot,
+	} {
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			return Config{}, fmt.Errorf("%s must be a clean absolute path", name)
+		}
+	}
+	mcpEndpoint, err := url.Parse(config.MCPEndpointURL)
+	if err != nil || (mcpEndpoint.Scheme != "http" && mcpEndpoint.Scheme != "https") || mcpEndpoint.Host == "" ||
+		mcpEndpoint.User != nil || mcpEndpoint.RawQuery != "" || mcpEndpoint.Fragment != "" || mcpEndpoint.Path != "/mcp" {
+		return Config{}, fmt.Errorf("OMNIGREX_MCP_ENDPOINT_URL must be an HTTP URL ending at /mcp without credentials, query, or fragment")
+	}
+	if strings.TrimSpace(config.MCPAddr) == "" {
+		return Config{}, fmt.Errorf("OMNIGREX_MCP_ADDR must not be blank")
 	}
 	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM"), "/")
 	if !found || strings.Contains(platformArch, "/") {

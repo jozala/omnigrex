@@ -866,6 +866,11 @@ func enqueueWorkflowJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, 
 		return err
 	}
 	idempotencyKey := fmt.Sprintf("workflow:%s:delivery:%s:action:%s", workflowID, deliveryID, actionKey)
+	normalizedEventID := nullableString(deliveryID)
+	provenanceActionKey := nullableString(actionKey)
+	if deliveryID == "" {
+		provenanceActionKey = nil
+	}
 	query := `
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
@@ -875,7 +880,7 @@ VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, COALESCE($5, clock_timestamp()), 3,
         $6, $7, $8, $9, $10)
 ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`
 	result, err := tx.Exec(ctx, query, jobID, WorkflowActionQueue, kind, payload, availableAt,
-		idempotencyKey, workflowID, nullableString(attemptID), deliveryID, actionKey)
+		idempotencyKey, workflowID, nullableString(attemptID), normalizedEventID, provenanceActionKey)
 	if err != nil {
 		return fmt.Errorf("enqueue %s action: %w", actionKey, err)
 	}

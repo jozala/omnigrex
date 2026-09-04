@@ -37,9 +37,14 @@ func Handler(readiness ReadinessChecker, githubWebhook http.Handler) http.Handle
 }
 
 func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, readiness ReadinessChecker, githubWebhook http.Handler) error {
+	return RunHandler(ctx, addr, shutdownTimeout, logger, "http", Handler(readiness, githubWebhook))
+}
+
+// RunHandler serves one explicitly supplied private or public HTTP handler with bounded shutdown.
+func RunHandler(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, name string, handler http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           Handler(readiness, githubWebhook),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -47,7 +52,7 @@ func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("http server started", "address", addr)
+		logger.Info(name+" server started", "address", addr)
 		serveErr <- httpServer.ListenAndServe()
 	}()
 

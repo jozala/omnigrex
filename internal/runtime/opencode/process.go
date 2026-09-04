@@ -44,6 +44,7 @@ type ProcessOptions struct {
 	ExecutionEpoch     uint64
 	VolumeBindings     map[string]string
 	AssignmentSubpaths map[string]string
+	Environment        map[string]string
 	Labels             map[string]string
 }
 
@@ -67,6 +68,15 @@ func BuildProcess(runtimeProfile profile.Profile, rendered *RenderedProfile, cre
 	environment, err := compileEnvironment(contract.Environment, rendered.Environment())
 	if err != nil {
 		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, err
+	}
+	for name, value := range options.Environment {
+		if name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, fmt.Errorf("%w: invalid trusted tool environment", ErrInvalidProcess)
+		}
+		if existing, present := environment[name]; present && existing != value {
+			return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, fmt.Errorf("%w: environment values conflict for %s", ErrInvalidProcess, name)
+		}
+		environment[name] = value
 	}
 	if environment["OPENCODE_AUTH_CONTENT"] != "{}" {
 		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, fmt.Errorf("%w: static OpenCode authentication placeholder is invalid", ErrInvalidProcess)

@@ -82,8 +82,35 @@ func dispatch(snapshot Snapshot, event Event) Decision {
 		return reduceAssignmentConfigurationConflict(snapshot, event)
 	case AgentTurnPreparationFailedEvent:
 		return reduceAgentTurnPreparationFailed(snapshot, event)
+	case AgentTurnMutationReconciliationExhaustedEvent:
+		return reduceAgentTurnMutationReconciliationExhausted(snapshot, event)
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
+	}
+}
+
+func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event AgentTurnMutationReconciliationExhaustedEvent) Decision {
+	if snapshot.ActiveTurn != nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
+	}
+	expectedRole := RoleDeveloper
+	if snapshot.State == StateReviewing {
+		expectedRole = RoleReviewer
+	}
+	if event.Role != expectedRole {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
+	}
+	next := cloneSnapshot(snapshot)
+	next.State = StateNeedsHuman
+	next.ResumeRole = event.Role
+	next.Assignments.Status = AssignmentWaitingForHuman
+	next.Revision++
+	return Decision{
+		Snapshot: next, Disposition: DispositionApplied, Reason: ReasonAgentTurnMutationReconciliationExhausted,
+		Actions: []Action{
+			MarkHumanHandoffAction{Reason: ReasonAgentTurnMutationReconciliationExhausted, Diagnostic: event.Diagnostic},
+			ReconcileLabelsAction{State: StateNeedsHuman},
+		},
 	}
 }
 

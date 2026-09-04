@@ -35,6 +35,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.MiseVolume != "omnigrex-mise" {
 		t.Errorf("MiseVolume = %q, want %q", got.MiseVolume, "omnigrex-mise")
 	}
+	if got.WorkspaceRoot != "/var/lib/omnigrex/workspaces" || got.MiseRoot != "/var/lib/omnigrex/mise" {
+		t.Errorf("orchestrator workspace roots = (%q, %q)", got.WorkspaceRoot, got.MiseRoot)
+	}
+	if got.MCPAddr != "omnigrex-mcp:8081" || got.MCPEndpointURL != "http://omnigrex-mcp:8081/mcp" {
+		t.Errorf("MCP endpoint = (%q, %q)", got.MCPAddr, got.MCPEndpointURL)
+	}
 	if got.AgentImageReference != "omnigrex/opencode:1.18.19" {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.19")
 	}
@@ -84,6 +90,10 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_WORKSPACE_VOLUME":                          "workspaces",
 		"OMNIGREX_RUNTIME_STATE_VOLUME":                      "runtime-state",
 		"OMNIGREX_MISE_VOLUME":                               "mise",
+		"OMNIGREX_WORKSPACE_ROOT":                            "/data/workspaces",
+		"OMNIGREX_MISE_ROOT":                                 "/data/mise",
+		"OMNIGREX_MCP_ADDR":                                  "127.0.0.1:9001",
+		"OMNIGREX_MCP_ENDPOINT_URL":                          "https://mcp.internal/mcp",
 		"OMNIGREX_AGENT_IMAGE_REFERENCE":                     "registry.example/agent:v2",
 		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":                     "registry.example/agent/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":                  "linux/amd64",
@@ -124,6 +134,10 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	}
 	if got.WorkspaceVolume != values["OMNIGREX_WORKSPACE_VOLUME"] {
 		t.Errorf("WorkspaceVolume = %q, want %q", got.WorkspaceVolume, values["OMNIGREX_WORKSPACE_VOLUME"])
+	}
+	if got.WorkspaceRoot != values["OMNIGREX_WORKSPACE_ROOT"] || got.MiseRoot != values["OMNIGREX_MISE_ROOT"] ||
+		got.MCPAddr != values["OMNIGREX_MCP_ADDR"] || got.MCPEndpointURL != values["OMNIGREX_MCP_ENDPOINT_URL"] {
+		t.Errorf("workspace/MCP settings = (%q, %q, %q, %q)", got.WorkspaceRoot, got.MiseRoot, got.MCPAddr, got.MCPEndpointURL)
 	}
 	if got.RuntimeStateVolume != values["OMNIGREX_RUNTIME_STATE_VOLUME"] {
 		t.Errorf("RuntimeStateVolume = %q, want %q", got.RuntimeStateVolume, values["OMNIGREX_RUNTIME_STATE_VOLUME"])

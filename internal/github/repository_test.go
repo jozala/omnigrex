@@ -53,13 +53,14 @@ func TestAPIClientResolvesDefaultBranchCommitAndFetchesExactFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAPIClient() error = %v", err)
 	}
-	commit, err := client.ResolveDefaultBranchCommit(context.Background(), "installation-token", "acme", "widgets")
+	defaultBranch, err := client.ResolveDefaultBranch(context.Background(), "installation-token", "acme", "widgets")
 	if err != nil {
-		t.Fatalf("ResolveDefaultBranchCommit() error = %v", err)
+		t.Fatalf("ResolveDefaultBranch() error = %v", err)
 	}
-	if commit != commitSHA {
-		t.Errorf("commit = %q, want %q", commit, commitSHA)
+	if defaultBranch.Name != "trunk/production" || defaultBranch.CommitSHA != commitSHA {
+		t.Errorf("default branch = %#v, want trunk/production at %s", defaultBranch, commitSHA)
 	}
+	commit := defaultBranch.CommitSHA
 	content, err := client.FetchRepositoryFile(context.Background(), "installation-token", "acme", "widgets", ".omnigrex/team/developer.md", commit)
 	if err != nil {
 		t.Fatalf("FetchRepositoryFile() error = %v", err)

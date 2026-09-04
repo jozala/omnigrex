@@ -24,6 +24,8 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 		return event.EventMetadata, EventKindAssignmentConfigurationConflict, true
 	case AgentTurnPreparationFailedEvent:
 		return event.EventMetadata, EventKindAgentTurnPreparationFailed, true
+	case AgentTurnMutationReconciliationExhaustedEvent:
+		return event.EventMetadata, EventKindAgentTurnMutationReconciliationExhausted, true
 	default:
 		return EventMetadata{}, "", false
 	}
@@ -67,6 +69,8 @@ func validEvent(event Event, metadata EventMetadata) bool {
 	case AssignmentConfigurationConflictEvent:
 		return validRole(event.Role)
 	case AgentTurnPreparationFailedEvent:
+		return validRole(event.Role) && event.Diagnostic != ""
+	case AgentTurnMutationReconciliationExhaustedEvent:
 		return validRole(event.Role) && event.Diagnostic != ""
 	default:
 		return false
@@ -200,6 +204,8 @@ func legalInState(state State, kind EventKind) bool {
 	case EventKindAssignmentConfigurationConflict:
 		return state == StateDeveloping || state == StateReviewing
 	case EventKindAgentTurnPreparationFailed:
+		return state == StateDeveloping || state == StateReviewing
+	case EventKindAgentTurnMutationReconciliationExhausted:
 		return state == StateDeveloping || state == StateReviewing
 	default:
 		return false

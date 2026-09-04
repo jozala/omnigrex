@@ -31,6 +31,122 @@ const (
 	postgresDatabase = "omnigrex"
 )
 
+func TestPhaseSevenMigrationPreservesRetryLineagesAndScopesCallerKeys(t *testing.T) {
+	postgres := startPostgres(t)
+	pool := openPool(t, postgres.databaseURL(true))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	for _, filename := range []string{
+		"000001_bootstrap.sql",
+		"000002_normalized_events.sql",
+		"000003_durable_jobs_and_turn_fencing.sql",
+		"000004_phase_five_acknowledgement_barriers.sql",
+		"000005_single_live_workflow_successor.sql",
+		"000006_agent_turn_preparation.sql",
+	} {
+		contents, err := migrations.Files.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filename, err)
+		}
+		if _, err := pool.Exec(ctx, string(contents)); err != nil {
+			t.Fatalf("apply migration %s: %v", filename, err)
+		}
+	}
+
+	fixture := seedAgentSession(t, pool, 35)
+	if _, err := pool.Exec(ctx, `
+	INSERT INTO agent_turns (
+	    id, workflow_id, agent_session_id, workflow_attempt_id, turn_number, execution_epoch,
+	    retry_of_turn_id, status, active, control_revision, agent_profile_commit_sha,
+	    agent_profile_content_sha256, agent_profile_config, purpose, completed_at
+	)
+	VALUES ('6e000000-0000-4000-8000-000000000001', $1, $2, $3, 1, 1, NULL,
+	        'FAILED', FALSE, 1, 'legacy-profile', decode(repeat('11', 32), 'hex'),
+	        '{}'::jsonb, 'INITIAL_DEVELOPMENT', clock_timestamp()),
+	       ('6e000000-0000-4000-8000-000000000002', $1, $2, $3, 2, 2,
+	        '6e000000-0000-4000-8000-000000000001', 'FAILED', FALSE, 1, 'legacy-profile',
+	        decode(repeat('11', 32), 'hex'), '{}'::jsonb, 'RETRY', clock_timestamp()),
+	       ('6e000000-0000-4000-8000-000000000003', $1, $2, $3, 3, 3,
+	        '6e000000-0000-4000-8000-000000000002', 'SUCCEEDED', FALSE, 1, 'legacy-profile',
+	        decode(repeat('11', 32), 'hex'), '{}'::jsonb, 'RETRY', clock_timestamp()),
+	       ('6e000000-0000-4000-8000-000000000004', $1, $2, $3, 4, 4, NULL,
+	        'SUCCEEDED', FALSE, 1, 'legacy-profile', decode(repeat('11', 32), 'hex'),
+	        '{}'::jsonb, 'REQUESTED_CHANGES', clock_timestamp())`, fixture.workflowID, fixture.sessionID, fixture.attemptID); err != nil {
+		t.Fatalf("seed version-6 Agent Turns: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO tool_invocations (
+    id, agent_turn_id, execution_epoch, invocation_number, tool_name, kind, state,
+    idempotency_key, operation_id, request, result
+)
+VALUES ('6e000000-0000-4000-8000-000000000011', '6e000000-0000-4000-8000-000000000001',
+        1, 1, 'comment_on_issue', 'MUTATION', 'SUCCEEDED', 'legacy-key-1', 'legacy-key-1',
+        '{"body":"first"}'::jsonb, '{"comment_id":1}'::jsonb),
+	       ('6e000000-0000-4000-8000-000000000012', '6e000000-0000-4000-8000-000000000004',
+	        4, 1, 'comment_on_issue', 'MUTATION', 'SUCCEEDED', 'legacy-key-2', 'legacy-key-2',
+	        '{"body":"second"}'::jsonb, '{"comment_id":2}'::jsonb)`); err != nil {
+		t.Fatalf("seed version-6 invocations: %v", err)
+	}
+
+	contents, err := migrations.Files.ReadFile("000007_scoped_mutation_operations.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, string(contents)); err != nil {
+		t.Fatalf("apply migration 000007: %v", err)
+	}
+
+	var preserved string
+	if err := pool.QueryRow(ctx, `
+SELECT string_agg(operation_id || ':' || request::text || ':' || result::text, '|' ORDER BY invocation_number, id)
+FROM tool_invocations`).Scan(&preserved); err != nil {
+		t.Fatalf("read migrated invocations: %v", err)
+	}
+	if preserved != `legacy-key-1:{"body": "first"}:{"comment_id": 1}|legacy-key-2:{"body": "second"}:{"comment_id": 2}` {
+		t.Errorf("migrated invocations = %q, want legacy values unchanged", preserved)
+	}
+
+	for indexName, columns := range map[string]string{
+		"tool_invocations_operation_id_idx": "(operation_lineage_id, operation_id)",
+		"tool_invocations_idempotency_idx":  "(agent_turn_id, execution_epoch, idempotency_key)",
+	} {
+		var definition string
+		if err := pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, indexName).Scan(&definition); err != nil {
+			t.Fatalf("read %s: %v", indexName, err)
+		}
+		if !strings.Contains(definition, "UNIQUE INDEX") || !strings.Contains(definition, columns) {
+			t.Errorf("%s = %q, want scoped unique columns %s", indexName, definition, columns)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tool_invocations SET operation_id = 'shared-caller-key', idempotency_key = 'shared-caller-key'`); err != nil {
+		t.Fatalf("reuse caller key across migrated turn epochs: %v", err)
+	}
+	var lineages string
+	if err := pool.QueryRow(ctx, `
+SELECT string_agg(id::text || ':' || operation_lineage_id::text, '|' ORDER BY execution_epoch)
+FROM agent_turns`).Scan(&lineages); err != nil {
+		t.Fatal(err)
+	}
+	if lineages != "6e000000-0000-4000-8000-000000000001:6e000000-0000-4000-8000-000000000001|"+
+		"6e000000-0000-4000-8000-000000000002:6e000000-0000-4000-8000-000000000001|"+
+		"6e000000-0000-4000-8000-000000000003:6e000000-0000-4000-8000-000000000001|"+
+		"6e000000-0000-4000-8000-000000000004:6e000000-0000-4000-8000-000000000004" {
+		t.Errorf("migrated operation lineages = %q", lineages)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO tool_invocations (
+    id, agent_turn_id, execution_epoch, operation_lineage_id, invocation_number,
+    tool_name, kind, state, operation_id, request
+)
+VALUES ('6e000000-0000-4000-8000-000000000013',
+        '6e000000-0000-4000-8000-000000000002', 2,
+        '6e000000-0000-4000-8000-000000000001', 1,
+        'comment_on_issue', 'MUTATION', 'RESERVED', 'shared-caller-key', '{}'::jsonb)`); err == nil {
+		t.Fatal("duplicate operation ID in migrated retry lineage succeeded")
+	}
+}
+
 func TestPhaseSixMigrationPreservesExistingRuntimeStatePaths(t *testing.T) {
 	postgres := startPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
@@ -2000,8 +2116,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 6 {
-		t.Errorf("schema_migrations rows = %d, want 6", count)
+	if count != 7 {
+		t.Errorf("schema_migrations rows = %d, want 7", count)
 	}
 	for version, filename := range map[int]string{
 		1: "000001_bootstrap.sql",
@@ -2010,6 +2126,7 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		4: "000004_phase_five_acknowledgement_barriers.sql",
 		5: "000005_single_live_workflow_successor.sql",
 		6: "000006_agent_turn_preparation.sql",
+		7: "000007_scoped_mutation_operations.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2080,8 +2197,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 6 {
-		t.Errorf("migrations applied by Open() = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Errorf("migrations applied by Open() = %d, want 7", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

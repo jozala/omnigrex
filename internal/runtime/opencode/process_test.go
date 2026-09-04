@@ -148,6 +148,44 @@ func TestBuildProcessCompilesExactDeveloperEnvironment(t *testing.T) {
 	}
 }
 
+func TestBuildProcessAddsTrustedToolEnvironmentWithoutOverridingRuntimeContract(t *testing.T) {
+	options := validProcessOptions()
+	options.Environment = map[string]string{
+		"PATH":          "/home/opencode/.local/share/mise/shims:/usr/local/bin:/usr/bin",
+		"PROJECT_MODE":  "verification",
+		"MISE_DATA_DIR": "/home/opencode/.local/share/mise",
+	}
+	policy, spec, err := opencode.BuildProcess(
+		processRuntimeProfile(t), processRenderedProfile(t, opencode.RoleDeveloper),
+		processCredentials(opencode.RoleDeveloper, `{}`), options,
+	)
+	if err != nil {
+		t.Fatalf("BuildProcess() error = %v", err)
+	}
+	for name, want := range options.Environment {
+		if policy.Environment[name] != want || !containsEnvironment(spec.Environment, name+"="+want) {
+			t.Errorf("trusted environment %s = %q in policy and %v in spec, want %q", name, policy.Environment[name], spec.Environment, want)
+		}
+	}
+
+	options.Environment["HOME"] = "/tmp/override"
+	if _, _, err := opencode.BuildProcess(
+		processRuntimeProfile(t), processRenderedProfile(t, opencode.RoleDeveloper),
+		processCredentials(opencode.RoleDeveloper, `{}`), options,
+	); !errors.Is(err, opencode.ErrInvalidProcess) {
+		t.Errorf("BuildProcess() static environment override error = %v, want ErrInvalidProcess", err)
+	}
+}
+
+func containsEnvironment(environment []string, wanted string) bool {
+	for _, entry := range environment {
+		if entry == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildProcessRejectsInvalidMappingsAndLabelsWithoutExposingValues(t *testing.T) {
 	runtimeProfile := processRuntimeProfile(t)
 	rendered := processRenderedProfile(t, opencode.RoleDeveloper)

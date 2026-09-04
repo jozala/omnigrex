@@ -426,6 +426,43 @@ func TestAgentTurnPreparationFailureCreatesHumanHandoffWithoutFabricatingTurn(t 
 	}
 }
 
+func TestAgentTurnMutationReconciliationExhaustionCreatesHumanHandoff(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		snapshot workflow.Snapshot
+		role     workflow.Role
+	}{
+		{name: "Developer", snapshot: developingSnapshot(nil), role: workflow.RoleDeveloper},
+		{name: "Reviewer", snapshot: reviewingSnapshot(1, "review-head"), role: workflow.RoleReviewer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.snapshot.ActiveTurn = nil
+			event := workflow.AgentTurnMutationReconciliationExhaustedEvent{
+				EventMetadata: metadata(test.snapshot, "agent-turn-mutation-reconciliation-exhausted"),
+				Role:          test.role,
+				Diagnostic:    "outcome unknowable; escalated: GitHub reconciliation remained inconclusive",
+			}
+
+			decision := workflow.Reduce(test.snapshot, event)
+
+			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentTurnMutationReconciliationExhausted, workflow.StateNeedsHuman, test.snapshot.Revision+1)
+			if decision.Snapshot.ActiveTurn != nil || decision.Snapshot.ResumeRole != test.role ||
+				decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman ||
+				decision.Snapshot.CurrentAttempt.ID != test.snapshot.CurrentAttempt.ID {
+				t.Errorf("mutation reconciliation handoff state = %#v", decision.Snapshot)
+			}
+			handoff := onlyAction[workflow.MarkHumanHandoffAction](t, decision.Actions)
+			if handoff.Reason != workflow.ReasonAgentTurnMutationReconciliationExhausted || handoff.Diagnostic != event.Diagnostic {
+				t.Errorf("mutation reconciliation handoff = %#v", handoff)
+			}
+			if labels := onlyAction[workflow.ReconcileLabelsAction](t, decision.Actions); labels.State != workflow.StateNeedsHuman {
+				t.Errorf("label reconciliation = %#v", labels)
+			}
+			assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+		})
+	}
+}
+
 func TestIssueCanCloseAfterInitialPreparationFailureWithoutAssignments(t *testing.T) {
 	snapshot := developingSnapshot(nil)
 	snapshot.ActiveTurn = nil
