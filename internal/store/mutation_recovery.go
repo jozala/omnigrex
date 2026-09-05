@@ -89,6 +89,9 @@ func (store *Store) GetAgentTurnMutationReconciliationContext(ctx context.Contex
 	if err != nil {
 		return AgentTurnMutationReconciliationContext{}, err
 	}
+	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
+		return AgentTurnMutationReconciliationContext{}, err
+	}
 	var reconciliation AgentTurnMutationReconciliationContext
 	if err := tx.QueryRow(ctx, `
 SELECT id::text, repository_id, repository_owner, repository_name, issue_id, issue_number
@@ -146,7 +149,7 @@ WHERE id = $1 AND workflow_id = $2 AND repository_id = $3
 }
 
 // ListAgentTurnMutationsForReconciliation returns UNKNOWN and RECONCILING
-// mutations in invocation order under the live recovery-job fence.
+// mutations in invocation order under the live recovery-job fence after stale Runtime Process stop is durable.
 func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context, lease JobLease) ([]MutationReservation, error) {
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -155,6 +158,9 @@ func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context,
 	defer func() { _ = tx.Rollback(ctx) }()
 	job, _, err := lockAgentTurnRecoveryJob(ctx, tx, lease, ReconcileAgentTurnMutationsJobKind)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, mutationSelect+`
@@ -201,6 +207,9 @@ func (store *Store) AcknowledgeAgentTurnMutationReconciliationFailure(ctx contex
 
 	job, _, err := lockAgentTurnRecoveryJob(ctx, tx, lease, ReconcileAgentTurnMutationsJobKind)
 	if err != nil {
+		return AgentTurnMutationReconciliationAcknowledgement{}, err
+	}
+	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
 	var unresolved int
@@ -273,6 +282,18 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 	if err := persistAppliedDecision(ctx, tx, "", job.WorkflowID, snapshot, decision, "agent-turn-mutation-reconciliation:"+job.ID); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
+	continuation, err := tx.Exec(ctx, `
+UPDATE agent_turns
+SET recovery_continuation = 'MUTATION_RECONCILIATION_HANDOFF_APPLIED'
+WHERE id = $1 AND execution_epoch = $2
+  AND recovery_continuation = 'PENDING_INFRASTRUCTURE_FAILURE'
+  AND recovery_settlement_id IS NULL`, job.AgentTurnID, job.ExecutionEpoch)
+	if err != nil {
+		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("record mutation reconciliation Workflow continuation: %w", err)
+	}
+	if continuation.RowsAffected() != 1 {
+		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE agent_assignments
 SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
@@ -291,12 +312,9 @@ WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN'
 	if err := completeRecoveryJobTx(ctx, tx, job, jobResult); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
-	settled, err := settleAgentTurnRecoveryTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)
+	_, err = settleAgentTurnRecoveryTx(ctx, tx, job)
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
-	}
-	if !settled {
-		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryUnsettled
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("commit Agent Turn mutation reconciliation escalation: %w", err)
@@ -326,6 +344,24 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 		job.ID, job.LeaseToken, job.AttemptCount, retryDelay.Microseconds(), diagnostic)
 	if err != nil || jobResult.RowsAffected() != 1 {
 		return ErrAgentTurnRecoveryFenceLost
+	}
+	return nil
+}
+
+func requireRecoveredRuntimeStopped(ctx context.Context, tx pgx.Tx, job Job) error {
+	var stopped bool
+	if err := tx.QueryRow(ctx, `
+SELECT turn.runtime_stopped_at IS NOT NULL AND stop.status = 'SUCCEEDED'
+FROM agent_turns AS turn
+JOIN jobs AS stop ON stop.id = turn.stop_runtime_job_id
+WHERE turn.id = $1 AND turn.execution_epoch = $2`, job.AgentTurnID, job.ExecutionEpoch).Scan(&stopped); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAgentTurnRecoveryFenceLost
+		}
+		return fmt.Errorf("inspect recovered Runtime Process stop: %w", err)
+	}
+	if !stopped {
+		return ErrAgentTurnRecoveryUnsettled
 	}
 	return nil
 }

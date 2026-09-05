@@ -1,6 +1,7 @@
 package workflow_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -339,6 +340,56 @@ func TestReviewOutcomesSuppressSuccessorWhenPendingEventsNeedReconciliation(t *t
 	}
 }
 
+func TestPendingSynchronizedHeadMakesReviewStaleWithoutConsumingBudget(t *testing.T) {
+	for _, outcome := range []workflow.TurnOutcome{workflow.TurnOutcomeApproved, workflow.TurnOutcomeChangesRequested} {
+		t.Run(string(outcome), func(t *testing.T) {
+			snapshot := reviewingSnapshot(1, "head-reviewed")
+			event := reviewEvent(snapshot, "review-raced-"+string(outcome), outcome,
+				review(712, 64, "head-reviewed"), proposal(64, "head-reviewed"))
+			event.PendingEvents = workflow.PendingEventsObservation{
+				Count: 2, RequiresReconciliation: true, LatestObservedHeadSHA: "head-pushed",
+			}
+
+			decision := workflow.Reduce(snapshot, event)
+
+			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
+			if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+				t.Errorf("raced review result = budget %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+			}
+			recorded := onlyAction[workflow.RecordReviewAction](t, decision.Actions)
+			if recorded.Accepted {
+				t.Errorf("raced review was accepted: %#v", recorded)
+			}
+			reconciliation := onlyAction[workflow.ReconcilePendingEventsAction](t, decision.Actions)
+			if reconciliation.LatestObservedHeadSHA != "head-pushed" || reconciliation.FallbackRole != workflow.RoleReviewer ||
+				reconciliation.FallbackPurpose != workflow.TurnPurposeSynchronization || reconciliation.FallbackExpectedHead != "head-reviewed" {
+				t.Errorf("raced review reconciliation = %#v", reconciliation)
+			}
+			assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+		})
+	}
+}
+
+func TestSameHeadPendingSynchronizationDoesNotMakeReviewStale(t *testing.T) {
+	snapshot := reviewingSnapshot(0, "head-reviewed")
+	event := reviewEvent(snapshot, "review-same-pending-head", workflow.TurnOutcomeApproved,
+		review(713, 64, "head-reviewed"), proposal(64, "head-reviewed"))
+	event.PendingEvents = workflow.PendingEventsObservation{
+		Count: 1, RequiresReconciliation: true, LatestObservedHeadSHA: "head-reviewed",
+	}
+
+	decision := workflow.Reduce(snapshot, event)
+
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonApproved, workflow.StatePRReady, snapshot.Revision+1)
+	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-reviewed" {
+		t.Errorf("same-head review result = budget %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+	}
+	if recorded := onlyAction[workflow.RecordReviewAction](t, decision.Actions); !recorded.Accepted {
+		t.Errorf("same-head review was not accepted: %#v", recorded)
+	}
+	assertActionCount[workflow.ReconcilePendingEventsAction](t, decision.Actions, 1)
+}
+
 func TestAgentBlockerCreatesHumanHandoff(t *testing.T) {
 	snapshot := developingSnapshot(nil)
 	event := settledEvent(snapshot, "blocked", workflow.TurnOutcomeBlocked)
@@ -460,6 +511,86 @@ func TestAgentTurnMutationReconciliationExhaustionCreatesHumanHandoff(t *testing
 			}
 			assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
 		})
+	}
+}
+
+func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsResumeRole(t *testing.T) {
+	prReady := reviewingSnapshot(1, "ready-head")
+	prReady.State = workflow.StatePRReady
+	prReady.ActiveTurn = nil
+	prReady.ChangeProposal.ReadyForSHA = "ready-head"
+	tests := []struct {
+		name       string
+		snapshot   workflow.Snapshot
+		resumeRole workflow.Role
+		wantRole   workflow.Role
+	}{
+		{name: "pending fallback", snapshot: func() workflow.Snapshot {
+			snapshot := developingSnapshot(nil)
+			snapshot.ActiveTurn = nil
+			return snapshot
+		}(), resumeRole: workflow.RoleReviewer, wantRole: workflow.RoleReviewer},
+		{name: "reviewing inference", snapshot: func() workflow.Snapshot {
+			snapshot := reviewingSnapshot(1, "review-head")
+			snapshot.ActiveTurn = nil
+			return snapshot
+		}(), wantRole: workflow.RoleReviewer},
+		{name: "PR ready inference", snapshot: prReady, wantRole: workflow.RoleReviewer},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision := workflow.Reduce(test.snapshot, workflow.WorkflowActionExhaustedEvent{
+				EventMetadata: metadata(test.snapshot, "workflow-action-exhausted"),
+				ResumeRole:    test.resumeRole,
+				Diagnostic:    "durable action reached its terminal attempt",
+			})
+
+			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonWorkflowActionExhausted, workflow.StateNeedsHuman, test.snapshot.Revision+1)
+			if decision.Snapshot.ActiveTurn != nil || decision.Snapshot.ResumeRole != test.wantRole ||
+				decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman {
+				t.Errorf("action exhaustion handoff state = %#v", decision.Snapshot)
+			}
+			if decision.Snapshot.ChangeProposal != nil && decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+				t.Errorf("action exhaustion retained readiness = %#v", decision.Snapshot.ChangeProposal)
+			}
+			assertActionCount[workflow.InterruptTurnForHumanHandoffAction](t, decision.Actions, 0)
+			handoff := onlyAction[workflow.MarkHumanHandoffAction](t, decision.Actions)
+			if handoff.Reason != workflow.ReasonWorkflowActionExhausted || handoff.Diagnostic == "" {
+				t.Errorf("Human Handoff action = %#v", handoff)
+			}
+			assertActionCount[workflow.ReconcileLabelsAction](t, decision.Actions, 1)
+		})
+	}
+}
+
+func TestWorkflowActionExhaustionDefersWithoutInterruptingActiveTurn(t *testing.T) {
+	snapshot := developingSnapshot(nil)
+	decision := workflow.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
+		EventMetadata: metadata(snapshot, "workflow-action-exhausted-during-turn"),
+		Diagnostic:    "unrelated GitHub acknowledgement exhausted",
+	})
+
+	assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, snapshot.State, snapshot.Revision)
+	if len(decision.Actions) != 0 || !reflect.DeepEqual(decision.Snapshot.ActiveTurn, snapshot.ActiveTurn) {
+		t.Errorf("deferred exhaustion altered active turn: %#v", decision)
+	}
+}
+
+func TestWorkflowActionExhaustionDoesNotRecurseInHumanHandoff(t *testing.T) {
+	snapshot := developingSnapshot(nil)
+	snapshot.ActiveTurn = nil
+	first := workflow.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
+		EventMetadata: metadata(snapshot, "first-workflow-action-exhausted"),
+		Diagnostic:    "GitHub installation is missing",
+	})
+	second := workflow.Reduce(first.Snapshot, workflow.WorkflowActionExhaustedEvent{
+		EventMetadata: metadata(first.Snapshot, "second-workflow-action-exhausted"),
+		Diagnostic:    "Human Handoff publication is also forbidden",
+	})
+
+	assertDecision(t, second, workflow.DispositionDuplicate, workflow.ReasonWorkflowActionExhausted, workflow.StateNeedsHuman, first.Snapshot.Revision)
+	if len(second.Actions) != 0 {
+		t.Errorf("recursive exhaustion actions = %#v, want none", second.Actions)
 	}
 }
 
@@ -615,6 +746,14 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 		if decision.Snapshot.ChangeProposal.HeadSHA != "head-2" {
 			t.Errorf("head regressed to %q", decision.Snapshot.ChangeProposal.HeadSHA)
 		}
+	})
+
+	t.Run("same-head redelivery is duplicate despite old previous head", func(t *testing.T) {
+		snapshot := reviewingSnapshot(1, "head-2")
+		snapshot.ActiveTurn = nil
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-duplicate"), ChangeProposalID: 64, PreviousHeadSHA: "head-1", HeadSHA: "head-2"}
+		decision := workflow.Reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonSynchronizationDuplicate, snapshot.State, snapshot.Revision)
 	})
 }
 

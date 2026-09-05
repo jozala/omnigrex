@@ -9,6 +9,7 @@ import (
 type WorkflowState string
 
 const (
+	StateNone       WorkflowState = ""
 	StateRun        WorkflowState = "omnigrex:run"
 	StateDeveloping WorkflowState = "omnigrex:developing"
 	StateReviewing  WorkflowState = "omnigrex:reviewing"
@@ -75,11 +76,13 @@ func (reconciler *LabelReconciler) EnsureManagedLabels(ctx context.Context, inst
 }
 
 func (reconciler *LabelReconciler) ReconcileState(ctx context.Context, installationToken, owner, repository string, issueNumber int, desired WorkflowState) error {
-	if !isManagedState(desired) {
+	if desired != StateNone && !isManagedState(desired) {
 		return &ConfigurationError{Cause: fmt.Errorf("%w: %q", ErrInvalidWorkflowState, desired)}
 	}
-	if err := reconciler.EnsureManagedLabels(ctx, installationToken, owner, repository); err != nil {
-		return err
+	if desired != StateNone {
+		if err := reconciler.EnsureManagedLabels(ctx, installationToken, owner, repository); err != nil {
+			return err
+		}
 	}
 	current, err := reconciler.api.ListIssueLabels(ctx, installationToken, owner, repository, issueNumber)
 	if err != nil {
@@ -89,7 +92,7 @@ func (reconciler *LabelReconciler) ReconcileState(ctx context.Context, installat
 	for _, label := range managedLabels {
 		managed[label.Name] = struct{}{}
 	}
-	desiredPresent := false
+	desiredPresent := desired == StateNone
 	for _, label := range current {
 		if label.Name == string(desired) {
 			desiredPresent = true
@@ -107,7 +110,7 @@ func (reconciler *LabelReconciler) ReconcileState(ctx context.Context, installat
 		}
 	}
 	for _, label := range current {
-		if _, isManaged := managed[label.Name]; !isManaged || label.Name == string(desired) {
+		if _, isManaged := managed[label.Name]; !isManaged || desired != StateNone && label.Name == string(desired) {
 			continue
 		}
 		if err := reconciler.api.RemoveIssueLabel(ctx, installationToken, owner, repository, issueNumber, label.Name); err != nil {
@@ -162,6 +165,9 @@ func labelsConverged(labels []Label, desired WorkflowState) bool {
 				return false
 			}
 		}
+	}
+	if desired == StateNone {
+		return managedCount == 0
 	}
 	return managedCount == 1
 }

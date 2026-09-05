@@ -8,54 +8,68 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 const (
-	defaultDatabaseURL                  = "postgres://omnigrex@postgres:5432/omnigrex?sslmode=disable"
-	defaultDatabasePasswordSecretFile   = "/run/secrets/omnigrex-database-password"
-	defaultDockerAgentNetwork           = "omnigrex-agent"
-	defaultWorkspaceVolume              = "omnigrex-workspaces"
-	defaultRuntimeStateVolume           = "omnigrex-runtime-state"
-	defaultMiseVolume                   = "omnigrex-mise"
-	defaultWorkspaceRoot                = "/var/lib/omnigrex/workspaces"
-	defaultMiseRoot                     = "/var/lib/omnigrex/mise"
-	defaultMCPAddr                      = "omnigrex-mcp:8081"
-	defaultMCPEndpointURL               = "http://omnigrex-mcp:8081/mcp"
-	defaultAgentImageReference          = "omnigrex/opencode:1.18.19"
-	defaultGitHubAPIURL                 = "https://api.github.com"
-	defaultHTTPAddr                     = ":8080"
-	defaultReadinessTimeout             = 15 * time.Second
-	defaultShutdownTimeout              = 10 * time.Second
-	defaultWebhookLeaseDuration         = 30 * time.Second
-	defaultWebhookPollInterval          = 250 * time.Millisecond
-	defaultPreparationLeaseDuration     = 30 * time.Second
-	defaultPreparationHeartbeat         = 10 * time.Second
-	defaultPreparationPollInterval      = 250 * time.Millisecond
-	defaultPreparationRetryDelay        = 5 * time.Second
-	defaultAssignmentRetention          = 30 * 24 * time.Hour
-	defaultAgentTurnConcurrencyLimit    = 2
-	minimumWebhookLeaseDuration         = 5 * time.Second
-	maximumAgentTurnPreparationDuration = 365 * 24 * time.Hour
+	defaultDatabaseURL                 = "postgres://omnigrex@postgres:5432/omnigrex?sslmode=disable"
+	defaultDatabasePasswordSecretFile  = "/run/secrets/omnigrex-database-password"
+	defaultDockerAgentNetwork          = "omnigrex-agent"
+	defaultWorkspaceVolume             = "omnigrex-workspaces"
+	defaultRuntimeStateVolume          = "omnigrex-runtime-state"
+	defaultMiseVolume                  = "omnigrex-mise"
+	defaultWorkspaceRoot               = "/var/lib/omnigrex/workspaces"
+	defaultMiseRoot                    = "/var/lib/omnigrex/mise"
+	defaultMCPAddr                     = "omnigrex-mcp:8081"
+	defaultMCPEndpointURL              = "http://omnigrex-mcp:8081/mcp"
+	defaultMCPMutationOperationTimeout = 2 * time.Hour
+	defaultAgentImageReference         = "omnigrex/opencode:1.18.19"
+	defaultGitHubAPIURL                = "https://api.github.com"
+	defaultGitRemoteBaseURL            = gitremote.DefaultBaseURL
+	defaultHTTPAddr                    = ":8080"
+	defaultReadinessTimeout            = 15 * time.Second
+	defaultShutdownTimeout             = 10 * time.Second
+	defaultWebhookLeaseDuration        = 30 * time.Second
+	defaultWebhookPollInterval         = 250 * time.Millisecond
+	defaultPreparationLeaseDuration    = 30 * time.Second
+	defaultPreparationHeartbeat        = 10 * time.Second
+	defaultPreparationPollInterval     = 250 * time.Millisecond
+	defaultPreparationRetryDelay       = 5 * time.Second
+	defaultExecutionLeaseDuration      = 30 * time.Second
+	defaultExecutionHeartbeat          = 10 * time.Second
+	defaultExecutionPollInterval       = 250 * time.Millisecond
+	defaultExecutionTurnTimeout        = 2 * time.Hour
+	defaultExecutionCleanupTimeout     = 10 * time.Second
+	defaultWorkflowEffectLeaseDuration = 30 * time.Second
+	defaultWorkflowEffectHeartbeat     = 10 * time.Second
+	defaultWorkflowEffectPollInterval  = 250 * time.Millisecond
+	defaultWorkflowEffectRetryDelay    = 5 * time.Second
+	defaultAssignmentRetention         = 30 * 24 * time.Hour
+	defaultAgentTurnConcurrencyLimit   = 2
+	minimumWebhookLeaseDuration        = 5 * time.Second
+	maximumWorkerDuration              = 365 * 24 * time.Hour
 )
 
 type Config struct {
-	DatabaseURL                string
-	DatabasePasswordSecretFile string
-	DockerAgentNetwork         string
-	WorkspaceVolume            string
-	RuntimeStateVolume         string
-	MiseVolume                 string
-	WorkspaceRoot              string
-	MiseRoot                   string
-	MCPAddr                    string
-	MCPEndpointURL             string
+	DatabaseURL                 string
+	DatabasePasswordSecretFile  string
+	DockerAgentNetwork          string
+	WorkspaceVolume             string
+	RuntimeStateVolume          string
+	MiseVolume                  string
+	WorkspaceRoot               string
+	MiseRoot                    string
+	MCPAddr                     string
+	MCPEndpointURL              string
+	MCPMutationOperationTimeout time.Duration
 	// AgentImageReference is the mutable local image used by deployment readiness checks.
 	AgentImageReference string
 	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
 	OpenCodeACPV1Image                    string
 	OpenCodeACPV1Platform                 profile.Platform
 	GitHubAPIURL                          string
+	GitRemoteBaseURL                      string
 	GitHubDeveloperAppID                  int64
 	GitHubReviewerAppID                   int64
 	GitHubDeveloperPrivateKeyFile         string
@@ -69,6 +83,15 @@ type Config struct {
 	AgentTurnPreparationHeartbeatInterval time.Duration
 	AgentTurnPreparationPollInterval      time.Duration
 	AgentTurnPreparationRetryDelay        time.Duration
+	AgentTurnExecutionLeaseDuration       time.Duration
+	AgentTurnExecutionHeartbeatInterval   time.Duration
+	AgentTurnExecutionPollInterval        time.Duration
+	AgentTurnExecutionTurnTimeout         time.Duration
+	AgentTurnExecutionCleanupTimeout      time.Duration
+	WorkflowEffectLeaseDuration           time.Duration
+	WorkflowEffectHeartbeatInterval       time.Duration
+	WorkflowEffectPollInterval            time.Duration
+	WorkflowEffectRetryDelay              time.Duration
 	AssignmentRetentionDuration           time.Duration
 	AgentTurnConcurrencyLimit             int
 	HTTPAddr                              string
@@ -88,9 +111,11 @@ func Load(getenv func(string) string) (Config, error) {
 		MiseRoot:                              valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
 		MCPAddr:                               valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
 		MCPEndpointURL:                        valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
+		MCPMutationOperationTimeout:           defaultMCPMutationOperationTimeout,
 		AgentImageReference:                   valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
 		OpenCodeACPV1Image:                    getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
 		GitHubAPIURL:                          valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
+		GitRemoteBaseURL:                      valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
 		GitHubDeveloperPrivateKeyFile:         getenv("OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"),
 		GitHubReviewerPrivateKeyFile:          getenv("OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"),
 		GitHubWebhookSecretFile:               getenv("OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"),
@@ -102,6 +127,15 @@ func Load(getenv func(string) string) (Config, error) {
 		AgentTurnPreparationHeartbeatInterval: defaultPreparationHeartbeat,
 		AgentTurnPreparationPollInterval:      defaultPreparationPollInterval,
 		AgentTurnPreparationRetryDelay:        defaultPreparationRetryDelay,
+		AgentTurnExecutionLeaseDuration:       defaultExecutionLeaseDuration,
+		AgentTurnExecutionHeartbeatInterval:   defaultExecutionHeartbeat,
+		AgentTurnExecutionPollInterval:        defaultExecutionPollInterval,
+		AgentTurnExecutionTurnTimeout:         defaultExecutionTurnTimeout,
+		AgentTurnExecutionCleanupTimeout:      defaultExecutionCleanupTimeout,
+		WorkflowEffectLeaseDuration:           defaultWorkflowEffectLeaseDuration,
+		WorkflowEffectHeartbeatInterval:       defaultWorkflowEffectHeartbeat,
+		WorkflowEffectPollInterval:            defaultWorkflowEffectPollInterval,
+		WorkflowEffectRetryDelay:              defaultWorkflowEffectRetryDelay,
 		AssignmentRetentionDuration:           defaultAssignmentRetention,
 		AgentTurnConcurrencyLimit:             defaultAgentTurnConcurrencyLimit,
 		HTTPAddr:                              valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
@@ -144,6 +178,11 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil || githubAPIURL.Scheme != "https" || githubAPIURL.Host == "" || githubAPIURL.RawQuery != "" || githubAPIURL.Fragment != "" {
 		return Config{}, fmt.Errorf("OMNIGREX_GITHUB_API_URL must be an HTTPS URL without query or fragment")
 	}
+	gitRemoteBaseURL, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
+	if err != nil {
+		return Config{}, fmt.Errorf("OMNIGREX_GIT_REMOTE_BASE_URL must be a clean HTTPS base URL without credentials, query, or fragment")
+	}
+	config.GitRemoteBaseURL = gitRemoteBaseURL.String()
 	config.GitHubDeveloperAppID, err = positiveInt64(getenv("OMNIGREX_GITHUB_DEVELOPER_APP_ID"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMNIGREX_GITHUB_DEVELOPER_APP_ID must be a positive integer")
@@ -223,10 +262,20 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	for name, destination := range map[string]*time.Duration{
+		"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":            &config.MCPMutationOperationTimeout,
 		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     &config.AgentTurnPreparationLeaseDuration,
 		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": &config.AgentTurnPreparationHeartbeatInterval,
 		"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      &config.AgentTurnPreparationPollInterval,
 		"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        &config.AgentTurnPreparationRetryDelay,
+		"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":       &config.AgentTurnExecutionLeaseDuration,
+		"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL":   &config.AgentTurnExecutionHeartbeatInterval,
+		"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":        &config.AgentTurnExecutionPollInterval,
+		"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":         &config.AgentTurnExecutionTurnTimeout,
+		"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":      &config.AgentTurnExecutionCleanupTimeout,
+		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":            &config.WorkflowEffectLeaseDuration,
+		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":        &config.WorkflowEffectHeartbeatInterval,
+		"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":             &config.WorkflowEffectPollInterval,
+		"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":               &config.WorkflowEffectRetryDelay,
 	} {
 		value := getenv(name)
 		if value == "" {
@@ -236,13 +285,19 @@ func Load(getenv func(string) string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("parse %s: %w", name, err)
 		}
-		if duration < time.Microsecond || duration > maximumAgentTurnPreparationDuration {
-			return Config{}, fmt.Errorf("%s must be between one microsecond and %s", name, maximumAgentTurnPreparationDuration)
+		if duration < time.Microsecond || duration > maximumWorkerDuration {
+			return Config{}, fmt.Errorf("%s must be between one microsecond and %s", name, maximumWorkerDuration)
 		}
 		*destination = duration
 	}
 	if config.AgentTurnPreparationHeartbeatInterval >= config.AgentTurnPreparationLeaseDuration {
 		return Config{}, fmt.Errorf("OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL must be shorter than OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION")
+	}
+	if config.AgentTurnExecutionHeartbeatInterval >= config.AgentTurnExecutionLeaseDuration {
+		return Config{}, fmt.Errorf("OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL must be shorter than OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION")
+	}
+	if config.WorkflowEffectHeartbeatInterval >= config.WorkflowEffectLeaseDuration {
+		return Config{}, fmt.Errorf("OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL must be shorter than OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION")
 	}
 
 	if value := getenv("OMNIGREX_ASSIGNMENT_RETENTION_DURATION"); value != "" {

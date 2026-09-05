@@ -51,6 +51,9 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		profile.Steps == 0 || profile.Steps > 1000 {
 		return nil, ErrInvalidProfile
 	}
+	if role == RoleReviewer && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {
+		return nil, ErrInvalidProfile
+	}
 	if edit, hasEdit := profile.Permissions["edit"]; hasEdit {
 		if patch, hasPatch := profile.Permissions["patch"]; hasPatch && patch != edit {
 			return nil, ErrInvalidProfile

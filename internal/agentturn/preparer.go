@@ -1,4 +1,4 @@
-// Package agentturn coordinates durable Agent Turn preparation.
+// Package agentturn coordinates durable Agent Turn preparation and execution.
 package agentturn
 
 import (

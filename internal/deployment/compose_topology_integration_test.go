@@ -122,6 +122,9 @@ func TestComposeTopology(t *testing.T) {
 	if got := orchestrator.Environment["OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-reviewer-provider-credentials" {
 		t.Errorf("Reviewer provider credentials path = %q", got)
 	}
+	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"]; got != "2" {
+		t.Errorf("Agent Turn concurrency limit = %q, want 2", got)
+	}
 
 	assertExactKeys(t, "postgres networks", postgres.Networks, "backend")
 	if len(postgres.Ports) != 0 {
@@ -165,6 +168,9 @@ func TestComposeTopology(t *testing.T) {
 	}
 	if got := orchestrator.Environment["OMNIGREX_MCP_ENDPOINT_URL"]; got != "http://omnigrex-mcp:8081/mcp" {
 		t.Errorf("orchestrator MCP endpoint URL = %q, want agent-network alias URL", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT"]; got != "2h" {
+		t.Errorf("orchestrator MCP mutation operation timeout = %q, want 2h", got)
 	}
 	if got := orchestrator.Environment["OMNIGREX_HTTP_ADDR"]; got != ":8080" {
 		t.Errorf("orchestrator public HTTP bind address = %q, want :8080", got)

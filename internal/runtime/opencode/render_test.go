@@ -144,6 +144,41 @@ func TestRenderRejectsConflictingEditAndPatchPermissions(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsReviewerEditAndPatchPermissionAllows(t *testing.T) {
+	for _, tool := range []string{"edit", "patch"} {
+		t.Run(tool, func(t *testing.T) {
+			_, err := opencode.Render(opencode.RoleReviewer, opencode.Profile{
+				Instructions: "Review without modifying files.", Model: "provider/model", Steps: 1,
+				Permissions: opencode.PermissionPolicy{tool: opencode.PermissionAllow},
+			})
+			if !errors.Is(err, opencode.ErrInvalidProfile) {
+				t.Fatalf("Render() error = %v, want ErrInvalidProfile", err)
+			}
+		})
+	}
+}
+
+func TestRenderKeepsDeveloperEditAndPatchPermissionsAvailable(t *testing.T) {
+	for _, tool := range []string{"edit", "patch"} {
+		t.Run(tool, func(t *testing.T) {
+			rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
+				Instructions: "Implement changes.", Model: "provider/model", Steps: 1,
+				Permissions: opencode.PermissionPolicy{tool: opencode.PermissionAllow},
+			})
+			if err != nil {
+				t.Fatalf("Render() error = %v", err)
+			}
+			request := acp.PermissionRequest{
+				ToolCall: json.RawMessage(`{"toolCallId":"tool-1","kind":"edit"}`),
+				Options:  []acp.PermissionOption{{ID: "allow", Name: "Allow once", Kind: "allow_once"}},
+			}
+			if decision := rendered.DecidePermission(request); decision.OptionID != "allow" {
+				t.Fatalf("DecidePermission() = %#v, want Developer edit allowed", decision)
+			}
+		})
+	}
+}
+
 func TestRenderedProfileMediatesACPRequestsFromPermissionPolicy(t *testing.T) {
 	options := []acp.PermissionOption{
 		{ID: "allow", Name: "Allow once", Kind: "allow_once"},

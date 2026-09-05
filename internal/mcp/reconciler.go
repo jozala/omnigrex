@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 	"unicode"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -50,9 +50,10 @@ type MutationReconciler interface {
 }
 
 type ProductionReconcilerConfig struct {
-	GitHub       GitHubAPI
-	Credentials  RepositoryCredentials
-	Publications PublicationReconciler
+	GitHub           GitHubAPI
+	Credentials      RepositoryCredentials
+	Publications     PublicationReconciler
+	GitRemoteBaseURL string
 }
 
 // ProductionReconciler finds exact GitHub and Git publication artifacts from durable reservation data.
@@ -60,6 +61,7 @@ type ProductionReconciler struct {
 	github       GitHubAPI
 	credentials  RepositoryCredentials
 	publications PublicationReconciler
+	remoteBase   gitremote.BaseURL
 }
 
 var (
@@ -71,7 +73,11 @@ func NewProductionReconciler(config ProductionReconcilerConfig) (*ProductionReco
 	if interfaceNil(config.GitHub) || interfaceNil(config.Credentials) || interfaceNil(config.Publications) {
 		return nil, ErrInvalidReconcilerConfiguration
 	}
-	return &ProductionReconciler{github: config.GitHub, credentials: config.Credentials, publications: config.Publications}, nil
+	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
+	if err != nil {
+		return nil, ErrInvalidReconcilerConfiguration
+	}
+	return &ProductionReconciler{github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase}, nil
 }
 
 func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
@@ -122,9 +128,13 @@ func (reconciler *ProductionReconciler) reconcilePublication(ctx context.Context
 	if proposal := reconciliation.ChangeProposal; proposal != nil && proposal.HeadRef == branch && exactTurnExpectedHead(reconciliation, mutation) {
 		expectedOldHead = mutation.ExpectedSHA
 	}
+	repositoryURL, err := reconciler.remoteBase.RepositoryURL(reconciliation.Repository.Owner, reconciliation.Repository.Name)
+	if err != nil {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
 	observed, err := reconciler.publications.ReconcilePublication(ctx, workspace.PublicationReconciliation{
 		AssignmentID:  reconciliation.Turn.AgentAssignmentID,
-		RepositoryURL: "https://github.com/" + url.PathEscape(reconciliation.Repository.Owner) + "/" + url.PathEscape(reconciliation.Repository.Name) + ".git",
+		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: mutation.ExpectedSHA, ExpectedOldHead: expectedOldHead,
 		Branch: branch, OperationID: mutation.ID,
 	})

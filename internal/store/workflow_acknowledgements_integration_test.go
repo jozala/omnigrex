@@ -152,6 +152,156 @@ FROM normalized_events WHERE delivery_id = ANY($1)`, deferredIDs, fixture.workfl
 	}
 }
 
+func TestPendingEventReconciliationFailureRetriesThenAtomicallyCreatesHumanHandoff(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	fixture := seedAgentSession(t, pool, 48)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET status = 'DEVELOPING', state_revision = 4,
+    desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE agent_turns SET active = FALSE, status = 'FAILED', mutation_admission_open = FALSE,
+    mutation_admission_closed_at = clock_timestamp(), completed_at = clock_timestamp()
+WHERE id = $1`, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	deferredID := "48000000-0000-4000-8000-000000000001"
+	originID := "48000000-0000-4000-8000-000000000002"
+	for _, deliveryID := range []string{deferredID, originID} {
+		delivery := workflowDelivery(deliveryID)
+		delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 48, 48, 48
+		delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+		if inserted, err := databases[0].InsertWebhookDelivery(ctx, delivery); err != nil || !inserted {
+			t.Fatalf("InsertWebhookDelivery(%s) = (%t, %v)", deliveryID, inserted, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE webhook_deliveries SET status = 'PROCESSED', workflow_id = $2, processed_at = clock_timestamp() WHERE delivery_id = $1`, deliveryID, fixture.workflowID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO normalized_events (
+    delivery_id, payload, status, workflow_id, disposition, reason,
+    applied_revision, deferred_for_turn_id, processed_at
+)
+VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 3, $4, clock_timestamp()),
+       ($5, $6, 'COMPLETED', $3, 'APPLIED', 'infrastructure_retry', 4, NULL, clock_timestamp())`,
+		deferredID, normalizedPayload(deferredID, "deferred"), fixture.workflowID, turn.ID,
+		originID, normalizedPayload(originID, "settled")); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "48000000-0000-4000-8000-000000000003"
+	payload, err := json.Marshal(map[string]any{
+		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID,
+		"count": 1, "latest_observed_head_sha": "", "fallback_role": workflow.RoleDeveloper,
+		"fallback_purpose": workflow.TurnPurposeRetry, "fallback_expected_head_sha": "",
+		"retry_of_turn_id": turn.ID, "revision": 4, "source_turn_id": turn.ID,
+		"source_execution_epoch": turn.ExecutionEpoch, "source_control_revision": turn.ControlRevision,
+		"deferred_normalized_event_ids": []string{deferredID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, max_attempts, idempotency_key, workflow_id,
+    workflow_attempt_id, agent_assignment_id, agent_session_id, agent_turn_id,
+    execution_epoch, normalized_event_id, action_key
+)
+VALUES ($1, 'workflow', 'RECONCILE_PENDING_EVENTS', $2, 2, 'pending-terminal-48', $3,
+        $4, $5, $6, $7, $8, $9, 'reconcile-pending-events')`, jobID, payload,
+		fixture.workflowID, fixture.attemptID, fixture.assignmentID, fixture.sessionID,
+		turn.ID, turn.ExecutionEpoch, originID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO job_normalized_events (job_id, normalized_event_id) VALUES ($1, $2)`, jobID, deferredID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "reconciler-1", 5*time.Second)
+	if err != nil || first == nil {
+		t.Fatalf("first claim = (%#v, %v)", first, err)
+	}
+	acknowledgement, err := databases[0].AcknowledgePendingEventReconciliationFailure(ctx, *first, errors.New("temporary replay failure"), true, 0)
+	if err != nil || !acknowledgement.RetryScheduled || acknowledgement.HandoffApplied {
+		t.Fatalf("retry acknowledgement = (%#v, %v)", acknowledgement, err)
+	}
+	second, err := databases[1].ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "reconciler-2", 5*time.Second)
+	if err != nil || second == nil || second.Attempt != 2 {
+		t.Fatalf("second claim = (%#v, %v)", second, err)
+	}
+	type terminalResult struct {
+		ack store.WorkflowActionFailureAcknowledgement
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan terminalResult, 2)
+	for _, database := range databases {
+		go func(database *store.Store) {
+			<-start
+			ack, err := database.AcknowledgePendingEventReconciliationFailure(ctx, *second, errors.New("permanent normalized-event failure"), false, 0)
+			results <- terminalResult{ack: ack, err: err}
+		}(database)
+	}
+	close(start)
+	var terminalAcknowledgements, fencedAcknowledgements int
+	for range 2 {
+		result := <-results
+		switch {
+		case result.err == nil:
+			terminalAcknowledgements++
+			acknowledgement = result.ack
+		case errors.Is(result.err, store.ErrPendingEventReconciliationFenceLost):
+			fencedAcknowledgements++
+		default:
+			t.Fatalf("concurrent terminal acknowledgement error = %v", result.err)
+		}
+	}
+	if terminalAcknowledgements != 1 || fencedAcknowledgements != 1 || acknowledgement.RetryScheduled ||
+		!acknowledgement.EscalationScheduled || acknowledgement.HandoffApplied || acknowledgement.WorkflowRevision != 4 || acknowledgement.DeferredEventsCompleted != 0 {
+		t.Fatalf("concurrent terminal acknowledgements = success %d fenced %d result %#v", terminalAcknowledgements, fencedAcknowledgements, acknowledgement)
+	}
+	escalation, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second)
+	if err != nil || escalation == nil || !escalation.HandoffApplied || escalation.WorkflowRevision != 5 || escalation.DeferredEventsCompleted != 1 {
+		t.Fatalf("ApplyNextWorkflowActionFailureEscalation() = (%#v, %v)", escalation, err)
+	}
+	var workflowState, assignmentStatus, sourceStatus, deferredStatus, disposition, reason string
+	var revision, successorCount, derivedCount int
+	if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.state_revision, workflow.desired_assignment_status,
+       source.status, event.status, event.disposition, event.reason,
+       (SELECT count(*) FROM jobs WHERE workflow_id = workflow.id AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')),
+       (SELECT count(*) FROM jobs WHERE normalized_event_id = $2
+           AND action_key IN (
+               'workflow-action:reconcile_pending_events:' || $3 || ':publish-human-handoff',
+               'workflow-action:reconcile_pending_events:' || $3 || ':reconcile-github-labels'
+           ))
+FROM workflows AS workflow
+JOIN jobs AS source ON source.id = $3
+JOIN normalized_events AS event ON event.delivery_id = $4
+WHERE workflow.id = $1`, fixture.workflowID, originID, jobID, deferredID).Scan(
+		&workflowState, &revision, &assignmentStatus, &sourceStatus, &deferredStatus,
+		&disposition, &reason, &successorCount, &derivedCount); err != nil {
+		t.Fatal(err)
+	}
+	if workflowState != string(workflow.StateNeedsHuman) || revision != 5 ||
+		assignmentStatus != string(workflow.AssignmentWaitingForHuman) || sourceStatus != string(store.JobFailed) ||
+		deferredStatus != string(store.NormalizedEventCompleted) || disposition != string(workflow.DispositionReconciliationFailed) ||
+		reason != string(workflow.ReasonWorkflowActionExhausted) || successorCount != 0 || derivedCount != 2 {
+		t.Errorf("terminal state = Workflow %s@%d assignment %s source %s deferred %s/%s/%s successors %d derived %d",
+			workflowState, revision, assignmentStatus, sourceStatus, deferredStatus, disposition, reason, successorCount, derivedCount)
+	}
+}
+
 func TestPendingEventReconciliationReplaysSynchronizationAndSupersedesFallback(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 22)
@@ -194,8 +344,12 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	}
 
 	deferredID := "43000000-0000-4000-8000-000000000001"
-	syncPayload, err := json.Marshal(map[string]string{
-		"delivery_id": deferredID, "before": "head-old", "head": "head-new",
+	syncPayload, err := json.Marshal(map[string]any{
+		"delivery_id": deferredID, "event": "pull_request", "action": "synchronize",
+		"repository": map[string]any{"id": 22, "owner": "owner", "name": "repo"},
+		"pull_request": map[string]any{
+			"id": 220, "number": 22, "before_sha": "head-old", "head_sha": "head-new",
+		},
 	})
 	if err != nil {
 		t.Fatalf("encode synchronization payload: %v", err)
@@ -261,9 +415,11 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	}
 	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
 		var payload struct {
-			DeliveryID string `json:"delivery_id"`
-			Before     string `json:"before"`
-			Head       string `json:"head"`
+			DeliveryID  string `json:"delivery_id"`
+			PullRequest struct {
+				Before string `json:"before_sha"`
+				Head   string `json:"head_sha"`
+			} `json:"pull_request"`
 		}
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			return store.WorkflowLocator{}, nil, err
@@ -274,7 +430,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 					ID: payload.DeliveryID, ObservedAt: record.CreatedAt,
 					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 				},
-				ChangeProposalID: 220, PreviousHeadSHA: payload.Before, HeadSHA: payload.Head,
+				ChangeProposalID: 220, PreviousHeadSHA: payload.PullRequest.Before, HeadSHA: payload.PullRequest.Head,
 			})
 		}, nil
 	}

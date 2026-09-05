@@ -146,28 +146,62 @@ func TestRecoveryWorkerDoesNotAcknowledgeAfterRecoveryFenceLoss(t *testing.T) {
 	}
 }
 
-func TestRecoveryWorkerWaitsForRuntimeStopWithoutConsumingRetryBudget(t *testing.T) {
+func TestRecoveryWorkerWaitsAndHeartbeatsWithoutReconcilingBeforeRuntimeStop(t *testing.T) {
 	lease := reconciliationJobLease()
 	mutation := reconciliationMutation(mcp.ToolReportBlocked, `{"operation_id":"blocked","reason":"blocked"}`)
 	durable := &recoveryStore{
 		lease: &lease, reconciliation: reconciliationContext(), mutations: []store.MutationReservation{mutation},
-		contextErrors: []error{store.ErrAgentTurnRecoveryUnsettled, nil},
+		waitForRuntimeStop: true,
 	}
 	reconciler := &recordingMutationReconciler{results: []mcp.MutationReconciliationResult{{
 		Disposition: mcp.ReconciliationFound,
 		Outcome:     store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: json.RawMessage(`{"outcome":"BLOCKED"}`)},
-	}}}
+	}}, started: make(chan struct{}), release: make(chan struct{})}
 	worker := newRecoveryWorker(t, durable, reconciler, mcp.RecoveryWorkerConfig{
-		ClaimOwner: "recovery-worker", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+		ClaimOwner: "recovery-worker", LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond,
 		IdlePollInterval: time.Millisecond, RetryDelay: time.Second,
 	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	processed, err := worker.ProcessNext(context.Background())
+	done := make(chan struct {
+		processed bool
+		err       error
+	}, 1)
+	go func() {
+		processed, err := worker.ProcessNext(ctx)
+		done <- struct {
+			processed bool
+			err       error
+		}{processed: processed, err: err}
+	}()
+	deadline := time.After(time.Second)
+	for durable.heartbeatCount() == 0 || durable.contextCallCount() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("reconciliation lease was not heartbeated while waiting for runtime stop")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-reconciler.started:
+		t.Fatal("external reconciler was called before runtime stop acknowledgement")
+	default:
+	}
+	durable.acknowledgeRuntimeStop()
+	select {
+	case <-reconciler.started:
+	case <-time.After(time.Second):
+		t.Fatal("external reconciler was not called after runtime stop acknowledgement")
+	}
+	close(reconciler.release)
+	result := <-done
+	processed, err := result.processed, result.err
 	if err != nil || !processed {
 		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
 	}
-	if durable.contextCalls != 2 || durable.acknowledgements != 0 {
-		t.Fatalf("context reads = %d, failure acknowledgements = %d", durable.contextCalls, durable.acknowledgements)
+	if durable.acknowledgements != 0 {
+		t.Fatalf("failure acknowledgements = %d, want zero", durable.acknowledgements)
 	}
 }
 
@@ -229,6 +263,8 @@ type recoveryStore struct {
 	contextErr, listErr               error
 	contextErrors                     []error
 	contextCalls                      int
+	waitForRuntimeStop                bool
+	runtimeStopped                    bool
 	reconciledIDs                     []string
 	outcomes                          []store.RecoveredMutationOutcome
 	reconcileErr                      error
@@ -263,10 +299,25 @@ func (durable *recoveryStore) heartbeatCount() int {
 	return durable.heartbeats
 }
 
+func (durable *recoveryStore) contextCallCount() int {
+	durable.mutex.Lock()
+	defer durable.mutex.Unlock()
+	return durable.contextCalls
+}
+
+func (durable *recoveryStore) acknowledgeRuntimeStop() {
+	durable.mutex.Lock()
+	defer durable.mutex.Unlock()
+	durable.runtimeStopped = true
+}
+
 func (durable *recoveryStore) GetAgentTurnMutationReconciliationContext(context.Context, store.JobLease) (store.AgentTurnMutationReconciliationContext, error) {
 	durable.mutex.Lock()
 	defer durable.mutex.Unlock()
 	durable.contextCalls++
+	if durable.waitForRuntimeStop && !durable.runtimeStopped {
+		return store.AgentTurnMutationReconciliationContext{}, store.ErrAgentTurnRecoveryUnsettled
+	}
 	if len(durable.contextErrors) != 0 {
 		err := durable.contextErrors[0]
 		durable.contextErrors = durable.contextErrors[1:]

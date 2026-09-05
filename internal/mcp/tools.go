@@ -97,6 +97,15 @@ var roleTools = map[workflow.Role][]string{
 	},
 }
 
+// CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.
+func CapabilitiesForRole(role workflow.Role) ([]string, error) {
+	capabilities, ok := roleTools[role]
+	if !ok {
+		return nil, fmt.Errorf("%w: Role capabilities", ErrInvalidConfiguration)
+	}
+	return slices.Clone(capabilities), nil
+}
+
 func emptyObjectSchema() map[string]any {
 	return objectSchema(map[string]any{})
 }
@@ -134,7 +143,10 @@ func definition(name string) (ToolDefinition, bool) {
 }
 
 func toolsForScope(scope TokenScope) ([]ToolDefinition, error) {
-	allowedForRole := roleTools[scope.Role]
+	allowedForRole, err := CapabilitiesForRole(scope.Role)
+	if err != nil {
+		return nil, err
+	}
 	requested := scope.AllowedTools
 	if len(requested) == 0 {
 		requested = allowedForRole

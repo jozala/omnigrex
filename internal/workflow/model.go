@@ -25,12 +25,13 @@ const (
 type Disposition string
 
 const (
-	DispositionApplied   Disposition = "APPLIED"
-	DispositionDeferred  Disposition = "DEFERRED"
-	DispositionDuplicate Disposition = "DUPLICATE"
-	DispositionStale     Disposition = "STALE"
-	DispositionUnrelated Disposition = "UNRELATED"
-	DispositionIllegal   Disposition = "ILLEGAL"
+	DispositionApplied              Disposition = "APPLIED"
+	DispositionDeferred             Disposition = "DEFERRED"
+	DispositionDuplicate            Disposition = "DUPLICATE"
+	DispositionStale                Disposition = "STALE"
+	DispositionUnrelated            Disposition = "UNRELATED"
+	DispositionIllegal              Disposition = "ILLEGAL"
+	DispositionReconciliationFailed Disposition = "RECONCILIATION_FAILED"
 )
 
 type Reason string
@@ -78,6 +79,8 @@ const ReasonAssignmentConfigurationConflict Reason = "assignment_configuration_c
 const ReasonAgentTurnPreparationFailed Reason = "agent_turn_preparation_failed"
 
 const ReasonAgentTurnMutationReconciliationExhausted Reason = "agent_turn_mutation_reconciliation_exhausted"
+
+const ReasonWorkflowActionExhausted Reason = "workflow_action_exhausted"
 
 type WorkItem struct {
 	RepositoryID int64
@@ -327,6 +330,15 @@ type AgentTurnMutationReconciliationExhaustedEvent struct {
 
 func (AgentTurnMutationReconciliationExhaustedEvent) isWorkflowEvent() {}
 
+// WorkflowActionExhaustedEvent records terminal failure of durable Workflow coordination or an effect.
+type WorkflowActionExhaustedEvent struct {
+	EventMetadata
+	ResumeRole Role
+	Diagnostic string
+}
+
+func (WorkflowActionExhaustedEvent) isWorkflowEvent() {}
+
 type EventKind string
 
 const (
@@ -346,6 +358,8 @@ const EventKindAssignmentConfigurationConflict EventKind = "ASSIGNMENT_CONFIGURA
 const EventKindAgentTurnPreparationFailed EventKind = "AGENT_TURN_PREPARATION_FAILED"
 
 const EventKindAgentTurnMutationReconciliationExhausted EventKind = "AGENT_TURN_MUTATION_RECONCILIATION_EXHAUSTED"
+
+const EventKindWorkflowActionExhausted EventKind = "WORKFLOW_ACTION_EXHAUSTED"
 
 type TurnPurpose string
 
@@ -434,6 +448,12 @@ type StopTurnAction struct {
 }
 
 func (StopTurnAction) isWorkflowAction() {}
+
+type InterruptTurnForHumanHandoffAction struct {
+	Turn TurnGuard
+}
+
+func (InterruptTurnForHumanHandoffAction) isWorkflowAction() {}
 
 type SettleClosureAction struct {
 	ClosureID string

@@ -468,6 +468,31 @@ func TestAmbiguousBackendFailureIsMarkedUnknownWithoutExposingItsCause(t *testin
 	}
 }
 
+func TestAmbiguousReservationFailureDrainsUnresolvedWithoutStartingBackend(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{reserveErr: errors.New("commit acknowledgement database-secret")}
+	backend := &recordingBackend{result: json.RawMessage(`{"comment_id":42}`)}
+	gateway := newTestGateway(t, now, durable, backend)
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	initialize(t, gateway, registration)
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"ambiguous-reservation","body":"comment"}}}`))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"isError":true`) || strings.Contains(response.Body.String(), "database-secret") {
+		t.Fatalf("ambiguous reservation response = %d %s", response.Code, response.Body.String())
+	}
+	if backend.count() != 0 {
+		t.Fatalf("backend calls = %d, want zero", backend.count())
+	}
+	if state := durable.mutationState("ambiguous-reservation"); state != store.MutationReserved {
+		t.Fatalf("committed mutation state = %s, want %s", state, store.MutationReserved)
+	}
+	assertUnresolvedDrain(t, gateway, registration)
+}
+
 func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{completionObserved: make(chan struct{}, 1)}
@@ -563,14 +588,15 @@ func TestMutationFenceLossCancelsBackendAndDrainsAsUnresolved(t *testing.T) {
 	assertUnresolvedDrain(t, gateway, registration)
 }
 
-func TestMutationLifecycleCancellationCancelsBackend(t *testing.T) {
+func TestMutationLifecycleCancellationFinalizesUnknownAndDrains(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	lifecycle, cancelLifecycle := context.WithCancel(context.Background())
-	durable := &fakeStore{unknownErr: errors.New("lifecycle transition unavailable")}
+	lifecycleValue := &struct{ name string }{"lifecycle-value"}
+	lifecycle, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), lifecycleContextKey{}, lifecycleValue))
+	durable := &fakeStore{unknownObserved: make(chan mutationContextObservation, 1)}
 	backend := &cancelingBackend{started: make(chan struct{}), finished: make(chan struct{})}
 	gateway, err := mcp.New(mcp.Config{
 		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
-		LifecycleContext: lifecycle, MutationFenceCheckInterval: time.Hour,
+		LifecycleContext: lifecycle, MutationFenceCheckInterval: time.Hour, MutationFinalizationTimeout: time.Second,
 		Now: func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x36}, 32)),
 	})
 	if err != nil {
@@ -600,7 +626,127 @@ func TestMutationLifecycleCancellationCancelsBackend(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("lifecycle-canceled mutation did not finish durable handling")
 	}
-	assertUnresolvedDrain(t, gateway, registration)
+	observation := <-durable.unknownObserved
+	if observation.contextErr != nil || observation.value != lifecycleValue || !observation.hasDeadline {
+		t.Fatalf("UNKNOWN finalization context = error %v, value %#v, deadline %t", observation.contextErr, observation.value, observation.hasDeadline)
+	}
+	_, _, _, _, unknown := durable.mutationCounts()
+	if unknown != 1 || durable.mutationState("lifecycle-cancel") != store.MutationUnknown {
+		t.Fatalf("UNKNOWN transition = calls %d, state %s", unknown, durable.mutationState("lifecycle-cancel"))
+	}
+	if err := gateway.CloseAndDrain(context.Background(), registration); err != nil {
+		t.Fatalf("CloseAndDrain() error = %v", err)
+	}
+}
+
+func TestMutationOperationDeadlineCancelsBlockedBackendAndPersistsUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{unknownObserved: make(chan mutationContextObservation, 1)}
+	backend := &cancelingBackend{started: make(chan struct{}), finished: make(chan struct{})}
+	gateway, err := mcp.New(mcp.Config{
+		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
+		MutationOperationTimeout: 50 * time.Millisecond, MutationFenceCheckInterval: time.Hour, MutationFinalizationTimeout: time.Second,
+		Now: func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x38}, 32)),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	initialize(t, gateway, registration)
+
+	handlerReturned := make(chan struct{})
+	go func() {
+		body := `{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"operation-deadline","body":"Wait"}}}`
+		gateway.ServeHTTP(httptest.NewRecorder(), rpcRequest(t, registration, mcp.ProtocolVersion, body))
+		close(handlerReturned)
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("backend operation did not start")
+	}
+	select {
+	case <-backend.finished:
+	case <-time.After(time.Second):
+		t.Fatal("operation deadline did not cancel the backend")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("deadline-canceled mutation did not finish")
+	}
+	observation := <-durable.unknownObserved
+	if observation.contextErr != nil || !observation.hasDeadline {
+		t.Fatalf("UNKNOWN finalization context = error %v, deadline %t", observation.contextErr, observation.hasDeadline)
+	}
+	if state := durable.mutationState("operation-deadline"); state != store.MutationUnknown {
+		t.Fatalf("deadline-canceled mutation state = %s, want %s", state, store.MutationUnknown)
+	}
+	if err := gateway.CloseAndDrain(context.Background(), registration); err != nil {
+		t.Fatalf("CloseAndDrain() error = %v", err)
+	}
+}
+
+func TestCloseAndDrainCancelsBlockedMutationAndPersistsUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{unknownObserved: make(chan mutationContextObservation, 1)}
+	backend := &cancelingBackend{started: make(chan struct{}), finished: make(chan struct{})}
+	gateway, err := mcp.New(mcp.Config{
+		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
+		MutationOperationTimeout: time.Hour, MutationFenceCheckInterval: time.Hour, MutationFinalizationTimeout: time.Second,
+		Now: func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x39}, 32)),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	initialize(t, gateway, registration)
+
+	handlerReturned := make(chan struct{})
+	go func() {
+		body := `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"drain-cancel","body":"Wait"}}}`
+		gateway.ServeHTTP(httptest.NewRecorder(), rpcRequest(t, registration, mcp.ProtocolVersion, body))
+		close(handlerReturned)
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("backend operation did not start")
+	}
+
+	drainReturned := make(chan error, 1)
+	go func() { drainReturned <- gateway.CloseAndDrain(context.Background(), registration) }()
+	select {
+	case err := <-drainReturned:
+		if err != nil {
+			t.Fatalf("CloseAndDrain() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CloseAndDrain() did not cancel and drain the blocked mutation")
+	}
+	select {
+	case <-backend.finished:
+	default:
+		t.Fatal("CloseAndDrain() returned before the backend observed cancellation")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("drain-canceled mutation handler did not finish")
+	}
+	observation := <-durable.unknownObserved
+	if observation.contextErr != nil || !observation.hasDeadline {
+		t.Fatalf("UNKNOWN finalization context = error %v, deadline %t", observation.contextErr, observation.hasDeadline)
+	}
+	if state := durable.mutationState("drain-cancel"); state != store.MutationUnknown {
+		t.Fatalf("drain-canceled mutation state = %s, want %s", state, store.MutationUnknown)
+	}
 }
 
 func TestSuccessfulShortMutationStopsFenceWatcher(t *testing.T) {
@@ -638,9 +784,9 @@ func TestSuccessfulShortMutationStopsFenceWatcher(t *testing.T) {
 	}
 }
 
-func TestCloseAndDrainWaitsForAdmittedMutationAfterHTTPRequestCancellation(t *testing.T) {
+func TestCloseAndDrainWaitsForNonCooperativeMutationAfterHTTPRequestCancellation(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	durable := &fakeStore{completionObserved: make(chan struct{}, 1)}
+	durable := &fakeStore{unknownObserved: make(chan mutationContextObservation, 1)}
 	backend := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), contextCanceled: make(chan bool, 1)}
 	gateway := newTestGateway(t, now, durable, backend)
 	registration, err := gateway.Register(validScope(now))
@@ -674,9 +820,9 @@ func TestCloseAndDrainWaitsForAdmittedMutationAfterHTTPRequestCancellation(t *te
 
 	close(backend.release)
 	select {
-	case <-durable.completionObserved:
+	case <-durable.unknownObserved:
 	case <-time.After(time.Second):
-		t.Fatal("admitted mutation was not completed durably")
+		t.Fatal("canceled mutation was not marked UNKNOWN durably")
 	}
 	select {
 	case err := <-drained:
@@ -684,10 +830,10 @@ func TestCloseAndDrainWaitsForAdmittedMutationAfterHTTPRequestCancellation(t *te
 			t.Fatalf("CloseAndDrain() error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("CloseAndDrain() did not return after durable completion")
+		t.Fatal("CloseAndDrain() did not return after durable UNKNOWN finalization")
 	}
-	if canceled := <-backend.contextCanceled; canceled {
-		t.Fatal("admitted backend operation inherited HTTP cancellation")
+	if canceled := <-backend.contextCanceled; !canceled {
+		t.Fatal("backend operation did not inherit drain cancellation")
 	}
 }
 
@@ -755,13 +901,13 @@ func TestCloseAndDrainTimeoutDoesNotReauthorizeRegistration(t *testing.T) {
 	assertUnauthorizedCall(t, gateway, registration)
 }
 
-func TestCloseAndDrainWaitsForMutationWhoseReservationHasStarted(t *testing.T) {
+func TestCloseAndDrainPreventsBackendStartAfterAdmissionClosesDuringReservation(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{
 		reserveStarted: make(chan struct{}), releaseReserve: make(chan struct{}),
-		completionObserved: make(chan struct{}, 1),
+		unknownObserved: make(chan mutationContextObservation, 1),
 	}
-	backend := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), contextCanceled: make(chan bool, 1)}
+	backend := &recordingBackend{result: json.RawMessage(`{"comment_id":99}`)}
 	gateway := newTestGateway(t, now, durable, backend)
 	registration, err := gateway.Register(validScope(now))
 	if err != nil {
@@ -787,20 +933,9 @@ func TestCloseAndDrainWaitsForMutationWhoseReservationHasStarted(t *testing.T) {
 	}
 	close(durable.releaseReserve)
 	select {
-	case <-backend.started:
+	case <-durable.unknownObserved:
 	case <-time.After(time.Second):
-		t.Fatal("reserved mutation was not executed")
-	}
-	select {
-	case err := <-drained:
-		t.Fatalf("CloseAndDrain() returned before mutation execution completed: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(backend.release)
-	select {
-	case <-durable.completionObserved:
-	case <-time.After(time.Second):
-		t.Fatal("reserved mutation did not reach durable completion")
+		t.Fatal("closed-admission reservation was not marked UNKNOWN")
 	}
 	select {
 	case err := <-drained:
@@ -808,18 +943,21 @@ func TestCloseAndDrainWaitsForMutationWhoseReservationHasStarted(t *testing.T) {
 			t.Fatalf("CloseAndDrain() error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("CloseAndDrain() did not return after durable completion")
+		t.Fatal("CloseAndDrain() did not return after durable UNKNOWN finalization")
 	}
 	select {
 	case <-handlerReturned:
 	case <-time.After(time.Second):
 		t.Fatal("mutation handler did not return")
 	}
-	if !strings.Contains(response.Body.String(), `\"comment_id\":99`) {
+	if !strings.Contains(response.Body.String(), `"isError":true`) {
 		t.Fatalf("mutation response = %d %s", response.Code, response.Body.String())
 	}
+	if backend.count() != 0 {
+		t.Fatalf("backend calls after admission closed = %d, want zero", backend.count())
+	}
 	reserved, started, completed, failed, unknown := durable.mutationCounts()
-	if reserved != 1 || started != 1 || completed != 1 || failed != 0 || unknown != 0 {
+	if reserved != 1 || started != 1 || completed != 0 || failed != 0 || unknown != 1 {
 		t.Fatalf("mutation lifecycle counts = reserve %d, start %d, complete %d, fail %d, unknown %d", reserved, started, completed, failed, unknown)
 	}
 }
@@ -968,6 +1106,50 @@ func TestNewRejectsInvalidMutationFenceCheckInterval(t *testing.T) {
 			MutationFenceCheckInterval: interval,
 		}); err != nil {
 			t.Errorf("New() interval %s error = %v", interval, err)
+		}
+	}
+}
+
+func TestNewRejectsInvalidMutationFinalizationTimeout(t *testing.T) {
+	const maximum = 365 * 24 * time.Hour
+	for _, timeout := range []time.Duration{-time.Second, time.Nanosecond, maximum + time.Microsecond} {
+		_, err := mcp.New(mcp.Config{
+			EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: fakeBackend{},
+			MutationFinalizationTimeout: timeout,
+		})
+		if !errors.Is(err, mcp.ErrInvalidConfiguration) {
+			t.Errorf("New() timeout %s error = %v, want ErrInvalidConfiguration", timeout, err)
+		}
+	}
+
+	for _, timeout := range []time.Duration{0, time.Microsecond, maximum} {
+		if _, err := mcp.New(mcp.Config{
+			EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: fakeBackend{},
+			MutationFinalizationTimeout: timeout,
+		}); err != nil {
+			t.Errorf("New() timeout %s error = %v", timeout, err)
+		}
+	}
+}
+
+func TestNewRejectsInvalidMutationOperationTimeout(t *testing.T) {
+	const maximum = 365 * 24 * time.Hour
+	for _, timeout := range []time.Duration{-time.Second, time.Nanosecond, maximum + time.Microsecond} {
+		_, err := mcp.New(mcp.Config{
+			EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: fakeBackend{},
+			MutationOperationTimeout: timeout,
+		})
+		if !errors.Is(err, mcp.ErrInvalidConfiguration) {
+			t.Errorf("New() timeout %s error = %v, want ErrInvalidConfiguration", timeout, err)
+		}
+	}
+
+	for _, timeout := range []time.Duration{0, time.Microsecond, maximum} {
+		if _, err := mcp.New(mcp.Config{
+			EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: fakeBackend{},
+			MutationOperationTimeout: timeout,
+		}); err != nil {
+			t.Errorf("New() timeout %s error = %v", timeout, err)
 		}
 	}
 }
@@ -1320,11 +1502,21 @@ type fakeStore struct {
 	specs              []store.MutationSpec
 	completionObserved chan struct{}
 	startErr           error
+	reserveErr         error
 	completeErr        error
 	failErr            error
 	unknownErr         error
+	unknownObserved    chan mutationContextObservation
 	reserveStarted     chan struct{}
 	releaseReserve     chan struct{}
+}
+
+type lifecycleContextKey struct{}
+
+type mutationContextObservation struct {
+	contextErr  error
+	value       any
+	hasDeadline bool
 }
 
 func (fake *fakeStore) ValidateTurnFence(_ context.Context, lease store.AgentTurnLease) error {
@@ -1359,7 +1551,7 @@ func (fake *fakeStore) setFailError(err error) {
 	fake.failErr = err
 }
 
-func (fake *fakeStore) ReserveMutation(_ context.Context, _ store.AgentTurnLease, spec store.MutationSpec) (store.MutationReservation, error) {
+func (fake *fakeStore) ReserveMutation(_ context.Context, lease store.AgentTurnLease, spec store.MutationSpec) (store.MutationReservation, error) {
 	if fake.reserveStarted != nil {
 		close(fake.reserveStarted)
 		<-fake.releaseReserve
@@ -1374,9 +1566,16 @@ func (fake *fakeStore) ReserveMutation(_ context.Context, _ store.AgentTurnLease
 	if existing, ok := fake.mutations[spec.OperationID]; ok {
 		return existing, nil
 	}
-	reservation := store.MutationReservation{ID: testMutationID(len(fake.mutations) + 1), OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, State: store.MutationReserved}
+	reservation := store.MutationReservation{
+		ID: testMutationID(len(fake.mutations) + 1), AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
+		OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, State: store.MutationReserved,
+	}
 	fake.mutations[spec.OperationID] = reservation
-	return reservation, nil
+	return reservation, fake.reserveErr
+}
+
+func (*fakeStore) AcknowledgeMutationReplay(context.Context, store.AgentTurnLease, string, store.MutationSpec) error {
+	return nil
 }
 
 func (fake *fakeStore) mutationSpecs() []store.MutationSpec {
@@ -1434,7 +1633,13 @@ func (fake *fakeStore) FailMutation(_ context.Context, _ store.AgentTurnLease, m
 	return fake.setMutationState(mutationID, store.MutationFailed)
 }
 
-func (fake *fakeStore) MarkMutationUnknown(_ context.Context, _ store.AgentTurnLease, mutationID string, _ error) error {
+func (fake *fakeStore) MarkMutationUnknown(ctx context.Context, _ store.AgentTurnLease, mutationID string, _ error) error {
+	if fake.unknownObserved != nil {
+		_, hasDeadline := ctx.Deadline()
+		fake.unknownObserved <- mutationContextObservation{
+			contextErr: ctx.Err(), value: ctx.Value(lifecycleContextKey{}), hasDeadline: hasDeadline,
+		}
+	}
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
 	fake.unknown++
@@ -1442,6 +1647,12 @@ func (fake *fakeStore) MarkMutationUnknown(_ context.Context, _ store.AgentTurnL
 		return fake.unknownErr
 	}
 	return fake.setMutationState(mutationID, store.MutationUnknown)
+}
+
+func (fake *fakeStore) mutationState(operationID string) store.MutationState {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	return fake.mutations[operationID].State
 }
 
 func (fake *fakeStore) setMutationState(mutationID string, state store.MutationState) error {

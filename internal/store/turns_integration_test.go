@@ -127,8 +127,13 @@ func TestAgentTurnFenceRejectsStaleEpochOwnerAndControlRevision(t *testing.T) {
 		t.Fatalf("AcquireAgentTurn() error = %v", err)
 	}
 	time.Sleep(35 * time.Millisecond)
-	if err := databases[0].HeartbeatAgentTurn(ctx, lease, 150*time.Millisecond); err != nil {
-		t.Fatalf("HeartbeatAgentTurn() error = %v", err)
+	refreshed, err := databases[0].RefreshAgentTurnLease(ctx, lease, 150*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RefreshAgentTurnLease() error = %v", err)
+	}
+	if !refreshed.LeaseExpiresAt.After(lease.LeaseExpiresAt) || refreshed.JobLease.LeaseExpiresAt == nil ||
+		!refreshed.JobLease.LeaseExpiresAt.Equal(refreshed.LeaseExpiresAt) {
+		t.Fatalf("RefreshAgentTurnLease() expiration = turn %v, job %v, original %v", refreshed.LeaseExpiresAt, refreshed.JobLease.LeaseExpiresAt, lease.LeaseExpiresAt)
 	}
 	time.Sleep(60 * time.Millisecond)
 	if err := databases[0].ValidateTurnFence(ctx, lease); err != nil {
@@ -541,6 +546,7 @@ func TestAgentTurnMutationOperationIDIsScopedToLineage(t *testing.T) {
 		{OperationID: spec.OperationID, ToolName: "comment_on_pull_request", Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA},
 		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: json.RawMessage(`{"body":"changed"}`), ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA},
 		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: "issue-2", ExpectedSHA: spec.ExpectedSHA},
+		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: "different-head"},
 	}
 	for index, conflict := range conflicts {
 		if _, err := databases[0].ReserveMutation(ctx, firstLease, conflict); !errors.Is(err, store.ErrMutationOperationConflict) {
@@ -564,6 +570,12 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 	unrelatedFixture := seedAgentSession(t, pool, 34)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', state_revision = 1 WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 
 	root, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
 	if err != nil {
@@ -603,11 +615,17 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 	if err != nil || stopJob == nil {
 		t.Fatalf("ClaimJobKind() stop = (%#v, %v)", stopJob, err)
 	}
-	if acknowledged, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopJob); err != nil || !acknowledged.SuccessorAllowed {
+	acknowledged, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopJob)
+	if err != nil || !acknowledged.SuccessorAllowed {
 		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() = (%#v, %v)", acknowledged, err)
 	}
 	if recovery.ReconcileMutationsJobID != "" {
 		t.Fatalf("successful mutation recovery enqueued reconciliation job %s", recovery.ReconcileMutationsJobID)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp(), updated_at = clock_timestamp()
+WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status = 'AVAILABLE'`, acknowledged.SettlementID); err != nil {
+		t.Fatal(err)
 	}
 
 	acquireRetry := func(target store.AgentTurn, owner string) (store.AgentTurn, store.AgentTurnLease) {
@@ -631,7 +649,11 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 	}
 
 	firstRetry, firstRetryLease := acquireRetry(root, "runtime-retry-1")
-	cached, err := database.ReserveMutation(ctx, firstRetryLease, spec)
+	replaySpec := spec
+	replaySpec.ExternalService = "planner-started-empty"
+	replaySpec.ExternalResourceID = "planner-derived-resource"
+	replaySpec.ExpectedSHA = "planner-derived-head"
+	cached, err := database.ReserveMutation(ctx, firstRetryLease, replaySpec)
 	if err != nil {
 		t.Fatalf("ReserveMutation() process-death retry error = %v", err)
 	}
@@ -642,7 +664,8 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 		t.Fatalf("decode cached mutation result: %v", err)
 	}
 	if cached.ID != original.ID || cached.AgentTurnID != root.ID || cached.ExecutionEpoch != root.ExecutionEpoch ||
-		cached.State != store.MutationSucceeded || cachedResult.CommentID != 330 {
+		cached.State != store.MutationSucceeded || cachedResult.CommentID != 330 || cached.ExternalService != spec.ExternalService ||
+		cached.ExternalResourceID != spec.ExternalResourceID || cached.ExpectedSHA != spec.ExpectedSHA {
 		t.Fatalf("process-death retry reservation = %#v, want original SUCCEEDED reservation %#v", cached, original)
 	}
 	conflict := spec
@@ -777,6 +800,13 @@ VALUES ($1, $2, $3, $2, 1, $4, 'MUTATION', $5, $6, $6, $7, clock_timestamp(), 'u
 			if count != 1 {
 				t.Errorf("%s retry reservations = %d, want 1", state, count)
 			}
+			var replays int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1`, retry.ID).Scan(&replays); err != nil {
+				t.Fatal(err)
+			}
+			if replays != 0 {
+				t.Errorf("%s retry replay rows = %d, want 0 for unresolved source", state, replays)
+			}
 		})
 	}
 }
@@ -786,6 +816,12 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	fixture := seedAgentSession(t, pool, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', state_revision = 1 WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatalf("AllocateAgentTurn() error = %v", err)
@@ -854,10 +890,8 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	if err != nil || reconcileJob == nil || reconcileJob.Kind != store.ReconcileAgentTurnMutationsJobKind {
 		t.Fatalf("ClaimJob() for mutation reconciliation = (%#v, %v), want RECONCILE_AGENT_TURN_MUTATIONS", reconcileJob, err)
 	}
-	if _, err := databases[0].ReconcileRecoveredMutation(ctx, *reconcileJob, reservation.ID, store.RecoveredMutationOutcome{
-		State: store.MutationSucceeded, Result: json.RawMessage(`{"premature":true}`),
-	}); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
-		t.Errorf("ReconcileRecoveredMutation() before runtime stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	if _, err := databases[0].GetAgentTurnMutationReconciliationContext(ctx, *reconcileJob); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("GetAgentTurnMutationReconciliationContext() before runtime stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
 	staleStop := *stopJob
 	staleStop.LeaseToken = "30000000-0000-4000-8000-000000000097"
@@ -892,14 +926,14 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	if !settled.SuccessorAllowed || settled.RecoverySettledAt == nil {
 		t.Errorf("recovery after final mutation = %#v, want successor allowed", settled)
 	}
-	successorSpec := fixture.turnSpec()
-	successorSpec.RetryOfTurnID = turn.ID
-	successor, err := databases[0].AllocateAgentTurn(ctx, successorSpec)
-	if err != nil {
-		t.Fatalf("AllocateAgentTurn() immediately after final mutation error = %v", err)
+	var retryOf string
+	if err := pool.QueryRow(ctx, `
+SELECT payload->>'retry_of_turn_id' FROM jobs
+WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, settled.SettlementID).Scan(&retryOf); err != nil {
+		t.Fatalf("read recovery successor preparation: %v", err)
 	}
-	if successor.ExecutionEpoch != turn.ExecutionEpoch+1 {
-		t.Errorf("successor execution epoch = %d, want %d", successor.ExecutionEpoch, turn.ExecutionEpoch+1)
+	if retryOf != turn.ID {
+		t.Errorf("recovery successor retries %s, want %s", retryOf, turn.ID)
 	}
 	settled, err = databases[0].CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil || !settled.SuccessorAllowed {
@@ -1146,12 +1180,18 @@ func TestBeginAgentTurnMutationRecoveryRejectsInvalidStateWithoutPartialJobs(t *
 	}
 }
 
-func TestAgentTurnRecoveryBlocksDeveloperAndReviewerSuccessorsWorkflowWide(t *testing.T) {
+func TestAgentTurnRecoveryBlocksOtherSuccessorsAndSchedulesExactRole(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 44)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', state_revision = 1 WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 
 	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
 	if err != nil {
@@ -1237,8 +1277,17 @@ VALUES ($1, $2, 1, 'reviewer-session', 'runtime', '1', 'sha256:reviewer', $3, 'A
 	if _, err := database.CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.AllocateAgentTurn(ctx, reviewerSpec); err != nil {
-		t.Fatalf("AllocateAgentTurn() for Reviewer after recovery settled error = %v", err)
+	if _, err := database.AllocateAgentTurn(ctx, reviewerSpec); !errors.Is(err, store.ErrWorkflowSuccessorConflict) {
+		t.Fatalf("AllocateAgentTurn() for Reviewer beside recovery retry error = %v, want ErrWorkflowSuccessorConflict", err)
+	}
+	var role, retryOf string
+	if err := pool.QueryRow(ctx, `
+SELECT payload->>'role', payload->>'retry_of_turn_id'
+FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status = 'AVAILABLE'`, fixture.workflowID).Scan(&role, &retryOf); err != nil {
+		t.Fatal(err)
+	}
+	if role != string(workflow.RoleDeveloper) || retryOf != turn.ID {
+		t.Errorf("recovery preparation = %s retry of %s", role, retryOf)
 	}
 }
 
@@ -1290,11 +1339,191 @@ func TestAgentTurnGlobalConcurrencyLimitAcrossStoreConnections(t *testing.T) {
 	}
 }
 
+func TestClaimAndAcquireAgentTurnReturnsNoWork(t *testing.T) {
+	databases, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lease, acquired, err := databases[0].ClaimAndAcquireAgentTurn(ctx, "runtime", time.Second, 1)
+	if err != nil || acquired || lease.ID != "" {
+		t.Fatalf("ClaimAndAcquireAgentTurn() = (%#v, %t, %v), want no work", lease, acquired, err)
+	}
+}
+
+func TestClaimAndAcquireAgentTurnLeavesJobAvailableWhenConcurrencyIsFull(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	firstFixture := seedAgentSession(t, pool, 71)
+	firstTurn, err := database.AllocateAgentTurn(ctx, firstFixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, acquired, err := database.ClaimAndAcquireAgentTurn(ctx, "runtime-first", time.Second, 1)
+	if err != nil || !acquired || first.ID != firstTurn.ID {
+		t.Fatalf("first ClaimAndAcquireAgentTurn() = (%#v, %t, %v)", first, acquired, err)
+	}
+	if first.JobLease.Status != store.JobLeased || first.JobLease.Attempt != 1 || first.JobLease.LeaseOwner != "runtime-first" {
+		t.Fatalf("atomic Agent Turn Job lease = %#v, want leased attempt 1", first.JobLease)
+	}
+	if err := database.ValidateTurnFence(ctx, first); err != nil {
+		t.Fatalf("ValidateTurnFence() for atomic acquisition error = %v", err)
+	}
+
+	secondFixture := seedAgentSession(t, pool, 72)
+	secondTurn, err := database.AllocateAgentTurn(ctx, secondFixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, acquired, err := database.ClaimAndAcquireAgentTurn(ctx, "runtime-second", time.Second, 1)
+	if err != nil || acquired || lease.ID != "" {
+		t.Fatalf("capacity-limited ClaimAndAcquireAgentTurn() = (%#v, %t, %v), want no acquisition", lease, acquired, err)
+	}
+
+	var status string
+	var attempts, attemptRows int
+	if err := pool.QueryRow(ctx, `
+SELECT status, attempt_count,
+       (SELECT count(*) FROM job_attempts AS attempt WHERE attempt.job_id = job.id)
+FROM jobs AS job WHERE agent_turn_id = $1`, secondTurn.ID).Scan(&status, &attempts, &attemptRows); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(store.JobAvailable) || attempts != 0 || attemptRows != 0 {
+		t.Errorf("capacity-limited job = (%s, %d attempts, %d attempt rows), want AVAILABLE/0/0", status, attempts, attemptRows)
+	}
+}
+
+func TestClaimAndAcquireAgentTurnCompetingClaimsRespectGlobalCapacity(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for index := range databases {
+		fixture := seedAgentSession(t, pool, 80+index)
+		if _, err := databases[index].AllocateAgentTurn(ctx, fixture.turnSpec()); err != nil {
+			t.Fatalf("AllocateAgentTurn(%d) error = %v", index, err)
+		}
+	}
+
+	type claimResult struct {
+		lease    store.AgentTurnLease
+		acquired bool
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, len(databases))
+	var wait sync.WaitGroup
+	for index := range databases {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			lease, acquired, err := databases[index].ClaimAndAcquireAgentTurn(ctx, fmt.Sprintf("runtime-%d", index), time.Second, 2)
+			results <- claimResult{lease: lease, acquired: acquired, err: err}
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	seen := make(map[string]bool)
+	acquired := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", result.err)
+		}
+		if !result.acquired {
+			continue
+		}
+		acquired++
+		if result.lease.ID == "" || seen[result.lease.ID] {
+			t.Errorf("acquired duplicate or empty Agent Turn %q", result.lease.ID)
+		}
+		seen[result.lease.ID] = true
+	}
+	var leasedJobs, availableJobs, attemptRows, slots int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE status = 'LEASED'),
+       count(*) FILTER (WHERE status = 'AVAILABLE'),
+       (SELECT count(*) FROM job_attempts),
+       (SELECT count(*) FROM agent_turn_slots)
+FROM jobs WHERE kind = 'RUN_AGENT_TURN'`).Scan(&leasedJobs, &availableJobs, &attemptRows, &slots); err != nil {
+		t.Fatal(err)
+	}
+	if acquired != 2 || leasedJobs != 2 || availableJobs != 2 || attemptRows != 2 || slots != 2 {
+		t.Errorf("competing claims = %d acquired, jobs %d/%d, attempts %d, slots %d; want 2, 2/2, 2, 2",
+			acquired, leasedJobs, availableJobs, attemptRows, slots)
+	}
+}
+
+func TestClaimAndAcquireAgentTurnRejectsMalformedAndStaleJobsWithoutClaiming(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	malformedFixture := seedAgentSession(t, pool, 91)
+	malformedTurn, err := database.AllocateAgentTurn(ctx, malformedFixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET payload = '{}'::jsonb WHERE agent_turn_id = $1`, malformedTurn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if lease, acquired, err := database.ClaimAndAcquireAgentTurn(ctx, "runtime-malformed", time.Second, 1); !errors.Is(err, store.ErrAgentTurnFenceLost) || acquired || lease.ID != "" {
+		t.Fatalf("malformed ClaimAndAcquireAgentTurn() = (%#v, %t, %v), want fence loss", lease, acquired, err)
+	}
+	assertUnclaimedAgentTurnJob(t, pool, ctx, malformedTurn.ID)
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp() WHERE agent_turn_id = $1`, malformedTurn.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	staleFixture := seedAgentSession(t, pool, 92)
+	staleTurn, err := database.AllocateAgentTurn(ctx, staleFixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET control_revision = control_revision + 1 WHERE id = $1`, staleFixture.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if lease, acquired, err := database.ClaimAndAcquireAgentTurn(ctx, "runtime-stale", time.Second, 1); !errors.Is(err, store.ErrAgentTurnFenceLost) || acquired || lease.ID != "" {
+		t.Fatalf("stale ClaimAndAcquireAgentTurn() = (%#v, %t, %v), want fence loss", lease, acquired, err)
+	}
+	assertUnclaimedAgentTurnJob(t, pool, ctx, staleTurn.ID)
+}
+
+func assertUnclaimedAgentTurnJob(t *testing.T, pool *pgxpool.Pool, ctx context.Context, turnID string) {
+	t.Helper()
+	var status, turnStatus string
+	var attempts, attemptRows, slots int
+	if err := pool.QueryRow(ctx, `
+SELECT job.status, job.attempt_count,
+       (SELECT count(*) FROM job_attempts AS attempt WHERE attempt.job_id = job.id),
+       (SELECT count(*) FROM agent_turn_slots AS slot WHERE slot.agent_turn_id = job.agent_turn_id),
+       turn.status
+FROM jobs AS job
+JOIN agent_turns AS turn ON turn.id = job.agent_turn_id
+WHERE job.agent_turn_id = $1`, turnID).Scan(&status, &attempts, &attemptRows, &slots, &turnStatus); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(store.JobAvailable) || attempts != 0 || attemptRows != 0 || slots != 0 || turnStatus != string(store.AgentTurnQueued) {
+		t.Errorf("rejected Agent Turn job = job %s/%d, attempts %d, slots %d, turn %s; want AVAILABLE/0/0/0/QUEUED",
+			status, attempts, attemptRows, slots, turnStatus)
+	}
+}
+
 func TestAgentTurnExpiredOwnershipRequiresRecoveryAndNewEpoch(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', state_revision = 1 WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatalf("AllocateAgentTurn() error = %v", err)
@@ -1332,14 +1561,14 @@ func TestAgentTurnExpiredOwnershipRequiresRecoveryAndNewEpoch(t *testing.T) {
 	if acknowledged.RuntimeStoppedAt == nil || !acknowledged.SuccessorAllowed || acknowledged.RecoverySettledAt == nil {
 		t.Errorf("acknowledged recovery = %#v, want stopped and settled barrier", acknowledged)
 	}
-	successorSpec := fixture.turnSpec()
-	successorSpec.RetryOfTurnID = turn.ID
-	successor, err := databases[0].AllocateAgentTurn(ctx, successorSpec)
-	if err != nil {
-		t.Fatalf("successor AllocateAgentTurn() immediately after stop acknowledgement error = %v", err)
+	var purpose, retryOf string
+	if err := pool.QueryRow(ctx, `
+SELECT payload->>'purpose', payload->>'retry_of_turn_id'
+FROM jobs WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, acknowledged.SettlementID).Scan(&purpose, &retryOf); err != nil {
+		t.Fatalf("read recovery preparation job: %v", err)
 	}
-	if successor.ExecutionEpoch != turn.ExecutionEpoch+1 {
-		t.Errorf("successor epoch = %d, want %d", successor.ExecutionEpoch, turn.ExecutionEpoch+1)
+	if purpose != string(workflow.TurnPurposeRetry) || retryOf != turn.ID {
+		t.Errorf("recovery preparation = %s retry of %s", purpose, retryOf)
 	}
 	for range 2 {
 		settled, err := databases[0].CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)

@@ -41,6 +41,7 @@ const (
 // LauncherStore supplies launch context only under an already-acquired Agent Turn fence.
 type LauncherStore interface {
 	ValidateTurnFence(context.Context, store.AgentTurnLease) error
+	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 }
@@ -123,6 +124,7 @@ type LauncherConfig struct {
 // LaunchRequest contains per-turn credentials and exact repository revisions.
 type LaunchRequest struct {
 	Lease                  store.AgentTurnLease
+	LeaseDuration          time.Duration
 	RepositoryURL          string
 	DefaultBranchName      string
 	DefaultBranchSHA       string
@@ -131,6 +133,9 @@ type LaunchRequest struct {
 	ProviderCredentialJSON json.RawMessage
 	Stderr                 io.Writer
 }
+
+func (LaunchRequest) String() string   { return "Agent Turn launch request" }
+func (LaunchRequest) GoString() string { return "agentturn.LaunchRequest{<credentials redacted>}" }
 
 // Launcher composes one epoch-fenced Runtime Process and Agent Session attachment.
 type Launcher struct {
@@ -153,6 +158,7 @@ type Launcher struct {
 type RuntimeHandle struct {
 	Client  RuntimeACPClient
 	Session session.Result
+	lease   store.AgentTurnLease
 
 	gateway            MCPRegistrar
 	registration       mcp.Registration
@@ -162,6 +168,7 @@ type RuntimeHandle struct {
 	engine             RuntimeEngine
 	process            RuntimeProcess
 	stopTimeout        time.Duration
+	secrets            []string
 	mcpMutex           sync.Mutex
 	mcpDrained         bool
 	cleanupMutex       sync.Mutex
@@ -252,7 +259,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated Agent workspace: %w", err)
 	}
-	resources := &RuntimeHandle{gateway: launcher.gateway, stopTimeout: launcher.stopTimeout}
+	resources := &RuntimeHandle{
+		gateway: launcher.gateway, stopTimeout: launcher.stopTimeout, lease: request.Lease,
+		secrets: append([]string(nil), secrets...),
+	}
 	if execution.Assignment.Role == workflow.RoleReviewer {
 		resources.workspace = launcher.workspace
 		resources.assignmentID = execution.Assignment.ID
@@ -263,8 +273,13 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCleanupTimeout)
 		defer cancel()
-		err = errors.Join(err, resources.Cleanup(cleanupCtx))
-		handle = nil
+		cleanupErr := resources.Cleanup(cleanupCtx)
+		err = errors.Join(err, cleanupErr)
+		if cleanupErr != nil {
+			handle = resources
+		} else {
+			handle = nil
+		}
 	}()
 	miseRevision := revision
 	if execution.Assignment.Role == workflow.RoleReviewer {
@@ -284,9 +299,12 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, err
 	}
-	if err := launcher.store.ValidateTurnFence(ctx, request.Lease); err != nil {
-		return nil, fmt.Errorf("validate Agent Turn fence before Runtime Process launch: %w", err)
+	refreshedLease, err := launcher.store.RefreshAgentTurnLease(ctx, request.Lease, request.LeaseDuration)
+	if err != nil {
+		return nil, fmt.Errorf("refresh Agent Turn lease before Runtime Process launch: %w", err)
 	}
+	request.Lease = refreshedLease
+	resources.lease = refreshedLease
 
 	registration, err := launcher.gateway.Register(mcp.TokenScope{
 		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
@@ -296,6 +314,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	})
 	resources.registration = registration
 	secrets = append(secrets, registrationSecrets(registration)...)
+	resources.secrets = append(resources.secrets, registrationSecrets(registration)...)
 	if err != nil {
 		launcher.gateway.Revoke(registration)
 		return nil, fmt.Errorf("register per-turn MCP authority: %w", err)
@@ -376,51 +395,93 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	return resources, nil
 }
 
-// CloseMCP closes mutation admission and waits for admitted mutations to reach durable completion.
-func (handle *RuntimeHandle) CloseMCP(ctx context.Context) error {
+// LaunchExecution exposes Launch through the execution worker's narrow runtime boundary.
+func (launcher *Launcher) LaunchExecution(ctx context.Context, request LaunchRequest) (ExecutionRuntime, error) {
+	handle, err := launcher.Launch(ctx, request)
+	if handle == nil {
+		return nil, err
+	}
+	return handle, err
+}
+
+// CloseMCP revokes MCP authority and waits for admitted mutations to reach durable completion.
+func (handle *RuntimeHandle) CloseMCP(ctx context.Context) (err error) {
 	if handle == nil {
 		return nil
 	}
+	defer func() {
+		if err != nil {
+			err = sanitizeLaunchError(err, handle.secrets)
+		}
+	}()
 	handle.mcpMutex.Lock()
 	defer handle.mcpMutex.Unlock()
 	if handle.mcpDrained || handle.gateway == nil || !handle.registered {
 		return nil
 	}
-	if err := handle.gateway.CloseAndDrain(ctx, handle.registration); err != nil {
-		return err
+	drainErr := handle.gateway.CloseAndDrain(ctx, handle.registration)
+	if drainErr == nil || errors.Is(drainErr, mcp.ErrMutationDrainUnresolved) {
+		handle.mcpDrained = true
 	}
-	handle.mcpDrained = true
-	return nil
+	return drainErr
 }
 
-// Cleanup drains MCP authority, closes ACP, stops and removes the process, discards Reviewer changes, and closes Docker resources.
-func (handle *RuntimeHandle) Cleanup(ctx context.Context) error {
+// CurrentLease returns the lease whose expiration was refreshed immediately before MCP registration.
+func (handle *RuntimeHandle) CurrentLease() store.AgentTurnLease {
+	if handle == nil {
+		return store.AgentTurnLease{}
+	}
+	return handle.lease
+}
+
+// PromptClient exposes only the prompt capability retained by the execution worker.
+func (handle *RuntimeHandle) PromptClient() session.PromptClient {
 	if handle == nil {
 		return nil
 	}
+	return handle.Client
+}
+
+// Cleanup drains MCP authority, closes ACP, stops and removes the process, discards Reviewer changes, and closes Docker resources.
+func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
+	if handle == nil {
+		return nil
+	}
+	defer func() {
+		if err != nil {
+			err = sanitizeLaunchError(err, handle.secrets)
+		}
+	}()
 	handle.cleanupMutex.Lock()
 	defer handle.cleanupMutex.Unlock()
 
-	if err := handle.CloseMCP(ctx); err != nil {
-		return fmt.Errorf("close and drain MCP authority: %w", err)
-	}
 	var cleanupErrors []error
+	if err := handle.CloseMCP(ctx); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("close and drain MCP authority: %w", err))
+	}
 	if handle.Client != nil && !handle.acpClosed {
 		if err := handle.Client.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("close ACP client: %w", err))
 		} else {
 			handle.acpClosed = true
+			handle.Client = nil
 		}
 	}
 	if handle.process != nil && !handle.processRemoved {
 		if !handle.processStopped {
-			if err := handle.process.Stop(ctx, handle.stopTimeout); err != nil {
+			stopCtx, cancelStop := handle.teardownContext(ctx)
+			err := handle.process.Stop(stopCtx, handle.stopTimeout)
+			cancelStop()
+			if err != nil {
 				cleanupErrors = append(cleanupErrors, err)
 			} else {
 				handle.processStopped = true
 			}
 		}
-		if err := handle.process.Remove(ctx); err != nil {
+		removeCtx, cancelRemove := handle.teardownContext(ctx)
+		err := handle.process.Remove(removeCtx)
+		cancelRemove()
+		if err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		} else {
 			handle.processRemoved = true
@@ -444,9 +505,17 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) error {
 	return errors.Join(cleanupErrors...)
 }
 
+func (handle *RuntimeHandle) teardownContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), handle.stopTimeout)
+}
+
 func validateLaunchRequest(request LaunchRequest) error {
 	if request.Lease.ID == "" || request.Lease.ExecutionEpoch <= 0 || request.Lease.OwnerID == "" || request.Lease.OwnerToken == "" ||
-		request.Lease.LeaseExpiresAt.IsZero() || strings.TrimSpace(request.RepositoryURL) == "" ||
+		request.Lease.LeaseExpiresAt.IsZero() || request.LeaseDuration < time.Microsecond || request.LeaseDuration > maximumWorkerDuration ||
+		strings.TrimSpace(request.RepositoryURL) == "" ||
 		strings.TrimSpace(request.DefaultBranchName) == "" || strings.TrimSpace(request.DefaultBranchName) != request.DefaultBranchName ||
 		strings.TrimSpace(request.DefaultBranchSHA) == "" ||
 		strings.TrimSpace(request.RepositoryCredential) == "" || len(request.ProviderCredentialJSON) == 0 {

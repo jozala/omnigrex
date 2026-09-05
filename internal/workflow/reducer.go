@@ -84,8 +84,43 @@ func dispatch(snapshot Snapshot, event Event) Decision {
 		return reduceAgentTurnPreparationFailed(snapshot, event)
 	case AgentTurnMutationReconciliationExhaustedEvent:
 		return reduceAgentTurnMutationReconciliationExhausted(snapshot, event)
+	case WorkflowActionExhaustedEvent:
+		return reduceWorkflowActionExhausted(snapshot, event)
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
+	}
+}
+
+func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaustedEvent) Decision {
+	if snapshot.State == StateNeedsHuman {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonWorkflowActionExhausted}
+	}
+	if snapshot.ActiveTurn != nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDeferred, Reason: ReasonActiveTurn}
+	}
+	role := event.ResumeRole
+	if role == "" {
+		role = RoleDeveloper
+		if snapshot.State == StateReviewing || snapshot.State == StatePRReady {
+			role = RoleReviewer
+		}
+	}
+	next := cloneSnapshot(snapshot)
+	actions := make([]Action, 0, 2)
+	if next.ChangeProposal != nil {
+		next.ChangeProposal.ReadyForSHA = ""
+	}
+	next.State = StateNeedsHuman
+	next.ResumeRole = role
+	next.Assignments.Status = AssignmentWaitingForHuman
+	next.Revision++
+	actions = append(actions,
+		MarkHumanHandoffAction{Reason: ReasonWorkflowActionExhausted, Diagnostic: event.Diagnostic},
+		ReconcileLabelsAction{State: StateNeedsHuman},
+	)
+	return Decision{
+		Snapshot: next, Disposition: DispositionApplied, Reason: ReasonWorkflowActionExhausted,
+		Actions: actions,
 	}
 }
 
@@ -290,7 +325,10 @@ func reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decisi
 	proposal.ReadyForSHA = ""
 	next.ChangeProposal = &proposal
 	next.CurrentAttempt.InfrastructureRetryBudget.Used = 0
-	staleHead := event.Review.HeadSHA != event.Turn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA || snapshot.ChangeProposal.HeadSHA != event.Turn.ExpectedHeadSHA
+	pendingHead := event.PendingEvents.LatestObservedHeadSHA
+	pendingHeadReplaced := pendingHead != "" && (pendingHead != event.Review.HeadSHA || pendingHead != event.Turn.ExpectedHeadSHA)
+	staleHead := event.Review.HeadSHA != event.Turn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
+		snapshot.ChangeProposal.HeadSHA != event.Turn.ExpectedHeadSHA || pendingHeadReplaced
 	if staleHead {
 		next.State = StateReviewing
 		next.Revision++
@@ -390,11 +428,11 @@ func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decisi
 	if snapshot.ChangeProposal == nil || snapshot.ChangeProposal.ID != event.ChangeProposalID {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
 	}
-	if event.PreviousHeadSHA != snapshot.ChangeProposal.HeadSHA {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonSynchronizationStale}
-	}
 	if event.HeadSHA == snapshot.ChangeProposal.HeadSHA {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonSynchronizationDuplicate}
+	}
+	if event.PreviousHeadSHA != snapshot.ChangeProposal.HeadSHA {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonSynchronizationStale}
 	}
 	next := cloneSnapshot(snapshot)
 	next.ChangeProposal.HeadSHA = event.HeadSHA

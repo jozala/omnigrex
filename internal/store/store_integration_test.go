@@ -2116,17 +2116,20 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 7 {
-		t.Errorf("schema_migrations rows = %d, want 7", count)
+	if count != 10 {
+		t.Errorf("schema_migrations rows = %d, want 10", count)
 	}
 	for version, filename := range map[int]string{
-		1: "000001_bootstrap.sql",
-		2: "000002_normalized_events.sql",
-		3: "000003_durable_jobs_and_turn_fencing.sql",
-		4: "000004_phase_five_acknowledgement_barriers.sql",
-		5: "000005_single_live_workflow_successor.sql",
-		6: "000006_agent_turn_preparation.sql",
-		7: "000007_scoped_mutation_operations.sql",
+		1:  "000001_bootstrap.sql",
+		2:  "000002_normalized_events.sql",
+		3:  "000003_durable_jobs_and_turn_fencing.sql",
+		4:  "000004_phase_five_acknowledgement_barriers.sql",
+		5:  "000005_single_live_workflow_successor.sql",
+		6:  "000006_agent_turn_preparation.sql",
+		7:  "000007_scoped_mutation_operations.sql",
+		8:  "000008_agent_turn_settlements.sql",
+		9:  "000009_workflow_action_exhaustion.sql",
+		10: "000010_workflow_action_failure_barriers.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2151,11 +2154,15 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		"agent_turns",
 		"change_proposals",
 		"tool_invocations",
+		"tool_invocation_replays",
 		"jobs",
 		"job_attempts",
 		"agent_turn_slots",
 		"job_normalized_events",
 		"workflow_closure_barriers",
+		"agent_turn_settlements",
+		"workflow_github_effect_cleanups",
+		"workflow_action_failures",
 	} {
 		var exists bool
 		err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists)
@@ -2197,8 +2204,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 7 {
-		t.Errorf("migrations applied by Open() = %d, want 7", migrationCount)
+	if migrationCount != 10 {
+		t.Errorf("migrations applied by Open() = %d, want 10", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

@@ -14,6 +14,8 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
+var errInvalidPendingNormalizedEvent = store.ErrPendingNormalizedEventInvalid
+
 // ProcessorStore is the durable inbox boundary used by Processor.
 type ProcessorStore interface {
 	ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
@@ -134,14 +136,14 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 func (processor *Processor) pendingTransition(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
 	var event NormalizedEvent
 	if err := json.Unmarshal(record.Payload, &event); err != nil {
-		return store.WorkflowLocator{}, nil, fmt.Errorf("decode normalized event %s: %w", record.DeliveryID, err)
+		return store.WorkflowLocator{}, nil, fmt.Errorf("%w: decode normalized event %s: %v", errInvalidPendingNormalizedEvent, record.DeliveryID, err)
 	}
 	return processor.transition(event, record.CreatedAt)
 }
 
 func (processor *Processor) transition(event NormalizedEvent, observedAt time.Time) (store.WorkflowLocator, store.WorkflowTransition, error) {
 	if observedAt.IsZero() {
-		return store.WorkflowLocator{}, nil, errors.New("normalized event observed timestamp is zero")
+		return store.WorkflowLocator{}, nil, fmt.Errorf("%w: normalized event observed timestamp is zero", errInvalidPendingNormalizedEvent)
 	}
 	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID}
 	if event.Issue != nil {
@@ -164,7 +166,7 @@ func (processor *Processor) transition(event NormalizedEvent, observedAt time.Ti
 		}
 	case "issues.reopened", "pull_request.opened", "pull_request.synchronize", "pull_request_review.submitted":
 	default:
-		return store.WorkflowLocator{}, nil, fmt.Errorf("unsupported normalized event %s.%s", event.EventName, event.Action)
+		return store.WorkflowLocator{}, nil, fmt.Errorf("%w: unsupported normalized event %s.%s", errInvalidPendingNormalizedEvent, event.EventName, event.Action)
 	}
 	if err != nil {
 		return store.WorkflowLocator{}, nil, err

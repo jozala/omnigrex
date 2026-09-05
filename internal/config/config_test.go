@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,8 +39,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.WorkspaceRoot != "/var/lib/omnigrex/workspaces" || got.MiseRoot != "/var/lib/omnigrex/mise" {
 		t.Errorf("orchestrator workspace roots = (%q, %q)", got.WorkspaceRoot, got.MiseRoot)
 	}
-	if got.MCPAddr != "omnigrex-mcp:8081" || got.MCPEndpointURL != "http://omnigrex-mcp:8081/mcp" {
-		t.Errorf("MCP endpoint = (%q, %q)", got.MCPAddr, got.MCPEndpointURL)
+	if got.MCPAddr != "omnigrex-mcp:8081" || got.MCPEndpointURL != "http://omnigrex-mcp:8081/mcp" || got.MCPMutationOperationTimeout != 2*time.Hour {
+		t.Errorf("MCP settings = (%q, %q, %s)", got.MCPAddr, got.MCPEndpointURL, got.MCPMutationOperationTimeout)
 	}
 	if got.AgentImageReference != "omnigrex/opencode:1.18.19" {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.19")
@@ -52,6 +53,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if got.GitHubAPIURL != "https://api.github.com" {
 		t.Errorf("GitHubAPIURL = %q, want %q", got.GitHubAPIURL, "https://api.github.com")
+	}
+	if got.GitRemoteBaseURL != "https://github.com" {
+		t.Errorf("GitRemoteBaseURL = %q, want %q", got.GitRemoteBaseURL, "https://github.com")
 	}
 	if got.GitHubDeveloperAppID != 101 || got.GitHubReviewerAppID != 202 {
 		t.Errorf("GitHub App IDs = (%d, %d), want (101, 202)", got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
@@ -67,6 +71,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if got.AgentTurnPreparationLeaseDuration != 30*time.Second || got.AgentTurnPreparationHeartbeatInterval != 10*time.Second || got.AgentTurnPreparationPollInterval != 250*time.Millisecond || got.AgentTurnPreparationRetryDelay != 5*time.Second {
 		t.Errorf("Agent Turn preparation timing = (%s, %s, %s, %s), want (30s, 10s, 250ms, 5s)", got.AgentTurnPreparationLeaseDuration, got.AgentTurnPreparationHeartbeatInterval, got.AgentTurnPreparationPollInterval, got.AgentTurnPreparationRetryDelay)
+	}
+	if got.AgentTurnExecutionLeaseDuration != 30*time.Second || got.AgentTurnExecutionHeartbeatInterval != 10*time.Second || got.AgentTurnExecutionPollInterval != 250*time.Millisecond || got.AgentTurnExecutionTurnTimeout != 2*time.Hour || got.AgentTurnExecutionCleanupTimeout != 10*time.Second {
+		t.Errorf("Agent Turn execution timing = (%s, %s, %s, %s, %s), want (30s, 10s, 250ms, 2h, 10s)", got.AgentTurnExecutionLeaseDuration, got.AgentTurnExecutionHeartbeatInterval, got.AgentTurnExecutionPollInterval, got.AgentTurnExecutionTurnTimeout, got.AgentTurnExecutionCleanupTimeout)
+	}
+	if got.WorkflowEffectLeaseDuration != 30*time.Second || got.WorkflowEffectHeartbeatInterval != 10*time.Second || got.WorkflowEffectPollInterval != 250*time.Millisecond || got.WorkflowEffectRetryDelay != 5*time.Second {
+		t.Errorf("Workflow effect timing = (%s, %s, %s, %s), want (30s, 10s, 250ms, 5s)", got.WorkflowEffectLeaseDuration, got.WorkflowEffectHeartbeatInterval, got.WorkflowEffectPollInterval, got.WorkflowEffectRetryDelay)
 	}
 	if got.AssignmentRetentionDuration != 30*24*time.Hour || got.AgentTurnConcurrencyLimit != 2 {
 		t.Errorf("workflow limits = (%s, %d), want (720h, 2)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
@@ -94,10 +104,12 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_MISE_ROOT":                                 "/data/mise",
 		"OMNIGREX_MCP_ADDR":                                  "127.0.0.1:9001",
 		"OMNIGREX_MCP_ENDPOINT_URL":                          "https://mcp.internal/mcp",
+		"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":            "17m",
 		"OMNIGREX_AGENT_IMAGE_REFERENCE":                     "registry.example/agent:v2",
 		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":                     "registry.example/agent/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":                  "linux/amd64",
 		"OMNIGREX_GITHUB_API_URL":                            "https://github.example/api/v3",
+		"OMNIGREX_GIT_REMOTE_BASE_URL":                       "https://github.example/source",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                   "303",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                    "404",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":         "/secrets/custom-developer.pem",
@@ -111,6 +123,15 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "15s",
 		"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "750ms",
 		"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "3s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":       "45s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL":   "15s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":        "400ms",
+		"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":         "3h",
+		"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":      "12s",
+		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":            "1m",
+		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":        "20s",
+		"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":             "600ms",
+		"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":               "4s",
 		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":             "48h",
 		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":              "7",
 		"OMNIGREX_HTTP_ADDR":                                 "127.0.0.1:9000",
@@ -136,8 +157,8 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		t.Errorf("WorkspaceVolume = %q, want %q", got.WorkspaceVolume, values["OMNIGREX_WORKSPACE_VOLUME"])
 	}
 	if got.WorkspaceRoot != values["OMNIGREX_WORKSPACE_ROOT"] || got.MiseRoot != values["OMNIGREX_MISE_ROOT"] ||
-		got.MCPAddr != values["OMNIGREX_MCP_ADDR"] || got.MCPEndpointURL != values["OMNIGREX_MCP_ENDPOINT_URL"] {
-		t.Errorf("workspace/MCP settings = (%q, %q, %q, %q)", got.WorkspaceRoot, got.MiseRoot, got.MCPAddr, got.MCPEndpointURL)
+		got.MCPAddr != values["OMNIGREX_MCP_ADDR"] || got.MCPEndpointURL != values["OMNIGREX_MCP_ENDPOINT_URL"] || got.MCPMutationOperationTimeout != 17*time.Minute {
+		t.Errorf("workspace/MCP settings = (%q, %q, %q, %q, %s)", got.WorkspaceRoot, got.MiseRoot, got.MCPAddr, got.MCPEndpointURL, got.MCPMutationOperationTimeout)
 	}
 	if got.RuntimeStateVolume != values["OMNIGREX_RUNTIME_STATE_VOLUME"] {
 		t.Errorf("RuntimeStateVolume = %q, want %q", got.RuntimeStateVolume, values["OMNIGREX_RUNTIME_STATE_VOLUME"])
@@ -154,6 +175,9 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.GitHubAPIURL != values["OMNIGREX_GITHUB_API_URL"] || got.GitHubDeveloperAppID != 303 || got.GitHubReviewerAppID != 404 {
 		t.Errorf("GitHub API/App config = (%q, %d, %d)", got.GitHubAPIURL, got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
 	}
+	if got.GitRemoteBaseURL != values["OMNIGREX_GIT_REMOTE_BASE_URL"] {
+		t.Errorf("GitRemoteBaseURL = %q, want %q", got.GitRemoteBaseURL, values["OMNIGREX_GIT_REMOTE_BASE_URL"])
+	}
 	if got.GitHubDeveloperPrivateKeyFile != values["OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"] || got.GitHubReviewerPrivateKeyFile != values["OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"] || got.GitHubWebhookSecretFile != values["OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"] {
 		t.Errorf("GitHub secret file config = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
 	}
@@ -165,6 +189,12 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	}
 	if got.AgentTurnPreparationLeaseDuration != time.Minute || got.AgentTurnPreparationHeartbeatInterval != 15*time.Second || got.AgentTurnPreparationPollInterval != 750*time.Millisecond || got.AgentTurnPreparationRetryDelay != 3*time.Second {
 		t.Errorf("Agent Turn preparation timing = (%s, %s, %s, %s)", got.AgentTurnPreparationLeaseDuration, got.AgentTurnPreparationHeartbeatInterval, got.AgentTurnPreparationPollInterval, got.AgentTurnPreparationRetryDelay)
+	}
+	if got.AgentTurnExecutionLeaseDuration != 45*time.Second || got.AgentTurnExecutionHeartbeatInterval != 15*time.Second || got.AgentTurnExecutionPollInterval != 400*time.Millisecond || got.AgentTurnExecutionTurnTimeout != 3*time.Hour || got.AgentTurnExecutionCleanupTimeout != 12*time.Second {
+		t.Errorf("Agent Turn execution timing = (%s, %s, %s, %s, %s)", got.AgentTurnExecutionLeaseDuration, got.AgentTurnExecutionHeartbeatInterval, got.AgentTurnExecutionPollInterval, got.AgentTurnExecutionTurnTimeout, got.AgentTurnExecutionCleanupTimeout)
+	}
+	if got.WorkflowEffectLeaseDuration != time.Minute || got.WorkflowEffectHeartbeatInterval != 20*time.Second || got.WorkflowEffectPollInterval != 600*time.Millisecond || got.WorkflowEffectRetryDelay != 4*time.Second {
+		t.Errorf("Workflow effect timing = (%s, %s, %s, %s)", got.WorkflowEffectLeaseDuration, got.WorkflowEffectHeartbeatInterval, got.WorkflowEffectPollInterval, got.WorkflowEffectRetryDelay)
 	}
 	if got.AssignmentRetentionDuration != 48*time.Hour || got.AgentTurnConcurrencyLimit != 7 {
 		t.Errorf("workflow limits = (%s, %d), want (48h, 7)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
@@ -202,6 +232,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "malformed deployment platform", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "linux"},
 		{name: "GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "://invalid"},
 		{name: "insecure GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "http://github.example"},
+		{name: "insecure Git remote base URL", key: "OMNIGREX_GIT_REMOTE_BASE_URL", value: "http://github.example"},
+		{name: "credentialed Git remote base URL", key: "OMNIGREX_GIT_REMOTE_BASE_URL", value: "https://credential-sentinel@github.example"},
+		{name: "unclean Git remote base path", key: "OMNIGREX_GIT_REMOTE_BASE_URL", value: "https://github.example/source/../repos"},
 		{name: "Developer App ID", key: "OMNIGREX_GITHUB_DEVELOPER_APP_ID", value: "0"},
 		{name: "Reviewer App ID", key: "OMNIGREX_GITHUB_REVIEWER_APP_ID", value: "not-an-id"},
 		{name: "Developer private key file", key: "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE", value: "relative.pem"},
@@ -230,6 +263,21 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "preparation retry value", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "0s"},
 		{name: "preparation retry below Store precision", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "1ns"},
 		{name: "preparation retry above Store maximum", key: "OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY", value: "8760h1us"},
+		{name: "execution lease value", key: "OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION", value: "0s"},
+		{name: "execution heartbeat value", key: "OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL", value: "0s"},
+		{name: "execution heartbeat reaches lease", key: "OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL", value: "30s"},
+		{name: "execution poll value", key: "OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL", value: "0s"},
+		{name: "execution turn timeout syntax", key: "OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT", value: "eventually"},
+		{name: "execution turn timeout above maximum", key: "OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT", value: "8760h1us"},
+		{name: "execution cleanup value", key: "OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT", value: "0s"},
+		{name: "MCP mutation operation timeout syntax", key: "OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT", value: "eventually"},
+		{name: "MCP mutation operation timeout below precision", key: "OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT", value: "1ns"},
+		{name: "MCP mutation operation timeout above maximum", key: "OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT", value: "8760h1us"},
+		{name: "Workflow effect lease value", key: "OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION", value: "0s"},
+		{name: "Workflow effect heartbeat value", key: "OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL", value: "0s"},
+		{name: "Workflow effect heartbeat reaches lease", key: "OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL", value: "30s"},
+		{name: "Workflow effect poll value", key: "OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL", value: "0s"},
+		{name: "Workflow effect retry above maximum", key: "OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY", value: "8760h1us"},
 		{name: "assignment retention syntax", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "later"},
 		{name: "assignment retention value", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "0s"},
 		{name: "Agent Turn concurrency syntax", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "many"},
@@ -246,6 +294,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			if err == nil {
 				t.Fatal("Load() error = nil, want validation error")
 			}
+			if strings.Contains(err.Error(), "credential-sentinel") {
+				t.Fatalf("Load() error disclosed credentials: %v", err)
+			}
 		})
 	}
 }
@@ -256,16 +307,54 @@ func TestLoadAcceptsAgentTurnPreparationDurationBoundaries(t *testing.T) {
 		overrides map[string]string
 	}{
 		{name: "minimum", overrides: map[string]string{
+			"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":            "1us",
 			"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "2us",
 			"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "1us",
 			"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "1us",
 			"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "1us",
 		}},
 		{name: "maximum", overrides: map[string]string{
+			"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":            "8760h",
 			"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "8760h",
 			"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "8759h59m59.999999s",
 			"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "8760h",
 			"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "8760h",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := config.Load(environment(test.overrides)); err != nil {
+				t.Fatalf("Load() boundary error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsPhase8WorkerDurationBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "minimum", overrides: map[string]string{
+			"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":     "2us",
+			"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL": "1us",
+			"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":      "1us",
+			"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":       "1us",
+			"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":    "1us",
+			"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":          "2us",
+			"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":      "1us",
+			"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":           "1us",
+			"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":             "1us",
+		}},
+		{name: "maximum", overrides: map[string]string{
+			"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":     "8760h",
+			"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL": "8759h59m59.999999s",
+			"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":      "8760h",
+			"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":       "8760h",
+			"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":    "8760h",
+			"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":          "8760h",
+			"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":      "8759h59m59.999999s",
+			"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":           "8760h",
+			"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":             "8760h",
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

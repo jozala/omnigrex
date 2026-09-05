@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/workflowaction"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -113,23 +115,26 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		reviewer:  reviewerRepositoryCredentials,
 	}
 	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub:      githubServices.api,
-		Credentials: repositoryCredentials,
-		Publisher:   workspaces,
-		Workflow:    mcp.LedgerWorkflowMutations{},
+		GitHub:           githubServices.api,
+		Credentials:      repositoryCredentials,
+		Publisher:        workspaces,
+		Workflow:         mcp.LedgerWorkflowMutations{},
+		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP tool backend: %w", err)
 	}
 	toolGateway, err := mcp.New(mcp.Config{
 		EndpointURL: settings.MCPEndpointURL, Store: database, Backend: toolBackend,
-		Ledger: readLedger, LifecycleContext: ctx,
+		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
+		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP Tool Gateway: %w", err)
 	}
 	mutationReconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
 		GitHub: githubServices.api, Credentials: repositoryCredentials, Publications: workspaces,
+		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP mutation reconciler: %w", err)
@@ -171,17 +176,94 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure stale Runtime Process stop Worker: %w", err)
 	}
+	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
 		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
-		Sessions: runtimesession.NewCoordinator(database), Network: settings.DockerAgentNetwork,
+		Sessions: sessions, Network: settings.DockerAgentNetwork,
 		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
 		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
 	}
-	_ = runtimeLauncher // Phase 8's execution Worker owns launch and prompt lifecycle.
+	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: database, GitHub: githubServices.api,
+	})
+	if err != nil {
+		return fmt.Errorf("configure Agent Turn outcome reconciler: %w", err)
+	}
+	developerProviderCredentialJSON, err := readNonemptyJSONObject(settings.DeveloperProviderCredentialsFile)
+	if err != nil {
+		return fmt.Errorf("read Developer provider credentials: %w", err)
+	}
+	reviewerProviderCredentialJSON, err := readNonemptyJSONObject(settings.ReviewerProviderCredentialsFile)
+	if err != nil {
+		zeroBytes(developerProviderCredentialJSON)
+		return fmt.Errorf("read Reviewer provider credentials: %w", err)
+	}
+	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
+		Store: database, DeveloperCredentials: developerRepositoryCredentials,
+		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
+		Launcher: runtimeLauncher, Sessions: sessions, Outcomes: outcomeReconciler, Workspace: workspaces,
+	}, agentturn.ExecutionWorkerConfig{
+		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
+		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
+		TurnTimeout: settings.AgentTurnExecutionTurnTimeout, CleanupTimeout: settings.AgentTurnExecutionCleanupTimeout,
+		ConcurrencyLimit: settings.AgentTurnConcurrencyLimit, DeveloperProviderCredentialJSON: developerProviderCredentialJSON,
+		ReviewerProviderCredentialJSON: reviewerProviderCredentialJSON, GitRemoteBaseURL: settings.GitRemoteBaseURL,
+		OnError: func(err error) {
+			logger.Error("execute Agent Turn", "error", err)
+		},
+	})
+	zeroBytes(developerProviderCredentialJSON)
+	zeroBytes(reviewerProviderCredentialJSON)
+	if executionWorkerErr != nil {
+		return fmt.Errorf("configure Agent Turn execution Worker: %w", executionWorkerErr)
+	}
+	reconciliationWorker, err := webhook.NewReconciliationWorker(database, githubServices.webhookProcessor, webhook.ReconciliationWorkerConfig{
+		ClaimOwner: githubServices.claimOwner + ":reconcile-pending-events", LeaseDuration: settings.WorkflowEffectLeaseDuration,
+		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
+		RetryDelay: settings.WorkflowEffectRetryDelay,
+		OnError: func(err error) {
+			logger.Error("reconcile pending Workflow events", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure pending-event reconciliation Worker: %w", err)
+	}
+	labelWorker, err := githubapi.NewLabelWorker(database, developerRepositoryCredentials, githubServices.api, githubapi.VisibleEffectWorkerConfig{
+		ClaimOwner: githubServices.claimOwner + ":reconcile-github-labels", LeaseDuration: settings.WorkflowEffectLeaseDuration,
+		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
+		RetryDelay: settings.WorkflowEffectRetryDelay,
+		OnError: func(err error) {
+			logger.Error("reconcile GitHub Workflow labels", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure GitHub label Worker: %w", err)
+	}
+	humanHandoffWorker, err := githubapi.NewHumanHandoffWorker(database, developerRepositoryCredentials, githubServices.api, githubapi.VisibleEffectWorkerConfig{
+		ClaimOwner: githubServices.claimOwner + ":publish-human-handoff", LeaseDuration: settings.WorkflowEffectLeaseDuration,
+		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
+		RetryDelay: settings.WorkflowEffectRetryDelay,
+		OnError: func(err error) {
+			logger.Error("publish GitHub Human Handoff", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure GitHub Human Handoff Worker: %w", err)
+	}
+	failureWorker, err := workflowaction.NewFailureWorker(database, workflowaction.FailureWorkerConfig{
+		ClaimOwner:    githubServices.claimOwner + ":escalate-workflow-action-failure",
+		LeaseDuration: settings.WorkflowEffectLeaseDuration, IdlePollInterval: settings.WorkflowEffectPollInterval,
+		OnError: func(err error) {
+			logger.Error("escalate Workflow action failure", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure Workflow action failure Worker: %w", err)
+	}
 
 	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
 		AgentNetwork:       settings.DockerAgentNetwork,
@@ -212,9 +294,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			return server.RunHandler(ctx, settings.MCPAddr, settings.ShutdownTimeout, logger, "mcp", toolGateway)
 		},
 		githubServices.webhookProcessor.Run,
+		reconciliationWorker.Run,
 		preparationWorker.Run,
+		executionWorker.Run,
 		runtimeStopWorker.Run,
 		mutationRecoveryWorker.Run,
+		labelWorker.Run,
+		humanHandoffWorker.Run,
+		failureWorker.Run,
 	)
 }
 
@@ -304,6 +391,33 @@ func readSecret(path string) ([]byte, error) {
 		return nil, errors.New("secret is empty")
 	}
 	return []byte(secret), nil
+}
+
+func readNonemptyJSONObject(path string) (json.RawMessage, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &object); err != nil || len(object) == 0 {
+		zeroBytes(contents)
+		for key, value := range object {
+			zeroBytes(value)
+			delete(object, key)
+		}
+		return nil, errors.New("file must contain a nonempty JSON object")
+	}
+	for key, value := range object {
+		zeroBytes(value)
+		delete(object, key)
+	}
+	return json.RawMessage(contents), nil
+}
+
+func zeroBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func runServices(ctx context.Context, services ...func(context.Context) error) error {

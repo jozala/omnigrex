@@ -66,7 +66,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	})
 
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
@@ -78,7 +78,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)
 	}
-	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "fence", "mcp-register", "docker-new", "turn-fence", "docker-create", "process-start", "fence", "acp-new", "session-prepare"}
+	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "refresh", "mcp-register", "docker-new", "turn-fence", "docker-create", "process-start", "fence", "acp-new", "session-prepare"}
 	if !reflect.DeepEqual(operations, wantPrefix) {
 		t.Fatalf("dependency operations = %v, want %v", operations, wantPrefix)
 	}
@@ -90,7 +90,8 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 	if gateway.scope.WorkflowID != runtimeTestWorkflow || gateway.scope.Role != workflow.RoleDeveloper ||
 		gateway.scope.Branch != "omnigrex/issue-17" || gateway.scope.DefaultBranch != "trunk" || gateway.scope.HeadSHA != runtimeTestDefaultSHA ||
-		gateway.scope.PullRequest != nil || gateway.scope.ExpiresAt != lease.LeaseExpiresAt || gateway.scope.Lease.ExecutionEpoch != 7 {
+		gateway.scope.PullRequest != nil || gateway.scope.ExpiresAt != handle.CurrentLease().LeaseExpiresAt ||
+		gateway.scope.ExpiresAt != lease.LeaseExpiresAt.Add(time.Minute) || gateway.scope.Lease.ExecutionEpoch != 7 {
 		t.Errorf("MCP token scope = %#v", gateway.scope)
 	}
 
@@ -182,7 +183,7 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			})
 
 			handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-				Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+				Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 				DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "unused-initial-branch",
 				RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 			})
@@ -227,7 +228,7 @@ func TestLauncherFenceFailureHasNoOtherDependencyAction(t *testing.T) {
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
@@ -256,14 +257,14 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	want := []string{"fence", "execution", "profile", "workspace", "mise", "fence"}
+	want := []string{"fence", "execution", "profile", "workspace", "mise", "refresh"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("dependency operations = %v, want %v", operations, want)
 	}
@@ -296,7 +297,7 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	launchResult := make(chan error, 1)
 	go func() {
 		_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-			Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+			Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 			DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 			RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 		})
@@ -343,7 +344,7 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 	launchResult := make(chan error, 1)
 	go func() {
 		handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-			Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+			Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 			DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 			RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 		})
@@ -398,7 +399,7 @@ func TestLauncherCleansCreatedProcessWhenStartCannotCrossRecoveryFence(t *testin
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
@@ -428,7 +429,7 @@ func TestLauncherRevalidatesFenceImmediatelyAfterStartAndCleansBeforeReturn(t *t
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
@@ -477,7 +478,7 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 			})
 
 			_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-				Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+				Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 				DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 				RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 			})
@@ -515,7 +516,7 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "unused",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
@@ -581,7 +582,32 @@ func TestRuntimeHandleCloseMCPIsIdempotentAcrossCleanup(t *testing.T) {
 	}
 }
 
-func TestRuntimeHandleCleanupRetriesMCPDrainBeforeTearingDownRuntime(t *testing.T) {
+func TestRuntimeHandleUnresolvedMCPDrainIsNotRetriedDuringCleanup(t *testing.T) {
+	operations := []string{}
+	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+	resources.gateway.drainErr = mcp.ErrMutationDrainUnresolved
+	operations = operations[:0]
+	resources.gateway.operations = &operations
+	resources.engineFactory.engine.operations = &operations
+	resources.engineFactory.engine.process.operations = &operations
+	resources.client.operations = &operations
+
+	if err := handle.CloseMCP(context.Background()); !errors.Is(err, mcp.ErrMutationDrainUnresolved) {
+		t.Fatalf("CloseMCP() error = %v, want ErrMutationDrainUnresolved", err)
+	}
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	if !reflect.DeepEqual(operations, want) {
+		t.Fatalf("cleanup operations = %v, want %v", operations, want)
+	}
+	if resources.gateway.drained != 1 {
+		t.Fatalf("CloseAndDrain calls = %d, want one", resources.gateway.drained)
+	}
+}
+
+func TestRuntimeHandleCleanupContinuesTeardownAndRetriesMCPDrain(t *testing.T) {
 	operations := []string{}
 	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
 	drainErr := context.DeadlineExceeded
@@ -596,7 +622,7 @@ func TestRuntimeHandleCleanupRetriesMCPDrainBeforeTearingDownRuntime(t *testing.
 	if !errors.Is(err, drainErr) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -605,9 +631,60 @@ func TestRuntimeHandleCleanupRetriesMCPDrainBeforeTearingDownRuntime(t *testing.
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want = []string{"mcp-close-and-drain", "mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want = []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "mcp-close-and-drain"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
+	}
+}
+
+func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	handle, resources, err := launchRuntimeForRoleCleanupFailure(t, &operations, workflow.RoleReviewer, proposal, nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	resources.gateway.drainErr = context.DeadlineExceeded
+	operations = operations[:0]
+	resources.gateway.operations = &operations
+	resources.workspace.operations = &operations
+	resources.engineFactory.engine.operations = &operations
+	resources.engineFactory.engine.process.operations = &operations
+	resources.client.operations = &operations
+
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
+	}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "workspace-discard", "docker-close"}
+	if !reflect.DeepEqual(operations, want) {
+		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
+	}
+}
+
+func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t *testing.T) {
+	operations := []string{}
+	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+	resources.gateway.drainWait = true
+	operations = operations[:0]
+	resources.gateway.operations = &operations
+	resources.engineFactory.engine.operations = &operations
+	resources.engineFactory.engine.process.operations = &operations
+	resources.client.operations = &operations
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	if err := handle.Cleanup(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
+	}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	if !reflect.DeepEqual(operations, want) {
+		t.Fatalf("cleanup operations = %v, want %v", operations, want)
+	}
+	if resources.engineFactory.engine.process.stopContextErr != nil || resources.engineFactory.engine.process.removeContextErr != nil {
+		t.Fatalf("teardown received canceled context: stop %v, remove %v", resources.engineFactory.engine.process.stopContextErr, resources.engineFactory.engine.process.removeContextErr)
 	}
 }
 
@@ -841,6 +918,39 @@ func TestLauncherFailureCleansResourcesAndRedactsEveryCredential(t *testing.T) {
 	}
 }
 
+func TestLauncherFailureReturnsRecoverableHandleWhenCleanupCannotProveRemoval(t *testing.T) {
+	operations := []string{}
+	cleanupFailure := errors.New("remove failed with repository-secret provider-secret mcp-secret")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(
+		t, &operations, workflow.RoleDeveloper, nil, errors.New("prepare failed"),
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.removeErr = cleanupFailure
+		},
+	)
+	if err == nil || handle == nil {
+		t.Fatalf("Launch() = (%#v, %v), want recoverable handle and failure", handle, err)
+	}
+	if handle.PromptClient() != nil {
+		t.Fatal("failed launch returned a stale prompt capability")
+	}
+	for _, secret := range []string{runtimeTestCredential, runtimeTestProviderKey, "mcp-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Launch() cleanup error exposes credential %q: %v", secret, err)
+		}
+	}
+	if resources.engineFactory.engine.process.removed != 1 || resources.engineFactory.engine.closed != 0 {
+		t.Fatalf("initial cleanup = removed %d, engine closed %d", resources.engineFactory.engine.process.removed, resources.engineFactory.engine.closed)
+	}
+
+	resources.engineFactory.engine.process.removeErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatalf("recoverable handle Cleanup() error = %v", err)
+	}
+	if resources.engineFactory.engine.process.removed != 2 || resources.engineFactory.engine.closed != 1 {
+		t.Fatalf("retried cleanup = removed %d, engine closed %d", resources.engineFactory.engine.process.removed, resources.engineFactory.engine.closed)
+	}
+}
+
 type runtimeLaunchResources struct {
 	store         *runtimeStore
 	workspace     *runtimeWorkspace
@@ -863,6 +973,10 @@ func launchRuntimeForCleanupFailure(t *testing.T, operations *[]string, sessionE
 }
 
 func launchRuntimeForRoleCleanupFailure(t *testing.T, operations *[]string, role workflow.Role, proposal *store.AgentTurnChangeProposal, sessionErr error) (*agentturn.RuntimeHandle, *runtimeLaunchResources, error) {
+	return launchRuntimeForRoleCleanupFailureConfigured(t, operations, role, proposal, sessionErr, nil)
+}
+
+func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]string, role workflow.Role, proposal *store.AgentTurnChangeProposal, sessionErr error, configure func(*runtimeLaunchResources)) (*agentturn.RuntimeHandle, *runtimeLaunchResources, error) {
 	t.Helper()
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, role, proposal)
@@ -884,12 +998,16 @@ func launchRuntimeForRoleCleanupFailure(t *testing.T, operations *[]string, role
 		Sessions: &runtimeSessionPreparer{operations: operations, err: sessionErr},
 		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
+	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client}
+	if configure != nil {
+		configure(resources)
+	}
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
-		Lease: lease, RepositoryURL: "https://github.example/acme/widgets.git",
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
-	return handle, &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client}, err
+	return handle, resources, err
 }
 
 func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.Launcher {
@@ -963,6 +1081,24 @@ type runtimeStore struct {
 	turnFence          sync.Mutex
 	withFenceAttempted chan struct{}
 	withFenceErr       error
+}
+
+func (database *runtimeStore) RefreshAgentTurnLease(_ context.Context, lease store.AgentTurnLease, extension time.Duration) (store.AgentTurnLease, error) {
+	*database.operations = append(*database.operations, "refresh")
+	if database.fenceCalls < len(database.fenceErrors) {
+		err := database.fenceErrors[database.fenceCalls]
+		database.fenceCalls++
+		if err != nil {
+			return store.AgentTurnLease{}, err
+		}
+	} else {
+		database.fenceCalls++
+		if database.fenceErr != nil {
+			return store.AgentTurnLease{}, database.fenceErr
+		}
+	}
+	lease.LeaseExpiresAt = lease.LeaseExpiresAt.Add(extension)
+	return lease, nil
 }
 
 func (database *runtimeStore) ValidateTurnFence(context.Context, store.AgentTurnLease) error {
@@ -1049,6 +1185,7 @@ type runtimeGateway struct {
 	revoked      int
 	drained      int
 	drainErr     error
+	drainWait    bool
 }
 
 func (gateway *runtimeGateway) Register(scope mcp.TokenScope) (mcp.Registration, error) {
@@ -1063,9 +1200,13 @@ func (gateway *runtimeGateway) Revoke(mcp.Registration) bool {
 	return true
 }
 
-func (gateway *runtimeGateway) CloseAndDrain(context.Context, mcp.Registration) error {
+func (gateway *runtimeGateway) CloseAndDrain(ctx context.Context, _ mcp.Registration) error {
 	*gateway.operations = append(*gateway.operations, "mcp-close-and-drain")
 	gateway.drained++
+	if gateway.drainWait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return gateway.drainErr
 }
 
@@ -1109,16 +1250,18 @@ func (engine *runtimeEngine) Close() error {
 }
 
 type runtimeProcess struct {
-	operations   *[]string
-	transport    io.ReadWriteCloser
-	stopped      int
-	removed      int
-	stopErr      error
-	removeErr    error
-	startErr     error
-	started      int
-	startEntered chan<- struct{}
-	releaseStart <-chan struct{}
+	operations       *[]string
+	transport        io.ReadWriteCloser
+	stopped          int
+	removed          int
+	stopErr          error
+	removeErr        error
+	startErr         error
+	started          int
+	startEntered     chan<- struct{}
+	releaseStart     <-chan struct{}
+	stopContextErr   error
+	removeContextErr error
 }
 
 func (process *runtimeProcess) Transport() io.ReadWriteCloser { return process.transport }
@@ -1133,14 +1276,16 @@ func (process *runtimeProcess) Start(context.Context) error {
 	}
 	return process.startErr
 }
-func (process *runtimeProcess) Stop(context.Context, time.Duration) error {
+func (process *runtimeProcess) Stop(ctx context.Context, _ time.Duration) error {
 	*process.operations = append(*process.operations, "process-stop")
 	process.stopped++
+	process.stopContextErr = ctx.Err()
 	return process.stopErr
 }
-func (process *runtimeProcess) Remove(context.Context) error {
+func (process *runtimeProcess) Remove(ctx context.Context) error {
 	*process.operations = append(*process.operations, "process-remove")
 	process.removed++
+	process.removeContextErr = ctx.Err()
 	return process.removeErr
 }
 

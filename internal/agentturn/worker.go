@@ -24,7 +24,7 @@ type WorkerStore interface {
 	AcknowledgeAssignmentConfigurationConflict(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AssignmentConfigurationHandoff, error)
 }
 
-// RepositoryCredentialProvider supplies a short-lived credential for reading Agent Profiles.
+// RepositoryCredentialProvider supplies a short-lived Role credential for repository access.
 type RepositoryCredentialProvider interface {
 	RepositoryCredential(context.Context, string, string) (string, error)
 }

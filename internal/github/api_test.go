@@ -1321,6 +1321,27 @@ func TestAPIClientSubmitsCommitBoundReviewWithValidatedInlineComments(t *testing
 	}
 }
 
+func TestAPIClientDeletesIssueCommentBySharedCommentID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete || request.URL.Path != "/repos/acme/widgets/issues/comments/602" {
+			t.Errorf("delete comment request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer installation-token" {
+			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("NewAPIClient() error = %v", err)
+	}
+
+	if err := client.DeleteIssueComment(context.Background(), "installation-token", "acme", "widgets", 602); err != nil {
+		t.Fatalf("DeleteIssueComment() error = %v", err)
+	}
+}
+
 func TestAPIClientAddsAndRemovesSpecificIssueLabels(t *testing.T) {
 	requestNumber := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

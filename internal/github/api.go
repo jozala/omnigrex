@@ -234,6 +234,7 @@ type API interface {
 	OpenPullRequest(context.Context, string, string, string, OpenPullRequestRequest) (PullRequest, error)
 	CreateIssueComment(context.Context, string, string, string, int, CommentRequest) (IssueComment, error)
 	CreatePullRequestComment(context.Context, string, string, string, int, CommentRequest) (IssueComment, error)
+	DeleteIssueComment(context.Context, string, string, string, int64) error
 	ListRepositoryLabels(context.Context, string, string, string) ([]Label, error)
 	ListIssueLabels(context.Context, string, string, string, int) ([]Label, error)
 	CreateRepositoryLabel(context.Context, string, string, string, Label) (Label, error)
@@ -1111,6 +1112,18 @@ func (client *APIClient) CreatePullRequestComment(ctx context.Context, installat
 		return IssueComment{}, &ConfigurationError{Cause: ErrInvalidPullRequestNumber}
 	}
 	return client.createComment(ctx, installationToken, owner, repository, pullRequestNumber, input)
+}
+
+// DeleteIssueComment deletes an Issue or Pull Request comment by its shared issue-comment ID.
+func (client *APIClient) DeleteIssueComment(ctx context.Context, installationToken, owner, repository string, commentID int64) error {
+	if err := validateRepository(owner, repository); err != nil {
+		return err
+	}
+	if commentID <= 0 {
+		return &ConfigurationError{Cause: ErrInvalidComment}
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", url.PathEscape(owner), url.PathEscape(repository), commentID)
+	return client.doJSON(ctx, http.MethodDelete, path, installationToken, nil, nil)
 }
 
 func (client *APIClient) createComment(ctx context.Context, installationToken, owner, repository string, number int, input CommentRequest) (IssueComment, error) {

@@ -26,6 +26,8 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 		return event.EventMetadata, EventKindAgentTurnPreparationFailed, true
 	case AgentTurnMutationReconciliationExhaustedEvent:
 		return event.EventMetadata, EventKindAgentTurnMutationReconciliationExhausted, true
+	case WorkflowActionExhaustedEvent:
+		return event.EventMetadata, EventKindWorkflowActionExhausted, true
 	default:
 		return EventMetadata{}, "", false
 	}
@@ -72,6 +74,8 @@ func validEvent(event Event, metadata EventMetadata) bool {
 		return validRole(event.Role) && event.Diagnostic != ""
 	case AgentTurnMutationReconciliationExhaustedEvent:
 		return validRole(event.Role) && event.Diagnostic != ""
+	case WorkflowActionExhaustedEvent:
+		return (event.ResumeRole == "" || validRole(event.ResumeRole)) && event.Diagnostic != ""
 	default:
 		return false
 	}
@@ -207,6 +211,8 @@ func legalInState(state State, kind EventKind) bool {
 		return state == StateDeveloping || state == StateReviewing
 	case EventKindAgentTurnMutationReconciliationExhausted:
 		return state == StateDeveloping || state == StateReviewing
+	case EventKindWorkflowActionExhausted:
+		return state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	default:
 		return false
 	}

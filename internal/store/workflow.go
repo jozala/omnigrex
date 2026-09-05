@@ -19,6 +19,12 @@ var (
 	ErrWorkflowDecisionInvalid = errors.New("workflow transition returned an invalid decision")
 	// ErrPendingEventReconciliationFenceLost means reconciliation ownership or immutable identity is stale.
 	ErrPendingEventReconciliationFenceLost = errors.New("pending event reconciliation fence lost")
+	// ErrPendingEventReconciliationPayloadInvalid means a fenced reconciliation job has an invalid durable payload.
+	ErrPendingEventReconciliationPayloadInvalid = errors.New("pending event reconciliation payload is invalid")
+	// ErrPendingNormalizedEventInvalid means persisted normalized event content is malformed or contradicts its durable envelope.
+	ErrPendingNormalizedEventInvalid = errors.New("invalid pending normalized event")
+	// ErrPendingEventCausalGap means no linked synchronization can advance the durable Change Proposal head.
+	ErrPendingEventCausalGap = errors.New("pending event synchronization has a causal gap")
 	// ErrClosureSettlementFenceLost means closure job ownership or immutable identity is stale.
 	ErrClosureSettlementFenceLost = errors.New("closure settlement fence lost")
 	// ErrClosureSettlementUnsettled means a closure stop or admitted mutation still needs acknowledgement.
@@ -70,6 +76,29 @@ func (store *Store) GetWorkflowRepository(ctx context.Context, workflowID string
 	return repository, nil
 }
 
+// GetChangeProposalReview returns a previously recorded review identity in one repository.
+func (store *Store) GetChangeProposalReview(ctx context.Context, repositoryID, reviewID int64) (*workflow.ReviewIdentity, error) {
+	if repositoryID <= 0 || reviewID <= 0 {
+		return nil, errors.New("get Change Proposal review: invalid identity")
+	}
+	var review workflow.ReviewIdentity
+	err := store.pool.QueryRow(ctx, `
+SELECT review.review_id, review.review_node_id, proposal.pull_request_id,
+       review.actor_id, review.head_sha
+FROM change_proposal_reviews AS review
+JOIN change_proposals AS proposal ON proposal.id = review.change_proposal_id
+WHERE review.repository_id = $1 AND review.review_id = $2`, repositoryID, reviewID).Scan(
+		&review.ID, &review.NodeID, &review.ChangeProposalID, &review.ActorID, &review.HeadSHA,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get Change Proposal review: %w", err)
+	}
+	return &review, nil
+}
+
 // WorkflowTransition applies a pure reducer transition to a relationally rehydrated Snapshot.
 type WorkflowTransition func(workflow.Snapshot) workflow.Decision
 
@@ -88,6 +117,7 @@ type WorkflowApplication struct {
 type PendingTransitionFactory func(NormalizedEventRecord) (WorkflowLocator, WorkflowTransition, error)
 
 type workflowEnvelope struct {
+	eventName, action               string
 	repositoryID                    int64
 	repositoryOwner, repositoryName string
 	issueID, issueNumber            int64
@@ -476,6 +506,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, workflowID,
 }
 
 func persistAppliedDecision(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	return persistAppliedDecisionWithProvenance(ctx, tx, deliveryID, "", workflowID, current, decision, actionNamespace)
+}
+
+func persistAppliedSettlementDecision(ctx context.Context, tx pgx.Tx, settlementID, workflowID string, current workflow.Snapshot, decision workflow.Decision) error {
+	return persistAppliedDecisionWithProvenance(ctx, tx, "", settlementID, workflowID, current, decision, "")
+}
+
+func persistAppliedDecisionWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
 	if decision.Reason == workflow.ReasonClosureSettled {
 		if err := requireClosureSettlementBarrier(ctx, tx, workflowID, current); err != nil {
 			return err
@@ -525,7 +563,7 @@ WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
-	if err := persistWorkflowActions(ctx, tx, deliveryID, workflowID, decision, actionNamespace); err != nil {
+	if err := persistWorkflowActionsWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, decision, actionNamespace); err != nil {
 		return err
 	}
 	return nil
@@ -624,6 +662,10 @@ type preparedTurnIntent struct {
 }
 
 func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, decision workflow.Decision, actionNamespace string) error {
+	return persistWorkflowActionsWithProvenance(ctx, tx, deliveryID, "", workflowID, decision, actionNamespace)
+}
+
+func persistWorkflowActionsWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, decision workflow.Decision, actionNamespace string) error {
 	intent := preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 	labels := false
 	consumeRun := false
@@ -641,7 +683,7 @@ func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflow
 		case workflow.ReconcileLabelsAction:
 			labels, labelAction = true, action
 		case workflow.RecordReviewAction:
-			if err := recordChangeProposalReview(ctx, tx, deliveryID, workflowID, action); err != nil {
+			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, workflowID, action); err != nil {
 				return err
 			}
 		case workflow.MarkHumanHandoffAction:
@@ -650,7 +692,13 @@ func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflow
 					return fmt.Errorf("mark attempt human handoff: %w", err)
 				}
 			}
-			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", map[string]any{"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision}, nil); err != nil {
+			handoffPayload := map[string]any{
+				"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision,
+			}
+			if decision.Snapshot.ChangeProposal != nil {
+				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
+			}
+			if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload, nil); err != nil {
 				return err
 			}
 		case workflow.CloseMutationAdmissionAction:
@@ -696,7 +744,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 				return err
 			}
 		case workflow.ReconcilePendingEventsAction:
-			if err := enqueueReconcilePendingEventsJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), decision.Snapshot.Revision, action); err != nil {
+			if err := enqueueReconcilePendingEventsJob(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), decision.Snapshot.Revision, action); err != nil {
 				return err
 			}
 		case workflow.RecordPendingEventAction, workflow.CompleteAttemptAction, workflow.CreateAttemptAction:
@@ -705,7 +753,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		}
 	}
 	if intent.set {
-		if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
+		if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
 			"mode": intent.mode, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
 			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
 			"revision": decision.Snapshot.Revision,
@@ -717,7 +765,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		if labelAction.State == "" {
 			labelAction.State = decision.Snapshot.State
 		}
-		if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
+		if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
 			"state": labelAction.State, "ready_for_sha": labelAction.ReadyForSHA,
 			"consume_run": consumeRun, "revision": decision.Snapshot.Revision,
 		}, nil); err != nil {
@@ -734,7 +782,7 @@ func namespacedWorkflowActionKey(namespace, action string) string {
 	return namespace + ":" + action
 }
 
-func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, attemptID string, revision uint64, action workflow.ReconcilePendingEventsAction) error {
+func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID string, revision uint64, action workflow.ReconcilePendingEventsAction) error {
 	rows, err := tx.Query(ctx, `
 SELECT event.delivery_id::text, event.deferred_for_turn_id::text,
 	   turn.execution_epoch, turn.control_revision, turn.agent_session_id::text,
@@ -805,14 +853,16 @@ ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.Tur
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
     idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id, action_key
+    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id,
+    agent_turn_settlement_id, action_key
 )
 VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 3,
-        $5, $6, $7, $8, $9, $10, $11, $12, 'reconcile-pending-events')
+        $5, $6, $7, $8, $9, $10, $11, $12, $13, 'reconcile-pending-events')
 ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`,
 		jobID, WorkflowActionQueue, ReconcilePendingEventsJobKind, payloadJSON,
-		fmt.Sprintf("workflow:%s:delivery:%s:action:reconcile-pending-events", workflowID, deliveryID),
-		workflowID, attemptID, sourceAssignmentID, sourceSessionID, sourceTurnID, sourceEpoch, deliveryID)
+		workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "reconcile-pending-events"),
+		workflowID, attemptID, sourceAssignmentID, sourceSessionID, sourceTurnID, sourceEpoch,
+		nullableString(deliveryID), nullableString(settlementID))
 	if err != nil {
 		return fmt.Errorf("enqueue pending-event reconciliation: %w", err)
 	}
@@ -820,7 +870,8 @@ ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT N
 		var existingPayload []byte
 		if err := tx.QueryRow(ctx, `
 SELECT id::text, payload FROM jobs
-WHERE normalized_event_id = $1 AND action_key = 'reconcile-pending-events'`, deliveryID).Scan(&jobID, &existingPayload); err != nil {
+WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
+  AND action_key = 'reconcile-pending-events'`, nullableString(deliveryID), nullableString(settlementID)).Scan(&jobID, &existingPayload); err != nil {
 			return fmt.Errorf("read pending-event reconciliation job: %w", err)
 		}
 		canonicalExisting, _ := canonicalJSON(existingPayload)
@@ -857,6 +908,10 @@ func currentAttemptID(snapshot workflow.Snapshot) string {
 }
 
 func enqueueWorkflowJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
+	return enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, "", workflowID, attemptID, actionKey, kind, value, availableAt)
+}
+
+func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode %s action: %w", actionKey, err)
@@ -865,29 +920,32 @@ func enqueueWorkflowJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, 
 	if err != nil {
 		return err
 	}
-	idempotencyKey := fmt.Sprintf("workflow:%s:delivery:%s:action:%s", workflowID, deliveryID, actionKey)
+	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, actionKey)
 	normalizedEventID := nullableString(deliveryID)
+	settlementProvenanceID := nullableString(settlementID)
 	provenanceActionKey := nullableString(actionKey)
-	if deliveryID == "" {
+	if deliveryID == "" && settlementID == "" {
 		provenanceActionKey = nil
 	}
 	query := `
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, normalized_event_id, action_key
+    idempotency_key, workflow_id, workflow_attempt_id, normalized_event_id,
+    agent_turn_settlement_id, action_key
 )
 VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, COALESCE($5, clock_timestamp()), 3,
-        $6, $7, $8, $9, $10)
+        $6, $7, $8, $9, $10, $11)
 ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`
 	result, err := tx.Exec(ctx, query, jobID, WorkflowActionQueue, kind, payload, availableAt,
-		idempotencyKey, workflowID, nullableString(attemptID), normalizedEventID, provenanceActionKey)
+		idempotencyKey, workflowID, nullableString(attemptID), normalizedEventID,
+		settlementProvenanceID, provenanceActionKey)
 	if err != nil {
 		return fmt.Errorf("enqueue %s action: %w", actionKey, err)
 	}
 	if result.RowsAffected() == 0 {
 		var existingKind string
 		var existingPayload []byte
-		if err := tx.QueryRow(ctx, `SELECT kind, payload FROM jobs WHERE normalized_event_id = $1 AND action_key = $2`, deliveryID, actionKey).Scan(&existingKind, &existingPayload); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT kind, payload FROM jobs WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2) AND action_key = $3`, nullableString(deliveryID), nullableString(settlementID), actionKey).Scan(&existingKind, &existingPayload); err != nil {
 			return fmt.Errorf("verify %s action: %w", actionKey, err)
 		}
 		canonical, _ := canonicalJSON(payload)
@@ -897,6 +955,27 @@ ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT N
 		}
 	}
 	return nil
+}
+
+func workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, actionKey string) string {
+	if settlementID != "" {
+		return fmt.Sprintf("workflow:%s:settlement:%s:action:%s", workflowID, settlementID, actionKey)
+	}
+	return fmt.Sprintf("workflow:%s:delivery:%s:action:%s", workflowID, deliveryID, actionKey)
+}
+
+func readWorkflowJobActionProvenance(ctx context.Context, tx pgx.Tx, jobID string) (string, string, error) {
+	var deliveryID, settlementID string
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(normalized_event_id::text, ''),
+       COALESCE(agent_turn_settlement_id::text, '')
+FROM jobs WHERE id = $1`, jobID).Scan(&deliveryID, &settlementID); err != nil {
+		return "", "", err
+	}
+	if (deliveryID == "") == (settlementID == "") {
+		return "", "", ErrWorkflowDecisionInvalid
+	}
+	return deliveryID, settlementID, nil
 }
 
 func closeMutationAdmissionTx(ctx context.Context, tx pgx.Tx, guard workflow.TurnGuard) error {
@@ -1068,7 +1147,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, clock_timestamp()), $10, $1
 	return nil
 }
 
-func recordChangeProposalReview(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, action workflow.RecordReviewAction) error {
+func recordChangeProposalReview(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, action workflow.RecordReviewAction) error {
 	var proposalID string
 	if err := tx.QueryRow(ctx, `
 SELECT id::text FROM change_proposals
@@ -1083,17 +1162,20 @@ WHERE workflow_id = $1 AND repository_id = (SELECT repository_id FROM workflows 
 	result, err := tx.Exec(ctx, `
 INSERT INTO change_proposal_reviews (
     repository_id, review_id, review_node_id, change_proposal_id,
-    actor_id, head_sha, accepted, normalized_event_id
+    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (repository_id, review_id) DO NOTHING`, repositoryID, action.Review.ID,
 		action.Review.NodeID, proposalID, action.Review.ActorID, action.Review.HeadSHA,
-		action.Accepted, deliveryID)
+		action.Accepted, nullableString(deliveryID), nullableString(settlementID))
 	if err != nil {
 		return fmt.Errorf("record change proposal review: %w", err)
 	}
 	if result.RowsAffected() == 1 {
 		return nil
+	}
+	if settlementID != "" {
+		return errors.New("change proposal review already has different provenance")
 	}
 	var nodeID, existingProposalID, headSHA string
 	var actorID int64

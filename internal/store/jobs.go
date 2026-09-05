@@ -210,9 +210,20 @@ LIMIT 1`, queue, kind).Scan(&jobID)
 		return nil, fmt.Errorf("select claimable job: %w", err)
 	}
 
+	claimed, err := leaseJobTx(ctx, tx, jobID, owner, token, lease)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit job claim: %w", err)
+	}
+	return claimed, nil
+}
+
+func leaseJobTx(ctx context.Context, tx pgx.Tx, jobID, owner, token string, lease time.Duration) (*JobLease, error) {
 	var attempt int
 	var leasedAt, expiresAt time.Time
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 UPDATE jobs
 SET status = 'LEASED',
     attempt_count = attempt_count + 1,
@@ -245,9 +256,6 @@ VALUES ($1, $2, $3, $4, 'LEASED', $5, $6)`, jobID, attempt, owner, token, leased
 	job, err := scanJob(row)
 	if err != nil {
 		return nil, fmt.Errorf("read claimed job: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit job claim: %w", err)
 	}
 	return &JobLease{Job: job, Attempt: attempt}, nil
 }
@@ -380,7 +388,7 @@ func (store *Store) ReclaimExpiredJobs(ctx context.Context, limit int) (int, err
 
 func reclaimExpiredJobsTx(ctx context.Context, tx pgx.Tx, limit int, queue, kind string) (int, error) {
 	rows, err := tx.Query(ctx, `
-SELECT id::text, attempt_count, max_attempts, lease_token::text
+SELECT id::text, attempt_count, max_attempts, lease_token::text, kind
 FROM jobs
 WHERE status = 'LEASED'
   AND kind <> 'RUN_AGENT_TURN'
@@ -394,13 +402,13 @@ LIMIT $1`, limit, queue, kind)
 		return 0, err
 	}
 	type expiredJob struct {
-		id, token            string
+		id, token, kind      string
 		attempt, maxAttempts int
 	}
 	var expired []expiredJob
 	for rows.Next() {
 		var job expiredJob
-		if err := rows.Scan(&job.id, &job.attempt, &job.maxAttempts, &job.token); err != nil {
+		if err := rows.Scan(&job.id, &job.attempt, &job.maxAttempts, &job.token, &job.kind); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -418,6 +426,15 @@ SET status = 'EXPIRED', finished_at = clock_timestamp(), retryable = $4, last_er
 WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`,
 			job.id, job.attempt, job.token, job.attempt < job.maxAttempts); err != nil {
 			return 0, err
+		}
+		if job.attempt >= job.maxAttempts && isExhaustionAwareWorkflowAction(job.kind) {
+			expiredAction, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, job.id))
+			if err != nil {
+				return 0, err
+			}
+			if err := exhaustExpiredWorkflowActionTx(ctx, tx, expiredAction); err != nil {
+				return 0, err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 UPDATE jobs

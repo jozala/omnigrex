@@ -441,12 +441,12 @@ func (store *Store) AcknowledgeAssignmentConfigurationConflict(ctx context.Conte
 	if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonAssignmentConfigurationConflict {
 		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
-	var normalizedEventID string
-	if err := tx.QueryRow(ctx, `SELECT normalized_event_id::text FROM jobs WHERE id = $1`, job.ID).Scan(&normalizedEventID); err != nil {
+	normalizedEventID, settlementID, err := readWorkflowJobActionProvenance(ctx, tx, job.ID)
+	if err != nil {
 		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	actionNamespace := "prepare-agent-turn:" + job.ID
-	if err := persistAppliedDecision(ctx, tx, normalizedEventID, job.WorkflowID, snapshot, decision, actionNamespace); err != nil {
+	if err := persistAppliedDecisionWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, snapshot, decision, actionNamespace); err != nil {
 		return AssignmentConfigurationHandoff{}, err
 	}
 	updated, err := tx.Exec(ctx, `
@@ -554,11 +554,11 @@ SELECT EXISTS (
 		if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonAgentTurnPreparationFailed {
 			return AgentTurnPreparationFailureAcknowledgement{}, ErrAgentTurnPreparationFenceLost
 		}
-		var normalizedEventID string
-		if err := tx.QueryRow(ctx, `SELECT normalized_event_id::text FROM jobs WHERE id = $1`, job.ID).Scan(&normalizedEventID); err != nil {
+		normalizedEventID, settlementID, err := readWorkflowJobActionProvenance(ctx, tx, job.ID)
+		if err != nil {
 			return AgentTurnPreparationFailureAcknowledgement{}, ErrAgentTurnPreparationFenceLost
 		}
-		if err := persistAppliedDecision(ctx, tx, normalizedEventID, job.WorkflowID, snapshot, decision, "prepare-agent-turn:"+job.ID); err != nil {
+		if err := persistAppliedDecisionWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, snapshot, decision, "prepare-agent-turn:"+job.ID); err != nil {
 			return AgentTurnPreparationFailureAcknowledgement{}, err
 		}
 		if _, err := tx.Exec(ctx, `

@@ -1,12 +1,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,6 +16,8 @@ import (
 	"unicode"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -115,13 +119,14 @@ type ProductionBackend struct {
 	credentials RepositoryCredentials
 	publisher   WorkspacePublisher
 	workflow    WorkflowMutations
-	remoteBase  string
+	remoteBase  gitremote.BaseURL
 	identity    workspace.CommitIdentity
 
-	publicationMutex sync.Mutex
-	publicationLocks map[publicationTurn]*sync.Mutex
-	publishedHeads   map[publicationTurn]publicationHead
-	plannedHeads     map[publicationPlan]string
+	publicationMutex  sync.Mutex
+	publicationLocks  map[publicationTurn]*sync.Mutex
+	publishedHeads    map[publicationTurn]publicationHead
+	plannedHeads      map[publicationPlan]string
+	restoredMutations map[publicationTurn]map[string][sha256.Size]byte
 }
 
 type publicationTurn struct {
@@ -142,30 +147,29 @@ type publicationHead struct {
 }
 
 var (
-	_ Backend            = (*ProductionBackend)(nil)
-	_ MutationPlanner    = (*ProductionBackend)(nil)
-	_ TurnReleaser       = (*ProductionBackend)(nil)
-	_ GitHubAPI          = (*githubapi.APIClient)(nil)
-	_ WorkspacePublisher = (*workspace.Lifecycle)(nil)
+	_ Backend                = (*ProductionBackend)(nil)
+	_ MutationPlanner        = (*ProductionBackend)(nil)
+	_ MutationReplayRestorer = (*ProductionBackend)(nil)
+	_ TurnReleaser           = (*ProductionBackend)(nil)
+	_ GitHubAPI              = (*githubapi.APIClient)(nil)
+	_ WorkspacePublisher     = (*workspace.Lifecycle)(nil)
 )
 
 func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, error) {
 	if config.GitHub == nil || config.Credentials == nil || config.Publisher == nil || config.Workflow == nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
-	if config.GitRemoteBaseURL == "" {
-		config.GitRemoteBaseURL = "https://github.com"
-	}
-	parsed, err := url.Parse(config.GitRemoteBaseURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
+	if err != nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
-		workflow: config.Workflow, remoteBase: strings.TrimRight(config.GitRemoteBaseURL, "/"),
+		workflow: config.Workflow, remoteBase: remoteBase,
 		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
-		plannedHeads: make(map[publicationPlan]string),
+		plannedHeads:      make(map[publicationPlan]string),
+		restoredMutations: make(map[publicationTurn]map[string][sha256.Size]byte),
 	}, nil
 }
 
@@ -288,6 +292,108 @@ func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Inv
 	return metadata, nil
 }
 
+// RestoreMutationReplay validates durable ancestor evidence and restores only exact-turn derived publication state.
+func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invocation Invocation, source store.MutationReservation) error {
+	tool, err := validateMutationReplay(invocation, source)
+	if err != nil {
+		return err
+	}
+	if tool.Name != ToolPublishChanges && tool.Name != ToolOpenPR && tool.Name != ToolRequestReview {
+		return nil
+	}
+
+	turnKey := publicationTurnKey(invocation.Scope)
+	lock := backend.publicationLock(turnKey)
+	lock.Lock()
+	defer lock.Unlock()
+
+	backend.publicationMutex.Lock()
+	defer backend.publicationMutex.Unlock()
+	fingerprint := mutationReplayFingerprint(source)
+	if restored := backend.restoredMutations[turnKey]; restored != nil {
+		if previous, ok := restored[source.ID]; ok {
+			if previous != fingerprint {
+				return ErrToolPrecondition
+			}
+			return nil
+		}
+	}
+
+	progress, exists := backend.publishedHeads[turnKey]
+	if !exists {
+		progress = publicationHead{head: invocation.Scope.HeadSHA, branchExists: invocation.Scope.PullRequest != nil}
+	}
+	if invocation.Scope.PullRequest != nil {
+		if progress.pullRequest != nil && *progress.pullRequest != *invocation.Scope.PullRequest {
+			return ErrToolPrecondition
+		}
+		if progress.pullRequest == nil {
+			pullRequest := *invocation.Scope.PullRequest
+			progress.pullRequest = &pullRequest
+		}
+		progress.branchExists = true
+	}
+	if exists && progress.head != source.ExpectedSHA {
+		return ErrToolPrecondition
+	}
+
+	switch tool.Name {
+	case ToolPublishChanges:
+		var result struct {
+			Head    string `json:"head"`
+			Branch  string `json:"branch"`
+			Changed *bool  `json:"changed"`
+		}
+		if !decodeExactResult(source.Result, &result) || result.Changed == nil || !validRevision(result.Head) || result.Branch != invocation.Scope.Branch ||
+			*result.Changed && result.Head == source.ExpectedSHA || !*result.Changed && result.Head != source.ExpectedSHA {
+			return ErrToolPrecondition
+		}
+		progress.head = result.Head
+		progress.branchExists = progress.branchExists || *result.Changed || result.Head != invocation.Scope.HeadSHA
+	case ToolOpenPR:
+		pullRequest, head, ok := restoredPullRequest(source.Result, source.ExpectedSHA)
+		if !ok {
+			return ErrToolPrecondition
+		}
+		if !sameOrMissingPullRequest(progress.pullRequest, pullRequest) {
+			return ErrToolPrecondition
+		}
+		progress.head = head
+		progress.branchExists = true
+		if progress.pullRequest == nil {
+			progress.pullRequest = pullRequest
+		}
+	case ToolRequestReview:
+		var result struct {
+			Outcome           string `json:"outcome"`
+			PullRequestID     int64  `json:"pull_request_id"`
+			PullRequestNumber int64  `json:"pull_request_number"`
+			HeadSHA           string `json:"head_sha"`
+		}
+		if !decodeExactResult(source.Result, &result) {
+			return ErrToolPrecondition
+		}
+		pullRequest := &PullRequestScope{ID: result.PullRequestID, Number: result.PullRequestNumber}
+		if result.Outcome != "REVIEW_REQUESTED" || pullRequest.ID <= 0 || pullRequest.Number <= 0 ||
+			result.HeadSHA != source.ExpectedSHA || !sameOrMissingPullRequest(progress.pullRequest, pullRequest) {
+			return ErrToolPrecondition
+		}
+		progress.head = result.HeadSHA
+		progress.branchExists = true
+		if progress.pullRequest == nil {
+			progress.pullRequest = pullRequest
+		}
+	}
+
+	backend.publishedHeads[turnKey] = progress
+	if backend.restoredMutations[turnKey] == nil {
+		backend.restoredMutations[turnKey] = make(map[string][sha256.Size]byte)
+	}
+	backend.restoredMutations[turnKey][source.ID] = fingerprint
+	backend.plannedHeads[publicationPlan{turn: turnKey, operationID: source.OperationID}] = source.ExpectedSHA
+	return nil
+}
+
 // ReleaseTurn retires mutation planning and publication state after the gateway drains the registration.
 func (backend *ProductionBackend) ReleaseTurn(scope ToolScope) {
 	turnKey := publicationTurnKey(scope)
@@ -295,6 +401,7 @@ func (backend *ProductionBackend) ReleaseTurn(scope ToolScope) {
 	defer backend.publicationMutex.Unlock()
 	delete(backend.publicationLocks, turnKey)
 	delete(backend.publishedHeads, turnKey)
+	delete(backend.restoredMutations, turnKey)
 	for planKey := range backend.plannedHeads {
 		if planKey.turn == turnKey {
 			delete(backend.plannedHeads, planKey)
@@ -817,9 +924,13 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 	if progress.branchExists {
 		expectedOldHead = progress.head
 	}
+	repositoryURL, err := backend.remoteBase.RepositoryURL(invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name)
+	if err != nil {
+		return nil, ErrInvalidInvocation
+	}
 	result, err := backend.publisher.Publish(ctx, workspace.Publication{
 		AssignmentID:  invocation.Scope.AgentAssignmentID,
-		RepositoryURL: backend.repositoryURL(invocation.Scope.Repository),
+		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: progress.head, ExpectedOldHead: expectedOldHead,
 		Branch: invocation.Scope.Branch, Message: arguments.Message + "\n\nOmnigrex-Operation-ID: " + invocation.OperationID,
 		Identity: backend.identity, Time: invocation.Scope.TurnCreatedAt.UTC(),
@@ -856,8 +967,112 @@ func (backend *ProductionBackend) publicationLock(turnKey publicationTurn) *sync
 	return lock
 }
 
-func (backend *ProductionBackend) repositoryURL(repository RepositoryScope) string {
-	return backend.remoteBase + "/" + url.PathEscape(repository.Owner) + "/" + url.PathEscape(repository.Name) + ".git"
+func validateMutationReplay(invocation Invocation, source store.MutationReservation) (ToolDefinition, error) {
+	tool, err := validateBackendInvocation(invocation)
+	if err != nil || tool.Class != MutationTool || source.State != store.MutationSucceeded ||
+		source.ID == "" || invocation.OperationID != source.ID || source.AgentTurnID == "" ||
+		source.AgentTurnID == invocation.Scope.AgentTurnID || source.ExecutionEpoch <= 0 ||
+		source.ToolName != invocation.Name || !validOperationID(source.OperationID) {
+		return ToolDefinition{}, ErrInvalidInvocation
+	}
+	operationID, err := requiredStringArgument(invocation.Arguments, "operation_id")
+	if err != nil || operationID != source.OperationID {
+		return ToolDefinition{}, ErrInvalidInvocation
+	}
+	request, err := canonicalJSON(source.Request)
+	if err != nil || !bytes.Equal(request, source.Request) || !bytes.Equal(request, invocation.Arguments) {
+		return ToolDefinition{}, ErrInvalidInvocation
+	}
+	result, err := canonicalJSON(source.Result)
+	var object map[string]json.RawMessage
+	if err != nil || json.Unmarshal(result, &object) != nil || len(object) == 0 {
+		return ToolDefinition{}, ErrToolPrecondition
+	}
+	expected := replayMetadataForScope(invocation.Name, invocation.Scope)
+	if invocation.Mutation.ExternalService != source.ExternalService || invocation.Mutation.ExternalResourceID != source.ExternalResourceID ||
+		invocation.Mutation.ExpectedSHA != source.ExpectedSHA || source.ExternalService != expected.ExternalService ||
+		source.ExternalResourceID != expected.ExternalResourceID {
+		return ToolDefinition{}, ErrToolPrecondition
+	}
+	publicationMutation := invocation.Name == ToolPublishChanges || invocation.Name == ToolOpenPR || invocation.Name == ToolRequestReview
+	if publicationMutation {
+		if !validRevision(source.ExpectedSHA) {
+			return ToolDefinition{}, ErrToolPrecondition
+		}
+	} else if source.ExpectedSHA != expected.ExpectedSHA {
+		return ToolDefinition{}, ErrToolPrecondition
+	}
+	return tool, nil
+}
+
+func mutationReplayFingerprint(source store.MutationReservation) [sha256.Size]byte {
+	result, _ := canonicalJSON(source.Result)
+	encoded, _ := json.Marshal(struct {
+		AgentTurnID        string          `json:"agent_turn_id"`
+		ExecutionEpoch     int64           `json:"execution_epoch"`
+		OperationID        string          `json:"operation_id"`
+		ToolName           string          `json:"tool_name"`
+		Request            json.RawMessage `json:"request"`
+		ExternalService    string          `json:"external_service"`
+		ExternalResourceID string          `json:"external_resource_id"`
+		ExpectedSHA        string          `json:"expected_sha"`
+		Result             json.RawMessage `json:"result"`
+	}{source.AgentTurnID, source.ExecutionEpoch, source.OperationID, source.ToolName, source.Request,
+		source.ExternalService, source.ExternalResourceID, source.ExpectedSHA, result})
+	return sha256.Sum256(encoded)
+}
+
+func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
+	metadata := MutationMetadata{ExternalService: "github"}
+	switch tool {
+	case ToolPublishChanges:
+		metadata.ExternalService = "git"
+		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
+		metadata.ExpectedSHA = scope.HeadSHA
+	case ToolOpenPR:
+		metadata.ExternalResourceID = fmt.Sprintf("%d:%s:%s", scope.Repository.ID, scope.Branch, scope.DefaultBranch)
+		metadata.ExpectedSHA = scope.HeadSHA
+	case ToolRequestReview:
+		metadata.ExternalService = "omnigrex"
+		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
+		metadata.ExpectedSHA = scope.HeadSHA
+	case ToolReportBlocked:
+		metadata.ExternalService = "omnigrex"
+		metadata.ExternalResourceID = scope.WorkflowID
+	case ToolSubmitReview, ToolCommentOnPullRequest:
+		if scope.PullRequest != nil {
+			metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.PullRequest.ID)
+		}
+		metadata.ExpectedSHA = scope.HeadSHA
+	case ToolCommentOnIssue:
+		metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.Issue.ID)
+	}
+	return metadata
+}
+
+func restoredPullRequest(raw json.RawMessage, expectedHead string) (*PullRequestScope, string, bool) {
+	var result struct {
+		PullRequestID int64  `json:"pull_request_id"`
+		NodeID        string `json:"node_id"`
+		Number        int64  `json:"number"`
+		HTMLURL       string `json:"html_url"`
+		HeadSHA       string `json:"head_sha"`
+	}
+	if !decodeExactResult(raw, &result) || result.PullRequestID <= 0 || result.NodeID == "" || result.Number <= 0 ||
+		result.HTMLURL == "" || result.HeadSHA != expectedHead {
+		return nil, "", false
+	}
+	return &PullRequestScope{ID: result.PullRequestID, Number: result.Number}, result.HeadSHA, true
+}
+
+func sameOrMissingPullRequest(current, restored *PullRequestScope) bool {
+	return current == nil || restored != nil && *current == *restored
+}
+
+func decodeExactResult(raw json.RawMessage, destination any) bool {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(destination) == nil && decoder.Decode(&struct{}{}) == io.EOF
 }
 
 func validateBackendInvocation(invocation Invocation) (ToolDefinition, error) {
@@ -954,7 +1169,7 @@ func (backend *ProductionBackend) credential(ctx context.Context, tool string, r
 }
 
 func (backend *ProductionBackend) String() string {
-	return fmt.Sprintf("production MCP backend for %s", backend.remoteBase)
+	return fmt.Sprintf("production MCP backend for %s", backend.remoteBase.String())
 }
 
 func (backend *ProductionBackend) GoString() string {

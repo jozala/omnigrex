@@ -32,6 +32,56 @@ type PendingEventReconciliation struct {
 	SuccessorJobID string
 }
 
+// AcknowledgePendingEventReconciliationFailure retries within the source job budget.
+// Terminal failure preserves linked deferred events for a barrier-safe escalation authority.
+func (store *Store) AcknowledgePendingEventReconciliationFailure(ctx context.Context, lease JobLease, cause error, retryable bool, retryDelay time.Duration) (WorkflowActionFailureAcknowledgement, error) {
+	if err := validateWorkflowActionFailure(cause, retryDelay); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return WorkflowActionFailureAcknowledgement{}, fmt.Errorf("begin pending-event reconciliation failure acknowledgement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	job, err := lockFencedWorkflowJob(ctx, tx, lease, ReconcilePendingEventsJobKind, ErrPendingEventReconciliationFenceLost)
+	if err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	retryScheduled := retryable && job.AttemptCount < job.MaxAttempts
+	if err := failWorkflowActionJobTx(ctx, tx, job, cause.Error(), retryable, retryScheduled, retryDelay); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, ErrPendingEventReconciliationFenceLost
+	}
+	acknowledgement := WorkflowActionFailureAcknowledgement{
+		JobID: job.ID, WorkflowID: job.WorkflowID, RetryScheduled: retryScheduled,
+	}
+	if retryScheduled {
+		if err := tx.Commit(ctx); err != nil {
+			return WorkflowActionFailureAcknowledgement{}, fmt.Errorf("commit pending-event reconciliation retry: %w", err)
+		}
+		return acknowledgement, nil
+	}
+	var payload pendingEventReconciliationPayload
+	_ = json.Unmarshal(job.Payload, &payload)
+	role := payload.FallbackRole
+	if role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
+		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+			return WorkflowActionFailureAcknowledgement{}, ErrPendingEventReconciliationFenceLost
+		}
+	}
+	escalationScheduled, err := requestWorkflowActionFailureEscalationTx(ctx, tx, job, role, cause.Error())
+	if err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	acknowledgement.EscalationScheduled = escalationScheduled
+	if err := tx.QueryRow(ctx, `SELECT state_revision FROM workflows WHERE id = $1`, job.WorkflowID).Scan(&acknowledgement.WorkflowRevision); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, fmt.Errorf("commit pending-event reconciliation exhaustion: %w", err)
+	}
+	return acknowledgement, nil
+}
+
 type pendingEventReconciliationPayload struct {
 	WorkflowID                string               `json:"workflow_id"`
 	WorkflowAttemptID         string               `json:"workflow_attempt_id"`
@@ -66,7 +116,7 @@ func (store *Store) AcknowledgePendingEventReconciliation(ctx context.Context, l
 	}
 	var payload pendingEventReconciliationPayload
 	if err := json.Unmarshal(job.Payload, &payload); err != nil || !validPendingEventReconciliationPayload(payload, job) {
-		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
+		return PendingEventReconciliation{}, ErrPendingEventReconciliationPayloadInvalid
 	}
 	var revision int64
 	if err := tx.QueryRow(ctx, `SELECT state_revision FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(&revision); err != nil || revision != payload.Revision {
@@ -106,6 +156,9 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 	if err != nil || !equalStringSets(linkedEventIDs(linkedEvents), payload.DeferredNormalizedEventID) || len(linkedEvents) != int(payload.Count) {
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 	}
+	if err := prepareLinkedDeferredEvents(linkedEvents, snapshot); err != nil {
+		return PendingEventReconciliation{}, err
+	}
 
 	intent := preparedTurnIntent{
 		mode: workflow.AssignmentGenerationCurrent,
@@ -115,10 +168,11 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		},
 		set: payload.FallbackRole != "",
 	}
-	for _, linked := range linkedEvents {
-		if err := validateNormalizedDeliveryID(linked.record.Payload, linked.record.DeliveryID); err != nil {
-			return PendingEventReconciliation{}, fmt.Errorf("reconcile normalized event %s: %w", linked.record.DeliveryID, err)
-		}
+	remaining := append([]linkedDeferredEvent(nil), linkedEvents...)
+	for len(remaining) > 0 {
+		next := nextLinkedDeferredEvent(remaining)
+		linked := remaining[next]
+		remaining = append(remaining[:next], remaining[next+1:]...)
 		locator, transition, err := factory(linked.record)
 		if err != nil {
 			return PendingEventReconciliation{}, fmt.Errorf("build reconciled transition %s: %w", linked.record.DeliveryID, err)
@@ -187,11 +241,11 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 	}
 	successorJobID := ""
 	if intent.set {
-		var normalizedEventID string
-		if err := tx.QueryRow(ctx, `SELECT normalized_event_id::text FROM jobs WHERE id = $1`, job.ID).Scan(&normalizedEventID); err != nil {
+		normalizedEventID, settlementID, err := readWorkflowJobActionProvenance(ctx, tx, job.ID)
+		if err != nil {
 			return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 		}
-		if err := enqueueWorkflowJob(ctx, tx, normalizedEventID, job.WorkflowID, job.WorkflowAttemptID,
+		if err := enqueueWorkflowJobWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, job.WorkflowAttemptID,
 			"prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
 				"mode": intent.mode, "role": successor.Role,
 				"purpose": successor.Purpose, "expected_head_sha": successor.ExpectedHeadSHA,
@@ -201,8 +255,9 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 		}
 		if err := tx.QueryRow(ctx, `
 SELECT id::text FROM jobs
-WHERE normalized_event_id = $1 AND action_key = 'prepare-agent-turn'`,
-			normalizedEventID).Scan(&successorJobID); err != nil {
+WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
+  AND action_key = 'prepare-agent-turn'`, nullableString(normalizedEventID),
+			nullableString(settlementID)).Scan(&successorJobID); err != nil {
 			return PendingEventReconciliation{}, fmt.Errorf("resolve reconciled successor job: %w", err)
 		}
 	}
@@ -264,8 +319,15 @@ func validPendingEventReconciliationPayload(payload pendingEventReconciliationPa
 }
 
 type linkedDeferredEvent struct {
-	record   NormalizedEventRecord
-	envelope workflowEnvelope
+	record          NormalizedEventRecord
+	envelope        workflowEnvelope
+	synchronization *linkedSynchronization
+}
+
+type linkedSynchronization struct {
+	beforeSHA string
+	headSHA   string
+	order     int
 }
 
 func lockLinkedDeferredEvents(ctx context.Context, tx pgx.Tx, job Job) ([]linkedDeferredEvent, error) {
@@ -274,7 +336,8 @@ SELECT event.delivery_id::text, event.payload, event.status,
        COALESCE(event.workflow_id::text, ''), event.disposition, event.reason,
        event.applied_revision, COALESCE(event.deferred_for_turn_id::text, ''),
        event.created_at, event.processed_at,
-       delivery.status, COALESCE(delivery.repository_id, 0),
+       delivery.status, delivery.event_name, COALESCE(delivery.action, ''),
+       COALESCE(delivery.repository_id, 0),
        COALESCE(delivery.repository_owner, ''), COALESCE(delivery.repository_name, ''),
        COALESCE(delivery.issue_id, 0), COALESCE(delivery.issue_number, 0)
 FROM job_normalized_events AS link
@@ -297,7 +360,8 @@ FOR UPDATE OF event, delivery`, job.ID)
 			&item.record.WorkflowID, &item.record.Disposition, &item.record.Reason,
 			&item.record.AppliedRevision, &item.record.DeferredForTurnID,
 			&item.record.CreatedAt, &item.record.ProcessedAt,
-			&webhookStatus, &item.envelope.repositoryID, &item.envelope.repositoryOwner,
+			&webhookStatus, &item.envelope.eventName, &item.envelope.action,
+			&item.envelope.repositoryID, &item.envelope.repositoryOwner,
 			&item.envelope.repositoryName, &item.envelope.issueID, &item.envelope.issueNumber,
 		); err != nil {
 			return nil, err
@@ -310,6 +374,156 @@ FOR UPDATE OF event, delivery`, job.ID)
 		linked = append(linked, item)
 	}
 	return linked, rows.Err()
+}
+
+// prepareLinkedDeferredEvents validates synchronization identity and derives one
+// causal path before payload content can influence replay order.
+func prepareLinkedDeferredEvents(linked []linkedDeferredEvent, snapshot workflow.Snapshot) error {
+	for index := range linked {
+		item := &linked[index]
+		if err := validateNormalizedDeliveryID(item.record.Payload, item.record.DeliveryID); err != nil {
+			return fmt.Errorf("%w: reconcile normalized event %s: %v", ErrPendingNormalizedEventInvalid, item.record.DeliveryID, err)
+		}
+		var normalized struct {
+			DeliveryID string `json:"delivery_id"`
+			EventName  string `json:"event"`
+			Action     string `json:"action"`
+			Repository struct {
+				ID    int64  `json:"id"`
+				Owner string `json:"owner"`
+				Name  string `json:"name"`
+			} `json:"repository"`
+			PullRequest *struct {
+				ID        int64  `json:"id"`
+				Number    int64  `json:"number"`
+				HeadSHA   string `json:"head_sha"`
+				BeforeSHA string `json:"before_sha"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(item.record.Payload, &normalized); err != nil {
+			return fmt.Errorf("%w: decode normalized event %s: %v", ErrPendingNormalizedEventInvalid, item.record.DeliveryID, err)
+		}
+		durableSynchronization := item.envelope.eventName == "pull_request" && item.envelope.action == "synchronize"
+		payloadSynchronization := normalized.EventName == "pull_request" && normalized.Action == "synchronize"
+		if !durableSynchronization && !payloadSynchronization {
+			continue
+		}
+		pullRequest := normalized.PullRequest
+		valid := durableSynchronization && payloadSynchronization &&
+			normalized.DeliveryID == item.record.DeliveryID &&
+			normalized.Repository.ID > 0 && normalized.Repository.ID == item.envelope.repositoryID &&
+			strings.TrimSpace(normalized.Repository.Owner) != "" && normalized.Repository.Owner == item.envelope.repositoryOwner &&
+			strings.TrimSpace(normalized.Repository.Name) != "" && normalized.Repository.Name == item.envelope.repositoryName &&
+			pullRequest != nil && pullRequest.ID > 0 && pullRequest.Number > 0 &&
+			strings.TrimSpace(pullRequest.BeforeSHA) != "" && strings.TrimSpace(pullRequest.HeadSHA) != "" &&
+			snapshot.ChangeProposal != nil && pullRequest.ID == snapshot.ChangeProposal.ID && pullRequest.Number == snapshot.ChangeProposal.Number
+		if !valid {
+			return fmt.Errorf("%w: synchronization identity %s contradicts its durable envelope or Workflow", ErrPendingNormalizedEventInvalid, item.record.DeliveryID)
+		}
+		item.synchronization = &linkedSynchronization{beforeSHA: pullRequest.BeforeSHA, headSHA: pullRequest.HeadSHA}
+	}
+	return prepareLinkedSynchronizationOrder(linked, snapshot)
+}
+
+type linkedSynchronizationEdge struct {
+	beforeSHA string
+	headSHA   string
+}
+
+func prepareLinkedSynchronizationOrder(linked []linkedDeferredEvent, snapshot workflow.Snapshot) error {
+	outgoing := make(map[string]linkedSynchronizationEdge)
+	incoming := make(map[string]linkedSynchronizationEdge)
+	edges := make(map[linkedSynchronizationEdge]struct{})
+	for index := range linked {
+		synchronization := linked[index].synchronization
+		if synchronization == nil {
+			continue
+		}
+		edge := linkedSynchronizationEdge{beforeSHA: synchronization.beforeSHA, headSHA: synchronization.headSHA}
+		if edge.beforeSHA == edge.headSHA {
+			return fmt.Errorf("%w: synchronization cycle at delivery %s", ErrPendingEventCausalGap, linked[index].record.DeliveryID)
+		}
+		if _, duplicate := edges[edge]; duplicate {
+			continue
+		}
+		if previous, exists := outgoing[edge.beforeSHA]; exists && previous != edge {
+			return fmt.Errorf("%w: synchronization fork at head %q", ErrPendingEventCausalGap, edge.beforeSHA)
+		}
+		if previous, exists := incoming[edge.headSHA]; exists && previous != edge {
+			return fmt.Errorf("%w: ambiguous synchronization predecessor for head %q", ErrPendingEventCausalGap, edge.headSHA)
+		}
+		edges[edge] = struct{}{}
+		outgoing[edge.beforeSHA] = edge
+		incoming[edge.headSHA] = edge
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+	if snapshot.ChangeProposal == nil {
+		return fmt.Errorf("%w: Workflow has no Change Proposal", ErrPendingEventCausalGap)
+	}
+
+	root := ""
+	for index := range linked {
+		synchronization := linked[index].synchronization
+		if synchronization == nil {
+			continue
+		}
+		if _, hasPredecessor := incoming[synchronization.beforeSHA]; hasPredecessor {
+			continue
+		}
+		if root != "" && root != synchronization.beforeSHA {
+			return fmt.Errorf("%w: disconnected synchronization chains", ErrPendingEventCausalGap)
+		}
+		root = synchronization.beforeSHA
+	}
+	if root == "" {
+		return fmt.Errorf("%w: synchronization cycle", ErrPendingEventCausalGap)
+	}
+
+	orders := make(map[linkedSynchronizationEdge]int, len(edges))
+	nodes := map[string]struct{}{root: {}}
+	for head, order := root, 0; ; order++ {
+		edge, exists := outgoing[head]
+		if !exists {
+			break
+		}
+		if _, visited := nodes[edge.headSHA]; visited {
+			return fmt.Errorf("%w: synchronization cycle at head %q", ErrPendingEventCausalGap, edge.headSHA)
+		}
+		orders[edge] = order
+		nodes[edge.headSHA] = struct{}{}
+		head = edge.headSHA
+	}
+	if len(orders) != len(edges) {
+		return fmt.Errorf("%w: disconnected synchronization chains", ErrPendingEventCausalGap)
+	}
+	currentHead := snapshot.ChangeProposal.HeadSHA
+	if _, connected := nodes[currentHead]; !connected {
+		return fmt.Errorf("%w after head %q", ErrPendingEventCausalGap, currentHead)
+	}
+	for index := range linked {
+		if synchronization := linked[index].synchronization; synchronization != nil {
+			synchronization.order = orders[linkedSynchronizationEdge{beforeSHA: synchronization.beforeSHA, headSHA: synchronization.headSHA}]
+		}
+	}
+	return nil
+}
+
+// Non-synchronization events retain arrival order. Once a synchronization is
+// next, its oldest remaining causal edge, including exact redeliveries, wins.
+func nextLinkedDeferredEvent(remaining []linkedDeferredEvent) int {
+	if len(remaining) == 0 || remaining[0].synchronization == nil {
+		return 0
+	}
+	next := 0
+	for index := 1; index < len(remaining); index++ {
+		candidate := remaining[index].synchronization
+		if candidate != nil && candidate.order < remaining[next].synchronization.order {
+			next = index
+		}
+	}
+	return next
 }
 
 func linkedEventIDs(linked []linkedDeferredEvent) []string {
@@ -791,5 +1005,7 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 
 func isFencedWorkflowJob(kind string) bool {
 	return kind == ReconcilePendingEventsJobKind || kind == StopAgentTurnJobKind ||
-		kind == SettleClosureJobKind || kind == PrepareAgentTurnJobKind
+		kind == SettleClosureJobKind || kind == PrepareAgentTurnJobKind ||
+		kind == ReconcileGitHubLabelsJobKind || kind == PublishHumanHandoffJobKind ||
+		kind == EscalateWorkflowActionFailureJobKind
 }

@@ -38,7 +38,7 @@ type RecoveryWorkerConfig struct {
 	OnError           func(error)
 }
 
-// RecoveryWorker resolves unknown mutations before opening successor Agent Turn allocation.
+// RecoveryWorker resolves unknown mutations after stale Runtime Process stop and before successor Agent Turn allocation.
 type RecoveryWorker struct {
 	store             RecoveryStore
 	reconciler        MutationReconciler
@@ -118,7 +118,8 @@ func (worker *RecoveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 		return true, errors.Join(operationErr, fmt.Errorf("acknowledge mutation reconciliation failure: %w", acknowledgeErr))
 	}
 	if acknowledgement.Escalated {
-		if _, completeErr := worker.store.CompleteAgentTurnRecovery(ctx, lease.AgentTurnID, lease.ExecutionEpoch); completeErr != nil {
+		if _, completeErr := worker.store.CompleteAgentTurnRecovery(ctx, lease.AgentTurnID, lease.ExecutionEpoch); completeErr != nil &&
+			!errors.Is(completeErr, store.ErrAgentTurnRecoveryUnsettled) {
 			return true, errors.Join(operationErr, errRecoveryCompletion, completeErr)
 		}
 	}
@@ -174,8 +175,11 @@ func (worker *RecoveryWorker) reconcileJob(ctx, completionCtx context.Context, l
 			return fmt.Errorf("record reconciled mutation: %w", err)
 		}
 	}
-	// The final mutation write completes the reconciliation job, so its expected stale heartbeat must not cancel barrier settlement.
+	// The final mutation write completes the reconciliation job and stop-first recovery settlement.
 	if _, err := worker.store.CompleteAgentTurnRecovery(completionCtx, reconciliation.Turn.ID, reconciliation.Turn.ExecutionEpoch); err != nil {
+		if errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+			return nil
+		}
 		return errors.Join(errRecoveryCompletion, err)
 	}
 	return nil

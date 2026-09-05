@@ -12,6 +12,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -119,6 +120,81 @@ func TestProductionBackendPublishesOrderedDeterministicCommits(t *testing.T) {
 	}
 }
 
+func TestProductionPublicationAndReconciliationUseExactConfiguredRemoteURL(t *testing.T) {
+	const remoteBase = "https://github.enterprise.test/source/"
+	const wantRepositoryURL = "https://github.enterprise.test/source/acme/widgets.git"
+	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: advancedHeadSHA, Changed: true}}}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: publisher, Workflow: &backendWorkflow{}, GitRemoteBaseURL: remoteBase,
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"publish-enterprise","message":"Publish"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "publish-enterprise",
+	})
+	if err != nil {
+		t.Fatalf("Execute(publish_changes) error = %v", err)
+	}
+
+	publications := &reconciliationPublications{result: workspace.PublicationReconciliationResult{Outcome: workspace.PublicationReconciliationUnknown}}
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
+		GitHub: &reconciliationGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publications: publications, GitRemoteBaseURL: remoteBase,
+	})
+	if err != nil {
+		t.Fatalf("NewProductionReconciler() error = %v", err)
+	}
+	reconciliation := reconciliationContext()
+	mutation := reconciliationMutation(mcp.ToolPublishChanges, `{"operation_id":"caller-publish","message":"Publish"}`)
+	mutation.ExternalService = "git"
+	mutation.ExternalResourceID = "9123:omnigrex/issue-12"
+	if _, err := reconciler.Reconcile(context.Background(), reconciliation, mutation); err != nil {
+		t.Fatalf("Reconcile(publish_changes) error = %v", err)
+	}
+
+	if len(publisher.publications) != 1 || publisher.publications[0].RepositoryURL != wantRepositoryURL {
+		t.Fatalf("publication repository URL = %#v, want %q", publisher.publications, wantRepositoryURL)
+	}
+	if publications.input.RepositoryURL != publisher.publications[0].RepositoryURL {
+		t.Fatalf("reconciliation URL %q disagrees with publication URL %q", publications.input.RepositoryURL, publisher.publications[0].RepositoryURL)
+	}
+}
+
+func TestProductionMCPConstructorsRejectUnsafeRemoteBaseWithoutCredentialDisclosure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		remoteBase string
+	}{
+		{name: "insecure", remoteBase: "http://github.enterprise.test/source"},
+		{name: "credentialed", remoteBase: "https://credential-sentinel@github.enterprise.test/source"},
+		{name: "unclean path", remoteBase: "https://github.enterprise.test/source/../repos"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, backendErr := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+				GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+				Publisher: &backendPublisher{}, Workflow: &backendWorkflow{}, GitRemoteBaseURL: test.remoteBase,
+			})
+			if backend != nil || !errors.Is(backendErr, mcp.ErrInvalidBackendConfiguration) {
+				t.Fatalf("NewProductionBackend() = (%#v, %v)", backend, backendErr)
+			}
+			reconciler, reconcilerErr := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
+				GitHub: &reconciliationGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+				Publications: &reconciliationPublications{}, GitRemoteBaseURL: test.remoteBase,
+			})
+			if reconciler != nil || !errors.Is(reconcilerErr, mcp.ErrInvalidReconcilerConfiguration) {
+				t.Fatalf("NewProductionReconciler() = (%#v, %v)", reconciler, reconcilerErr)
+			}
+			if strings.Contains(backendErr.Error(), "credential-sentinel") || strings.Contains(reconcilerErr.Error(), "credential-sentinel") {
+				t.Fatalf("constructor error disclosed credentials: backend %v, reconciler %v", backendErr, reconcilerErr)
+			}
+		})
+	}
+}
+
 func TestProductionBackendReleaseTurnRetiresOnlyExactTurnState(t *testing.T) {
 	publisher := &backendPublisher{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
@@ -153,9 +229,9 @@ func TestProductionBackendReleaseTurnRetiresOnlyExactTurnState(t *testing.T) {
 	}
 
 	releaser.ReleaseTurn(productionToolScope(workflow.RoleDeveloper))
-	assertProductionBackendStateSizes(t, backend, 1, 1, 1)
+	assertProductionBackendStateSizes(t, backend, 1, 1, 1, 0)
 	releaser.ReleaseTurn(retained)
-	assertProductionBackendStateSizes(t, backend, 0, 0, 0)
+	assertProductionBackendStateSizes(t, backend, 0, 0, 0, 0)
 
 	for index := 0; index < 100; index++ {
 		scope := productionToolScope(workflow.RoleDeveloper)
@@ -172,17 +248,222 @@ func TestProductionBackendReleaseTurnRetiresOnlyExactTurnState(t *testing.T) {
 		}
 		releaser.ReleaseTurn(scope)
 	}
-	assertProductionBackendStateSizes(t, backend, 0, 0, 0)
+	assertProductionBackendStateSizes(t, backend, 0, 0, 0, 0)
 }
 
-func assertProductionBackendStateSizes(t *testing.T, backend *mcp.ProductionBackend, locks, heads, plans int) {
+func TestProductionBackendRestoresOrderedPublicationReplayAndContinues(t *testing.T) {
+	head1 := "1123456789abcdef0123456789abcdef01234567"
+	head2 := "2123456789abcdef0123456789abcdef01234567"
+	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: head2, Changed: true}}}
+	workflowBackend := &backendWorkflow{requestReviewResult: json.RawMessage(`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"` + head2 + `"}`)}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: publisher, Workflow: workflowBackend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+
+	publish := replayMutation("51000000-0000-4000-8000-000000000001", mcp.ToolPublishChanges,
+		`{"operation_id":"publish-1","message":"First"}`, "git", "9123:"+scope.Branch, productionHeadSHA,
+		`{"head":"`+head1+`","branch":"`+scope.Branch+`","changed":true}`)
+	open := replayMutation("51000000-0000-4000-8000-000000000002", mcp.ToolOpenPR,
+		`{"operation_id":"open-1","title":"Changes","body":"Ready"}`, "github", "9123:"+scope.Branch+":"+scope.DefaultBranch, head1,
+		`{"pull_request_id":654,"node_id":"PR_654","number":23,"html_url":"https://github.com/acme/widgets/pull/23","head_sha":"`+head1+`"}`)
+	review := replayMutation("51000000-0000-4000-8000-000000000003", mcp.ToolRequestReview,
+		`{"operation_id":"review-1","summary":"Ready"}`, "omnigrex", "9123:"+scope.Branch, head1,
+		`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"`+head1+`"}`)
+	for _, replay := range []store.MutationReservation{publish, open, review} {
+		if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, replay), replay); err != nil {
+			t.Fatalf("RestoreMutationReplay(%s) error = %v", replay.ToolName, err)
+		}
+	}
+
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"publish-2","message":"Second"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "publish-2",
+	})
+	if err != nil {
+		t.Fatalf("publish after replay error = %v", err)
+	}
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolRequestReview, Arguments: json.RawMessage(`{"operation_id":"review-2","summary":"Updated"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "review-2",
+	})
+	if err != nil {
+		t.Fatalf("request_review after replay error = %v", err)
+	}
+	if len(publisher.publications) != 1 || publisher.publications[0].BaseRevision != head1 || publisher.publications[0].ExpectedOldHead != head1 {
+		t.Fatalf("publication after replay = %#v", publisher.publications)
+	}
+	if workflowBackend.requestReview.HeadSHA != head2 || workflowBackend.requestReview.Scope.PullRequest == nil ||
+		workflowBackend.requestReview.Scope.PullRequest.ID != 654 || workflowBackend.requestReview.Scope.PullRequest.Number != 23 {
+		t.Fatalf("review after replay = %#v", workflowBackend.requestReview)
+	}
+}
+
+func TestProductionBackendRestoresRequestReviewOnlyAndNoChangePublicationInference(t *testing.T) {
+	head1 := "3123456789abcdef0123456789abcdef01234567"
+	head2 := "4123456789abcdef0123456789abcdef01234567"
+	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: head2, Changed: true}}}
+	workflowBackend := &backendWorkflow{requestReviewResult: json.RawMessage(`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"` + head1 + `"}`)}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: publisher, Workflow: workflowBackend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+	review := replayMutation("52000000-0000-4000-8000-000000000001", mcp.ToolRequestReview,
+		`{"operation_id":"review-only","summary":"Ready"}`, "omnigrex", "9123:"+scope.Branch, head1,
+		`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"`+head1+`"}`)
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, review), review); err != nil {
+		t.Fatalf("request_review-only restoration error = %v", err)
+	}
+	if _, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolRequestReview, Arguments: json.RawMessage(`{"operation_id":"review-again","summary":"Again"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "review-again",
+	}); err != nil {
+		t.Fatalf("request_review after review-only restoration error = %v", err)
+	}
+	if workflowBackend.requestReview.HeadSHA != head1 || workflowBackend.requestReview.Scope.PullRequest == nil {
+		t.Fatalf("request_review restored state = %#v", workflowBackend.requestReview)
+	}
+
+	backend.ReleaseTurn(scope)
+	assertProductionBackendStateSizes(t, backend, 0, 0, 0, 0)
+	noChange := replayMutation("52000000-0000-4000-8000-000000000002", mcp.ToolPublishChanges,
+		`{"operation_id":"publish-no-change","message":"No change"}`, "git", "9123:"+scope.Branch, head1,
+		`{"head":"`+head1+`","branch":"`+scope.Branch+`","changed":false}`)
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, noChange), noChange); err != nil {
+		t.Fatalf("no-change restoration error = %v", err)
+	}
+	if _, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"publish-after-no-change","message":"After"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "publish-after-no-change",
+	}); err != nil {
+		t.Fatalf("publish after no-change restoration error = %v", err)
+	}
+	if len(publisher.publications) != 1 || publisher.publications[0].ExpectedOldHead != head1 {
+		t.Fatalf("no-change replay did not establish branch: %#v", publisher.publications)
+	}
+}
+
+func TestProductionBackendRejectsMalformedBackwardAndConflictingReplay(t *testing.T) {
+	head1 := "5123456789abcdef0123456789abcdef01234567"
+	head2 := "6123456789abcdef0123456789abcdef01234567"
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+	first := replayMutation("53000000-0000-4000-8000-000000000001", mcp.ToolPublishChanges,
+		`{"operation_id":"publish-first","message":"First"}`, "git", "9123:"+scope.Branch, productionHeadSHA,
+		`{"head":"`+head1+`","branch":"`+scope.Branch+`","changed":true}`)
+	second := replayMutation("53000000-0000-4000-8000-000000000002", mcp.ToolPublishChanges,
+		`{"operation_id":"publish-second","message":"Second"}`, "git", "9123:"+scope.Branch, head1,
+		`{"head":"`+head2+`","branch":"`+scope.Branch+`","changed":true}`)
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, first), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, second), second); err != nil {
+		t.Fatal(err)
+	}
+	alteredDuplicate := second
+	alteredDuplicate.Result = canonicalTestJSON(json.RawMessage(`{"head":"` + head1 + `","branch":"` + scope.Branch + `","changed":false}`))
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, alteredDuplicate), alteredDuplicate); !errors.Is(err, mcp.ErrToolPrecondition) {
+		t.Fatalf("altered duplicate replay error = %v", err)
+	}
+	backward := first
+	backward.ID = "53000000-0000-4000-8000-000000000003"
+	backward.OperationID = "publish-backward"
+	backward.Request = canonicalTestJSON(json.RawMessage(`{"operation_id":"publish-backward","message":"Back"}`))
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, backward), backward); !errors.Is(err, mcp.ErrToolPrecondition) {
+		t.Fatalf("backward replay error = %v", err)
+	}
+	malformed := second
+	malformed.ID = "53000000-0000-4000-8000-000000000004"
+	malformed.OperationID = "publish-malformed"
+	malformed.Request = canonicalTestJSON(json.RawMessage(`{"operation_id":"publish-malformed","message":"Bad"}`))
+	malformed.ExpectedSHA = head2
+	malformed.Result = canonicalTestJSON(json.RawMessage(`{"head":"credential-sentinel","branch":"` + scope.Branch + `","changed":true}`))
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, malformed), malformed); !errors.Is(err, mcp.ErrToolPrecondition) || strings.Contains(err.Error(), "credential-sentinel") {
+		t.Fatalf("malformed replay error = %v", err)
+	}
+	missingField := malformed
+	missingField.ID = "53000000-0000-4000-8000-000000000007"
+	missingField.OperationID = "publish-missing-field"
+	missingField.Request = canonicalTestJSON(json.RawMessage(`{"operation_id":"publish-missing-field","message":"Missing"}`))
+	missingField.Result = canonicalTestJSON(json.RawMessage(`{"head":"` + head2 + `","branch":"` + scope.Branch + `"}`))
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, missingField), missingField); !errors.Is(err, mcp.ErrToolPrecondition) {
+		t.Fatalf("missing result field replay error = %v", err)
+	}
+	wrongRepository := malformed
+	wrongRepository.ID = "53000000-0000-4000-8000-000000000006"
+	wrongRepository.OperationID = "publish-wrong-repository"
+	wrongRepository.Request = canonicalTestJSON(json.RawMessage(`{"operation_id":"publish-wrong-repository","message":"Wrong"}`))
+	wrongRepository.ExternalResourceID = "999:" + scope.Branch
+	wrongRepository.Result = canonicalTestJSON(json.RawMessage(`{"head":"7123456789abcdef0123456789abcdef01234567","branch":"` + scope.Branch + `","changed":true}`))
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, wrongRepository), wrongRepository); !errors.Is(err, mcp.ErrToolPrecondition) {
+		t.Fatalf("cross-repository replay error = %v", err)
+	}
+	conflictingReview := replayMutation("53000000-0000-4000-8000-000000000005", mcp.ToolRequestReview,
+		`{"operation_id":"review-conflict","summary":"Ready"}`, "omnigrex", "9123:"+scope.Branch, head2,
+		`{"outcome":"REVIEW_REQUESTED","pull_request_id":999,"pull_request_number":99,"head_sha":"`+head2+`"}`)
+	scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
+	if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, conflictingReview), conflictingReview); !errors.Is(err, mcp.ErrToolPrecondition) {
+		t.Fatalf("conflicting Pull Request replay error = %v", err)
+	}
+}
+
+func replayMutation(id, tool, request, service, resource, expectedSHA, result string) store.MutationReservation {
+	canonicalRequest := canonicalTestJSON(json.RawMessage(request))
+	return store.MutationReservation{
+		ID: id, AgentTurnID: "source-turn", ExecutionEpoch: 1, OperationID: replayOperationID(canonicalRequest),
+		ToolName: tool, Request: canonicalRequest, State: store.MutationSucceeded,
+		ExternalService: service, ExternalResourceID: resource, ExpectedSHA: expectedSHA, Result: canonicalTestJSON(json.RawMessage(result)),
+	}
+}
+
+func canonicalTestJSON(raw json.RawMessage) json.RawMessage {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return raw
+	}
+	canonical, _ := json.Marshal(value)
+	return canonical
+}
+
+func replayOperationID(request json.RawMessage) string {
+	var arguments struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(request, &arguments)
+	return arguments.OperationID
+}
+
+func replayInvocation(scope mcp.ToolScope, source store.MutationReservation) mcp.Invocation {
+	return mcp.Invocation{
+		Name: source.ToolName, Arguments: source.Request, Scope: scope, Class: mcp.MutationTool, OperationID: source.ID,
+		Mutation: mcp.MutationMetadata{ExternalService: source.ExternalService, ExternalResourceID: source.ExternalResourceID, ExpectedSHA: source.ExpectedSHA},
+	}
+}
+
+func assertProductionBackendStateSizes(t *testing.T, backend *mcp.ProductionBackend, locks, heads, plans, restored int) {
 	t.Helper()
 	value := reflect.ValueOf(backend).Elem()
 	gotLocks := value.FieldByName("publicationLocks").Len()
 	gotHeads := value.FieldByName("publishedHeads").Len()
 	gotPlans := value.FieldByName("plannedHeads").Len()
-	if gotLocks != locks || gotHeads != heads || gotPlans != plans {
-		t.Fatalf("backend state sizes = locks %d, heads %d, plans %d; want %d, %d, %d", gotLocks, gotHeads, gotPlans, locks, heads, plans)
+	gotRestored := value.FieldByName("restoredMutations").Len()
+	if gotLocks != locks || gotHeads != heads || gotPlans != plans || gotRestored != restored {
+		t.Fatalf("backend state sizes = locks %d, heads %d, plans %d, restored %d; want %d, %d, %d, %d", gotLocks, gotHeads, gotPlans, gotRestored, locks, heads, plans, restored)
 	}
 }
 

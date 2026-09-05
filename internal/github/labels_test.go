@@ -94,6 +94,24 @@ func TestLabelReconcilerPreservesLabelAddedConcurrentlyByHuman(t *testing.T) {
 	}
 }
 
+func TestLabelReconcilerClearsManagedLabelsAndPreservesHumanLabels(t *testing.T) {
+	labels := &fakeLabelAPI{issueLabels: []githubapi.Label{
+		{Name: string(githubapi.StateRun)},
+		{Name: "security-review"},
+		{Name: string(githubapi.StatePRReady)},
+	}}
+
+	if err := githubapi.NewLabelReconciler(labels).ReconcileState(context.Background(), "installation-token", "acme", "widgets", 17, githubapi.StateNone); err != nil {
+		t.Fatalf("ReconcileState(StateNone) error = %v", err)
+	}
+	if got := fmt.Sprint(labelNames(labels.issueLabels)); got != "[security-review]" {
+		t.Errorf("labels after clear = %s, want [security-review]", got)
+	}
+	if len(labels.created) != 0 {
+		t.Errorf("clear created repository labels: %v", labelNames(labels.created))
+	}
+}
+
 func TestLabelReconcilerRejectsUnknownManagedState(t *testing.T) {
 	reconciler := githubapi.NewLabelReconciler(&fakeLabelAPI{})
 	err := reconciler.ReconcileState(context.Background(), "installation-token", "acme", "widgets", 17, githubapi.WorkflowState("omnigrex:unknown"))

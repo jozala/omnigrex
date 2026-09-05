@@ -24,11 +24,15 @@ import (
 )
 
 const (
-	ProtocolVersion                   = "2025-11-25"
-	defaultMaxRequestSize             = int64(1 << 20)
-	defaultMutationFenceCheckInterval = time.Second
-	maximumMutationFenceCheckInterval = 365 * 24 * time.Hour
-	tokenBytes                        = 32
+	ProtocolVersion                    = "2025-11-25"
+	defaultMaxRequestSize              = int64(1 << 20)
+	defaultMutationFenceCheckInterval  = time.Second
+	defaultMutationFinalizationTimeout = 10 * time.Second
+	defaultMutationOperationTimeout    = 2 * time.Hour
+	maximumMutationFenceCheckInterval  = 365 * 24 * time.Hour
+	maximumMutationFinalizationTimeout = 365 * 24 * time.Hour
+	maximumMutationOperationTimeout    = 365 * 24 * time.Hour
+	tokenBytes                         = 32
 )
 
 var (
@@ -41,6 +45,7 @@ var (
 type Store interface {
 	ValidateTurnFence(context.Context, store.AgentTurnLease) error
 	ReserveMutation(context.Context, store.AgentTurnLease, store.MutationSpec) (store.MutationReservation, error)
+	AcknowledgeMutationReplay(context.Context, store.AgentTurnLease, string, store.MutationSpec) error
 	StartMutation(context.Context, store.AgentTurnLease, string) (store.MutationReservation, error)
 	CompleteMutation(context.Context, store.AgentTurnLease, string, json.RawMessage) error
 	FailMutation(context.Context, store.AgentTurnLease, string, error) error
@@ -57,6 +62,11 @@ type MutationPlanner interface {
 	PlanMutation(context.Context, Invocation) (MutationMetadata, error)
 }
 
+// MutationReplayRestorer validates a successful ancestor result and restores backend turn state without repeating its side effect.
+type MutationReplayRestorer interface {
+	RestoreMutationReplay(context.Context, Invocation, store.MutationReservation) error
+}
+
 // TurnReleaser optionally retires backend state once a registration is closed and drained.
 type TurnReleaser interface {
 	ReleaseTurn(ToolScope)
@@ -68,15 +78,17 @@ type ReadLedger interface {
 }
 
 type Config struct {
-	EndpointURL                string
-	Store                      Store
-	Backend                    Backend
-	Ledger                     ReadLedger
-	LifecycleContext           context.Context
-	MutationFenceCheckInterval time.Duration
-	MaxRequestBytes            int64
-	Now                        func() time.Time
-	Random                     io.Reader
+	EndpointURL                 string
+	Store                       Store
+	Backend                     Backend
+	Ledger                      ReadLedger
+	LifecycleContext            context.Context
+	MutationFenceCheckInterval  time.Duration
+	MutationFinalizationTimeout time.Duration
+	MutationOperationTimeout    time.Duration
+	MaxRequestBytes             int64
+	Now                         func() time.Time
+	Random                      io.Reader
 }
 
 type RepositoryScope struct {
@@ -188,15 +200,17 @@ func (registration Registration) GoString() string {
 }
 
 type Gateway struct {
-	endpointURL                string
-	store                      Store
-	backend                    Backend
-	ledger                     ReadLedger
-	maxBody                    int64
-	now                        func() time.Time
-	random                     io.Reader
-	lifecycle                  context.Context
-	mutationFenceCheckInterval time.Duration
+	endpointURL                 string
+	store                       Store
+	backend                     Backend
+	ledger                      ReadLedger
+	maxBody                     int64
+	now                         func() time.Time
+	random                      io.Reader
+	lifecycle                   context.Context
+	mutationFenceCheckInterval  time.Duration
+	mutationFinalizationTimeout time.Duration
+	mutationOperationTimeout    time.Duration
 
 	mutex         sync.RWMutex
 	randomMutex   sync.Mutex
@@ -223,6 +237,8 @@ type grant struct {
 	unresolved   bool
 	drained      chan struct{}
 	gate         *mutationGate
+	operationCtx context.Context
+	cancelOps    context.CancelFunc
 	retireWait   sync.Once
 	retireOnce   sync.Once
 }
@@ -247,6 +263,18 @@ func New(config Config) (*Gateway, error) {
 	if config.MutationFenceCheckInterval < time.Microsecond || config.MutationFenceCheckInterval > maximumMutationFenceCheckInterval {
 		return nil, fmt.Errorf("%w: mutation fence check interval", ErrInvalidConfiguration)
 	}
+	if config.MutationFinalizationTimeout == 0 {
+		config.MutationFinalizationTimeout = defaultMutationFinalizationTimeout
+	}
+	if config.MutationFinalizationTimeout < time.Microsecond || config.MutationFinalizationTimeout > maximumMutationFinalizationTimeout {
+		return nil, fmt.Errorf("%w: mutation finalization timeout", ErrInvalidConfiguration)
+	}
+	if config.MutationOperationTimeout == 0 {
+		config.MutationOperationTimeout = defaultMutationOperationTimeout
+	}
+	if config.MutationOperationTimeout < time.Microsecond || config.MutationOperationTimeout > maximumMutationOperationTimeout {
+		return nil, fmt.Errorf("%w: mutation operation timeout", ErrInvalidConfiguration)
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -257,17 +285,19 @@ func New(config Config) (*Gateway, error) {
 		config.LifecycleContext = context.Background()
 	}
 	return &Gateway{
-		endpointURL:                config.EndpointURL,
-		store:                      config.Store,
-		backend:                    config.Backend,
-		ledger:                     config.Ledger,
-		maxBody:                    config.MaxRequestBytes,
-		now:                        config.Now,
-		random:                     config.Random,
-		lifecycle:                  config.LifecycleContext,
-		mutationFenceCheckInterval: config.MutationFenceCheckInterval,
-		registrations:              make(map[[sha256.Size]byte]*grant),
-		gates:                      make(map[string]*mutationGate),
+		endpointURL:                 config.EndpointURL,
+		store:                       config.Store,
+		backend:                     config.Backend,
+		ledger:                      config.Ledger,
+		maxBody:                     config.MaxRequestBytes,
+		now:                         config.Now,
+		random:                      config.Random,
+		lifecycle:                   config.LifecycleContext,
+		mutationFenceCheckInterval:  config.MutationFenceCheckInterval,
+		mutationFinalizationTimeout: config.MutationFinalizationTimeout,
+		mutationOperationTimeout:    config.MutationOperationTimeout,
+		registrations:               make(map[[sha256.Size]byte]*grant),
+		gates:                       make(map[string]*mutationGate),
 	}, nil
 }
 
@@ -311,7 +341,11 @@ func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
 				gateway.gates[scope.Lease.AgentSessionID] = gate
 			}
 			gate.refs++
-			registeredGrant = &grant{id: id, tokenHash: hash, scope: cloneScope(scope), drained: make(chan struct{}), gate: gate}
+			operationCtx, cancelOps := context.WithCancel(gateway.lifecycle)
+			registeredGrant = &grant{
+				id: id, tokenHash: hash, scope: cloneScope(scope), drained: make(chan struct{}), gate: gate,
+				operationCtx: operationCtx, cancelOps: cancelOps,
+			}
 			gateway.registrations[hash] = registeredGrant
 			gateway.mutex.Unlock()
 			break
@@ -334,7 +368,7 @@ func (gateway *Gateway) CloseAndDrain(ctx context.Context, registration Registra
 		return fmt.Errorf("%w: registration", ErrInvalidConfiguration)
 	}
 
-	drained := gateway.closeGrant(registration.grant)
+	drained := gateway.closeGrant(registration.grant, true)
 
 	select {
 	case <-drained:
@@ -365,11 +399,11 @@ func (gateway *Gateway) Revoke(registration Registration) bool {
 	if !removed {
 		return false
 	}
-	gateway.closeGrant(registration.grant)
+	gateway.closeGrant(registration.grant, false)
 	return true
 }
 
-func (gateway *Gateway) closeGrant(registration *grant) <-chan struct{} {
+func (gateway *Gateway) closeGrant(registration *grant, cancelOperations bool) <-chan struct{} {
 	gateway.mutex.Lock()
 	if gateway.registrations[registration.tokenHash] == registration {
 		delete(gateway.registrations, registration.tokenHash)
@@ -382,6 +416,9 @@ func (gateway *Gateway) closeGrant(registration *grant) <-chan struct{} {
 		if registration.admitted == 0 {
 			close(registration.drained)
 		}
+	}
+	if cancelOperations {
+		registration.cancelOps()
 	}
 	drained := registration.drained
 	registration.mutex.Unlock()
@@ -706,30 +743,54 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		writeRPCError(response, id, -32001, "tool authorization is stale")
 		return
 	}
+	operationContext, cancelOperation := context.WithTimeout(registration.operationCtx, gateway.mutationOperationTimeout)
+	finishCall := func(durablyResolved bool) {
+		cancelOperation()
+		registration.finishCall(durablyResolved)
+		<-gate
+	}
 	if planner, ok := gateway.backend.(MutationPlanner); ok {
-		invocation.Mutation, err = planner.PlanMutation(request.Context(), invocation)
+		invocation.Mutation, err = planner.PlanMutation(operationContext, invocation)
 		if err != nil {
-			registration.finishCall(true)
-			<-gate
+			finishCall(true)
 			writeToolError(response, id, "mutation was not admitted")
 			return
 		}
 	}
-	reservation, err := gateway.store.ReserveMutation(request.Context(), registration.scope.Lease, store.MutationSpec{
+	spec := store.MutationSpec{
 		OperationID: operationID, ToolName: invocation.Name, Request: append(json.RawMessage(nil), invocation.Arguments...),
 		ExternalService: invocation.Mutation.ExternalService, ExternalResourceID: invocation.Mutation.ExternalResourceID,
 		ExpectedSHA: invocation.Mutation.ExpectedSHA,
-	})
+	}
+	reservation, err := gateway.store.ReserveMutation(operationContext, registration.scope.Lease, spec)
 	if err != nil {
-		registration.finishCall(true)
-		<-gate
+		finishCall(false)
 		writeToolError(response, id, "mutation was not admitted")
 		return
 	}
 	switch reservation.State {
 	case store.MutationSucceeded:
-		registration.finishCall(true)
-		<-gate
+		if reservation.AgentTurnID != registration.scope.Lease.ID || reservation.ExecutionEpoch != registration.scope.Lease.ExecutionEpoch {
+			restorer, ok := gateway.backend.(MutationReplayRestorer)
+			if !ok {
+				finishCall(true)
+				writeToolError(response, id, "cached mutation replay failed")
+				return
+			}
+			replayInvocation := cloneInvocation(invocation)
+			replayInvocation.OperationID = reservation.ID
+			replayInvocation.Mutation = MutationMetadata{
+				ExternalService: reservation.ExternalService, ExternalResourceID: reservation.ExternalResourceID,
+				ExpectedSHA: reservation.ExpectedSHA,
+			}
+			if err := restorer.RestoreMutationReplay(operationContext, replayInvocation, reservation); err != nil ||
+				gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec) != nil {
+				finishCall(true)
+				writeToolError(response, id, "cached mutation replay failed")
+				return
+			}
+		}
+		finishCall(true)
 		if len(reservation.Result) == 0 || !json.Valid(reservation.Result) {
 			writeToolError(response, id, "cached mutation result is unavailable")
 			return
@@ -737,20 +798,23 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		writeToolResult(response, id, reservation.Result)
 		return
 	case store.MutationFailed:
-		registration.finishCall(true)
-		<-gate
+		if (reservation.AgentTurnID != registration.scope.Lease.ID || reservation.ExecutionEpoch != registration.scope.Lease.ExecutionEpoch) &&
+			gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec) != nil {
+			finishCall(true)
+			writeToolError(response, id, "cached mutation replay failed")
+			return
+		}
+		finishCall(true)
 		writeToolError(response, id, "mutation previously failed")
 		return
 	case store.MutationUnknown, store.MutationReconciling, store.MutationInFlight:
-		registration.finishCall(true)
-		<-gate
+		finishCall(true)
 		writeToolError(response, id, "mutation outcome is unresolved")
 		return
 	case store.MutationReserved:
 		invocation.OperationID = reservation.ID
 	default:
-		registration.finishCall(true)
-		<-gate
+		finishCall(true)
 		writeToolError(response, id, "mutation state is invalid")
 		return
 	}
@@ -758,7 +822,8 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	outcome := make(chan mutationOutcome, 1)
 	go func() {
 		defer func() { <-gate }()
-		completed := gateway.executeMutation(registration.scope.Lease, reservation, invocation)
+		defer cancelOperation()
+		completed := gateway.executeMutation(operationContext, registration.scope.Lease, reservation, invocation)
 		registration.finishCall(completed.durablyResolved)
 		outcome <- completed
 	}()
@@ -805,16 +870,29 @@ func (registration *grant) drainResult() error {
 	return nil
 }
 
-func (gateway *Gateway) executeMutation(lease store.AgentTurnLease, reservation store.MutationReservation, invocation Invocation) mutationOutcome {
-	if _, err := gateway.store.StartMutation(gateway.lifecycle, lease, reservation.ID); err != nil {
-		if failErr := gateway.store.FailMutation(gateway.lifecycle, lease, reservation.ID, errors.New("mutation could not start")); failErr != nil {
+func (gateway *Gateway) executeMutation(operationContext context.Context, lease store.AgentTurnLease, reservation store.MutationReservation, invocation Invocation) mutationOutcome {
+	if err := gateway.finalizeMutation(func(ctx context.Context) error {
+		_, err := gateway.store.StartMutation(ctx, lease, reservation.ID)
+		return err
+	}); err != nil {
+		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("mutation could not start"))
+		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
 		return mutationOutcome{message: "mutation could not start", durablyResolved: true}
 	}
+	if operationContext.Err() != nil {
+		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("backend outcome is ambiguous"))
+		}); markErr != nil {
+			return mutationOutcome{message: "mutation durable state is unresolved"}
+		}
+		return mutationOutcome{message: "mutation outcome is unresolved", durablyResolved: true}
+	}
 
-	operationContext, cancelOperation := context.WithCancel(gateway.lifecycle)
-	watcherContext, cancelWatcher := context.WithCancel(operationContext)
+	backendContext, cancelBackend := context.WithCancel(operationContext)
+	watcherContext, cancelWatcher := context.WithCancel(backendContext)
 	watcherDone := make(chan struct{})
 	var watcherMutex sync.Mutex
 	stoppingWatcher := false
@@ -830,7 +908,7 @@ func (gateway *Gateway) executeMutation(lease store.AgentTurnLease, reservation 
 				if err := gateway.store.ValidateTurnFence(watcherContext, lease); err != nil {
 					watcherMutex.Lock()
 					if !stoppingWatcher {
-						cancelOperation()
+						cancelBackend()
 					}
 					watcherMutex.Unlock()
 					return
@@ -839,41 +917,57 @@ func (gateway *Gateway) executeMutation(lease store.AgentTurnLease, reservation 
 		}
 	}()
 
-	result, err := gateway.backend.Execute(operationContext, invocation)
+	result, err := gateway.backend.Execute(backendContext, invocation)
 	watcherMutex.Lock()
 	stoppingWatcher = true
 	cancelWatcher()
 	watcherMutex.Unlock()
 	<-watcherDone
-	operationCanceled := operationContext.Err() != nil
-	cancelOperation()
+	operationCanceled := backendContext.Err() != nil
+	cancelBackend()
 
 	if operationCanceled || err != nil && (IsOutcomeUnknown(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		if markErr := gateway.store.MarkMutationUnknown(gateway.lifecycle, lease, reservation.ID, errors.New("backend outcome is ambiguous")); markErr != nil {
+		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("backend outcome is ambiguous"))
+		}); markErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
 		return mutationOutcome{message: "mutation outcome is unresolved", durablyResolved: true}
 	}
 	if err != nil || len(result) == 0 || !json.Valid(result) {
-		if failErr := gateway.store.FailMutation(gateway.lifecycle, lease, reservation.ID, errors.New("backend mutation failed")); failErr != nil {
+		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("backend mutation failed"))
+		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
 		return mutationOutcome{message: "mutation failed", durablyResolved: true}
 	}
 	result, err = canonicalJSON(result)
 	if err != nil {
-		if failErr := gateway.store.FailMutation(gateway.lifecycle, lease, reservation.ID, errors.New("backend returned an invalid result")); failErr != nil {
+		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("backend returned an invalid result"))
+		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
 		return mutationOutcome{message: "mutation failed", durablyResolved: true}
 	}
-	if err := gateway.store.CompleteMutation(gateway.lifecycle, lease, reservation.ID, result); err != nil {
-		if markErr := gateway.store.MarkMutationUnknown(gateway.lifecycle, lease, reservation.ID, errors.New("mutation completion is uncertain")); markErr != nil {
+	if err := gateway.finalizeMutation(func(ctx context.Context) error {
+		return gateway.store.CompleteMutation(ctx, lease, reservation.ID, result)
+	}); err != nil {
+		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("mutation completion is uncertain"))
+		}); markErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
 		return mutationOutcome{message: "mutation outcome is unresolved", durablyResolved: true}
 	}
 	return mutationOutcome{result: result, durablyResolved: true}
+}
+
+func (gateway *Gateway) finalizeMutation(operation func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(gateway.lifecycle), gateway.mutationFinalizationTimeout)
+	defer cancel()
+	return operation(ctx)
 }
 
 func requiredStringArgument(arguments json.RawMessage, name string) (string, error) {

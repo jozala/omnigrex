@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -61,8 +62,8 @@ VALUES ('40000000-0000-4000-8000-000000000218', $1, 21, 'owner', 'repo',
 	if err != nil {
 		t.Fatalf("AllocateAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, 80*time.Millisecond)
-	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime", 80*time.Millisecond, 1)
+	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
+	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime", 5*time.Second, 1)
 	if err != nil {
 		t.Fatalf("AcquireAgentTurn() error = %v", err)
 	}
@@ -111,7 +112,7 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 		t.Fatalf("seed newer active Change Proposal: %v", err)
 	}
 
-	time.Sleep(110 * time.Millisecond)
+	expireAgentTurnExecution(t, pool, ctx, executionJob.ID, turn.ID)
 	recovery, err := database.RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil {
 		t.Fatalf("RecoverExpiredAgentTurn() error = %v", err)
@@ -131,10 +132,29 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	if _, err := database.ListAgentTurnMutationsForReconciliation(ctx, *reconcileLease); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 		t.Errorf("ListAgentTurnMutationsForReconciliation() before stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
+	if _, err := database.ReconcileRecoveredMutation(ctx, *reconcileLease, unknown.ID, store.RecoveredMutationOutcome{
+		State: store.MutationSucceeded, Result: json.RawMessage(`{"pull_request_id":8121}`),
+	}); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("ReconcileRecoveredMutation() before stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	}
+	if _, err := database.AcknowledgeAgentTurnMutationReconciliationFailure(ctx, *reconcileLease, errors.New("premature reconciliation"), 0); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("AcknowledgeAgentTurnMutationReconciliationFailure() before stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	}
+	if err := database.HeartbeatJob(ctx, *reconcileLease, 2*time.Second); err != nil {
+		t.Fatalf("HeartbeatJob() while waiting for runtime stop error = %v", err)
+	}
 	stale := *reconcileLease
 	stale.LeaseToken = "30000000-0000-4000-8000-000000000097"
 	if _, err := database.GetAgentTurnMutationReconciliationContext(ctx, stale); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
 		t.Errorf("GetAgentTurnMutationReconciliationContext() stale lease error = %v, want ErrAgentTurnRecoveryFenceLost", err)
+	}
+	staleStop := *stopLease
+	staleStop.LeaseToken = "30000000-0000-4000-8000-000000000096"
+	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, staleStop); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
+		t.Errorf("AcknowledgeRecoveredRuntimeStopped() stale lease error = %v, want ErrAgentTurnRecoveryFenceLost", err)
+	}
+	if _, err := database.GetAgentTurnMutationReconciliationContext(ctx, *reconcileLease); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("GetAgentTurnMutationReconciliationContext() after stale stop acknowledgement error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
 	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopLease); err != nil {
 		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() error = %v", err)
@@ -232,6 +252,9 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	if !settledAfterEscalation.SuccessorAllowed || settledAfterEscalation.RecoverySettledAt == nil || settledAfterEscalation.MutationsUnsettled {
 		t.Errorf("recovery after final escalation = %#v, want settled", settledAfterEscalation)
 	}
+	if settledAfterEscalation.Continuation != "MUTATION_RECONCILIATION_HANDOFF_APPLIED" || settledAfterEscalation.SettlementID != "" {
+		t.Errorf("reconciliation exhaustion continuation = %#v", settledAfterEscalation)
+	}
 
 	for _, mutationID := range []string{unknown.ID, reconciling.ID} {
 		var state, diagnostic string
@@ -267,6 +290,21 @@ WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS 
 	}
 	if waitingAssignments != 2 {
 		t.Errorf("waiting Assignments = %d, want 2", waitingAssignments)
+	}
+	var infrastructureFailures, settlements, preparationJobs, handoffJobs int
+	if err := pool.QueryRow(ctx, `
+SELECT attempt.infrastructure_failures,
+       (SELECT count(*) FROM agent_turn_settlements WHERE agent_turn_id = $2),
+       (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'),
+       (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PUBLISH_HUMAN_HANDOFF')
+FROM workflow_attempts AS attempt WHERE attempt.id = $3`, fixture.workflowID, turn.ID, fixture.attemptID).Scan(
+		&infrastructureFailures, &settlements, &preparationJobs, &handoffJobs,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if infrastructureFailures != 0 || settlements != 0 || preparationJobs != 0 || handoffJobs != 1 {
+		t.Errorf("exhaustion transition = infrastructure budget %d, settlements %d, preparations %d, handoffs %d",
+			infrastructureFailures, settlements, preparationJobs, handoffJobs)
 	}
 	var handoffPayload, labelsPayload []byte
 	if err := pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE workflow_id = $1 AND kind = 'PUBLISH_HUMAN_HANDOFF'`, fixture.workflowID).Scan(&handoffPayload); err != nil {
@@ -310,8 +348,8 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocateAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, 80*time.Millisecond)
-	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "review-runtime", 80*time.Millisecond, 1)
+	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
+	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "review-runtime", 5*time.Second, 1)
 	if err != nil {
 		t.Fatalf("AcquireAgentTurn() error = %v", err)
 	}
@@ -337,7 +375,7 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 		t.Fatalf("StartMutation() conflicting error = %v", err)
 	}
 
-	time.Sleep(110 * time.Millisecond)
+	expireAgentTurnExecution(t, pool, ctx, executionJob.ID, turn.ID)
 	if _, err := database.RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch); err != nil {
 		t.Fatalf("RecoverExpiredAgentTurn() error = %v", err)
 	}
@@ -400,5 +438,24 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	}
 	if actorID != 9201 || mutationState != string(store.MutationUnknown) {
 		t.Errorf("conflicting recovery CAS = actor %d, mutation %s; want actor 9201 and UNKNOWN rollback", actorID, mutationState)
+	}
+}
+
+func expireAgentTurnExecution(t *testing.T, pool interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, ctx context.Context, jobID, turnID string) {
+	t.Helper()
+	for _, update := range []struct {
+		query string
+		id    string
+	}{
+		{`UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, jobID},
+		{`UPDATE job_attempts SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE job_id = $1 AND status = 'LEASED'`, jobID},
+		{`UPDATE agent_turns SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, turnID},
+		{`UPDATE agent_turn_slots SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE agent_turn_id = $1`, turnID},
+	} {
+		if _, err := pool.Exec(ctx, update.query, update.id); err != nil {
+			t.Fatalf("expire Agent Turn execution: %v", err)
+		}
 	}
 }
