@@ -368,7 +368,8 @@ func validateWorkflowActionFailure(cause error, retryDelay time.Duration) error 
 }
 
 func isExhaustionAwareWorkflowAction(kind string) bool {
-	return kind == ReconcilePendingEventsJobKind || kind == ReconcileGitHubLabelsJobKind || kind == PublishHumanHandoffJobKind
+	return kind == ReconcilePendingEventsJobKind || kind == StopAgentTurnJobKind || kind == SettleClosureJobKind ||
+		kind == ReconcileGitHubLabelsJobKind || kind == PublishHumanHandoffJobKind
 }
 
 func exhaustExpiredWorkflowActionTx(ctx context.Context, tx pgx.Tx, job Job) error {

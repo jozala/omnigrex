@@ -23,6 +23,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 const (
@@ -252,6 +253,42 @@ func TestOpenCodeControlledStateUpgrade(t *testing.T) {
 
 	assertRuntimeStateExcludes(t, sourceStateVolume, "not-a-real-secret")
 	assertRuntimeStateExcludes(t, candidateStateVolume, "not-a-real-secret")
+	emitRuntimeProfileCompatibilityResult(t)
+}
+
+func emitRuntimeProfileCompatibilityResult(t *testing.T) {
+	t.Helper()
+	output := os.Getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE")
+	if output == "" {
+		return
+	}
+	sourceImage := os.Getenv("OMNIGREX_PREVIOUS_OPENCODE_IMAGE")
+	targetImage := os.Getenv("OMNIGREX_OPENCODE_IMAGE")
+	platform := runtimeprofile.Platform{OS: "linux", Arch: runtime.GOARCH}
+	source, err := runtimeprofile.NewOpenCodeV1(sourceImage, platform)
+	if err != nil {
+		t.Fatalf("qualification output requires an exact source registry digest: %v", err)
+	}
+	target, err := runtimeprofile.NewOpenCodeV1(targetImage, platform)
+	if err != nil {
+		t.Fatalf("qualification output requires an exact target registry digest: %v", err)
+	}
+	result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), platform, time.Now())
+	encoded, err := runtimeprofile.EncodeCompatibilityResultsFile([]runtimeprofile.CompatibilityResult{result})
+	if err != nil {
+		t.Fatalf("encode Runtime Profile compatibility qualification result: %v", err)
+	}
+	file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create Runtime Profile compatibility qualification result: %v", err)
+	}
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		t.Fatalf("write Runtime Profile compatibility qualification result: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close Runtime Profile compatibility qualification result: %v", err)
+	}
 }
 
 func TestOpenCodeReviewerIsolationBoundary(t *testing.T) {

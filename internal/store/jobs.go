@@ -420,32 +420,45 @@ LIMIT $1`, limit, queue, kind)
 	}
 	rows.Close()
 	for _, job := range expired {
+		retryScheduled := job.attempt < job.maxAttempts
+		retryDelay := time.Duration(0)
+		var expiredAction Job
+		if !retryScheduled {
+			expiredAction, err = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, job.id))
+			if err != nil {
+				return 0, err
+			}
+			continued, _, err := continueIrreversibleJobAfterExhaustionTx(ctx, tx, expiredAction)
+			if err != nil {
+				return 0, err
+			}
+			if continued {
+				retryScheduled = true
+				retryDelay = irreversibleRetryDelay
+			}
+		}
 		if _, err := tx.Exec(ctx, `
 UPDATE job_attempts
 SET status = 'EXPIRED', finished_at = clock_timestamp(), retryable = $4, last_error = 'lease expired'
 WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`,
-			job.id, job.attempt, job.token, job.attempt < job.maxAttempts); err != nil {
+			job.id, job.attempt, job.token, retryScheduled); err != nil {
 			return 0, err
 		}
-		if job.attempt >= job.maxAttempts && isExhaustionAwareWorkflowAction(job.kind) {
-			expiredAction, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, job.id))
-			if err != nil {
-				return 0, err
-			}
+		if !retryScheduled && isExhaustionAwareWorkflowAction(job.kind) {
 			if err := exhaustExpiredWorkflowActionTx(ctx, tx, expiredAction); err != nil {
 				return 0, err
 			}
 		}
 		if _, err := tx.Exec(ctx, `
 UPDATE jobs
-SET status = CASE WHEN attempt_count < max_attempts THEN 'AVAILABLE' ELSE 'FAILED' END,
-    available_at = CASE WHEN attempt_count < max_attempts THEN clock_timestamp() ELSE available_at END,
+SET status = CASE WHEN $4 THEN 'AVAILABLE' ELSE 'FAILED' END,
+    available_at = CASE WHEN $4 THEN clock_timestamp() + $5 * interval '1 microsecond' ELSE available_at END,
     lease_owner = NULL, lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
     heartbeat_at = NULL, updated_at = clock_timestamp(),
-    completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE clock_timestamp() END,
+    completed_at = CASE WHEN $4 THEN NULL ELSE clock_timestamp() END,
     last_error = 'lease expired'
 WHERE id = $1 AND status = 'LEASED' AND lease_token = $2 AND attempt_count = $3`,
-			job.id, job.token, job.attempt); err != nil {
+			job.id, job.token, job.attempt, retryScheduled, retryDelay.Microseconds()); err != nil {
 			return 0, err
 		}
 	}

@@ -30,6 +30,16 @@ type AgentTurnRuntimeCleanupContext struct {
 	Role         workflow.Role
 }
 
+// AgentTurnRuntimeStopFailureAcknowledgement is the durable retry outcome of one stale-runtime stop attempt.
+type AgentTurnRuntimeStopFailureAcknowledgement struct {
+	JobID               string
+	WorkflowID          string
+	AgentTurnID         string
+	Attempt             int
+	RetryScheduled      bool
+	EscalationScheduled bool
+}
+
 // AgentTurnMutationReconciliationAcknowledgement is the durable retry or
 // Human Handoff outcome of one inconclusive reconciliation attempt.
 type AgentTurnMutationReconciliationAcknowledgement struct {
@@ -73,6 +83,47 @@ WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan
 		return AgentTurnRuntimeCleanupContext{}, fmt.Errorf("commit Agent Turn runtime cleanup context: %w", err)
 	}
 	return cleanup, nil
+}
+
+// AcknowledgeRecoveredRuntimeStopFailure promptly releases a failed stop attempt while preserving cleanup authority.
+func (store *Store) AcknowledgeRecoveredRuntimeStopFailure(ctx context.Context, lease JobLease, cause error, retryDelay time.Duration) (AgentTurnRuntimeStopFailureAcknowledgement, error) {
+	if cause == nil || strings.TrimSpace(cause.Error()) == "" {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, errors.New("acknowledge Agent Turn runtime stop failure: cause is empty")
+	}
+	if retryDelay < 0 || retryDelay > maximumJobDelay {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, fmt.Errorf("acknowledge Agent Turn runtime stop failure: retry delay must be between zero and %s", maximumJobDelay)
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, fmt.Errorf("begin Agent Turn runtime stop failure acknowledgement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, _, err := lockAgentTurnRecoveryJob(ctx, tx, lease, StopStaleRuntimeJobKind)
+	if err != nil {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, err
+	}
+	acknowledgement := AgentTurnRuntimeStopFailureAcknowledgement{
+		JobID: job.ID, WorkflowID: job.WorkflowID, AgentTurnID: job.AgentTurnID,
+		Attempt: job.AttemptCount, RetryScheduled: true,
+	}
+	if job.AttemptCount >= job.MaxAttempts {
+		continued, scheduled, err := continueIrreversibleJobAfterExhaustionTx(ctx, tx, job)
+		if err != nil {
+			return AgentTurnRuntimeStopFailureAcknowledgement{}, err
+		}
+		if !continued {
+			return AgentTurnRuntimeStopFailureAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
+		}
+		acknowledgement.EscalationScheduled = scheduled
+	}
+	if err := failWorkflowActionJobTx(ctx, tx, job, cause.Error(), true, true, retryDelay); err != nil {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRuntimeStopFailureAcknowledgement{}, fmt.Errorf("commit Agent Turn runtime stop failure acknowledgement: %w", err)
+	}
+	return acknowledgement, nil
 }
 
 // GetAgentTurnMutationReconciliationContext reads the repository, Work Item,
@@ -148,8 +199,8 @@ WHERE id = $1 AND workflow_id = $2 AND repository_id = $3
 	return reconciliation, nil
 }
 
-// ListAgentTurnMutationsForReconciliation returns UNKNOWN and RECONCILING
-// mutations in invocation order under the live recovery-job fence after stale Runtime Process stop is durable.
+// ListAgentTurnMutationsForReconciliation returns mutations that require fresh
+// reconciliation in invocation order under the live recovery-job fence after stale Runtime Process stop is durable.
 func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context, lease JobLease) ([]MutationReservation, error) {
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -165,7 +216,7 @@ func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context,
 	}
 	rows, err := tx.Query(ctx, mutationSelect+`
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
-  AND state IN ('UNKNOWN', 'RECONCILING')
+  AND state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')
 ORDER BY invocation_number`, job.AgentTurnID, job.ExecutionEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("list Agent Turn mutations for reconciliation: %w", err)
@@ -212,14 +263,16 @@ func (store *Store) AcknowledgeAgentTurnMutationReconciliationFailure(ctx contex
 	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
-	var unresolved int
+	var candidates, unresolved int
 	if err := tx.QueryRow(ctx, `
-SELECT count(*) FROM tool_invocations
+SELECT count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')),
+       count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING'))
+FROM tool_invocations
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
-  AND state IN ('UNKNOWN', 'RECONCILING')`, job.AgentTurnID, job.ExecutionEpoch).Scan(&unresolved); err != nil {
+	`, job.AgentTurnID, job.ExecutionEpoch).Scan(&candidates, &unresolved); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("count unresolved recovered mutations: %w", err)
 	}
-	if unresolved == 0 {
+	if candidates == 0 {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryUnsettled
 	}
 
@@ -227,7 +280,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 		JobID: job.ID, WorkflowID: job.WorkflowID, WorkflowAttemptID: job.WorkflowAttemptID,
 		AgentTurnID: job.AgentTurnID, Attempt: job.AttemptCount,
 		RetryScheduled:          job.AttemptCount < job.MaxAttempts,
-		UnresolvedMutationCount: unresolved,
+		UnresolvedMutationCount: candidates,
 	}
 	if acknowledgement.RetryScheduled {
 		if err := failAgentTurnMutationReconciliationAttemptTx(ctx, tx, job, cause.Error(), retryDelay); err != nil {
@@ -304,7 +357,7 @@ WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN'
 	}
 	jobResult, err := json.Marshal(map[string]any{
 		"escalated": true, "diagnostic": diagnostic,
-		"unresolved_mutation_count": unresolved, "workflow_revision": decision.Snapshot.Revision,
+		"unresolved_mutation_count": candidates, "workflow_revision": decision.Snapshot.Revision,
 	})
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
@@ -323,6 +376,50 @@ WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN'
 	acknowledgement.Diagnostic = diagnostic
 	acknowledgement.WorkflowRevision = decision.Snapshot.Revision
 	return acknowledgement, nil
+}
+
+// CompleteAgentTurnMutationReconciliation acknowledges that every listed
+// successful mutation was freshly found and every ambiguous mutation reached a fenced terminal state.
+func (store *Store) CompleteAgentTurnMutationReconciliation(ctx context.Context, lease JobLease) (AgentTurnRecovery, error) {
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("begin Agent Turn mutation reconciliation completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, _, err := lockAgentTurnRecoveryJob(ctx, tx, lease, ReconcileAgentTurnMutationsJobKind)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	var unresolved bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM tool_invocations
+    WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+      AND state IN ('UNKNOWN', 'RECONCILING')
+)`, job.AgentTurnID, job.ExecutionEpoch).Scan(&unresolved); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("check completed recovered mutations: %w", err)
+	}
+	if unresolved {
+		return AgentTurnRecovery{}, ErrAgentTurnRecoveryUnsettled
+	}
+	if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"mutations_reconciled":true}`)); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if _, err := settleAgentTurnRecoveryTx(ctx, tx, job); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	recovery, err := readAgentTurnRecovery(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("read completed mutation recovery: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("commit Agent Turn mutation reconciliation completion: %w", err)
+	}
+	return recovery, nil
 }
 
 func failAgentTurnMutationReconciliationAttemptTx(ctx context.Context, tx pgx.Tx, job Job, diagnostic string, retryDelay time.Duration) error {

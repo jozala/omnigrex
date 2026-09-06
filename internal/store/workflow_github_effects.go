@@ -40,6 +40,7 @@ type WorkflowGitHubEffectContext struct {
 	ReadyForSHA              string
 	HandoffReason            string
 	HandoffDiagnostic        string
+	SafetyDiagnostic         bool
 	ChangeProposal           *WorkflowGitHubChangeProposal
 	CleanupRequired          bool
 	CleanupIssueNumber       int64
@@ -59,8 +60,11 @@ type WorkflowGitHubEffectAcknowledgement struct {
 }
 
 type workflowGitHubEffectPayload struct {
-	Revision          int64 `json:"revision"`
-	PullRequestNumber int64 `json:"pull_request_number"`
+	Revision          int64  `json:"revision"`
+	PullRequestNumber int64  `json:"pull_request_number"`
+	Reason            string `json:"reason,omitempty"`
+	Diagnostic        string `json:"diagnostic,omitempty"`
+	SafetyDiagnostic  bool   `json:"safety_diagnostic,omitempty"`
 }
 
 // ClaimWorkflowGitHubEffectJob leases one exact visible-effect kind while serializing claims per Workflow.
@@ -144,11 +148,15 @@ func (store *Store) GetWorkflowGitHubEffectContext(ctx context.Context, lease Jo
 		return WorkflowGitHubEffectContext{}, err
 	}
 	var payload workflowGitHubEffectPayload
-	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Revision <= 0 {
+	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Revision <= 0 ||
+		payload.SafetyDiagnostic && expectedKind != PublishHumanHandoffJobKind {
 		return WorkflowGitHubEffectContext{}, ErrWorkflowGitHubEffectFenceLost
 	}
 
-	effect := WorkflowGitHubEffectContext{WorkflowID: job.WorkflowID, JobRevision: uint64(payload.Revision)}
+	effect := WorkflowGitHubEffectContext{
+		WorkflowID: job.WorkflowID, JobRevision: uint64(payload.Revision),
+		SafetyDiagnostic: payload.SafetyDiagnostic,
+	}
 	err = tx.QueryRow(ctx, `
 SELECT repository_id, repository_owner, repository_name, issue_number,
 	   status, state_revision, COALESCE(human_handoff_reason, '')
@@ -178,7 +186,13 @@ FOR SHARE`, job.WorkflowID, effect.RepositoryID).Scan(
 		return WorkflowGitHubEffectContext{}, fmt.Errorf("read active Change Proposal for GitHub effect: %w", err)
 	}
 
-	if effect.HandoffReason != "" {
+	if payload.SafetyDiagnostic {
+		if strings.TrimSpace(payload.Reason) == "" || strings.TrimSpace(payload.Diagnostic) == "" {
+			return WorkflowGitHubEffectContext{}, ErrWorkflowGitHubEffectFenceLost
+		}
+		effect.HandoffReason = payload.Reason
+		effect.HandoffDiagnostic = payload.Diagnostic
+	} else if effect.HandoffReason != "" {
 		err = tx.QueryRow(ctx, `
 SELECT COALESCE(payload->>'diagnostic', '')
 FROM jobs
@@ -243,7 +257,9 @@ func (store *Store) acknowledgeWorkflowGitHubEffect(ctx context.Context, lease J
 		return WorkflowGitHubEffectAcknowledgement{}, err
 	}
 	var payload workflowGitHubEffectPayload
-	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Revision <= 0 || observed.JobRevision != uint64(payload.Revision) {
+	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Revision <= 0 ||
+		payload.SafetyDiagnostic && expectedKind != PublishHumanHandoffJobKind ||
+		observed.JobRevision != uint64(payload.Revision) || observed.SafetyDiagnostic != payload.SafetyDiagnostic {
 		return WorkflowGitHubEffectAcknowledgement{}, ErrWorkflowGitHubEffectFenceLost
 	}
 	var currentRevision uint64
@@ -262,9 +278,13 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 		return WorkflowGitHubEffectAcknowledgement{}, ErrWorkflowGitHubEffectFenceLost
 	}
 
+	superseded := currentRevision != observed.Revision || currentState != observed.State
+	if payload.SafetyDiagnostic {
+		superseded = false
+	}
 	acknowledgement := WorkflowGitHubEffectAcknowledgement{
 		JobID: job.ID, WorkflowID: job.WorkflowID, Revision: currentRevision, State: currentState,
-		Superseded: currentRevision != observed.Revision || currentState != observed.State,
+		Superseded: superseded,
 	}
 	cleanupPending := false
 	if expectedKind == PublishHumanHandoffJobKind {
@@ -274,8 +294,9 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 			return WorkflowGitHubEffectAcknowledgement{}, fmt.Errorf("inspect Workflow GitHub effect cleanup: %w", err)
 		}
 	}
-	sourceSuperseded := acknowledgement.Superseded || expectedKind == PublishHumanHandoffJobKind &&
-		(uint64(payload.Revision) != currentRevision || currentState != workflow.StateNeedsHuman)
+	sourceSuperseded := !payload.SafetyDiagnostic && (acknowledgement.Superseded ||
+		expectedKind == PublishHumanHandoffJobKind &&
+			(uint64(payload.Revision) != currentRevision || currentState != workflow.StateNeedsHuman))
 	if cleanupPending && cause == nil {
 		acknowledgement.Superseded = true
 		acknowledgement.CleanupRequired = true

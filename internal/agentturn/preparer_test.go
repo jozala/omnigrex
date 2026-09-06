@@ -56,8 +56,16 @@ func (source *profileSource) FetchRepositoryFile(_ context.Context, credential, 
 
 type preparationStore struct {
 	selected workflow.Role
+	bindings store.AgentTurnPreparationRuntimeBindings
 	calls    []store.AgentTurnPreparationSpec
 	err      error
+}
+
+func (database *preparationStore) GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error) {
+	if database.bindings.Mode == "" {
+		return store.AgentTurnPreparationRuntimeBindings{Mode: workflow.AssignmentGenerationNew}, nil
+	}
+	return database.bindings, nil
 }
 
 func (database *preparationStore) PrepareAgentTurn(_ context.Context, _ store.JobLease, spec store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error) {
@@ -347,6 +355,52 @@ func TestPrepareRefreshesMutableProfileSnapshotsWithoutChangingBindings(t *testi
 		if preparations[0].Profile.CommitSHA != testCommitSHA || preparations[1].Profile.CommitSHA != source.commitSHA {
 			t.Errorf("%s commits = (%q, %q)", role, preparations[0].Profile.CommitSHA, preparations[1].Profile.CommitSHA)
 		}
+	}
+}
+
+func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration(t *testing.T) {
+	oldImage := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("1", 64)
+	candidateImage := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("2", 64)
+	oldProfile := runtimeProfile(t, oldImage)
+	candidateProfile := runtimeProfile(t, candidateImage)
+	catalog, err := runtimeprofile.NewCatalog([]runtimeprofile.Profile{candidateProfile}, []runtimeprofile.Profile{oldProfile})
+	if err != nil {
+		t.Fatalf("NewCatalog() error = %v", err)
+	}
+	oldDeveloper := store.AssignmentRuntimeBinding{
+		AgentProfileName: "developer", RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		RuntimeProfileContentSHA256: oldProfile.ContentSHA256(), RuntimeImageDigest: oldImage,
+	}
+	oldReviewer := oldDeveloper
+	oldReviewer.AgentProfileName = "reviewer"
+	retainedStore := &preparationStore{
+		selected: workflow.RoleDeveloper,
+		bindings: store.AgentTurnPreparationRuntimeBindings{
+			Mode: workflow.AssignmentGenerationRetained, Developer: &oldDeveloper, Reviewer: &oldReviewer,
+		},
+	}
+
+	retained, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), catalog, retainedStore).Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Prepare() retained error = %v", err)
+	}
+	if retained.Commit.Assignment.RuntimeImageDigest != oldImage || retained.RuntimeProfile.ContentSHA256() != oldProfile.ContentSHA256() {
+		t.Fatalf("retained binding migrated: Assignment %#v, profile %s", retained.Commit.Assignment.AssignmentRuntimeBinding, retained.RuntimeProfile.ContentSHA256())
+	}
+	if retainedStore.calls[0].Developer.Binding != oldDeveloper || retainedStore.calls[0].Reviewer.Binding != oldReviewer {
+		t.Fatalf("retained Store bindings = %#v", retainedStore.calls[0])
+	}
+
+	newStore := &preparationStore{selected: workflow.RoleDeveloper}
+	created, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), catalog, newStore).Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Prepare() new error = %v", err)
+	}
+	if created.Commit.Assignment.RuntimeImageDigest != candidateImage || created.RuntimeProfile.ContentSHA256() != candidateProfile.ContentSHA256() {
+		t.Fatalf("new generation did not use candidate: Assignment %#v, profile %s", created.Commit.Assignment.AssignmentRuntimeBinding, created.RuntimeProfile.ContentSHA256())
+	}
+	if retainedStore.calls[0].Developer.Binding != oldDeveloper {
+		t.Fatal("new generation preparation altered retained old binding")
 	}
 }
 

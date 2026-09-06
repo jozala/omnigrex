@@ -51,6 +51,89 @@ func TestRecoveryWorkerClaimsOnlyReconciliationJobsAndRecordsMutationsInOrder(t 
 	}
 }
 
+func TestRecoveryWorkerFreshlyVerifiesSucceededMutationWithoutRewritingLedger(t *testing.T) {
+	lease := reconciliationJobLease()
+	mutation := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"caller","body":"update"}`)
+	mutation.State = store.MutationSucceeded
+	mutation.Result = json.RawMessage(`{"comment_id":42}`)
+	durable := &recoveryStore{lease: &lease, reconciliation: reconciliationContext(), mutations: []store.MutationReservation{mutation}}
+	reconciler := &recordingMutationReconciler{results: []mcp.MutationReconciliationResult{{
+		Disposition: mcp.ReconciliationFound,
+		Outcome:     store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: json.RawMessage(`{"comment_id":42}`)},
+	}}}
+	worker := newRecoveryWorker(t, durable, reconciler, mcp.RecoveryWorkerConfig{
+		ClaimOwner: "recovery-worker", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+		IdlePollInterval: 10 * time.Millisecond, RetryDelay: time.Minute,
+	})
+
+	processed, err := worker.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	if !reflect.DeepEqual(reconciler.mutationIDs, []string{mutation.ID}) || len(durable.reconciledIDs) != 0 {
+		t.Fatalf("successful verification = reads %v, ledger writes %v", reconciler.mutationIDs, durable.reconciledIDs)
+	}
+	if durable.reconciliationCompletions != 1 || durable.completedTurnID != "turn-1" {
+		t.Fatalf("barrier completions = %d, recovery completion = %q", durable.reconciliationCompletions, durable.completedTurnID)
+	}
+}
+
+func TestRecoveryWorkerRequiresFoundForSucceededMutation(t *testing.T) {
+	for _, disposition := range []mcp.MutationReconciliationDisposition{mcp.ReconciliationUnresolved, mcp.ReconciliationDefinitelyFailed} {
+		t.Run(string(disposition), func(t *testing.T) {
+			lease := reconciliationJobLease()
+			mutation := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"caller","body":"update"}`)
+			mutation.State = store.MutationSucceeded
+			durable := &recoveryStore{
+				lease: &lease, reconciliation: reconciliationContext(), mutations: []store.MutationReservation{mutation},
+				acknowledgement: store.AgentTurnMutationReconciliationAcknowledgement{Escalated: true},
+			}
+			result := mcp.MutationReconciliationResult{Disposition: disposition}
+			if disposition == mcp.ReconciliationDefinitelyFailed {
+				result.Outcome = store.RecoveredMutationOutcome{State: store.MutationFailed, LastError: "artifact missing"}
+			}
+			worker := newRecoveryWorker(t, durable, &recordingMutationReconciler{results: []mcp.MutationReconciliationResult{result}}, mcp.RecoveryWorkerConfig{
+				ClaimOwner: "recovery-worker", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+				IdlePollInterval: 10 * time.Millisecond, RetryDelay: time.Minute,
+			})
+
+			processed, err := worker.ProcessNext(context.Background())
+			if !processed || !errors.Is(err, mcp.ErrMutationReconciliationUnresolved) {
+				t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+			}
+			if durable.acknowledgements != 1 || durable.reconciliationCompletions != 0 || len(durable.reconciledIDs) != 0 {
+				t.Fatalf("failed verification = acknowledgements %d, barrier completions %d, ledger writes %v", durable.acknowledgements, durable.reconciliationCompletions, durable.reconciledIDs)
+			}
+		})
+	}
+}
+
+func TestRecoveryWorkerProcessesMixedSucceededAndUnknownMutationsInInvocationOrder(t *testing.T) {
+	lease := reconciliationJobLease()
+	succeeded := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"first","body":"first"}`)
+	succeeded.State = store.MutationSucceeded
+	succeeded.InvocationNumber = 1
+	unknown := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"second","body":"second"}`)
+	unknown.ID = "10000000-0000-4000-8000-000000000012"
+	unknown.InvocationNumber = 2
+	durable := &recoveryStore{lease: &lease, reconciliation: reconciliationContext(), mutations: []store.MutationReservation{succeeded, unknown}}
+	reconciler := &recordingMutationReconciler{results: []mcp.MutationReconciliationResult{
+		{Disposition: mcp.ReconciliationFound, Outcome: store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: json.RawMessage(`{"comment_id":1}`)}},
+		{Disposition: mcp.ReconciliationFound, Outcome: store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: json.RawMessage(`{"comment_id":2}`)}},
+	}}
+	worker := newRecoveryWorker(t, durable, reconciler, mcp.RecoveryWorkerConfig{
+		ClaimOwner: "recovery-worker", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+		IdlePollInterval: 10 * time.Millisecond, RetryDelay: time.Minute,
+	})
+
+	if processed, err := worker.ProcessNext(context.Background()); err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	if !reflect.DeepEqual(reconciler.mutationIDs, []string{succeeded.ID, unknown.ID}) || !reflect.DeepEqual(durable.reconciledIDs, []string{unknown.ID}) {
+		t.Fatalf("mixed reconciliation order = reads %v, writes %v", reconciler.mutationIDs, durable.reconciledIDs)
+	}
+}
+
 func TestRecoveryWorkerAcknowledgesUnresolvedAndDependencyFailuresForStoreBudgeting(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -278,6 +361,8 @@ type recoveryStore struct {
 	retryDelay                        time.Duration
 	acknowledgement                   store.AgentTurnMutationReconciliationAcknowledgement
 	acknowledgeErr                    error
+	reconciliationCompletions         int
+	reconciliationCompletionErr       error
 }
 
 func (durable *recoveryStore) ClaimJobKind(_ context.Context, queue, kind, owner string, lease time.Duration) (*store.JobLease, error) {
@@ -334,6 +419,11 @@ func (durable *recoveryStore) ReconcileRecoveredMutation(_ context.Context, _ st
 	durable.reconciledIDs = append(durable.reconciledIDs, mutationID)
 	durable.outcomes = append(durable.outcomes, outcome)
 	return store.MutationReservation{ID: mutationID, State: outcome.State, Result: outcome.Result, LastError: outcome.LastError}, durable.reconcileErr
+}
+
+func (durable *recoveryStore) CompleteAgentTurnMutationReconciliation(_ context.Context, lease store.JobLease) (store.AgentTurnRecovery, error) {
+	durable.reconciliationCompletions++
+	return store.AgentTurnRecovery{TurnID: lease.AgentTurnID, ExecutionEpoch: lease.ExecutionEpoch}, durable.reconciliationCompletionErr
 }
 
 func (durable *recoveryStore) AcknowledgeAgentTurnMutationReconciliationFailure(_ context.Context, _ store.JobLease, _ error, delay time.Duration) (store.AgentTurnMutationReconciliationAcknowledgement, error) {

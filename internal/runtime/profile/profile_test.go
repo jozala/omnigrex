@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/runtime/profile"
@@ -277,6 +278,47 @@ func TestRegistryRejectsDuplicateReferenceConflict(t *testing.T) {
 	}
 	if _, err := profile.NewRegistry(profile.Profile{}); !errors.Is(err, profile.ErrInvalid) {
 		t.Fatalf("NewRegistry() zero profile error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
+	oldContract := validContract(t)
+	oldContract.Image = "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("1", 64)
+	oldProfile, err := profile.New(oldContract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateContract := validContract(t)
+	candidateContract.Image = "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("2", 64)
+	candidateProfile, err := profile.New(candidateContract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := profile.NewCatalog([]profile.Profile{candidateProfile}, []profile.Profile{oldProfile})
+	if err != nil {
+		t.Fatalf("NewCatalog() error = %v", err)
+	}
+
+	current, err := catalog.Resolve("opencode-acp", "v1")
+	if err != nil || current.ContentSHA256() != candidateProfile.ContentSHA256() {
+		t.Fatalf("Resolve() current = (%s, %v), want candidate", current.ContentSHA256(), err)
+	}
+	historical, err := catalog.ResolveBinding(oldProfile.Binding())
+	if err != nil || historical.ContentSHA256() != oldProfile.ContentSHA256() {
+		t.Fatalf("ResolveBinding() historical = (%s, %v), want old", historical.ContentSHA256(), err)
+	}
+	conflicting := oldProfile.Binding()
+	conflicting.Image = candidateProfile.Contract().Image
+	if _, err := catalog.ResolveBinding(conflicting); !errors.Is(err, profile.ErrNotFound) {
+		t.Fatalf("ResolveBinding() mixed binding error = %v, want ErrNotFound", err)
+	}
+	currentOnly, err := profile.NewRegistry(candidateProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := currentOnly.ResolveBinding(oldProfile.Binding())
+	if err != nil || recovered.Contract().Platform != oldProfile.Contract().Platform {
+		t.Fatalf("ResolveBinding() qualified persisted history = (%#v, %v)", recovered.Contract(), err)
 	}
 }
 

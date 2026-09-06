@@ -318,7 +318,7 @@ func matrixClosureSettled(snapshot workflow.Snapshot) workflow.Event {
 	if snapshot.Closure != nil {
 		closureID = snapshot.Closure.ID
 	}
-	return workflow.ClosureSettledEvent{EventMetadata: matrixMetadata(snapshot, "matrix-closure-settled"), ClosureID: closureID, Turn: turnGuardPointer(snapshot)}
+	return workflow.ClosureSettledEvent{EventMetadata: matrixMetadata(snapshot, "matrix-closure-settled"), ClosureID: closureID, Turn: turnGuardPointer(snapshot), AssignmentsExist: true}
 }
 
 func matrixIssueReopened(snapshot workflow.Snapshot) workflow.Event {

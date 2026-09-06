@@ -25,6 +25,7 @@ type RecoveryStore interface {
 	GetAgentTurnMutationReconciliationContext(context.Context, store.JobLease) (store.AgentTurnMutationReconciliationContext, error)
 	ListAgentTurnMutationsForReconciliation(context.Context, store.JobLease) ([]store.MutationReservation, error)
 	ReconcileRecoveredMutation(context.Context, store.JobLease, string, store.RecoveredMutationOutcome) (store.MutationReservation, error)
+	CompleteAgentTurnMutationReconciliation(context.Context, store.JobLease) (store.AgentTurnRecovery, error)
 	AcknowledgeAgentTurnMutationReconciliationFailure(context.Context, store.JobLease, error, time.Duration) (store.AgentTurnMutationReconciliationAcknowledgement, error)
 	CompleteAgentTurnRecovery(context.Context, string, int64) (store.AgentTurnRecovery, error)
 }
@@ -171,11 +172,22 @@ func (worker *RecoveryWorker) reconcileJob(ctx, completionCtx context.Context, l
 		default:
 			return errors.New("mutation reconciler returned an invalid disposition")
 		}
+		if mutation.State == store.MutationSucceeded {
+			if result.Disposition != ReconciliationFound {
+				return ErrMutationReconciliationUnresolved
+			}
+			continue
+		}
+		if mutation.State != store.MutationUnknown && mutation.State != store.MutationReconciling {
+			return errors.New("mutation reconciliation state is invalid")
+		}
 		if _, err := worker.store.ReconcileRecoveredMutation(ctx, lease, mutation.ID, result.Outcome); err != nil {
 			return fmt.Errorf("record reconciled mutation: %w", err)
 		}
 	}
-	// The final mutation write completes the reconciliation job and stop-first recovery settlement.
+	if _, err := worker.store.CompleteAgentTurnMutationReconciliation(ctx, lease); err != nil {
+		return fmt.Errorf("complete mutation reconciliation barrier: %w", err)
+	}
 	if _, err := worker.store.CompleteAgentTurnRecovery(completionCtx, reconciliation.Turn.ID, reconciliation.Turn.ExecutionEpoch); err != nil {
 		if errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 			return nil

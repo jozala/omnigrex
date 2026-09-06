@@ -638,6 +638,231 @@ type ClosureSettlement struct {
 	SettledAt               *time.Time
 }
 
+// GetClosureTurnRuntimeIdentity returns the complete Runtime Process identity
+// under the exact live closure stop-job fence.
+func (store *Store) GetClosureTurnRuntimeIdentity(ctx context.Context, lease JobLease) (AgentTurnRuntimeIdentity, error) {
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnRuntimeIdentity{}, fmt.Errorf("begin closure Runtime Process identity read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockClosureWorkflow(ctx, tx, lease); err != nil {
+		return AgentTurnRuntimeIdentity{}, err
+	}
+	job, _, barrier, err := lockClosureJob(ctx, tx, lease, StopAgentTurnJobKind)
+	if err != nil {
+		return AgentTurnRuntimeIdentity{}, err
+	}
+	if barrier.SourceTurnID == "" {
+		return AgentTurnRuntimeIdentity{}, ErrClosureSettlementFenceLost
+	}
+	identity := AgentTurnRuntimeIdentity{
+		AssignmentID: job.AgentAssignmentID, AgentSessionID: job.AgentSessionID,
+		AgentTurnID: job.AgentTurnID, ExecutionEpoch: job.ExecutionEpoch,
+	}
+	var assignmentProfileName, assignmentProfileVersion string
+	if err := tx.QueryRow(ctx, `
+SELECT session.runtime_profile_name, session.runtime_profile_version,
+       assignment.runtime_profile_name, assignment.runtime_profile_version
+FROM agent_sessions AS session
+JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+WHERE assignment.id = $1 AND session.id = $2 AND assignment.workflow_id = $3`,
+		job.AgentAssignmentID, job.AgentSessionID, job.WorkflowID).Scan(
+		&identity.RuntimeProfileName, &identity.RuntimeProfileVersion,
+		&assignmentProfileName, &assignmentProfileVersion,
+	); err != nil || identity.RuntimeProfileName != assignmentProfileName || identity.RuntimeProfileVersion != assignmentProfileVersion {
+		return AgentTurnRuntimeIdentity{}, ErrClosureSettlementFenceLost
+	}
+	if err := validateAgentTurnRuntimeIdentity(identity); err != nil {
+		return AgentTurnRuntimeIdentity{}, ErrClosureSettlementFenceLost
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRuntimeIdentity{}, fmt.Errorf("commit closure Runtime Process identity read: %w", err)
+	}
+	return identity, nil
+}
+
+// GetClosureMutationReconciliationContext returns fresh external-read scope
+// after the exact closure Runtime Process stop is durable.
+func (store *Store) GetClosureMutationReconciliationContext(ctx context.Context, lease JobLease) (AgentTurnMutationReconciliationContext, error) {
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("begin closure mutation reconciliation context: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockClosureWorkflow(ctx, tx, lease); err != nil {
+		return AgentTurnMutationReconciliationContext{}, err
+	}
+	job, _, barrier, err := lockClosureJob(ctx, tx, lease, SettleClosureJobKind)
+	if err != nil {
+		return AgentTurnMutationReconciliationContext{}, err
+	}
+	if barrier.SourceTurnID == "" {
+		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
+	}
+	if err := requireClosureRuntimeStopped(ctx, tx, barrier); err != nil {
+		return AgentTurnMutationReconciliationContext{}, err
+	}
+	turn, err := lockAgentTurn(ctx, tx, barrier.SourceTurnID)
+	if err != nil || turn.AgentSessionID != barrier.SourceSessionID ||
+		turn.WorkflowAttemptID != barrier.SourceAttemptID || turn.ExecutionEpoch != barrier.ExecutionEpoch ||
+		turn.ControlRevision != barrier.ControlRevision {
+		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
+	}
+	turn.AgentAssignmentID = job.AgentAssignmentID
+	reconciliation := AgentTurnMutationReconciliationContext{WorkflowID: job.WorkflowID, Turn: turn.AgentTurn}
+	if err := tx.QueryRow(ctx, `
+SELECT repository_id, repository_owner, repository_name, issue_id, issue_number
+FROM workflows WHERE id = $1`, job.WorkflowID).Scan(
+		&reconciliation.Repository.ID, &reconciliation.Repository.Owner,
+		&reconciliation.Repository.Name, &reconciliation.Issue.ID,
+		&reconciliation.Issue.Number,
+	); err != nil {
+		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("read closure mutation Work Item: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT source.role, COALESCE(reviewer.github_app_actor_id, 0)
+FROM agent_assignments AS source
+LEFT JOIN agent_assignments AS reviewer
+  ON reviewer.workflow_id = source.workflow_id
+ AND reviewer.role = 'REVIEWER'
+ AND reviewer.status <> 'SUPERSEDED'
+ AND reviewer.state_deleted_at IS NULL
+WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(
+		&reconciliation.Role, &reconciliation.ReviewerActorID,
+	); err != nil || reconciliation.Role != workflow.RoleDeveloper && reconciliation.Role != workflow.RoleReviewer {
+		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
+	}
+	if turn.ChangeProposalID != "" {
+		proposal := &AgentTurnChangeProposal{}
+		if err := tx.QueryRow(ctx, `
+SELECT id::text, pull_request_id, pull_request_number, base_ref, base_sha, head_ref, head_sha
+FROM change_proposals
+WHERE id = $1 AND workflow_id = $2 AND repository_id = $3
+  AND repository_owner = $4 AND repository_name = $5`,
+			turn.ChangeProposalID, job.WorkflowID, reconciliation.Repository.ID,
+			reconciliation.Repository.Owner, reconciliation.Repository.Name,
+		).Scan(
+			&proposal.ID, &proposal.PullRequestID, &proposal.PullRequestNumber,
+			&proposal.BaseRef, &proposal.BaseSHA, &proposal.HeadRef, &proposal.HeadSHA,
+		); err != nil {
+			return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
+		}
+		reconciliation.ChangeProposal = proposal
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("commit closure mutation reconciliation context: %w", err)
+	}
+	return reconciliation, nil
+}
+
+// ListClosureMutationsForReconciliation returns only ambiguous admitted
+// mutations for the exact closure source Turn epoch, in invocation order.
+func (store *Store) ListClosureMutationsForReconciliation(ctx context.Context, lease JobLease) ([]MutationReservation, error) {
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin closure mutation reconciliation list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockClosureWorkflow(ctx, tx, lease); err != nil {
+		return nil, err
+	}
+	_, _, barrier, err := lockClosureJob(ctx, tx, lease, SettleClosureJobKind)
+	if err != nil {
+		return nil, err
+	}
+	if barrier.SourceTurnID == "" {
+		return nil, ErrClosureSettlementFenceLost
+	}
+	if err := requireClosureRuntimeStopped(ctx, tx, barrier); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, mutationSelect+`
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+  AND state IN ('UNKNOWN', 'RECONCILING')
+ORDER BY invocation_number`, barrier.SourceTurnID, barrier.ExecutionEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("list closure mutations for reconciliation: %w", err)
+	}
+	defer rows.Close()
+	var mutations []MutationReservation
+	for rows.Next() {
+		mutation, err := scanMutation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan closure mutation for reconciliation: %w", err)
+		}
+		mutations = append(mutations, mutation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list closure mutations for reconciliation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit closure mutation reconciliation list: %w", err)
+	}
+	return mutations, nil
+}
+
+// AcknowledgeClosureActionFailure records one closure worker failure and preserves cleanup authority after escalation.
+func (store *Store) AcknowledgeClosureActionFailure(ctx context.Context, lease JobLease, cause error, retryable bool, retryDelay time.Duration) (WorkflowActionFailureAcknowledgement, error) {
+	return store.acknowledgeClosureActionFailure(ctx, lease, cause, retryable, retryDelay, true)
+}
+
+// AcknowledgeClosureSettlementWait releases a settlement lease with delay when
+// its healthy stop dependency has not crossed the durable barrier yet.
+func (store *Store) AcknowledgeClosureSettlementWait(ctx context.Context, lease JobLease, retryDelay time.Duration) (WorkflowActionFailureAcknowledgement, error) {
+	return store.acknowledgeClosureActionFailure(ctx, lease, ErrClosureSettlementUnsettled, true, retryDelay, false)
+}
+
+func (store *Store) acknowledgeClosureActionFailure(ctx context.Context, lease JobLease, cause error, _ bool, retryDelay time.Duration, actualFailure bool) (WorkflowActionFailureAcknowledgement, error) {
+	if err := validateWorkflowActionFailure(cause, retryDelay); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	expectedKind := lease.Kind
+	if expectedKind != StopAgentTurnJobKind && expectedKind != SettleClosureJobKind {
+		return WorkflowActionFailureAcknowledgement{}, ErrClosureSettlementFenceLost
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return WorkflowActionFailureAcknowledgement{}, fmt.Errorf("begin closure action failure acknowledgement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockClosureWorkflow(ctx, tx, lease); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	job, _, _, err := lockClosureJob(ctx, tx, lease, expectedKind)
+	if err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	retryScheduled := true
+	acknowledgement := WorkflowActionFailureAcknowledgement{
+		JobID: job.ID, WorkflowID: job.WorkflowID, RetryScheduled: retryScheduled,
+	}
+	if !actualFailure {
+		if _, err := tx.Exec(ctx, `UPDATE jobs SET max_attempts = max_attempts + 1 WHERE id = $1`, job.ID); err != nil {
+			return WorkflowActionFailureAcknowledgement{}, err
+		}
+	} else if job.AttemptCount >= job.MaxAttempts {
+		continued, scheduled, err := continueIrreversibleJobAfterExhaustionTx(ctx, tx, job)
+		if err != nil {
+			return WorkflowActionFailureAcknowledgement{}, err
+		}
+		if !continued {
+			return WorkflowActionFailureAcknowledgement{}, ErrClosureSettlementFenceLost
+		}
+		acknowledgement.EscalationScheduled = scheduled
+	}
+	if err := failWorkflowActionJobTx(ctx, tx, job, cause.Error(), true, retryScheduled, retryDelay); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, ErrClosureSettlementFenceLost
+	}
+	if err := tx.QueryRow(ctx, `SELECT state_revision FROM workflows WHERE id = $1`, job.WorkflowID).Scan(&acknowledgement.WorkflowRevision); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowActionFailureAcknowledgement{}, fmt.Errorf("commit closure action failure acknowledgement: %w", err)
+	}
+	return acknowledgement, nil
+}
+
 // AcknowledgeClosureTurnStopped records Runtime Process termination under the
 // exact closure stop-job, source-turn, epoch, control, and Workflow revision fence.
 func (store *Store) AcknowledgeClosureTurnStopped(ctx context.Context, lease JobLease) (ClosureSettlement, error) {
@@ -724,9 +949,9 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 	return mutation, nil
 }
 
-// CompleteClosureSettlement succeeds the one leased settlement job only after
-// mutation admission is closed, Runtime Process stop is acknowledged, and every
-// admitted mutation is terminal or explicitly reconciled/escalated.
+// CompleteClosureSettlement atomically settles the exact closure barrier,
+// applies the reducer-owned internal ClosureSettled transition, concretely
+// retains current Assignments and Sessions, and succeeds the settlement Job.
 func (store *Store) CompleteClosureSettlement(ctx context.Context, lease JobLease) (ClosureSettlement, error) {
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -736,36 +961,112 @@ func (store *Store) CompleteClosureSettlement(ctx context.Context, lease JobLeas
 	if err := lockClosureWorkflow(ctx, tx, lease); err != nil {
 		return ClosureSettlement{}, err
 	}
+	if settled, ok, err := resolveCompletedClosureSettlement(ctx, tx, lease); err != nil || ok {
+		if err != nil {
+			return ClosureSettlement{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ClosureSettlement{}, fmt.Errorf("commit resolved closure settlement: %w", err)
+		}
+		return settled, nil
+	}
 	job, _, barrier, err := lockClosureJob(ctx, tx, lease, SettleClosureJobKind)
 	if err != nil {
 		return ClosureSettlement{}, err
 	}
 	if barrier.SourceTurnID != "" {
-		var stopStatus JobStatus
-		if err := tx.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1 FOR UPDATE`, barrier.StopJobID).Scan(&stopStatus); err != nil {
-			return ClosureSettlement{}, ErrClosureSettlementFenceLost
+		if err := requireClosureRuntimeStopped(ctx, tx, barrier); err != nil {
+			return ClosureSettlement{}, err
 		}
 		var unsettled bool
 		if err := tx.QueryRow(ctx, unsettledMutationsForTurnSQL, barrier.SourceTurnID, barrier.ExecutionEpoch).Scan(&unsettled); err != nil {
 			return ClosureSettlement{}, fmt.Errorf("check closure mutations: %w", err)
 		}
-		if barrier.RuntimeStoppedAt == nil || stopStatus != JobSucceeded || unsettled {
+		if unsettled {
 			return ClosureSettlement{}, ErrClosureSettlementUnsettled
 		}
+	}
+	snapshot, err := rehydrateWorkflow(ctx, tx, barrier.WorkflowID)
+	if err != nil {
+		return ClosureSettlement{}, fmt.Errorf("rehydrate closure settlement Workflow: %w", err)
+	}
+	if snapshot.State != workflow.StateClosing || snapshot.Closure == nil || snapshot.Closure.ID != barrier.ClosureID ||
+		(barrier.SourceTurnID == "") != (snapshot.ActiveTurn == nil) {
+		return ClosureSettlement{}, fmt.Errorf("closure settlement aggregate does not match barrier: %w", ErrClosureSettlementFenceLost)
+	}
+	if err := cancelPendingAgentTurnPreparationsTx(ctx, tx, barrier.WorkflowID); err != nil {
+		return ClosureSettlement{}, err
+	}
+	var assignmentsExist bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM agent_assignments
+    WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL
+)`, barrier.WorkflowID).Scan(&assignmentsExist); err != nil {
+		return ClosureSettlement{}, fmt.Errorf("inspect closure Assignments: %w", err)
+	}
+	var turn *workflow.TurnGuard
+	if snapshot.ActiveTurn != nil {
+		if snapshot.ActiveTurn.ID != barrier.SourceTurnID || snapshot.ActiveTurn.SessionID != barrier.SourceSessionID ||
+			snapshot.ActiveTurn.AttemptID != barrier.SourceAttemptID || int64(snapshot.ActiveTurn.Epoch) != barrier.ExecutionEpoch ||
+			int64(snapshot.ActiveTurn.ControlRevision) != barrier.ControlRevision {
+			return ClosureSettlement{}, fmt.Errorf("closure settlement source Turn does not match barrier: %w", ErrClosureSettlementFenceLost)
+		}
+		guard := workflow.TurnGuard{
+			TurnID: snapshot.ActiveTurn.ID, SessionID: snapshot.ActiveTurn.SessionID,
+			AttemptID: snapshot.ActiveTurn.AttemptID, Role: snapshot.ActiveTurn.Role,
+			Epoch: snapshot.ActiveTurn.Epoch, ControlRevision: snapshot.ActiveTurn.ControlRevision,
+			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
+			ExpectedHeadSHA:  snapshot.ActiveTurn.ExpectedHeadSHA,
+		}
+		turn = &guard
+	}
+	var observedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&observedAt); err != nil {
+		return ClosureSettlement{}, err
+	}
+	internalEventID, err := randomUUID()
+	if err != nil {
+		return ClosureSettlement{}, err
+	}
+	event := workflow.ClosureSettledEvent{EventMetadata: workflow.EventMetadata{
+		ID: internalEventID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
+		ExpectedRevision: snapshot.Revision,
+	}, ClosureID: barrier.ClosureID, Turn: turn, AssignmentsExist: assignmentsExist}
+	decision := workflow.Reduce(snapshot, event)
+	if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonClosureSettled {
+		return ClosureSettlement{}, fmt.Errorf("closure settlement reducer decision is %s/%s (validation %v): %w", decision.Disposition, decision.Reason, err, ErrClosureSettlementFenceLost)
+	}
+	eventPayload, err := json.Marshal(map[string]any{
+		"closure_id": barrier.ClosureID, "source_turn_id": barrier.SourceTurnID,
+		"source_execution_epoch":  barrier.ExecutionEpoch,
+		"source_control_revision": barrier.ControlRevision,
+		"assignments_exist":       assignmentsExist,
+	})
+	if err != nil {
+		return ClosureSettlement{}, err
+	}
+	if err := insertInternalEventTx(ctx, tx, internalEventID, job, workflow.EventKindClosureSettled, eventPayload, observedAt); err != nil {
+		return ClosureSettlement{}, err
+	}
+	if barrier.SourceTurnID != "" {
 		if err := settleClosedAgentTurnTx(ctx, tx, barrier); err != nil {
 			return ClosureSettlement{}, err
 		}
 	}
 	var settledAt time.Time
 	if err := tx.QueryRow(ctx, `
-UPDATE workflow_closure_barriers SET settled_at = clock_timestamp()
+UPDATE workflow_closure_barriers
+SET settled_at = clock_timestamp(), internal_event_id = $3, applied_revision = $4
 WHERE workflow_id = $1 AND closure_id = $2 AND settled_at IS NULL
-RETURNING settled_at`, barrier.WorkflowID, barrier.ClosureID).Scan(&settledAt); err != nil {
-		return ClosureSettlement{}, ErrClosureSettlementFenceLost
+RETURNING settled_at`, barrier.WorkflowID, barrier.ClosureID, internalEventID,
+		int64(decision.Snapshot.Revision)).Scan(&settledAt); err != nil {
+		return ClosureSettlement{}, fmt.Errorf("mark closure barrier settled: %w", ErrClosureSettlementFenceLost)
 	}
 	jobResult, err := json.Marshal(map[string]any{
 		"closure_id": barrier.ClosureID, "workflow_revision": barrier.WorkflowRevision,
-		"source_turn_id": barrier.SourceTurnID,
+		"applied_revision": decision.Snapshot.Revision, "source_turn_id": barrier.SourceTurnID,
+		"internal_event_id": internalEventID,
 	})
 	if err != nil {
 		return ClosureSettlement{}, err
@@ -773,11 +1074,86 @@ RETURNING settled_at`, barrier.WorkflowID, barrier.ClosureID).Scan(&settledAt); 
 	if err := completeAcknowledgementJobTx(ctx, tx, job, jobResult, ErrClosureSettlementFenceLost); err != nil {
 		return ClosureSettlement{}, err
 	}
+	if err := persistAppliedDecisionWithInternalProvenance(ctx, tx, "", "", internalEventID, barrier.WorkflowID, snapshot, decision, ""); err != nil {
+		return ClosureSettlement{}, err
+	}
+	if err := completeInternalEventTx(ctx, tx, internalEventID, decision); err != nil {
+		return ClosureSettlement{}, err
+	}
 	barrier.SettledAt = &settledAt
+	barrier.CurrentWorkflowRevision = int64(decision.Snapshot.Revision)
 	if err := tx.Commit(ctx); err != nil {
 		return ClosureSettlement{}, fmt.Errorf("commit closure settlement completion: %w", err)
 	}
 	return barrier.settlement(), nil
+}
+
+func cancelPendingAgentTurnPreparationsTx(ctx context.Context, tx pgx.Tx, workflowID string) error {
+	if _, err := tx.Exec(ctx, `
+UPDATE job_attempts AS attempt
+SET status = 'FAILED', finished_at = clock_timestamp(), retryable = FALSE,
+    last_error = 'Issue closure cancelled Agent Turn preparation'
+FROM jobs AS job
+WHERE job.workflow_id = $1 AND job.kind = 'PREPARE_AGENT_TURN'
+  AND job.status = 'LEASED' AND job.id = attempt.job_id
+  AND attempt.attempt_number = job.attempt_count
+  AND attempt.lease_token = job.lease_token AND attempt.status = 'LEASED'`, workflowID); err != nil {
+		return fmt.Errorf("fail cancelled Agent Turn preparation attempt: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE jobs
+SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
+    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+    completed_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'Issue closure cancelled Agent Turn preparation'
+WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'
+  AND status IN ('AVAILABLE', 'LEASED')`, workflowID); err != nil {
+		return fmt.Errorf("cancel Agent Turn preparation: %w", err)
+	}
+	return nil
+}
+
+func resolveCompletedClosureSettlement(ctx context.Context, tx pgx.Tx, lease JobLease) (ClosureSettlement, bool, error) {
+	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 || strings.TrimSpace(lease.LeaseOwner) == "" {
+		return ClosureSettlement{}, false, nil
+	}
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.ID))
+	if err != nil || job.Kind != SettleClosureJobKind || job.Queue != WorkflowActionQueue ||
+		job.Status != JobSucceeded || job.WorkflowID != lease.WorkflowID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
+		job.ExecutionEpoch != lease.ExecutionEpoch || job.AttemptCount != lease.Attempt ||
+		!bytes.Equal(job.Payload, lease.Payload) {
+		return ClosureSettlement{}, false, nil
+	}
+	var attemptStatus string
+	if err := tx.QueryRow(ctx, `
+SELECT status FROM job_attempts
+WHERE job_id = $1 AND attempt_number = $2 AND lease_owner = $3 AND lease_token = $4`,
+		lease.ID, lease.Attempt, lease.LeaseOwner, lease.LeaseToken).Scan(&attemptStatus); err != nil || attemptStatus != "SUCCEEDED" {
+		return ClosureSettlement{}, false, nil
+	}
+	var barrier lockedClosureBarrier
+	if err := tx.QueryRow(ctx, `
+SELECT barrier.workflow_id::text, barrier.closure_id, barrier.workflow_revision,
+       workflow.state_revision, COALESCE(barrier.source_turn_id::text, ''),
+       COALESCE(barrier.source_session_id::text, ''), COALESCE(barrier.source_attempt_id::text, ''),
+       COALESCE(barrier.source_execution_epoch, 0), COALESCE(barrier.source_control_revision, 0),
+       barrier.runtime_stopped_at, barrier.settled_at,
+       COALESCE(barrier.stop_job_id::text, ''), barrier.settlement_job_id::text
+FROM workflow_closure_barriers AS barrier
+JOIN workflows AS workflow ON workflow.id = barrier.workflow_id
+JOIN workflow_internal_events AS event ON event.id = barrier.internal_event_id
+WHERE barrier.settlement_job_id = $1 AND barrier.settled_at IS NOT NULL
+  AND event.source_job_id = $1 AND event.applied_at IS NOT NULL`, lease.ID).Scan(
+		&barrier.WorkflowID, &barrier.ClosureID, &barrier.WorkflowRevision,
+		&barrier.CurrentWorkflowRevision, &barrier.SourceTurnID, &barrier.SourceSessionID,
+		&barrier.SourceAttemptID, &barrier.ExecutionEpoch, &barrier.ControlRevision,
+		&barrier.RuntimeStoppedAt, &barrier.SettledAt, &barrier.StopJobID,
+		&barrier.SettlementJobID); err != nil {
+		return ClosureSettlement{}, false, nil
+	}
+	return barrier.settlement(), true, nil
 }
 
 type lockedClosureBarrier struct {
@@ -796,6 +1172,20 @@ func (barrier lockedClosureBarrier) settlement() ClosureSettlement {
 		ExecutionEpoch: barrier.ExecutionEpoch, ControlRevision: barrier.ControlRevision,
 		RuntimeStoppedAt: barrier.RuntimeStoppedAt, SettledAt: barrier.SettledAt,
 	}
+}
+
+func requireClosureRuntimeStopped(ctx context.Context, tx pgx.Tx, barrier lockedClosureBarrier) error {
+	if barrier.SourceTurnID == "" || barrier.StopJobID == "" {
+		return ErrClosureSettlementFenceLost
+	}
+	var stopStatus JobStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1 FOR UPDATE`, barrier.StopJobID).Scan(&stopStatus); err != nil {
+		return ErrClosureSettlementFenceLost
+	}
+	if barrier.RuntimeStoppedAt == nil || stopStatus != JobSucceeded {
+		return ErrClosureSettlementUnsettled
+	}
+	return nil
 }
 
 func lockClosureWorkflow(ctx context.Context, tx pgx.Tx, lease JobLease) error {
@@ -1006,6 +1396,8 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 func isFencedWorkflowJob(kind string) bool {
 	return kind == ReconcilePendingEventsJobKind || kind == StopAgentTurnJobKind ||
 		kind == SettleClosureJobKind || kind == PrepareAgentTurnJobKind ||
+		kind == CollectAssignmentsJobKind || kind == "COMPLETE_ASSIGNMENTS" ||
+		kind == "CANCEL_ASSIGNMENT_RETENTION" ||
 		kind == ReconcileGitHubLabelsJobKind || kind == PublishHumanHandoffJobKind ||
 		kind == EscalateWorkflowActionFailureJobKind
 }

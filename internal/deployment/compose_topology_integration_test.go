@@ -113,6 +113,9 @@ func TestComposeTopology(t *testing.T) {
 	if got := orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_PLATFORM"]; got != "linux/amd64" {
 		t.Errorf("orchestrator opencode-acp/v1 platform = %q, want linux/amd64", got)
 	}
+	if got := orchestrator.Environment["OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"]; got != "" {
+		t.Errorf("orchestrator optional compatibility results file = %q, want empty", got)
+	}
 	if readinessImage == testDeploymentImage {
 		t.Fatal("local readiness image and deployment Runtime Profile image must be separate settings")
 	}
@@ -124,6 +127,9 @@ func TestComposeTopology(t *testing.T) {
 	}
 	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"]; got != "2" {
 		t.Errorf("Agent Turn concurrency limit = %q, want 2", got)
+	}
+	if got := orchestrator.Environment["OMNIGREX_ASSIGNMENT_RETENTION_DURATION"]; got != "720h" {
+		t.Errorf("Assignment retention duration = %q, want 720h", got)
 	}
 
 	assertExactKeys(t, "postgres networks", postgres.Networks, "backend")
@@ -185,6 +191,7 @@ func TestComposeTopology(t *testing.T) {
 	}
 	assertMounts(t, "orchestrator", orchestrator.Volumes,
 		composeMount{Type: "bind", Source: dockerSocket, Target: dockerSocket, ReadOnly: true},
+		composeMount{Type: "bind", Source: "/dev/null", Target: "/run/omnigrex/runtime-profile-compatibility-results.json", ReadOnly: true},
 		composeMount{Type: "volume", Source: "workspaces", Target: "/var/lib/omnigrex/workspaces"},
 		composeMount{Type: "volume", Source: "mise-data", Target: "/var/lib/omnigrex/mise"},
 	)

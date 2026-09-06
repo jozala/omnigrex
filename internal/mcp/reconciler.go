@@ -460,7 +460,8 @@ func validReconciliationScope(reconciliation store.AgentTurnMutationReconciliati
 		reconciliation.Repository.ID > 0 && validRepositoryPart(reconciliation.Repository.Owner) && validRepositoryPart(reconciliation.Repository.Name) &&
 		reconciliation.Issue.ID > 0 && reconciliation.Issue.Number > 0 && reconciliation.Turn.ID != "" && reconciliation.Turn.AgentAssignmentID != "" && reconciliation.Turn.ExecutionEpoch > 0 &&
 		validArtifactOperationID(mutation.ID) && mutation.AgentTurnID == reconciliation.Turn.ID && mutation.ExecutionEpoch == reconciliation.Turn.ExecutionEpoch && mutation.InvocationNumber > 0 &&
-		(mutation.State == store.MutationUnknown || mutation.State == store.MutationReconciling) && mutation.OperationID != "" && len(mutation.Request) != 0
+		(mutation.State == store.MutationUnknown || mutation.State == store.MutationReconciling || mutation.State == store.MutationSucceeded) &&
+		mutation.OperationID != "" && len(mutation.Request) != 0
 	if !valid {
 		return false
 	}

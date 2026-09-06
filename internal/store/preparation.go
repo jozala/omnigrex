@@ -82,8 +82,9 @@ type AgentProfileSnapshot struct {
 
 // RolePreparation supplies one Role's immutable binding and per-turn profile snapshot.
 type RolePreparation struct {
-	Binding AssignmentRuntimeBinding
-	Profile AgentProfileSnapshot
+	Binding              AssignmentRuntimeBinding
+	RuntimeCompatibility RuntimeCompatibilityRequirement
+	Profile              AgentProfileSnapshot
 }
 
 // AgentTurnPreparationSpec supplies preparations for the complete two-Role Assignment set.
@@ -205,7 +206,7 @@ type agentTurnPreparationPayload struct {
 // PrepareAgentTurn atomically establishes the Assignment and Session, allocates the Turn,
 // enqueues its execution Job, and acknowledges the preparation Job.
 func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec AgentTurnPreparationSpec) (AgentTurnPreparationCommit, error) {
-	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 {
+	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || !validUUID(lease.WorkflowID) || lease.Attempt <= 0 {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnPreparationFenceLost
 	}
 	if err := validatePreparationSpec(spec); err != nil {
@@ -216,6 +217,9 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 		return AgentTurnPreparationCommit{}, fmt.Errorf("begin agent turn preparation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
 	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
@@ -245,11 +249,15 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if session.Status == AgentSessionRetained {
 		if _, err := tx.Exec(ctx, `
 UPDATE agent_sessions
-SET status = 'ACTIVE', retained_at = NULL, updated_at = clock_timestamp()
+SET status = CASE WHEN acp_session_id IS NULL THEN 'CREATING' ELSE 'ACTIVE' END,
+    retained_at = NULL, updated_at = clock_timestamp()
 WHERE id = $1 AND status = 'RETAINED'`, session.ID); err != nil {
 			return AgentTurnPreparationCommit{}, fmt.Errorf("reactivate retained agent session: %w", err)
 		}
-		session.Status = AgentSessionActive
+		session.Status = AgentSessionCreating
+		if session.ACPSessionID != "" {
+			session.Status = AgentSessionActive
+		}
 		session.RetainedAt = nil
 	}
 	preparation := AgentTurnPreparation{
@@ -407,6 +415,9 @@ func (store *Store) AcknowledgeAssignmentConfigurationConflict(ctx context.Conte
 		return AssignmentConfigurationHandoff{}, fmt.Errorf("begin Assignment configuration conflict acknowledgement: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
+		return AssignmentConfigurationHandoff{}, err
+	}
 
 	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
 	if err != nil {
@@ -458,7 +469,7 @@ WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN'
 	if err != nil {
 		return AssignmentConfigurationHandoff{}, fmt.Errorf("mark Assignments waiting for Human Handoff: %w", err)
 	}
-	if updated.RowsAffected() != 2 {
+	if updated.RowsAffected() != 2 && !(payload.Mode == workflow.AssignmentGenerationNew && updated.RowsAffected() == 0) {
 		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	jobResult, err := json.Marshal(map[string]any{
@@ -492,6 +503,9 @@ func (store *Store) AcknowledgeAgentTurnPreparationFailure(ctx context.Context, 
 		return AgentTurnPreparationFailureAcknowledgement{}, fmt.Errorf("begin Agent Turn preparation failure acknowledgement: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
+		return AgentTurnPreparationFailureAcknowledgement{}, err
+	}
 
 	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
 	if err != nil {
@@ -1009,6 +1023,17 @@ SELECT EXISTS (
 	return proposalID, nil
 }
 
+func lockAgentTurnPreparationWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {
+	if !validUUID(workflowID) {
+		return ErrAgentTurnPreparationFenceLost
+	}
+	var lockedID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(&lockedID); err != nil || lockedID != workflowID {
+		return ErrAgentTurnPreparationFenceLost
+	}
+	return nil
+}
+
 type agentProfileConfig struct {
 	Name         string            `json:"name"`
 	Path         string            `json:"path"`
@@ -1162,6 +1187,13 @@ func ensurePreparationAssignments(ctx context.Context, tx pgx.Tx, preparationJob
 		workflow.RoleReviewer:  spec.Reviewer.Binding,
 	}
 	if mode == workflow.AssignmentGenerationNew {
+		missing, err := runtimeProfileCompatibilityMissing(ctx, tx, spec)
+		if err != nil {
+			return nil, err
+		}
+		if missing {
+			return nil, errors.Join(ErrAssignmentConfigurationConflict, ErrRuntimeProfileCompatibilityQualificationMissing)
+		}
 		if len(current) == 2 {
 			generation := 0
 			for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
@@ -1341,7 +1373,7 @@ func revalidateAssignmentConfigurationConflict(ctx context.Context, tx pgx.Tx, j
 	generation := 0
 	if payload.Mode == workflow.AssignmentGenerationNew {
 		if len(current) == 0 {
-			return false, nil
+			return runtimeProfileCompatibilityMissing(ctx, tx, spec)
 		}
 		if len(current) != 2 {
 			return false, ErrAgentTurnPreparationFenceLost

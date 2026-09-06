@@ -66,81 +66,83 @@ type Config struct {
 	// AgentImageReference is the mutable local image used by deployment readiness checks.
 	AgentImageReference string
 	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
-	OpenCodeACPV1Image                    string
-	OpenCodeACPV1Platform                 profile.Platform
-	GitHubAPIURL                          string
-	GitRemoteBaseURL                      string
-	GitHubDeveloperAppID                  int64
-	GitHubReviewerAppID                   int64
-	GitHubDeveloperPrivateKeyFile         string
-	GitHubReviewerPrivateKeyFile          string
-	GitHubWebhookSecretFile               string
-	DeveloperProviderCredentialsFile      string
-	ReviewerProviderCredentialsFile       string
-	WebhookLeaseDuration                  time.Duration
-	WebhookPollInterval                   time.Duration
-	AgentTurnPreparationLeaseDuration     time.Duration
-	AgentTurnPreparationHeartbeatInterval time.Duration
-	AgentTurnPreparationPollInterval      time.Duration
-	AgentTurnPreparationRetryDelay        time.Duration
-	AgentTurnExecutionLeaseDuration       time.Duration
-	AgentTurnExecutionHeartbeatInterval   time.Duration
-	AgentTurnExecutionPollInterval        time.Duration
-	AgentTurnExecutionTurnTimeout         time.Duration
-	AgentTurnExecutionCleanupTimeout      time.Duration
-	WorkflowEffectLeaseDuration           time.Duration
-	WorkflowEffectHeartbeatInterval       time.Duration
-	WorkflowEffectPollInterval            time.Duration
-	WorkflowEffectRetryDelay              time.Duration
-	AssignmentRetentionDuration           time.Duration
-	AgentTurnConcurrencyLimit             int
-	HTTPAddr                              string
-	ReadinessTimeout                      time.Duration
-	ShutdownTimeout                       time.Duration
+	OpenCodeACPV1Image                     string
+	OpenCodeACPV1Platform                  profile.Platform
+	RuntimeProfileCompatibilityResultsFile string
+	GitHubAPIURL                           string
+	GitRemoteBaseURL                       string
+	GitHubDeveloperAppID                   int64
+	GitHubReviewerAppID                    int64
+	GitHubDeveloperPrivateKeyFile          string
+	GitHubReviewerPrivateKeyFile           string
+	GitHubWebhookSecretFile                string
+	DeveloperProviderCredentialsFile       string
+	ReviewerProviderCredentialsFile        string
+	WebhookLeaseDuration                   time.Duration
+	WebhookPollInterval                    time.Duration
+	AgentTurnPreparationLeaseDuration      time.Duration
+	AgentTurnPreparationHeartbeatInterval  time.Duration
+	AgentTurnPreparationPollInterval       time.Duration
+	AgentTurnPreparationRetryDelay         time.Duration
+	AgentTurnExecutionLeaseDuration        time.Duration
+	AgentTurnExecutionHeartbeatInterval    time.Duration
+	AgentTurnExecutionPollInterval         time.Duration
+	AgentTurnExecutionTurnTimeout          time.Duration
+	AgentTurnExecutionCleanupTimeout       time.Duration
+	WorkflowEffectLeaseDuration            time.Duration
+	WorkflowEffectHeartbeatInterval        time.Duration
+	WorkflowEffectPollInterval             time.Duration
+	WorkflowEffectRetryDelay               time.Duration
+	AssignmentRetentionDuration            time.Duration
+	AgentTurnConcurrencyLimit              int
+	HTTPAddr                               string
+	ReadinessTimeout                       time.Duration
+	ShutdownTimeout                        time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
-		DatabaseURL:                           valueOrDefault(getenv("OMNIGREX_DATABASE_URL"), defaultDatabaseURL),
-		DatabasePasswordSecretFile:            valueOrDefault(getenv("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE"), defaultDatabasePasswordSecretFile),
-		DockerAgentNetwork:                    valueOrDefault(getenv("OMNIGREX_DOCKER_AGENT_NETWORK"), defaultDockerAgentNetwork),
-		WorkspaceVolume:                       valueOrDefault(getenv("OMNIGREX_WORKSPACE_VOLUME"), defaultWorkspaceVolume),
-		RuntimeStateVolume:                    valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_VOLUME"), defaultRuntimeStateVolume),
-		MiseVolume:                            valueOrDefault(getenv("OMNIGREX_MISE_VOLUME"), defaultMiseVolume),
-		WorkspaceRoot:                         valueOrDefault(getenv("OMNIGREX_WORKSPACE_ROOT"), defaultWorkspaceRoot),
-		MiseRoot:                              valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
-		MCPAddr:                               valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
-		MCPEndpointURL:                        valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
-		MCPMutationOperationTimeout:           defaultMCPMutationOperationTimeout,
-		AgentImageReference:                   valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
-		OpenCodeACPV1Image:                    getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
-		GitHubAPIURL:                          valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
-		GitRemoteBaseURL:                      valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
-		GitHubDeveloperPrivateKeyFile:         getenv("OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"),
-		GitHubReviewerPrivateKeyFile:          getenv("OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"),
-		GitHubWebhookSecretFile:               getenv("OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"),
-		DeveloperProviderCredentialsFile:      getenv("OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"),
-		ReviewerProviderCredentialsFile:       getenv("OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"),
-		WebhookLeaseDuration:                  defaultWebhookLeaseDuration,
-		WebhookPollInterval:                   defaultWebhookPollInterval,
-		AgentTurnPreparationLeaseDuration:     defaultPreparationLeaseDuration,
-		AgentTurnPreparationHeartbeatInterval: defaultPreparationHeartbeat,
-		AgentTurnPreparationPollInterval:      defaultPreparationPollInterval,
-		AgentTurnPreparationRetryDelay:        defaultPreparationRetryDelay,
-		AgentTurnExecutionLeaseDuration:       defaultExecutionLeaseDuration,
-		AgentTurnExecutionHeartbeatInterval:   defaultExecutionHeartbeat,
-		AgentTurnExecutionPollInterval:        defaultExecutionPollInterval,
-		AgentTurnExecutionTurnTimeout:         defaultExecutionTurnTimeout,
-		AgentTurnExecutionCleanupTimeout:      defaultExecutionCleanupTimeout,
-		WorkflowEffectLeaseDuration:           defaultWorkflowEffectLeaseDuration,
-		WorkflowEffectHeartbeatInterval:       defaultWorkflowEffectHeartbeat,
-		WorkflowEffectPollInterval:            defaultWorkflowEffectPollInterval,
-		WorkflowEffectRetryDelay:              defaultWorkflowEffectRetryDelay,
-		AssignmentRetentionDuration:           defaultAssignmentRetention,
-		AgentTurnConcurrencyLimit:             defaultAgentTurnConcurrencyLimit,
-		HTTPAddr:                              valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
-		ReadinessTimeout:                      defaultReadinessTimeout,
-		ShutdownTimeout:                       defaultShutdownTimeout,
+		DatabaseURL:                            valueOrDefault(getenv("OMNIGREX_DATABASE_URL"), defaultDatabaseURL),
+		DatabasePasswordSecretFile:             valueOrDefault(getenv("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE"), defaultDatabasePasswordSecretFile),
+		DockerAgentNetwork:                     valueOrDefault(getenv("OMNIGREX_DOCKER_AGENT_NETWORK"), defaultDockerAgentNetwork),
+		WorkspaceVolume:                        valueOrDefault(getenv("OMNIGREX_WORKSPACE_VOLUME"), defaultWorkspaceVolume),
+		RuntimeStateVolume:                     valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_VOLUME"), defaultRuntimeStateVolume),
+		MiseVolume:                             valueOrDefault(getenv("OMNIGREX_MISE_VOLUME"), defaultMiseVolume),
+		WorkspaceRoot:                          valueOrDefault(getenv("OMNIGREX_WORKSPACE_ROOT"), defaultWorkspaceRoot),
+		MiseRoot:                               valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
+		MCPAddr:                                valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
+		MCPEndpointURL:                         valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
+		MCPMutationOperationTimeout:            defaultMCPMutationOperationTimeout,
+		AgentImageReference:                    valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
+		OpenCodeACPV1Image:                     getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
+		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
+		GitHubAPIURL:                           valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
+		GitRemoteBaseURL:                       valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
+		GitHubDeveloperPrivateKeyFile:          getenv("OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"),
+		GitHubReviewerPrivateKeyFile:           getenv("OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"),
+		GitHubWebhookSecretFile:                getenv("OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"),
+		DeveloperProviderCredentialsFile:       getenv("OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"),
+		ReviewerProviderCredentialsFile:        getenv("OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"),
+		WebhookLeaseDuration:                   defaultWebhookLeaseDuration,
+		WebhookPollInterval:                    defaultWebhookPollInterval,
+		AgentTurnPreparationLeaseDuration:      defaultPreparationLeaseDuration,
+		AgentTurnPreparationHeartbeatInterval:  defaultPreparationHeartbeat,
+		AgentTurnPreparationPollInterval:       defaultPreparationPollInterval,
+		AgentTurnPreparationRetryDelay:         defaultPreparationRetryDelay,
+		AgentTurnExecutionLeaseDuration:        defaultExecutionLeaseDuration,
+		AgentTurnExecutionHeartbeatInterval:    defaultExecutionHeartbeat,
+		AgentTurnExecutionPollInterval:         defaultExecutionPollInterval,
+		AgentTurnExecutionTurnTimeout:          defaultExecutionTurnTimeout,
+		AgentTurnExecutionCleanupTimeout:       defaultExecutionCleanupTimeout,
+		WorkflowEffectLeaseDuration:            defaultWorkflowEffectLeaseDuration,
+		WorkflowEffectHeartbeatInterval:        defaultWorkflowEffectHeartbeat,
+		WorkflowEffectPollInterval:             defaultWorkflowEffectPollInterval,
+		WorkflowEffectRetryDelay:               defaultWorkflowEffectRetryDelay,
+		AssignmentRetentionDuration:            defaultAssignmentRetention,
+		AgentTurnConcurrencyLimit:              defaultAgentTurnConcurrencyLimit,
+		HTTPAddr:                               valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
+		ReadinessTimeout:                       defaultReadinessTimeout,
+		ShutdownTimeout:                        defaultShutdownTimeout,
 	}
 
 	databaseURL, err := url.Parse(config.DatabaseURL)
@@ -173,6 +175,10 @@ func Load(getenv func(string) string) (Config, error) {
 	config.OpenCodeACPV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
 	if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
 		return Config{}, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err)
+	}
+	if config.RuntimeProfileCompatibilityResultsFile != "" &&
+		(!filepath.IsAbs(config.RuntimeProfileCompatibilityResultsFile) || filepath.Clean(config.RuntimeProfileCompatibilityResultsFile) != config.RuntimeProfileCompatibilityResultsFile) {
+		return Config{}, fmt.Errorf("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE must be a clean absolute path")
 	}
 	githubAPIURL, err := url.Parse(config.GitHubAPIURL)
 	if err != nil || githubAPIURL.Scheme != "https" || githubAPIURL.Host == "" || githubAPIURL.RawQuery != "" || githubAPIURL.Fragment != "" {

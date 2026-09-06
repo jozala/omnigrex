@@ -48,6 +48,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.OpenCodeACPV1Image != deploymentImage {
 		t.Errorf("OpenCodeACPV1Image = %q, want %q", got.OpenCodeACPV1Image, deploymentImage)
 	}
+	if got.RuntimeProfileCompatibilityResultsFile != "" {
+		t.Errorf("RuntimeProfileCompatibilityResultsFile = %q, want empty", got.RuntimeProfileCompatibilityResultsFile)
+	}
 	if want := (profile.Platform{OS: "linux", Arch: "arm64"}); !reflect.DeepEqual(got.OpenCodeACPV1Platform, want) {
 		t.Errorf("OpenCodeACPV1Platform = %#v, want %#v", got.OpenCodeACPV1Platform, want)
 	}
@@ -94,49 +97,50 @@ func TestLoadUsesDefaults(t *testing.T) {
 
 func TestLoadUsesEnvironment(t *testing.T) {
 	values := map[string]string{
-		"OMNIGREX_DATABASE_URL":                              "postgres://app@database/app",
-		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":             "/secrets/database-password",
-		"OMNIGREX_DOCKER_AGENT_NETWORK":                      "agents",
-		"OMNIGREX_WORKSPACE_VOLUME":                          "workspaces",
-		"OMNIGREX_RUNTIME_STATE_VOLUME":                      "runtime-state",
-		"OMNIGREX_MISE_VOLUME":                               "mise",
-		"OMNIGREX_WORKSPACE_ROOT":                            "/data/workspaces",
-		"OMNIGREX_MISE_ROOT":                                 "/data/mise",
-		"OMNIGREX_MCP_ADDR":                                  "127.0.0.1:9001",
-		"OMNIGREX_MCP_ENDPOINT_URL":                          "https://mcp.internal/mcp",
-		"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":            "17m",
-		"OMNIGREX_AGENT_IMAGE_REFERENCE":                     "registry.example/agent:v2",
-		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":                     "registry.example/agent/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":                  "linux/amd64",
-		"OMNIGREX_GITHUB_API_URL":                            "https://github.example/api/v3",
-		"OMNIGREX_GIT_REMOTE_BASE_URL":                       "https://github.example/source",
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                   "303",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                    "404",
-		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":         "/secrets/custom-developer.pem",
-		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":          "/secrets/custom-reviewer.pem",
-		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":                "/secrets/custom-webhook",
-		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE":       "/secrets/custom-developer-provider.json",
-		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":        "/secrets/custom-reviewer-provider.json",
-		"OMNIGREX_WEBHOOK_LEASE_DURATION":                    "45s",
-		"OMNIGREX_WEBHOOK_POLL_INTERVAL":                     "500ms",
-		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "1m",
-		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "15s",
-		"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":      "750ms",
-		"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":        "3s",
-		"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":       "45s",
-		"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL":   "15s",
-		"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":        "400ms",
-		"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":         "3h",
-		"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":      "12s",
-		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":            "1m",
-		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":        "20s",
-		"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":             "600ms",
-		"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":               "4s",
-		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":             "48h",
-		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":              "7",
-		"OMNIGREX_HTTP_ADDR":                                 "127.0.0.1:9000",
-		"OMNIGREX_READINESS_TIMEOUT":                         "3s",
-		"OMNIGREX_SHUTDOWN_TIMEOUT":                          "20s",
+		"OMNIGREX_DATABASE_URL":                               "postgres://app@database/app",
+		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":              "/secrets/database-password",
+		"OMNIGREX_DOCKER_AGENT_NETWORK":                       "agents",
+		"OMNIGREX_WORKSPACE_VOLUME":                           "workspaces",
+		"OMNIGREX_RUNTIME_STATE_VOLUME":                       "runtime-state",
+		"OMNIGREX_MISE_VOLUME":                                "mise",
+		"OMNIGREX_WORKSPACE_ROOT":                             "/data/workspaces",
+		"OMNIGREX_MISE_ROOT":                                  "/data/mise",
+		"OMNIGREX_MCP_ADDR":                                   "127.0.0.1:9001",
+		"OMNIGREX_MCP_ENDPOINT_URL":                           "https://mcp.internal/mcp",
+		"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":             "17m",
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":                      "registry.example/agent:v2",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":                      "registry.example/agent/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":                   "linux/amd64",
+		"OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE": "/results/runtime-profile-compatibility.json",
+		"OMNIGREX_GITHUB_API_URL":                             "https://github.example/api/v3",
+		"OMNIGREX_GIT_REMOTE_BASE_URL":                        "https://github.example/source",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                    "303",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                     "404",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":          "/secrets/custom-developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":           "/secrets/custom-reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":                 "/secrets/custom-webhook",
+		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE":        "/secrets/custom-developer-provider.json",
+		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":         "/secrets/custom-reviewer-provider.json",
+		"OMNIGREX_WEBHOOK_LEASE_DURATION":                     "45s",
+		"OMNIGREX_WEBHOOK_POLL_INTERVAL":                      "500ms",
+		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":      "1m",
+		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL":  "15s",
+		"OMNIGREX_AGENT_TURN_PREPARATION_POLL_INTERVAL":       "750ms",
+		"OMNIGREX_AGENT_TURN_PREPARATION_RETRY_DELAY":         "3s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":        "45s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL":    "15s",
+		"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":         "400ms",
+		"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":          "3h",
+		"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":       "12s",
+		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":             "1m",
+		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":         "20s",
+		"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":              "600ms",
+		"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":                "4s",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":              "48h",
+		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":               "7",
+		"OMNIGREX_HTTP_ADDR":                                  "127.0.0.1:9000",
+		"OMNIGREX_READINESS_TIMEOUT":                          "3s",
+		"OMNIGREX_SHUTDOWN_TIMEOUT":                           "20s",
 	}
 
 	got, err := config.Load(func(key string) string { return values[key] })
@@ -171,6 +175,9 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	}
 	if got.OpenCodeACPV1Image != values["OMNIGREX_OPENCODE_ACP_V1_IMAGE"] || got.OpenCodeACPV1Platform != (profile.Platform{OS: "linux", Arch: "amd64"}) {
 		t.Errorf("OpenCode ACP v1 deployment = (%q, %#v)", got.OpenCodeACPV1Image, got.OpenCodeACPV1Platform)
+	}
+	if got.RuntimeProfileCompatibilityResultsFile != values["OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"] {
+		t.Errorf("RuntimeProfileCompatibilityResultsFile = %q", got.RuntimeProfileCompatibilityResultsFile)
 	}
 	if got.GitHubAPIURL != values["OMNIGREX_GITHUB_API_URL"] || got.GitHubDeveloperAppID != 303 || got.GitHubReviewerAppID != 404 {
 		t.Errorf("GitHub API/App config = (%q, %d, %d)", got.GitHubAPIURL, got.GitHubDeveloperAppID, got.GitHubReviewerAppID)
@@ -230,6 +237,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "unsupported deployment architecture", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "linux/s390x"},
 		{name: "missing deployment platform", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: ""},
 		{name: "malformed deployment platform", key: "OMNIGREX_OPENCODE_ACP_V1_PLATFORM", value: "linux"},
+		{name: "compatibility results file", key: "OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE", value: "relative.json"},
 		{name: "GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "://invalid"},
 		{name: "insecure GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "http://github.example"},
 		{name: "insecure Git remote base URL", key: "OMNIGREX_GIT_REMOTE_BASE_URL", value: "http://github.example"},

@@ -75,14 +75,35 @@ type Profile struct {
 	contentSHA256 string
 }
 
-// Registry is an immutable collection of Runtime Profiles keyed by name and version.
+// Binding is the immutable Runtime Profile identity persisted by an Assignment and Agent Session.
+// Platform is part of the content identified by ContentSHA256 and is recovered only by exact resolution.
+type Binding struct {
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	ContentSHA256 string `json:"content_sha256"`
+	Image         string `json:"image_digest"`
+}
+
+// Catalog contains explicitly current Runtime Profiles and current or historical immutable profiles.
+type Catalog struct {
+	current  map[reference]Profile
+	profiles map[bindingReference]Profile
+}
+
+// Registry is an immutable collection whose profiles are all current.
 type Registry struct {
-	profiles map[reference]Profile
+	Catalog
 }
 
 type reference struct {
 	name    string
 	version string
+}
+
+type bindingReference struct {
+	reference
+	contentSHA256 string
+	image         string
 }
 
 // NewOpenCodeV1 constructs the qualified opencode-acp/v1 contract.
@@ -163,35 +184,107 @@ func (profile Profile) ContentSHA256() string {
 	return profile.contentSHA256
 }
 
-// NewRegistry snapshots profiles and rejects conflicting content for one reference.
-func NewRegistry(profiles ...Profile) (Registry, error) {
-	registry := Registry{profiles: make(map[reference]Profile, len(profiles))}
-	for _, candidate := range profiles {
+// NewCatalog snapshots current and historical profiles. Historical profiles may share a
+// name and version with a current profile, but current references must be unambiguous.
+func NewCatalog(current, historical []Profile) (Catalog, error) {
+	catalog := Catalog{
+		current:  make(map[reference]Profile, len(current)),
+		profiles: make(map[bindingReference]Profile, len(current)+len(historical)),
+	}
+	for _, candidate := range append(slices.Clone(current), historical...) {
 		if err := validate(candidate.contract); err != nil || candidate.contentSHA256 == "" {
 			if err != nil {
-				return Registry{}, err
+				return Catalog{}, err
 			}
-			return Registry{}, invalid("profile has no canonical content hash")
+			return Catalog{}, invalid("profile has no canonical content hash")
 		}
-		key := reference{name: candidate.contract.Name, version: candidate.contract.Version}
-		if existing, ok := registry.profiles[key]; ok {
-			if existing.contentSHA256 != candidate.contentSHA256 {
-				return Registry{}, fmt.Errorf("%w: %s/%s", ErrConflict, key.name, key.version)
-			}
-			continue
+		key := bindingReference{
+			reference:     reference{name: candidate.contract.Name, version: candidate.contract.Version},
+			contentSHA256: candidate.contentSHA256,
+			image:         candidate.contract.Image,
 		}
-		registry.profiles[key] = cloneProfile(candidate)
+		catalog.profiles[key] = cloneProfile(candidate)
 	}
-	return registry, nil
+	for _, candidate := range current {
+		key := reference{name: candidate.contract.Name, version: candidate.contract.Version}
+		if existing, ok := catalog.current[key]; ok && existing.contentSHA256 != candidate.contentSHA256 {
+			return Catalog{}, fmt.Errorf("%w: current %s/%s", ErrConflict, key.name, key.version)
+		}
+		catalog.current[key] = cloneProfile(candidate)
+	}
+	return catalog, nil
 }
 
-// Resolve returns the profile matching the exact name and version.
-func (registry Registry) Resolve(name, version string) (Profile, error) {
-	value, ok := registry.profiles[reference{name: name, version: version}]
+// NewRegistry snapshots profiles and rejects conflicting current content for one reference.
+func NewRegistry(profiles ...Profile) (Registry, error) {
+	catalog, err := NewCatalog(profiles, nil)
+	if err != nil {
+		return Registry{}, err
+	}
+	return Registry{Catalog: catalog}, nil
+}
+
+// Resolve returns the explicitly configured current profile matching the name and version.
+func (catalog Catalog) Resolve(name, version string) (Profile, error) {
+	value, ok := catalog.current[reference{name: name, version: version}]
 	if !ok {
 		return Profile{}, fmt.Errorf("%w: %s/%s", ErrNotFound, name, version)
 	}
 	return cloneProfile(value), nil
+}
+
+// ResolveBinding returns only a profile whose complete persisted immutable binding matches.
+func (catalog Catalog) ResolveBinding(binding Binding) (Profile, error) {
+	if err := binding.Validate(); err != nil {
+		return Profile{}, err
+	}
+	key := bindingReference{
+		reference:     reference{name: binding.Name, version: binding.Version},
+		contentSHA256: binding.ContentSHA256,
+		image:         binding.Image,
+	}
+	value, ok := catalog.profiles[key]
+	if !ok {
+		// Qualified built-in contracts can recover historical image/platform content from
+		// the persisted hash without accepting a mutable reference or guessing a platform.
+		for _, platform := range []Platform{{OS: "linux", Arch: "amd64"}, {OS: "linux", Arch: "arm64"}} {
+			candidate, err := NewOpenCodeV1(binding.Image, platform)
+			if err == nil && candidate.Binding() == binding {
+				return candidate, nil
+			}
+		}
+		return Profile{}, fmt.Errorf("%w: immutable %s/%s", ErrNotFound, binding.Name, binding.Version)
+	}
+	return cloneProfile(value), nil
+}
+
+// Binding returns the complete persisted identity for this profile.
+func (profile Profile) Binding() Binding {
+	return Binding{
+		Name: profile.contract.Name, Version: profile.contract.Version,
+		ContentSHA256: profile.contentSHA256, Image: profile.contract.Image,
+	}
+}
+
+// Validate rejects incomplete bindings, mutable tags, and bare local image IDs.
+func (binding Binding) Validate() error {
+	if strings.TrimSpace(binding.Name) == "" || strings.TrimSpace(binding.Name) != binding.Name ||
+		strings.TrimSpace(binding.Version) == "" || strings.TrimSpace(binding.Version) != binding.Version ||
+		len(binding.ContentSHA256) != 64 || binding.ContentSHA256 != strings.ToLower(binding.ContentSHA256) {
+		return invalid("immutable binding is incomplete")
+	}
+	if _, err := hex.DecodeString(binding.ContentSHA256); err != nil {
+		return invalid("immutable binding content hash is invalid")
+	}
+	if !IsExactRegistryImage(binding.Image) {
+		return invalid("immutable binding image must be a registry name with an exact sha256 digest")
+	}
+	return nil
+}
+
+// IsExactRegistryImage reports whether image is a registry reference pinned by sha256 digest.
+func IsExactRegistryImage(image string) bool {
+	return registryImagePattern.MatchString(image)
 }
 
 func cloneProfile(profile Profile) Profile {

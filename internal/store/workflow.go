@@ -514,6 +514,10 @@ func persistAppliedSettlementDecision(ctx context.Context, tx pgx.Tx, settlement
 }
 
 func persistAppliedDecisionWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	return persistAppliedDecisionWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, current, decision, actionNamespace)
+}
+
+func persistAppliedDecisionWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
 	if decision.Reason == workflow.ReasonClosureSettled {
 		if err := requireClosureSettlementBarrier(ctx, tx, workflowID, current); err != nil {
 			return err
@@ -563,7 +567,7 @@ WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
-	if err := persistWorkflowActionsWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, decision, actionNamespace); err != nil {
+	if err := persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision, actionNamespace); err != nil {
 		return err
 	}
 	return nil
@@ -666,6 +670,10 @@ func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflow
 }
 
 func persistWorkflowActionsWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, decision workflow.Decision, actionNamespace string) error {
+	return persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, decision, actionNamespace)
+}
+
+func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, decision workflow.Decision, actionNamespace string) error {
 	intent := preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 	labels := false
 	consumeRun := false
@@ -725,22 +733,15 @@ func persistWorkflowActionsWithProvenance(ctx context.Context, tx pgx.Tx, delive
 				return err
 			}
 		case workflow.CompleteAssignmentsAction:
-			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, "", "complete-assignments", "COMPLETE_ASSIGNMENTS", map[string]any{"revision": decision.Snapshot.Revision}, nil); err != nil {
+			if err := completeCurrentAssignmentsTx(ctx, tx, workflowID, decision.Snapshot); err != nil {
 				return err
 			}
 		case workflow.ScheduleRetentionAction:
-			deadline := action.RetainUntil
-			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, "", "collect-retention", "COLLECT_ASSIGNMENTS", map[string]any{"retention_token": action.RetentionToken, "retain_until": action.RetainUntil, "revision": decision.Snapshot.Revision}, &deadline); err != nil {
+			if err := scheduleAssignmentRetentionTx(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision.Snapshot.Revision, action); err != nil {
 				return err
 			}
 		case workflow.CancelRetentionAction:
-			if _, err := tx.Exec(ctx, `
-UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp(), updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
-  AND payload->>'retention_token' = $2`, workflowID, action.RetentionToken); err != nil {
-				return fmt.Errorf("cancel assignment retention: %w", err)
-			}
-			if err := enqueueWorkflowJob(ctx, tx, deliveryID, workflowID, "", "cancel-retention", "CANCEL_ASSIGNMENT_RETENTION", map[string]any{"retention_token": action.RetentionToken, "revision": decision.Snapshot.Revision}, nil); err != nil {
+			if err := cancelAssignmentRetentionTx(ctx, tx, workflowID, action.RetentionToken); err != nil {
 				return err
 			}
 		case workflow.ReconcilePendingEventsAction:
@@ -753,7 +754,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		}
 	}
 	if intent.set {
-		if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
+		if err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
 			"mode": intent.mode, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
 			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
 			"revision": decision.Snapshot.Revision,
@@ -765,7 +766,7 @@ WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS' AND status = 'AVAILABLE'
 		if labelAction.State == "" {
 			labelAction.State = decision.Snapshot.State
 		}
-		if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
+		if err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
 			"state": labelAction.State, "ready_for_sha": labelAction.ReadyForSHA,
 			"consume_run": consumeRun, "revision": decision.Snapshot.Revision,
 		}, nil); err != nil {
@@ -860,7 +861,7 @@ VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 3,
         $5, $6, $7, $8, $9, $10, $11, $12, $13, 'reconcile-pending-events')
 ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`,
 		jobID, WorkflowActionQueue, ReconcilePendingEventsJobKind, payloadJSON,
-		workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "reconcile-pending-events"),
+		workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "", "reconcile-pending-events"),
 		workflowID, attemptID, sourceAssignmentID, sourceSessionID, sourceTurnID, sourceEpoch,
 		nullableString(deliveryID), nullableString(settlementID))
 	if err != nil {
@@ -912,6 +913,10 @@ func enqueueWorkflowJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, 
 }
 
 func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
+	return enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, attemptID, actionKey, kind, value, availableAt)
+}
+
+func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode %s action: %w", actionKey, err)
@@ -920,32 +925,33 @@ func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID
 	if err != nil {
 		return err
 	}
-	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, actionKey)
+	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey)
 	normalizedEventID := nullableString(deliveryID)
 	settlementProvenanceID := nullableString(settlementID)
+	internalProvenanceID := nullableString(internalEventID)
 	provenanceActionKey := nullableString(actionKey)
-	if deliveryID == "" && settlementID == "" {
+	if deliveryID == "" && settlementID == "" && internalEventID == "" {
 		provenanceActionKey = nil
 	}
 	query := `
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
     idempotency_key, workflow_id, workflow_attempt_id, normalized_event_id,
-    agent_turn_settlement_id, action_key
+    agent_turn_settlement_id, workflow_internal_event_id, action_key
 )
 VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, COALESCE($5, clock_timestamp()), 3,
-        $6, $7, $8, $9, $10, $11)
+        $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`
 	result, err := tx.Exec(ctx, query, jobID, WorkflowActionQueue, kind, payload, availableAt,
 		idempotencyKey, workflowID, nullableString(attemptID), normalizedEventID,
-		settlementProvenanceID, provenanceActionKey)
+		settlementProvenanceID, internalProvenanceID, provenanceActionKey)
 	if err != nil {
 		return fmt.Errorf("enqueue %s action: %w", actionKey, err)
 	}
 	if result.RowsAffected() == 0 {
 		var existingKind string
 		var existingPayload []byte
-		if err := tx.QueryRow(ctx, `SELECT kind, payload FROM jobs WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2) AND action_key = $3`, nullableString(deliveryID), nullableString(settlementID), actionKey).Scan(&existingKind, &existingPayload); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT kind, payload FROM jobs WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2 OR workflow_internal_event_id = $3) AND action_key = $4`, nullableString(deliveryID), nullableString(settlementID), nullableString(internalEventID), actionKey).Scan(&existingKind, &existingPayload); err != nil {
 			return fmt.Errorf("verify %s action: %w", actionKey, err)
 		}
 		canonical, _ := canonicalJSON(payload)
@@ -957,7 +963,10 @@ ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT N
 	return nil
 }
 
-func workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, actionKey string) string {
+func workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey string) string {
+	if internalEventID != "" {
+		return fmt.Sprintf("workflow:%s:internal-event:%s:action:%s", workflowID, internalEventID, actionKey)
+	}
 	if settlementID != "" {
 		return fmt.Sprintf("workflow:%s:settlement:%s:action:%s", workflowID, settlementID, actionKey)
 	}

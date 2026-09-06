@@ -761,7 +761,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 					ID: prematureClaim.DeliveryID, ObservedAt: prematureClaim.ReceivedAt,
 					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 				},
-				ClosureID: "closure-21", Turn: &guard,
+				ClosureID: "closure-21", Turn: &guard, AssignmentsExist: true,
 			})
 		})
 	if !errors.Is(err, store.ErrClosureSettlementUnsettled) {
@@ -775,6 +775,21 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if err != nil || settlementJob == nil || settlementJob.Kind != store.SettleClosureJobKind {
 		t.Fatalf("ClaimJob() settlement = (%#v, %v)", settlementJob, err)
 	}
+	runtimeIdentity, err := databases[0].GetClosureTurnRuntimeIdentity(ctx, *stopJob)
+	if err != nil {
+		t.Fatalf("GetClosureTurnRuntimeIdentity() error = %v", err)
+	}
+	if runtimeIdentity.AssignmentID != fixture.assignmentID || runtimeIdentity.AgentSessionID != fixture.sessionID ||
+		runtimeIdentity.AgentTurnID != turn.ID || runtimeIdentity.ExecutionEpoch != turn.ExecutionEpoch ||
+		runtimeIdentity.RuntimeProfileName != "runtime" || runtimeIdentity.RuntimeProfileVersion != "1" {
+		t.Fatalf("closure Runtime Process identity = %#v", runtimeIdentity)
+	}
+	if _, err := databases[0].GetClosureMutationReconciliationContext(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementUnsettled) {
+		t.Errorf("closure reconciliation context before stop error = %v, want ErrClosureSettlementUnsettled", err)
+	}
+	if _, err := databases[0].ListClosureMutationsForReconciliation(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementUnsettled) {
+		t.Errorf("closure reconciliation list before stop error = %v, want ErrClosureSettlementUnsettled", err)
+	}
 	if err := databases[0].CompleteJob(ctx, *stopJob, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowJobRequiresAcknowledgement) {
 		t.Errorf("generic stop completion error = %v", err)
 	}
@@ -783,6 +798,14 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	}
 	if _, err := databases[0].CompleteClosureSettlement(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementUnsettled) {
 		t.Errorf("settlement before stop acknowledgement error = %v", err)
+	}
+	wait, err := databases[0].AcknowledgeClosureSettlementWait(ctx, *settlementJob, 0)
+	if err != nil || !wait.RetryScheduled || wait.EscalationScheduled {
+		t.Fatalf("AcknowledgeClosureSettlementWait() = (%#v, %v)", wait, err)
+	}
+	settlementJob, err = databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.SettleClosureJobKind, "settlement-worker", 10*time.Second)
+	if err != nil || settlementJob == nil || settlementJob.Attempt != 2 {
+		t.Fatalf("reclaim delayed closure settlement = (%#v, %v)", settlementJob, err)
 	}
 	if _, err := databases[0].ReconcileClosureMutation(ctx, *settlementJob, mutation.ID, store.RecoveredMutationOutcome{
 		State: store.MutationSucceeded, Result: json.RawMessage(`{"ok":true}`),
@@ -796,6 +819,20 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	}
 	if _, err := databases[0].AcknowledgeClosureTurnStopped(ctx, *stopJob); err != nil {
 		t.Fatalf("AcknowledgeClosureTurnStopped() error = %v", err)
+	}
+	reconciliation, err := databases[0].GetClosureMutationReconciliationContext(ctx, *settlementJob)
+	if err != nil {
+		t.Fatalf("GetClosureMutationReconciliationContext() error = %v", err)
+	}
+	if reconciliation.WorkflowID != fixture.workflowID || reconciliation.Turn.ID != turn.ID ||
+		reconciliation.Turn.AgentAssignmentID != fixture.assignmentID || reconciliation.Turn.ExecutionEpoch != turn.ExecutionEpoch ||
+		reconciliation.Repository.ID != 21 || reconciliation.Repository.Owner != "owner" || reconciliation.Repository.Name != "repo" ||
+		reconciliation.Issue.ID != 21 || reconciliation.Issue.Number != 21 {
+		t.Fatalf("closure mutation reconciliation context = %#v", reconciliation)
+	}
+	mutations, err := databases[0].ListClosureMutationsForReconciliation(ctx, *settlementJob)
+	if err != nil || len(mutations) != 1 || mutations[0].ID != mutation.ID || mutations[0].State != store.MutationUnknown {
+		t.Fatalf("ListClosureMutationsForReconciliation() = (%#v, %v)", mutations, err)
 	}
 	if _, err := databases[0].CompleteClosureSettlement(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementUnsettled) {
 		t.Errorf("settlement with ambiguous mutation error = %v", err)
@@ -819,8 +856,8 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if settled.SettledAt == nil || settled.RuntimeStoppedAt == nil || settled.SourceTurnID != turn.ID {
 		t.Errorf("closure settlement = %#v", settled)
 	}
-	if _, err := databases[0].CompleteClosureSettlement(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementFenceLost) {
-		t.Errorf("duplicate closure settlement error = %v", err)
+	if duplicate, err := databases[0].CompleteClosureSettlement(ctx, *settlementJob); err != nil || duplicate.CurrentWorkflowRevision != settled.CurrentWorkflowRevision {
+		t.Errorf("duplicate closure settlement = (%#v, %v), want resolved committed result", duplicate, err)
 	}
 	var turnStatus, executionStatus, settlementStatus, assignmentStatus string
 	var active bool
@@ -840,38 +877,26 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind IN ('COMPLETE_ASSIGNMENTS', 'COLLECT_ASSIGNMENTS')`, fixture.workflowID).Scan(&completionJobs); err != nil {
 		t.Fatalf("count premature closure jobs: %v", err)
 	}
-	if turnStatus != "INTERRUPTED" || active || executionStatus != "CANCELLED" || settlementStatus != "SUCCEEDED" || assignmentStatus != "ACTIVE" || completionJobs != 0 {
+	if turnStatus != "INTERRUPTED" || active || executionStatus != "CANCELLED" || settlementStatus != "SUCCEEDED" || assignmentStatus != "COMPLETED" || completionJobs != 1 {
 		t.Errorf("closure durability = turn %s/%t, execution %s, settlement %s, assignment %s, completion jobs %d",
 			turnStatus, active, executionStatus, settlementStatus, assignmentStatus, completionJobs)
 	}
 
-	settledDelivery := workflowDelivery("42000000-0000-4000-8000-000000000003")
-	settledDelivery.RepositoryID, settledDelivery.IssueID, settledDelivery.IssueNumber = 21, 21, 21
-	settledDelivery.RepositoryOwner, settledDelivery.RepositoryName = "owner", "repo"
-	settledClaim := claimWorkflowDelivery(t, databases[0], ctx, settledDelivery)
-	application, err = databases[0].CompleteWebhookTransition(ctx, settledClaim.DeliveryID, settledClaim.ClaimToken,
-		normalizedPayload(settledClaim.DeliveryID, "closure-settled"),
-		store.WorkflowLocator{RepositoryID: 21, IssueID: 21, IssueNumber: 21},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.ClosureSettledEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: settledClaim.DeliveryID, ObservedAt: settledClaim.ReceivedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
-				ClosureID: "closure-21",
-			})
-		})
-	if err != nil || application.State != workflow.StateClosed {
-		t.Fatalf("ClosureSettledEvent after barrier = (%#v, %v)", application, err)
-	}
-	var desiredAssignmentStatus string
-	if err := pool.QueryRow(ctx, `SELECT desired_assignment_status FROM workflows WHERE id = $1`, fixture.workflowID).Scan(&desiredAssignmentStatus); err != nil {
+	var desiredAssignmentStatus, workflowState, sessionStatus string
+	var internalEvents int
+	if err := pool.QueryRow(ctx, `SELECT desired_assignment_status, status FROM workflows WHERE id = $1`, fixture.workflowID).Scan(&desiredAssignmentStatus, &workflowState); err != nil {
 		t.Fatalf("query settled closure Workflow: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus); err != nil {
+		t.Fatalf("query retained Agent Session: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind IN ('COMPLETE_ASSIGNMENTS', 'COLLECT_ASSIGNMENTS')`, fixture.workflowID).Scan(&completionJobs); err != nil {
 		t.Fatalf("count permitted closure jobs: %v", err)
 	}
-	if desiredAssignmentStatus != "COMPLETED" || completionJobs != 2 {
-		t.Errorf("settled closure work = desired assignment %s, jobs %d; want COMPLETED and 2", desiredAssignmentStatus, completionJobs)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow_internal_events WHERE workflow_id = $1 AND kind = 'CLOSURE_SETTLED' AND applied_at IS NOT NULL`, fixture.workflowID).Scan(&internalEvents); err != nil {
+		t.Fatalf("count closure internal events: %v", err)
+	}
+	if desiredAssignmentStatus != "COMPLETED" || workflowState != "CLOSED" || sessionStatus != "RETAINED" || completionJobs != 1 || internalEvents != 1 {
+		t.Errorf("settled closure = Workflow %s, Assignment %s, Session %s, jobs %d, events %d", workflowState, desiredAssignmentStatus, sessionStatus, completionJobs, internalEvents)
 	}
 }

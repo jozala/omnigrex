@@ -74,6 +74,9 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 	if len(options.HostConfig.ExtraHosts) != 1 || options.HostConfig.ExtraHosts[0] != "host.docker.internal:host-gateway" {
 		t.Errorf("ExtraHosts = %v", options.HostConfig.ExtraHosts)
 	}
+	if options.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue || options.Config.Labels["io.omnigrex.assignment"] != "assignment-1" {
+		t.Errorf("managed Runtime Process labels = %#v", options.Config.Labels)
+	}
 	if options.HostConfig.Memory != 512<<20 {
 		t.Errorf("memory = %d, want %d", options.HostConfig.Memory, 512<<20)
 	}
@@ -147,6 +150,10 @@ func TestBuildCreateOptionsRejectsUnsafeSpec(t *testing.T) {
 		}},
 		{name: "missing platform", spec: Spec{Image: testImage, User: "10001:10001", WorkingDir: "/workspace"}},
 		{name: "unsupported platform", spec: Spec{Image: testImage, Platform: Platform{OS: "linux", Architecture: "s390x"}, User: "10001:10001", WorkingDir: "/workspace"}},
+		{name: "reserved runtime marker", spec: Spec{
+			Image: testImage, Platform: Platform{OS: "linux", Architecture: "arm64"}, User: "10001:10001", WorkingDir: "/workspace",
+			Labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue},
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

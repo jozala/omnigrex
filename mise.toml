@@ -75,6 +75,15 @@ run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSIO
 description = "Build current and previous OpenCode compatibility images"
 depends = ["agent-image", "agent-image-previous"]
 
+[tasks.release-check-runtime-upgrade]
+description = "Qualify source-to-candidate state compatibility and optionally emit an exact-digest result"
+depends = ["agent-images"]
+run = '''
+go test -race -tags=integration ./internal/runtime/acp -run '^TestOpenCodeControlledStateUpgrade$' -count=1
+go test -race ./internal/agentturn -run '^TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration$' -count=1
+go test -race ./internal/runtime/profile -run '^TestCompatibilityResults'
+'''
+
 [tasks.check]
 description = "Run all local verification checks"
 depends = ["format-check", "lint", "test", "compose-check"]

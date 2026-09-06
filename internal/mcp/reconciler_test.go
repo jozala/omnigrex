@@ -34,6 +34,7 @@ func TestProductionReconcilerFindsExactCommentArtifactUsingReservationIdentity(t
 	reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
 	mutation := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"caller-key","body":"Visible update"}`)
 	mutation.ExternalResourceID = "9123:456"
+	mutation.State = store.MutationSucceeded
 
 	result, err := reconciler.Reconcile(context.Background(), reconciliationContext(), mutation)
 	if err != nil {
@@ -59,6 +60,7 @@ func TestProductionReconcilerUsesDeveloperCredentialsForReviewerPullRequestComme
 	reconciliation.Role = workflow.RoleReviewer
 	mutation := reconciliationMutation(mcp.ToolCommentOnPullRequest, `{"operation_id":"caller-key","body":"Reviewer update"}`)
 	mutation.ExternalResourceID = "9123:654"
+	mutation.State = store.MutationSucceeded
 
 	result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 	if err != nil || result.Disposition != mcp.ReconciliationFound {
@@ -83,6 +85,7 @@ func TestProductionReconcilerFindsExactPullRequestAndReviewArtifacts(t *testing.
 		reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
 		mutation := reconciliationMutation(mcp.ToolOpenPR, `{"operation_id":"caller-open","title":"Implement it","body":"Description"}`)
 		mutation.ExternalResourceID = "9123:omnigrex/issue-12:main"
+		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 		if err != nil || result.Disposition != mcp.ReconciliationFound ||
@@ -105,6 +108,7 @@ func TestProductionReconcilerFindsExactPullRequestAndReviewArtifacts(t *testing.
 		reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
 		mutation := reconciliationMutation(mcp.ToolSubmitReview, `{"operation_id":"caller-review","event":"REQUEST_CHANGES","body":"Fix this","comments":[]}`)
 		mutation.ExternalResourceID = "9123:654"
+		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 		if err != nil || result.Disposition != mcp.ReconciliationFound ||
@@ -337,6 +341,7 @@ func TestProductionReconcilerReconcilesPublicationAndInternalMutations(t *testin
 		mutation := reconciliationMutation(mcp.ToolPublishChanges, `{"operation_id":"caller-publish","message":"Publish"}`)
 		mutation.ExternalService = "git"
 		mutation.ExternalResourceID = "9123:omnigrex/issue-12"
+		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 		if err != nil || result.Disposition != mcp.ReconciliationFound ||
@@ -357,6 +362,7 @@ func TestProductionReconcilerReconcilesPublicationAndInternalMutations(t *testin
 		mutation.ExternalService = "omnigrex"
 		mutation.ExternalResourceID = "workflow-1"
 		mutation.ExpectedSHA = ""
+		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 		if err != nil || result.Disposition != mcp.ReconciliationFound ||
@@ -370,6 +376,7 @@ func TestProductionReconcilerReconcilesPublicationAndInternalMutations(t *testin
 		mutation := reconciliationMutation(mcp.ToolRequestReview, `{"operation_id":"caller-request-review","summary":"Ready"}`)
 		mutation.ExternalService = "omnigrex"
 		mutation.ExternalResourceID = "9123:omnigrex/issue-12"
+		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
 		if err != nil || result.Disposition != mcp.ReconciliationFound ||

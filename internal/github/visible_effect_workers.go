@@ -173,7 +173,7 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 			return fmt.Errorf("read latest durable Workflow GitHub effect context: %w", err)
 		}
 		if kind == store.PublishHumanHandoffJobKind && !effect.CleanupRequired &&
-			(effect.JobRevision != effect.Revision || effect.State != workflow.StateNeedsHuman) {
+			!effect.SafetyDiagnostic && (effect.JobRevision != effect.Revision || effect.State != workflow.StateNeedsHuman) {
 			acknowledgement, err := worker.store.AcknowledgeWorkflowGitHubEffect(workCtx, *lease, effect, json.RawMessage(`{"superseded":true}`))
 			if err != nil {
 				return fmt.Errorf("record superseded %s cleanup: %w", kind, err)
@@ -402,11 +402,11 @@ func managedLabelState(state workflow.State) (WorkflowState, error) {
 }
 
 func (worker *HumanHandoffWorker) publish(ctx context.Context, credential string, effect store.WorkflowGitHubEffectContext, lease store.JobLease) (json.RawMessage, error) {
-	if effect.JobRevision != effect.Revision || effect.State != workflow.StateNeedsHuman {
+	if !effect.SafetyDiagnostic && (effect.JobRevision != effect.Revision || effect.State != workflow.StateNeedsHuman) {
 		return json.Marshal(map[string]any{"superseded": true, "current_revision": effect.Revision, "current_state": effect.State})
 	}
 	if strings.TrimSpace(effect.HandoffReason) == "" {
-		return nil, &ConfigurationError{Cause: errors.New("NEEDS_HUMAN Workflow has no Human Handoff reason")}
+		return nil, &ConfigurationError{Cause: errors.New("Human Handoff has no reason")}
 	}
 	marker, err := RenderMarker(Marker{WorkflowID: effect.WorkflowID, OperationID: lease.ID})
 	if err != nil {

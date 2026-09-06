@@ -1143,7 +1143,7 @@ type runtimeRegistry struct {
 	err            error
 }
 
-func (registry *runtimeRegistry) Resolve(string, string) (profile.Profile, error) {
+func (registry *runtimeRegistry) ResolveBinding(profile.Binding) (profile.Profile, error) {
 	*registry.operations = append(*registry.operations, "profile")
 	return registry.runtimeProfile, registry.err
 }

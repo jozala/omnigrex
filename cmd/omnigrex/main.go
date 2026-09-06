@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,17 +21,25 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
+	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflowaction"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 var version = "dev"
+
+const (
+	startupMaximumPasses           = 100
+	startupMaximumRuntimeProcesses = 100_000
+	startupMaximumRecoveries       = 100_000
+)
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
@@ -62,13 +72,16 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("initialize database: %w", err)
 	}
 	defer database.Close()
-	githubServices, err := configureGitHub(settings, database, logger)
-	if err != nil {
-		return err
-	}
 	openCodeV1, err := runtimeprofile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
 	if err != nil {
 		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
+	}
+	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, openCodeV1); err != nil {
+		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
+	}
+	githubServices, err := configureGitHub(settings, database, logger)
+	if err != nil {
+		return err
 	}
 	runtimeRegistry, err := runtimeprofile.NewRegistry(openCodeV1)
 	if err != nil {
@@ -163,6 +176,61 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			logger.Error("close stale Runtime Process cleanup", "error", err)
 		}
 	}()
+	runtimeInventory, err := dockerruntime.NewRuntimeProcessInventory()
+	if err != nil {
+		return fmt.Errorf("configure Runtime Process inventory: %w", err)
+	}
+	defer func() {
+		if err := runtimeInventory.Close(); err != nil {
+			logger.Error("close Runtime Process inventory", "error", err)
+		}
+	}()
+	profileContract := openCodeV1.Contract()
+	runtimeStateCleaner, err := dockerruntime.NewAssignmentRuntimeStateCleaner(dockerruntime.AssignmentRuntimeStateCleanerOptions{
+		Image: profileContract.Image,
+		Platform: dockerruntime.Platform{
+			OS: profileContract.Platform.OS, Architecture: profileContract.Platform.Arch,
+		},
+		User: strconv.FormatUint(uint64(profileContract.User.UID), 10) + ":" +
+			strconv.FormatUint(uint64(profileContract.User.GID), 10),
+		RuntimeStateVolume: settings.RuntimeStateVolume,
+	})
+	if err != nil {
+		return fmt.Errorf("configure Assignment runtime-state cleanup: %w", err)
+	}
+	defer func() {
+		if err := runtimeStateCleaner.Close(); err != nil {
+			logger.Error("close Assignment runtime-state cleanup", "error", err)
+		}
+	}()
+	exactImages, err := dockerruntime.NewExactImageAvailability()
+	if err != nil {
+		return fmt.Errorf("configure exact Runtime Profile image availability: %w", err)
+	}
+	defer func() {
+		if err := exactImages.Close(); err != nil {
+			logger.Error("close exact Runtime Profile image availability", "error", err)
+		}
+	}()
+	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry.Catalog, exactImages)
+	if err != nil {
+		return fmt.Errorf("configure protected Runtime Profile availability: %w", err)
+	}
+	startupDocker := startupDockerAdapter{inventory: runtimeInventory, cleaner: runtimeCleaner}
+	startupReconciler, err := startup.NewReconciler(database, startupDocker, startupDocker, startupDocker, startup.ReconcilerOptions{
+		MaxPasses: startupMaximumPasses, MaxRuntimeProcesses: startupMaximumRuntimeProcesses,
+		MaxRecoveries: startupMaximumRecoveries,
+	})
+	if err != nil {
+		return fmt.Errorf("configure startup reconciliation: %w", err)
+	}
+	expiredTurnMonitor, err := startup.NewMonitor(database, startup.MonitorOptions{
+		PollInterval: settings.AgentTurnPreparationPollInterval, MaxRecoveriesPerPoll: startupMaximumRecoveries,
+		OnError: func(err error) { logger.Error("reconcile expired Agent Turns", "error", err) },
+	})
+	if err != nil {
+		return fmt.Errorf("configure expired Agent Turn monitor: %w", err)
+	}
 	runtimeStopWorker, err := agentturn.NewStopWorker(database, runtimeCleaner, workspaces, agentturn.StopWorkerConfig{
 		ClaimOwner:           githubServices.claimOwner + ":stop-stale-runtime",
 		LeaseDuration:        settings.AgentTurnPreparationLeaseDuration,
@@ -264,6 +332,44 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow action failure Worker: %w", err)
 	}
+	closureWorkerConfig := func(owner, operation string) workflowaction.ClosureWorkerConfig {
+		return workflowaction.ClosureWorkerConfig{
+			ClaimOwner:    githubServices.claimOwner + ":" + owner,
+			LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
+			IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,
+			OnError: func(err error) { logger.Error(operation, "error", err) },
+		}
+	}
+	closureStopWorker, err := workflowaction.NewClosureStopWorker(database, runtimeCleaner,
+		closureWorkerConfig("stop-closing-agent-turn", "stop closing Agent Turn"))
+	if err != nil {
+		return fmt.Errorf("configure closure Agent Turn stop Worker: %w", err)
+	}
+	closureSettlementWorker, err := workflowaction.NewClosureSettlementWorker(database, mutationReconciler,
+		closureWorkerConfig("settle-workflow-closure", "settle Workflow closure"))
+	if err != nil {
+		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
+	}
+	retentionWorker, err := retention.NewWorker(database, runtimeStateCleaner, retention.WorkerConfig{
+		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
+		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
+		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,
+		OnError: func(err error) { logger.Error("collect retained Assignments", "error", err) },
+	})
+	if err != nil {
+		return fmt.Errorf("configure Assignment retention Worker: %w", err)
+	}
+
+	reconciliation, err := prepareStartup(ctx, settings.ReadinessTimeout, profileAvailability, startupReconciler)
+	if err != nil {
+		return err
+	}
+	logger.Info("startup reconciliation complete",
+		"passes", reconciliation.Passes,
+		"recovered_agent_turns", reconciliation.RecoveredAgentTurns,
+		"removed_runtime_identities", reconciliation.RemovedRuntimeIdentities,
+		"removed_malformed_processes", reconciliation.RemovedMalformedProcesses,
+	)
 
 	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
 		AgentNetwork:       settings.DockerAgentNetwork,
@@ -281,11 +387,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		}
 	}()
 
-	readiness := server.ReadinessFunc(func(ctx context.Context) error {
-		probeCtx, cancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
-		defer cancel()
-		return errors.Join(database.Ready(probeCtx), dockerProbe.Check(probeCtx))
-	})
+	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, dockerProbe.Check,
+		profileAvailability.Check, func(ctx context.Context) error {
+			return database.CheckPendingRuntimeProfileCompatibility(ctx, openCodeV1)
+		})
 	return runServices(ctx,
 		func(ctx context.Context) error {
 			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubServices.webhookHandler)
@@ -299,10 +404,130 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		executionWorker.Run,
 		runtimeStopWorker.Run,
 		mutationRecoveryWorker.Run,
+		expiredTurnMonitor.Run,
 		labelWorker.Run,
 		humanHandoffWorker.Run,
 		failureWorker.Run,
+		closureStopWorker.Run,
+		closureSettlementWorker.Run,
+		retentionWorker.Run,
 	)
+}
+
+type runtimeProcessInventory interface {
+	List(context.Context) (dockerruntime.RuntimeProcessInventorySnapshot, error)
+}
+
+type startupRuntimeCleaner interface {
+	EnsureAbsent(context.Context, map[string]string) error
+	EnsureManagedContainerAbsent(context.Context, string) error
+}
+
+type startupDockerAdapter struct {
+	inventory runtimeProcessInventory
+	cleaner   startupRuntimeCleaner
+}
+
+func (adapter startupDockerAdapter) List(ctx context.Context) (startup.RuntimeInventorySnapshot, error) {
+	dockerSnapshot, err := adapter.inventory.List(ctx)
+	if err != nil {
+		return startup.RuntimeInventorySnapshot{}, err
+	}
+	snapshot := startup.RuntimeInventorySnapshot{
+		Processes:  make([]startup.ManagedRuntimeProcess, 0, len(dockerSnapshot.Processes)),
+		Duplicates: make([]startup.DuplicateManagedRuntimeProcess, 0, len(dockerSnapshot.Duplicates)),
+		Malformed:  make([]startup.MalformedManagedRuntimeProcess, 0, len(dockerSnapshot.Malformed)),
+	}
+	for _, process := range dockerSnapshot.Processes {
+		identity, ok := startupRuntimeIdentity(process.Identity)
+		if !ok {
+			snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
+				ContainerID: process.ContainerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
+			})
+			continue
+		}
+		snapshot.Processes = append(snapshot.Processes, startup.ManagedRuntimeProcess{
+			Identity: identity, ContainerID: process.ContainerID,
+		})
+	}
+	for _, duplicate := range dockerSnapshot.Duplicates {
+		identity, ok := startupRuntimeIdentity(duplicate.Identity)
+		if !ok {
+			for _, containerID := range duplicate.ContainerIDs {
+				snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
+					ContainerID: containerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
+				})
+			}
+			continue
+		}
+		snapshot.Duplicates = append(snapshot.Duplicates, startup.DuplicateManagedRuntimeProcess{
+			Identity: identity, ContainerIDs: append([]string(nil), duplicate.ContainerIDs...),
+		})
+	}
+	for _, malformed := range dockerSnapshot.Malformed {
+		snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
+			ContainerID: malformed.ContainerID, Reason: string(malformed.Reason),
+		})
+	}
+	return snapshot, nil
+}
+
+func (adapter startupDockerAdapter) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {
+	return adapter.cleaner.EnsureAbsent(ctx, map[string]string{
+		dockerruntime.RuntimeProcessAssignmentLabel: identity.AssignmentID,
+		dockerruntime.RuntimeProcessSessionLabel:    identity.AgentSessionID,
+		dockerruntime.RuntimeProcessTurnLabel:       identity.AgentTurnID,
+		dockerruntime.RuntimeProcessEpochLabel:      strconv.FormatInt(identity.ExecutionEpoch, 10),
+		dockerruntime.RuntimeProfileIdentityLabel:   identity.RuntimeProfileName + "/" + identity.RuntimeProfileVersion,
+	})
+}
+
+func (adapter startupDockerAdapter) EnsureMalformedAbsent(ctx context.Context, process startup.MalformedManagedRuntimeProcess) error {
+	return adapter.cleaner.EnsureManagedContainerAbsent(ctx, process.ContainerID)
+}
+
+func startupRuntimeIdentity(identity dockerruntime.RuntimeProcessIdentity) (store.AgentTurnRuntimeIdentity, bool) {
+	if identity.ExecutionEpoch > math.MaxInt64 {
+		return store.AgentTurnRuntimeIdentity{}, false
+	}
+	return store.AgentTurnRuntimeIdentity{
+		AssignmentID: identity.AssignmentID, AgentSessionID: identity.AgentSessionID,
+		AgentTurnID: identity.AgentTurnID, ExecutionEpoch: int64(identity.ExecutionEpoch),
+		RuntimeProfileName: identity.RuntimeProfile.Name, RuntimeProfileVersion: identity.RuntimeProfile.Version,
+	}, true
+}
+
+type protectedBindingChecker interface {
+	CheckBindings(context.Context) error
+}
+
+type startupTurnReconciler interface {
+	Reconcile(context.Context) (startup.ReconciliationResult, error)
+}
+
+func prepareStartup(ctx context.Context, timeout time.Duration, bindings protectedBindingChecker, reconciler startupTurnReconciler) (startup.ReconciliationResult, error) {
+	startupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := bindings.CheckBindings(startupCtx); err != nil {
+		return startup.ReconciliationResult{}, fmt.Errorf("validate protected Runtime Profile bindings during startup: %w", err)
+	}
+	result, err := reconciler.Reconcile(startupCtx)
+	if err != nil {
+		return result, fmt.Errorf("reconcile durable runtime state during startup: %w", err)
+	}
+	return result, nil
+}
+
+func combinedReadiness(timeout time.Duration, checks ...func(context.Context) error) server.ReadinessFunc {
+	return func(ctx context.Context) error {
+		probeCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		results := make([]error, 0, len(checks))
+		for _, check := range checks {
+			results = append(results, check(probeCtx))
+		}
+		return errors.Join(results...)
+	}
 }
 
 type roleRepositoryCredentials struct {
@@ -412,6 +637,35 @@ func readNonemptyJSONObject(path string) (json.RawMessage, error) {
 		delete(object, key)
 	}
 	return json.RawMessage(contents), nil
+}
+
+type runtimeProfileCompatibilityImporter interface {
+	ImportRuntimeProfileCompatibilityResults(context.Context, runtimeprofile.CompatibilityResultsFile) error
+}
+
+func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runtimeProfileCompatibilityImporter, filePath string, target runtimeprofile.Profile) error {
+	if filePath == "" {
+		return nil
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open compatibility results file: %w", err)
+	}
+	defer file.Close()
+	results, err := runtimeprofile.DecodeCompatibilityResultsFile(file)
+	if err != nil {
+		return err
+	}
+	targetContract := target.Contract()
+	for index, result := range results.Results {
+		if result.Target != target.Binding() || result.Platform != targetContract.Platform {
+			return fmt.Errorf("compatibility result %d does not target the configured Runtime Profile binding and platform", index)
+		}
+	}
+	if err := importer.ImportRuntimeProfileCompatibilityResults(ctx, results); err != nil {
+		return err
+	}
+	return nil
 }
 
 func zeroBytes(value []byte) {

@@ -413,6 +413,11 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 	initProcess := true
 	stopTimeout := 10
 	pidsLimit := spec.PIDsLimit
+	labels := maps.Clone(spec.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
 
 	mounts := make([]mount.Mount, 0, len(spec.Volumes))
 	for _, volume := range spec.Volumes {
@@ -460,7 +465,7 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 			Cmd:          spec.Command,
 			Image:        spec.Image,
 			WorkingDir:   spec.WorkingDir,
-			Labels:       spec.Labels,
+			Labels:       labels,
 			StopTimeout:  &stopTimeout,
 		},
 		HostConfig: &container.HostConfig{
@@ -489,6 +494,9 @@ func validateSpec(spec Spec) (string, string, error) {
 	}
 	if !filepath.IsAbs(spec.WorkingDir) || filepath.Clean(spec.WorkingDir) != spec.WorkingDir {
 		return "", "", fmt.Errorf("%w: working directory must be an absolute clean path", ErrInvalidSpec)
+	}
+	if _, present := spec.Labels[RuntimeProcessMarkerLabel]; present {
+		return "", "", fmt.Errorf("%w: Runtime Process marker label is reserved", ErrInvalidSpec)
 	}
 	uid, gid, found := strings.Cut(spec.User, ":")
 	if !found {

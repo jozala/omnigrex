@@ -514,6 +514,9 @@ func reduceClosureSettled(snapshot Snapshot, event ClosureSettledEvent) Decision
 	next.ActiveTurn = nil
 	next.Closure = nil
 	next.Assignments.Status = AssignmentCompleted
+	if !event.AssignmentsExist {
+		next.Assignments.RuntimeState = RuntimeStateCollected
+	}
 	if next.ChangeProposal != nil {
 		next.ChangeProposal.ReadyForSHA = ""
 	}

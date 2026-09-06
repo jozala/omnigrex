@@ -157,6 +157,24 @@ func TestHumanHandoffWorkerPublishesIssueAndPullRequestIdempotently(t *testing.T
 	}
 }
 
+func TestHumanHandoffWorkerPublishesDurableSafetyDiagnosticWithoutWorkflowTransition(t *testing.T) {
+	effect := testEffect(workflow.StateClosing, 5)
+	effect.JobRevision = 4
+	effect.HandoffReason = "closure_cleanup_exhausted"
+	effect.HandoffDiagnostic = "Closure cleanup failed three times; safe retries will continue."
+	effect.SafetyDiagnostic = true
+	workerStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, effect)
+	api := newFakeVisibleEffectAPI()
+	worker := newTestHandoffWorker(t, workerStore, api, testWorkerConfig())
+
+	if processed, err := worker.ProcessNext(context.Background()); err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	if api.issueCreates != 1 || api.pullRequestCreates != 1 || !workerStore.acknowledged {
+		t.Fatalf("safety publication = Issue %d PR %d acknowledged %t", api.issueCreates, api.pullRequestCreates, workerStore.acknowledged)
+	}
+}
+
 func TestHumanHandoffWorkerRecoversAmbiguousCreateByMarker(t *testing.T) {
 	effect := testEffect(workflow.StateNeedsHuman, 5)
 	effect.HandoffReason = string(workflow.ReasonAgentBlocked)

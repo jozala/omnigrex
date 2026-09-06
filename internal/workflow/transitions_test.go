@@ -788,7 +788,7 @@ func TestIssueClosureFencesTurnAndSettlementSchedulesSuppliedRetentionGeneration
 	assertActionCount[workflow.StopTurnAction](t, closing.Actions, 1)
 	assertActionCount[workflow.SettleClosureAction](t, closing.Actions, 1)
 
-	settledEvent := workflow.ClosureSettledEvent{EventMetadata: metadata(closing.Snapshot, "closure-settled"), ClosureID: "closure-1", Turn: turnGuardPointer(closing.Snapshot)}
+	settledEvent := workflow.ClosureSettledEvent{EventMetadata: metadata(closing.Snapshot, "closure-settled"), ClosureID: "closure-1", Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true}
 	settled := workflow.Reduce(closing.Snapshot, settledEvent)
 
 	assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateClosed, closing.Snapshot.Revision+1)
@@ -806,6 +806,37 @@ func TestIssueClosureFencesTurnAndSettlementSchedulesSuppliedRetentionGeneration
 	if schedule.RetentionToken != "retention-token-1" || !schedule.RetainUntil.Equal(closeEvent.RetainUntil) {
 		t.Errorf("retention action = %#v", schedule)
 	}
+}
+
+func TestClosureSettlementWithoutConcreteAssignmentsCollectsImmediately(t *testing.T) {
+	snapshot := developingSnapshot(nil)
+	snapshot.ActiveTurn = nil
+	closing := workflow.Reduce(snapshot, closeEvent(snapshot, "closure-empty", "retention-empty"))
+
+	settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
+		EventMetadata: metadata(closing.Snapshot, "closure-empty-settled"),
+		ClosureID:     "closure-empty",
+	})
+
+	assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateClosed, closing.Snapshot.Revision+1)
+	if settled.Snapshot.Assignments.RuntimeState != workflow.RuntimeStateCollected ||
+		!settled.Snapshot.Assignments.RetainedUntil.IsZero() || settled.Snapshot.Assignments.RetentionToken != "" {
+		t.Fatalf("empty closure Assignments = %#v, want collected without retention", settled.Snapshot.Assignments)
+	}
+	assertActionCount[workflow.ScheduleRetentionAction](t, settled.Actions, 0)
+
+	reopenedClosing := workflow.Reduce(closing.Snapshot, workflow.IssueReopenedEvent{
+		EventMetadata: metadata(closing.Snapshot, "closure-empty-reopened"),
+	})
+	reopened := workflow.Reduce(reopenedClosing.Snapshot, workflow.ClosureSettledEvent{
+		EventMetadata: metadata(reopenedClosing.Snapshot, "closure-empty-reopen-settled"),
+		ClosureID:     "closure-empty",
+	})
+	assertDecision(t, reopened, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateDormant, reopenedClosing.Snapshot.Revision+1)
+	if reopened.Snapshot.Assignments.RuntimeState != workflow.RuntimeStateCollected {
+		t.Fatalf("reopened empty closure Assignments = %#v, want collected", reopened.Snapshot.Assignments)
+	}
+	assertActionCount[workflow.ScheduleRetentionAction](t, reopened.Actions, 0)
 }
 
 func TestIssueClosureDerivesResumeRoleWithOrWithoutActiveTurn(t *testing.T) {
@@ -861,7 +892,7 @@ func TestQueuedReviewOrReadyClosureReopenRetriggerResumesReviewer(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			closing := workflow.Reduce(test.snapshot, closeEvent(test.snapshot, "closure-"+test.name, "retention-"+test.name))
 			settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
-				EventMetadata: metadata(closing.Snapshot, "settle-"+test.name), ClosureID: "closure-" + test.name, Turn: turnGuardPointer(closing.Snapshot),
+				EventMetadata: metadata(closing.Snapshot, "settle-"+test.name), ClosureID: "closure-" + test.name, Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true,
 			})
 			assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateClosed, closing.Snapshot.Revision+1)
 			if settled.Snapshot.ResumeRole != workflow.RoleReviewer {
@@ -902,7 +933,7 @@ func TestReopenWhileClosingCancelsClosureAndSettlesDormantWithoutRetention(t *te
 	}
 
 	settled := workflow.Reduce(cancelled.Snapshot, workflow.ClosureSettledEvent{
-		EventMetadata: metadata(cancelled.Snapshot, "settled-after-reopen"), ClosureID: "closure-reopen", Turn: turnGuardPointer(cancelled.Snapshot),
+		EventMetadata: metadata(cancelled.Snapshot, "settled-after-reopen"), ClosureID: "closure-reopen", Turn: turnGuardPointer(cancelled.Snapshot), AssignmentsExist: true,
 	})
 
 	assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateDormant, cancelled.Snapshot.Revision+1)
@@ -931,7 +962,7 @@ func TestTriggerAfterReviewClosureResumesReviewerAssignment(t *testing.T) {
 	snapshot := reviewingSnapshot(1, "review-head")
 	closing := workflow.Reduce(snapshot, closeEvent(snapshot, "closure-review", "retention-review"))
 	settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
-		EventMetadata: metadata(closing.Snapshot, "settle-review"), ClosureID: "closure-review", Turn: turnGuardPointer(closing.Snapshot),
+		EventMetadata: metadata(closing.Snapshot, "settle-review"), ClosureID: "closure-review", Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true,
 	})
 	reopened := workflow.Reduce(settled.Snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata(settled.Snapshot, "reopen-review")})
 	trigger := workflow.TriggerEvent{

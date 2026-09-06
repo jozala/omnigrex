@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
-	"github.com/jozala/omnigrex/internal/store"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -24,10 +23,10 @@ func TestExactLabelCleanerUsesAllExactFiltersAndAcceptsAbsence(t *testing.T) {
 		t.Fatalf("ContainerList() options = %#v", api.listOptions)
 	}
 	wantFilters := make(mobyclient.Filters).Add("label",
-		store.RuntimeLabelAssignmentID+"="+exactRuntimeLabels()[store.RuntimeLabelAssignmentID],
-		store.RuntimeLabelSessionID+"="+exactRuntimeLabels()[store.RuntimeLabelSessionID],
-		store.RuntimeLabelTurnID+"="+exactRuntimeLabels()[store.RuntimeLabelTurnID],
-		store.RuntimeLabelEpoch+"=9",
+		RuntimeProcessAssignmentLabel+"="+exactRuntimeLabels()[RuntimeProcessAssignmentLabel],
+		RuntimeProcessSessionLabel+"="+exactRuntimeLabels()[RuntimeProcessSessionLabel],
+		RuntimeProcessTurnLabel+"="+exactRuntimeLabels()[RuntimeProcessTurnLabel],
+		RuntimeProcessEpochLabel+"=9",
 	)
 	if !maps.EqualFunc(api.listOptions[0].Filters, wantFilters, maps.Equal) {
 		t.Fatalf("ContainerList() filters = %#v, want %#v", api.listOptions[0].Filters, wantFilters)
@@ -37,10 +36,31 @@ func TestExactLabelCleanerUsesAllExactFiltersAndAcceptsAbsence(t *testing.T) {
 	}
 }
 
+func TestExactLabelCleanerIncludesRuntimeProfileWhenSupplied(t *testing.T) {
+	labels := exactRuntimeLabels()
+	labels[RuntimeProfileIdentityLabel] = "opencode-acp/v1"
+	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{{}}}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+
+	if err := cleaner.EnsureAbsent(context.Background(), labels); err != nil {
+		t.Fatalf("EnsureAbsent() error = %v", err)
+	}
+	wantFilters := make(mobyclient.Filters).Add("label",
+		RuntimeProcessAssignmentLabel+"="+labels[RuntimeProcessAssignmentLabel],
+		RuntimeProcessSessionLabel+"="+labels[RuntimeProcessSessionLabel],
+		RuntimeProcessTurnLabel+"="+labels[RuntimeProcessTurnLabel],
+		RuntimeProcessEpochLabel+"=9",
+		RuntimeProfileIdentityLabel+"=opencode-acp/v1",
+	)
+	if len(api.listOptions) != 1 || !maps.EqualFunc(api.listOptions[0].Filters, wantFilters, maps.Equal) {
+		t.Fatalf("ContainerList() filters = %#v, want %#v", api.listOptions, wantFilters)
+	}
+}
+
 func TestExactLabelCleanerStopsRemovesAndConfirmsMatchingContainersAreAbsent(t *testing.T) {
 	labels := exactRuntimeLabels()
 	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{
-		{Items: []container.Summary{{ID: "container-1", Labels: maps.Clone(labels)}, {ID: "container-2", Labels: maps.Clone(labels)}}},
+		{Items: []container.Summary{{ID: "container-1", Labels: markedExactRuntimeLabels()}, {ID: "container-2", Labels: markedExactRuntimeLabels()}}},
 		{},
 	}}
 	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: 1500 * time.Millisecond})
@@ -61,10 +81,50 @@ func TestExactLabelCleanerStopsRemovesAndConfirmsMatchingContainersAreAbsent(t *
 	}
 }
 
+func TestExactLabelCleanerRemovesCompleteLegacyContainer(t *testing.T) {
+	labels := exactRuntimeLabels()
+	legacy := maps.Clone(labels)
+	legacy[RuntimeProfileIdentityLabel] = "opencode-acp/v1"
+	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{
+		{Items: []container.Summary{{ID: "legacy", Labels: legacy}}},
+		{},
+	}}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+
+	if err := cleaner.EnsureAbsent(context.Background(), labels); err != nil {
+		t.Fatalf("EnsureAbsent() error = %v", err)
+	}
+	if _, stopped := api.stopped["legacy"]; !stopped {
+		t.Fatal("complete legacy Runtime Process was not stopped")
+	}
+	if _, removed := api.removed["legacy"]; !removed {
+		t.Fatal("complete legacy Runtime Process was not removed")
+	}
+}
+
+func TestExactLabelCleanerLeavesUnprovenExactLabelMatchesUntouched(t *testing.T) {
+	markerFalse := exactRuntimeLabels()
+	markerFalse[RuntimeProfileIdentityLabel] = "opencode-acp/v1"
+	markerFalse[RuntimeProcessMarkerLabel] = "false"
+	partialLegacy := exactRuntimeLabels()
+	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{{Items: []container.Summary{
+		{ID: "marker-false", Labels: markerFalse},
+		{ID: "partial-legacy", Labels: partialLegacy},
+	}}}}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+
+	if err := cleaner.EnsureAbsent(context.Background(), exactRuntimeLabels()); err != nil {
+		t.Fatalf("EnsureAbsent() error = %v", err)
+	}
+	if len(api.stopped) != 0 || len(api.removed) != 0 {
+		t.Fatalf("unproven containers were mutated: stop %#v remove %#v", api.stopped, api.removed)
+	}
+}
+
 func TestExactLabelCleanerRejectsMismatchedFilteredResultWithoutMutation(t *testing.T) {
 	labels := exactRuntimeLabels()
 	mismatch := maps.Clone(labels)
-	mismatch[store.RuntimeLabelTurnID] = "30000000-0000-4000-8000-000000000099"
+	mismatch[RuntimeProcessTurnLabel] = "30000000-0000-4000-8000-000000000099"
 	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{{Items: []container.Summary{
 		{ID: "matching", Labels: maps.Clone(labels)},
 		{ID: "mismatched", Labels: mismatch},
@@ -76,6 +136,24 @@ func TestExactLabelCleanerRejectsMismatchedFilteredResultWithoutMutation(t *test
 	}
 	if len(api.stopped) != 0 || len(api.removed) != 0 {
 		t.Fatalf("mismatched result mutated containers: stop %v remove %v", api.stopped, api.removed)
+	}
+}
+
+func TestExactLabelCleanerRejectsDifferentRuntimeProfileWithoutMutation(t *testing.T) {
+	labels := exactRuntimeLabels()
+	labels[RuntimeProfileIdentityLabel] = "opencode-acp/v1"
+	mismatch := maps.Clone(labels)
+	mismatch[RuntimeProfileIdentityLabel] = "opencode-acp/v2"
+	api := &exactLabelCleanupFake{lists: []mobyclient.ContainerListResult{{Items: []container.Summary{{
+		ID: "different-profile", Labels: mismatch,
+	}}}}}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+
+	if err := cleaner.EnsureAbsent(context.Background(), labels); err == nil {
+		t.Fatal("EnsureAbsent() error = nil, want defensive Runtime Profile mismatch rejection")
+	}
+	if len(api.stopped) != 0 || len(api.removed) != 0 {
+		t.Fatalf("different Runtime Profile was mutated: stop %v remove %v", api.stopped, api.removed)
 	}
 }
 
@@ -92,7 +170,7 @@ func TestExactLabelCleanerTreatsStopAndRemoveRacesAsSuccess(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			api := &exactLabelCleanupFake{
-				lists:   []mobyclient.ContainerListResult{{Items: []container.Summary{{ID: "container-1", Labels: exactRuntimeLabels()}}}, {}},
+				lists:   []mobyclient.ContainerListResult{{Items: []container.Summary{{ID: "container-1", Labels: markedExactRuntimeLabels()}}}, {}},
 				stopErr: test.stopErr, removeErr: test.removeErr,
 			}
 			cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
@@ -108,6 +186,81 @@ func TestExactLabelCleanerTreatsStopAndRemoveRacesAsSuccess(t *testing.T) {
 	}
 }
 
+func TestExactLabelCleanerRevalidatesMalformedManagedContainerBeforeRemoval(t *testing.T) {
+	api := &exactLabelCleanupFake{inspects: []mobyclient.ContainerInspectResult{{Container: container.InspectResponse{
+		ID:     "malformed-container",
+		Config: &container.Config{Labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}},
+	}}}}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: 1500 * time.Millisecond})
+
+	if err := cleaner.EnsureManagedContainerAbsent(context.Background(), "malformed-container"); err != nil {
+		t.Fatalf("EnsureManagedContainerAbsent() error = %v", err)
+	}
+	if !maps.Equal(api.stopped, map[string]int{"malformed-container": 2}) ||
+		!maps.Equal(api.removed, map[string]mobyclient.ContainerRemoveOptions{"malformed-container": {Force: true}}) {
+		t.Fatalf("cleanup calls = stop %#v remove %#v", api.stopped, api.removed)
+	}
+}
+
+func TestExactLabelCleanerRefusesMalformedContainerWhenOwnershipChangedAfterInventory(t *testing.T) {
+	legacy := managedRuntimeLabels()
+	delete(legacy, RuntimeProcessMarkerLabel)
+	partialLegacy := map[string]string{RuntimeProcessTurnLabel: "malformed"}
+	markerFalse := maps.Clone(partialLegacy)
+	markerFalse[RuntimeProcessMarkerLabel] = "false"
+	tests := []struct {
+		name        string
+		containerID string
+		inspected   container.InspectResponse
+	}{
+		{name: "marker false", containerID: "marker-false", inspected: container.InspectResponse{ID: "marker-false", Config: &container.Config{Labels: markerFalse}}},
+		{name: "unrelated single reserved label", containerID: "marker-absent", inspected: container.InspectResponse{ID: "marker-absent", Config: &container.Config{Labels: partialLegacy}}},
+		{name: "marker absent complete legacy", containerID: "legacy", inspected: container.InspectResponse{ID: "legacy", Config: &container.Config{Labels: legacy}}},
+		{name: "ID mismatch", containerID: "inventoried", inspected: container.InspectResponse{ID: "replacement", Config: &container.Config{Labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &exactLabelCleanupFake{inspects: []mobyclient.ContainerInspectResult{{Container: test.inspected}}}
+			cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+
+			if err := cleaner.EnsureManagedContainerAbsent(context.Background(), test.containerID); !errors.Is(err, ErrInvalidExactLabelCleanup) {
+				t.Fatalf("EnsureManagedContainerAbsent() error = %v, want ErrInvalidExactLabelCleanup", err)
+			}
+			if len(api.stopped) != 0 || len(api.removed) != 0 {
+				t.Fatalf("changed container was mutated: stop %#v remove %#v", api.stopped, api.removed)
+			}
+		})
+	}
+}
+
+func TestExactLabelCleanerLeavesContainerChangedAfterInventoryUntouched(t *testing.T) {
+	api := &exactLabelCleanupFake{
+		lists: []mobyclient.ContainerListResult{
+			{Items: []container.Summary{{ID: "changed", Labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}}}},
+			{},
+		},
+		inspects: []mobyclient.ContainerInspectResult{{Container: container.InspectResponse{
+			ID: "changed", Config: &container.Config{Labels: managedRuntimeLabels()},
+		}}},
+	}
+	inventory := newRuntimeProcessInventory(api, func() error { return nil })
+	snapshot, err := inventory.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Malformed) != 1 || snapshot.Malformed[0].ContainerID != "changed" {
+		t.Fatalf("initial malformed inventory = %#v", snapshot)
+	}
+
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+	if err := cleaner.EnsureManagedContainerAbsent(context.Background(), snapshot.Malformed[0].ContainerID); !errors.Is(err, ErrInvalidExactLabelCleanup) {
+		t.Fatalf("EnsureManagedContainerAbsent() error = %v, want ErrInvalidExactLabelCleanup", err)
+	}
+	if len(api.stopped) != 0 || len(api.removed) != 0 {
+		t.Fatalf("container changed after inventory was mutated: stop %#v remove %#v", api.stopped, api.removed)
+	}
+}
+
 func TestExactLabelCleanerValidatesIdentityEpochAndTimeout(t *testing.T) {
 	for _, timeout := range []time.Duration{0, time.Nanosecond, maximumExactLabelCleanupTimeout + time.Microsecond} {
 		if err := validateExactLabelCleanerOptions(ExactLabelCleanerOptions{StopTimeout: timeout}); !errors.Is(err, ErrInvalidExactLabelCleanup) {
@@ -116,11 +269,12 @@ func TestExactLabelCleanerValidatesIdentityEpochAndTimeout(t *testing.T) {
 	}
 	labels := exactRuntimeLabels()
 	for _, mutate := range []func(map[string]string){
-		func(labels map[string]string) { delete(labels, store.RuntimeLabelSessionID) },
+		func(labels map[string]string) { delete(labels, RuntimeProcessSessionLabel) },
 		func(labels map[string]string) { labels["unexpected"] = "value" },
-		func(labels map[string]string) { labels[store.RuntimeLabelAssignmentID] = "not-a-uuid" },
-		func(labels map[string]string) { labels[store.RuntimeLabelEpoch] = "0" },
-		func(labels map[string]string) { labels[store.RuntimeLabelEpoch] = "09" },
+		func(labels map[string]string) { labels[RuntimeProcessAssignmentLabel] = "not-a-uuid" },
+		func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "0" },
+		func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "09" },
+		func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "invalid/profile/identity" },
 	} {
 		candidate := maps.Clone(labels)
 		mutate(candidate)
@@ -148,21 +302,41 @@ func TestExactLabelCleanerCloseUsesOwnedClientClose(t *testing.T) {
 
 func exactRuntimeLabels() map[string]string {
 	return map[string]string{
-		store.RuntimeLabelAssignmentID: "10000000-0000-4000-8000-000000000001",
-		store.RuntimeLabelSessionID:    "20000000-0000-4000-8000-000000000001",
-		store.RuntimeLabelTurnID:       "30000000-0000-4000-8000-000000000001",
-		store.RuntimeLabelEpoch:        "9",
+		RuntimeProcessAssignmentLabel: "10000000-0000-4000-8000-000000000001",
+		RuntimeProcessSessionLabel:    "20000000-0000-4000-8000-000000000001",
+		RuntimeProcessTurnLabel:       "30000000-0000-4000-8000-000000000001",
+		RuntimeProcessEpochLabel:      "9",
 	}
+}
+
+func markedExactRuntimeLabels() map[string]string {
+	labels := exactRuntimeLabels()
+	labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
+	return labels
 }
 
 type exactLabelCleanupFake struct {
 	lists       []mobyclient.ContainerListResult
 	listOptions []mobyclient.ContainerListOptions
 	listErr     error
+	inspects    []mobyclient.ContainerInspectResult
+	inspectErr  error
 	stopped     map[string]int
 	stopErr     error
 	removed     map[string]mobyclient.ContainerRemoveOptions
 	removeErr   error
+}
+
+func (api *exactLabelCleanupFake) ContainerInspect(_ context.Context, _ string, _ mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error) {
+	if api.inspectErr != nil {
+		return mobyclient.ContainerInspectResult{}, api.inspectErr
+	}
+	if len(api.inspects) == 0 {
+		return mobyclient.ContainerInspectResult{}, errdefs.ErrNotFound
+	}
+	result := api.inspects[0]
+	api.inspects = api.inspects[1:]
+	return result, nil
 }
 
 func (api *exactLabelCleanupFake) ContainerList(_ context.Context, options mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error) {

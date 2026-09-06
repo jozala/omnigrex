@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -605,6 +606,14 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 	if err := database.CompleteMutation(ctx, rootLease, original.ID, wantResult); err != nil {
 		t.Fatal(err)
 	}
+	var originalResult string
+	var originalUpdatedAt, originalFinishedAt time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT result::text, updated_at, finished_at FROM tool_invocations WHERE id = $1`, original.ID).Scan(
+		&originalResult, &originalUpdatedAt, &originalFinishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(100 * time.Millisecond)
 	recovery, err := database.RecoverExpiredAgentTurn(ctx, root.ID, root.ExecutionEpoch)
@@ -616,11 +625,51 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 		t.Fatalf("ClaimJobKind() stop = (%#v, %v)", stopJob, err)
 	}
 	acknowledged, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopJob)
-	if err != nil || !acknowledged.SuccessorAllowed {
+	if err != nil || acknowledged.SuccessorAllowed {
 		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() = (%#v, %v)", acknowledged, err)
 	}
-	if recovery.ReconcileMutationsJobID != "" {
-		t.Fatalf("successful mutation recovery enqueued reconciliation job %s", recovery.ReconcileMutationsJobID)
+	if recovery.ReconcileMutationsJobID == "" || recovery.Status != store.AgentTurnReconciling {
+		t.Fatalf("successful mutation recovery = %#v, want fresh verification barrier", recovery)
+	}
+	var prematureRetries int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM jobs
+WHERE kind = 'PREPARE_AGENT_TURN' AND payload->>'retry_of_turn_id' = $1`, root.ID).Scan(&prematureRetries); err != nil {
+		t.Fatal(err)
+	}
+	if prematureRetries != 0 {
+		t.Fatalf("retry jobs before fresh verification = %d, want zero", prematureRetries)
+	}
+
+	verification := &successfulMutationVerificationReconciler{}
+	recoveryWorker, err := mcp.NewRecoveryWorker(database, verification, mcp.RecoveryWorkerConfig{
+		ClaimOwner: "successful-mutation-verifier", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+		IdlePollInterval: time.Millisecond, RetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := recoveryWorker.ProcessNext(ctx); err != nil || !processed {
+		t.Fatalf("ProcessNext() successful verification = (%t, %v)", processed, err)
+	}
+	if verification.callCount() != 1 {
+		t.Fatalf("fresh successful mutation verifications = %d, want one", verification.callCount())
+	}
+	acknowledged, err = database.CompleteAgentTurnRecovery(ctx, root.ID, root.ExecutionEpoch)
+	if err != nil || !acknowledged.SuccessorAllowed {
+		t.Fatalf("CompleteAgentTurnRecovery() after verification = (%#v, %v)", acknowledged, err)
+	}
+	var verifiedResult string
+	var verifiedUpdatedAt, verifiedFinishedAt time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT result::text, updated_at, finished_at FROM tool_invocations WHERE id = $1`, original.ID).Scan(
+		&verifiedResult, &verifiedUpdatedAt, &verifiedFinishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if verifiedResult != originalResult || !verifiedUpdatedAt.Equal(originalUpdatedAt) || !verifiedFinishedAt.Equal(originalFinishedAt) {
+		t.Fatalf("successful ledger evidence changed during verification: result %s -> %s, updated %s -> %s, finished %s -> %s",
+			originalResult, verifiedResult, originalUpdatedAt, verifiedUpdatedAt, originalFinishedAt, verifiedFinishedAt)
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp(), updated_at = clock_timestamp()
@@ -918,6 +967,9 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 		State: store.MutationSucceeded, Result: json.RawMessage(`{"pull_request_id":42}`),
 	}); err != nil {
 		t.Fatalf("ReconcileRecoveredMutation() error = %v", err)
+	}
+	if _, err := databases[0].CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob); err != nil {
+		t.Fatalf("CompleteAgentTurnMutationReconciliation() error = %v", err)
 	}
 	settled, err := databases[0].GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil {
@@ -1274,6 +1326,9 @@ VALUES ($1, $2, 1, 'reviewer-session', 'runtime', '1', 'sha256:reviewer', $3, 'A
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := database.CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch); err != nil {
 		t.Fatal(err)
 	}
@@ -1583,13 +1638,16 @@ FROM jobs WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, 
 
 func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) {
 	for _, test := range []struct {
-		name                  string
-		prepareUnknown        bool
-		wantStatus            store.AgentTurnStatus
-		wantReconciliationJob bool
+		name                   string
+		mutationState          store.MutationState
+		wantStatus             store.AgentTurnStatus
+		wantReconciliationJob  bool
+		wantMutationsUnsettled bool
 	}{
 		{name: "SETTLING without unknown mutations", wantStatus: store.AgentTurnInterrupted},
-		{name: "RECONCILING with an unknown mutation", prepareUnknown: true, wantStatus: store.AgentTurnReconciling, wantReconciliationJob: true},
+		{name: "RECONCILING with an unknown mutation", mutationState: store.MutationUnknown, wantStatus: store.AgentTurnReconciling, wantReconciliationJob: true, wantMutationsUnsettled: true},
+		{name: "SETTLING with a successful mutation", mutationState: store.MutationSucceeded, wantStatus: store.AgentTurnReconciling, wantReconciliationJob: true},
+		{name: "SETTLING with a failed mutation", mutationState: store.MutationFailed, wantStatus: store.AgentTurnInterrupted},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			databases, pool := openPhaseFiveStores(t, 1)
@@ -1610,9 +1668,9 @@ func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) 
 			if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 				t.Fatal(err)
 			}
-			if test.prepareUnknown {
+			if test.mutationState != "" {
 				mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
-					OperationID: "post-close-unknown", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
+					OperationID: "post-close-mutation", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -1620,8 +1678,19 @@ func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) 
 				if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
 					t.Fatal(err)
 				}
-				if err := database.MarkMutationUnknown(ctx, lease, mutation.ID, errors.New("response lost")); err != nil {
-					t.Fatal(err)
+				switch test.mutationState {
+				case store.MutationUnknown:
+					if err := database.MarkMutationUnknown(ctx, lease, mutation.ID, errors.New("response lost")); err != nil {
+						t.Fatal(err)
+					}
+				case store.MutationSucceeded:
+					if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"comment_id":51}`)); err != nil {
+						t.Fatal(err)
+					}
+				case store.MutationFailed:
+					if err := database.FailMutation(ctx, lease, mutation.ID, errors.New("definite failure")); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			if err := database.CloseMutationAdmission(ctx, lease); err != nil {
@@ -1635,7 +1704,7 @@ func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) 
 			}
 			if recovery.Status != test.wantStatus || recovery.StopRuntimeJobID == "" ||
 				(recovery.ReconcileMutationsJobID != "") != test.wantReconciliationJob ||
-				recovery.MutationsUnsettled != test.wantReconciliationJob {
+				recovery.MutationsUnsettled != test.wantMutationsUnsettled {
 				t.Errorf("recovery = %#v, want status %s, stop job, reconciliation job=%t", recovery, test.wantStatus, test.wantReconciliationJob)
 			}
 		})
@@ -2020,4 +2089,27 @@ VALUES ($1, $2, 1, $3, 'runtime', '1', 'sha256:test', $4, 'ACTIVE')`, fixture.se
 		t.Fatalf("seed agent session: %v", err)
 	}
 	return fixture
+}
+
+type successfulMutationVerificationReconciler struct {
+	mutex sync.Mutex
+	calls int
+}
+
+func (reconciler *successfulMutationVerificationReconciler) Reconcile(_ context.Context, _ store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (mcp.MutationReconciliationResult, error) {
+	reconciler.mutex.Lock()
+	reconciler.calls++
+	reconciler.mutex.Unlock()
+	return mcp.MutationReconciliationResult{
+		Disposition: mcp.ReconciliationFound,
+		Outcome: store.RecoveredMutationOutcome{
+			State: store.MutationSucceeded, Result: append(json.RawMessage(nil), mutation.Result...),
+		},
+	}, nil
+}
+
+func (reconciler *successfulMutationVerificationReconciler) callCount() int {
+	reconciler.mutex.Lock()
+	defer reconciler.mutex.Unlock()
+	return reconciler.calls
 }

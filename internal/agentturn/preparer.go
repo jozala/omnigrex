@@ -47,8 +47,13 @@ type RuntimeRegistry interface {
 	Resolve(string, string) (runtimeprofile.Profile, error)
 }
 
+type runtimeBindingResolver interface {
+	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
+}
+
 // PreparationStore commits the complete two-Role preparation under a job fence.
 type PreparationStore interface {
+	GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error)
 	PrepareAgentTurn(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error)
 }
 
@@ -104,11 +109,15 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)
 	}
 
-	developer, developerRuntime, err := preparer.prepareRole(snapshot.Developer(), snapshot.CommitSHA())
+	bindings, err := preparer.store.GetAgentTurnPreparationRuntimeBindings(ctx, request.Lease)
+	if err != nil {
+		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
+	}
+	developer, developerRuntime, err := preparer.prepareRole(snapshot.Developer(), snapshot.CommitSHA(), bindings.Developer)
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare Developer profile: %w", err)
 	}
-	reviewer, reviewerRuntime, err := preparer.prepareRole(snapshot.Reviewer(), snapshot.CommitSHA())
+	reviewer, reviewerRuntime, err := preparer.prepareRole(snapshot.Reviewer(), snapshot.CommitSHA(), bindings.Reviewer)
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare Reviewer profile: %w", err)
 	}
@@ -133,12 +142,25 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	return Result{Commit: commit, RuntimeProfile: selectedRuntime}, nil
 }
 
-func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string) (store.RolePreparation, runtimeprofile.Profile, error) {
+func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding) (store.RolePreparation, runtimeprofile.Profile, error) {
 	name, version, ok := strings.Cut(profile.Runtime(), "/")
 	if !ok || name == "" || version == "" || strings.Contains(version, "/") {
 		return store.RolePreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
 	}
-	resolved, err := preparer.registry.Resolve(name, version)
+	var resolved runtimeprofile.Profile
+	var err error
+	if pinned != nil && pinned.RuntimeProfileName == name && pinned.RuntimeProfileVersion == version {
+		resolver, ok := preparer.registry.(runtimeBindingResolver)
+		if !ok {
+			return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
+		}
+		resolved, err = resolver.ResolveBinding(runtimeprofile.Binding{
+			Name: pinned.RuntimeProfileName, Version: pinned.RuntimeProfileVersion,
+			ContentSHA256: pinned.RuntimeProfileContentSHA256, Image: pinned.RuntimeImageDigest,
+		})
+	} else {
+		resolved, err = preparer.registry.Resolve(name, version)
+	}
 	if err != nil {
 		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
 	}
@@ -154,6 +176,10 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 			RuntimeProfileVersion:       contract.Version,
 			RuntimeProfileContentSHA256: resolved.ContentSHA256(),
 			RuntimeImageDigest:          contract.Image,
+		},
+		RuntimeCompatibility: store.RuntimeCompatibilityRequirement{
+			Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
+			WorkspacePath: runtimeprofile.StableWorkspacePath,
 		},
 		Profile: store.AgentProfileSnapshot{
 			CommitSHA:     commitSHA,

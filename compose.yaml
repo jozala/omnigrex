@@ -110,6 +110,7 @@ services:
       OMNIGREX_AGENT_IMAGE_REFERENCE: "${OMNIGREX_AGENT_IMAGE_REFERENCE:-omnigrex/opencode:1.18.19}"
       OMNIGREX_OPENCODE_ACP_V1_IMAGE: "${OMNIGREX_OPENCODE_ACP_V1_IMAGE:?set OMNIGREX_OPENCODE_ACP_V1_IMAGE to the exact registry digest}"
       OMNIGREX_OPENCODE_ACP_V1_PLATFORM: "${OMNIGREX_OPENCODE_ACP_V1_PLATFORM:?set OMNIGREX_OPENCODE_ACP_V1_PLATFORM to linux/amd64 or linux/arm64}"
+      OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:+/run/omnigrex/runtime-profile-compatibility-results.json}"
       OMNIGREX_GITHUB_API_URL: "${OMNIGREX_GITHUB_API_URL:-https://api.github.com}"
       OMNIGREX_GIT_REMOTE_BASE_URL: "${OMNIGREX_GIT_REMOTE_BASE_URL:-https://github.com}"
       OMNIGREX_GITHUB_DEVELOPER_APP_ID: "${OMNIGREX_GITHUB_DEVELOPER_APP_ID:?set OMNIGREX_GITHUB_DEVELOPER_APP_ID}"
@@ -133,6 +134,7 @@ services:
       OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL: "${OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL:-10s}"
       OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL: "${OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL:-250ms}"
       OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY: "${OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY:-5s}"
+      OMNIGREX_ASSIGNMENT_RETENTION_DURATION: "${OMNIGREX_ASSIGNMENT_RETENTION_DURATION:-720h}"
       OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-developer-provider-credentials
       OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-reviewer-provider-credentials
     secrets:
@@ -146,6 +148,10 @@ services:
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:-/dev/null}"
+        target: /run/omnigrex/runtime-profile-compatibility-results.json
         read_only: true
       - type: volume
         source: workspaces

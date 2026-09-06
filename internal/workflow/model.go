@@ -285,8 +285,9 @@ func (IssueClosedEvent) isWorkflowEvent() {}
 
 type ClosureSettledEvent struct {
 	EventMetadata
-	ClosureID string
-	Turn      *TurnGuard
+	ClosureID        string
+	Turn             *TurnGuard
+	AssignmentsExist bool
 }
 
 func (ClosureSettledEvent) isWorkflowEvent() {}

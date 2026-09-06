@@ -79,6 +79,11 @@ type RuntimeEngineFactory interface {
 	New(dockerruntime.EngineOptions) (RuntimeEngine, error)
 }
 
+// RuntimeBindingResolver resolves the complete immutable binding persisted for a generation.
+type RuntimeBindingResolver interface {
+	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
+}
+
 // RuntimeACPClient is the ACP capability retained for Phase 8 after launch preparation.
 type RuntimeACPClient interface {
 	session.AgentClient
@@ -107,7 +112,7 @@ var (
 // LauncherConfig supplies stable deployment dependencies and named Docker resources.
 type LauncherConfig struct {
 	Store              LauncherStore
-	Registry           RuntimeRegistry
+	Registry           RuntimeBindingResolver
 	Workspace          RuntimeWorkspace
 	Gateway            MCPRegistrar
 	Docker             RuntimeEngineFactory
@@ -140,7 +145,7 @@ func (LaunchRequest) GoString() string { return "agentturn.LaunchRequest{<creden
 // Launcher composes one epoch-fenced Runtime Process and Agent Session attachment.
 type Launcher struct {
 	store              LauncherStore
-	registry           RuntimeRegistry
+	registry           RuntimeBindingResolver
 	workspace          RuntimeWorkspace
 	gateway            MCPRegistrar
 	docker             RuntimeEngineFactory
@@ -236,7 +241,11 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, err
 	}
 
-	runtimeProfile, err := launcher.registry.Resolve(execution.Assignment.RuntimeProfileName, execution.Assignment.RuntimeProfileVersion)
+	runtimeProfile, err := launcher.registry.ResolveBinding(runtimeprofile.Binding{
+		Name: execution.Assignment.RuntimeProfileName, Version: execution.Assignment.RuntimeProfileVersion,
+		ContentSHA256: execution.Assignment.RuntimeProfileContentSHA256,
+		Image:         execution.Assignment.RuntimeImageDigest,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve assigned Runtime Profile: %w", err)
 	}

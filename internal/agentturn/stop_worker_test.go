@@ -86,31 +86,29 @@ func TestStopWorkerRetainsRecoveredDeveloperWorkspace(t *testing.T) {
 	}
 }
 
-func TestStopWorkerRetriesReviewerDiscardWithinLeaseAndAcknowledgesOnlyAfterSuccess(t *testing.T) {
+func TestStopWorkerReviewerDiscardFailureConsumesOneClaimedAttempt(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
 		AssignmentID: lease.AgentAssignmentID,
 		Role:         workflow.RoleReviewer,
 	}}
-	discarder := &recordingWorkspaceDiscarder{results: []error{errors.New("workspace temporarily unavailable"), nil}}
+	failure := errors.New("workspace temporarily unavailable")
+	discarder := &recordingWorkspaceDiscarder{results: []error{failure}}
 	worker := newStopWorkerWithWorkspace(t, durable, &recordingRuntimeCleaner{}, discarder, 100*time.Millisecond, time.Millisecond, 5*time.Millisecond)
 
 	processed, err := worker.ProcessNext(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ProcessNext() = (%t, %v), want discard retry then acknowledgement", processed, err)
+	if !errors.Is(err, failure) || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want one failed discard attempt", processed, err)
 	}
-	if discarder.callCount() != 2 || durable.claims.Load() != 1 {
-		t.Fatalf("DiscardWorkspace()/ClaimJobKind() calls = (%d, %d), want (2, 1)", discarder.callCount(), durable.claims.Load())
+	if discarder.callCount() != 1 || durable.claims.Load() != 1 {
+		t.Fatalf("DiscardWorkspace()/ClaimJobKind() calls = (%d, %d), want (1, 1)", discarder.callCount(), durable.claims.Load())
 	}
-	if durable.heartbeatCount() == 0 {
-		t.Fatal("HeartbeatJob() was not called during workspace discard retry")
-	}
-	if durable.acknowledgements != 1 || durable.discardCallsAtAcknowledgement != 2 || durable.discardSuccessesAtAcknowledgement != 1 {
-		t.Fatalf("acknowledgements = %d after %d discard calls and %d successes", durable.acknowledgements, durable.discardCallsAtAcknowledgement, durable.discardSuccessesAtAcknowledgement)
+	if durable.failureAcknowledgements != 1 || durable.acknowledgements != 0 {
+		t.Fatalf("failure/success acknowledgements = (%d, %d), want (1, 0)", durable.failureAcknowledgements, durable.acknowledgements)
 	}
 }
 
-func TestStopWorkerRetriesCleanupContextWithinHeartbeatedLease(t *testing.T) {
+func TestStopWorkerCleanupContextFailureConsumesOneClaimedAttempt(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{
 		lease: &lease,
@@ -118,19 +116,19 @@ func TestStopWorkerRetriesCleanupContextWithinHeartbeatedLease(t *testing.T) {
 			AssignmentID: lease.AgentAssignmentID,
 			Role:         workflow.RoleDeveloper,
 		},
-		cleanupContextResults: []error{errors.New("database temporarily unavailable"), nil},
+		cleanupContextResults: []error{errors.New("database temporarily unavailable")},
 	}
 	worker := newStopWorker(t, durable, &recordingRuntimeCleaner{}, 100*time.Millisecond, time.Millisecond, 5*time.Millisecond)
 
 	processed, err := worker.ProcessNext(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ProcessNext() = (%t, %v), want context retry then acknowledgement", processed, err)
+	if err == nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want one failed context-read attempt", processed, err)
 	}
-	if durable.cleanupContextCallCount() != 2 || durable.claims.Load() != 1 || durable.heartbeatCount() == 0 {
-		t.Fatalf("cleanup context/claim/heartbeat calls = (%d, %d, %d), want (2, 1, >0)", durable.cleanupContextCallCount(), durable.claims.Load(), durable.heartbeatCount())
+	if durable.cleanupContextCallCount() != 1 || durable.claims.Load() != 1 {
+		t.Fatalf("cleanup context/claim calls = (%d, %d), want (1, 1)", durable.cleanupContextCallCount(), durable.claims.Load())
 	}
-	if durable.acknowledgements != 1 {
-		t.Fatalf("acknowledgements = %d, want 1", durable.acknowledgements)
+	if durable.failureAcknowledgements != 1 || durable.acknowledgements != 0 {
+		t.Fatalf("failure/success acknowledgements = (%d, %d), want (1, 0)", durable.failureAcknowledgements, durable.acknowledgements)
 	}
 }
 
@@ -148,27 +146,80 @@ func TestStopWorkerReturnsCleanupContextFenceLossWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestStopWorkerRetriesCleanupWithinHeartbeatedLeaseAndAcknowledgesOnlyAfterAbsence(t *testing.T) {
+func TestStopWorkerRuntimeCleanupFailureConsumesOneClaimedAttempt(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease}
-	cleaner := &recordingRuntimeCleaner{results: []error{errors.New("Docker temporarily unavailable"), nil}}
+	failure := errors.New("Docker temporarily unavailable")
+	cleaner := &recordingRuntimeCleaner{results: []error{failure}}
 	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, time.Millisecond, 5*time.Millisecond)
 
 	processed, err := worker.ProcessNext(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ProcessNext() = (%t, %v), want retry then acknowledgement", processed, err)
+	if !errors.Is(err, failure) || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want one failed cleanup attempt", processed, err)
 	}
-	if cleaner.callCount() != 2 {
-		t.Fatalf("EnsureAbsent() calls = %d, want 2 within one claim", cleaner.callCount())
+	if cleaner.callCount() != 1 {
+		t.Fatalf("EnsureAbsent() calls = %d, want 1 within one claim", cleaner.callCount())
 	}
 	if durable.claims.Load() != 1 {
 		t.Fatalf("ClaimJobKind() calls = %d, want one durable attempt", durable.claims.Load())
 	}
-	if durable.heartbeatCount() == 0 || durable.heartbeatExtension != 100*time.Millisecond {
-		t.Fatalf("HeartbeatJob() calls = %d, extension %s", durable.heartbeatCount(), durable.heartbeatExtension)
+	if durable.failureAcknowledgements != 1 || durable.acknowledgements != 0 || durable.failureDelay != 5*time.Millisecond {
+		t.Fatalf("failure/success acknowledgements = (%d, %d), delay %s", durable.failureAcknowledgements, durable.acknowledgements, durable.failureDelay)
 	}
-	if durable.acknowledgements != 1 || durable.cleanupCallsAtAcknowledgement != 2 {
-		t.Fatalf("acknowledgements = %d after cleanup call %d", durable.acknowledgements, durable.cleanupCallsAtAcknowledgement)
+}
+
+func TestStopWorkerStopsHeartbeatBeforeFailureAcknowledgement(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	failure := errors.New("Docker unavailable")
+	cleaner := &recordingRuntimeCleaner{results: []error{failure}, delay: 10 * time.Millisecond}
+	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, time.Millisecond, time.Millisecond)
+
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || !errors.Is(err, failure) {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	atAcknowledgement := durable.heartbeatsAtFailureAcknowledgement
+	if atAcknowledgement == 0 {
+		t.Fatal("HeartbeatJob() did not run during cleanup")
+	}
+	time.Sleep(5 * time.Millisecond)
+	if got := durable.heartbeatCount(); got != atAcknowledgement {
+		t.Fatalf("HeartbeatJob() calls after failure acknowledgement = %d, want %d", got, atAcknowledgement)
+	}
+}
+
+func TestStopWorkerRunReportsFailureWithoutBusyLoop(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	cleaner := &recordingRuntimeCleaner{results: []error{errors.New("Docker unavailable")}}
+	reported := make(chan error, 1)
+	worker, err := agentturn.NewStopWorker(durable, cleaner, &recordingWorkspaceDiscarder{}, agentturn.StopWorkerConfig{
+		ClaimOwner: "runtime-stop-worker", LeaseDuration: 100 * time.Millisecond,
+		HeartbeatInterval: time.Millisecond, IdlePollInterval: 50 * time.Millisecond,
+		CleanupRetryInterval: time.Millisecond, OnError: func(err error) { reported <- err },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	select {
+	case err := <-reported:
+		if err == nil {
+			t.Fatal("OnError received nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OnError was not called")
+	}
+	time.Sleep(5 * time.Millisecond)
+	if claims := durable.claims.Load(); claims != 1 {
+		t.Fatalf("ClaimJobKind() calls before idle delay elapsed = %d, want 1", claims)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -325,23 +376,29 @@ type stopWorkerStore struct {
 	mutex sync.Mutex
 	lease *store.JobLease
 
-	claims                            atomic.Int32
-	claimQueue, claimKind, claimOwner string
-	claimDuration                     time.Duration
-	heartbeats                        int
-	heartbeatExtension                time.Duration
-	heartbeatErr                      error
-	acknowledgements                  int
-	acknowledged                      store.JobLease
-	cleanupCallsAtAcknowledgement     int
-	cleaner                           *recordingRuntimeCleaner
-	cleanupContext                    store.AgentTurnRuntimeCleanupContext
-	cleanupContextResults             []error
-	cleanupContextCalls               int
-	cleanupContextLease               store.JobLease
-	discardCallsAtAcknowledgement     int
-	discardSuccessesAtAcknowledgement int
-	workspaces                        *recordingWorkspaceDiscarder
+	claims                             atomic.Int32
+	claimQueue, claimKind, claimOwner  string
+	claimDuration                      time.Duration
+	heartbeats                         int
+	heartbeatExtension                 time.Duration
+	heartbeatErr                       error
+	acknowledgements                   int
+	acknowledged                       store.JobLease
+	cleanupCallsAtAcknowledgement      int
+	cleaner                            *recordingRuntimeCleaner
+	cleanupContext                     store.AgentTurnRuntimeCleanupContext
+	cleanupContextResults              []error
+	cleanupContextCalls                int
+	cleanupContextLease                store.JobLease
+	discardCallsAtAcknowledgement      int
+	discardSuccessesAtAcknowledgement  int
+	workspaces                         *recordingWorkspaceDiscarder
+	failureAcknowledgements            int
+	failureAcknowledged                store.JobLease
+	failureDelay                       time.Duration
+	failureErr                         error
+	failureAcknowledgementErr          error
+	heartbeatsAtFailureAcknowledgement int
 }
 
 func (durable *stopWorkerStore) ClaimJobKind(_ context.Context, queue, kind, owner string, duration time.Duration) (*store.JobLease, error) {
@@ -402,12 +459,24 @@ func (durable *stopWorkerStore) AcknowledgeRecoveredRuntimeStopped(_ context.Con
 	return store.AgentTurnRecovery{}, nil
 }
 
+func (durable *stopWorkerStore) AcknowledgeRecoveredRuntimeStopFailure(_ context.Context, lease store.JobLease, cause error, delay time.Duration) (store.AgentTurnRuntimeStopFailureAcknowledgement, error) {
+	durable.mutex.Lock()
+	defer durable.mutex.Unlock()
+	durable.failureAcknowledgements++
+	durable.failureAcknowledged = lease
+	durable.failureErr = cause
+	durable.failureDelay = delay
+	durable.heartbeatsAtFailureAcknowledgement = durable.heartbeats
+	return store.AgentTurnRuntimeStopFailureAcknowledgement{RetryScheduled: true}, durable.failureAcknowledgementErr
+}
+
 type recordingRuntimeCleaner struct {
 	mutex              sync.Mutex
 	results            []error
 	labels             []map[string]string
 	blockUntilCanceled bool
 	canceled           bool
+	delay              time.Duration
 }
 
 func (cleaner *recordingRuntimeCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
@@ -420,6 +489,15 @@ func (cleaner *recordingRuntimeCleaner) EnsureAbsent(ctx context.Context, labels
 		cleaner.results = cleaner.results[1:]
 	}
 	cleaner.mutex.Unlock()
+	if cleaner.delay > 0 {
+		timer := time.NewTimer(cleaner.delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 	if block {
 		<-ctx.Done()
 		cleaner.mutex.Lock()

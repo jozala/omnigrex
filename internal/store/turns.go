@@ -681,7 +681,7 @@ func (store *Store) RefreshAgentTurnLease(ctx context.Context, lease AgentTurnLe
 		return AgentTurnLease{}, err
 	}
 	var expiresAt time.Time
-	err := store.withLockedAgentTurnLease(ctx, lease, "heartbeat agent turn", func(tx pgx.Tx, _ lockedTurn) error {
+	err := store.withLockedAgentTurnLeaseStatus(ctx, lease, "heartbeat agent turn", true, func(tx pgx.Tx, _ lockedTurn) error {
 		if err := tx.QueryRow(ctx, `SELECT clock_timestamp() + $1 * interval '1 microsecond'`, extension.Microseconds()).Scan(&expiresAt); err != nil {
 			return err
 		}
@@ -828,7 +828,7 @@ WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
 	}
 	var recoveryMutations, residualMutations int
 	if err := tx.QueryRow(ctx, `
-SELECT count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING')),
+SELECT count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')),
        count(*) FILTER (WHERE state IN ('RESERVED', 'IN_FLIGHT'))
 FROM tool_invocations
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'`,
@@ -934,6 +934,7 @@ func (store *Store) BeginAgentTurnMutationRecovery(ctx context.Context, lease Ag
 }
 
 // RecoverExpiredAgentTurn terminally fences an expired job/turn ownership without reusing its epoch.
+// Repeating the exact recovery after an ambiguous commit returns the existing durable barrier.
 func (store *Store) RecoverExpiredAgentTurn(ctx context.Context, turnID string, executionEpoch int64) (AgentTurnRecovery, error) {
 	if !validUUID(turnID) || executionEpoch <= 0 {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
@@ -943,18 +944,42 @@ func (store *Store) RecoverExpiredAgentTurn(ctx context.Context, turnID string, 
 		return AgentTurnRecovery{}, fmt.Errorf("begin agent turn recovery: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var jobID string
-	if err := tx.QueryRow(ctx, `
-SELECT id::text FROM jobs
-WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2`, turnID, executionEpoch).Scan(&jobID); errors.Is(err, pgx.ErrNoRows) {
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+`
+WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2
+FOR UPDATE`, turnID, executionEpoch))
+	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
-	} else if err != nil {
+	}
+	if err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("look up expired agent turn job: %w", err)
 	}
-	job, err := lockExpiredAgentTurnJob(ctx, tx, jobID, turnID, executionEpoch)
+	if job.Status != JobLeased {
+		recovery, err := readAgentTurnRecovery(ctx, tx, turnID, executionEpoch)
+		if err != nil || recovery.JobID != job.ID {
+			return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("commit repeated agent turn recovery: %w", err)
+		}
+		return recovery, nil
+	}
+	recovery, err := recoverExpiredAgentTurnTx(ctx, tx, job)
 	if err != nil {
 		return AgentTurnRecovery{}, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("commit agent turn recovery: %w", err)
+	}
+	return recovery, nil
+}
+
+func recoverExpiredAgentTurnTx(ctx context.Context, tx pgx.Tx, claimedJob Job) (AgentTurnRecovery, error) {
+	job, err := lockExpiredAgentTurnJob(ctx, tx, claimedJob.ID, claimedJob.AgentTurnID, claimedJob.ExecutionEpoch)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	turnID := job.AgentTurnID
+	executionEpoch := job.ExecutionEpoch
 	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
 		return AgentTurnRecovery{}, err
 	}
@@ -996,12 +1021,17 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
   AND state = 'IN_FLIGHT'`, turnID, executionEpoch); err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("mark in-flight recovered mutations unknown: %w", err)
 	}
-	var unsettled bool
-	if err := tx.QueryRow(ctx, unsettledMutationsForTurnSQL, turnID, executionEpoch).Scan(&unsettled); err != nil {
+	var reconciliationRequired bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM tool_invocations
+    WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+      AND state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')
+)`, turnID, executionEpoch).Scan(&reconciliationRequired); err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("check recovery mutations: %w", err)
 	}
 	status := AgentTurnInterrupted
-	if unsettled {
+	if reconciliationRequired {
 		status = AgentTurnReconciling
 	}
 	stopJobID, err := enqueueAgentTurnRecoveryJob(ctx, tx, job, turn, StopStaleRuntimeJobKind, stopStaleRuntimeJobPriority)
@@ -1009,7 +1039,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 		return AgentTurnRecovery{}, err
 	}
 	reconcileJobID := ""
-	if unsettled {
+	if reconciliationRequired {
 		reconcileJobID, err = enqueueAgentTurnRecoveryJob(ctx, tx, job, turn, ReconcileAgentTurnMutationsJobKind, reconcileTurnMutationsJobPriority)
 		if err != nil {
 			return AgentTurnRecovery{}, err
@@ -1060,15 +1090,14 @@ RETURNING recovery_started_at`, turnID, status, stopJobID, nullableString(reconc
 	if err := turnResult; err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("fence expired agent turn: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return AgentTurnRecovery{}, fmt.Errorf("commit agent turn recovery: %w", err)
+	recovery, err := readAgentTurnRecovery(ctx, tx, turnID, executionEpoch)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("read expired Agent Turn recovery: %w", err)
 	}
-	return AgentTurnRecovery{
-		TurnID: turnID, JobID: job.ID, ExecutionEpoch: executionEpoch, Status: status,
-		MutationsUnsettled: unsettled, SuccessorAllowed: false, RuntimeStopRequired: true,
-		RecoveryStartedAt: &recoveryStartedAt, StopRuntimeJobID: stopJobID,
-		ReconcileMutationsJobID: reconcileJobID, Continuation: recoveryContinuationPendingInfrastructure,
-	}, nil
+	if recovery.RecoveryStartedAt == nil || !recovery.RecoveryStartedAt.Equal(recoveryStartedAt) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	return recovery, nil
 }
 
 // GetAgentTurnRecovery returns the durable recovery barrier for one fenced epoch.
@@ -1181,19 +1210,6 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 	}
 	if outcome.State == MutationSucceeded {
 		if err := bindReviewerActorForSubmitReview(ctx, tx, job.AgentAssignmentID, mutation.ToolName, result); err != nil {
-			return MutationReservation{}, err
-		}
-	}
-	var unsettled bool
-	if err := tx.QueryRow(ctx, unsettledMutationsForTurnSQL, job.AgentTurnID, job.ExecutionEpoch).Scan(&unsettled); err != nil {
-		return MutationReservation{}, fmt.Errorf("check remaining recovered mutations: %w", err)
-	}
-	if !unsettled {
-		if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"mutations_reconciled":true}`)); err != nil {
-			return MutationReservation{}, err
-		}
-		_, err := settleAgentTurnRecoveryTx(ctx, tx, job)
-		if err != nil {
 			return MutationReservation{}, err
 		}
 	}

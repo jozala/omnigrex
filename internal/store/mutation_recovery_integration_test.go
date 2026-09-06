@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -441,6 +444,163 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	}
 }
 
+func TestSucceededMutationVerificationExhaustsIntoHumanHandoffWithoutRetry(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 341, workflow.RoleDeveloper, "")
+	if _, err := pool.Exec(ctx, `
+UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, lease.WorkflowAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "verify-succeeded-missing", ToolName: mcp.ToolCommentOnIssue,
+		Request:         json.RawMessage(`{"operation_id":"verify-succeeded-missing","body":"durable"}`),
+		ExternalService: "github", ExternalResourceID: "341:341",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"comment_id":341}`)); err != nil {
+		t.Fatal(err)
+	}
+	var originalResult string
+	var originalUpdatedAt, originalFinishedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT result::text, updated_at, finished_at FROM tool_invocations WHERE id = $1`, mutation.ID).Scan(
+		&originalResult, &originalUpdatedAt, &originalFinishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	expireAgentTurnExecution(t, pool, ctx, lease.JobLease.ID, lease.ID)
+	recovery, err := database.RecoverExpiredAgentTurn(ctx, lease.ID, lease.ExecutionEpoch)
+	if err != nil || recovery.ReconcileMutationsJobID == "" {
+		t.Fatalf("RecoverExpiredAgentTurn() = (%#v, %v), want successful-mutation verification barrier", recovery, err)
+	}
+	stopLease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "missing-verification-stop")
+	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, stopLease); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := mcp.NewRecoveryWorker(database, unresolvedMutationReconciler{}, mcp.RecoveryWorkerConfig{
+		ClaimOwner: "missing-verification-worker", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+		IdlePollInterval: time.Millisecond, RetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		processed, processErr := worker.ProcessNext(ctx)
+		if !processed || !errors.Is(processErr, mcp.ErrMutationReconciliationUnresolved) {
+			t.Fatalf("ProcessNext() attempt %d = (%t, %v)", attempt, processed, processErr)
+		}
+		if attempt < 3 {
+			time.Sleep(3 * time.Millisecond)
+		}
+	}
+
+	var workflowState, mutationState, verifiedResult string
+	var verifiedUpdatedAt, verifiedFinishedAt time.Time
+	var retries int
+	if err := pool.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(&workflowState); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT state, result::text, updated_at, finished_at FROM tool_invocations WHERE id = $1`, mutation.ID).Scan(
+		&mutationState, &verifiedResult, &verifiedUpdatedAt, &verifiedFinishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM jobs
+WHERE kind = 'PREPARE_AGENT_TURN' AND payload->>'retry_of_turn_id' = $1`, lease.ID).Scan(&retries); err != nil {
+		t.Fatal(err)
+	}
+	if workflowState != string(workflow.StateNeedsHuman) || mutationState != string(store.MutationSucceeded) || retries != 0 {
+		t.Fatalf("exhausted verification = workflow %s, mutation %s, retries %d", workflowState, mutationState, retries)
+	}
+	if verifiedResult != originalResult || !verifiedUpdatedAt.Equal(originalUpdatedAt) || !verifiedFinishedAt.Equal(originalFinishedAt) {
+		t.Fatal("successful mutation ledger evidence changed during failed verification")
+	}
+}
+
+func TestConcurrentSucceededMutationVerificationRunsOnce(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, lease, _ := prepareOpenSettlementTurn(t, databases[0], pool, ctx, 342, workflow.RoleDeveloper, "")
+	mutation, err := databases[0].ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "verify-succeeded-concurrently", ToolName: mcp.ToolCommentOnIssue,
+		Request:         json.RawMessage(`{"operation_id":"verify-succeeded-concurrently","body":"durable"}`),
+		ExternalService: "github", ExternalResourceID: "342:342",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := databases[0].StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"comment_id":342}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	expireAgentTurnExecution(t, pool, ctx, lease.JobLease.ID, lease.ID)
+	if _, err := databases[0].RecoverExpiredAgentTurn(ctx, lease.ID, lease.ExecutionEpoch); err != nil {
+		t.Fatal(err)
+	}
+	stopLease := claimRecoveryJob(t, databases[0], ctx, store.StopStaleRuntimeJobKind, "concurrent-verification-stop")
+	if _, err := databases[0].AcknowledgeRecoveredRuntimeStopped(ctx, stopLease); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciler := &concurrentFoundMutationReconciler{}
+	start := make(chan struct{})
+	results := make(chan bool, len(databases))
+	errorsFound := make(chan error, len(databases))
+	var wait sync.WaitGroup
+	for index, database := range databases {
+		worker, err := mcp.NewRecoveryWorker(database, reconciler, mcp.RecoveryWorkerConfig{
+			ClaimOwner: fmt.Sprintf("concurrent-verifier-%d", index), LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
+			IdlePollInterval: time.Millisecond, RetryDelay: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			processed, err := worker.ProcessNext(ctx)
+			results <- processed
+			errorsFound <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	processed := 0
+	for result := range results {
+		if result {
+			processed++
+		}
+	}
+	if processed != 1 || reconciler.callCount() != 1 {
+		t.Fatalf("concurrent verification = %d workers, %d reconciler calls; want one each", processed, reconciler.callCount())
+	}
+}
+
 func expireAgentTurnExecution(t *testing.T, pool interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, ctx context.Context, jobID, turnID string) {
@@ -458,4 +618,31 @@ func expireAgentTurnExecution(t *testing.T, pool interface {
 			t.Fatalf("expire Agent Turn execution: %v", err)
 		}
 	}
+}
+
+type unresolvedMutationReconciler struct{}
+
+func (unresolvedMutationReconciler) Reconcile(context.Context, store.AgentTurnMutationReconciliationContext, store.MutationReservation) (mcp.MutationReconciliationResult, error) {
+	return mcp.MutationReconciliationResult{Disposition: mcp.ReconciliationUnresolved}, nil
+}
+
+type concurrentFoundMutationReconciler struct {
+	mutex sync.Mutex
+	calls int
+}
+
+func (reconciler *concurrentFoundMutationReconciler) Reconcile(_ context.Context, _ store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (mcp.MutationReconciliationResult, error) {
+	reconciler.mutex.Lock()
+	reconciler.calls++
+	reconciler.mutex.Unlock()
+	return mcp.MutationReconciliationResult{
+		Disposition: mcp.ReconciliationFound,
+		Outcome:     store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: append(json.RawMessage(nil), mutation.Result...)},
+	}, nil
+}
+
+func (reconciler *concurrentFoundMutationReconciler) callCount() int {
+	reconciler.mutex.Lock()
+	defer reconciler.mutex.Unlock()
+	return reconciler.calls
 }

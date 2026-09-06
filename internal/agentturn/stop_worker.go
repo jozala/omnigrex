@@ -18,6 +18,7 @@ type StopWorkerStore interface {
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
 	GetAgentTurnRuntimeCleanupContext(context.Context, store.JobLease) (store.AgentTurnRuntimeCleanupContext, error)
 	AcknowledgeRecoveredRuntimeStopped(context.Context, store.JobLease) (store.AgentTurnRecovery, error)
+	AcknowledgeRecoveredRuntimeStopFailure(context.Context, store.JobLease, error, time.Duration) (store.AgentTurnRuntimeStopFailureAcknowledgement, error)
 }
 
 // ExactRuntimeCleaner removes every Runtime Process carrying an exact runtime identity.
@@ -116,6 +117,12 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (bool, error) {
 	if ctx.Err() != nil {
 		return true, ctx.Err()
 	}
+	if staleStopWorkerFence(operationErr) {
+		return true, operationErr
+	}
+	if _, acknowledgeErr := worker.store.AcknowledgeRecoveredRuntimeStopFailure(ctx, *lease, operationErr, worker.cleanupRetryInterval); acknowledgeErr != nil {
+		return true, errors.Join(operationErr, fmt.Errorf("acknowledge stale Runtime Process stop failure: %w", acknowledgeErr))
+	}
 	return true, operationErr
 }
 
@@ -151,33 +158,18 @@ func validRuntimeLabelIdentity(value string) bool {
 }
 
 func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, labels map[string]string) error {
-	var cleanup store.AgentTurnRuntimeCleanupContext
-	for {
-		var err error
-		cleanup, err = worker.store.GetAgentTurnRuntimeCleanupContext(ctx, lease)
-		if err == nil {
-			break
-		}
-		if err := worker.retryCleanup(ctx, fmt.Errorf("read stale Runtime Process cleanup context: %w", err)); err != nil {
-			return err
-		}
+	cleanup, err := worker.store.GetAgentTurnRuntimeCleanupContext(ctx, lease)
+	if err != nil {
+		return fmt.Errorf("read stale Runtime Process cleanup context: %w", err)
 	}
 
-	for {
-		if err := worker.cleaner.EnsureAbsent(ctx, labels); err == nil {
-			break
-		} else if err := worker.retryCleanup(ctx, fmt.Errorf("ensure stale Runtime Process absent: %w", err)); err != nil {
-			return err
-		}
+	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {
+		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
 	}
 
 	if cleanup.Role == workflow.RoleReviewer {
-		for {
-			if err := worker.workspaces.DiscardWorkspace(cleanup.AssignmentID); err == nil {
-				break
-			} else if err := worker.retryCleanup(ctx, fmt.Errorf("discard recovered Reviewer workspace: %w", err)); err != nil {
-				return err
-			}
+		if err := worker.workspaces.DiscardWorkspace(cleanup.AssignmentID); err != nil {
+			return fmt.Errorf("discard recovered Reviewer workspace: %w", err)
 		}
 	}
 
@@ -185,16 +177,6 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 		return fmt.Errorf("acknowledge stale Runtime Process stopped: %w", err)
 	}
 	return nil
-}
-
-func (worker *StopWorker) retryCleanup(ctx context.Context, err error) error {
-	if staleStopWorkerFence(err) {
-		return err
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return waitForStopWorker(ctx, worker.cleanupRetryInterval)
 }
 
 func (worker *StopWorker) heartbeat(ctx context.Context, lease store.JobLease) error {

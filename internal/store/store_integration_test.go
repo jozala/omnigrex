@@ -2069,6 +2069,9 @@ CREATE TABLE schema_migrations (
 	}); err != nil {
 		t.Fatalf("consume migrated mutation reconciliation Job under Human Handoff: %v", err)
 	}
+	if _, err := database.CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob); err != nil {
+		t.Fatalf("complete migrated mutation reconciliation Job under Human Handoff: %v", err)
+	}
 	application, applied, err := database.ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
 		if record.DeliveryID != "68000000-0000-4000-8000-000000000091" || record.Status != store.NormalizedEventPending {
 			t.Errorf("claimed migrated normalized event = %#v", record)
@@ -2116,8 +2119,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 10 {
-		t.Errorf("schema_migrations rows = %d, want 10", count)
+	if count != 12 {
+		t.Errorf("schema_migrations rows = %d, want 12", count)
 	}
 	for version, filename := range map[int]string{
 		1:  "000001_bootstrap.sql",
@@ -2130,6 +2133,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		8:  "000008_agent_turn_settlements.sql",
 		9:  "000009_workflow_action_exhaustion.sql",
 		10: "000010_workflow_action_failure_barriers.sql",
+		11: "000011_durable_closure_retention.sql",
+		12: "000012_runtime_profile_compatibility.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2163,6 +2168,10 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		"agent_turn_settlements",
 		"workflow_github_effect_cleanups",
 		"workflow_action_failures",
+		"workflow_internal_events",
+		"assignment_retention_generations",
+		"assignment_retention_targets",
+		"runtime_profile_compatibility_results",
 	} {
 		var exists bool
 		err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists)
@@ -2204,8 +2213,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 10 {
-		t.Errorf("migrations applied by Open() = %d, want 10", migrationCount)
+	if migrationCount != 12 {
+		t.Errorf("migrations applied by Open() = %d, want 12", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {
