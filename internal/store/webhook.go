@@ -124,7 +124,7 @@ INSERT INTO webhook_deliveries (
     delivery_id, event_name, action, repository_id, repository_owner,
     repository_name, issue_id, issue_number, headers, payload
 )
-VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, 0), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, 0), NULLIF($8, 0), $9, $10)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4::BIGINT, 0), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7::BIGINT, 0), NULLIF($8::BIGINT, 0), $9, $10)
 ON CONFLICT (delivery_id) DO NOTHING`,
 		delivery.DeliveryID,
 		delivery.EventName,

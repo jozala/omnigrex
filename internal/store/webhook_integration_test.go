@@ -23,11 +23,11 @@ func TestInsertWebhookDeliveryDeduplicatesDeliveryID(t *testing.T) {
 		DeliveryID:      "123e4567-e89b-12d3-a456-426614174000",
 		EventName:       "issues",
 		Action:          "labeled",
-		RepositoryID:    9123,
+		RepositoryID:    3_000_000_001,
 		RepositoryOwner: "jozala",
 		RepositoryName:  "omnigrex",
-		IssueID:         456,
-		IssueNumber:     12,
+		IssueID:         5_367_580_208,
+		IssueNumber:     3_000_000_002,
 		Headers:         map[string]string{"X-GitHub-Event": "issues"},
 		Payload:         []byte(`{"original":true}`),
 	}
@@ -55,8 +55,9 @@ func TestInsertWebhookDeliveryDeduplicatesDeliveryID(t *testing.T) {
 	if got.Status != store.WebhookPending || got.AttemptCount != 0 {
 		t.Errorf("delivery state = (%q, %d attempts), want (PENDING, 0 attempts)", got.Status, got.AttemptCount)
 	}
-	if got.IssueID != 456 || got.IssueNumber != 12 {
-		t.Errorf("stored Issue identity = (%d, %d), want (456, 12)", got.IssueID, got.IssueNumber)
+	if got.RepositoryID != delivery.RepositoryID || got.IssueID != delivery.IssueID || got.IssueNumber != delivery.IssueNumber {
+		t.Errorf("stored GitHub identity = (%d, %d, %d), want (%d, %d, %d)",
+			got.RepositoryID, got.IssueID, got.IssueNumber, delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber)
 	}
 	if string(got.Payload) != `{"original":true}` {
 		t.Errorf("stored payload = %s, want original payload", got.Payload)
