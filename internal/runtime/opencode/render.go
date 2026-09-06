@@ -32,6 +32,7 @@ type Profile struct {
 	Variant      string
 	Steps        uint
 	Permissions  PermissionPolicy
+	RuntimeTools []string
 }
 
 type RenderedProfile struct {
@@ -79,6 +80,17 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		} else {
 			permission[openCodeName] = "deny"
 		}
+	}
+	seenRuntimeTools := make(map[string]struct{}, len(profile.RuntimeTools))
+	for _, name := range profile.RuntimeTools {
+		if !strings.HasPrefix(name, "omnigrex_") || containsWhitespaceOrControl(name) {
+			return nil, ErrInvalidProfile
+		}
+		if _, duplicate := seenRuntimeTools[name]; duplicate {
+			return nil, ErrInvalidProfile
+		}
+		seenRuntimeTools[name] = struct{}{}
+		permission[name] = "allow"
 	}
 
 	agentID := "omnigrex-" + string(role)

@@ -120,6 +120,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		"PATH":          "/home/opencode/.local/share/mise/shims:/usr/bin",
 		"PROJECT_MODE":  "development",
 	})
+	assertRuntimeMCPPermissions(t, spec.Environment, workflow.RoleDeveloper)
 	for _, secret := range []string{runtimeTestCredential, "mcp-secret"} {
 		if strings.Contains(strings.Join(spec.Environment, "\n"), secret) || strings.Contains(stringMap(spec.Labels), secret) {
 			t.Errorf("Docker contract contains non-provider credential %q", secret)
@@ -209,6 +210,7 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 					"OPENCODE_PURE":                    "true",
 				})
 			}
+			assertRuntimeMCPPermissions(t, engineFactory.engine.spec.Environment, testCase.role)
 		})
 	}
 }
@@ -1371,6 +1373,56 @@ func assertRuntimeEnvironment(t *testing.T, entries []string, wanted map[string]
 	for name, value := range wanted {
 		if actual[name] != value {
 			t.Errorf("environment %s = %q, want %q", name, actual[name], value)
+		}
+	}
+}
+
+func assertRuntimeMCPPermissions(t *testing.T, entries []string, role workflow.Role) {
+	t.Helper()
+	var configJSON string
+	for _, entry := range entries {
+		if name, value, found := strings.Cut(entry, "="); found && name == "OPENCODE_CONFIG_CONTENT" {
+			configJSON = value
+			break
+		}
+	}
+	var config struct {
+		Permission map[string]string `json:"permission"`
+		Agent      map[string]struct {
+			Permission map[string]string `json:"permission"`
+		} `json:"agent"`
+	}
+	if configJSON == "" || json.Unmarshal([]byte(configJSON), &config) != nil {
+		t.Fatalf("runtime has no valid OpenCode configuration: %q", configJSON)
+	}
+	capabilities, err := mcp.CapabilitiesForRole(role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := "omnigrex-developer"
+	forbidden := []string{mcp.ServerName + "_" + mcp.ToolSubmitReview}
+	if role == workflow.RoleReviewer {
+		agentID = "omnigrex-reviewer"
+		forbidden = []string{
+			mcp.ServerName + "_" + mcp.ToolPublishChanges,
+			mcp.ServerName + "_" + mcp.ToolOpenPR,
+			mcp.ServerName + "_" + mcp.ToolRequestReview,
+		}
+	}
+	for _, permissions := range []map[string]string{config.Permission, config.Agent[agentID].Permission} {
+		if permissions["*"] != "deny" {
+			t.Errorf("OpenCode wildcard permission = %q, want deny", permissions["*"])
+		}
+		for _, capability := range capabilities {
+			name := mcp.ServerName + "_" + capability
+			if permissions[name] != "allow" {
+				t.Errorf("OpenCode permission %s = %q, want allow", name, permissions[name])
+			}
+		}
+		for _, name := range forbidden {
+			if _, exposed := permissions[name]; exposed {
+				t.Errorf("OpenCode permissions expose Role-forbidden tool %s", name)
+			}
 		}
 	}
 }

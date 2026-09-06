@@ -22,6 +22,7 @@ const (
 )
 
 const (
+	ServerName                 = "omnigrex"
 	ToolGetIssue               = "get_issue"
 	ToolListIssueComments      = "list_issue_comments"
 	ToolGetPullRequest         = "get_pull_request"

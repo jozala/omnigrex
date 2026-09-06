@@ -604,9 +604,17 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext) (*opencode.Ren
 	for name, value := range snapshot.Permissions {
 		permissions[name] = opencode.Permission(value)
 	}
+	capabilities, err := mcp.CapabilitiesForRole(execution.Assignment.Role)
+	if err != nil {
+		return nil, "", ErrRuntimeBinding
+	}
+	runtimeTools := make([]string, len(capabilities))
+	for index, capability := range capabilities {
+		runtimeTools[index] = mcp.ServerName + "_" + capability
+	}
 	rendered, err := opencode.Render(role, opencode.Profile{
 		Instructions: snapshot.Instructions, Model: snapshot.Model, Variant: snapshot.Variant,
-		Steps: snapshot.Steps, Permissions: permissions,
+		Steps: snapshot.Steps, Permissions: permissions, RuntimeTools: runtimeTools,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("render assigned Agent Profile: %w", err)

@@ -356,7 +356,7 @@ func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
 	return Registration{
 		id: id, gateway: gateway, grant: registeredGrant,
 		Server: acp.MCPServer{
-			Type: "http", Name: "omnigrex", URL: gateway.endpointURL,
+			Type: "http", Name: ServerName, URL: gateway.endpointURL,
 			Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer " + token}},
 		},
 	}, nil

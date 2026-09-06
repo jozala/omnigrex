@@ -132,6 +132,45 @@ func TestRenderMapsPatchPermissionToOpenCodeEditPermission(t *testing.T) {
 	}
 }
 
+func TestRenderAllowsExactRuntimeOwnedMCPTools(t *testing.T) {
+	rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
+		Instructions: "instructions", Model: "provider/model", Steps: 1,
+		Permissions:  opencode.PermissionPolicy{"read": opencode.PermissionAllow},
+		RuntimeTools: []string{"omnigrex_get_issue", "omnigrex_request_review"},
+	})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config struct {
+		Permission map[string]string `json:"permission"`
+		Agent      map[string]struct {
+			Permission map[string]string `json:"permission"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(rendered.ConfigJSON(), &config); err != nil {
+		t.Fatalf("decode rendered config: %v", err)
+	}
+	for _, permissions := range []map[string]string{config.Permission, config.Agent["omnigrex-developer"].Permission} {
+		if permissions["*"] != "deny" || permissions["omnigrex_get_issue"] != "allow" || permissions["omnigrex_request_review"] != "allow" {
+			t.Fatalf("runtime-owned MCP permissions = %#v", permissions)
+		}
+		if _, exposed := permissions["omnigrex_submit_review"]; exposed {
+			t.Fatalf("runtime-owned permissions expose Reviewer tool: %#v", permissions)
+		}
+	}
+}
+
+func TestRenderRejectsInvalidRuntimeOwnedToolNames(t *testing.T) {
+	for _, tools := range [][]string{{"get_issue"}, {"omnigrex_get_issue", "omnigrex_get_issue"}, {"omnigrex_bad tool"}} {
+		_, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
+			Instructions: "instructions", Model: "provider/model", Steps: 1, RuntimeTools: tools,
+		})
+		if !errors.Is(err, opencode.ErrInvalidProfile) {
+			t.Fatalf("Render(RuntimeTools=%q) error = %v, want ErrInvalidProfile", tools, err)
+		}
+	}
+}
+
 func TestRenderRejectsConflictingEditAndPatchPermissions(t *testing.T) {
 	_, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
 		Instructions: "instructions", Model: "provider/model", Steps: 1,

@@ -1111,8 +1111,9 @@ func startFakeProvider(t *testing.T) string {
 		"enabled_providers": []string{"fake"},
 		"mcp":               map[string]any{},
 		"permission": map[string]string{
-			"*":    "ask",
-			"bash": "ask",
+			"*":           "deny",
+			"bash":        "ask",
+			"compat_echo": "allow",
 		},
 		"provider": map[string]any{
 			"fake": map[string]any{
