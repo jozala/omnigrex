@@ -65,11 +65,11 @@ run = "docker build --tag omnigrex/orchestrator:dev ."
 
 [tasks.agent-image]
 description = "Build the pinned OpenCode Runtime Process image"
-run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.19 ."
+run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 ."
 
 [tasks.agent-image-previous]
 description = "Build the previous OpenCode image used for controlled upgrade tests"
-run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.18 --tag omnigrex/opencode:1.18.18 ."
+run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.19 --tag omnigrex/opencode:1.18.19 ."
 
 [tasks.agent-images]
 description = "Build current and previous OpenCode compatibility images"

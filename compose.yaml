@@ -41,7 +41,7 @@ services:
     build:
       context: .
       dockerfile: agent/opencode/Dockerfile
-    image: omnigrex/opencode:1.18.19
+    image: omnigrex/opencode:1.18.29
     user: "10001:10001"
     entrypoint: ["sh", "-c"]
     command:
@@ -49,7 +49,7 @@ services:
         set -eu
         test "$$(id -u)" = 10001
         test "$$(id -g)" = 10001
-        test "$$(opencode --version)" = 1.18.19
+        test "$$(opencode --version)" = 1.18.29
         mise --version
         git --version
         for path in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do
@@ -107,7 +107,7 @@ services:
       OMNIGREX_MISE_VOLUME: omnigrex-mise
       OMNIGREX_WORKSPACE_ROOT: /var/lib/omnigrex/workspaces
       OMNIGREX_MISE_ROOT: /var/lib/omnigrex/mise
-      OMNIGREX_AGENT_IMAGE_REFERENCE: "${OMNIGREX_AGENT_IMAGE_REFERENCE:-omnigrex/opencode:1.18.19}"
+      OMNIGREX_AGENT_IMAGE_REFERENCE: "${OMNIGREX_AGENT_IMAGE_REFERENCE:-omnigrex/opencode:1.18.29}"
       OMNIGREX_OPENCODE_ACP_V1_IMAGE: "${OMNIGREX_OPENCODE_ACP_V1_IMAGE:?set OMNIGREX_OPENCODE_ACP_V1_IMAGE to the exact registry digest}"
       OMNIGREX_OPENCODE_ACP_V1_PLATFORM: "${OMNIGREX_OPENCODE_ACP_V1_PLATFORM:?set OMNIGREX_OPENCODE_ACP_V1_PLATFORM to linux/amd64 or linux/arm64}"
       OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:+/run/omnigrex/runtime-profile-compatibility-results.json}"

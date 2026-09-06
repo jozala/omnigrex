@@ -2,7 +2,7 @@
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS download
 
 ARG TARGETARCH
-ARG OPENCODE_VERSION=1.18.19
+ARG OPENCODE_VERSION=1.18.29
 ARG MISE_VERSION=2026.8.10
 
 RUN case "$TARGETARCH" in \
@@ -19,10 +19,10 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac && \
     case "${OPENCODE_VERSION}:${TARGETARCH}" in \
-      1.18.18:amd64) opencode_sha="60279c62d2182aa4279cea4d5a84d23437f8074042cbbed4a2bfa70e5acbd193" ;; \
-      1.18.18:arm64) opencode_sha="38a7504dab35007c70d2cdf89870b4be63faa60667318a90338798d34f53eab1" ;; \
       1.18.19:amd64) opencode_sha="71eaeb20f2dc55a6d22ea1dabf659db513d02cd65f58b4a29e4c9f45b0d529ac" ;; \
       1.18.19:arm64) opencode_sha="cf5732a2665da6db7331fd4bff37a32eed71d684fef5e0956c0e29254600136b" ;; \
+      1.18.29:amd64) opencode_sha="294bfa0f4647e0fc5d3edceed94e8dc1047757975689f4269aadb91d6774f9ed" ;; \
+      1.18.29:arm64) opencode_sha="9b9044ede6449dc34888b85f0a51be5777a5886fe5e1cbd67898b13f8a5bec04" ;; \
       *) echo "unsupported OpenCode version and architecture: ${OPENCODE_VERSION}:${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     wget -q "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${opencode_arch}-musl.tar.gz" -O /tmp/opencode.tar.gz && \
@@ -34,7 +34,7 @@ RUN case "$TARGETARCH" in \
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-ARG OPENCODE_VERSION=1.18.19
+ARG OPENCODE_VERSION=1.18.29
 ARG MISE_VERSION=2026.8.10
 ARG TARGETARCH
 

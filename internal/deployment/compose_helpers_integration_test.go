@@ -42,7 +42,7 @@ func composeEnvironment(secretFile, dockerGID, secretGID, httpPort string, addit
 		"OMNIGREX_DOCKER_GID":                                 dockerGID,
 		"OMNIGREX_SECRET_GID":                                 secretGID,
 		"OMNIGREX_HTTP_PORT":                                  httpPort,
-		"OMNIGREX_AGENT_IMAGE_REFERENCE":                      "omnigrex/opencode:1.18.19",
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":                      "omnigrex/opencode:1.18.29",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                    "1",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                     "2",
 		"OMNIGREX_READINESS_TIMEOUT":                          "15s",

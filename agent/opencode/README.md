@@ -1,6 +1,6 @@
 # OpenCode Runtime Process
 
-This image packages OpenCode `1.18.19` and mise `2026.8.10` as checksum-verified release artifacts on a digest-pinned Alpine base.
+This image packages OpenCode `1.18.29` and mise `2026.8.10` as checksum-verified release artifacts on a digest-pinned Alpine base.
 Every installed APK, including transitive dependencies, is downloaded as an exact versioned artifact, SHA-256 verified, and installed without repository access.
 Clean builds still depend on Alpine retaining those versioned artifacts at its release CDN, so pushed Runtime Profile images must be retained by registry digest rather than reconstructed as disaster recovery.
 The process runs as UID and GID `10001` and starts `opencode acp` in `/workspace`.
@@ -47,9 +47,9 @@ Reviewer configuration must also omit static MCP entries and pass only orchestra
 Runtime-owned configuration must require ACP approval for every tool category and explicitly override branch-configurable tools such as bash; the ACP decision function cancels every permission request not authorized by the Agent Profile.
 The compatibility suite verifies that project config, agents, MCP entries, skills, and configured instructions do not reach the Reviewer model under these flags.
 
-OpenCode `1.18.19` still executes an auto-discovered project plugin during a prompt even when `OPENCODE_PURE` and `OPENCODE_DISABLE_PROJECT_CONFIG` are both `true`.
+OpenCode `1.18.29` still executes an auto-discovered project plugin during a prompt even when `OPENCODE_PURE` and `OPENCODE_DISABLE_PROJECT_CONFIG` are both `true`.
 It can also discover nested `AGENTS.md` and `CONTEXT.md` files when reading files because that resolver does not honor the project-config flag.
-OpenCode `1.18.25` retains the same relevant plugin and nested-instruction paths and does not expose another suppression control.
+OpenCode `1.18.29` retains the same relevant plugin and nested-instruction paths and does not expose another suppression control.
 The Control Owner accepted these limitations for this compatibility profile on 2026-09-01, but the Reviewer Runtime Process is not an arbitrary-code or instruction-isolation boundary and its provider credentials and network access must be treated accordingly.
 
 ## Local Validation
@@ -66,20 +66,21 @@ Build both the current and previous images required by the controlled-upgrade su
 mise run agent-images
 ```
 
-The integration suite accepts already available digest-qualified image references and expected versions through `OMNIGREX_PREVIOUS_OPENCODE_IMAGE`, `OMNIGREX_PREVIOUS_OPENCODE_VERSION`, `OMNIGREX_OPENCODE_IMAGE`, and `OMNIGREX_OPENCODE_VERSION`.
+The integration suite accepts already available digest-qualified image references, expected versions, and an explicit target architecture through `OMNIGREX_PREVIOUS_OPENCODE_IMAGE`, `OMNIGREX_PREVIOUS_OPENCODE_VERSION`, `OMNIGREX_OPENCODE_IMAGE`, `OMNIGREX_OPENCODE_VERSION`, and `OMNIGREX_OPENCODE_ARCH`.
 For example:
 
 ```sh
 OMNIGREX_PREVIOUS_OPENCODE_IMAGE='registry.example/opencode@sha256:source' \
 OMNIGREX_PREVIOUS_OPENCODE_VERSION='1.18.19' \
 OMNIGREX_OPENCODE_IMAGE='registry.example/opencode@sha256:candidate' \
-OMNIGREX_OPENCODE_VERSION='1.18.25' \
+OMNIGREX_OPENCODE_VERSION='1.18.29' \
+OMNIGREX_OPENCODE_ARCH='amd64' \
 go test -race -tags=integration ./internal/runtime/acp
 ```
 
 Validate the bundled tools and non-root identity with:
 
 ```sh
-docker run --rm --entrypoint sh omnigrex/opencode:1.18.19 -c \
+docker run --rm --entrypoint sh omnigrex/opencode:1.18.29 -c \
   'test "$(id -u)" = 10001 && opencode --version && mise --version && git --version'
 ```

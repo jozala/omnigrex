@@ -24,7 +24,7 @@ const (
 	defaultMCPAddr                     = "omnigrex-mcp:8081"
 	defaultMCPEndpointURL              = "http://omnigrex-mcp:8081/mcp"
 	defaultMCPMutationOperationTimeout = 2 * time.Hour
-	defaultAgentImageReference         = "omnigrex/opencode:1.18.19"
+	defaultAgentImageReference         = "omnigrex/opencode:1.18.29"
 	defaultGitHubAPIURL                = "https://api.github.com"
 	defaultGitRemoteBaseURL            = gitremote.DefaultBaseURL
 	defaultHTTPAddr                    = ":8080"

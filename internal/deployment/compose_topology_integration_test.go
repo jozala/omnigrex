@@ -12,7 +12,7 @@ import (
 
 const (
 	postgresImage  = "postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545"
-	readinessImage = "omnigrex/opencode:1.18.19"
+	readinessImage = "omnigrex/opencode:1.18.29"
 	dockerSocket   = "/var/run/docker.sock"
 )
 

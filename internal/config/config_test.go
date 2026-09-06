@@ -42,8 +42,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.MCPAddr != "omnigrex-mcp:8081" || got.MCPEndpointURL != "http://omnigrex-mcp:8081/mcp" || got.MCPMutationOperationTimeout != 2*time.Hour {
 		t.Errorf("MCP settings = (%q, %q, %s)", got.MCPAddr, got.MCPEndpointURL, got.MCPMutationOperationTimeout)
 	}
-	if got.AgentImageReference != "omnigrex/opencode:1.18.19" {
-		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.19")
+	if got.AgentImageReference != "omnigrex/opencode:1.18.29" {
+		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.29")
 	}
 	if got.OpenCodeACPV1Image != deploymentImage {
 		t.Errorf("OpenCodeACPV1Image = %q, want %q", got.OpenCodeACPV1Image, deploymentImage)

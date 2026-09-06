@@ -15,7 +15,7 @@ import (
 )
 
 func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
-	image := environmentOrDefault("OMNIGREX_OPENCODE_IMAGE", "omnigrex/opencode:1.18.19")
+	image := environmentOrDefault("OMNIGREX_OPENCODE_IMAGE", "omnigrex/opencode:1.18.29")
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	network := "omnigrex-readiness-agent-" + suffix
 	workspace := "omnigrex-readiness-workspaces-" + suffix
