@@ -580,7 +580,9 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("read GitHub webhook secret: %w", err)
 	}
-	handler, err := webhook.NewHandler(webhookSecret, database)
+	handler, err := webhook.NewHandler(webhookSecret, database, func(err error) {
+		logger.Error("handle GitHub webhook delivery", "error", err)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("configure GitHub webhook handler: %w", err)
 	}

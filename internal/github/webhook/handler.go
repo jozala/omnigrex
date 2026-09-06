@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -23,19 +24,20 @@ type DeliveryInbox interface {
 
 // Handler authenticates GitHub webhooks and writes them to the durable inbox.
 type Handler struct {
-	secret []byte
-	inbox  DeliveryInbox
+	secret  []byte
+	inbox   DeliveryInbox
+	onError func(error)
 }
 
 // NewHandler creates a GitHub webhook HTTP handler.
-func NewHandler(secret []byte, inbox DeliveryInbox) (*Handler, error) {
+func NewHandler(secret []byte, inbox DeliveryInbox, onError func(error)) (*Handler, error) {
 	if len(secret) == 0 {
 		return nil, errors.New("webhook secret is empty")
 	}
 	if inbox == nil {
 		return nil, errors.New("webhook inbox is nil")
 	}
-	return &Handler{secret: append([]byte(nil), secret...), inbox: inbox}, nil
+	return &Handler{secret: append([]byte(nil), secret...), inbox: inbox, onError: onError}, nil
 }
 
 // ServeHTTP handles one GitHub webhook request.
@@ -120,6 +122,9 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 	_, err = handler.inbox.InsertWebhookDelivery(request.Context(), delivery)
 	if err != nil {
+		if handler.onError != nil {
+			handler.onError(fmt.Errorf("store GitHub webhook delivery %s (%s.%s): %w", delivery.DeliveryID, delivery.EventName, delivery.Action, err))
+		}
 		http.Error(response, "store webhook delivery", http.StatusInternalServerError)
 		return
 	}

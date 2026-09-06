@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,7 +19,7 @@ import (
 
 func TestHandlerRejectsInvalidSignatureBeforeParsingOrWriting(t *testing.T) {
 	inbox := &recordingInbox{}
-	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox)
+	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -38,7 +39,7 @@ func TestHandlerRejectsInvalidSignatureBeforeParsingOrWriting(t *testing.T) {
 
 func TestHandlerRejectsMissingSignatureBeforeParsingOrWriting(t *testing.T) {
 	inbox := &recordingInbox{}
-	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox)
+	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -59,7 +60,7 @@ func TestHandlerDurablyAcceptsAuthenticatedDelivery(t *testing.T) {
 	const secret = "webhook-secret"
 	body := []byte(`{"action":"labeled","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"issue":{"id":456,"number":12}}`)
 	inbox := &recordingInbox{inserted: true}
-	handler, err := webhook.NewHandler([]byte(secret), inbox)
+	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -107,7 +108,7 @@ func TestHandlerDurablyAcceptsAuthenticatedDelivery(t *testing.T) {
 func TestHandlerAcceptsDuplicateDelivery(t *testing.T) {
 	const secret = "webhook-secret"
 	inbox := &recordingInbox{inserted: false}
-	handler, err := webhook.NewHandler([]byte(secret), inbox)
+	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -126,10 +127,36 @@ func TestHandlerAcceptsDuplicateDelivery(t *testing.T) {
 	}
 }
 
+func TestHandlerReportsInboxFailureWithDeliveryIdentity(t *testing.T) {
+	const secret = "webhook-secret"
+	failure := errors.New("database unavailable")
+	inbox := &recordingInbox{err: failure}
+	var reported error
+	handler, err := webhook.NewHandler([]byte(secret), inbox, func(err error) {
+		reported = err
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	request := signedRequest([]byte(validEnvelope()), secret)
+	request.Header.Set("X-GitHub-Delivery", validDeliveryID())
+	request.Header.Set("X-GitHub-Event", "issues")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	if !errors.Is(reported, failure) || !strings.Contains(reported.Error(), validDeliveryID()) || !strings.Contains(reported.Error(), "issues.opened") {
+		t.Errorf("reported error = %v, want wrapped failure with delivery and event identity", reported)
+	}
+}
+
 func TestHandlerDurablyAcceptsUnsupportedEventWithoutParsingPayload(t *testing.T) {
 	const secret = "webhook-secret"
 	inbox := &recordingInbox{inserted: true}
-	handler, err := webhook.NewHandler([]byte(secret), inbox)
+	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -151,7 +178,7 @@ func TestHandlerDurablyAcceptsUnsupportedEventWithoutParsingPayload(t *testing.T
 
 func TestHandlerOnlyAcceptsPost(t *testing.T) {
 	inbox := &recordingInbox{}
-	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox)
+	handler, err := webhook.NewHandler([]byte("webhook-secret"), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -175,7 +202,7 @@ func TestHandlerRejectsBodyLargerThanOneMiB(t *testing.T) {
 	const secret = "webhook-secret"
 	body := bytes.Repeat([]byte("x"), 1<<20+1)
 	inbox := &recordingInbox{}
-	handler, err := webhook.NewHandler([]byte(secret), inbox)
+	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -213,7 +240,7 @@ func TestHandlerRejectsAuthenticatedMalformedHeadersAndEnvelope(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			inbox := &recordingInbox{}
-			handler, err := webhook.NewHandler([]byte(secret), inbox)
+			handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 			if err != nil {
 				t.Fatalf("NewHandler() error = %v", err)
 			}
