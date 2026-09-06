@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -195,6 +196,10 @@ func TestLifecycleReconciliationNeverReturnsCredentialsInErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), credential) {
 		t.Errorf("ReconcilePublication() error exposed credential: %v", err)
+	}
+	encodedCredential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + credential))
+	if strings.Contains(err.Error(), encodedCredential) {
+		t.Errorf("ReconcilePublication() error exposed encoded credential: %v", err)
 	}
 }
 

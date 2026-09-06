@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,21 @@ func TestLifecyclePreparesExactCredentialFreeWorkspace(t *testing.T) {
 	}
 	if got := gitOutput(t, paths.Workspace, "remote", "get-url", "origin"); got != fixture.remote {
 		t.Errorf("origin = %q, want credential-free %q", got, fixture.remote)
+	}
+	gitConfig, err := os.ReadFile(filepath.Join(paths.Workspace, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		"short-lived-secret",
+		base64.StdEncoding.EncodeToString([]byte("x-access-token:short-lived-secret")),
+	} {
+		if strings.Contains(string(gitConfig), secret) {
+			t.Errorf(".git/config exposed credential material %q", secret)
+		}
+	}
+	if strings.Contains(string(gitConfig), "extraHeader") {
+		t.Errorf(".git/config persisted HTTP authorization: %s", gitConfig)
 	}
 	if got := gitOutput(t, paths.Workspace, "config", "--get", "core.hooksPath"); got != "/dev/null" {
 		t.Errorf("core.hooksPath = %q, want /dev/null", got)
@@ -59,7 +75,12 @@ func TestLifecyclePreparesExactCredentialFreeWorkspace(t *testing.T) {
 }
 
 func TestLifecycleNeverReturnsGitCredentialsInErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	authorizations := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case authorizations <- request.Header.Get("Authorization"):
+		default:
+		}
 		http.Error(writer, "denied", http.StatusUnauthorized)
 	}))
 	defer server.Close()
@@ -74,6 +95,19 @@ func TestLifecycleNeverReturnsGitCredentialsInErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), credential) {
 		t.Errorf("error exposed credential: %v", err)
+	}
+	encodedCredential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + credential))
+	if strings.Contains(err.Error(), encodedCredential) {
+		t.Errorf("error exposed encoded credential: %v", err)
+	}
+	select {
+	case authorization := <-authorizations:
+		want := "Basic " + encodedCredential
+		if authorization != want {
+			t.Errorf("Git Authorization = %q, want %q", authorization, want)
+		}
+	default:
+		t.Error("Git sent no HTTP request")
 	}
 }
 

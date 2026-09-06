@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -140,7 +141,7 @@ func commandEnvironment(credential, miseDataDir string) []string {
 	if credential != "" {
 		environment = append(environment,
 			"GIT_CONFIG_KEY_2=http.extraHeader",
-			"GIT_CONFIG_VALUE_2=Authorization: Bearer "+credential,
+			"GIT_CONFIG_VALUE_2="+gitAuthorizationHeader(credential),
 		)
 		configCount++
 	}
@@ -149,6 +150,11 @@ func commandEnvironment(credential, miseDataDir string) []string {
 		environment = append(environment, "MISE_DATA_DIR="+miseDataDir)
 	}
 	return environment
+}
+
+func gitAuthorizationHeader(credential string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + credential))
+	return "Authorization: Basic " + encoded
 }
 
 func validateRemote(value string) error {
@@ -208,5 +214,7 @@ func redact(value, secret string) string {
 	if secret == "" {
 		return value
 	}
-	return strings.ReplaceAll(value, secret, "[REDACTED]")
+	value = strings.ReplaceAll(value, secret, "[REDACTED]")
+	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + secret))
+	return strings.ReplaceAll(value, encoded, "[REDACTED]")
 }
