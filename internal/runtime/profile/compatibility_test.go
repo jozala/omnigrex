@@ -51,6 +51,38 @@ func TestCompatibilityResultsRejectMutableImagesAndMalformedContracts(t *testing
 	}
 }
 
+func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
+	target, err := profile.NewOpenCodeV1(
+		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("b", 64),
+		profile.Platform{OS: "linux", Arch: "amd64"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := profile.NewOpenCodeV1(
+		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64),
+		profile.Platform{OS: "linux", Arch: "amd64"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := profile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform, time.Date(2026, time.September, 7, 12, 0, 0, 0, time.UTC))
+	file := profile.CompatibilityResultsFile{SchemaVersion: profile.CompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
+	if err := file.ValidateTarget(target); err != nil {
+		t.Fatalf("ValidateTarget() error = %v", err)
+	}
+	other, err := profile.NewOpenCodeV1(
+		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("c", 64),
+		profile.Platform{OS: "linux", Arch: "amd64"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.ValidateTarget(other); err == nil {
+		t.Fatal("ValidateTarget() error = nil, want target mismatch")
+	}
+}
+
 func TestDecodeCompatibilityResultsFileIsStrict(t *testing.T) {
 	for _, content := range []string{
 		`{}`,

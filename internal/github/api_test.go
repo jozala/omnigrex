@@ -79,6 +79,66 @@ func TestAPIClientResolvesRepositoryInstallationAndCreatesToken(t *testing.T) {
 	}
 }
 
+func TestAPIClientGetsAuthenticatedAppConfiguration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/app" || request.Header.Get("Authorization") != "Bearer app-jwt" {
+			t.Errorf("request = %s %s, authorization %q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		_, _ = fmt.Fprint(writer, `{"id":17,"events":["issues","pull_request"],"permissions":{"metadata":"read","issues":"write"}}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := client.GetAuthenticatedApp(context.Background(), "app-jwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.ID != 17 || len(app.Events) != 2 || app.Events[0] != "issues" || app.Permissions["issues"] != "write" {
+		t.Fatalf("authenticated App = %#v", app)
+	}
+}
+
+func TestAPIClientGetsAppWebhookConfiguration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/app/hook/config" || request.Header.Get("Authorization") != "Bearer app-jwt" {
+			t.Errorf("request = %s %s, authorization %q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		_, _ = fmt.Fprint(writer, `{"url":"https://omnigrex.example/webhook","content_type":"json","secret":"********","insecure_ssl":0}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := client.GetAppWebhookConfig(context.Background(), "app-jwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.URL != "https://omnigrex.example/webhook" || configuration.ContentType != "json" || configuration.Secret != "********" || !configuration.VerifiesTLS() {
+		t.Fatalf("webhook configuration = %#v", configuration)
+	}
+}
+
+func TestAPIClientGetsDisabledAppWebhookConfiguration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(writer, `{"url":"","content_type":"form","secret":"","insecure_ssl":"0"}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := client.GetAppWebhookConfig(context.Background(), "app-jwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.URL != "" || configuration.Secret != "" {
+		t.Fatalf("webhook configuration = %#v", configuration)
+	}
+}
+
 func TestAPIClientRejectsInvalidBaseURL(t *testing.T) {
 	if _, err := githubapi.NewAPIClient(http.DefaultClient, "://invalid"); err == nil {
 		t.Fatal("NewAPIClient() error = nil, want invalid base URL error")

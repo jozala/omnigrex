@@ -252,6 +252,23 @@ type APIClient struct {
 	baseURL    string
 }
 
+type AuthenticatedApp struct {
+	ID          int64                   `json:"id"`
+	Events      []string                `json:"events"`
+	Permissions InstallationPermissions `json:"permissions"`
+}
+
+type AppWebhookConfig struct {
+	URL         string          `json:"url"`
+	ContentType string          `json:"content_type"`
+	Secret      string          `json:"secret"`
+	InsecureSSL json.RawMessage `json:"insecure_ssl"`
+}
+
+func (configuration AppWebhookConfig) VerifiesTLS() bool {
+	return strings.TrimSpace(string(configuration.InsecureSSL)) == "0" || strings.TrimSpace(string(configuration.InsecureSSL)) == `"0"`
+}
+
 func NewAPIClient(httpClient HTTPDoer, baseURL string) (*APIClient, error) {
 	if baseURL == "" {
 		baseURL = "https://api.github.com"
@@ -278,6 +295,39 @@ func secureAPIURL(parsed *url.URL) bool {
 	}
 	host := parsed.Hostname()
 	return strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
+}
+
+// GetAuthenticatedApp returns the App identity and configured repository event policy for one App JWT.
+func (client *APIClient) GetAuthenticatedApp(ctx context.Context, appJWT string) (AuthenticatedApp, error) {
+	var app AuthenticatedApp
+	if err := client.doJSON(ctx, http.MethodGet, "/app", appJWT, nil, &app); err != nil {
+		return AuthenticatedApp{}, err
+	}
+	if app.ID <= 0 || app.Events == nil || app.Permissions == nil {
+		return AuthenticatedApp{}, fmt.Errorf("%w: authenticated App response is incomplete", ErrInvalidAPIResponse)
+	}
+	return app, nil
+}
+
+// GetAppWebhookConfig returns the authenticated App's webhook delivery configuration.
+func (client *APIClient) GetAppWebhookConfig(ctx context.Context, appJWT string) (AppWebhookConfig, error) {
+	var configuration AppWebhookConfig
+	if err := client.doJSON(ctx, http.MethodGet, "/app/hook/config", appJWT, nil, &configuration); err != nil {
+		return AppWebhookConfig{}, err
+	}
+	if len(configuration.InsecureSSL) != 0 && !validWebhookTLSMode(configuration.InsecureSSL) {
+		return AppWebhookConfig{}, fmt.Errorf("%w: App webhook configuration response is incomplete", ErrInvalidAPIResponse)
+	}
+	return configuration, nil
+}
+
+func validWebhookTLSMode(value json.RawMessage) bool {
+	switch strings.TrimSpace(string(value)) {
+	case "0", "1", `"0"`, `"1"`:
+		return true
+	default:
+		return false
+	}
 }
 
 func (client *APIClient) ResolveRepositoryInstallation(ctx context.Context, appJWT, owner, repository string) (int64, error) {

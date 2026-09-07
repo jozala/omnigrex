@@ -78,6 +78,47 @@ func Run(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// Check verifies that PostgreSQL contains exactly the bundled migration history without changing it.
+func Check(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
+		return errors.New("check migrations: nil PostgreSQL pool")
+	}
+	expected, err := discover(Files)
+	if err != nil {
+		return err
+	}
+	rows, err := pool.Query(ctx, `SELECT version, name, checksum FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return fmt.Errorf("read migration history: %w", err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		var version int64
+		var name string
+		var checksum []byte
+		if err := rows.Scan(&version, &name, &checksum); err != nil {
+			return fmt.Errorf("scan migration history: %w", err)
+		}
+		if index >= len(expected) {
+			return fmt.Errorf("database contains unknown migration %06d_%s.sql", version, name)
+		}
+		migration := expected[index]
+		if version != migration.version || name != migration.name || !bytes.Equal(checksum, migration.checksum[:]) {
+			return fmt.Errorf("migration history differs at version %06d", migration.version)
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read migration history: %w", err)
+	}
+	if index != len(expected) {
+		migration := expected[index]
+		return fmt.Errorf("database is missing migration %06d_%s.sql", migration.version, migration.name)
+	}
+	return nil
+}
+
 func discover(files fs.FS) ([]migration, error) {
 	entries, err := fs.ReadDir(files, ".")
 	if err != nil {

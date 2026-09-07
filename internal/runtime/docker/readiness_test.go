@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
@@ -51,6 +52,23 @@ func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 	}
 }
 
+func TestReadinessProbeInspectDoesNotCreateContainers(t *testing.T) {
+	api := &fakeReadinessAPI{clientVersion: "1.45"}
+	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.Inspect(context.Background()); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if api.image != "omnigrex/opencode:qualified" || api.network != "omnigrex-agent" || len(api.volumes) != 3 {
+		t.Fatalf("inspected resources = image %q, network %q, volumes %v", api.image, api.network, api.volumes)
+	}
+	if len(api.created) != 0 {
+		t.Fatalf("Inspect() created %d containers", len(api.created))
+	}
+}
+
 func TestReadinessProbeFailsWhenResourceIsUnavailable(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45", networkErr: errors.New("missing")}
 	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
@@ -64,6 +82,31 @@ func TestReadinessProbeFailsWhenResourceIsUnavailable(t *testing.T) {
 	}
 	if len(api.created) != 0 {
 		t.Fatalf("created containers = %d, want none", len(api.created))
+	}
+}
+
+func TestReadinessProbeReportsEveryUnavailableResource(t *testing.T) {
+	api := &fakeReadinessAPI{
+		clientVersion: "1.45",
+		imageErr:      errors.New("missing image"),
+		networkErr:    errors.New("missing network"),
+		volumeErr:     errors.New("missing volume"),
+	}
+	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = probe.Inspect(context.Background())
+	if err == nil {
+		t.Fatal("Inspect() error = nil, want aggregated errors")
+	}
+	for _, want := range []string{"missing image", "missing network", "missing volume"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Inspect() error = %q, want %q", err, want)
+		}
+	}
+	if len(api.volumes) != 3 {
+		t.Errorf("inspected volumes = %v, want all three", api.volumes)
 	}
 }
 
@@ -125,7 +168,9 @@ func testReadinessProbeOptions() ReadinessProbeOptions {
 
 type fakeReadinessAPI struct {
 	clientVersion string
+	imageErr      error
 	networkErr    error
+	volumeErr     error
 	image         string
 	network       string
 	volumes       []string
@@ -145,7 +190,7 @@ func (api *fakeReadinessAPI) ClientVersion() string {
 
 func (api *fakeReadinessAPI) ImageInspect(_ context.Context, image string, _ ...mobyclient.ImageInspectOption) (mobyclient.ImageInspectResult, error) {
 	api.image = image
-	return mobyclient.ImageInspectResult{}, nil
+	return mobyclient.ImageInspectResult{}, api.imageErr
 }
 
 func (api *fakeReadinessAPI) NetworkInspect(_ context.Context, network string, _ mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error) {
@@ -155,7 +200,7 @@ func (api *fakeReadinessAPI) NetworkInspect(_ context.Context, network string, _
 
 func (api *fakeReadinessAPI) VolumeInspect(_ context.Context, volume string, _ mobyclient.VolumeInspectOptions) (mobyclient.VolumeInspectResult, error) {
 	api.volumes = append(api.volumes, volume)
-	return mobyclient.VolumeInspectResult{}, nil
+	return mobyclient.VolumeInspectResult{}, api.volumeErr
 }
 
 func (api *fakeReadinessAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {

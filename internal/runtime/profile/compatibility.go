@@ -94,6 +94,20 @@ func (file CompatibilityResultsFile) Validate() error {
 	return nil
 }
 
+// ValidateTarget requires every result to qualify the configured Runtime Profile binding and platform.
+func (file CompatibilityResultsFile) ValidateTarget(target Profile) error {
+	contract := target.Contract()
+	if contract.Name == "" {
+		return errors.New("configured Runtime Profile is invalid")
+	}
+	for index, result := range file.Results {
+		if result.Target != target.Binding() || result.Platform != contract.Platform {
+			return fmt.Errorf("compatibility result %d does not target the configured Runtime Profile binding and platform", index)
+		}
+	}
+	return nil
+}
+
 // Validate checks all immutable qualification axes and permits only successful results.
 func (result CompatibilityResult) Validate() error {
 	if err := result.Source.Validate(); err != nil {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/config"
+	"github.com/jozala/omnigrex/internal/doctor"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	"github.com/jozala/omnigrex/internal/mcp"
@@ -43,8 +46,18 @@ const (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		os.Exit(healthcheck())
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			os.Exit(healthcheck())
+		case "doctor":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction))
+		default:
+			_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
+			os.Exit(2)
+		}
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -63,6 +76,53 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("omnigrex stopped")
+}
+
+type doctorExecutor func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error)
+
+func runDoctorCommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, execute doctorExecutor) int {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	repositoryValue := flags.String("repository", "", "repository to validate in OWNER/REPOSITORY form")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "doctor does not accept positional arguments")
+		return 2
+	}
+	repository, err := doctor.ParseRepository(*repositoryValue)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+	settings, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "FAIL configuration: %v\n", err)
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "PASS configuration")
+	results, err := execute(ctx, settings, repository)
+	if err != nil {
+		_, _ = fmt.Fprintf(stdout, "FAIL doctor: %v\n", err)
+		return 1
+	}
+	failed := false
+	for _, result := range results {
+		if result.Err != nil {
+			failed = true
+			_, _ = fmt.Fprintf(stdout, "FAIL %s: %v\n", result.Name, result.Err)
+			continue
+		}
+		_, _ = fmt.Fprintf(stdout, "PASS %s\n", result.Name)
+	}
+	if failed {
+		return 1
+	}
+	return 0
 }
 
 func run(ctx context.Context, settings config.Config, logger *slog.Logger) error {
@@ -716,11 +776,8 @@ func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runt
 	if err != nil {
 		return err
 	}
-	targetContract := target.Contract()
-	for index, result := range results.Results {
-		if result.Target != target.Binding() || result.Platform != targetContract.Platform {
-			return fmt.Errorf("compatibility result %d does not target the configured Runtime Profile binding and platform", index)
-		}
+	if err := results.ValidateTarget(target); err != nil {
+		return err
 	}
 	if err := importer.ImportRuntimeProfileCompatibilityResults(ctx, results); err != nil {
 		return err

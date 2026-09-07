@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/config"
+	"github.com/jozala/omnigrex/internal/doctor"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -22,6 +24,80 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
+
+func TestDoctorCommandReportsAllChecksAndFailsWhenAnyCheckFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runDoctorCommand(context.Background(), []string{"--repository", "jozala/omnigrex"}, doctorTestEnvironment, &stdout, &stderr,
+		func(_ context.Context, _ config.Config, repository doctor.Repository) ([]doctor.Result, error) {
+			if repository.Owner != "jozala" || repository.Name != "omnigrex" {
+				t.Fatalf("repository = %#v", repository)
+			}
+			return []doctor.Result{{Name: "postgres"}, {Name: "reviewer-app", Err: errors.New("not installed")}, {Name: "docker"}}, nil
+		})
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	for _, want := range []string{"PASS configuration", "PASS postgres", "FAIL reviewer-app: not installed", "PASS docker"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout does not contain %q: %s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestDoctorCommandRejectsInvalidRepositoryWithoutRunningChecks(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	exitCode := runDoctorCommand(context.Background(), []string{"--repository", "invalid"}, doctorTestEnvironment, &stdout, &stderr,
+		func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error) {
+			called = true
+			return nil, nil
+		})
+	if exitCode != 2 || called || !strings.Contains(stderr.String(), "OWNER/REPOSITORY") {
+		t.Fatalf("exit code = %d, called = %t, stderr = %s", exitCode, called, stderr.String())
+	}
+}
+
+func TestDoctorCommandReportsInvalidConfigurationWithoutRunningChecks(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	exitCode := runDoctorCommand(context.Background(), []string{"--repository", "jozala/omnigrex"}, func(string) string { return "" }, &stdout, &stderr,
+		func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error) {
+			called = true
+			return nil, nil
+		})
+	if exitCode != 1 || called || !strings.Contains(stdout.String(), "FAIL configuration") {
+		t.Fatalf("exit code = %d, called = %t, stdout = %s", exitCode, called, stdout.String())
+	}
+}
+
+func TestDoctorCommandSucceedsWhenEveryCheckPasses(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runDoctorCommand(context.Background(), []string{"--repository=jozala/omnigrex"}, doctorTestEnvironment, &stdout, &stderr,
+		func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error) {
+			return []doctor.Result{{Name: "postgres"}, {Name: "docker"}}, nil
+		})
+	if exitCode != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+}
+
+func doctorTestEnvironment(name string) string {
+	values := map[string]string{
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":               "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64),
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":            "linux/amd64",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":             "1",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":              "2",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":   "/run/secrets/developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":    "/run/secrets/reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":          "/run/secrets/webhook",
+		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE": "/run/secrets/developer.json",
+		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":  "/run/secrets/reviewer.json",
+	}
+	return values[name]
+}
 
 func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 	var output bytes.Buffer

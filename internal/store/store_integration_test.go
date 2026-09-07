@@ -2223,6 +2223,62 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyDoesNotApplyMigrations(t *testing.T) {
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword+"\n"), 0o600); err != nil {
+		t.Fatalf("write password secret: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.OpenReadOnly(ctx, postgres.databaseURL(false), passwordFile)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() error = %v", err)
+	}
+	defer database.Close()
+	if err := database.CheckMigrations(ctx); err == nil {
+		t.Fatal("CheckMigrations() error = nil before migrations")
+	}
+	pool := openPool(t, postgres.databaseURL(true))
+	var historyTable bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.schema_migrations') IS NOT NULL`).Scan(&historyTable); err != nil {
+		t.Fatal(err)
+	}
+	if historyTable {
+		t.Fatal("OpenReadOnly() created migration history table")
+	}
+}
+
+func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword+"\n"), 0o600); err != nil {
+		t.Fatalf("write password secret: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	writable, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writable.Close()
+	database, err := store.OpenReadOnly(ctx, postgres.databaseURL(false), passwordFile)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() error = %v", err)
+	}
+	defer database.Close()
+	if err := database.CheckMigrations(ctx); err != nil {
+		t.Fatalf("CheckMigrations() error = %v", err)
+	}
+	pool := openPool(t, postgres.databaseURL(true))
+	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET name = 'changed' WHERE version = 13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CheckMigrations(ctx); err == nil {
+		t.Fatal("CheckMigrations() error = nil for changed migration history")
+	}
+}
+
 type postgresContainer struct {
 	hostPort string
 }

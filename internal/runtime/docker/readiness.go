@@ -87,26 +87,8 @@ func (probe *ReadinessProbe) Close() error {
 }
 
 func (probe *ReadinessProbe) Check(ctx context.Context) error {
-	ping, err := probe.api.Ping(ctx, mobyclient.PingOptions{
-		NegotiateAPIVersion: true,
-		ForceNegotiate:      true,
-	})
-	if err != nil {
-		return fmt.Errorf("negotiate Docker API version: %w", err)
-	}
-	if err := validateAPIVersions(ping.APIVersion, probe.api.ClientVersion()); err != nil {
+	if err := probe.Inspect(ctx); err != nil {
 		return err
-	}
-	if _, err := probe.api.ImageInspect(ctx, probe.options.AgentImage); err != nil {
-		return fmt.Errorf("inspect agent image %q: %w", probe.options.AgentImage, err)
-	}
-	if _, err := probe.api.NetworkInspect(ctx, probe.options.AgentNetwork, mobyclient.NetworkInspectOptions{}); err != nil {
-		return fmt.Errorf("inspect agent network %q: %w", probe.options.AgentNetwork, err)
-	}
-	for _, volume := range []string{probe.options.WorkspaceVolume, probe.options.RuntimeStateVolume, probe.options.MiseVolume} {
-		if _, err := probe.api.VolumeInspect(ctx, volume, mobyclient.VolumeInspectOptions{}); err != nil {
-			return fmt.Errorf("inspect volume %q: %w", volume, err)
-		}
 	}
 
 	subpath := "readiness-" + strconv.FormatUint(readinessSequence.Add(1), 10) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -121,6 +103,33 @@ func (probe *ReadinessProbe) Check(ctx context.Context) error {
 		runtimeErr = fmt.Errorf("exercise Runtime Process writable paths: %w", runtimeErr)
 	}
 	return errors.Join(runtimeErr, probe.cleanup(subpath))
+}
+
+// Inspect verifies Docker API compatibility and required resources without creating containers or writing volumes.
+func (probe *ReadinessProbe) Inspect(ctx context.Context) error {
+	ping, err := probe.api.Ping(ctx, mobyclient.PingOptions{
+		NegotiateAPIVersion: true,
+		ForceNegotiate:      true,
+	})
+	if err != nil {
+		return fmt.Errorf("negotiate Docker API version: %w", err)
+	}
+	if err := validateAPIVersions(ping.APIVersion, probe.api.ClientVersion()); err != nil {
+		return err
+	}
+	var resourceErrors []error
+	if _, err := probe.api.ImageInspect(ctx, probe.options.AgentImage); err != nil {
+		resourceErrors = append(resourceErrors, fmt.Errorf("inspect agent image %q: %w", probe.options.AgentImage, err))
+	}
+	if _, err := probe.api.NetworkInspect(ctx, probe.options.AgentNetwork, mobyclient.NetworkInspectOptions{}); err != nil {
+		resourceErrors = append(resourceErrors, fmt.Errorf("inspect agent network %q: %w", probe.options.AgentNetwork, err))
+	}
+	for _, volume := range []string{probe.options.WorkspaceVolume, probe.options.RuntimeStateVolume, probe.options.MiseVolume} {
+		if _, err := probe.api.VolumeInspect(ctx, volume, mobyclient.VolumeInspectOptions{}); err != nil {
+			resourceErrors = append(resourceErrors, fmt.Errorf("inspect volume %q: %w", volume, err))
+		}
+	}
+	return errors.Join(resourceErrors...)
 }
 
 func (probe *ReadinessProbe) cleanup(subpath string) error {
