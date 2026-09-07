@@ -627,10 +627,12 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Metadata  json.RawMessage `json:"_meta"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(rpc.Params)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF || !slicesContains(registration.scope.AllowedTools, params.Name) {
+	if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		!validRequestMetadata(params.Metadata) || !slicesContains(registration.scope.AllowedTools, params.Name) {
 		writeRPCError(response, rpc.ID, -32602, "invalid tool call")
 		return
 	}
@@ -684,6 +686,14 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		return
 	}
 	writeToolResult(response, rpc.ID, result)
+}
+
+func validRequestMetadata(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var metadata map[string]json.RawMessage
+	return json.Unmarshal(raw, &metadata) == nil && metadata != nil
 }
 
 func scopeAllowsTool(scope TokenScope, tool string) bool {

@@ -87,7 +87,7 @@ func TestReadToolCallIsFencedScopedAndRecorded(t *testing.T) {
 	initialize(t, gateway, registration)
 
 	response := httptest.NewRecorder()
-	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":"read-1","method":"tools/call","params":{"name":"get_issue","arguments":{}}}`))
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":"read-1","method":"tools/call","params":{"name":"get_issue","arguments":{},"_meta":{"progressToken":17,"io.modelcontextprotocol/related-task":{"taskId":"task-1"}}}}`))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `\"number\":12`) {
 		t.Fatalf("tools/call response = %d %s", response.Code, response.Body.String())
 	}
@@ -98,6 +98,32 @@ func TestReadToolCallIsFencedScopedAndRecorded(t *testing.T) {
 	}
 	if durable.validationCount() != 3 || ledger.count() != 1 || !ledger.records[0].Succeeded || string(ledger.records[0].Result) != `{"number":12,"title":"Fix it"}` {
 		t.Fatalf("fence calls = %d, read records = %#v", durable.validationCount(), ledger.records)
+	}
+}
+
+func TestToolCallRejectsInvalidOrUnknownRequestMetadata(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	backend := &recordingBackend{result: json.RawMessage(`{"number":12}`)}
+	gateway := newTestGateway(t, now, &fakeStore{}, backend)
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+
+	for _, params := range []string{
+		`{"name":"get_issue","arguments":{},"_meta":null}`,
+		`{"name":"get_issue","arguments":{},"unexpected":true}`,
+	} {
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+			`{"jsonrpc":"2.0","id":"invalid-meta","method":"tools/call","params":`+params+`}`))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32602`) {
+			t.Errorf("tools/call params %s response = %d %s", params, response.Code, response.Body.String())
+		}
+	}
+	if backend.count() != 0 {
+		t.Fatalf("invalid metadata reached backend %d times", backend.count())
 	}
 }
 

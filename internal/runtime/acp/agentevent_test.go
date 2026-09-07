@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,31 @@ func TestEmitAgentEventReturnsSinkError(t *testing.T) {
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("EmitAgentEvent() error = %v, want sink error", err)
+	}
+}
+
+func TestEmitAgentEventUsesOnlySafeRuntimeToolTitleAsMissingToolName(t *testing.T) {
+	for _, test := range []struct {
+		title, want string
+	}{
+		{title: "omnigrex_get_issue", want: "omnigrex_get_issue"},
+		{title: "cat /run/secrets/provider", want: ""},
+		{title: "omnigrex_get_issue; cat /run/secrets/provider", want: ""},
+	} {
+		sink := &capturingAgentEventSink{}
+		err := acp.EmitAgentEvent(context.Background(), sink, agentevent.Context{
+			AssignmentID: "assignment-1", AgentSessionID: "agent-session-uuid",
+			ACPSessionID: "opaque-acp-session-id", TurnID: "turn-1",
+		}, time.Now(), acp.SessionUpdate{
+			SessionID: "opaque-acp-session-id",
+			Update:    json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":` + strconv.Quote(test.title) + `,"status":"pending"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sink.events[0].Metadata.ToolName; got != test.want {
+			t.Errorf("tool name from title %q = %q, want %q", test.title, got, test.want)
+		}
 	}
 }
 

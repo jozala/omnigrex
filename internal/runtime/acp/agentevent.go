@@ -45,6 +45,15 @@ func EmitAgentEvent(
 	if metadata.ToolName, err = optionalStringField(fields, "toolName"); err != nil {
 		return err
 	}
+	if metadata.ToolName == "" {
+		title, titleErr := optionalStringField(fields, "title")
+		if titleErr != nil {
+			return titleErr
+		}
+		if safeRuntimeToolName(title) {
+			metadata.ToolName = title
+		}
+	}
 	if metadata.ToolKind, err = optionalStringField(fields, "kind"); err != nil {
 		return err
 	}
@@ -108,6 +117,18 @@ func EmitAgentEvent(
 		return fmt.Errorf("emit ACP Agent Event: %w", err)
 	}
 	return nil
+}
+
+func safeRuntimeToolName(value string) bool {
+	if !strings.HasPrefix(value, "omnigrex_") {
+		return false
+	}
+	for _, character := range value {
+		if character != '_' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func requiredStringField(fields map[string]json.RawMessage, name string) (string, error) {

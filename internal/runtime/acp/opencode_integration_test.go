@@ -127,6 +127,7 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	prompt(t, first, session.ID, mcpPrompt)
 	waitForAgentText(t, firstUpdates, mcpResultMarker)
 	mcp.assertSingleCall(t, "echo", map[string]any{"value": "phase-2"})
+	mcp.assertSingleCallHasMetadata(t)
 	first.stop(t)
 	replaceWorkspaceContents(t, workspaceVolume, workspaceOutput)
 
@@ -1414,6 +1415,7 @@ const (
 type mcpToolCall struct {
 	Name      string
 	Arguments map[string]any
+	Metadata  map[string]json.RawMessage
 }
 
 type mcpRPCRequest struct {
@@ -1571,14 +1573,17 @@ func (fixture *testMCPServer) handle(response http.ResponseWriter, request *http
 			return
 		}
 		var params struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
+			Name      string                     `json:"name"`
+			Arguments map[string]any             `json:"arguments"`
+			Metadata  map[string]json.RawMessage `json:"_meta"`
 		}
-		if json.Unmarshal(rpcRequest.Params, &params) != nil || params.Name != "echo" {
+		decoder := json.NewDecoder(bytes.NewReader(rpcRequest.Params))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF || params.Name != "echo" {
 			writeMCPError(response, rpcRequest.ID, -32602, "invalid tool call")
 			return
 		}
-		call := mcpToolCall{Name: params.Name, Arguments: params.Arguments}
+		call := mcpToolCall{Name: params.Name, Arguments: params.Arguments, Metadata: params.Metadata}
 		if fixture.takeBlock(mcpBlockBeforeSideEffect) {
 			fixture.observeCall(call)
 			<-request.Context().Done()
@@ -1696,6 +1701,15 @@ func writeMCPJSON(response http.ResponseWriter, payload any) {
 
 func (fixture *testMCPServer) assertSingleCall(t *testing.T, name string, arguments map[string]any) {
 	fixture.assertCalls(t, 1, name, arguments)
+}
+
+func (fixture *testMCPServer) assertSingleCallHasMetadata(t *testing.T) {
+	t.Helper()
+	fixture.mutex.Lock()
+	defer fixture.mutex.Unlock()
+	if len(fixture.calls) != 1 || fixture.calls[0].Metadata == nil {
+		t.Fatalf("MCP tool calls have no request metadata: %+v", fixture.calls)
+	}
 }
 
 func (fixture *testMCPServer) assertCalls(t *testing.T, count int, name string, arguments map[string]any) {
