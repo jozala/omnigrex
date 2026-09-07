@@ -303,8 +303,16 @@ func (state *productionState) checkReviewerWebhook(ctx context.Context) error {
 		return err
 	}
 	configuration, err := api.GetAppWebhookConfig(ctx, appJWT)
-	if err != nil {
-		return err
+	return validateReviewerWebhookConfiguration(configuration, err)
+}
+
+func validateReviewerWebhookConfiguration(configuration githubapi.AppWebhookConfig, requestErr error) error {
+	if requestErr != nil {
+		var apiError *githubapi.APIError
+		if errors.As(requestErr, &apiError) && apiError.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		return requestErr
 	}
 	if configuration.URL != "" || configuration.Secret != "" {
 		return errors.New("Reviewer GitHub App webhook must be disabled")
