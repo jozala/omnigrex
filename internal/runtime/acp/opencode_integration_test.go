@@ -23,6 +23,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -98,7 +99,7 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	mcp := startTestMCPServer(t)
 	mcpServers := []acp.MCPServer{{
 		Type: "http",
-		Name: "compat",
+		Name: "omnigrex",
 		URL:  mcp.URL,
 	}}
 	workspaceVolume := uniqueDockerName("workspace")
@@ -184,7 +185,7 @@ func TestOpenCodeControlledStateUpgrade(t *testing.T) {
 	mcp := startTestMCPServer(t)
 	mcpServers := []acp.MCPServer{{
 		Type: "http",
-		Name: "compat",
+		Name: "omnigrex",
 		URL:  mcp.URL,
 	}}
 	workspaceVolume := uniqueDockerName("upgrade-workspace")
@@ -521,7 +522,7 @@ func testOpenCodeSessionContinuesAfterMCPInterruption(t *testing.T, blockPoint m
 	mcp := startMCPServer(t, blockPoint)
 	mcpServers := []acp.MCPServer{{
 		Type: "http",
-		Name: "compat",
+		Name: "omnigrex",
 		URL:  mcp.URL,
 	}}
 	purpose := "mcp-call"
@@ -882,6 +883,14 @@ func startOpenCodeWithTransport(
 	if wrapTransport != nil {
 		transport = wrapTransport(transport)
 	}
+	permissions, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
+		Instructions: roleInstruction, Model: "fake/fake-model", Steps: 100,
+		Permissions:  opencode.PermissionPolicy{"bash": opencode.PermissionAllow},
+		RuntimeTools: []string{"omnigrex_echo"},
+	})
+	if err != nil {
+		t.Fatalf("render compatibility permissions: %v", err)
+	}
 	process.client = acp.NewClient(transport, acp.ClientOptions{
 		RequiredCapabilities: acp.RequiredCapabilities{
 			SessionList:   true,
@@ -893,7 +902,7 @@ func startOpenCodeWithTransport(
 		},
 		DecidePermission: func(ctx context.Context, request acp.PermissionRequest) acp.PermissionDecision {
 			process.permissionRequests <- request
-			return compatibilityPermissionDecision(ctx, request)
+			return compatibilityPermissionDecision(request, permissions)
 		},
 	})
 	t.Cleanup(func() {
@@ -1111,9 +1120,9 @@ func startFakeProvider(t *testing.T) string {
 		"enabled_providers": []string{"fake"},
 		"mcp":               map[string]any{},
 		"permission": map[string]string{
-			"*":           "deny",
-			"bash":        "ask",
-			"compat_echo": "allow",
+			"*":             "deny",
+			"bash":          "ask",
+			"omnigrex_echo": "allow",
 		},
 		"provider": map[string]any{
 			"fake": map[string]any{
@@ -1249,11 +1258,11 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 	case strings.Contains(activePrompt, mcpPrompt) && strings.Contains(latestToolMessage(chat), mcpSideEffect):
 		reply = mcpResultMarker
 	case strings.Contains(activePrompt, mcpPrompt):
-		if !hasFakeTool(chat, "compat_echo") {
+		if !hasFakeTool(chat, "omnigrex_echo") {
 			reply = "MCP_TOOL_MISSING"
 			break
 		}
-		writeFakeToolCall(response, "compat_echo", map[string]any{"value": "phase-2"})
+		writeFakeToolCall(response, "omnigrex_echo", map[string]any{"value": "phase-2"})
 		return
 	case strings.Contains(activePrompt, seedPrompt):
 		reply = firstMarker
@@ -1742,7 +1751,7 @@ func mapsEqual(left, right map[string]any) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
-func compatibilityPermissionDecision(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
+func compatibilityPermissionDecision(request acp.PermissionRequest, permissions *opencode.RenderedProfile) acp.PermissionDecision {
 	var toolCall struct {
 		ID       string         `json:"toolCallId"`
 		Title    string         `json:"title"`
@@ -1753,12 +1762,12 @@ func compatibilityPermissionDecision(_ context.Context, request acp.PermissionRe
 	if json.Unmarshal(request.ToolCall, &toolCall) != nil || toolCall.ID == "" || toolCall.Status != "pending" {
 		return acp.PermissionDecision{}
 	}
-	authorized := toolCall.Title == "compat_echo" && toolCall.Kind == "other" && len(toolCall.RawInput) == 0
-	if (toolCall.Title == localToolCommand || toolCall.Title == workspaceCommand) &&
-		toolCall.Kind == "execute" &&
-		toolCall.RawInput["command"] == toolCall.Title {
-		authorized = true
+	if toolCall.Kind == "other" {
+		return permissions.DecidePermission(request)
 	}
+	authorized := (toolCall.Title == localToolCommand || toolCall.Title == workspaceCommand) &&
+		toolCall.Kind == "execute" &&
+		toolCall.RawInput["command"] == toolCall.Title
 	if !authorized {
 		return acp.PermissionDecision{}
 	}

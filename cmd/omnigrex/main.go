@@ -23,6 +23,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
@@ -250,7 +251,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
 		Sessions: sessions, Network: settings.DockerAgentNetwork,
 		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{},
+		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{
+			AgentEventSink: loggingAgentEventSink{logger: logger},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -273,7 +276,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
-		Launcher: runtimeLauncher, Sessions: sessions, Outcomes: outcomeReconciler, Workspace: workspaces,
+		Launcher: runtimeLauncher, Sessions: sessions,
+		Outcomes:  loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
+		Workspace: workspaces,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
@@ -412,6 +417,52 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		closureSettlementWorker.Run,
 		retentionWorker.Run,
 	)
+}
+
+type loggingAgentEventSink struct {
+	logger *slog.Logger
+}
+
+func (sink loggingAgentEventSink) Emit(_ context.Context, event agentevent.AgentEvent) error {
+	if sink.logger == nil || event.Metadata.ToolCallID == "" && event.Metadata.ToolName == "" {
+		return nil
+	}
+	sink.logger.Info("ACP tool update",
+		"assignment_id", event.AssignmentID,
+		"agent_session_id", event.AgentSessionID,
+		"agent_turn_id", event.TurnID,
+		"execution_epoch", event.ExecutionEpoch,
+		"control_revision", event.ControlRevision,
+		"kind", event.Kind,
+		"tool_call_id", event.Metadata.ToolCallID,
+		"tool_name", event.Metadata.ToolName,
+		"status", event.Metadata.Status,
+	)
+	return nil
+}
+
+type loggingOutcomeReconciler struct {
+	delegate agentturn.ExecutionOutcomeReconciler
+	logger   *slog.Logger
+}
+
+func (reconciler loggingOutcomeReconciler) Reconcile(ctx context.Context, request agentturn.OutcomeReconciliation) (store.AgentTurnSettlementObservation, error) {
+	observation, err := reconciler.delegate.Reconcile(ctx, request)
+	if err != nil || reconciler.logger == nil {
+		return observation, err
+	}
+	reconciler.logger.Info("Agent Turn outcome reconciled",
+		"workflow_id", request.Execution.WorkflowID,
+		"assignment_id", request.Execution.Assignment.ID,
+		"agent_session_id", request.Execution.Session.ID,
+		"agent_turn_id", request.Execution.Turn.ID,
+		"execution_epoch", request.Execution.Turn.ExecutionEpoch,
+		"role", request.Execution.Assignment.Role,
+		"status", observation.Completion.Status,
+		"outcome", observation.Outcome,
+		"diagnostic", observation.Diagnostic,
+	)
+	return observation, nil
 }
 
 type runtimeProcessInventory interface {

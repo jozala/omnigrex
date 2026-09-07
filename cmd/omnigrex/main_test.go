@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"math"
 	"os"
@@ -12,11 +14,62 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/workflow"
 )
+
+func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	sink := loggingAgentEventSink{logger: logger}
+	if err := sink.Emit(context.Background(), agentevent.AgentEvent{
+		AssignmentID: "assignment-1", AgentSessionID: "session-1", TurnID: "turn-1", ExecutionEpoch: 2, ControlRevision: 3,
+		Kind: "tool_call_update", Metadata: agentevent.OperationalMetadata{
+			ToolCallID: "call-1", ToolName: "omnigrex_request_review", Status: "completed",
+			Runtime: []byte(`{"content":"credential-sentinel"}`),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := loggingOutcomeReconciler{
+		delegate: mainTestOutcomeReconciler{observation: store.AgentTurnSettlementObservation{
+			Outcome: workflow.TurnOutcomeInfrastructureFailed, Diagnostic: "safe diagnostic",
+			Completion: store.AgentTurnCompletion{Status: store.AgentTurnFailed},
+		}},
+		logger: logger,
+	}
+	_, err := reconciler.Reconcile(context.Background(), agentturn.OutcomeReconciliation{Execution: store.AgentTurnExecutionContext{
+		WorkflowID: "workflow-1",
+		Assignment: store.AgentAssignment{ID: "assignment-1", Role: workflow.RoleDeveloper},
+		Session:    store.AgentSession{ID: "session-1"},
+		Turn:       store.AgentTurn{ID: "turn-1", ExecutionEpoch: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := output.String()
+	for _, want := range []string{"ACP tool update", "omnigrex_request_review", "Agent Turn outcome reconciled", "safe diagnostic"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("operational logs do not contain %q: %s", want, logged)
+		}
+	}
+	if strings.Contains(logged, "credential-sentinel") {
+		t.Fatalf("operational logs contain runtime content: %s", logged)
+	}
+}
+
+type mainTestOutcomeReconciler struct {
+	observation store.AgentTurnSettlementObservation
+}
+
+func (reconciler mainTestOutcomeReconciler) Reconcile(context.Context, agentturn.OutcomeReconciliation) (store.AgentTurnSettlementObservation, error) {
+	return reconciler.observation, nil
+}
 
 func TestReadNonemptyJSONObject(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "provider.json")

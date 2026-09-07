@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"slices"
@@ -135,6 +136,9 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if required := clientFactory.options.RequiredCapabilities; !required.SessionList || !required.SessionResume || !required.SessionLoad {
 		t.Errorf("ACP required capabilities = %#v", required)
 	}
+	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "allow")
+	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "reject")
+	assertRuntimePermissionDecision(t, clientFactory.options, "write file", "edit", "allow")
 	if len(sessions.request.MCPServers) != 1 || !reflect.DeepEqual(sessions.request.MCPServers[0], gateway.registration.Server) {
 		t.Errorf("Session MCP servers = %#v, want registered descriptor", sessions.request.MCPServers)
 	}
@@ -174,12 +178,13 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			}}}
 			engineFactory := &runtimeEngineFactory{operations: &operations}
 			client := &runtimeACPClient{operations: &operations}
+			clientFactory := &runtimeACPFactory{operations: &operations, client: client}
 			sessions := &runtimeSessionPreparer{operations: &operations}
 			launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 				Store:     &runtimeStore{operations: &operations, execution: execution},
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 				Workspace: workspaces, Gateway: gateway, Docker: engineFactory,
-				ACP: &runtimeACPFactory{operations: &operations, client: client}, Sessions: sessions,
+				ACP: clientFactory, Sessions: sessions,
 				Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 			})
 
@@ -211,6 +216,10 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 				})
 			}
 			assertRuntimeMCPPermissions(t, engineFactory.engine.spec.Environment, testCase.role)
+			if testCase.role == workflow.RoleReviewer {
+				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "allow")
+				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "reject")
+			}
 		})
 	}
 }
@@ -1424,6 +1433,23 @@ func assertRuntimeMCPPermissions(t *testing.T, entries []string, role workflow.R
 				t.Errorf("OpenCode permissions expose Role-forbidden tool %s", name)
 			}
 		}
+	}
+}
+
+func assertRuntimePermissionDecision(t *testing.T, options acp.ClientOptions, title, kind, want string) {
+	t.Helper()
+	if options.DecidePermission == nil {
+		t.Fatal("ACP permission decision callback is nil")
+	}
+	decision := options.DecidePermission(context.Background(), acp.PermissionRequest{
+		ToolCall: json.RawMessage(fmt.Sprintf(`{"toolCallId":"tool-1","title":%q,"kind":%q}`, title, kind)),
+		Options: []acp.PermissionOption{
+			{ID: "allow", Name: "Allow once", Kind: "allow_once"},
+			{ID: "reject", Name: "Reject", Kind: "reject_once"},
+		},
+	})
+	if decision.OptionID != want {
+		t.Errorf("ACP permission decision for %s/%s = %#v, want %s", title, kind, decision, want)
 	}
 }
 

@@ -388,6 +388,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	clientOptions := launcher.acpOptions
 	clientOptions.RequiredCapabilities = requiredACPCapabilities(runtimeProfile)
+	// The rendered profile is the sole ACP permission authority for this assignment.
+	clientOptions.DecidePermission = func(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
+		return rendered.DecidePermission(request)
+	}
 	client := launcher.acp.New(transport, clientOptions)
 	if nilInterface(client) {
 		return nil, errors.New("attach ACP client: factory returned nil")

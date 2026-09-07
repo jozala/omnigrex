@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 )
@@ -11,8 +12,9 @@ func (profile *RenderedProfile) DecidePermission(request acp.PermissionRequest) 
 		return selectPermissionOption(request.Options, false)
 	}
 	var toolCall struct {
-		ID   string `json:"toolCallId"`
-		Kind string `json:"kind"`
+		ID    string `json:"toolCallId"`
+		Title string `json:"title"`
+		Kind  string `json:"kind"`
 	}
 	if json.Unmarshal(request.ToolCall, &toolCall) != nil || toolCall.ID == "" {
 		return selectPermissionOption(request.Options, false)
@@ -33,7 +35,11 @@ func (profile *RenderedProfile) DecidePermission(request acp.PermissionRequest) 
 	case "search":
 		allowed = profile.allowsAny("glob", "grep", "list")
 	case "other":
-		allowed = profile.allowsAny("websearch", "codesearch", "todoread", "todowrite", "question", "skill")
+		if strings.HasPrefix(toolCall.Title, "omnigrex_") {
+			_, allowed = profile.runtimeTools[toolCall.Title]
+		} else {
+			allowed = profile.allowsAny("websearch", "codesearch", "todoread", "todowrite", "question", "skill")
+		}
 	}
 	return selectPermissionOption(request.Options, allowed)
 }

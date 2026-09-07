@@ -36,11 +36,12 @@ type Profile struct {
 }
 
 type RenderedProfile struct {
-	role    Role
-	config  []byte
-	environ []string
-	policy  PermissionPolicy
-	session SessionConfiguration
+	role         Role
+	config       []byte
+	environ      []string
+	policy       PermissionPolicy
+	runtimeTools map[string]struct{}
+	session      SessionConfiguration
 }
 
 func Render(role Role, profile Profile) (*RenderedProfile, error) {
@@ -150,11 +151,12 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 	}
 
 	return &RenderedProfile{
-		role:    role,
-		config:  config,
-		environ: environ,
-		policy:  policy,
-		session: SessionConfiguration{Model: profile.Model, Variant: profile.Variant, Mode: agentID},
+		role:         role,
+		config:       config,
+		environ:      environ,
+		policy:       policy,
+		runtimeTools: seenRuntimeTools,
+		session:      SessionConfiguration{Model: profile.Model, Variant: profile.Variant, Mode: agentID},
 	}, nil
 }
 

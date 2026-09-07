@@ -254,3 +254,37 @@ func TestRenderedProfileMediatesACPRequestsFromPermissionPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderedProfileMediatesExactRuntimeToolPermission(t *testing.T) {
+	rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
+		Instructions: "instructions", Model: "provider/model", Steps: 1,
+		Permissions:  opencode.PermissionPolicy{"websearch": opencode.PermissionAllow},
+		RuntimeTools: []string{"omnigrex_get_issue"},
+	})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	options := []acp.PermissionOption{
+		{ID: "allow", Name: "Allow once", Kind: "allow_once"},
+		{ID: "reject", Name: "Reject", Kind: "reject_once"},
+	}
+	for _, test := range []struct {
+		name, title, kind, want string
+	}{
+		{name: "exact MCP tool", title: "omnigrex_get_issue", kind: "other", want: "allow"},
+		{name: "other Role MCP tool", title: "omnigrex_submit_review", kind: "other", want: "reject"},
+		{name: "unknown MCP tool", title: "omnigrex_unknown", kind: "other", want: "reject"},
+		{name: "allowed local other tool", title: "Search the web", kind: "other", want: "allow"},
+		{name: "wrong ACP kind", title: "omnigrex_get_issue", kind: "execute", want: "reject"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := acp.PermissionRequest{
+				ToolCall: json.RawMessage(`{"toolCallId":"tool-1","title":"` + test.title + `","kind":"` + test.kind + `"}`),
+				Options:  options,
+			}
+			if got := rendered.DecidePermission(request); got.OptionID != test.want {
+				t.Errorf("DecidePermission(%q, %q) = %#v, want option %q", test.title, test.kind, got, test.want)
+			}
+		})
+	}
+}
