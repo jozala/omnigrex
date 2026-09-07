@@ -60,6 +60,9 @@ func EmitAgentEvent(
 	if metadata.Status, err = optionalStringField(fields, "status"); err != nil {
 		return err
 	}
+	if metadata.Status == "failed" {
+		metadata.FailureClass = safeToolFailureClass(fields["rawOutput"])
+	}
 	if metadata.ModeID, err = optionalStringField(fields, "currentModeId"); err != nil {
 		return err
 	}
@@ -129,6 +132,43 @@ func safeRuntimeToolName(value string) bool {
 		}
 	}
 	return true
+}
+
+func safeToolFailureClass(raw json.RawMessage) string {
+	var output struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(raw, &output) != nil {
+		return ""
+	}
+	switch output.Error {
+	case "mutation planning failed":
+		return "mutation_planning_failed"
+	case "mutation operation identity conflict":
+		return "mutation_operation_identity_conflict"
+	case "mutation admission is closed":
+		return "mutation_admission_closed"
+	case "mutation was not admitted":
+		return "mutation_not_admitted"
+	case "cached mutation replay failed":
+		return "mutation_replay_failed"
+	case "cached mutation result is unavailable":
+		return "mutation_result_unavailable"
+	case "mutation previously failed":
+		return "mutation_previously_failed"
+	case "mutation outcome is unresolved":
+		return "mutation_outcome_unresolved"
+	case "mutation durable state is unresolved":
+		return "mutation_durable_state_unresolved"
+	case "mutation could not start":
+		return "mutation_not_started"
+	case "mutation failed":
+		return "mutation_failed"
+	case "mutation state is invalid":
+		return "mutation_state_invalid"
+	default:
+		return ""
+	}
 }
 
 func requiredStringField(fields map[string]json.RawMessage, name string) (string, error) {

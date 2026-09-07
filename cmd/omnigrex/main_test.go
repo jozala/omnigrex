@@ -30,8 +30,16 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 	if err := sink.Emit(context.Background(), agentevent.AgentEvent{
 		AssignmentID: "assignment-1", AgentSessionID: "session-1", TurnID: "turn-1", ExecutionEpoch: 2, ControlRevision: 3,
 		Kind: "tool_call_update", Metadata: agentevent.OperationalMetadata{
-			ToolCallID: "call-1", ToolName: "omnigrex_request_review", Status: "completed",
+			ToolCallID: "call-1", ToolName: "omnigrex_request_review", Status: "failed", FailureClass: "mutation_not_admitted",
 			Runtime: []byte(`{"content":"credential-sentinel"}`),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Emit(context.Background(), agentevent.AgentEvent{
+		AssignmentID: "assignment-1", AgentSessionID: "session-1", TurnID: "turn-1",
+		Kind: "tool_call_update", Metadata: agentevent.OperationalMetadata{
+			ToolCallID: "successful-call", ToolName: "omnigrex_get_issue", Status: "completed",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -53,13 +61,16 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	logged := output.String()
-	for _, want := range []string{"ACP tool update", "omnigrex_request_review", "Agent Turn outcome reconciled", "safe diagnostic"} {
+	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted", "Agent Turn outcome reconciled", "safe diagnostic"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("operational logs do not contain %q: %s", want, logged)
 		}
 	}
 	if strings.Contains(logged, "credential-sentinel") {
 		t.Fatalf("operational logs contain runtime content: %s", logged)
+	}
+	if strings.Contains(logged, "successful-call") {
+		t.Fatalf("INFO operational logs contain successful ACP lifecycle noise: %s", logged)
 	}
 }
 

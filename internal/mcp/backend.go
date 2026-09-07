@@ -137,6 +137,7 @@ type publicationTurn struct {
 
 type publicationPlan struct {
 	turn        publicationTurn
+	toolName    string
 	operationID string
 }
 
@@ -276,7 +277,7 @@ func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Inv
 	metadata := invocation.Mutation
 	if tool.Name == ToolPublishChanges || tool.Name == ToolOpenPR || tool.Name == ToolRequestReview {
 		turnKey := publicationTurnKey(invocation.Scope)
-		planKey := publicationPlan{turn: turnKey, operationID: invocation.OperationID}
+		planKey := publicationPlan{turn: turnKey, toolName: invocation.Name, operationID: invocation.OperationID}
 		backend.publicationMutex.Lock()
 		head, exists := backend.plannedHeads[planKey]
 		if !exists {
@@ -390,7 +391,7 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 		backend.restoredMutations[turnKey] = make(map[string][sha256.Size]byte)
 	}
 	backend.restoredMutations[turnKey][source.ID] = fingerprint
-	backend.plannedHeads[publicationPlan{turn: turnKey, operationID: source.OperationID}] = source.ExpectedSHA
+	backend.plannedHeads[publicationPlan{turn: turnKey, toolName: source.ToolName, operationID: source.OperationID}] = source.ExpectedSHA
 	return nil
 }
 

@@ -1377,10 +1377,10 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 	}
 	var reservation MutationReservation
 	err = store.withLockedAgentTurnLease(ctx, lease, "reserve mutation", func(tx pgx.Tx, turn lockedTurn) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`, turn.operationLineageID, spec.OperationID); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))`, turn.operationLineageID, spec.ToolName, spec.OperationID); err != nil {
 			return err
 		}
-		existing, err := getMutationByOperation(ctx, tx, turn.operationLineageID, spec.OperationID)
+		existing, err := getMutationByOperation(ctx, tx, turn.operationLineageID, spec.ToolName, spec.OperationID)
 		if err == nil {
 			if existing.AgentTurnID == turn.ID && !sameMutationDefinition(existing, spec) ||
 				existing.AgentTurnID != turn.ID && !sameAgentMutationDefinition(existing, spec) {
@@ -1434,10 +1434,10 @@ func (store *Store) AcknowledgeMutationReplay(ctx context.Context, lease AgentTu
 	}
 	spec.Request = request
 	return store.withLockedAgentTurnLease(ctx, lease, "acknowledge mutation replay", func(tx pgx.Tx, turn lockedTurn) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`, turn.operationLineageID, spec.OperationID); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))`, turn.operationLineageID, spec.ToolName, spec.OperationID); err != nil {
 			return err
 		}
-		source, err := getMutationByOperation(ctx, tx, turn.operationLineageID, spec.OperationID)
+		source, err := getMutationByOperation(ctx, tx, turn.operationLineageID, spec.ToolName, spec.OperationID)
 		if err != nil {
 			return err
 		}
@@ -2399,9 +2399,9 @@ SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, turnID, sourceTurnID).Sc
 	return nil
 }
 
-func getMutationByOperation(ctx context.Context, tx pgx.Tx, operationLineageID, operationID string) (MutationReservation, error) {
+func getMutationByOperation(ctx context.Context, tx pgx.Tx, operationLineageID, toolName, operationID string) (MutationReservation, error) {
 	return scanMutation(tx.QueryRow(ctx, mutationSelect+`
-WHERE operation_lineage_id = $1 AND operation_id = $2 AND kind = 'MUTATION'`, operationLineageID, operationID))
+WHERE operation_lineage_id = $1 AND tool_name = $2 AND operation_id = $3 AND kind = 'MUTATION'`, operationLineageID, toolName, operationID))
 }
 
 func getMutationByID(ctx context.Context, tx pgx.Tx, mutationID string) (MutationReservation, error) {

@@ -423,11 +423,17 @@ type loggingAgentEventSink struct {
 	logger *slog.Logger
 }
 
-func (sink loggingAgentEventSink) Emit(_ context.Context, event agentevent.AgentEvent) error {
-	if sink.logger == nil || event.Metadata.ToolCallID == "" && event.Metadata.ToolName == "" {
+func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.AgentEvent) error {
+	if sink.logger == nil || event.Metadata.ToolCallID == "" {
 		return nil
 	}
-	sink.logger.Info("ACP tool update",
+	level := slog.LevelDebug
+	message := "ACP tool update"
+	if event.Metadata.Status == "failed" && strings.HasPrefix(event.Metadata.ToolName, "omnigrex_") {
+		level = slog.LevelWarn
+		message = "ACP MCP tool failed"
+	}
+	sink.logger.Log(ctx, level, message,
 		"assignment_id", event.AssignmentID,
 		"agent_session_id", event.AgentSessionID,
 		"agent_turn_id", event.TurnID,
@@ -437,6 +443,7 @@ func (sink loggingAgentEventSink) Emit(_ context.Context, event agentevent.Agent
 		"tool_call_id", event.Metadata.ToolCallID,
 		"tool_name", event.Metadata.ToolName,
 		"status", event.Metadata.Status,
+		"failure_class", event.Metadata.FailureClass,
 	)
 	return nil
 }

@@ -542,9 +542,17 @@ func TestAgentTurnMutationOperationIDIsScopedToLineage(t *testing.T) {
 	if err != nil || retry.ID != first.ID {
 		t.Fatalf("identical ReserveMutation() retry = (%#v, %v), want reservation %s", retry, err, first.ID)
 	}
+	crossTool := spec
+	crossTool.ToolName = "comment_on_pull_request"
+	crossToolReservation, err := databases[0].ReserveMutation(ctx, firstLease, crossTool)
+	if err != nil {
+		t.Fatalf("ReserveMutation() with same caller operation for another tool error = %v", err)
+	}
+	if crossToolReservation.ID == first.ID || crossToolReservation.OperationID != first.OperationID {
+		t.Fatalf("cross-tool reservation = %#v, want distinct reservation with shared caller operation", crossToolReservation)
+	}
 
 	conflicts := []store.MutationSpec{
-		{OperationID: spec.OperationID, ToolName: "comment_on_pull_request", Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA},
 		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: json.RawMessage(`{"body":"changed"}`), ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA},
 		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: "issue-2", ExpectedSHA: spec.ExpectedSHA},
 		{OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, ExternalService: spec.ExternalService, ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: "different-head"},

@@ -34,6 +34,7 @@ type OperationalMetadata struct {
 	ToolName              string
 	ToolKind              string
 	Status                string
+	FailureClass          string
 	ModeID                string
 	UsedTokens            *uint64
 	ContextSize           *uint64

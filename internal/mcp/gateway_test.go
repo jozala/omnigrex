@@ -219,7 +219,7 @@ func TestMutationIsDurablySequencedAndSuccessfulRetryUsesCachedResult(t *testing
 	}
 }
 
-func TestSameTurnPublishAndOpenPullRequestReservationsUseLatestPublishedHead(t *testing.T) {
+func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	firstHead := "1123456789abcdef0123456789abcdef01234567"
 	secondHead := "2123456789abcdef0123456789abcdef01234567"
@@ -249,10 +249,10 @@ func TestSameTurnPublishAndOpenPullRequestReservationsUseLatestPublishedHead(t *
 
 	requests := []string{
 		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"publish-1","message":"First"}}}`,
-		`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"publish-2","message":"Second"}}}`,
+		`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"shared","message":"Second"}}}`,
 		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"publish-1","message":"First"}}}`,
-		`{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"open_pr","arguments":{"operation_id":"open-1","title":"Changes","body":"Ready"}}}`,
-		`{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"request_review","arguments":{"operation_id":"request-review-1","summary":"Ready"}}}`,
+		`{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"open_pr","arguments":{"operation_id":"shared","title":"Changes","body":"Ready"}}}`,
+		`{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"request_review","arguments":{"operation_id":"shared","summary":"Ready"}}}`,
 	}
 	for _, body := range requests {
 		response := httptest.NewRecorder()
@@ -282,7 +282,7 @@ func TestSameTurnPublishAndOpenPullRequestReservationsUseLatestPublishedHead(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if api.openRequest.Marker != wantMarker || strings.Contains(api.openRequest.Marker, "open-1") {
+	if api.openRequest.Marker != wantMarker || strings.Contains(api.openRequest.Marker, "shared") {
 		t.Fatalf("open Pull Request marker = %q, want reservation identity only", api.openRequest.Marker)
 	}
 	if len(publisher.publications) != 2 || strings.Contains(publisher.publications[0].Message, "publish-1") ||
@@ -1589,14 +1589,15 @@ func (fake *fakeStore) ReserveMutation(_ context.Context, lease store.AgentTurnL
 	if fake.mutations == nil {
 		fake.mutations = make(map[string]store.MutationReservation)
 	}
-	if existing, ok := fake.mutations[spec.OperationID]; ok {
+	key := spec.ToolName + "\x00" + spec.OperationID
+	if existing, ok := fake.mutations[key]; ok {
 		return existing, nil
 	}
 	reservation := store.MutationReservation{
 		ID: testMutationID(len(fake.mutations) + 1), AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
 		OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, State: store.MutationReserved,
 	}
-	fake.mutations[spec.OperationID] = reservation
+	fake.mutations[key] = reservation
 	return reservation, fake.reserveErr
 }
 
@@ -1678,7 +1679,12 @@ func (fake *fakeStore) MarkMutationUnknown(ctx context.Context, _ store.AgentTur
 func (fake *fakeStore) mutationState(operationID string) store.MutationState {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
-	return fake.mutations[operationID].State
+	for _, mutation := range fake.mutations {
+		if mutation.OperationID == operationID {
+			return mutation.State
+		}
+	}
+	return ""
 }
 
 func (fake *fakeStore) setMutationState(mutationID string, state store.MutationState) error {

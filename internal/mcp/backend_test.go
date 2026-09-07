@@ -646,6 +646,39 @@ func TestProductionBackendPerformsInternalWorkflowMutationsWithDurableJSON(t *te
 	}
 }
 
+func TestProductionBackendScopesSharedCallerOperationIDByTool(t *testing.T) {
+	publishedHead := "4123456789abcdef0123456789abcdef01234567"
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: &backendPublisher{results: []workspace.PublicationResult{{Head: publishedHead, Changed: true}}},
+		Workflow:  &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+	publish := mcp.Invocation{
+		Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"shared","message":"Publish"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "shared",
+	}
+	publishPlan, err := backend.PlanMutation(context.Background(), publish)
+	if err != nil || publishPlan.ExpectedSHA != scope.HeadSHA {
+		t.Fatalf("publish plan = (%#v, %v)", publishPlan, err)
+	}
+	if _, err := backend.Execute(context.Background(), publish); err != nil {
+		t.Fatalf("publish error = %v", err)
+	}
+	open := mcp.Invocation{
+		Name: mcp.ToolOpenPR, Arguments: json.RawMessage(`{"operation_id":"shared","title":"Open","body":"Body"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "shared",
+	}
+	openPlan, err := backend.PlanMutation(context.Background(), open)
+	if err != nil || openPlan.ExpectedSHA != publishedHead {
+		t.Fatalf("open Pull Request plan = (%#v, %v), want head %s", openPlan, err, publishedHead)
+	}
+}
+
 func TestLedgerWorkflowMutationsReturnTurnSettlementIntents(t *testing.T) {
 	workflowMutations := mcp.LedgerWorkflowMutations{}
 	scope := productionToolScope(workflow.RoleDeveloper)

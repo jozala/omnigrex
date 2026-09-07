@@ -117,6 +117,38 @@ func TestEmitAgentEventUsesOnlySafeRuntimeToolTitleAsMissingToolName(t *testing.
 	}
 }
 
+func TestEmitAgentEventClassifiesOnlyKnownToolFailures(t *testing.T) {
+	for _, test := range []struct {
+		errorMessage string
+		want         string
+	}{
+		{errorMessage: "mutation operation identity conflict", want: "mutation_operation_identity_conflict"},
+		{errorMessage: "credential-sentinel database failure", want: ""},
+	} {
+		sink := &capturingAgentEventSink{}
+		err := acp.EmitAgentEvent(context.Background(), sink, agentevent.Context{
+			AssignmentID: "assignment-1", AgentSessionID: "agent-session-uuid",
+			ACPSessionID: "opaque-acp-session-id", TurnID: "turn-1",
+		}, time.Now(), acp.SessionUpdate{
+			SessionID: "opaque-acp-session-id",
+			Update:    json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","title":"omnigrex_open_pr","status":"failed","rawOutput":{"error":` + strconv.Quote(test.errorMessage) + `}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sink.events[0].Metadata.FailureClass; got != test.want {
+			t.Errorf("failure class for %q = %q, want %q", test.errorMessage, got, test.want)
+		}
+		encoded, marshalErr := json.Marshal(sink.events[0])
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if strings.Contains(string(encoded), test.errorMessage) {
+			t.Errorf("AgentEvent exposes raw failure %q: %s", test.errorMessage, encoded)
+		}
+	}
+}
+
 func TestEmitAgentEventRejectsIncompleteContext(t *testing.T) {
 	err := acp.EmitAgentEvent(context.Background(), agentevent.NoopSink{}, agentevent.Context{
 		AgentSessionID: "agent-session-uuid",

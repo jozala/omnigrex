@@ -376,7 +376,7 @@ CREATE TABLE schema_migrations (
 		}
 	}
 	if err := migrations.Run(ctx, pool); err != nil {
-		t.Fatalf("migration 000012 from current schema error = %v", err)
+		t.Fatalf("remaining migrations from current schema error = %v", err)
 	}
 	var version, tables int
 	if err := pool.QueryRow(ctx, `
@@ -384,7 +384,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
        (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'runtime_profile_compatibility_results')`).Scan(&version, &tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 12 || tables != 1 {
+	if version != 13 || tables != 1 {
 		t.Fatalf("migrated current schema = version %d, compatibility tables %d", version, tables)
 	}
 }
