@@ -101,7 +101,14 @@ func runDoctorCommand(ctx context.Context, args []string, getenv func(string) st
 	}
 	settings, err := config.Load(getenv)
 	if err != nil {
-		_, _ = fmt.Fprintf(stdout, "FAIL configuration: %v\n", err)
+		problems := []error{err}
+		var validation *config.ValidationError
+		if errors.As(err, &validation) {
+			problems = validation.Problems()
+		}
+		for _, problem := range problems {
+			_, _ = fmt.Fprintf(stdout, "FAIL configuration: %v\n", problem)
+		}
 		return 1
 	}
 	_, _ = fmt.Fprintln(stdout, "PASS configuration")

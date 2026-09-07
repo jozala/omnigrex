@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 
@@ -73,6 +74,26 @@ func TestParseInfersReviewerIdentityAndAcceptsEveryKnownTool(t *testing.T) {
 	}
 	if profile.Variant() != "" || len(profile.Permissions()) != 15 {
 		t.Errorf("reviewer optional values = (%q, %#v)", profile.Variant(), profile.Permissions())
+	}
+}
+
+func TestRepositoryAgentProfilesAreValid(t *testing.T) {
+	for _, name := range []agentprofile.Name{agentprofile.Developer, agentprofile.Reviewer} {
+		path := "../../.omnigrex/team/" + string(name) + ".md"
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		parsed, err := agentprofile.Parse(name, content)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if parsed.Runtime() != "opencode-acp/v1" || parsed.Model() != "opencode-go/muse-spark-1.3-contributor" {
+			t.Errorf("%s runtime/model = (%q, %q)", path, parsed.Runtime(), parsed.Model())
+		}
+		if name == agentprofile.Reviewer && (parsed.Permission("edit") != agentprofile.Deny || parsed.Permission("patch") != agentprofile.Deny) {
+			t.Errorf("%s permits OpenCode editing tools", path)
+		}
 	}
 }
 

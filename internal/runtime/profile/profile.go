@@ -287,6 +287,11 @@ func IsExactRegistryImage(image string) bool {
 	return registryImagePattern.MatchString(image)
 }
 
+// IsSupportedPlatform reports whether platform is supported by opencode-acp/v1.
+func IsSupportedPlatform(platform Platform) bool {
+	return platform.OS == "linux" && (platform.Arch == "arm64" || platform.Arch == "amd64")
+}
+
 func cloneProfile(profile Profile) Profile {
 	profile.contract = cloneContract(profile.contract)
 	return profile
@@ -308,7 +313,7 @@ func validate(contract Contract) error {
 	if !registryImagePattern.MatchString(contract.Image) {
 		return invalid("image must be a registry name with an exact sha256 digest")
 	}
-	if contract.Platform.OS != "linux" || (contract.Platform.Arch != "arm64" && contract.Platform.Arch != "amd64") {
+	if !IsSupportedPlatform(contract.Platform) {
 		return invalid("unsupported platform %q/%q", contract.Platform.OS, contract.Platform.Arch)
 	}
 	if contract.User != (User{UID: 10001, GID: 10001}) {

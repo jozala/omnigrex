@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -306,6 +307,86 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Load() error disclosed credentials: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadReportsAllConfigurationProblemsInOrder(t *testing.T) {
+	got, err := config.Load(environment(map[string]string{
+		"OMNIGREX_DATABASE_URL":                      "not-a-database-url",
+		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE":     "relative/password",
+		"OMNIGREX_WORKSPACE_ROOT":                    "relative/workspaces",
+		"OMNIGREX_MCP_ENDPOINT_URL":                  "not-an-endpoint",
+		"OMNIGREX_MCP_ADDR":                          "   ",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":             "omnigrex/opencode:latest",
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":          "darwin/s390x",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "not-an-id",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "also-not-an-id",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "relative.pem",
+		"OMNIGREX_DOCKER_AGENT_NETWORK":              "   ",
+		"OMNIGREX_READINESS_TIMEOUT":                 "eventually",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":     "0s",
+		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":      "many",
+	}))
+	if !reflect.DeepEqual(got, config.Config{}) {
+		t.Fatalf("Load() returned partial configuration: %#v", got)
+	}
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("Load() error = %T %v, want ValidationError", err, err)
+	}
+	want := []string{
+		"OMNIGREX_DATABASE_URL must be a PostgreSQL URL",
+		"OMNIGREX_DATABASE_PASSWORD_SECRET_FILE must be an absolute path",
+		"OMNIGREX_WORKSPACE_ROOT must be a clean absolute path",
+		"OMNIGREX_MCP_ENDPOINT_URL must be an HTTP URL ending at /mcp without credentials, query, or fragment",
+		"OMNIGREX_MCP_ADDR must not be blank",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE must be a registry name with an exact sha256 digest",
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM must be a supported linux platform",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID must be a positive integer",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID must be a positive integer",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE must be an absolute path",
+		"OMNIGREX_DOCKER_AGENT_NETWORK must not be blank",
+		"OMNIGREX_READINESS_TIMEOUT must be a valid duration",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be positive",
+		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT must be a positive integer",
+	}
+	problems := validation.Problems()
+	if len(problems) != len(want) {
+		t.Fatalf("Problems() = %v, want %v", problems, want)
+	}
+	for index, problem := range problems {
+		if problem.Error() != want[index] {
+			t.Errorf("Problems()[%d] = %q, want %q", index, problem, want[index])
+		}
+		if strings.Contains(problem.Error(), "eventually") {
+			t.Errorf("Problems()[%d] disclosed rejected environment value", index)
+		}
+	}
+	problems[0] = errors.New("mutated")
+	if validation.Problems()[0].Error() != want[0] {
+		t.Fatal("Problems() exposed mutable internal state")
+	}
+}
+
+func TestLoadDoesNotReportDependentProblemsForInvalidInputs(t *testing.T) {
+	_, err := config.Load(environment(map[string]string{
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":                   "invalid",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                    "invalid",
+		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":     "invalid",
+		"OMNIGREX_AGENT_TURN_PREPARATION_HEARTBEAT_INTERVAL": "1h",
+		"OMNIGREX_AGENT_TURN_EXECUTION_LEASE_DURATION":       "invalid",
+		"OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL":   "1h",
+		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":            "invalid",
+		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":        "1h",
+	}))
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("Load() error = %T %v, want ValidationError", err, err)
+	}
+	for _, problem := range validation.Problems() {
+		if strings.Contains(problem.Error(), "IDs must be distinct") || strings.Contains(problem.Error(), "must be shorter than") {
+			t.Errorf("Load() reported dependent problem for invalid inputs: %v", problem)
+		}
 	}
 }
 

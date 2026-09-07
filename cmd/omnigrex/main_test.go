@@ -63,12 +63,23 @@ func TestDoctorCommandRejectsInvalidRepositoryWithoutRunningChecks(t *testing.T)
 func TestDoctorCommandReportsInvalidConfigurationWithoutRunningChecks(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	called := false
-	exitCode := runDoctorCommand(context.Background(), []string{"--repository", "jozala/omnigrex"}, func(string) string { return "" }, &stdout, &stderr,
+	exitCode := runDoctorCommand(context.Background(), []string{"--repository", "jozala/omnigrex"}, func(name string) string {
+		switch name {
+		case "OMNIGREX_DATABASE_URL":
+			return "not-a-database-url"
+		case "OMNIGREX_GITHUB_DEVELOPER_APP_ID":
+			return "not-an-id"
+		default:
+			return doctorTestEnvironment(name)
+		}
+	}, &stdout, &stderr,
 		func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error) {
 			called = true
 			return nil, nil
 		})
-	if exitCode != 1 || called || !strings.Contains(stdout.String(), "FAIL configuration") {
+	if exitCode != 1 || called || !strings.Contains(stdout.String(), "FAIL configuration: OMNIGREX_DATABASE_URL must be a PostgreSQL URL") ||
+		!strings.Contains(stdout.String(), "FAIL configuration: OMNIGREX_GITHUB_DEVELOPER_APP_ID must be a positive integer") ||
+		strings.Contains(stdout.String(), "PASS configuration") {
 		t.Fatalf("exit code = %d, called = %t, stdout = %s", exitCode, called, stdout.String())
 	}
 }

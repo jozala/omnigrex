@@ -13,6 +13,8 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Project concept](./project-concept.md)
 - [First-iteration specification](./docs/first-iteration.md)
 - [Implementation plan](./docs/implementation-plan.md)
+- [Operator guide](./docs/operator-guide.md)
+- [Dogfooding record](./docs/dogfooding.md)
 - [Domain language](./CONTEXT.md)
 - [Architecture decisions](./docs/adr/)
 
