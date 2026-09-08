@@ -289,6 +289,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "Workflow effect retry above maximum", key: "OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY", value: "8760h1us"},
 		{name: "assignment retention syntax", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "later"},
 		{name: "assignment retention value", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "0s"},
+		{name: "assignment retention below Store precision", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "1ns"},
+		{name: "assignment retention above maximum", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "8760h1us"},
 		{name: "Agent Turn concurrency syntax", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "many"},
 		{name: "Agent Turn concurrency value", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "0"},
 		{name: "readiness timeout syntax", key: "OMNIGREX_READINESS_TIMEOUT", value: "eventually"},
@@ -347,7 +349,7 @@ func TestLoadReportsAllConfigurationProblemsInOrder(t *testing.T) {
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE must be an absolute path",
 		"OMNIGREX_DOCKER_AGENT_NETWORK must not be blank",
 		"OMNIGREX_READINESS_TIMEOUT must be a valid duration",
-		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be positive",
+		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be between one microsecond and 8760h0m0s",
 		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT must be a positive integer",
 	}
 	problems := validation.Problems()

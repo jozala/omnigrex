@@ -723,7 +723,7 @@ WHERE id = $1`, fixture.sessionID); err != nil {
 	closeAndSettleWithoutTurn(t, database, ctx, fixture, 73,
 		"51000000-0000-4000-8000-000000000731", "closure-prepared", "retention-prepared",
 		observedAt, observedAt.Add(time.Hour))
-	applyReopen(t, database, ctx, fixture, 73, "51000000-0000-4000-8000-000000000732")
+	applyReopen(t, database, ctx, 73, "51000000-0000-4000-8000-000000000732")
 	applyTrigger(t, database, ctx, fixture, 73,
 		"51000000-0000-4000-8000-000000000733", "52000000-0000-4000-8000-000000000733")
 
@@ -772,7 +772,7 @@ func TestReopenBeforeCollectionAuthorizationCancelsLeasedGenerationAndRetainedTr
 	if err != nil || lease == nil {
 		t.Fatalf("claim collection Job = (%#v, %v)", lease, err)
 	}
-	applyReopen(t, database, ctx, fixture, 32, "51000000-0000-4000-8000-000000000322")
+	applyReopen(t, database, ctx, 32, "51000000-0000-4000-8000-000000000322")
 	if _, err := database.AuthorizeAssignmentCollection(ctx, *lease); !errors.Is(err, store.ErrAssignmentCollectionFenceLost) {
 		t.Errorf("authorize cancelled lease error = %v, want fence lost", err)
 	}
@@ -841,9 +841,51 @@ func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollector
 		t.Errorf("generic collection completion error = %v", err)
 	}
 
-	reopenErr := applyReopenError(databases[1], ctx, fixture, 33, "51000000-0000-4000-8000-000000000332")
-	if !errors.Is(reopenErr, store.ErrAssignmentCollectionIrrevocable) {
-		t.Errorf("reopen after authorization error = %v, want irrevocable", reopenErr)
+	reopenDeliveryID := "51000000-0000-4000-8000-000000000332"
+	reopenApplication, reopenErr := applyReopenApplication(databases[1], ctx, 33, reopenDeliveryID)
+	if reopenErr != nil || reopenApplication.Status != store.NormalizedEventPending ||
+		reopenApplication.State != workflow.StateClosed {
+		t.Fatalf("reopen after authorization = (%#v, %v), want durable pending event on closed Workflow", reopenApplication, reopenErr)
+	}
+	var webhookStatus, normalizedStatus string
+	var normalizedAttempts int
+	if err := pool.QueryRow(ctx, `
+SELECT delivery.status, event.status, event.attempt_count
+FROM webhook_deliveries AS delivery
+JOIN normalized_events AS event USING (delivery_id)
+WHERE delivery.delivery_id = $1`, reopenDeliveryID).Scan(&webhookStatus, &normalizedStatus, &normalizedAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if webhookStatus != "PROCESSED" || normalizedStatus != "PENDING" || normalizedAttempts != 0 {
+		t.Fatalf("deferred reopen durability = webhook %s, normalized event %s/%d", webhookStatus, normalizedStatus, normalizedAttempts)
+	}
+	reopenFactory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		return store.WorkflowLocator{RepositoryID: 33, IssueID: 33, IssueNumber: 33}, func(snapshot workflow.Snapshot) workflow.Decision {
+			return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: workflow.EventMetadata{
+				ID: record.DeliveryID, ObservedAt: record.CreatedAt, WorkItem: snapshot.WorkItem,
+				ExpectedRevision: snapshot.Revision,
+			}})
+		}, nil
+	}
+	if application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, reopenFactory); err != nil || applied {
+		t.Fatalf("drain reopen during collection = (%#v, %t, %v), want no eligible event", application, applied, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT attempt_count FROM normalized_events WHERE delivery_id = $1`, reopenDeliveryID).Scan(&normalizedAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if normalizedAttempts != 0 {
+		t.Fatalf("deferred reopen attempts = %d, want zero", normalizedAttempts)
+	}
+	triggerDeliveryID := "51000000-0000-4000-8000-000000000334"
+	triggerAttemptID := "52000000-0000-4000-8000-000000000334"
+	triggerDelivery := workflowDelivery(triggerDeliveryID)
+	triggerDelivery.RepositoryID, triggerDelivery.IssueID, triggerDelivery.IssueNumber = 33, 33, 33
+	triggerDelivery.RepositoryOwner, triggerDelivery.RepositoryName = "owner", "repo"
+	if inserted, err := databases[0].InsertWebhookDelivery(ctx, triggerDelivery); err != nil || !inserted {
+		t.Fatalf("insert trigger behind deferred reopen = (%t, %v)", inserted, err)
+	}
+	if claim, err := databases[0].ClaimWebhookDelivery(ctx, "blocked-trigger-test", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim trigger while reopen is unresolved = (%#v, %v), want no claim", claim, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, first.ID); err != nil {
 		t.Fatal(err)
@@ -916,8 +958,26 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 			sessionDeletedAt, sessions, generationStatus, turns, attempts, events)
 	}
 
-	applyReopen(t, databases[0], ctx, fixture, 33, "51000000-0000-4000-8000-000000000333")
-	applyTrigger(t, databases[0], ctx, fixture, 33, "51000000-0000-4000-8000-000000000334", "52000000-0000-4000-8000-000000000334")
+	reopened, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, reopenFactory)
+	if err != nil || !applied || reopened.Status != store.NormalizedEventCompleted || reopened.State != workflow.StateDormant {
+		t.Fatalf("apply deferred reopen = (%#v, %t, %v), want completed dormant Workflow", reopened, applied, err)
+	}
+	triggerClaim, err := databases[0].ClaimWebhookDelivery(ctx, "post-collection-trigger-test", time.Minute)
+	if err != nil || triggerClaim == nil || triggerClaim.DeliveryID != triggerDeliveryID {
+		t.Fatalf("claim trigger after deferred reopen = (%#v, %v)", triggerClaim, err)
+	}
+	triggerApplication, err := databases[0].CompleteWebhookTransition(ctx, triggerClaim.DeliveryID, triggerClaim.ClaimToken,
+		normalizedPayload(triggerClaim.DeliveryID, "trigger"),
+		store.WorkflowLocator{RepositoryID: 33, IssueID: 33, IssueNumber: 33},
+		func(snapshot workflow.Snapshot) workflow.Decision {
+			return workflow.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: workflow.EventMetadata{
+				ID: triggerClaim.DeliveryID, ObservedAt: triggerClaim.ReceivedAt, WorkItem: snapshot.WorkItem,
+				ExpectedRevision: snapshot.Revision,
+			}, AttemptID: triggerAttemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
+		})
+	if err != nil || triggerApplication.State != workflow.StateDeveloping {
+		t.Fatalf("apply trigger after deferred reopen = (%#v, %v)", triggerApplication, err)
+	}
 	preparationLease := claimPreparationJob(t, databases[0], ctx)
 	var preparationPayload struct {
 		Mode workflow.AssignmentGeneration `json:"mode"`
@@ -1058,6 +1118,7 @@ func TestConcurrentAssignmentCollectionAuthorizationAndReopenHasOneWinner(t *tes
 	}
 
 	start := make(chan struct{})
+	var reopenApplication store.WorkflowApplication
 	var authorizationErr, reopenErr error
 	var wait sync.WaitGroup
 	wait.Add(2)
@@ -1069,18 +1130,22 @@ func TestConcurrentAssignmentCollectionAuthorizationAndReopenHasOneWinner(t *tes
 	go func() {
 		defer wait.Done()
 		<-start
-		reopenErr = applyReopenError(databases[1], ctx, fixture, 34, "51000000-0000-4000-8000-000000000342")
+		reopenApplication, reopenErr = applyReopenApplication(databases[1], ctx, 34, "51000000-0000-4000-8000-000000000342")
 	}()
 	close(start)
 	wait.Wait()
-	if authorizationErr == nil && !errors.Is(reopenErr, store.ErrAssignmentCollectionIrrevocable) {
-		t.Fatalf("authorization won but reopen error = %v", reopenErr)
+	if reopenErr != nil {
+		t.Fatalf("concurrent reopen error = %v", reopenErr)
 	}
-	if reopenErr == nil && !errors.Is(authorizationErr, store.ErrAssignmentCollectionFenceLost) {
-		t.Fatalf("reopen won but authorization error = %v", authorizationErr)
+	if authorizationErr == nil && (reopenApplication.Status != store.NormalizedEventPending || reopenApplication.State != workflow.StateClosed) {
+		t.Fatalf("authorization won but reopen application = %#v", reopenApplication)
 	}
-	if (authorizationErr == nil) == (reopenErr == nil) {
-		t.Fatalf("race outcomes = authorize %v, reopen %v; want exactly one winner", authorizationErr, reopenErr)
+	if errors.Is(authorizationErr, store.ErrAssignmentCollectionFenceLost) &&
+		(reopenApplication.Status != store.NormalizedEventCompleted || reopenApplication.State != workflow.StateDormant) {
+		t.Fatalf("reopen won but application = %#v", reopenApplication)
+	}
+	if authorizationErr != nil && !errors.Is(authorizationErr, store.ErrAssignmentCollectionFenceLost) {
+		t.Fatalf("collection authorization error = %v", authorizationErr)
 	}
 }
 
@@ -1127,25 +1192,31 @@ func closeAndSettleWithoutTurn(t *testing.T, database *store.Store, ctx context.
 	return settlement
 }
 
-func applyReopen(t *testing.T, database *store.Store, ctx context.Context, fixture agentFixture, number int, deliveryID string) {
+func applyReopen(t *testing.T, database *store.Store, ctx context.Context, number int, deliveryID string) {
 	t.Helper()
-	if err := applyReopenError(database, ctx, fixture, number, deliveryID); err != nil {
+	if err := applyReopenError(database, ctx, number, deliveryID); err != nil {
 		t.Fatalf("reopen Workflow: %v", err)
 	}
 }
 
-func applyReopenError(database *store.Store, ctx context.Context, fixture agentFixture, number int, deliveryID string) error {
+func applyReopenError(database *store.Store, ctx context.Context, number int, deliveryID string) error {
+	_, err := applyReopenApplication(database, ctx, number, deliveryID)
+	return err
+}
+
+func applyReopenApplication(database *store.Store, ctx context.Context, number int, deliveryID string) (store.WorkflowApplication, error) {
 	delivery := workflowDelivery(deliveryID)
+	delivery.EventName, delivery.Action = "issues", "reopened"
 	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = int64(number), int64(number), int64(number)
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
-		return err
+		return store.WorkflowApplication{}, err
 	}
 	claim, err := database.ClaimWebhookDelivery(ctx, "reopen-test", time.Minute)
 	if err != nil || claim == nil {
-		return fmt.Errorf("claim reopen delivery: %w", err)
+		return store.WorkflowApplication{}, fmt.Errorf("claim reopen delivery: %w", err)
 	}
-	_, err = database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+	return database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "reopened"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
 		func(snapshot workflow.Snapshot) workflow.Decision {
@@ -1154,7 +1225,6 @@ func applyReopenError(database *store.Store, ctx context.Context, fixture agentF
 				ExpectedRevision: snapshot.Revision,
 			}})
 		})
-	return err
 }
 
 func applyTrigger(t *testing.T, database *store.Store, ctx context.Context, fixture agentFixture, number int, deliveryID, attemptID string) {

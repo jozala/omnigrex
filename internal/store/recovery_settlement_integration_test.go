@@ -384,24 +384,30 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	}
 	assertRecoverySettlement(t, pool, ctx, lease, recovery, completed, mutationLease, workflow.ReasonInfrastructureRetriesExhausted, 0, 0)
 	var state, workflowReason, attemptReason string
-	var handoffs, labels int
+	var handoffs, labels, currentAssignments, waitingAssignments int
 	if err := pool.QueryRow(ctx, `
 SELECT workflow.status, workflow.human_handoff_reason, attempt.human_handoff_reason,
        count(*) FILTER (WHERE job.kind = 'PUBLISH_HUMAN_HANDOFF'),
-       count(*) FILTER (WHERE job.kind = 'RECONCILE_GITHUB_LABELS')
+	       count(*) FILTER (WHERE job.kind = 'RECONCILE_GITHUB_LABELS'),
+	       (SELECT count(*) FROM agent_assignments
+	        WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL),
+	       (SELECT count(*) FROM agent_assignments
+	        WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL)
 FROM workflows AS workflow
 JOIN workflow_attempts AS attempt ON attempt.id = $2
 LEFT JOIN jobs AS job ON job.agent_turn_settlement_id = $3
 WHERE workflow.id = $1
 GROUP BY workflow.status, workflow.human_handoff_reason, attempt.human_handoff_reason`,
 		lease.JobLease.WorkflowID, lease.WorkflowAttemptID, completed.SettlementID).Scan(
-		&state, &workflowReason, &attemptReason, &handoffs, &labels,
+		&state, &workflowReason, &attemptReason, &handoffs, &labels, &currentAssignments, &waitingAssignments,
 	); err != nil {
 		t.Fatal(err)
 	}
 	wantReason := string(workflow.ReasonInfrastructureRetriesExhausted)
-	if state != string(workflow.StateNeedsHuman) || workflowReason != wantReason || attemptReason != wantReason || handoffs != 1 || labels != 1 {
-		t.Errorf("Human Handoff = %s/%s/%s with %d handoffs and %d labels", state, workflowReason, attemptReason, handoffs, labels)
+	if state != string(workflow.StateNeedsHuman) || workflowReason != wantReason || attemptReason != wantReason ||
+		handoffs != 1 || labels != 1 || currentAssignments == 0 || waitingAssignments != currentAssignments {
+		t.Errorf("Human Handoff = %s/%s/%s with %d handoffs, %d labels, and %d/%d waiting Assignments",
+			state, workflowReason, attemptReason, handoffs, labels, waitingAssignments, currentAssignments)
 	}
 }
 

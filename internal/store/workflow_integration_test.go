@@ -542,6 +542,169 @@ func TestApplyNextPendingNormalizedEventAppliesHistoricalEventOnce(t *testing.T)
 	}
 }
 
+func TestApplyNextPendingNormalizedEventSerializesWorkItemWithoutBlockingOthers(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := seedAgentSession(t, pool, 940)
+	earlier := workflowDelivery("40000000-0000-4000-8000-000000000010")
+	earlier.RepositoryID, earlier.IssueID, earlier.IssueNumber = 940, 940, 940
+	earlier.Action = "reopened"
+	later := workflowDelivery("40000000-0000-4000-8000-000000000011")
+	later.RepositoryID, later.IssueID, later.IssueNumber = 940, 0, 0
+	later.EventName, later.Action = "pull_request", "synchronize"
+	for _, delivery := range []store.WebhookDelivery{earlier, later} {
+		claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
+		if err := databases[0].CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+			Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(claim.DeliveryID, "trigger"),
+		}); err != nil {
+			t.Fatalf("seed pending event %s: %v", delivery.DeliveryID, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE webhook_deliveries SET workflow_id = $1 WHERE delivery_id = ANY($2::uuid[])`,
+		fixture.workflowID, []string{earlier.DeliveryID, later.DeliveryID}); err != nil {
+		t.Fatalf("bind cross-event pending deliveries to Workflow: %v", err)
+	}
+	unrelated := workflowDelivery("40000000-0000-4000-8000-000000000012")
+	unrelated.IssueID, unrelated.IssueNumber = 457, 13
+	unrelatedClaim := claimWorkflowDelivery(t, databases[0], ctx, unrelated)
+	if err := databases[0].CompleteWebhookDelivery(ctx, unrelatedClaim.DeliveryID, unrelatedClaim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(unrelatedClaim.DeliveryID, "trigger"),
+	}); err != nil {
+		t.Fatalf("seed unrelated pending event: %v", err)
+	}
+
+	selected := make(chan struct{})
+	release := make(chan struct{})
+	type applicationResult struct {
+		application store.WorkflowApplication
+		applied     bool
+		err         error
+	}
+	firstResult := make(chan applicationResult, 1)
+	go func() {
+		application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+			close(selected)
+			<-release
+			locator := store.WorkflowLocator{RepositoryID: 940, IssueID: 940, IssueNumber: 940, WorkflowID: fixture.workflowID}
+			return locator, func(snapshot workflow.Snapshot) workflow.Decision {
+				return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: workflow.EventMetadata{
+					ID: record.DeliveryID, ObservedAt: record.CreatedAt, WorkItem: snapshot.WorkItem,
+					ExpectedRevision: snapshot.Revision,
+				}})
+			}, nil
+		})
+		firstResult <- applicationResult{application: application, applied: applied, err: err}
+	}()
+	<-selected
+
+	application, applied, err := databases[1].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		if record.DeliveryID != unrelated.DeliveryID {
+			return store.WorkflowLocator{}, nil, errors.New("later event overtook locked Work Item event")
+		}
+		locator := store.WorkflowLocator{RepositoryID: 9123, IssueID: 457, IssueNumber: 13}
+		return locator, func(snapshot workflow.Snapshot) workflow.Decision {
+			return workflow.Reduce(snapshot, workflow.TriggerEvent{
+				EventMetadata: workflow.EventMetadata{
+					ID: record.DeliveryID, ObservedAt: record.CreatedAt,
+					WorkItem:         workflow.WorkItem{RepositoryID: 9123, IssueID: 457, IssueNumber: 13},
+					ExpectedRevision: snapshot.Revision,
+				},
+				AttemptID: "50000000-0000-4000-8000-000000000012", AttemptNumber: snapshot.LastAttemptNumber + 1,
+			})
+		}, nil
+	})
+	if err != nil || !applied || application.DeliveryID != unrelated.DeliveryID {
+		t.Errorf("concurrent pending event drain = (%#v, %t, %v), want unrelated event applied", application, applied, err)
+	}
+	close(release)
+	first := <-firstResult
+	if first.err != nil || !first.applied || first.application.DeliveryID != earlier.DeliveryID {
+		t.Errorf("first pending event drain = (%#v, %t, %v), want earlier event applied", first.application, first.applied, first.err)
+	}
+}
+
+func TestCompleteWebhookTransitionDefersBehindEarlierWorkflowEvent(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := seedAgentSession(t, pool, 941)
+	earlier := workflowDelivery("40000000-0000-4000-8000-000000000014")
+	earlier.RepositoryID, earlier.IssueID, earlier.IssueNumber = 941, 941, 941
+	earlier.Action = "reopened"
+	earlierClaim := claimWorkflowDelivery(t, database, ctx, earlier)
+	if err := database.CompleteWebhookDelivery(ctx, earlierClaim.DeliveryID, earlierClaim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(earlierClaim.DeliveryID, "reopened"),
+	}); err != nil {
+		t.Fatalf("seed earlier pending Workflow event: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE webhook_deliveries SET workflow_id = $1 WHERE delivery_id = $2`, fixture.workflowID, earlier.DeliveryID); err != nil {
+		t.Fatalf("bind earlier delivery to Workflow: %v", err)
+	}
+	later := workflowDelivery("40000000-0000-4000-8000-000000000015")
+	later.RepositoryID, later.IssueID, later.IssueNumber = 941, 0, 0
+	later.EventName, later.Action = "pull_request", "synchronize"
+	laterClaim := claimWorkflowDelivery(t, database, ctx, later)
+	transitionCalled := false
+	application, err := database.CompleteWebhookTransition(ctx, laterClaim.DeliveryID, laterClaim.ClaimToken,
+		normalizedPayload(laterClaim.DeliveryID, "synchronization"),
+		store.WorkflowLocator{RepositoryID: 941, PullRequestID: 94100, WorkflowID: fixture.workflowID},
+		func(snapshot workflow.Snapshot) workflow.Decision {
+			transitionCalled = true
+			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonEventIllegalInState}
+		})
+	if err != nil || application.Status != store.NormalizedEventPending || application.WorkflowID != fixture.workflowID {
+		t.Fatalf("later Workflow transition = (%#v, %v), want pending behind earlier event", application, err)
+	}
+	if transitionCalled {
+		t.Error("later Workflow transition ran before earlier pending event")
+	}
+	var webhookStatus, eventStatus string
+	if err := pool.QueryRow(ctx, `
+SELECT delivery.status, event.status
+FROM webhook_deliveries AS delivery JOIN normalized_events AS event USING (delivery_id)
+WHERE delivery.delivery_id = $1`, later.DeliveryID).Scan(&webhookStatus, &eventStatus); err != nil {
+		t.Fatal(err)
+	}
+	if webhookStatus != "PROCESSED" || eventStatus != "PENDING" {
+		t.Errorf("deferred later event = webhook %s, normalized event %s", webhookStatus, eventStatus)
+	}
+}
+
+func TestCompleteWebhookTransitionDefersBehindEarlierClaimedReopen(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := seedAgentSession(t, pool, 942)
+	earlier := workflowDelivery("40000000-0000-4000-8000-000000000016")
+	earlier.RepositoryID, earlier.IssueID, earlier.IssueNumber = 942, 942, 942
+	earlier.Action = "reopened"
+	earlierClaim := claimWorkflowDelivery(t, database, ctx, earlier)
+	if earlierClaim.Action != "reopened" {
+		t.Fatalf("earlier claim action = %q, want reopened", earlierClaim.Action)
+	}
+	later := workflowDelivery("40000000-0000-4000-8000-000000000017")
+	later.RepositoryID, later.IssueID, later.IssueNumber = 942, 0, 0
+	later.EventName, later.Action = "pull_request", "synchronize"
+	laterClaim := claimWorkflowDelivery(t, database, ctx, later)
+	transitionCalled := false
+	application, err := database.CompleteWebhookTransition(ctx, laterClaim.DeliveryID, laterClaim.ClaimToken,
+		normalizedPayload(laterClaim.DeliveryID, "synchronization"),
+		store.WorkflowLocator{RepositoryID: 942, PullRequestID: 94200, WorkflowID: fixture.workflowID},
+		func(snapshot workflow.Snapshot) workflow.Decision {
+			transitionCalled = true
+			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonEventIllegalInState}
+		})
+	if err != nil || application.Status != store.NormalizedEventPending || application.WorkflowID != fixture.workflowID {
+		t.Fatalf("later Workflow transition = (%#v, %v), want pending behind claimed reopen", application, err)
+	}
+	if transitionCalled {
+		t.Error("later Workflow transition ran before earlier claimed reopen")
+	}
+}
+
 func TestApplyNextPendingNormalizedEventTerminalizesMismatchedDeliveryAndContinues(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

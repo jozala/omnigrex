@@ -412,6 +412,53 @@ func TestClaimWebhookDeliveryDoesNotLetRetryingPoisonStarveFreshDelivery(t *test
 	}
 }
 
+func TestClaimWebhookDeliveryKeepsLaterIssueWorkBehindUnresolvedReopen(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reopen := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	reopen.Action = "reopened"
+	if _, err := database.InsertWebhookDelivery(ctx, reopen); err != nil {
+		t.Fatalf("insert reopen delivery: %v", err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", 30*time.Second)
+	if err != nil || first == nil || first.DeliveryID != reopen.DeliveryID {
+		t.Fatalf("claim reopen delivery = (%#v, %v)", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("temporary failure"), true); err != nil {
+		t.Fatalf("return reopen for retry: %v", err)
+	}
+	later := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	later.Action = "labeled"
+	if _, err := database.InsertWebhookDelivery(ctx, later); err != nil {
+		t.Fatalf("insert later Issue delivery: %v", err)
+	}
+	unrelated := webhookDelivery("323e4567-e89b-12d3-a456-426614174000")
+	unrelated.IssueID, unrelated.IssueNumber = 457, 13
+	if _, err := database.InsertWebhookDelivery(ctx, unrelated); err != nil {
+		t.Fatalf("insert unrelated delivery: %v", err)
+	}
+
+	independent, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || independent == nil || independent.DeliveryID != unrelated.DeliveryID {
+		t.Fatalf("claim with unresolved reopen = (%#v, %v), want unrelated fresh delivery", independent, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, independent.DeliveryID, independent.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete unrelated delivery: %v", err)
+	}
+	retry, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || retry == nil || retry.DeliveryID != reopen.DeliveryID {
+		t.Fatalf("claim with unresolved reopen = (%#v, %v), want reopen retry", retry, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, retry.DeliveryID, retry.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete reopen retry: %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || claim == nil || claim.DeliveryID != later.DeliveryID {
+		t.Fatalf("claim after reopen completion = (%#v, %v), want later Issue delivery", claim, err)
+	}
+}
+
 func TestClaimWebhookDeliveryFailsExpiredExhaustedPoisonBeforeClaimingValidWork(t *testing.T) {
 	database := openWebhookStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

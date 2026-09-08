@@ -461,16 +461,13 @@ func (store *Store) AcknowledgeAssignmentConfigurationConflict(ctx context.Conte
 	if err := persistAppliedDecisionWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, snapshot, decision, actionNamespace); err != nil {
 		return AssignmentConfigurationHandoff{}, err
 	}
-	updated, err := tx.Exec(ctx, `
-UPDATE agent_assignments
-SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN')
-  AND state_deleted_at IS NULL`, job.WorkflowID)
-	if err != nil {
-		return AssignmentConfigurationHandoff{}, fmt.Errorf("mark Assignments waiting for Human Handoff: %w", err)
+	var currentAssignments int
+	if err := tx.QueryRow(ctx, `
+SELECT count(*) FROM agent_assignments
+WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, job.WorkflowID).Scan(&currentAssignments); err != nil {
+		return AssignmentConfigurationHandoff{}, fmt.Errorf("count Assignments after Human Handoff: %w", err)
 	}
-	if updated.RowsAffected() != 2 && !(payload.Mode == workflow.AssignmentGenerationNew && updated.RowsAffected() == 0) {
+	if currentAssignments != 2 && !(payload.Mode == workflow.AssignmentGenerationNew && currentAssignments == 0) {
 		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	jobResult, err := json.Marshal(map[string]any{
@@ -575,14 +572,6 @@ SELECT EXISTS (
 		}
 		if err := persistAppliedDecisionWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, snapshot, decision, "prepare-agent-turn:"+job.ID); err != nil {
 			return AgentTurnPreparationFailureAcknowledgement{}, err
-		}
-		if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
-SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED')
-  AND state_deleted_at IS NULL`, job.WorkflowID); err != nil {
-			return AgentTurnPreparationFailureAcknowledgement{}, fmt.Errorf("mark preparation Assignments waiting for Human Handoff: %w", err)
 		}
 		acknowledgement.WorkflowRevision = decision.Snapshot.Revision
 	}

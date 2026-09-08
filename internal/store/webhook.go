@@ -190,7 +190,7 @@ WHERE delivery_id = $1`, deliveryID).Scan(
 	return record, nil
 }
 
-// ClaimWebhookDelivery atomically leases pending or expired deliveries, preferring fresh work over retries.
+// ClaimWebhookDelivery atomically leases pending or expired deliveries, preferring fresh work without overtaking an unresolved Issue reopen.
 func (store *Store) ClaimWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*WebhookClaim, error) {
 	if strings.TrimSpace(owner) == "" {
 		return nil, errors.New("claim webhook delivery: owner is empty")
@@ -221,11 +221,25 @@ WITH exhausted AS (
     RETURNING delivery_id
 ), claimable AS (
     SELECT delivery_id
-    FROM webhook_deliveries
-    WHERE attempt_count < max_attempts
-      AND (status = 'PENDING'
-       OR (status = 'PROCESSING' AND lease_expires_at <= clock_timestamp()))
-    ORDER BY attempt_count, received_at, delivery_id
+    FROM webhook_deliveries AS delivery
+    WHERE delivery.attempt_count < delivery.max_attempts
+      AND (delivery.status = 'PENDING'
+       OR (delivery.status = 'PROCESSING' AND delivery.lease_expires_at <= clock_timestamp()))
+      AND NOT EXISTS (
+          SELECT 1
+          FROM webhook_deliveries AS earlier
+          LEFT JOIN normalized_events AS earlier_event ON earlier_event.delivery_id = earlier.delivery_id
+          WHERE ((delivery.workflow_id IS NOT NULL AND earlier.workflow_id = delivery.workflow_id)
+                 OR (delivery.repository_id IS NOT NULL AND delivery.issue_id IS NOT NULL
+                     AND earlier.repository_id = delivery.repository_id
+                     AND earlier.issue_id = delivery.issue_id
+                     AND earlier.issue_number = delivery.issue_number))
+            AND earlier.event_name = 'issues' AND earlier.action = 'reopened'
+            AND (earlier.received_at, earlier.delivery_id) < (delivery.received_at, delivery.delivery_id)
+            AND (earlier.status IN ('PENDING', 'PROCESSING')
+                 OR (earlier.status = 'PROCESSED' AND earlier_event.status = 'PENDING'))
+      )
+    ORDER BY delivery.attempt_count, delivery.received_at, delivery.delivery_id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )

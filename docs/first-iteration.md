@@ -215,6 +215,7 @@ The Reviewer receives no file-editing tools and cannot publish repository change
 Local verification commands may create temporary files, but all Reviewer workspace changes are discarded after the turn.
 
 The Reviewer App submits native GitHub reviews under an identity distinct from the Developer App.
+Separate Agent Sessions and GitHub App identities isolate session state, authorization, and attribution, not repository contents: the Reviewer inspects the Change Proposal files in its own isolated workspace.
 
 A successful Reviewer outcome is one of:
 

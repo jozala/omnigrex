@@ -347,14 +347,6 @@ WHERE id = $1 AND execution_epoch = $2
 	if continuation.RowsAffected() != 1 {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}
-	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
-SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN')
-  AND state_deleted_at IS NULL`, job.WorkflowID); err != nil {
-		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("mark mutation reconciliation Assignments waiting for Human Handoff: %w", err)
-	}
 	jobResult, err := json.Marshal(map[string]any{
 		"escalated": true, "diagnostic": diagnostic,
 		"unresolved_mutation_count": candidates, "workflow_revision": decision.Snapshot.Revision,

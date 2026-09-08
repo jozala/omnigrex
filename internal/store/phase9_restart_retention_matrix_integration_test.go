@@ -436,7 +436,7 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 		t.Fatalf("collection ProcessNext() = (%t, %v)", processed, err)
 	}
 
-	applyReopen(t, database, ctx, fixture, 706, "7b600000-0000-4000-8000-000000000002")
+	applyReopen(t, database, ctx, 706, "7b600000-0000-4000-8000-000000000002")
 	applyTrigger(t, database, ctx, fixture, 706,
 		"7b600000-0000-4000-8000-000000000003", "7b600000-0000-4000-8000-000000000004")
 	var fresh store.AgentTurnPreparationCommit

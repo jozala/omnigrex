@@ -330,6 +330,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL", destination: &config.WorkflowEffectHeartbeatInterval},
 		{name: "OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL", destination: &config.WorkflowEffectPollInterval},
 		{name: "OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY", destination: &config.WorkflowEffectRetryDelay},
+		{name: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", destination: &config.AssignmentRetentionDuration},
 	}
 	validDuration := make(map[string]bool, len(durationSettings))
 	for _, setting := range durationSettings {
@@ -362,17 +363,6 @@ func Load(getenv func(string) string) (Config, error) {
 	if validDuration["OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL"] && validDuration["OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION"] &&
 		config.WorkflowEffectHeartbeatInterval >= config.WorkflowEffectLeaseDuration {
 		problems = append(problems, fmt.Errorf("OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL must be shorter than OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION"))
-	}
-
-	if value := getenv("OMNIGREX_ASSIGNMENT_RETENTION_DURATION"); value != "" {
-		duration, err := time.ParseDuration(value)
-		if err != nil {
-			problems = append(problems, fmt.Errorf("OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be a valid duration"))
-		} else if duration <= 0 {
-			problems = append(problems, fmt.Errorf("OMNIGREX_ASSIGNMENT_RETENTION_DURATION must be positive"))
-		} else {
-			config.AssignmentRetentionDuration = duration
-		}
 	}
 
 	if value := getenv("OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"); value != "" {

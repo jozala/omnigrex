@@ -101,14 +101,6 @@ func applyWorkflowActionExhaustionTx(ctx context.Context, tx pgx.Tx, job Job, re
 	if err := persistAppliedDecisionWithProvenance(ctx, tx, deliveryID, settlementID, job.WorkflowID, snapshot, decision, namespace); err != nil {
 		return workflow.Decision{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
-SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status IN ('ACTIVE', 'COMPLETED', 'WAITING_FOR_HUMAN')
-  AND state_deleted_at IS NULL`, job.WorkflowID); err != nil {
-		return workflow.Decision{}, fmt.Errorf("mark exhausted Workflow action Assignments waiting for Human Handoff: %w", err)
-	}
 	return decision, nil
 }
 

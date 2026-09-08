@@ -160,17 +160,18 @@ WHERE attempt.id = $1`, fixture.attemptID, settled.SuccessorJobID).Scan(&used, &
 		if settled.State != workflow.StateNeedsHuman || settled.Reason != workflow.ReasonAgentBlocked || settled.SuccessorJobID != "" {
 			t.Fatalf("blocked settlement = %#v", settled)
 		}
-		var reason, diagnostic, provenance string
+		var reason, diagnostic, provenance, assignmentStatus string
 		if err := pool.QueryRow(ctx, `
 SELECT workflow.human_handoff_reason, handoff.payload->>'diagnostic',
-       handoff.agent_turn_settlement_id::text
+	       handoff.agent_turn_settlement_id::text, assignment.status
 FROM workflows AS workflow
 JOIN jobs AS handoff ON handoff.workflow_id = workflow.id AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
-WHERE workflow.id = $1`, fixture.workflowID).Scan(&reason, &diagnostic, &provenance); err != nil {
+JOIN agent_assignments AS assignment ON assignment.id = $2
+WHERE workflow.id = $1`, fixture.workflowID, fixture.assignmentID).Scan(&reason, &diagnostic, &provenance, &assignmentStatus); err != nil {
 			t.Fatal(err)
 		}
-		if reason != string(workflow.ReasonAgentBlocked) || diagnostic != "blocked diagnostic" || provenance != settled.ID {
-			t.Errorf("Human Handoff = reason %s, diagnostic %q, provenance %s", reason, diagnostic, provenance)
+		if reason != string(workflow.ReasonAgentBlocked) || diagnostic != "blocked diagnostic" || provenance != settled.ID || assignmentStatus != "WAITING_FOR_HUMAN" {
+			t.Errorf("Human Handoff = reason %s, diagnostic %q, provenance %s, Assignment %s", reason, diagnostic, provenance, assignmentStatus)
 		}
 	})
 

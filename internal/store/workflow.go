@@ -201,7 +201,32 @@ SELECT event.delivery_id::text, event.payload, event.status, event.created_at,
 FROM normalized_events AS event
 JOIN webhook_deliveries AS delivery USING (delivery_id)
 WHERE event.status = 'PENDING' AND event.attempt_count < event.max_attempts
-ORDER BY event.created_at, event.delivery_id
+  AND NOT EXISTS (
+      SELECT 1
+      FROM assignment_retention_generations AS generation
+      JOIN workflows AS candidate_workflow ON candidate_workflow.id = generation.workflow_id
+      WHERE generation.status = 'COLLECTING'
+        AND (candidate_workflow.id = delivery.workflow_id
+             OR (delivery.workflow_id IS NULL
+                 AND candidate_workflow.repository_id = delivery.repository_id
+                 AND candidate_workflow.issue_id = delivery.issue_id
+                 AND candidate_workflow.issue_number = delivery.issue_number))
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM normalized_events AS earlier_event
+      JOIN webhook_deliveries AS earlier_delivery USING (delivery_id)
+      WHERE earlier_event.status = 'PENDING'
+        AND earlier_event.attempt_count < earlier_event.max_attempts
+        AND ((delivery.workflow_id IS NOT NULL AND earlier_delivery.workflow_id = delivery.workflow_id)
+             OR (delivery.repository_id IS NOT NULL AND delivery.issue_id IS NOT NULL
+                 AND earlier_delivery.repository_id = delivery.repository_id
+                 AND earlier_delivery.issue_id = delivery.issue_id
+                 AND earlier_delivery.issue_number = delivery.issue_number))
+        AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+            < (delivery.received_at, delivery.delivery_id)
+  )
+ORDER BY delivery.received_at, event.delivery_id
 FOR UPDATE OF event SKIP LOCKED
 LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.CreatedAt,
 		&envelope.repositoryID, &envelope.repositoryOwner, &envelope.repositoryName,
@@ -214,6 +239,9 @@ LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.Crea
 	}
 	if err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("select pending normalized event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SAVEPOINT defer_pending_normalized_event`); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("save pending normalized event deferral: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `
 UPDATE normalized_events
@@ -244,6 +272,15 @@ RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptC
 	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, transition)
 	if err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
+	}
+	if application.Status == NormalizedEventPending {
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT defer_pending_normalized_event`); err != nil {
+			return WorkflowApplication{}, false, fmt.Errorf("rollback deferred pending normalized event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WorkflowApplication{}, false, fmt.Errorf("commit deferred pending normalized event: %w", err)
+		}
+		return application, false, nil
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("commit pending normalized event: %w", err)
@@ -342,6 +379,16 @@ func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedE
 		if err != nil {
 			return WorkflowApplication{}, err
 		}
+		blocked, err := workflowTransitionBlockedTx(ctx, tx, workflowID, event.DeliveryID)
+		if err != nil {
+			return WorkflowApplication{}, err
+		}
+		if blocked {
+			return WorkflowApplication{
+				DeliveryID: event.DeliveryID, WorkflowID: workflowID, Status: NormalizedEventPending,
+				State: snapshot.State, Revision: snapshot.Revision,
+			}, nil
+		}
 	}
 	decision := transition(snapshot)
 	if err := validateWorkflowDecision(snapshot, decision); err != nil {
@@ -392,6 +439,44 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
 		Disposition: decision.Disposition, Reason: decision.Reason,
 		State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
 	}, nil
+}
+
+func workflowTransitionBlockedTx(ctx context.Context, tx pgx.Tx, workflowID, deliveryID string) (bool, error) {
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM assignment_retention_generations
+    WHERE workflow_id = $1 AND status = 'COLLECTING'
+    UNION ALL
+    SELECT 1
+    FROM normalized_events AS earlier_event
+    JOIN webhook_deliveries AS earlier_delivery USING (delivery_id)
+    JOIN webhook_deliveries AS current_delivery ON current_delivery.delivery_id = $2
+    JOIN workflows AS current_workflow ON current_workflow.id = $1
+    WHERE earlier_event.status = 'PENDING'
+      AND earlier_event.attempt_count < earlier_event.max_attempts
+      AND (earlier_event.workflow_id = $1 OR earlier_delivery.workflow_id = $1
+           OR (earlier_delivery.repository_id = current_workflow.repository_id
+               AND earlier_delivery.issue_id = current_workflow.issue_id
+               AND earlier_delivery.issue_number = current_workflow.issue_number))
+      AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+          < (current_delivery.received_at, current_delivery.delivery_id)
+    UNION ALL
+    SELECT 1
+    FROM webhook_deliveries AS earlier_delivery
+    JOIN webhook_deliveries AS current_delivery ON current_delivery.delivery_id = $2
+    JOIN workflows AS current_workflow ON current_workflow.id = $1
+    WHERE earlier_delivery.event_name = 'issues' AND earlier_delivery.action = 'reopened'
+      AND earlier_delivery.status IN ('PENDING', 'PROCESSING')
+      AND earlier_delivery.repository_id = current_workflow.repository_id
+      AND earlier_delivery.issue_id = current_workflow.issue_id
+      AND earlier_delivery.issue_number = current_workflow.issue_number
+      AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+          < (current_delivery.received_at, current_delivery.delivery_id)
+)`, workflowID, deliveryID).Scan(&blocked); err != nil {
+		return false, fmt.Errorf("check Workflow transition barrier: %w", err)
+	}
+	return blocked, nil
 }
 
 func resolveWorkflowID(ctx context.Context, tx pgx.Tx, locator WorkflowLocator) (string, error) {
@@ -745,6 +830,13 @@ func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx
 				return err
 			}
 		case workflow.MarkHumanHandoffAction:
+			if _, err := tx.Exec(ctx, `
+UPDATE agent_assignments
+SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
+    updated_at = clock_timestamp()
+WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID); err != nil {
+				return fmt.Errorf("mark current Agent Assignments waiting for Human Handoff: %w", err)
+			}
 			if decision.Snapshot.CurrentAttempt != nil {
 				if _, err := tx.Exec(ctx, `UPDATE workflow_attempts SET human_handoff_reason = $2 WHERE id = $1`, decision.Snapshot.CurrentAttempt.ID, action.Reason); err != nil {
 					return fmt.Errorf("mark attempt human handoff: %w", err)
