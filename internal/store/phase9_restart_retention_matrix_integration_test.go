@@ -628,6 +628,7 @@ type phaseNineExecutionRuntime struct {
 
 func (runtime *phaseNineExecutionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
 func (runtime *phaseNineExecutionRuntime) PromptClient() session.PromptClient { return runtime.client }
+func (*phaseNineExecutionRuntime) RenewMCP(time.Time) bool                    { return true }
 func (*phaseNineExecutionRuntime) CloseMCP(context.Context) error             { return nil }
 func (*phaseNineExecutionRuntime) Cleanup(context.Context) error              { return nil }
 

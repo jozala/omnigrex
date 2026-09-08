@@ -97,6 +97,7 @@ const (
 	NormalizedEventPending   NormalizedEventStatus = "PENDING"
 	NormalizedEventDeferred  NormalizedEventStatus = "DEFERRED"
 	NormalizedEventCompleted NormalizedEventStatus = "COMPLETED"
+	NormalizedEventFailed    NormalizedEventStatus = "FAILED"
 )
 
 // NormalizedEventRecord is a queued normalized transition.
@@ -109,8 +110,11 @@ type NormalizedEventRecord struct {
 	Reason            workflow.Reason
 	AppliedRevision   uint64
 	DeferredForTurnID string
+	AttemptCount      int
+	MaxAttempts       int
 	CreatedAt         time.Time
 	ProcessedAt       *time.Time
+	LastError         *string
 }
 
 // InsertWebhookDelivery writes an authenticated delivery once, deduplicated by delivery ID.
@@ -186,7 +190,7 @@ WHERE delivery_id = $1`, deliveryID).Scan(
 	return record, nil
 }
 
-// ClaimWebhookDelivery atomically leases the oldest pending or expired delivery.
+// ClaimWebhookDelivery atomically leases pending or expired deliveries, preferring fresh work over retries.
 func (store *Store) ClaimWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*WebhookClaim, error) {
 	if strings.TrimSpace(owner) == "" {
 		return nil, errors.New("claim webhook delivery: owner is empty")
@@ -202,12 +206,26 @@ func (store *Store) ClaimWebhookDelivery(ctx context.Context, owner string, leas
 	var claim WebhookClaim
 	var headers []byte
 	err = store.pool.QueryRow(ctx, `
-WITH claimable AS (
+WITH exhausted AS (
+    UPDATE webhook_deliveries
+    SET status = 'FAILED',
+        claim_owner = NULL,
+        claim_token = NULL,
+        claimed_at = NULL,
+        lease_expires_at = NULL,
+        processed_at = clock_timestamp(),
+        last_error = COALESCE(last_error, 'webhook delivery attempt limit exhausted')
+    WHERE (status = 'PENDING'
+       OR (status = 'PROCESSING' AND lease_expires_at <= clock_timestamp()))
+      AND attempt_count >= max_attempts
+    RETURNING delivery_id
+), claimable AS (
     SELECT delivery_id
     FROM webhook_deliveries
-    WHERE status = 'PENDING'
-       OR (status = 'PROCESSING' AND lease_expires_at <= clock_timestamp())
-    ORDER BY received_at, delivery_id
+    WHERE attempt_count < max_attempts
+      AND (status = 'PENDING'
+       OR (status = 'PROCESSING' AND lease_expires_at <= clock_timestamp()))
+    ORDER BY attempt_count, received_at, delivery_id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
@@ -365,12 +383,14 @@ func (store *Store) GetNormalizedEvent(ctx context.Context, deliveryID string) (
 	err := store.pool.QueryRow(ctx, `
 SELECT delivery_id::text, payload, status, COALESCE(workflow_id::text, ''),
        COALESCE(disposition, ''), COALESCE(reason, ''), COALESCE(applied_revision, 0),
-       COALESCE(deferred_for_turn_id::text, ''), created_at, processed_at
+       COALESCE(deferred_for_turn_id::text, ''), attempt_count, max_attempts,
+       created_at, processed_at, last_error
 FROM normalized_events
 WHERE delivery_id = $1`, deliveryID).Scan(
 		&event.DeliveryID, &event.Payload, &event.Status, &event.WorkflowID,
 		&event.Disposition, &event.Reason, &event.AppliedRevision,
-		&event.DeferredForTurnID, &event.CreatedAt, &event.ProcessedAt,
+		&event.DeferredForTurnID, &event.AttemptCount, &event.MaxAttempts,
+		&event.CreatedAt, &event.ProcessedAt, &event.LastError,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NormalizedEventRecord{}, ErrNormalizedEventNotFound
@@ -404,6 +424,37 @@ WHERE delivery_id = $1
   AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, cause.Error())
 	if err != nil {
 		return fmt.Errorf("fail webhook delivery: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrWebhookClaimLost
+	}
+	return nil
+}
+
+// AcknowledgeWebhookDeliveryFailure releases a fenced claim for retry or terminally fails an exhausted delivery.
+func (store *Store) AcknowledgeWebhookDeliveryFailure(ctx context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool) error {
+	if cause == nil {
+		return errors.New("acknowledge webhook delivery failure: cause is nil")
+	}
+	if !validUUID(deliveryID) || !validUUID(claimToken) || attemptCount <= 0 {
+		return ErrWebhookClaimLost
+	}
+	result, err := store.pool.Exec(ctx, `
+UPDATE webhook_deliveries
+SET status = CASE WHEN $5 AND attempt_count < max_attempts THEN 'PENDING' ELSE 'FAILED' END,
+    claim_owner = NULL,
+    claim_token = NULL,
+    claimed_at = NULL,
+    lease_expires_at = NULL,
+    processed_at = CASE WHEN $5 AND attempt_count < max_attempts THEN NULL ELSE clock_timestamp() END,
+    last_error = $4
+WHERE delivery_id = $1
+  AND status = 'PROCESSING'
+  AND claim_token = $2
+  AND attempt_count = $3
+  AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, attemptCount, cause.Error(), retryable)
+	if err != nil {
+		return fmt.Errorf("acknowledge webhook delivery failure: %w", err)
 	}
 	if result.RowsAffected() != 1 {
 		return ErrWebhookClaimLost

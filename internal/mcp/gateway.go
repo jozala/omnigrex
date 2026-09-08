@@ -230,6 +230,7 @@ type grant struct {
 	scope     TokenScope
 
 	mutex        sync.Mutex
+	expiresAt    time.Time
 	initializing bool
 	initialized  bool
 	closed       bool
@@ -344,7 +345,7 @@ func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
 			operationCtx, cancelOps := context.WithCancel(gateway.lifecycle)
 			registeredGrant = &grant{
 				id: id, tokenHash: hash, scope: cloneScope(scope), drained: make(chan struct{}), gate: gate,
-				operationCtx: operationCtx, cancelOps: cancelOps,
+				expiresAt: scope.ExpiresAt, operationCtx: operationCtx, cancelOps: cancelOps,
 			}
 			gateway.registrations[hash] = registeredGrant
 			gateway.mutex.Unlock()
@@ -360,6 +361,30 @@ func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
 			Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer " + token}},
 		},
 	}, nil
+}
+
+// Renew extends one live registration to the durable lease expiration established by a successful heartbeat.
+func (gateway *Gateway) Renew(registration Registration, expiresAt time.Time) bool {
+	if registration.gateway != gateway || registration.id == 0 || registration.grant == nil || registration.grant.id != registration.id ||
+		!gateway.now().Before(expiresAt) {
+		return false
+	}
+	gateway.mutex.RLock()
+	current := gateway.registrations[registration.grant.tokenHash]
+	if current != registration.grant {
+		gateway.mutex.RUnlock()
+		return false
+	}
+	registration.grant.mutex.Lock()
+	if registration.grant.closed {
+		registration.grant.mutex.Unlock()
+		gateway.mutex.RUnlock()
+		return false
+	}
+	registration.grant.expiresAt = expiresAt
+	registration.grant.mutex.Unlock()
+	gateway.mutex.RUnlock()
+	return true
 }
 
 // CloseAndDrain revokes a registration and waits for its admitted mutations to reach a durable terminal or recoverable state.
@@ -1227,7 +1252,12 @@ func (gateway *Gateway) grantLive(registration *grant) bool {
 	gateway.mutex.RLock()
 	current := gateway.registrations[registration.tokenHash]
 	gateway.mutex.RUnlock()
-	return current == registration
+	if current != registration {
+		return false
+	}
+	registration.mutex.Lock()
+	defer registration.mutex.Unlock()
+	return !registration.closed && gateway.now().Before(registration.expiresAt)
 }
 
 func parsedPath(endpointURL string) string {

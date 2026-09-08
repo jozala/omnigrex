@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -68,9 +69,15 @@ func (realOutcomeReconcilerClock) Now() time.Time { return time.Now() }
 
 // OutcomeReconcilerConfig supplies only read dependencies and a testable observation clock.
 type OutcomeReconcilerConfig struct {
-	Store  OutcomeReconcilerStore
-	GitHub OutcomeReconcilerGitHub
-	Clock  interface{ Now() time.Time }
+	Store                  OutcomeReconcilerStore
+	GitHub                 OutcomeReconcilerGitHub
+	Clock                  interface{ Now() time.Time }
+	ProviderCredentialJSON []json.RawMessage
+}
+
+func (OutcomeReconcilerConfig) String() string { return "Agent Turn outcome reconciler config" }
+func (OutcomeReconcilerConfig) GoString() string {
+	return "agentturn.OutcomeReconcilerConfig{<credentials redacted>}"
 }
 
 // OutcomeReconciliation contains the exact acquired turn context and ephemeral Role credential.
@@ -92,9 +99,15 @@ func (OutcomeReconciliation) GoString() string {
 
 // OutcomeReconciler derives settlement observations without consulting ACP output text.
 type OutcomeReconciler struct {
-	store  OutcomeReconcilerStore
-	github OutcomeReconcilerGitHub
-	clock  outcomeReconcilerClock
+	store              OutcomeReconcilerStore
+	github             OutcomeReconcilerGitHub
+	clock              outcomeReconcilerClock
+	diagnosticRedactor *strings.Replacer
+}
+
+func (*OutcomeReconciler) String() string { return "Agent Turn outcome reconciler" }
+func (*OutcomeReconciler) GoString() string {
+	return "agentturn.OutcomeReconciler{<credentials redacted>}"
 }
 
 var (
@@ -113,14 +126,21 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	if nilInterface(clock) {
 		return nil, ErrInvalidOutcomeReconciler
 	}
-	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock}, nil
+	redactor, err := newProviderDiagnosticRedactor(config.ProviderCredentialJSON)
+	if err != nil {
+		return nil, ErrInvalidOutcomeReconciler
+	}
+	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock, diagnosticRedactor: redactor}, nil
 }
 
 // Reconcile reads the closed terminal ledger and corroborates its sole successful terminal intent.
-func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request OutcomeReconciliation) (store.AgentTurnSettlementObservation, error) {
+func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request OutcomeReconciliation) (observation store.AgentTurnSettlementObservation, err error) {
 	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
 	}
+	defer func() {
+		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
+	}()
 	mutations, err := reconciler.store.ListAgentTurnMutationInvocations(ctx, request.Lease)
 	if err != nil {
 		switch {
@@ -143,43 +163,96 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		return store.AgentTurnSettlementObservation{}, store.ErrAgentTurnMutationsUnsettled
 	}
 	if diagnostic := validateTerminalLedger(mutations, request.Lease); diagnostic != "" {
-		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic, request.RepositoryCredential), nil
+		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic), nil
 	}
 	if diagnostic := promptFailureDiagnostic(request); diagnostic != "" {
-		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic, request.RepositoryCredential), nil
+		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic), nil
 	}
 
 	intents := successfulTerminalIntents(mutations)
 	if len(intents) == 0 {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent", request.RepositoryCredential), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent"), nil
 	}
 	if len(intents) != 1 {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains duplicate or conflicting terminal intents", request.RepositoryCredential), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains duplicate or conflicting terminal intents"), nil
 	}
 	intent := intents[0]
 	if intent.ToolName == mcp.ToolReportBlocked {
-		return blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID, request.RepositoryCredential), nil
+		return blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID), nil
 	}
 
 	switch request.Execution.Assignment.Role {
 	case workflow.RoleDeveloper:
 		if intent.ToolName != mcp.ToolRequestReview {
-			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Developer mutation ledger contains an invalid terminal intent", request.RepositoryCredential), nil
+			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Developer mutation ledger contains an invalid terminal intent"), nil
 		}
 		return reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent), nil
 	case workflow.RoleReviewer:
 		if intent.ToolName != mcp.ToolSubmitReview {
-			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Reviewer mutation ledger contains an invalid terminal intent", request.RepositoryCredential), nil
+			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Reviewer mutation ledger contains an invalid terminal intent"), nil
 		}
 		return reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent), nil
 	default:
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent Turn has an invalid Role", request.RepositoryCredential), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent Turn has an invalid Role"), nil
 	}
+}
+
+func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replacer, error) {
+	values := make(map[string]struct{})
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+		values[value] = struct{}{}
+		quoted, _ := json.Marshal(value)
+		values[string(quoted)] = struct{}{}
+		if len(quoted) >= 2 {
+			values[string(quoted[1:len(quoted)-1])] = struct{}{}
+		}
+	}
+	for _, provider := range providers {
+		var decoded any
+		if json.Unmarshal(provider, &decoded) != nil {
+			return nil, ErrInvalidOutcomeReconciler
+		}
+		if _, ok := decoded.(map[string]any); !ok {
+			return nil, ErrInvalidOutcomeReconciler
+		}
+		add(string(provider))
+		canonical, _ := json.Marshal(decoded)
+		add(string(canonical))
+		// OpenCode auth secrets are strings; its accepted numeric expires field is metadata.
+		// Redacting standalone JSON scalars would erase ordinary diagnostics such as 1, true, or null.
+		leaves := make([]string, 0)
+		collectStringSecrets(decoded, &leaves)
+		for _, leaf := range leaves {
+			add(leaf)
+		}
+	}
+	sensitive := make([]string, 0, len(values))
+	for value := range values {
+		sensitive = append(sensitive, value)
+	}
+	sort.Slice(sensitive, func(left, right int) bool {
+		return len(sensitive[left]) > len(sensitive[right])
+	})
+	replacements := make([]string, 0, len(sensitive)*2)
+	for _, value := range sensitive {
+		replacements = append(replacements, value, "[REDACTED]")
+	}
+	return strings.NewReplacer(replacements...), nil
+}
+
+func (reconciler *OutcomeReconciler) redactProviderDiagnostic(value string) string {
+	if reconciler.diagnosticRedactor == nil {
+		return value
+	}
+	return reconciler.diagnosticRedactor.Replace(value)
 }
 
 func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, mutations []store.MutationReservation, intent store.MutationReservation) store.AgentTurnSettlementObservation {
 	failure := func(diagnostic string) store.AgentTurnSettlementObservation {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic, request.RepositoryCredential)
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic)
 	}
 	if strings.TrimSpace(request.RepositoryCredential) == "" {
 		return failure("Developer repository credential is unavailable")
@@ -267,7 +340,7 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 
 func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, intent store.MutationReservation) store.AgentTurnSettlementObservation {
 	failure := func(diagnostic string) store.AgentTurnSettlementObservation {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic, request.RepositoryCredential)
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic)
 	}
 	proposalScope := request.Execution.ChangeProposal
 	if strings.TrimSpace(request.RepositoryCredential) == "" || proposalScope == nil {
@@ -390,7 +463,7 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 	}, true
 }
 
-func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mutation store.MutationReservation, workflowID, credential string) store.AgentTurnSettlementObservation {
+func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mutation store.MutationReservation, workflowID string) store.AgentTurnSettlementObservation {
 	var arguments struct {
 		OperationID string `json:"operation_id"`
 		Reason      string `json:"reason"`
@@ -405,18 +478,12 @@ func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mut
 		!decodeExactObject(mutation.Request, &arguments) || arguments.OperationID != mutation.OperationID ||
 		!decodeExactObject(mutation.Result, &result) || result.Outcome != "BLOCKED" ||
 		strings.TrimSpace(result.Reason) == "" || result.Reason != arguments.Reason || result.Details != arguments.Details {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "report_blocked terminal evidence is malformed or incoherent", credential)
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "report_blocked terminal evidence is malformed or incoherent")
 	}
-	reason := sanitizeOutcomeDiagnostic(result.Reason, credential)
-	details := sanitizeOutcomeDiagnostic(result.Details, credential)
-	if reason == "" {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "report_blocked terminal evidence has no safe diagnostic", credential)
-	}
-	diagnostic := reason
-	if details != "" {
+	diagnostic := strings.TrimSpace(result.Reason)
+	if details := strings.TrimSpace(result.Details); details != "" {
 		diagnostic += ": " + details
 	}
-	diagnostic = sanitizeOutcomeDiagnostic(diagnostic, credential)
 	return store.AgentTurnSettlementObservation{
 		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic,
 		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
@@ -547,18 +614,31 @@ func encodedPromptOutcome(response *acp.PromptResponse) json.RawMessage {
 	return encoded
 }
 
-func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatus, promptOutcome json.RawMessage, diagnostic, credential string) store.AgentTurnSettlementObservation {
-	diagnostic = sanitizeOutcomeDiagnostic(diagnostic, credential)
-	if diagnostic == "" {
-		diagnostic = "Agent Turn outcome reconciliation failed"
-	}
+func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatus, promptOutcome json.RawMessage, diagnostic string) store.AgentTurnSettlementObservation {
 	return store.AgentTurnSettlementObservation{
 		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeInfrastructureFailed, Diagnostic: diagnostic,
 		Completion: store.AgentTurnCompletion{Status: status, Outcome: promptOutcome, LastError: diagnostic},
 	}
 }
 
-func sanitizeOutcomeDiagnostic(value, credential string) string {
+func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, credential string) store.AgentTurnSettlementObservation {
+	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, credential)
+	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, credential)
+	if observation.Outcome == workflow.TurnOutcomeBlocked && observation.Diagnostic == "" {
+		observation.Outcome = workflow.TurnOutcomeInfrastructureFailed
+		observation.Completion.Status = store.AgentTurnFailed
+		observation.Diagnostic = "report_blocked terminal evidence has no safe diagnostic"
+		observation.Completion.LastError = observation.Diagnostic
+	}
+	if observation.Outcome == workflow.TurnOutcomeInfrastructureFailed && observation.Diagnostic == "" {
+		observation.Diagnostic = "Agent Turn outcome reconciliation failed"
+		observation.Completion.LastError = observation.Diagnostic
+	}
+	return observation
+}
+
+func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value, credential string) string {
+	value = reconciler.redactProviderDiagnostic(value)
 	if credential != "" {
 		value = strings.ReplaceAll(value, credential, "[REDACTED]")
 	}

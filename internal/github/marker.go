@@ -8,12 +8,21 @@ import (
 
 const MarkerVersion = "v1"
 
-var ErrInvalidMarkerToken = errors.New("invalid Omnigrex marker token")
+var (
+	ErrInvalidMarkerToken  = errors.New("invalid Omnigrex marker token")
+	ErrUntrustedMarkerText = errors.New("text contains an untrusted Omnigrex marker")
+)
 
 type Marker struct {
 	WorkflowID        string
 	AgentAssignmentID string
 	OperationID       string
+}
+
+// MarkerInspection reports valid markers and whether any Omnigrex-like comment was malformed.
+type MarkerInspection struct {
+	Markers   []Marker
+	Untrusted bool
 }
 
 func RenderMarker(marker Marker) (string, error) {
@@ -38,8 +47,18 @@ func RenderMarker(marker Marker) (string, error) {
 }
 
 func ParseMarkers(text string) []Marker {
-	const prefix = "<!-- omnigrex:"
+	inspection := InspectMarkers(text)
+	if inspection.Untrusted {
+		return nil
+	}
+	return inspection.Markers
+}
+
+// InspectMarkers parses valid markers while retaining evidence of malformed Omnigrex-like comments.
+func InspectMarkers(text string) MarkerInspection {
+	const prefix = "<!-- omnigrex"
 	markers := make([]Marker, 0)
+	untrusted := false
 	for offset := 0; offset < len(text); {
 		start := strings.Index(text[offset:], prefix)
 		if start < 0 {
@@ -52,19 +71,23 @@ func ParseMarkers(text string) []Marker {
 			next += start + len(prefix)
 		}
 		if next >= 0 && (end < 0 || next < start+4+end) {
+			untrusted = true
 			offset = next
 			continue
 		}
 		if end < 0 {
+			untrusted = true
 			break
 		}
 		end += start + 4
 		if marker, ok := parseMarkerComment(text[start+4 : end]); ok {
 			markers = append(markers, marker)
+		} else {
+			untrusted = true
 		}
 		offset = end + 3
 	}
-	return markers
+	return MarkerInspection{Markers: markers, Untrusted: untrusted}
 }
 
 func EnsureMarker(text string, marker Marker) (string, error) {
@@ -72,7 +95,11 @@ func EnsureMarker(text string, marker Marker) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, existing := range ParseMarkers(text) {
+	inspection := InspectMarkers(text)
+	if inspection.Untrusted {
+		return "", ErrUntrustedMarkerText
+	}
+	for _, existing := range inspection.Markers {
 		if existing == marker {
 			return text, nil
 		}

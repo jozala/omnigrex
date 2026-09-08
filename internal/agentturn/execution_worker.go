@@ -26,7 +26,7 @@ const finalizationAttemptLimit = 3
 // ExecutionWorkerStore is the durable execution, mutation-barrier, and settlement boundary.
 type ExecutionWorkerStore interface {
 	ClaimAndAcquireAgentTurn(context.Context, string, time.Duration, int) (store.AgentTurnLease, bool, error)
-	HeartbeatAgentTurn(context.Context, store.AgentTurnLease, time.Duration) error
+	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	OpenMutationAdmission(context.Context, store.AgentTurnLease) error
 	CloseMutationAdmission(context.Context, store.AgentTurnLease) error
@@ -204,7 +204,7 @@ func (worker *ExecutionWorker) ProcessNext(ctx context.Context) (processed bool,
 		heartbeat.stop()
 		return true, fmt.Errorf("heartbeat acquired Agent Turn: %w", heartbeat.initialErr)
 	}
-	released, operationErr := worker.execute(heartbeat.workCtx, heartbeat.leaseCtx, &lease, &secrets)
+	released, operationErr := worker.execute(heartbeat.workCtx, heartbeat.leaseCtx, &heartbeat, &lease, &secrets)
 	heartbeatErr := heartbeat.stop()
 	if operationErr != nil {
 		if heartbeatErr != nil && !released {
@@ -218,7 +218,7 @@ func (worker *ExecutionWorker) ProcessNext(ctx context.Context) (processed bool,
 	return true, nil
 }
 
-func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, lease *store.AgentTurnLease, secrets *[]string) (bool, error) {
+func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartbeat *executionHeartbeat, lease *store.AgentTurnLease, secrets *[]string) (bool, error) {
 	execution, err := worker.store.GetAgentTurnExecutionContext(workCtx, *lease)
 	if err != nil {
 		return false, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
@@ -275,6 +275,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, lease 
 			DefaultBranchName: defaultBranch.Name, DefaultBranchSHA: defaultBranch.CommitSHA,
 			InitialFeatureBranch: fmt.Sprintf("omnigrex/issue-%d", execution.Issue.Number),
 			RepositoryCredential: repositoryCredential, ProviderCredentialJSON: launchProviderCredential,
+			PublishMCPRenewal: heartbeat.publishMCPRenewal,
 		})
 		zeroBytes(launchProviderCredential)
 		if !nilDependency(runtime) {
@@ -428,6 +429,12 @@ type executionHeartbeat struct {
 	stopSignal context.CancelFunc
 	done       <-chan error
 	initialErr error
+	renewal    *heartbeatRenewal
+}
+
+type heartbeatRenewal struct {
+	mutex sync.RWMutex
+	renew MCPRenewal
 }
 
 func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease store.AgentTurnLease) executionHeartbeat {
@@ -436,8 +443,22 @@ func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease stor
 	heartbeatCtx, stopSignal := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	initial := make(chan error, 1)
+	renewal := &heartbeatRenewal{}
 	go func() {
-		err := worker.store.HeartbeatAgentTurn(heartbeatCtx, lease, worker.leaseDuration)
+		refresh := func() error {
+			refreshed, err := worker.store.RefreshAgentTurnLease(heartbeatCtx, lease, worker.leaseDuration)
+			if err != nil {
+				return err
+			}
+			renewal.mutex.RLock()
+			renew := renewal.renew
+			renewal.mutex.RUnlock()
+			if renew != nil && !renew(refreshed.LeaseExpiresAt) {
+				return errors.New("renew MCP authority after Agent Turn heartbeat")
+			}
+			return nil
+		}
+		err := refresh()
 		initial <- err
 		if err == nil {
 			ticker := time.NewTicker(worker.heartbeatInterval)
@@ -448,7 +469,7 @@ func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease stor
 					err = nil
 					goto finished
 				case <-ticker.C:
-					err = worker.store.HeartbeatAgentTurn(heartbeatCtx, lease, worker.leaseDuration)
+					err = refresh()
 					if err != nil {
 						goto finished
 					}
@@ -467,7 +488,13 @@ func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease stor
 		cancelWork(initialErr)
 		cancelLease(initialErr)
 	}
-	return executionHeartbeat{workCtx: workCtx, leaseCtx: leaseCtx, stopSignal: stopSignal, done: done, initialErr: initialErr}
+	return executionHeartbeat{workCtx: workCtx, leaseCtx: leaseCtx, stopSignal: stopSignal, done: done, initialErr: initialErr, renewal: renewal}
+}
+
+func (heartbeat *executionHeartbeat) publishMCPRenewal(renew MCPRenewal) {
+	heartbeat.renewal.mutex.Lock()
+	heartbeat.renewal.renew = renew
+	heartbeat.renewal.mutex.Unlock()
 }
 
 func (heartbeat executionHeartbeat) stop() error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -134,6 +135,33 @@ func TestProcessorDrainsHistoricalPendingEventBeforeClaimingInbox(t *testing.T) 
 	}
 }
 
+func TestProcessorReportsTerminalizedHistoricalFailureOnceThenProcessesInbox(t *testing.T) {
+	historicalFailure := fmt.Errorf("%w: corrupted historical payload", store.ErrPendingNormalizedEventInvalid)
+	inbox := &processorInbox{
+		drainErr: historicalFailure,
+		claims: []*store.WebhookClaim{{
+			WebhookDelivery: store.WebhookDelivery{
+				DeliveryID: validDeliveryID(), EventName: "push",
+				Payload: []byte(`{"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}}`),
+			},
+			ClaimToken: "323e4567-e89b-12d3-a456-426614174000", AttemptCount: 1,
+		}},
+	}
+	processor := newTestProcessor(t, inbox)
+
+	if processed, err := processor.ProcessNext(context.Background()); processed || !errors.Is(err, store.ErrPendingNormalizedEventInvalid) {
+		t.Fatalf("first ProcessNext() = (%t, %v), want reported historical failure", processed, err)
+	}
+	// The real store commits the FAILED status before returning the first error.
+	inbox.drainErr = nil
+	if processed, err := processor.ProcessNext(context.Background()); !processed || err != nil {
+		t.Fatalf("second ProcessNext() = (%t, %v), want later inbox delivery processed", processed, err)
+	}
+	if len(inbox.completions) != 1 || inbox.completions[0].completion.Outcome != store.WebhookOutcomeIgnored {
+		t.Errorf("later inbox completions = %#v, want one ignored delivery", inbox.completions)
+	}
+}
+
 func TestProcessorMapsIssueClosureFromReceivedAt(t *testing.T) {
 	receivedAt := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
 	inbox := &processorInbox{
@@ -179,10 +207,36 @@ func TestProcessorRetryKeepsWebhookSemanticTimestamp(t *testing.T) {
 	if len(inbox.transitions) != 2 {
 		t.Fatalf("transition attempts = %d, want 2", len(inbox.transitions))
 	}
+	if len(inbox.failures) != 2 || !inbox.failures[0].retryable || !inbox.failures[1].retryable {
+		t.Fatalf("failure acknowledgements = %#v, want two retryable failures", inbox.failures)
+	}
 	for index, transition := range inbox.transitions {
 		if transition.decision.Snapshot.CurrentAttempt == nil || !transition.decision.Snapshot.CurrentAttempt.StartedAt.Equal(receivedAt) {
 			t.Errorf("retry %d StartedAt = %#v, want %s", index+1, transition.decision.Snapshot.CurrentAttempt, receivedAt)
 		}
+	}
+}
+
+func TestProcessorTerminallyAcknowledgesDeterministicTransitionFailure(t *testing.T) {
+	inbox := &processorInbox{
+		claims: []*store.WebhookClaim{{
+			WebhookDelivery: store.WebhookDelivery{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "synchronize", RepositoryID: 9123,
+				Payload: []byte(`{"action":"synchronize","before":"old-head","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"pull_request":{"id":654,"number":21,"body":"<!-- omnigrex:v1 workflow=not-a-uuid -->","base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"new-head"}}}`)},
+			ClaimToken: "323e4567-e89b-12d3-a456-426614174000", AttemptCount: 1, ReceivedAt: time.Now(),
+		}},
+		transitionErr: store.ErrWorkflowLocatorMismatch,
+	}
+	processor := newTestProcessor(t, inbox)
+
+	processed, err := processor.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want durably handled deterministic failure", processed, err)
+	}
+	if len(inbox.failures) != 1 || inbox.failures[0].retryable || inbox.failures[0].attemptCount != 1 || !errors.Is(inbox.failures[0].cause, store.ErrWorkflowLocatorMismatch) {
+		t.Errorf("failure acknowledgement = %#v, want fenced terminal locator failure", inbox.failures)
+	}
+	if len(inbox.transitions) != 1 || !inbox.transitions[0].locator.WorkflowMarkerInvalid || inbox.transitions[0].locator.WorkflowID != "" {
+		t.Errorf("transition locator = %#v, want invalid marker state without trusted Workflow ID", inbox.transitions)
 	}
 }
 
@@ -403,9 +457,11 @@ type recordedCompletion struct {
 }
 
 type recordedFailure struct {
-	deliveryID string
-	claimToken string
-	cause      error
+	deliveryID   string
+	claimToken   string
+	attemptCount int
+	cause        error
+	retryable    bool
 }
 
 func (inbox *processorInbox) ClaimWebhookDelivery(_ context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
@@ -454,8 +510,8 @@ func (inbox *processorInbox) CompleteWebhookDelivery(_ context.Context, delivery
 	return inbox.completeErr
 }
 
-func (inbox *processorInbox) FailWebhookDelivery(_ context.Context, deliveryID, claimToken string, cause error) error {
-	inbox.failures = append(inbox.failures, recordedFailure{deliveryID: deliveryID, claimToken: claimToken, cause: cause})
+func (inbox *processorInbox) AcknowledgeWebhookDeliveryFailure(_ context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool) error {
+	inbox.failures = append(inbox.failures, recordedFailure{deliveryID: deliveryID, claimToken: claimToken, attemptCount: attemptCount, cause: cause, retryable: retryable})
 	return inbox.failErr
 }
 
@@ -490,7 +546,7 @@ func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string,
 	return store.WorkflowApplication{}, nil
 }
 
-func (*retryingInbox) FailWebhookDelivery(context.Context, string, string, error) error {
+func (*retryingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {
 	return nil
 }
 
@@ -513,7 +569,7 @@ func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, 
 	return store.WorkflowApplication{}, nil
 }
 
-func (*pollingInbox) FailWebhookDelivery(context.Context, string, string, error) error {
+func (*pollingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {
 	return nil
 }
 

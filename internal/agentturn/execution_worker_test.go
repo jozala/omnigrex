@@ -101,6 +101,101 @@ func TestExecutionWorkerHeartbeatLossCancelsPromptAndOnlyCleansRuntime(t *testin
 			t.Fatalf("operations = %v, fence loss must not perform %s", operations, forbidden)
 		}
 	}
+	if contains(operations, "mcp-renew") {
+		t.Fatalf("operations = %v, failed heartbeat must not renew MCP authority", operations)
+	}
+}
+
+func TestExecutionWorkerRenewsMCPDuringLaunchOnlyAfterRegistrationAndBeforeReturn(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.config.HeartbeatInterval = time.Millisecond
+	fixture.store.heartbeatExpiry = time.Now().Add(3 * time.Hour)
+	fixture.store.heartbeatObserved = make(chan struct{}, 32)
+	fixture.launcher.launchStarted = make(chan struct{})
+	fixture.launcher.registrationRelease = make(chan struct{})
+	fixture.launcher.registrationPublished = make(chan struct{})
+	fixture.launcher.returnRelease = make(chan struct{})
+	fixture.runtime.renewals = make(chan time.Time, 32)
+	fixture.runtime.closeStarted = make(chan struct{})
+	fixture.runtime.closeRelease = make(chan struct{})
+	worker := fixture.worker(t)
+
+	result := make(chan struct {
+		processed bool
+		err       error
+	}, 1)
+	go func() {
+		processed, err := worker.ProcessNext(context.Background())
+		result <- struct {
+			processed bool
+			err       error
+		}{processed: processed, err: err}
+	}()
+
+	<-fixture.launcher.launchStarted
+	drainSignals(fixture.store.heartbeatObserved)
+	waitForSignals(t, fixture.store.heartbeatObserved, 3, "heartbeats before MCP registration")
+	if contains(fixture.operations.values(), "mcp-renew") {
+		t.Fatalf("operations before registration = %v, want no MCP renewal", fixture.operations.values())
+	}
+
+	close(fixture.launcher.registrationRelease)
+	<-fixture.launcher.registrationPublished
+	for range 3 {
+		select {
+		case expiry := <-fixture.runtime.renewals:
+			if expiry != fixture.store.heartbeatExpiry {
+				t.Fatalf("MCP renewal expiry = %s, want durable heartbeat expiry %s", expiry, fixture.store.heartbeatExpiry)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("MCP authority was not renewed while launch remained blocked")
+		}
+	}
+	select {
+	case completed := <-result:
+		t.Fatalf("ProcessNext() returned before launch release: (%t, %v)", completed.processed, completed.err)
+	default:
+	}
+
+	close(fixture.launcher.returnRelease)
+	<-fixture.runtime.closeStarted
+	drainSignals(fixture.store.heartbeatObserved)
+	renewalsAtClose := countOperation(fixture.operations.values(), "mcp-renew")
+	waitForSignals(t, fixture.store.heartbeatObserved, 3, "heartbeats after MCP close")
+	if renewals := countOperation(fixture.operations.values(), "mcp-renew"); renewals != renewalsAtClose {
+		t.Fatalf("MCP renewals after close = %d, want %d", renewals, renewalsAtClose)
+	}
+	close(fixture.runtime.closeRelease)
+
+	completed := <-result
+	processed, err := completed.processed, completed.err
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want renewed success", processed, err)
+	}
+	if !containsInOrder(fixture.operations.values(), "heartbeat", "mcp-renew") {
+		t.Fatalf("operations = %v, want Store heartbeat before MCP renewal", fixture.operations.values())
+	}
+}
+
+func drainSignals(signals <-chan struct{}) {
+	for {
+		select {
+		case <-signals:
+		default:
+			return
+		}
+	}
+}
+
+func waitForSignals(t *testing.T, signals <-chan struct{}, count int, description string) {
+	t.Helper()
+	for range count {
+		select {
+		case <-signals:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s", description)
+		}
+	}
 }
 
 func TestExecutionWorkerOperationFenceLossOnlyCleansRuntime(t *testing.T) {
@@ -1010,8 +1105,8 @@ func (database *executionRunStore) ClaimAndAcquireAgentTurn(_ context.Context, _
 	return database.lease, true, nil
 }
 
-func (*executionRunStore) HeartbeatAgentTurn(context.Context, store.AgentTurnLease, time.Duration) error {
-	return nil
+func (*executionRunStore) RefreshAgentTurnLease(_ context.Context, lease store.AgentTurnLease, _ time.Duration) (store.AgentTurnLease, error) {
+	return lease, nil
 }
 
 func (database *executionRunStore) GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error) {
@@ -1219,6 +1314,8 @@ type executionStore struct {
 	heartbeatErrAt             int
 	heartbeatErrAfterOperation string
 	heartbeatErr               error
+	heartbeatExpiry            time.Time
+	heartbeatObserved          chan struct{}
 	heartbeats                 int
 	openErr                    error
 	closeErr                   error
@@ -1246,7 +1343,7 @@ func (database *executionStore) ClaimAndAcquireAgentTurn(context.Context, string
 	return database.lease, database.acquired, nil
 }
 
-func (database *executionStore) HeartbeatAgentTurn(ctx context.Context, _ store.AgentTurnLease, _ time.Duration) error {
+func (database *executionStore) RefreshAgentTurnLease(ctx context.Context, lease store.AgentTurnLease, _ time.Duration) (store.AgentTurnLease, error) {
 	database.operations.add("heartbeat")
 	database.mutex.Lock()
 	defer database.mutex.Unlock()
@@ -1254,21 +1351,27 @@ func (database *executionStore) HeartbeatAgentTurn(ctx context.Context, _ store.
 		database.heartbeatCtx = ctx
 	}
 	database.heartbeats++
+	if database.heartbeatObserved != nil {
+		database.heartbeatObserved <- struct{}{}
+	}
 	if database.heartbeatErrAfterOperation != "" && contains(database.operations.values(), database.heartbeatErrAfterOperation) {
 		if database.heartbeatFailure != nil {
 			close(database.heartbeatFailure)
 			database.heartbeatFailure = nil
 		}
-		return database.heartbeatErr
+		return store.AgentTurnLease{}, database.heartbeatErr
 	}
 	if database.heartbeatErrAt != 0 && database.heartbeats >= database.heartbeatErrAt {
 		if database.heartbeatFailure != nil {
 			close(database.heartbeatFailure)
 			database.heartbeatFailure = nil
 		}
-		return database.heartbeatErr
+		return store.AgentTurnLease{}, database.heartbeatErr
 	}
-	return nil
+	if !database.heartbeatExpiry.IsZero() {
+		lease.LeaseExpiresAt = database.heartbeatExpiry
+	}
+	return lease, nil
 }
 
 func (database *executionStore) GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error) {
@@ -1426,16 +1529,35 @@ func (resolver *executionDefaultBranch) ResolveDefaultBranch(_ context.Context, 
 }
 
 type executionLauncher struct {
-	operations *executionOperations
-	runtime    *executionRuntime
-	request    agentturn.LaunchRequest
-	err        error
+	operations            *executionOperations
+	runtime               *executionRuntime
+	request               agentturn.LaunchRequest
+	err                   error
+	launchStarted         chan struct{}
+	registrationRelease   chan struct{}
+	registrationPublished chan struct{}
+	returnRelease         chan struct{}
 }
 
 func (launcher *executionLauncher) LaunchExecution(_ context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
 	launcher.operations.add("launch")
 	launcher.request = request
 	launcher.request.ProviderCredentialJSON = append(json.RawMessage(nil), request.ProviderCredentialJSON...)
+	if launcher.launchStarted != nil {
+		close(launcher.launchStarted)
+	}
+	if launcher.registrationRelease != nil {
+		<-launcher.registrationRelease
+	}
+	if request.PublishMCPRenewal != nil {
+		request.PublishMCPRenewal(launcher.runtime.RenewMCP)
+	}
+	if launcher.registrationPublished != nil {
+		close(launcher.registrationPublished)
+	}
+	if launcher.returnRelease != nil {
+		<-launcher.returnRelease
+	}
 	return launcher.runtime, launcher.err
 }
 
@@ -1447,19 +1569,52 @@ type executionRuntime struct {
 	drainResults   []error
 	drainWaits     int
 	cleanupResults []error
+	renewals       chan time.Time
+	closed         bool
+	closeStarted   chan struct{}
+	closeRelease   chan struct{}
+	closeOnce      sync.Once
 }
 
 func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
 func (runtime *executionRuntime) PromptClient() session.PromptClient { return runtime.client }
+func (runtime *executionRuntime) RenewMCP(expiresAt time.Time) bool {
+	runtime.mutex.Lock()
+	defer runtime.mutex.Unlock()
+	if runtime.closed {
+		return true
+	}
+	runtime.operations.add("mcp-renew")
+	if runtime.renewals != nil {
+		runtime.renewals <- expiresAt
+	}
+	return true
+}
 func (runtime *executionRuntime) CloseMCP(ctx context.Context) error {
 	runtime.operations.add("mcp-drain")
 	runtime.mutex.Lock()
+	runtime.closed = true
+	closeRelease := runtime.closeRelease
+	runtime.closeOnce.Do(func() {
+		if runtime.closeStarted != nil {
+			close(runtime.closeStarted)
+		}
+	})
 	if runtime.drainWaits > 0 {
 		runtime.drainWaits--
 		runtime.mutex.Unlock()
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	runtime.mutex.Unlock()
+	if closeRelease != nil {
+		select {
+		case <-closeRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	runtime.mutex.Lock()
 	defer runtime.mutex.Unlock()
 	if len(runtime.drainResults) == 0 {
 		return nil

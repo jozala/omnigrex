@@ -31,6 +31,90 @@ const (
 	postgresDatabase = "omnigrex"
 )
 
+func TestBoundedWebhookAttemptsMigrationPreservesExistingDeliveriesWithOneSafeRetry(t *testing.T) {
+	postgres := startPostgres(t)
+	pool := openPool(t, postgres.databaseURL(true))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, filename := range []string{"000001_bootstrap.sql", "000002_normalized_events.sql"} {
+		contents, err := migrations.Files.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filename, err)
+		}
+		if _, err := pool.Exec(ctx, string(contents)); err != nil {
+			t.Fatalf("apply migration %s: %v", filename, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO webhook_deliveries (
+    delivery_id, event_name, repository_id, repository_owner, repository_name,
+    payload, status, attempt_count, claim_owner, claim_token, claimed_at, lease_expires_at,
+    processed_at
+)
+VALUES ('14000000-0000-4000-8000-000000000001', 'push', 1, 'owner', 'repo', '{}'::bytea, 'PENDING', 7, NULL, NULL, NULL, NULL, NULL),
+       ('14000000-0000-4000-8000-000000000002', 'push', 1, 'owner', 'repo', '{}'::bytea, 'PROCESSING', 7, 'worker', '14000000-0000-4000-8000-000000000012', clock_timestamp(), clock_timestamp() + interval '1 minute', NULL),
+       ('14000000-0000-4000-8000-000000000003', 'push', 1, 'owner', 'repo', '{}'::bytea, 'FAILED', 7, NULL, NULL, NULL, NULL, clock_timestamp())`); err != nil {
+		t.Fatalf("seed existing webhook deliveries: %v", err)
+	}
+	contents, err := migrations.Files.ReadFile("000014_bounded_webhook_delivery_attempts.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, string(contents)); err != nil {
+		t.Fatalf("apply bounded webhook attempts migration: %v", err)
+	}
+	var notNull, validated bool
+	if err := pool.QueryRow(ctx, `
+SELECT attribute.attnotnull, constraint_record.convalidated
+FROM pg_attribute AS attribute
+JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+JOIN pg_constraint AS constraint_record ON constraint_record.conrelid = relation.oid
+WHERE relation.relname = 'webhook_deliveries' AND attribute.attname = 'max_attempts'
+  AND constraint_record.conname = 'webhook_deliveries_attempt_limit_check'`).Scan(&notNull, &validated); err != nil {
+		t.Fatalf("read staged attempt constraint: %v", err)
+	}
+	if notNull || validated {
+		t.Errorf("migration 14 attempt constraint = NOT NULL %t, validated %t; want deferred validation", notNull, validated)
+	}
+	contents, err = migrations.Files.ReadFile("000015_backfill_webhook_delivery_attempts.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, string(contents)); err != nil {
+		t.Fatalf("apply webhook attempt backfill migration: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+SELECT attribute.attnotnull, constraint_record.convalidated
+FROM pg_attribute AS attribute
+JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+JOIN pg_constraint AS constraint_record ON constraint_record.conrelid = relation.oid
+WHERE relation.relname = 'webhook_deliveries' AND attribute.attname = 'max_attempts'
+  AND constraint_record.conname = 'webhook_deliveries_attempt_limit_check'`).Scan(&notNull, &validated); err != nil {
+		t.Fatalf("read validated attempt constraint: %v", err)
+	}
+	if !notNull || !validated {
+		t.Errorf("migration 15 attempt constraint = NOT NULL %t, validated %t; want finalized constraint", notNull, validated)
+	}
+
+	var migrated string
+	if err := pool.QueryRow(ctx, `SELECT string_agg(delivery_id::text || ':' || max_attempts::text, '|' ORDER BY delivery_id) FROM webhook_deliveries`).Scan(&migrated); err != nil {
+		t.Fatalf("read migrated attempt bounds: %v", err)
+	}
+	if migrated != "14000000-0000-4000-8000-000000000001:8|14000000-0000-4000-8000-000000000002:8|14000000-0000-4000-8000-000000000003:7" {
+		t.Errorf("migrated attempt bounds = %q, want live deliveries to retain one retry and terminal history unchanged", migrated)
+	}
+	var defaultMax int
+	if err := pool.QueryRow(ctx, `
+INSERT INTO webhook_deliveries (delivery_id, event_name, repository_id, repository_owner, repository_name, payload)
+VALUES ('14000000-0000-4000-8000-000000000004', 'push', 1, 'owner', 'repo', '{}'::bytea)
+RETURNING max_attempts`).Scan(&defaultMax); err != nil {
+		t.Fatalf("insert delivery with migrated default: %v", err)
+	}
+	if defaultMax != 3 {
+		t.Errorf("new delivery max_attempts = %d, want 3", defaultMax)
+	}
+}
+
 func TestPhaseSevenMigrationPreservesRetryLineagesAndScopesCallerKeys(t *testing.T) {
 	postgres := startPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
@@ -2119,8 +2203,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 13 {
-		t.Errorf("schema_migrations rows = %d, want 13", count)
+	if count != 17 {
+		t.Errorf("schema_migrations rows = %d, want 17", count)
 	}
 	for version, filename := range map[int]string{
 		1:  "000001_bootstrap.sql",
@@ -2136,6 +2220,10 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		11: "000011_durable_closure_retention.sql",
 		12: "000012_runtime_profile_compatibility.sql",
 		13: "000013_tool_scoped_mutation_operations.sql",
+		14: "000014_bounded_webhook_delivery_attempts.sql",
+		15: "000015_backfill_webhook_delivery_attempts.sql",
+		16: "000016_failed_historical_normalized_events.sql",
+		17: "000017_validate_normalized_event_failures.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2214,8 +2302,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 13 {
-		t.Errorf("migrations applied by Open() = %d, want 13", migrationCount)
+	if migrationCount != 17 {
+		t.Errorf("migrations applied by Open() = %d, want 17", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

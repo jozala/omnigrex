@@ -71,6 +71,148 @@ func TestAssignmentRetentionWorkerWaitsForDeadlineAndLeavesNeighboringAssignment
 	}
 }
 
+func TestAssignmentRetentionWorkerTerminallyHandsOffLegacyInvalidTargets(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 66)
+	prepareClosableFixture(t, pool, fixture)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	observedAt := time.Now().UTC().Add(-time.Hour)
+	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 66,
+		"71000000-0000-4000-8000-000000000661", "worker-invalid", "worker-invalid-retention",
+		observedAt, observedAt.Add(time.Minute))
+	cleaner := &integrationRetentionCleaner{}
+	worker := newIntegrationRetentionWorker(t, databases[0], cleaner, "invalid-target-worker")
+
+	processed, err := worker.ProcessNext(ctx)
+	if !processed || !errors.Is(err, retention.ErrInvalidCleanupTargets) {
+		t.Fatalf("ProcessNext() = (%t, %v), want terminal invalid targets", processed, err)
+	}
+	if calls := cleaner.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("cleanup calls = %#v, want none", calls)
+	}
+	processed, err = worker.ProcessNext(ctx)
+	if err != nil || processed {
+		t.Fatalf("second ProcessNext() = (%t, %v), want no retry", processed, err)
+	}
+
+	var generationStatus, jobStatus, attemptStatus string
+	var attemptRetryable, authorizationAbsent bool
+	var handoffs int
+	if err := pool.QueryRow(ctx, `
+SELECT generation.status, job.status, attempt.status, attempt.retryable,
+       generation.authorized_attempt_number IS NULL
+           AND generation.authorized_lease_owner IS NULL
+           AND generation.authorized_lease_token IS NULL
+           AND generation.authorized_at IS NULL,
+       (SELECT count(*) FROM jobs AS handoff
+        WHERE handoff.workflow_id = generation.workflow_id
+          AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
+          AND handoff.payload->>'reason' = 'assignment_collection_invalid_targets')
+FROM assignment_retention_generations AS generation
+JOIN jobs AS job ON job.id = generation.collection_job_id
+JOIN job_attempts AS attempt ON attempt.job_id = job.id
+	WHERE generation.workflow_id = $1`, fixture.workflowID).Scan(
+		&generationStatus, &jobStatus, &attemptStatus, &attemptRetryable, &authorizationAbsent, &handoffs); err != nil {
+		t.Fatal(err)
+	}
+	if generationStatus != "SCHEDULED" || jobStatus != string(store.JobFailed) ||
+		attemptStatus != "FAILED" || attemptRetryable || !authorizationAbsent || handoffs != 1 {
+		t.Fatalf("invalid target outcome = generation %s authorized %t, Job %s, attempt %s retryable %t, handoffs %d",
+			generationStatus, !authorizationAbsent, jobStatus, attemptStatus, attemptRetryable, handoffs)
+	}
+}
+
+func TestAssignmentRetentionWorkerTerminallyHandsOffDurablyInvalidTargets(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, context.Context, *pgxpool.Pool, agentFixture, string, string)
+	}{
+		{name: "cross-Assignment Session target", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _ string, secondSessionID string) {
+			if _, err := pool.Exec(ctx, `
+UPDATE assignment_retention_targets
+SET assignment_id = $2, runtime_state_path = $3
+WHERE session_id = $1`, secondSessionID, fixture.assignmentID, canonicalRuntimePath(fixture.assignmentID)); err != nil {
+				t.Fatalf("cross-wire Session target: %v", err)
+			}
+		}},
+		{name: "omitted Session target", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _, _ string) {
+			if _, err := pool.Exec(ctx, `DELETE FROM assignment_retention_targets WHERE session_id = $1`, fixture.sessionID); err != nil {
+				t.Fatalf("omit Session target: %v", err)
+			}
+		}},
+		{name: "omitted Assignment targets", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, _ agentFixture, secondAssignmentID, _ string) {
+			if _, err := pool.Exec(ctx, `DELETE FROM assignment_retention_targets WHERE assignment_id = $1`, secondAssignmentID); err != nil {
+				t.Fatalf("omit Assignment targets: %v", err)
+			}
+		}},
+		{name: "mismatched durable path", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _, _ string) {
+			if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET runtime_state_path = 'durable/path/changed' WHERE id = $1`, fixture.assignmentID); err != nil {
+				t.Fatalf("change durable Assignment path: %v", err)
+			}
+		}},
+		{name: "mismatched durable image binding", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _, _ string) {
+			if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_image_digest = 'sha256:durable-changed' WHERE id = $1`, fixture.sessionID); err != nil {
+				t.Fatalf("change durable Session image binding: %v", err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			fixture := seedAgentSession(t, pool, 67)
+			makeFixtureRuntimePathCanonical(t, pool, fixture)
+			secondAssignmentID, secondSessionID := addRetainedFixtureAssignment(t, pool, fixture, 67)
+			prepareClosableFixture(t, pool, fixture)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			observedAt := time.Now().UTC().Add(-time.Hour)
+			closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 67,
+				"71000000-0000-4000-8000-000000000671", "worker-durable-invalid", "worker-durable-invalid-retention",
+				observedAt, observedAt.Add(time.Minute))
+			test.mutate(t, ctx, pool, fixture, secondAssignmentID, secondSessionID)
+			cleaner := &integrationRetentionCleaner{}
+			worker := newIntegrationRetentionWorker(t, databases[0], cleaner, "durable-invalid-target-worker")
+
+			processed, err := worker.ProcessNext(ctx)
+			if !processed || !errors.Is(err, retention.ErrInvalidCleanupTargets) {
+				t.Fatalf("ProcessNext() = (%t, %v), want terminal invalid targets", processed, err)
+			}
+			if calls := cleaner.callsSnapshot(); len(calls) != 0 {
+				t.Fatalf("cleanup calls = %#v, want none", calls)
+			}
+			if processed, err = worker.ProcessNext(ctx); err != nil || processed {
+				t.Fatalf("second ProcessNext() = (%t, %v), want no retry", processed, err)
+			}
+
+			var generationStatus, jobStatus string
+			var authorizationAbsent bool
+			var handoffs int
+			if err := pool.QueryRow(ctx, `
+SELECT generation.status, job.status,
+       generation.authorized_attempt_number IS NULL
+           AND generation.authorized_lease_owner IS NULL
+           AND generation.authorized_lease_token IS NULL
+           AND generation.authorized_at IS NULL,
+       (SELECT count(*) FROM jobs AS handoff
+        WHERE handoff.workflow_id = generation.workflow_id
+          AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
+          AND handoff.payload->>'reason' = 'assignment_collection_invalid_targets')
+FROM assignment_retention_generations AS generation
+JOIN jobs AS job ON job.id = generation.collection_job_id
+WHERE generation.workflow_id = $1`, fixture.workflowID).Scan(
+				&generationStatus, &jobStatus, &authorizationAbsent, &handoffs); err != nil {
+				t.Fatal(err)
+			}
+			if generationStatus != "SCHEDULED" || jobStatus != string(store.JobFailed) || !authorizationAbsent || handoffs != 1 {
+				t.Fatalf("invalid durable target outcome = generation %s authorized %t, Job %s, handoffs %d",
+					generationStatus, !authorizationAbsent, jobStatus, handoffs)
+			}
+		})
+	}
+}
+
 func TestAssignmentRetentionWorkerRetriesPartialCleanupIdempotentlyAcrossLeaseAttempts(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	fixture := seedAgentSession(t, pool, 63)

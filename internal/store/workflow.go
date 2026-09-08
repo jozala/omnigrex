@@ -47,11 +47,12 @@ const (
 
 // WorkflowLocator identifies a Workflow by its Work Item or known Change Proposal relation.
 type WorkflowLocator struct {
-	RepositoryID  int64
-	IssueID       int64
-	IssueNumber   int64
-	PullRequestID int64
-	WorkflowID    string
+	RepositoryID          int64
+	IssueID               int64
+	IssueNumber           int64
+	PullRequestID         int64
+	WorkflowID            string
+	WorkflowMarkerInvalid bool
 }
 
 // WorkflowRepository is the immutable repository identity captured when a Workflow is created.
@@ -199,7 +200,7 @@ SELECT event.delivery_id::text, event.payload, event.status, event.created_at,
        COALESCE(delivery.issue_number, 0)
 FROM normalized_events AS event
 JOIN webhook_deliveries AS delivery USING (delivery_id)
-WHERE event.status = 'PENDING'
+WHERE event.status = 'PENDING' AND event.attempt_count < event.max_attempts
 ORDER BY event.created_at, event.delivery_id
 FOR UPDATE OF event SKIP LOCKED
 LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.CreatedAt,
@@ -214,27 +215,72 @@ LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.Crea
 	if err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("select pending normalized event: %w", err)
 	}
+	if err := tx.QueryRow(ctx, `
+UPDATE normalized_events
+SET attempt_count = attempt_count + 1, last_error = NULL
+WHERE delivery_id = $1 AND status = 'PENDING' AND attempt_count < max_attempts
+RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptCount, &record.MaxAttempts); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("count pending normalized event attempt: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SAVEPOINT apply_pending_normalized_event`); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("save pending normalized event application: %w", err)
+	}
 	if err := validateNormalizedDeliveryID(record.Payload, record.DeliveryID); err != nil {
-		return WorkflowApplication{}, false, fmt.Errorf("apply pending normalized event: %w", err)
+		cause := fmt.Errorf("apply pending normalized event: %w", err)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
 	locator, transition, err := factory(record)
 	if err != nil {
-		return WorkflowApplication{}, false, fmt.Errorf("build pending transition: %w", err)
+		cause := fmt.Errorf("build pending transition: %w", err)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
 	if transition == nil {
-		return WorkflowApplication{}, false, errors.New("build pending transition: transition is nil")
+		cause := fmt.Errorf("build pending transition: transition is nil: %w", ErrPendingNormalizedEventInvalid)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
 	if err := validateWorkflowLocator(locator, envelope); err != nil {
-		return WorkflowApplication{}, false, err
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
 	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, transition)
 	if err != nil {
-		return WorkflowApplication{}, false, err
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("commit pending normalized event: %w", err)
 	}
 	return application, true, nil
+}
+
+func finishPendingNormalizedEventFailure(ctx context.Context, tx pgx.Tx, record NormalizedEventRecord, cause error) error {
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT apply_pending_normalized_event`); err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	terminal := deterministicPendingNormalizedEventFailure(cause) || record.AttemptCount >= record.MaxAttempts
+	result, err := tx.Exec(ctx, `
+UPDATE normalized_events
+SET status = CASE WHEN $4 THEN 'FAILED' ELSE 'PENDING' END,
+    reason = CASE WHEN $4 THEN $2 ELSE NULL END,
+    processed_at = CASE WHEN $4 THEN clock_timestamp() ELSE NULL END,
+    last_error = $2
+WHERE delivery_id = $1 AND status = 'PENDING' AND attempt_count = $3`,
+		record.DeliveryID, cause.Error(), record.AttemptCount, terminal)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("record failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	if result.RowsAffected() != 1 {
+		return errors.Join(cause, errors.New("pending normalized event is no longer pending"))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return errors.Join(cause, fmt.Errorf("commit failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	return cause
+}
+
+func deterministicPendingNormalizedEventFailure(err error) bool {
+	return errors.Is(err, ErrNormalizedEventDeliveryMismatch) ||
+		errors.Is(err, ErrPendingNormalizedEventInvalid) ||
+		errors.Is(err, ErrWorkflowLocatorMismatch) ||
+		errors.Is(err, ErrWorkflowDecisionInvalid)
 }
 
 func lockWebhookForTransition(ctx context.Context, tx pgx.Tx, deliveryID, claimToken string) (workflowEnvelope, error) {
@@ -262,7 +308,8 @@ FROM webhook_deliveries WHERE delivery_id = $1 FOR UPDATE`, deliveryID).Scan(
 func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope) error {
 	if locator.RepositoryID <= 0 || locator.RepositoryID != envelope.repositoryID ||
 		(locator.IssueID == 0) != (locator.IssueNumber == 0) || locator.IssueID < 0 || locator.IssueNumber < 0 || locator.PullRequestID < 0 ||
-		(locator.WorkflowID != "" && !validUUID(locator.WorkflowID)) {
+		(locator.WorkflowID != "" && !validUUID(locator.WorkflowID)) ||
+		(locator.WorkflowMarkerInvalid && locator.WorkflowID != "") {
 		return ErrWorkflowLocatorMismatch
 	}
 	if envelope.issueID > 0 && (locator.IssueID != envelope.issueID || locator.IssueNumber != envelope.issueNumber) {
@@ -365,6 +412,9 @@ WHERE repository_id = $1 AND pull_request_id = $2`, locator.RepositoryID, locato
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("resolve workflow by change proposal: %w", err)
 		}
+	}
+	if locator.WorkflowMarkerInvalid && byProposal == "" {
+		return "", ErrWorkflowLocatorMismatch
 	}
 	if locator.WorkflowID != "" {
 		err := tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id = $1 AND repository_id = $2`, locator.WorkflowID, locator.RepositoryID).Scan(&byMarker)

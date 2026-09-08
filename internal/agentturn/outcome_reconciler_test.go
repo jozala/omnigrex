@@ -34,6 +34,13 @@ const (
 
 var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 
+func TestOutcomeReconcilerConfigFormattingDoesNotExposeProviderCredentials(t *testing.T) {
+	config := agentturn.OutcomeReconcilerConfig{ProviderCredentialJSON: []json.RawMessage{json.RawMessage(`{"token":"provider-config-secret"}`)}}
+	if rendered := fmt.Sprintf("%v %#v", config, config); strings.Contains(rendered, "provider-config-secret") {
+		t.Fatalf("formatted Outcome reconciler config leaks provider credentials: %s", rendered)
+	}
+}
+
 func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEvidence(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleDeveloper, false)
 	ledger := []store.MutationReservation{
@@ -195,6 +202,85 @@ func TestOutcomeReconcilerAcceptsSanitizedBlockedEvidenceWithoutGitHub(t *testin
 	}
 }
 
+func TestOutcomeReconcilerRedactsBothProviderCredentialsFromBlockedDiagnostic(t *testing.T) {
+	developerProvider := json.RawMessage("{\n  \"openai\": {\"apiKey\": \"developer-leaf\", \"nested\": [\"developer-array-leaf\"]}\n}")
+	reviewerProvider := json.RawMessage(`{"anthropic":{"apiKey":"reviewer-leaf"}}`)
+	developerRaw := string(developerProvider)
+	reviewerRaw := string(reviewerProvider)
+	developerCanonical := `{"openai":{"apiKey":"developer-leaf","nested":["developer-array-leaf"]}}`
+	reviewerEscaped := `{\"anthropic\":{\"apiKey\":\"reviewer-leaf\"}}`
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	requestReason := "Cannot proceed with Developer provider " + developerRaw + " or leaf developer-array-leaf"
+	requestDetails := "Reviewer provider " + reviewerRaw + " canonical " + developerCanonical + " escaped " + reviewerEscaped
+	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeBlockedMutation(1, requestReason, requestDetails)}}
+	reconciler := newOutcomeReconcilerWithProviders(t, storeAPI, &outcomeGitHub{}, developerProvider, reviewerProvider)
+	for index := range developerProvider {
+		developerProvider[index] = 0
+	}
+	for index := range reviewerProvider {
+		reviewerProvider[index] = 0
+	}
+
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "Cannot proceed") || !strings.Contains(observation.Diagnostic, "[REDACTED]") {
+		t.Fatalf("blocked observation lost required diagnostic = %#v", observation)
+	}
+	for _, sensitive := range []string{
+		developerRaw, reviewerRaw, developerCanonical, reviewerEscaped,
+		"developer-leaf", "developer-array-leaf", "reviewer-leaf", "openai", "anthropic", "apiKey",
+	} {
+		if strings.Contains(observation.Diagnostic, sensitive) {
+			t.Errorf("blocked diagnostic contains sensitive provider representation %q: %q", sensitive, observation.Diagnostic)
+		}
+	}
+}
+
+func TestOutcomeReconcilerRedactsProviderCredentialsFromPromptFailureDiagnostic(t *testing.T) {
+	provider := json.RawMessage(`{"provider":{"auth":{"token":"provider-failure-leaf"}}}`)
+	request := outcomeRequest(t, workflow.RoleDeveloper, true)
+	request.PromptResponse = nil
+	request.PromptError = agentturn.PromptErrorFailure
+	request.PromptDiagnostic = `runtime exposed {\"provider\":{\"auth\":{\"token\":\"provider-failure-leaf\"}}}`
+	reconciler := newOutcomeReconcilerWithProviders(t, &outcomeStore{}, &outcomeGitHub{}, provider)
+
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if observation.Outcome != workflow.TurnOutcomeInfrastructureFailed || observation.Completion.Status != store.AgentTurnFailed ||
+		observation.Diagnostic != observation.Completion.LastError || !strings.Contains(observation.Diagnostic, "runtime exposed [REDACTED]") {
+		t.Fatalf("prompt failure observation lost required diagnostic = %#v", observation)
+	}
+	for _, sensitive := range []string{"provider-failure-leaf", "provider", "auth", "token"} {
+		if strings.Contains(observation.Diagnostic, sensitive) {
+			t.Errorf("prompt failure diagnostic contains sensitive provider representation %q: %q", sensitive, observation.Diagnostic)
+		}
+	}
+}
+
+func TestOutcomeReconcilerDoesNotTreatProviderNonStringScalarsAsStandaloneSecrets(t *testing.T) {
+	provider := json.RawMessage(`{"provider":{"type":"oauth","refresh":"refresh-secret","access":"access-secret","expires":1,"enabled":true,"optional":null}}`)
+	request := outcomeRequest(t, workflow.RoleDeveloper, true)
+	reason := "Attempt 1 remains active true with optional null"
+	details := "access-secret " + string(provider)
+	reconciler := newOutcomeReconcilerWithProviders(t,
+		&outcomeStore{mutations: []store.MutationReservation{outcomeBlockedMutation(1, reason, details)}},
+		&outcomeGitHub{}, provider)
+
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if observation.Outcome != workflow.TurnOutcomeBlocked ||
+		observation.Diagnostic != "Attempt 1 remains active true with optional null: [REDACTED] [REDACTED]" {
+		t.Fatalf("scalar-safe blocked observation = %#v", observation)
+	}
+}
+
 func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *testing.T) {
 	endTurn := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
 	tests := []struct {
@@ -349,8 +435,14 @@ type outcomeClock struct{}
 func (outcomeClock) Now() time.Time { return outcomeObservedAt }
 
 func newOutcomeReconciler(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub) *agentturn.OutcomeReconciler {
+	return newOutcomeReconcilerWithProviders(t, storeAPI, github)
+}
+
+func newOutcomeReconcilerWithProviders(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub, providers ...json.RawMessage) *agentturn.OutcomeReconciler {
 	t.Helper()
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: storeAPI, GitHub: github, Clock: outcomeClock{}})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: storeAPI, GitHub: github, Clock: outcomeClock{}, ProviderCredentialJSON: providers,
+	})
 	if err != nil {
 		t.Fatalf("NewOutcomeReconciler() error = %v", err)
 	}

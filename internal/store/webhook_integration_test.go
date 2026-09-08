@@ -284,6 +284,175 @@ func TestFailWebhookDeliveryIsFencedAndRecordsFailure(t *testing.T) {
 	}
 }
 
+func TestWebhookFailureAcknowledgementBoundsRetryablePoisonAndFencesAttempt(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+		if err != nil || claim == nil {
+			t.Fatalf("attempt %d ClaimWebhookDelivery() = (%#v, %v), want claim", attempt, claim, err)
+		}
+		if claim.AttemptCount != attempt {
+			t.Fatalf("claim attempt = %d, want %d", claim.AttemptCount, attempt)
+		}
+		if attempt == 1 {
+			err = database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount+1, errors.New("poison"), true)
+			if !errors.Is(err, store.ErrWebhookClaimLost) {
+				t.Fatalf("AcknowledgeWebhookDeliveryFailure() with wrong attempt error = %v, want ErrWebhookClaimLost", err)
+			}
+		}
+		if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, errors.New("poison"), true); err != nil {
+			t.Fatalf("attempt %d AcknowledgeWebhookDeliveryFailure() error = %v", attempt, err)
+		}
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.AttemptCount != 3 || record.ClaimToken != nil || record.LastError == nil || *record.LastError != "poison" {
+		t.Errorf("exhausted delivery = %#v, want FAILED after 3 attempts with poison error", record)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim != nil {
+		t.Errorf("ClaimWebhookDelivery() after exhaustion = (%#v, %v), want no claim", claim, err)
+	}
+}
+
+func TestWebhookFailureAcknowledgementKeepsTransientFailureRetryable(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", 30*time.Second)
+	if err != nil || first == nil {
+		t.Fatalf("first ClaimWebhookDelivery() = (%#v, %v), want claim", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("database unavailable"), true); err != nil {
+		t.Fatalf("AcknowledgeWebhookDeliveryFailure() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookPending || record.AttemptCount != 1 || record.ProcessedAt != nil || record.LastError == nil || *record.LastError != "database unavailable" {
+		t.Fatalf("retryable delivery = %#v, want PENDING attempt 1 with transient error", record)
+	}
+	second, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || second == nil || second.DeliveryID != delivery.DeliveryID || second.AttemptCount != 2 {
+		t.Errorf("retry ClaimWebhookDelivery() = (%#v, %v), want same delivery at attempt 2", second, err)
+	}
+}
+
+func TestWebhookFailureAcknowledgementTerminallyFailsDeterministicError(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, store.ErrWorkflowDecisionInvalid, false); err != nil {
+		t.Fatalf("AcknowledgeWebhookDeliveryFailure() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.AttemptCount != 1 || record.ProcessedAt == nil || record.ClaimToken != nil || record.LastError == nil {
+		t.Errorf("deterministically failed delivery = %#v, want terminal FAILED attempt 1", record)
+	}
+}
+
+func TestClaimWebhookDeliveryDoesNotLetRetryingPoisonStarveFreshDelivery(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	poison := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	valid := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, poison); err != nil {
+		t.Fatalf("insert poison delivery: %v", err)
+	}
+	poisonClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || poisonClaim == nil {
+		t.Fatalf("claim poison delivery = (%#v, %v)", poisonClaim, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, poisonClaim.DeliveryID, poisonClaim.ClaimToken, poisonClaim.AttemptCount, errors.New("retry poison"), true); err != nil {
+		t.Fatalf("acknowledge poison retry: %v", err)
+	}
+	if _, err := database.InsertWebhookDelivery(ctx, valid); err != nil {
+		t.Fatalf("insert valid delivery: %v", err)
+	}
+
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil || claim.DeliveryID != valid.DeliveryID || claim.AttemptCount != 1 {
+		t.Fatalf("claim with poison retry waiting = (%#v, %v), want fresh valid delivery", claim, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete valid delivery after poison: %v", err)
+	}
+	retry, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || retry == nil || retry.DeliveryID != poison.DeliveryID || retry.AttemptCount != 2 {
+		t.Errorf("claim after valid delivery = (%#v, %v), want poison retry attempt 2", retry, err)
+	}
+}
+
+func TestClaimWebhookDeliveryFailsExpiredExhaustedPoisonBeforeClaimingValidWork(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	poison := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	valid := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, poison); err != nil {
+		t.Fatalf("insert poison delivery: %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+		if err != nil || claim == nil || claim.DeliveryID != poison.DeliveryID {
+			t.Fatalf("poison attempt %d claim = (%#v, %v)", attempt, claim, err)
+		}
+		if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, errors.New("transient poison"), true); err != nil {
+			t.Fatalf("poison attempt %d acknowledgement: %v", attempt, err)
+		}
+	}
+	finalClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 50*time.Millisecond)
+	if err != nil || finalClaim == nil || finalClaim.DeliveryID != poison.DeliveryID || finalClaim.AttemptCount != 3 {
+		t.Fatalf("final poison claim = (%#v, %v), want attempt 3", finalClaim, err)
+	}
+	if _, err := database.InsertWebhookDelivery(ctx, valid); err != nil {
+		t.Fatalf("insert valid delivery: %v", err)
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	validClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || validClaim == nil || validClaim.DeliveryID != valid.DeliveryID {
+		t.Fatalf("claim after exhausted poison = (%#v, %v), want valid delivery", validClaim, err)
+	}
+	record, err := database.GetWebhookDelivery(ctx, poison.DeliveryID)
+	if err != nil {
+		t.Fatalf("get exhausted poison: %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.ProcessedAt == nil || record.ClaimToken != nil || record.LastError == nil {
+		t.Errorf("expired exhausted poison = %#v, want terminal FAILED state", record)
+	}
+}
+
 func TestExpiredWebhookClaimCannotCompleteOrFail(t *testing.T) {
 	database := openWebhookStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

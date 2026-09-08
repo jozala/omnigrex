@@ -14,7 +14,7 @@ import (
 
 const maximumWorkerDuration = 365 * 24 * time.Hour
 
-var ErrInvalidCleanupTargets = errors.New("invalid Assignment collection cleanup targets")
+var ErrInvalidCleanupTargets = store.ErrInvalidAssignmentCleanupTargets
 
 // WorkerStore is the durable Assignment collection boundary used by Worker.
 type WorkerStore interface {
@@ -147,48 +147,18 @@ type cleanupPath struct {
 	runtimeStatePath string
 }
 
-type assignmentTargetIdentity struct {
-	path              string
-	imageDigest       string
-	hasAssignmentRoot bool
-}
-
 func canonicalCleanupPaths(targets []store.AssignmentCleanupTarget) ([]cleanupPath, error) {
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("%w: target set is empty", ErrInvalidCleanupTargets)
+	if err := store.ValidateAssignmentCleanupTargets(targets); err != nil {
+		return nil, err
 	}
-	assignments := make(map[string]assignmentTargetIdentity)
+	assignments := make(map[string]string)
 	for _, target := range targets {
-		if !validUUID(target.AssignmentID) || target.SessionID != "" && !validUUID(target.SessionID) ||
-			strings.TrimSpace(target.RuntimeImageDigest) == "" {
-			return nil, fmt.Errorf("%w: target identity is malformed", ErrInvalidCleanupTargets)
-		}
-		canonicalPath := "assignment-" + target.AssignmentID + "/runtime-state"
-		if target.RuntimeStatePath != canonicalPath {
-			return nil, fmt.Errorf("%w: runtime-state path is not canonical for its Assignment", ErrInvalidCleanupTargets)
-		}
-		identity, exists := assignments[target.AssignmentID]
-		if exists && (identity.path != target.RuntimeStatePath || identity.imageDigest != target.RuntimeImageDigest) {
-			return nil, fmt.Errorf("%w: Session target does not match its immutable Assignment", ErrInvalidCleanupTargets)
-		}
-		if !exists {
-			identity = assignmentTargetIdentity{path: target.RuntimeStatePath, imageDigest: target.RuntimeImageDigest}
-		}
-		if target.SessionID == "" {
-			if identity.hasAssignmentRoot {
-				return nil, fmt.Errorf("%w: Assignment target is duplicated", ErrInvalidCleanupTargets)
-			}
-			identity.hasAssignmentRoot = true
-		}
-		assignments[target.AssignmentID] = identity
+		assignments[target.AssignmentID] = target.RuntimeStatePath
 	}
 
 	paths := make([]cleanupPath, 0, len(assignments))
-	for assignmentID, identity := range assignments {
-		if !identity.hasAssignmentRoot {
-			return nil, fmt.Errorf("%w: Assignment-level target is missing", ErrInvalidCleanupTargets)
-		}
-		paths = append(paths, cleanupPath{assignmentID: assignmentID, runtimeStatePath: identity.path})
+	for assignmentID, path := range assignments {
+		paths = append(paths, cleanupPath{assignmentID: assignmentID, runtimeStatePath: path})
 	}
 	sort.Slice(paths, func(left, right int) bool {
 		if paths[left].runtimeStatePath == paths[right].runtimeStatePath {
@@ -242,21 +212,6 @@ func collectionFenceLost(err error) bool {
 
 func validDuration(duration time.Duration) bool {
 	return duration >= time.Microsecond && duration <= maximumWorkerDuration
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return value != "00000000-0000-0000-0000-000000000000"
 }
 
 func nilDependency(dependency any) bool {

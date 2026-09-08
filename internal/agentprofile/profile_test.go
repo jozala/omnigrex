@@ -109,6 +109,17 @@ func TestParseAcceptsExactDelimitersWithCRLFLineEndings(t *testing.T) {
 	}
 }
 
+func TestParseRejectsReviewerEditingPermissions(t *testing.T) {
+	for _, tool := range []string{"edit", "patch"} {
+		t.Run(tool, func(t *testing.T) {
+			content := []byte("---\nruntime: opencode-acp/v1\nmodel: openai/gpt-5.2\nsteps: 10\npermissions:\n  " + tool + ": allow\n---\nReview the Change Proposal.\n")
+			if _, err := agentprofile.Parse(agentprofile.Reviewer, content); err == nil {
+				t.Fatal("Parse() error = nil, want Reviewer editing permission rejection")
+			}
+		})
+	}
+}
+
 func TestParseRejectsInvalidProfiles(t *testing.T) {
 	valid := "---\nruntime: opencode-acp/v1\nmodel: openai/gpt-5.2\nsteps: 10\npermissions:\n  read: allow\n---\nInstructions.\n"
 	tests := []struct {

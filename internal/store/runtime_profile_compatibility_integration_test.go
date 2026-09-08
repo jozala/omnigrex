@@ -384,7 +384,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
        (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'runtime_profile_compatibility_results')`).Scan(&version, &tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 13 || tables != 1 {
+	if version != 17 || tables != 1 {
 		t.Fatalf("migrated current schema = version %d, compatibility tables %d", version, tables)
 	}
 }

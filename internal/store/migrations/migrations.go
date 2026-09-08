@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,8 +21,9 @@ import (
 var migrationFilename = regexp.MustCompile(`^([0-9]{6})_([a-z0-9][a-z0-9_]*)\.sql$`)
 
 const (
-	migrationLockID     = int64(0x4f4d4e4947524558)
-	schemaMigrationsDDL = `
+	migrationLockID       = int64(0x4f4d4e4947524558)
+	migrationCleanupLimit = 5 * time.Second
+	schemaMigrationsDDL   = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version BIGINT PRIMARY KEY CHECK (version > 0),
     name TEXT NOT NULL CHECK (name <> ''),
@@ -43,7 +45,7 @@ type migration struct {
 var Files embed.FS
 
 // Run applies every pending embedded migration in version order.
-func Run(ctx context.Context, pool *pgxpool.Pool) error {
+func Run(ctx context.Context, pool *pgxpool.Pool) (runErr error) {
 	if pool == nil {
 		return errors.New("run migrations: nil PostgreSQL pool")
 	}
@@ -53,27 +55,74 @@ func Run(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("begin migration transaction: %w", err)
+		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
-		return fmt.Errorf("lock migrations: %w", err)
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		closeErr := closeMigrationConnection(conn)
+		return errors.Join(fmt.Errorf("lock migrations: %w", err), closeErr)
 	}
-	if _, err := tx.Exec(ctx, schemaMigrationsDDL); err != nil {
+	defer func() {
+		runErr = errors.Join(runErr, unlockMigrationConnection(conn))
+	}()
+
+	if _, err := conn.Exec(ctx, schemaMigrationsDDL); err != nil {
 		return fmt.Errorf("create migration history: %w", err)
 	}
 
 	for _, migration := range migrations {
-		if err := apply(ctx, tx, migration); err != nil {
+		if err := applyMigration(ctx, conn, migration); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
+func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration migration) (applyErr error) {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+		defer cancel()
+		if err := tx.Rollback(cleanupCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			applyErr = errors.Join(applyErr, fmt.Errorf("roll back migration %06d_%s.sql: %w", migration.version, migration.name, err))
+		}
+	}()
+
+	if err := apply(ctx, tx, migration); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit migrations: %w", err)
+		return fmt.Errorf("commit migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	return nil
+}
+
+func unlockMigrationConnection(conn *pgxpool.Conn) error {
+	// Session locks survive transactions, so cleanup must outlive a canceled Run context.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+	defer cancel()
+
+	var unlocked bool
+	if err := conn.QueryRow(cleanupCtx, `SELECT pg_advisory_unlock($1)`, migrationLockID).Scan(&unlocked); err != nil {
+		return errors.Join(fmt.Errorf("unlock migrations: %w", err), closeMigrationConnection(conn))
+	}
+	conn.Release()
+	if !unlocked {
+		return errors.New("unlock migrations: advisory lock was not held")
+	}
+	return nil
+}
+
+func closeMigrationConnection(conn *pgxpool.Conn) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+	defer cancel()
+	if err := conn.Hijack().Close(cleanupCtx); err != nil {
+		return fmt.Errorf("close migration connection: %w", err)
 	}
 	return nil
 }

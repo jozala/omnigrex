@@ -65,11 +65,18 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: clientFactory, Sessions: sessions,
 		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
+	var renewal agentturn.MCPRenewal
 
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
 		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
+		PublishMCPRenewal: func(published agentturn.MCPRenewal) {
+			if !slices.Contains(operations, "mcp-register") {
+				t.Fatal("MCP renewal published before registration")
+			}
+			renewal = published
+		},
 	})
 	if err != nil {
 		t.Fatalf("Launch() error = %v", err)
@@ -94,6 +101,32 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		gateway.scope.PullRequest != nil || gateway.scope.ExpiresAt != handle.CurrentLease().LeaseExpiresAt ||
 		gateway.scope.ExpiresAt != lease.LeaseExpiresAt.Add(time.Minute) || gateway.scope.Lease.ExecutionEpoch != 7 {
 		t.Errorf("MCP token scope = %#v", gateway.scope)
+	}
+	if renewal == nil {
+		t.Fatal("Launch() did not publish MCP renewal authority")
+	}
+	renewedExpiry := handle.CurrentLease().LeaseExpiresAt.Add(time.Minute)
+	if !renewal(renewedExpiry) || !slices.Equal(gateway.renewals, []time.Time{renewedExpiry}) {
+		t.Fatalf("published MCP renewal expiries = %v, want %s", gateway.renewals, renewedExpiry)
+	}
+	gateway.drainStarted = make(chan struct{})
+	gateway.drainRelease = make(chan struct{})
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- handle.CloseMCP(context.Background()) }()
+	<-gateway.drainStarted
+	renewResult := make(chan bool, 1)
+	go func() { renewResult <- renewal(renewedExpiry.Add(time.Minute)) }()
+	select {
+	case <-renewResult:
+		t.Fatal("MCP renewal raced past an in-progress close")
+	default:
+	}
+	close(gateway.drainRelease)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("CloseMCP() error = %v", err)
+	}
+	if !<-renewResult || !slices.Equal(gateway.renewals, []time.Time{renewedExpiry}) {
+		t.Fatalf("post-close MCP renewal reached gateway: %v", gateway.renewals)
 	}
 
 	spec := engineFactory.engine.spec
@@ -1197,12 +1230,21 @@ type runtimeGateway struct {
 	drained      int
 	drainErr     error
 	drainWait    bool
+	renewals     []time.Time
+	drainStarted chan struct{}
+	drainRelease chan struct{}
 }
 
 func (gateway *runtimeGateway) Register(scope mcp.TokenScope) (mcp.Registration, error) {
 	*gateway.operations = append(*gateway.operations, "mcp-register")
 	gateway.scope = scope
 	return gateway.registration, gateway.err
+}
+
+func (gateway *runtimeGateway) Renew(_ mcp.Registration, expiresAt time.Time) bool {
+	*gateway.operations = append(*gateway.operations, "mcp-renew")
+	gateway.renewals = append(gateway.renewals, expiresAt)
+	return true
 }
 
 func (gateway *runtimeGateway) Revoke(mcp.Registration) bool {
@@ -1214,6 +1256,16 @@ func (gateway *runtimeGateway) Revoke(mcp.Registration) bool {
 func (gateway *runtimeGateway) CloseAndDrain(ctx context.Context, _ mcp.Registration) error {
 	*gateway.operations = append(*gateway.operations, "mcp-close-and-drain")
 	gateway.drained++
+	if gateway.drainStarted != nil {
+		close(gateway.drainStarted)
+	}
+	if gateway.drainRelease != nil {
+		select {
+		case <-gateway.drainRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if gateway.drainWait {
 		<-ctx.Done()
 		return ctx.Err()

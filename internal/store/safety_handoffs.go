@@ -11,16 +11,18 @@ import (
 )
 
 const (
-	closureSafetyHandoffReason   = "closure_cleanup_exhausted"
-	retentionSafetyHandoffReason = "assignment_collection_exhausted"
-	recoverySafetyHandoffReason  = "agent_turn_recovery_exhausted"
-	irreversibleRetryDelay       = time.Second
+	closureSafetyHandoffReason           = "closure_cleanup_exhausted"
+	retentionSafetyHandoffReason         = "assignment_collection_exhausted"
+	retentionInvalidTargetsHandoffReason = "assignment_collection_invalid_targets"
+	recoverySafetyHandoffReason          = "agent_turn_recovery_exhausted"
+	irreversibleRetryDelay               = time.Second
 )
 
 const (
 	closureStopSafetyDiagnostic       = "Agent Turn stop failed three times; safe cleanup retries will continue."
 	closureSettlementSafetyDiagnostic = "Workflow closure settlement failed three times; safe retries will continue."
 	retentionSafetyDiagnostic         = "Assignment collection failed three times; safe cleanup retries will continue."
+	retentionInvalidTargetsDiagnostic = "Assignment collection stopped because retained runtime-state targets are invalid."
 	recoveryStopSafetyDiagnostic      = "Stale Runtime Process recovery failed three times; safe recovery retries will continue."
 	recoveryMutationSafetyDiagnostic  = "Agent Turn mutation recovery expired three times; safe recovery retries will continue."
 )

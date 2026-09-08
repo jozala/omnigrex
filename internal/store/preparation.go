@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -1035,15 +1036,15 @@ func lockAgentTurnPreparationWorkflow(ctx context.Context, tx pgx.Tx, workflowID
 }
 
 type agentProfileConfig struct {
-	Name         string            `json:"name"`
-	Path         string            `json:"path"`
-	Role         workflow.Role     `json:"role"`
-	Runtime      string            `json:"runtime"`
-	Model        string            `json:"model"`
-	Variant      json.RawMessage   `json:"variant,omitempty"`
-	Steps        int               `json:"steps"`
-	Permissions  map[string]string `json:"permissions"`
-	Instructions string            `json:"instructions"`
+	Name         string                                   `json:"name"`
+	Path         string                                   `json:"path"`
+	Role         workflow.Role                            `json:"role"`
+	Runtime      string                                   `json:"runtime"`
+	Model        string                                   `json:"model"`
+	Variant      json.RawMessage                          `json:"variant,omitempty"`
+	Steps        int                                      `json:"steps"`
+	Permissions  map[string]agentprofile.PermissionAction `json:"permissions"`
+	Instructions string                                   `json:"instructions"`
 }
 
 func validateAgentProfileSnapshot(profile AgentProfileSnapshot, preparation AgentTurnPreparation) (json.RawMessage, error) {
@@ -1088,16 +1089,8 @@ func validateAgentProfileConfig(value json.RawMessage, preparation AgentTurnPrep
 	if !validProfileReference(snapshot.Model) {
 		return nil, errors.New("prepare Agent Turn: Agent Profile model must use provider/model syntax")
 	}
-	if snapshot.Steps <= 0 {
-		return nil, errors.New("prepare Agent Turn: Agent Profile steps must be positive")
-	}
-	if len(snapshot.Permissions) == 0 {
-		return nil, errors.New("prepare Agent Turn: Agent Profile permissions must be a nonempty object")
-	}
-	for tool, action := range snapshot.Permissions {
-		if strings.TrimSpace(tool) == "" || strings.TrimSpace(action) == "" {
-			return nil, errors.New("prepare Agent Turn: Agent Profile permissions contain a blank key or value")
-		}
+	if err := agentprofile.ValidatePolicy(agentprofile.Role(snapshot.Role), snapshot.Steps, snapshot.Permissions); err != nil {
+		return nil, fmt.Errorf("prepare Agent Turn: Agent Profile policy: %w", err)
 	}
 	if strings.TrimSpace(snapshot.Instructions) == "" {
 		return nil, errors.New("prepare Agent Turn: Agent Profile instructions are blank")

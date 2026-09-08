@@ -155,21 +155,54 @@ func TestNormalizeRejectsSynchronizeWithoutBeforeSHA(t *testing.T) {
 	}
 }
 
-func TestNormalizeRejectsConflictingWorkflowMarkers(t *testing.T) {
+func TestNormalizeFlagsConflictingWorkflowMarkersWithoutTrustingEither(t *testing.T) {
 	body := `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->
 <!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000002 -->`
 	delivery := pullRequestDelivery("opened", body)
 
-	if _, err := webhook.Normalize(delivery); !errors.Is(err, webhook.ErrMalformedPayload) {
-		t.Fatalf("Normalize() error = %v, want ErrMalformedPayload", err)
+	result, err := webhook.Normalize(delivery)
+	if err != nil || result.Outcome != webhook.NormalizationSupported || result.Event == nil || result.Event.PullRequest == nil {
+		t.Fatalf("Normalize() = (%#v, %v), want supported event with marker warning", result, err)
+	}
+	if !result.Event.PullRequest.WorkflowMarkerInvalid || result.Event.PullRequest.WorkflowMarkerID != "" {
+		t.Errorf("Pull Request marker state = %#v, want invalid and no trusted Workflow ID", result.Event.PullRequest)
 	}
 }
 
-func TestNormalizeRejectsNonUUIDWorkflowMarker(t *testing.T) {
+func TestNormalizeFlagsNonUUIDWorkflowMarkerWithoutTrustingIt(t *testing.T) {
 	delivery := pullRequestDelivery("opened", `<!-- omnigrex:v1 workflow=not-a-uuid -->`)
 
-	if _, err := webhook.Normalize(delivery); !errors.Is(err, webhook.ErrMalformedPayload) {
-		t.Fatalf("Normalize() error = %v, want ErrMalformedPayload", err)
+	result, err := webhook.Normalize(delivery)
+	if err != nil || result.Outcome != webhook.NormalizationSupported || result.Event == nil || result.Event.PullRequest == nil {
+		t.Fatalf("Normalize() = (%#v, %v), want supported event with marker warning", result, err)
+	}
+	if !result.Event.PullRequest.WorkflowMarkerInvalid || result.Event.PullRequest.WorkflowMarkerID != "" {
+		t.Errorf("Pull Request marker state = %#v, want invalid and no trusted Workflow ID", result.Event.PullRequest)
+	}
+}
+
+func TestNormalizeFlagsMalformedOmnigrexMarkerCommentsWithoutTrustingValidNeighbors(t *testing.T) {
+	valid := `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "unsupported version", body: `<!-- omnigrex:v2 workflow=40000000-0000-4000-8000-000000000001 -->`},
+		{name: "unclosed", body: `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001`},
+		{name: "invalid token", body: `<!-- omnigrex:v1 workflow=bad/value -->`},
+		{name: "unknown field", body: valid + `\n<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 owner=user -->`},
+		{name: "malformed", body: `<!-- omnigrex v1 workflow=40000000-0000-4000-8000-000000000001 -->`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := webhook.Normalize(pullRequestDelivery("opened", test.body))
+			if err != nil || result.Event == nil || result.Event.PullRequest == nil {
+				t.Fatalf("Normalize() = (%#v, %v), want supported untrusted marker event", result, err)
+			}
+			if !result.Event.PullRequest.WorkflowMarkerInvalid || result.Event.PullRequest.WorkflowMarkerID != "" {
+				t.Errorf("Pull Request marker state = %#v, want invalid without trusted Workflow ID", result.Event.PullRequest)
+			}
+		})
 	}
 }
 

@@ -22,7 +22,7 @@ type ProcessorStore interface {
 	CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error
 	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowTransition) (store.WorkflowApplication, error)
 	ApplyNextPendingNormalizedEvent(context.Context, store.PendingTransitionFactory) (store.WorkflowApplication, bool, error)
-	FailWebhookDelivery(context.Context, string, string, error) error
+	AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error
 }
 
 // ProcessorConfig controls claim ownership, lease duration, and idle polling.
@@ -95,42 +95,61 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 		Payload:    claim.Payload,
 	})
 	if err != nil {
-		if failErr := processor.store.FailWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, err); failErr != nil {
-			return true, errors.Join(
-				fmt.Errorf("normalize webhook delivery %s: %w", claim.DeliveryID, err),
-				fmt.Errorf("record webhook delivery %s failure: %w", claim.DeliveryID, failErr),
-			)
-		}
-		return true, nil
+		cause := fmt.Errorf("normalize webhook delivery %s: %w", claim.DeliveryID, err)
+		return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 	}
 
 	switch normalization.Outcome {
 	case NormalizationSupported:
 		if normalization.Event == nil {
-			return true, errors.New("normalize webhook delivery: supported outcome has no event")
+			cause := errors.New("normalize webhook delivery: supported outcome has no event")
+			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
 		payload, err := json.Marshal(normalization.Event)
 		if err != nil {
-			return true, fmt.Errorf("encode normalized webhook delivery %s: %w", claim.DeliveryID, err)
+			cause := fmt.Errorf("encode normalized webhook delivery %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
 		locator, transition, err := processor.transition(*normalization.Event, claim.ReceivedAt)
 		if err != nil {
-			return true, fmt.Errorf("map normalized webhook delivery %s: %w", claim.DeliveryID, err)
+			cause := fmt.Errorf("map normalized webhook delivery %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
 		if _, err := processor.store.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, payload, locator, transition); err != nil {
-			return true, fmt.Errorf("complete webhook transition %s: %w", claim.DeliveryID, err)
+			cause := fmt.Errorf("complete webhook transition %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
 	case NormalizationIgnored:
 		if normalization.Event != nil {
-			return true, errors.New("normalize webhook delivery: ignored outcome has an event")
+			cause := errors.New("normalize webhook delivery: ignored outcome has an event")
+			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
 		if err := processor.store.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
-			return true, fmt.Errorf("complete ignored webhook delivery %s: %w", claim.DeliveryID, err)
+			cause := fmt.Errorf("complete ignored webhook delivery %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeFailure(ctx, claim, cause, true)
 		}
 	default:
-		return true, fmt.Errorf("normalize webhook delivery: invalid outcome %q", normalization.Outcome)
+		cause := fmt.Errorf("normalize webhook delivery: invalid outcome %q", normalization.Outcome)
+		return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 	}
 	return true, nil
+}
+
+func (processor *Processor) acknowledgeFailure(ctx context.Context, claim *store.WebhookClaim, cause error, retryable bool) error {
+	if err := processor.store.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, cause, retryable); err != nil {
+		return errors.Join(cause, fmt.Errorf("acknowledge webhook delivery %s failure: %w", claim.DeliveryID, err))
+	}
+	if retryable {
+		return cause
+	}
+	return nil
+}
+
+func deterministicWebhookFailure(err error) bool {
+	return errors.Is(err, errInvalidPendingNormalizedEvent) ||
+		errors.Is(err, store.ErrNormalizedEventDeliveryMismatch) ||
+		errors.Is(err, store.ErrWorkflowLocatorMismatch) ||
+		errors.Is(err, store.ErrWorkflowDecisionInvalid)
 }
 
 func (processor *Processor) pendingTransition(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
@@ -152,6 +171,7 @@ func (processor *Processor) transition(event NormalizedEvent, observedAt time.Ti
 	if event.PullRequest != nil {
 		locator.PullRequestID = event.PullRequest.ID
 		locator.WorkflowID = event.PullRequest.WorkflowMarkerID
+		locator.WorkflowMarkerInvalid = event.PullRequest.WorkflowMarkerInvalid
 	}
 
 	var attemptID, closureID, retentionToken string

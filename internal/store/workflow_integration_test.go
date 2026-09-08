@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -411,6 +412,58 @@ func TestSynchronizationGuardsPreviousHeadAndUpdatesExistingChangeProposal(t *te
 	}
 }
 
+func TestInvalidWorkflowMarkerUsesExistingPullRequestMappingAndRejectsUnmappedPullRequest(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING' WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatalf("make reviewing Workflow: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatalf("set attempt budget: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_proposals (id, workflow_id, repository_id, repository_owner, repository_name, pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha) VALUES ('60000000-0000-4000-8000-000000000008', $1, 8, 'owner', 'repo', 88, 18, 'OPEN', 'main', 'base', 'feature', 'old-head')`, fixture.workflowID); err != nil {
+		t.Fatalf("seed mapped Change Proposal: %v", err)
+	}
+
+	delivery := workflowDelivery("40000000-0000-4000-8000-000000000021")
+	delivery.RepositoryID, delivery.RepositoryOwner, delivery.RepositoryName = 8, "owner", "repo"
+	delivery.IssueID, delivery.IssueNumber = 0, 0
+	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
+	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 88, WorkflowMarkerInvalid: true}, func(snapshot workflow.Snapshot) workflow.Decision {
+			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
+				EventMetadata:    workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+				ChangeProposalID: 88, PreviousHeadSHA: "old-head", HeadSHA: "new-head",
+			})
+		})
+	if err != nil || application.WorkflowID != fixture.workflowID || application.Disposition != workflow.DispositionApplied {
+		t.Fatalf("mapped synchronization with invalid marker = (%#v, %v), want mapped Workflow application", application, err)
+	}
+
+	unmapped := delivery
+	unmapped.DeliveryID = "40000000-0000-4000-8000-000000000022"
+	claim = claimWorkflowDelivery(t, databases[0], ctx, unmapped)
+	_, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 99, WorkflowMarkerInvalid: true}, func(snapshot workflow.Snapshot) workflow.Decision {
+			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
+				EventMetadata:    workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+				ChangeProposalID: 99, PreviousHeadSHA: "old-head", HeadSHA: "new-head",
+			})
+		})
+	if !errors.Is(err, store.ErrWorkflowLocatorMismatch) {
+		t.Fatalf("unmapped synchronization with invalid marker error = %v, want ErrWorkflowLocatorMismatch", err)
+	}
+	var workflows, proposals int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM workflows), (SELECT count(*) FROM change_proposals)`).Scan(&workflows, &proposals); err != nil {
+		t.Fatalf("count durable identities: %v", err)
+	}
+	if workflows != 1 || proposals != 1 {
+		t.Errorf("durable identities = %d Workflows and %d Change Proposals, want existing mapping only", workflows, proposals)
+	}
+}
+
 func TestAppliedTransitionCannotManufactureChangeProposal(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 6)
@@ -489,7 +542,7 @@ func TestApplyNextPendingNormalizedEventAppliesHistoricalEventOnce(t *testing.T)
 	}
 }
 
-func TestApplyNextPendingNormalizedEventRejectsMismatchedDeliveryAndLeavesItPending(t *testing.T) {
+func TestApplyNextPendingNormalizedEventTerminalizesMismatchedDeliveryAndContinues(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -504,6 +557,12 @@ func TestApplyNextPendingNormalizedEventRejectsMismatchedDeliveryAndLeavesItPend
 		normalizedPayload("40000000-0000-4000-8000-000000000099", "trigger")); err != nil {
 		t.Fatalf("seed mismatched pending event: %v", err)
 	}
+	validClaim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000023"))
+	if err := databases[0].CompleteWebhookDelivery(ctx, validClaim.DeliveryID, validClaim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(validClaim.DeliveryID, "trigger"),
+	}); err != nil {
+		t.Fatalf("seed valid historical event: %v", err)
+	}
 	called := false
 
 	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
@@ -516,12 +575,140 @@ func TestApplyNextPendingNormalizedEventRejectsMismatchedDeliveryAndLeavesItPend
 	if called {
 		t.Error("factory called for mismatched historical payload")
 	}
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM normalized_events WHERE delivery_id = $1`, delivery.DeliveryID).Scan(&status); err != nil {
-		t.Fatalf("query pending event: %v", err)
+	event, err := databases[0].GetNormalizedEvent(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetNormalizedEvent() failed event error = %v", err)
 	}
-	if status != "PENDING" {
-		t.Errorf("normalized event status = %s, want PENDING after rollback", status)
+	if event.Status != store.NormalizedEventFailed || event.ProcessedAt == nil || event.Reason == "" || !strings.Contains(string(event.Reason), store.ErrNormalizedEventDeliveryMismatch.Error()) {
+		t.Errorf("failed normalized event = %#v, want audited FAILED mismatch", event)
+	}
+	if event.AttemptCount != 1 || event.MaxAttempts != 3 || event.LastError == nil {
+		t.Errorf("failed normalized event attempts = %#v, want terminal attempt 1 of 3", event)
+	}
+
+	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		return workflowLocator(), triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000023"), nil
+	})
+	if err != nil || !applied || application.DeliveryID != validClaim.DeliveryID || application.Disposition != workflow.DispositionApplied {
+		t.Errorf("ApplyNextPendingNormalizedEvent() after poison = (%#v, %t, %v), want valid event applied", application, applied, err)
+	}
+}
+
+func TestApplyNextPendingNormalizedEventLeavesTransientFactoryFailureRetryable(t *testing.T) {
+	databases, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	claim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000024"))
+	if err := databases[0].CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(claim.DeliveryID, "trigger"),
+	}); err != nil {
+		t.Fatalf("seed historical event: %v", err)
+	}
+	transient := errors.New("database unavailable")
+
+	if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		return store.WorkflowLocator{}, nil, transient
+	}); applied || !errors.Is(err, transient) {
+		t.Fatalf("ApplyNextPendingNormalizedEvent() transient failure = (%t, %v), want retryable error", applied, err)
+	}
+	event, err := databases[0].GetNormalizedEvent(ctx, claim.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetNormalizedEvent() error = %v", err)
+	}
+	if event.Status != store.NormalizedEventPending || event.ProcessedAt != nil || event.Reason != "" {
+		t.Fatalf("transiently failed normalized event = %#v, want unchanged PENDING state", event)
+	}
+	if event.AttemptCount != 1 || event.MaxAttempts != 3 || event.LastError == nil || !strings.Contains(*event.LastError, transient.Error()) {
+		t.Fatalf("transiently failed normalized event attempts = %#v, want retryable attempt 1 of 3", event)
+	}
+	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		return workflowLocator(), triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000024"), nil
+	})
+	if err != nil || !applied || application.Disposition != workflow.DispositionApplied {
+		t.Errorf("ApplyNextPendingNormalizedEvent() retry = (%#v, %t, %v), want applied", application, applied, err)
+	}
+	event, err = databases[0].GetNormalizedEvent(ctx, claim.DeliveryID)
+	if err != nil || event.Status != store.NormalizedEventCompleted || event.AttemptCount != 2 || event.LastError != nil {
+		t.Errorf("successful historical retry = (%#v, %v), want COMPLETED attempt 2 without error", event, err)
+	}
+}
+
+func TestApplyNextPendingNormalizedEventExhaustsTransientFailuresAndUnblocksInbox(t *testing.T) {
+	databases, _ := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	historical := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000025"))
+	if err := databases[0].CompleteWebhookDelivery(ctx, historical.DeliveryID, historical.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(historical.DeliveryID, "trigger"),
+	}); err != nil {
+		t.Fatalf("seed historical event: %v", err)
+	}
+	fresh := workflowDelivery("40000000-0000-4000-8000-000000000026")
+	fresh.EventName, fresh.Action, fresh.IssueID, fresh.IssueNumber = "push", "", 0, 0
+	if inserted, err := databases[0].InsertWebhookDelivery(ctx, fresh); err != nil || !inserted {
+		t.Fatalf("insert fresh inbox delivery = (%t, %v)", inserted, err)
+	}
+	transient := errors.New("temporary dependency failure")
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+			return store.WorkflowLocator{}, nil, transient
+		}); applied || !errors.Is(err, transient) {
+			t.Fatalf("historical attempt %d = (%t, %v), want transient failure", attempt, applied, err)
+		}
+		event, err := databases[0].GetNormalizedEvent(ctx, historical.DeliveryID)
+		if err != nil {
+			t.Fatalf("get historical attempt %d: %v", attempt, err)
+		}
+		wantStatus := store.NormalizedEventPending
+		if attempt == 3 {
+			wantStatus = store.NormalizedEventFailed
+		}
+		if event.Status != wantStatus || event.AttemptCount != attempt || event.MaxAttempts != 3 || event.LastError == nil {
+			t.Fatalf("historical attempt %d state = %#v, want %s with counted failure", attempt, event, wantStatus)
+		}
+		if attempt == 3 && (event.ProcessedAt == nil || event.Reason == "") {
+			t.Errorf("exhausted historical event = %#v, want terminal audit metadata", event)
+		}
+	}
+
+	claim, err := databases[0].ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil || claim.DeliveryID != fresh.DeliveryID {
+		t.Fatalf("ClaimWebhookDelivery() after historical exhaustion = (%#v, %v), want fresh delivery", claim, err)
+	}
+	if err := databases[0].CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete fresh delivery after historical exhaustion: %v", err)
+	}
+}
+
+func TestApplyNextPendingNormalizedEventRollsBackWorkflowBeforeDeterministicFailureAudit(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	claim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000027"))
+	if err := databases[0].CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(claim.DeliveryID, "trigger"),
+	}); err != nil {
+		t.Fatalf("seed historical event: %v", err)
+	}
+
+	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		return workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
+			decision := triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000027")(snapshot)
+			decision.Actions = append(decision.Actions, workflow.StopTurnAction{})
+			return decision
+		}, nil
+	})
+	if applied || !errors.Is(err, store.ErrWorkflowDecisionInvalid) {
+		t.Fatalf("ApplyNextPendingNormalizedEvent() = (%t, %v), want deterministic decision failure", applied, err)
+	}
+	var workflows, jobs int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM workflows), (SELECT count(*) FROM jobs)`).Scan(&workflows, &jobs); err != nil {
+		t.Fatalf("count rolled-back Workflow changes: %v", err)
+	}
+	event, eventErr := databases[0].GetNormalizedEvent(ctx, claim.DeliveryID)
+	if workflows != 0 || jobs != 0 || eventErr != nil || event.Status != store.NormalizedEventFailed || event.AttemptCount != 1 {
+		t.Errorf("deterministic rollback = %d Workflows, %d Jobs, event %#v, error %v; want no partial changes and FAILED attempt 1", workflows, jobs, event, eventErr)
 	}
 }
 

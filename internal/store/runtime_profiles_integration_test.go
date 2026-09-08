@@ -315,19 +315,22 @@ func setFixtureRuntimeBinding(t *testing.T, pool *pgxpool.Pool, fixture agentFix
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	runtimeStatePath := "assignment-" + fixture.assignmentID + "/runtime-state"
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_assignments
 SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5
+    runtime_profile_content_sha256 = $4, runtime_image_digest = $5,
+    runtime_state_path = $6
 WHERE id = $1`, fixture.assignmentID, assignment.Name, assignment.Version,
-		assignment.ContentSHA256, assignment.Image); err != nil {
+		assignment.ContentSHA256, assignment.Image, runtimeStatePath); err != nil {
 		t.Fatalf("set fixture Assignment Runtime Profile binding: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE agent_sessions
 SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5
+    runtime_profile_content_sha256 = $4, runtime_image_digest = $5,
+    runtime_state_path = $6
 WHERE id = $1`, fixture.sessionID, session.Name, session.Version,
-		session.ContentSHA256, session.Image); err != nil {
+		session.ContentSHA256, session.Image, runtimeStatePath); err != nil {
 		t.Fatalf("set fixture Agent Session Runtime Profile binding: %v", err)
 	}
 }

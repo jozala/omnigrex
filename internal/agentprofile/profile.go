@@ -15,7 +15,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const MaxContentSize = 256 << 10
+const (
+	MaxContentSize = 256 << 10
+	MaxSteps       = 1000
+)
 
 var (
 	ErrInvalidProfile  = errors.New("invalid Agent Profile")
@@ -91,7 +94,7 @@ func Parse(name Name, content []byte) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
-	if err := validateConfiguration(configuration, instructions); err != nil {
+	if err := validateConfiguration(identity.role, configuration, instructions); err != nil {
 		return Profile{}, err
 	}
 
@@ -252,7 +255,7 @@ func validateYAMLNode(node *yaml.Node) error {
 	return nil
 }
 
-func validateConfiguration(configuration frontMatter, instructions []byte) error {
+func validateConfiguration(role Role, configuration frontMatter, instructions []byte) error {
 	if !validReference(configuration.Runtime) {
 		return fmt.Errorf("%w: runtime must use name/version syntax without whitespace or control characters", ErrInvalidProfile)
 	}
@@ -262,25 +265,39 @@ func validateConfiguration(configuration frontMatter, instructions []byte) error
 	if configuration.Variant != "" && containsWhitespaceOrControl(configuration.Variant) {
 		return fmt.Errorf("%w: variant contains whitespace or control characters", ErrInvalidProfile)
 	}
-	if configuration.Steps <= 0 || configuration.Steps > 1000 {
-		return fmt.Errorf("%w: steps must be between 1 and 1000", ErrInvalidProfile)
-	}
-	if len(configuration.Permissions) == 0 {
-		return fmt.Errorf("%w: permissions must not be empty", ErrInvalidProfile)
-	}
-	for tool, action := range configuration.Permissions {
-		if _, ok := knownTools[tool]; !ok {
-			return fmt.Errorf("%w: unknown permission tool %q", ErrInvalidProfile, tool)
-		}
-		if action != Allow && action != Deny {
-			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
-		}
+	if err := ValidatePolicy(role, configuration.Steps, configuration.Permissions); err != nil {
+		return err
 	}
 	if strings.TrimSpace(string(instructions)) == "" {
 		return fmt.Errorf("%w: Role instructions must not be blank", ErrInvalidProfile)
 	}
 	if !utf8.Valid(instructions) {
 		return fmt.Errorf("%w: Role instructions must be valid UTF-8", ErrInvalidProfile)
+	}
+	return nil
+}
+
+// ValidatePolicy checks the execution limits and tool permissions shared by parsed and persisted Agent Profiles.
+func ValidatePolicy(role Role, steps int, permissions map[string]PermissionAction) error {
+	if role != RoleDeveloper && role != RoleReviewer {
+		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
+	}
+	if steps <= 0 || steps > MaxSteps {
+		return fmt.Errorf("%w: steps must be between 1 and %d", ErrInvalidProfile, MaxSteps)
+	}
+	if len(permissions) == 0 {
+		return fmt.Errorf("%w: permissions must not be empty", ErrInvalidProfile)
+	}
+	for tool, action := range permissions {
+		if _, ok := knownTools[tool]; !ok {
+			return fmt.Errorf("%w: unknown permission tool %q", ErrInvalidProfile, tool)
+		}
+		if action != Allow && action != Deny {
+			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
+		}
+		if role == RoleReviewer && action == Allow && (tool == "edit" || tool == "patch") {
+			return fmt.Errorf("%w: Reviewer permission for %q must be deny", ErrInvalidProfile, tool)
+		}
 	}
 	return nil
 }

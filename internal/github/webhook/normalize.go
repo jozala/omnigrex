@@ -76,15 +76,16 @@ type Issue struct {
 
 // PullRequest is a durable GitHub Pull Request identity and revision.
 type PullRequest struct {
-	ID               int64  `json:"id"`
-	Number           int64  `json:"number"`
-	NodeID           string `json:"node_id,omitempty"`
-	BaseRef          string `json:"base_ref"`
-	BaseSHA          string `json:"base_sha"`
-	HeadRef          string `json:"head_ref"`
-	HeadSHA          string `json:"head_sha"`
-	BeforeSHA        string `json:"before_sha,omitempty"`
-	WorkflowMarkerID string `json:"workflow_marker_id,omitempty"`
+	ID                    int64  `json:"id"`
+	Number                int64  `json:"number"`
+	NodeID                string `json:"node_id,omitempty"`
+	BaseRef               string `json:"base_ref"`
+	BaseSHA               string `json:"base_sha"`
+	HeadRef               string `json:"head_ref"`
+	HeadSHA               string `json:"head_sha"`
+	BeforeSHA             string `json:"before_sha,omitempty"`
+	WorkflowMarkerID      string `json:"workflow_marker_id,omitempty"`
+	WorkflowMarkerInvalid bool   `json:"workflow_marker_invalid,omitempty"`
 }
 
 // Review is a durable GitHub Pull Request review identity and revision.
@@ -249,15 +250,22 @@ func Normalize(delivery Delivery) (Normalization, error) {
 		if delivery.Action == "synchronize" {
 			event.PullRequest.BeforeSHA = payload.Before
 		}
-		for _, marker := range githubapi.ParseMarkers(payload.PullRequest.Body) {
+		markerInspection := githubapi.InspectMarkers(payload.PullRequest.Body)
+		event.PullRequest.WorkflowMarkerInvalid = markerInspection.Untrusted
+		for _, marker := range markerInspection.Markers {
 			workflowID, ok := canonicalUUID(marker.WorkflowID)
 			if !ok {
-				return Normalization{}, malformed("Pull Request has invalid Workflow marker")
+				event.PullRequest.WorkflowMarkerInvalid = true
+				continue
 			}
 			if event.PullRequest.WorkflowMarkerID != "" && event.PullRequest.WorkflowMarkerID != workflowID {
-				return Normalization{}, malformed("Pull Request has conflicting Workflow markers")
+				event.PullRequest.WorkflowMarkerInvalid = true
+				continue
 			}
 			event.PullRequest.WorkflowMarkerID = workflowID
+		}
+		if event.PullRequest.WorkflowMarkerInvalid {
+			event.PullRequest.WorkflowMarkerID = ""
 		}
 		if delivery.EventName == "pull_request_review" {
 			if payload.Review.ID <= 0 || strings.TrimSpace(payload.Review.NodeID) == "" || strings.TrimSpace(payload.Review.CommitID) == "" || payload.Review.User == nil {

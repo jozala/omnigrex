@@ -56,6 +56,7 @@ type RuntimeWorkspace interface {
 // MCPRegistrar issues, drains, and revokes exact per-turn MCP authority.
 type MCPRegistrar interface {
 	Register(mcp.TokenScope) (mcp.Registration, error)
+	Renew(mcp.Registration, time.Time) bool
 	CloseAndDrain(context.Context, mcp.Registration) error
 	Revoke(mcp.Registration) bool
 }
@@ -126,6 +127,9 @@ type LauncherConfig struct {
 	StopTimeout        time.Duration
 }
 
+// MCPRenewal can only extend the authority of the registration captured by its launcher.
+type MCPRenewal func(time.Time) bool
+
 // LaunchRequest contains per-turn credentials and exact repository revisions.
 type LaunchRequest struct {
 	Lease                  store.AgentTurnLease
@@ -137,6 +141,7 @@ type LaunchRequest struct {
 	RepositoryCredential   string
 	ProviderCredentialJSON json.RawMessage
 	Stderr                 io.Writer
+	PublishMCPRenewal      func(MCPRenewal)
 }
 
 func (LaunchRequest) String() string   { return "Agent Turn launch request" }
@@ -175,6 +180,7 @@ type RuntimeHandle struct {
 	stopTimeout        time.Duration
 	secrets            []string
 	mcpMutex           sync.Mutex
+	mcpClosed          bool
 	mcpDrained         bool
 	cleanupMutex       sync.Mutex
 	acpClosed          bool
@@ -329,6 +335,9 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("register per-turn MCP authority: %w", err)
 	}
 	resources.registered = true
+	if request.PublishMCPRenewal != nil {
+		request.PublishMCPRenewal(resources.renewMCP)
+	}
 
 	assignmentRoot := "assignment-" + execution.Assignment.ID
 	statePath := assignmentRoot + "/runtime-state"
@@ -432,11 +441,24 @@ func (handle *RuntimeHandle) CloseMCP(ctx context.Context) (err error) {
 	if handle.mcpDrained || handle.gateway == nil || !handle.registered {
 		return nil
 	}
+	handle.mcpClosed = true
 	drainErr := handle.gateway.CloseAndDrain(ctx, handle.registration)
 	if drainErr == nil || errors.Is(drainErr, mcp.ErrMutationDrainUnresolved) {
 		handle.mcpDrained = true
 	}
 	return drainErr
+}
+
+func (handle *RuntimeHandle) renewMCP(expiresAt time.Time) bool {
+	if handle == nil {
+		return false
+	}
+	handle.mcpMutex.Lock()
+	defer handle.mcpMutex.Unlock()
+	if handle.mcpClosed {
+		return true
+	}
+	return handle.gateway != nil && handle.registered && handle.gateway.Renew(handle.registration, expiresAt)
 }
 
 // CurrentLease returns the lease whose expiration was refreshed immediately before MCP registration.

@@ -133,7 +133,7 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 	}
 	reconciler := loggingOutcomeReconciler{
 		delegate: mainTestOutcomeReconciler{observation: store.AgentTurnSettlementObservation{
-			Outcome: workflow.TurnOutcomeInfrastructureFailed, Diagnostic: "safe diagnostic",
+			Outcome: workflow.TurnOutcomeInfrastructureFailed, Diagnostic: "arbitrary agent diagnostic with provider-value-sentinel",
 			Completion: store.AgentTurnCompletion{Status: store.AgentTurnFailed},
 		}},
 		logger: logger,
@@ -148,13 +148,16 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	logged := output.String()
-	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted", "Agent Turn outcome reconciled", "safe diagnostic"} {
+	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted", "Agent Turn outcome reconciled", `"status":"FAILED"`, `"outcome":"INFRASTRUCTURE_FAILED"`} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("operational logs do not contain %q: %s", want, logged)
 		}
 	}
 	if strings.Contains(logged, "credential-sentinel") {
 		t.Fatalf("operational logs contain runtime content: %s", logged)
+	}
+	if strings.Contains(logged, "arbitrary agent diagnostic") || strings.Contains(logged, "provider-value-sentinel") {
+		t.Fatalf("INFO operational logs contain Agent-controlled diagnostic: %s", logged)
 	}
 	if strings.Contains(logged, "successful-call") {
 		t.Fatalf("INFO operational logs contain successful ACP lifecycle noise: %s", logged)

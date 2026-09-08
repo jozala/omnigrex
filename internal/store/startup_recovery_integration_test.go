@@ -142,6 +142,108 @@ func TestStartupRecoveryClassifiesAndRecoversExactRuntimeIdentity(t *testing.T) 
 	}
 }
 
+func TestStartupReconcilerFencesLiveDuplicateRuntimeProcessesBeforeCleanup(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	fixture := seedAgentSession(t, pool, 105)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', state_revision = 1 WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+
+	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
+	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "duplicate-live-runtime", 5*time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	inFlight, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "duplicate-live-in-flight", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, inFlight.ID); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "duplicate-live-reserved", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := runtimeIdentityForFixture(fixture, turn)
+	assertRuntimeDisposition(t, database, ctx, identity, store.AgentTurnRuntimeLive)
+	runtimes := &duplicateStartupRuntimes{
+		database: database,
+		duplicate: startup.DuplicateManagedRuntimeProcess{
+			Identity: identity, ContainerIDs: []string{"duplicate-live-a", "duplicate-live-b"},
+		},
+	}
+	reconciler, err := startup.NewReconciler(database, runtimes, runtimes, runtimes, startup.ReconcilerOptions{
+		MaxPasses: 10, MaxRuntimeProcesses: 10, MaxRecoveries: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := reconciler.Reconcile(ctx)
+	if err != nil || result.Passes != 3 || result.RemovedRuntimeIdentities != 1 || runtimes.cleanupCalls != 1 || !runtimes.absent {
+		t.Fatalf("Reconcile() live duplicates = (%#v, %v), cleanup calls %d absent %t", result, err, runtimes.cleanupCalls, runtimes.absent)
+	}
+	assertRuntimeDisposition(t, database, ctx, identity, store.AgentTurnRuntimeRecovery)
+	recovery, err := database.GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
+	if err != nil || recovery.ExecutionEpoch != turn.ExecutionEpoch || recovery.SuccessorAllowed ||
+		recovery.StopRuntimeJobID == "" || recovery.ReconcileMutationsJobID == "" {
+		t.Fatalf("GetAgentTurnRecovery() = (%#v, %v), want unsettled same-epoch recovery", recovery, err)
+	}
+	repeated, err := database.FenceDuplicateAgentTurnRuntime(ctx, identity)
+	if err != nil || repeated.StopRuntimeJobID != recovery.StopRuntimeJobID ||
+		repeated.ReconcileMutationsJobID != recovery.ReconcileMutationsJobID {
+		t.Fatalf("repeated FenceDuplicateAgentTurnRuntime() = (%#v, %v), want original barrier", repeated, err)
+	}
+
+	var admissionOpen, admissionClosed, ownerCleared bool
+	var nextExecutionEpoch int64
+	if err := pool.QueryRow(ctx, `
+SELECT turn.mutation_admission_open, turn.mutation_admission_closed_at IS NOT NULL,
+       turn.owner_id IS NULL AND turn.owner_token IS NULL, session.next_execution_epoch
+FROM agent_turns AS turn
+JOIN agent_sessions AS session ON session.id = turn.agent_session_id
+WHERE turn.id = $1`, turn.ID).Scan(&admissionOpen, &admissionClosed, &ownerCleared, &nextExecutionEpoch); err != nil {
+		t.Fatal(err)
+	}
+	var slots int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turn_slots WHERE agent_turn_id = $1`, turn.ID).Scan(&slots); err != nil {
+		t.Fatal(err)
+	}
+	var inFlightState, reservedState string
+	if err := pool.QueryRow(ctx, `SELECT state FROM tool_invocations WHERE id = $1`, inFlight.ID).Scan(&inFlightState); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT state FROM tool_invocations WHERE id = $1`, reserved.ID).Scan(&reservedState); err != nil {
+		t.Fatal(err)
+	}
+	if admissionOpen || !admissionClosed || !ownerCleared || nextExecutionEpoch != turn.ExecutionEpoch+1 || slots != 0 ||
+		inFlightState != string(store.MutationUnknown) || reservedState != string(store.MutationFailed) {
+		t.Errorf("duplicate fence = admission %t/%t owner-cleared %t next-epoch %d slots %d mutations %s/%s",
+			admissionOpen, admissionClosed, ownerCleared, nextExecutionEpoch, slots, inFlightState, reservedState)
+	}
+	if _, err := database.AllocateAgentTurn(ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("AllocateAgentTurn() during duplicate recovery error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	}
+}
+
 func TestClassifyAgentTurnRuntimeRequiresCompleteLiveAuthorityChain(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
@@ -528,4 +630,35 @@ func TestPeriodicExpiredTurnMonitorLeavesLiveOwnerThenRecoversAfterLeaseExpiry(t
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Monitor.Run() cancellation error = %v", err)
 	}
+}
+
+type duplicateStartupRuntimes struct {
+	database     *store.Store
+	duplicate    startup.DuplicateManagedRuntimeProcess
+	absent       bool
+	cleanupCalls int
+}
+
+func (runtimes *duplicateStartupRuntimes) List(context.Context) (startup.RuntimeInventorySnapshot, error) {
+	if runtimes.absent {
+		return startup.RuntimeInventorySnapshot{}, nil
+	}
+	return startup.RuntimeInventorySnapshot{Duplicates: []startup.DuplicateManagedRuntimeProcess{runtimes.duplicate}}, nil
+}
+
+func (runtimes *duplicateStartupRuntimes) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {
+	state, found, err := runtimes.database.ClassifyAgentTurnRuntime(ctx, identity)
+	if err != nil {
+		return err
+	}
+	if !found || state.Disposition != store.AgentTurnRuntimeRecovery {
+		return fmt.Errorf("cleanup observed durable disposition %s, want RECOVERY", state.Disposition)
+	}
+	runtimes.cleanupCalls++
+	runtimes.absent = true
+	return nil
+}
+
+func (*duplicateStartupRuntimes) EnsureMalformedAbsent(context.Context, startup.MalformedManagedRuntimeProcess) error {
+	return nil
 }

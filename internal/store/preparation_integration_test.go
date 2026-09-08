@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
@@ -36,6 +37,17 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 		t.Fatalf("CompleteJob() for preparation job error = %v, want fenced acknowledgement", err)
 	}
 	spec := preparationSpec("atomic-profile", "openai/gpt-5.2")
+	spec.Developer.Profile.Config = json.RawMessage(`{
+  "steps": 40,
+  "runtime": "opencode-acp/1",
+  "role": "DEVELOPER",
+  "permissions": {"read": "allow", "edit": "deny"},
+  "path": ".omnigrex/team/developer.md",
+  "name": "developer",
+  "model": "openai/gpt-5.2",
+  "instructions": "Perform development."
+}`)
+	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", "openai/gpt-5.2", "", 40, "Perform development.", nil)
 	spec.Reviewer.Profile = store.AgentProfileSnapshot{}
 	prepared, err := database.PrepareAgentTurn(ctx, preparationJob, spec)
 	if err != nil {
@@ -48,6 +60,7 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 		prepared.Turn.AgentSessionID != prepared.Session.ID || prepared.Turn.ExecutionEpoch != 1 ||
 		prepared.Turn.Purpose != workflow.TurnPurposeInitialDevelopment ||
 		prepared.Turn.AgentProfileCommitSHA != "atomic-profile" ||
+		string(prepared.Turn.AgentProfileConfig) != string(wantProfileConfig) ||
 		prepared.Job.Kind != store.RunAgentTurnJobKind || prepared.Job.AgentTurnID != prepared.Turn.ID {
 		t.Fatalf("PrepareAgentTurn() = %#v", prepared)
 	}
@@ -315,6 +328,93 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 		t.Fatalf("execution Jobs after rollback = (%d, %v), want none", executionJobs, err)
 	}
 	prepareTurn(t, database, ctx, lease, "valid-profile", "openai/gpt-5.2")
+}
+
+func TestPrepareAgentTurnRejectsUnsafePersistedProfileBeforeAllocatingTurn(t *testing.T) {
+	tests := []struct {
+		name        string
+		role        workflow.Role
+		steps       int
+		permissions map[string]string
+	}{
+		{name: "steps above maximum", role: workflow.RoleDeveloper, steps: 1001, permissions: map[string]string{"read": "allow"}},
+		{name: "unknown permission tool", role: workflow.RoleDeveloper, steps: 40, permissions: map[string]string{"execute": "allow"}},
+		{name: "unknown permission action", role: workflow.RoleDeveloper, steps: 40, permissions: map[string]string{"read": "ask"}},
+		{name: "Reviewer edit allowance", role: workflow.RoleReviewer, steps: 40, permissions: map[string]string{"edit": "allow"}},
+		{name: "Reviewer patch allowance", role: workflow.RoleReviewer, steps: 40, permissions: map[string]string{"patch": "allow"}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			database := databases[0]
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			sequence := index + 51
+			workflowID := fmt.Sprintf("61000000-0000-4000-8000-%012d", sequence)
+			attemptID := fmt.Sprintf("62000000-0000-4000-8000-%012d", sequence)
+			status, purpose, expectedHeadSHA := workflow.StateDeveloping, workflow.TurnPurposeInitialDevelopment, ""
+			if test.role == workflow.RoleReviewer {
+				status, purpose, expectedHeadSHA = workflow.StateReviewing, workflow.TurnPurposeReview, "review-head"
+			}
+			if _, err := pool.Exec(ctx, `
+INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
+VALUES ($1, 9123, 'owner', 'repo', $2, $2, $3)`, workflowID, sequence, status); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `
+INSERT INTO workflow_attempts (id, workflow_id, attempt_number, status)
+VALUES ($1, $2, 1, 'ACTIVE')`, attemptID, workflowID); err != nil {
+				t.Fatal(err)
+			}
+			if test.role == workflow.RoleReviewer {
+				proposalID := fmt.Sprintf("63000000-0000-4000-8000-%012d", sequence)
+				if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ($1, $2, 9123, 'owner', 'repo', $3, $3, 'OPEN', 'main', 'base', 'feature', 'review-head')`,
+					proposalID, workflowID, sequence); err != nil {
+					t.Fatal(err)
+				}
+			}
+			insertPreparationJob(t, pool, workflowID, attemptID, 1, workflow.AssignmentGenerationNew, test.role, purpose, expectedHeadSHA, "")
+
+			lease := claimPreparationJob(t, database, ctx)
+			spec := preparationSpec("unsafe-persisted-profile", "openai/gpt-5.2")
+			profile := &spec.Developer.Profile
+			name, role, model, instructions := "developer", workflow.RoleDeveloper, "openai/gpt-5.2", "Perform development."
+			if test.role == workflow.RoleReviewer {
+				profile = &spec.Reviewer.Profile
+				name, role, model, instructions = "reviewer", workflow.RoleReviewer, "anthropic/reviewer", "Perform review."
+			}
+			profile.Config = agentProfileConfig(name, role, "opencode-acp/1", model, "", test.steps, instructions, test.permissions)
+
+			if _, err := database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, agentprofile.ErrInvalidProfile) {
+				t.Fatalf("PrepareAgentTurn() error = %v, want Agent Profile policy rejection", err)
+			}
+			var assignments, sessions, turns, executionJobs int
+			if err := pool.QueryRow(ctx, `
+SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
+       (SELECT count(*) FROM agent_sessions AS session
+        JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+        WHERE assignment.workflow_id = $1),
+       (SELECT count(*) FROM agent_turns WHERE workflow_id = $1),
+       (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RUN_AGENT_TURN')`,
+				workflowID).Scan(&assignments, &sessions, &turns, &executionJobs); err != nil {
+				t.Fatal(err)
+			}
+			job, err := database.GetJob(ctx, lease.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if assignments != 0 || sessions != 0 || turns != 0 || executionJobs != 0 || job.Status != store.JobLeased {
+				t.Fatalf("rejected preparation left assignments=%d sessions=%d turns=%d execution jobs=%d job=%s; want 0, 0, 0, 0, LEASED",
+					assignments, sessions, turns, executionJobs, job.Status)
+			}
+		})
+	}
 }
 
 func TestAcquireAgentTurnAllowsLaterTurnToRecoverUnboundCreatingSession(t *testing.T) {
@@ -1715,7 +1815,7 @@ func preparationBindings() map[workflow.Role]store.AssignmentRuntimeBinding {
 
 func agentProfileConfig(name string, role workflow.Role, runtime, model, variant string, steps int, instructions string, permissions map[string]string) json.RawMessage {
 	if permissions == nil {
-		permissions = map[string]string{"read": "allow", "write": "deny"}
+		permissions = map[string]string{"edit": "deny", "read": "allow"}
 	}
 	profile := map[string]any{
 		"name": name, "path": ".omnigrex/team/" + name + ".md", "role": role,

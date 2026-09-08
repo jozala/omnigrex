@@ -325,12 +325,6 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
 	}
-	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api,
-	})
-	if err != nil {
-		return fmt.Errorf("configure Agent Turn outcome reconciler: %w", err)
-	}
 	developerProviderCredentialJSON, err := readNonemptyJSONObject(settings.DeveloperProviderCredentialsFile)
 	if err != nil {
 		return fmt.Errorf("read Developer provider credentials: %w", err)
@@ -339,6 +333,15 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		zeroBytes(developerProviderCredentialJSON)
 		return fmt.Errorf("read Reviewer provider credentials: %w", err)
+	}
+	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: database, GitHub: githubServices.api,
+		ProviderCredentialJSON: []json.RawMessage{developerProviderCredentialJSON, reviewerProviderCredentialJSON},
+	})
+	if err != nil {
+		zeroBytes(developerProviderCredentialJSON)
+		zeroBytes(reviewerProviderCredentialJSON)
+		return fmt.Errorf("configure Agent Turn outcome reconciler: %w", err)
 	}
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
@@ -534,7 +537,6 @@ func (reconciler loggingOutcomeReconciler) Reconcile(ctx context.Context, reques
 		"role", request.Execution.Assignment.Role,
 		"status", observation.Completion.Status,
 		"outcome", observation.Outcome,
-		"diagnostic", observation.Diagnostic,
 	)
 	return observation, nil
 }

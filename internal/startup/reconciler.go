@@ -40,6 +40,7 @@ type TurnStore interface {
 	ClaimAndRecoverExpiredAgentTurn(context.Context) (store.AgentTurnRecovery, bool, error)
 	HasRecoverableExpiredAgentTurn(context.Context) (bool, error)
 	ClassifyAgentTurnRuntime(context.Context, store.AgentTurnRuntimeIdentity) (store.AgentTurnRuntimeState, bool, error)
+	FenceDuplicateAgentTurnRuntime(context.Context, store.AgentTurnRuntimeIdentity) (store.AgentTurnRecovery, error)
 	RecoverExpiredAgentTurn(context.Context, string, int64) (store.AgentTurnRecovery, error)
 }
 
@@ -193,8 +194,13 @@ func (reconciler *Reconciler) reconcileIdentity(ctx context.Context, identity st
 		switch state.Disposition {
 		case store.AgentTurnRuntimeLive:
 			if duplicate {
-				// Duplicate processes are split authority, but a live lease must be fenced before cleanup.
-				return true, false, nil
+				if _, err := reconciler.turns.FenceDuplicateAgentTurnRuntime(ctx, identity); err != nil {
+					if errors.Is(err, store.ErrAgentTurnFenceLost) {
+						return true, false, nil
+					}
+					return false, false, fmt.Errorf("fence duplicate live Runtime Processes: %w", err)
+				}
+				break
 			}
 			return false, false, nil
 		case store.AgentTurnRuntimeRecovery:

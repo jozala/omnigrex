@@ -101,7 +101,7 @@ func TestReconcilerIdempotentRerunDoesNotAdoptOrCleanRecoveryProcess(t *testing.
 	}
 }
 
-func TestReconcilerDoesNotCleanLiveDuplicatesBeforeDurableRecovery(t *testing.T) {
+func TestReconcilerFencesLiveDuplicatesBeforeCleanupAndConverges(t *testing.T) {
 	identity := runtimeIdentity(21)
 	turns := newFakeTurnStore(map[store.AgentTurnRuntimeIdentity]store.AgentTurnRuntimeDisposition{
 		identity: store.AgentTurnRuntimeLive,
@@ -112,21 +112,13 @@ func TestReconcilerDoesNotCleanLiveDuplicatesBeforeDurableRecovery(t *testing.T)
 	reconciler := newReconciler(t, turns, runtimes)
 
 	result, err := reconciler.Reconcile(context.Background())
-	if !errors.Is(err, startup.ErrReconciliationUnstable) || result.Passes != 10 {
-		t.Fatalf("Reconcile() live duplicates = (%#v, %v), want unstable", result, err)
+	if err != nil || result.Passes != 3 || result.RemovedRuntimeIdentities != 1 {
+		t.Fatalf("Reconcile() live duplicates = (%#v, %v), want converged cleanup", result, err)
 	}
-	if runtimes.exactCalls(identity) != 0 || turns.recoveryCount() != 0 {
-		t.Fatalf("live duplicate cleanup/recoveries = (%d, %d), want no cleanup before fencing", runtimes.exactCalls(identity), turns.recoveryCount())
-	}
-
-	turns.mu.Lock()
-	turns.states[identity] = store.AgentTurnRuntimeExpired
-	turns.mu.Unlock()
-	result, err = reconciler.Reconcile(context.Background())
-	if err != nil || turns.disposition(identity) != store.AgentTurnRuntimeRecovery ||
+	if turns.disposition(identity) != store.AgentTurnRuntimeRecovery || turns.recoveryCount() != 1 ||
 		runtimes.exactCalls(identity) != 1 || len(runtimes.duplicates) != 0 {
-		t.Fatalf("Reconcile() expired duplicates = (%#v, %v), disposition %s, cleanup calls %d, remaining %#v",
-			result, err, turns.disposition(identity), runtimes.exactCalls(identity), runtimes.duplicates)
+		t.Fatalf("live duplicate recovery = disposition %s, recoveries %d, cleanup calls %d, remaining %#v",
+			turns.disposition(identity), turns.recoveryCount(), runtimes.exactCalls(identity), runtimes.duplicates)
 	}
 }
 
@@ -431,6 +423,24 @@ func (turns *fakeTurnStore) ClassifyAgentTurnRuntime(_ context.Context, identity
 	defer turns.mu.Unlock()
 	disposition, found := turns.states[identity]
 	return store.AgentTurnRuntimeState{Identity: identity, Disposition: disposition}, found, nil
+}
+
+func (turns *fakeTurnStore) FenceDuplicateAgentTurnRuntime(_ context.Context, identity store.AgentTurnRuntimeIdentity) (store.AgentTurnRecovery, error) {
+	turns.mu.Lock()
+	defer turns.mu.Unlock()
+	disposition, found := turns.states[identity]
+	if !found {
+		return store.AgentTurnRecovery{}, store.ErrAgentTurnFenceLost
+	}
+	if disposition == store.AgentTurnRuntimeRecovery {
+		return store.AgentTurnRecovery{TurnID: identity.AgentTurnID, ExecutionEpoch: identity.ExecutionEpoch}, nil
+	}
+	if disposition != store.AgentTurnRuntimeLive {
+		return store.AgentTurnRecovery{}, store.ErrAgentTurnFenceLost
+	}
+	turns.states[identity] = store.AgentTurnRuntimeRecovery
+	turns.recoveries++
+	return store.AgentTurnRecovery{TurnID: identity.AgentTurnID, ExecutionEpoch: identity.ExecutionEpoch}, nil
 }
 
 func (turns *fakeTurnStore) RecoverExpiredAgentTurn(_ context.Context, turnID string, epoch int64) (store.AgentTurnRecovery, error) {

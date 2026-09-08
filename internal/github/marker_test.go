@@ -57,7 +57,7 @@ func TestMarkerSupportsOptionalAssignmentAndOperation(t *testing.T) {
 	}
 }
 
-func TestMarkerRejectsUnsafeTokensAndIgnoresMalformedText(t *testing.T) {
+func TestMarkerRejectsUnsafeTokensAndDoesNotTrustValidNeighborsOfMalformedText(t *testing.T) {
 	unsafeMarkers := []githubapi.Marker{
 		{},
 		{WorkflowID: "contains space"},
@@ -83,9 +83,56 @@ func TestMarkerRejectsUnsafeTokensAndIgnoresMalformedText(t *testing.T) {
 		"unfinished <!-- omnigrex:v1 workflow=ignored",
 	}, "\n")
 	parsed := githubapi.ParseMarkers(text)
-	want := githubapi.Marker{WorkflowID: "valid", OperationID: "op-1"}
-	if len(parsed) != 1 || parsed[0] != want {
-		t.Errorf("ParseMarkers() = %#v, want only %#v", parsed, want)
+	if len(parsed) != 0 {
+		t.Errorf("ParseMarkers() = %#v, want no trusted markers from untrusted text", parsed)
+	}
+	if _, found, err := githubapi.FindMarker(text, githubapi.Marker{OperationID: "op-1"}); err != nil || found {
+		t.Errorf("FindMarker() = (_, %t, %v), want no binding from untrusted text", found, err)
+	}
+}
+
+func TestInspectMarkersMarksMalformedOmnigrexCommentsUntrusted(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "unsupported version", body: `<!-- omnigrex:v2 workflow=workflow-1 -->`},
+		{name: "unclosed", body: `<!-- omnigrex:v1 workflow=workflow-1`},
+		{name: "invalid token", body: `<!-- omnigrex:v1 workflow=bad/value -->`},
+		{name: "unknown field", body: `<!-- omnigrex:v1 workflow=workflow-1 owner=user -->`},
+		{name: "missing colon", body: `<!-- omnigrex v1 workflow=workflow-1 -->`},
+		{name: "malformed spacing", body: `<!-- omnigrex:v1  workflow=workflow-1 -->`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inspection := githubapi.InspectMarkers(test.body)
+			if !inspection.Untrusted || len(inspection.Markers) != 0 {
+				t.Errorf("InspectMarkers() = %#v, want untrusted without parsed markers", inspection)
+			}
+		})
+	}
+
+	inspection := githubapi.InspectMarkers(strings.Join([]string{
+		`<!-- omnigrex:v1 workflow=workflow-1 -->`,
+		`<!-- omnigrex:v1 workflow=bad/value -->`,
+	}, "\n"))
+	if !inspection.Untrusted || len(inspection.Markers) != 1 || inspection.Markers[0].WorkflowID != "workflow-1" {
+		t.Errorf("mixed marker inspection = %#v, want valid observation plus untrusted marker state", inspection)
+	}
+}
+
+func TestEnsureMarkerRejectsUntrustedOmnigrexLikeText(t *testing.T) {
+	marker := githubapi.Marker{WorkflowID: "workflow-1", OperationID: "operation-1"}
+	for _, body := range []string{
+		`<!-- omnigrex:v2 workflow=workflow-1 -->`,
+		`<!-- omnigrex:v1 workflow=workflow-1`,
+		`<!-- omnigrex:v1 workflow=bad/value -->`,
+		`<!-- omnigrex:v1 workflow=workflow-1 owner=user -->`,
+		`<!-- omnigrex v1 workflow=workflow-1 -->`,
+	} {
+		if got, err := githubapi.EnsureMarker(body, marker); !errors.Is(err, githubapi.ErrUntrustedMarkerText) || got != "" {
+			t.Errorf("EnsureMarker(%q) = (%q, %v), want ErrUntrustedMarkerText without output", body, got, err)
+		}
 	}
 }
 

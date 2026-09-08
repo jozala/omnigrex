@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -121,7 +122,140 @@ func (store *Store) ClassifyAgentTurnRuntime(ctx context.Context, identity Agent
 	if err := validateAgentTurnRuntimeIdentity(identity); err != nil {
 		return AgentTurnRuntimeState{}, false, err
 	}
-	state, err := scanAgentTurnRuntimeState(store.pool.QueryRow(ctx, agentTurnRuntimeStateSelect+`
+	state, found, err := classifyAgentTurnRuntime(ctx, store.pool, identity)
+	if err != nil {
+		return AgentTurnRuntimeState{}, false, fmt.Errorf("classify Agent Turn Runtime Process: %w", err)
+	}
+	return state, found, nil
+}
+
+// FenceDuplicateAgentTurnRuntime atomically revokes a live exact identity and enters its existing recovery path.
+// Repeating the call after an ambiguous commit returns the original recovery barrier.
+func (store *Store) FenceDuplicateAgentTurnRuntime(ctx context.Context, identity AgentTurnRuntimeIdentity) (AgentTurnRecovery, error) {
+	if err := validateAgentTurnRuntimeIdentity(identity); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("begin duplicate Agent Turn Runtime Process fence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+`
+WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2
+FOR UPDATE`, identity.AgentTurnID, identity.ExecutionEpoch))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("lock duplicate Agent Turn execution job: %w", err)
+	}
+	if job.AgentAssignmentID != identity.AssignmentID || job.AgentSessionID != identity.AgentSessionID {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if job.Status == JobLeased {
+		var attemptExists bool
+		err = tx.QueryRow(ctx, `
+SELECT TRUE FROM job_attempts
+WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3
+FOR UPDATE`, job.ID, job.AttemptCount, job.LeaseToken).Scan(&attemptExists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+		}
+		if err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("lock duplicate Agent Turn execution attempt: %w", err)
+		}
+	}
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	turn, err := lockAgentTurn(ctx, tx, identity.AgentTurnID)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if turn.AgentSessionID != identity.AgentSessionID || turn.ExecutionEpoch != identity.ExecutionEpoch {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+
+	if job.Status != JobLeased {
+		_, found, err := classifyAgentTurnRuntime(ctx, tx, identity)
+		if err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("classify repeated duplicate Agent Turn Runtime Process fence: %w", err)
+		}
+		if !found {
+			return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+		}
+		recovery, err := readAgentTurnRecovery(ctx, tx, identity.AgentTurnID, identity.ExecutionEpoch)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && recovery.JobID != job.ID {
+			return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+		}
+		if err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("read repeated duplicate Agent Turn Runtime Process recovery: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("commit repeated duplicate Agent Turn Runtime Process fence: %w", err)
+		}
+		return recovery, nil
+	}
+
+	if err := lockAgentTurnSlots(ctx, tx); err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	var slotExists bool
+	err = tx.QueryRow(ctx, `SELECT TRUE FROM agent_turn_slots WHERE agent_turn_id = $1 FOR UPDATE`, identity.AgentTurnID).Scan(&slotExists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("lock duplicate Agent Turn slot: %w", err)
+	}
+	state, found, err := classifyAgentTurnRuntime(ctx, tx, identity)
+	if err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("classify locked duplicate Agent Turn Runtime Process: %w", err)
+	}
+	if !found || state.Disposition != AgentTurnRuntimeLive {
+		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+	}
+
+	var revokedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() - interval '1 microsecond'`).Scan(&revokedAt); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("calculate duplicate Agent Turn lease revocation: %w", err)
+	}
+	updates := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{"execution job", `UPDATE jobs SET lease_expires_at = $2 WHERE id = $1 AND status = 'LEASED'`, []any{job.ID, revokedAt}},
+		{"execution attempt", `UPDATE job_attempts SET lease_expires_at = $4 WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`, []any{job.ID, job.AttemptCount, job.LeaseToken, revokedAt}},
+		{"Agent Turn", `UPDATE agent_turns SET lease_expires_at = $3 WHERE id = $1 AND execution_epoch = $2 AND active`, []any{identity.AgentTurnID, identity.ExecutionEpoch, revokedAt}},
+		{"Agent Turn slot", `UPDATE agent_turn_slots SET lease_expires_at = $3 WHERE agent_turn_id = $1 AND execution_epoch = $2`, []any{identity.AgentTurnID, identity.ExecutionEpoch, revokedAt}},
+	}
+	for _, update := range updates {
+		result, err := tx.Exec(ctx, update.query, update.args...)
+		if err != nil {
+			return AgentTurnRecovery{}, fmt.Errorf("revoke duplicate %s lease: %w", update.name, err)
+		}
+		if result.RowsAffected() != 1 {
+			return AgentTurnRecovery{}, ErrAgentTurnFenceLost
+		}
+	}
+	recovery, err := recoverExpiredAgentTurnTx(ctx, tx, job)
+	if err != nil {
+		return AgentTurnRecovery{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentTurnRecovery{}, fmt.Errorf("commit duplicate Agent Turn Runtime Process fence: %w", err)
+	}
+	return recovery, nil
+}
+
+type agentTurnRuntimeStateQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func classifyAgentTurnRuntime(ctx context.Context, queryer agentTurnRuntimeStateQueryer, identity AgentTurnRuntimeIdentity) (AgentTurnRuntimeState, bool, error) {
+	state, err := scanAgentTurnRuntimeState(queryer.QueryRow(ctx, agentTurnRuntimeStateSelect+`
 WHERE turn.id = $1 AND turn.execution_epoch = $2
   AND session.id = $3 AND assignment.id = $4
   AND session.runtime_profile_name = $5 AND session.runtime_profile_version = $6`,
@@ -131,10 +265,7 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentTurnRuntimeState{}, false, nil
 	}
-	if err != nil {
-		return AgentTurnRuntimeState{}, false, fmt.Errorf("classify Agent Turn Runtime Process: %w", err)
-	}
-	return state, true, nil
+	return state, err == nil, err
 }
 
 // ListAgentTurnRuntimeStates returns a deterministic page of durable Runtime Process identities.

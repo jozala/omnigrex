@@ -523,6 +523,39 @@ func TestProductionBackendPerformsMarkedGitHubMutationsAndCommitBoundReview(t *t
 	}
 }
 
+func TestProductionBackendRejectsEveryUntrustedOmnigrexLikeBody(t *testing.T) {
+	for _, body := range []string{
+		`<!-- omnigrex:v2 workflow=workflow-1 -->`,
+		`<!-- omnigrex:v1 workflow=workflow-1`,
+		`<!-- omnigrex:v1 workflow=bad/value -->`,
+		`<!-- omnigrex:v1 workflow=workflow-1 owner=user -->`,
+		`<!-- omnigrex v1 workflow=workflow-1 -->`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			api := &backendGitHub{}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+				GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+			})
+			if err != nil {
+				t.Fatalf("NewProductionBackend() error = %v", err)
+			}
+			arguments, err := json.Marshal(map[string]string{"operation_id": "malformed-marker", "body": body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = backend.Execute(context.Background(), mcp.Invocation{
+				Name: mcp.ToolCommentOnIssue, Arguments: arguments, Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "malformed-marker",
+			})
+			if !errors.Is(err, mcp.ErrInvalidInvocation) {
+				t.Errorf("Execute(comment_on_issue) error = %v, want ErrInvalidInvocation", err)
+			}
+			if api.issueCommentRequest.Body != "" || api.issueCommentRequest.Marker != "" {
+				t.Errorf("Issue comment request = %#v, want no GitHub mutation", api.issueCommentRequest)
+			}
+		})
+	}
+}
+
 func TestProductionBackendSubmitsReviewCommentsOnlyForLinesInScopedDiffHunks(t *testing.T) {
 	patch := "@@ -10,5 +10,5 @@ section\n context\n-removed\n-removed too\n+added\n+another added\n next context\n last context"
 	api := &backendGitHub{pullRequestFiles: []githubapi.PullRequestFile{{

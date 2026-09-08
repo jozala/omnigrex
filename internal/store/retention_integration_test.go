@@ -612,6 +612,7 @@ func TestClosureRetainsAndCollectsPreparedCreatingSessionWithoutFabricatingACPId
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 35)
+	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	prepareClosableFixture(t, pool, fixture)
@@ -811,6 +812,7 @@ func TestReopenBeforeCollectionAuthorizationCancelsLeasedGenerationAndRetainedTr
 func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollectorCrash(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	fixture := seedAgentSession(t, pool, 33)
+	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	preparationBinding := preparationBindings()[workflow.RoleDeveloper]
@@ -830,6 +832,10 @@ func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollector
 	authorized, err := databases[0].AuthorizeAssignmentCollection(ctx, *first)
 	if err != nil || len(authorized.Targets) != 2 {
 		t.Fatalf("AuthorizeAssignmentCollection() = (%#v, %v)", authorized, err)
+	}
+	var firstAuthorizedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT authorized_at FROM assignment_retention_generations WHERE id = $1`, authorized.GenerationID).Scan(&firstAuthorizedAt); err != nil {
+		t.Fatal(err)
 	}
 	if err := databases[0].CompleteJob(ctx, *first, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowJobRequiresAcknowledgement) {
 		t.Errorf("generic collection completion error = %v", err)
@@ -855,6 +861,13 @@ func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollector
 	reauthorized, err := databases[1].AuthorizeAssignmentCollection(ctx, *second)
 	if err != nil || fmt.Sprint(reauthorized.Targets) != fmt.Sprint(authorized.Targets) {
 		t.Fatalf("replacement authorization = (%#v, %v), want immutable targets %#v", reauthorized, err, authorized.Targets)
+	}
+	var reauthorizedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT authorized_at FROM assignment_retention_generations WHERE id = $1`, authorized.GenerationID).Scan(&reauthorizedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !reauthorizedAt.Equal(firstAuthorizedAt) {
+		t.Fatalf("replacement authorization time = %v, want original due proof %v", reauthorizedAt, firstAuthorizedAt)
 	}
 	stale := *second
 	stale.LeaseToken = "53000000-0000-4000-8000-000000000001"
@@ -942,9 +955,97 @@ WHERE generation.workflow_id = $1 AND generation.retention_token = 'retention-se
 	}
 }
 
+func TestAssignmentCollectionFailureDoesNotTrustCallerClaimOfInvalidTargets(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 37)
+	makeFixtureRuntimePathCanonical(t, pool, fixture)
+	prepareClosableFixture(t, pool, fixture)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	observedAt := time.Now().UTC().Add(-time.Hour)
+	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 37,
+		"51000000-0000-4000-8000-000000000371", "closure-false-invalid", "retention-false-invalid",
+		observedAt, observedAt.Add(time.Minute))
+	lease, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "false-invalid-collector", time.Minute)
+	if err != nil || lease == nil {
+		t.Fatalf("claim collection Job = (%#v, %v)", lease, err)
+	}
+	claimedInvalid := fmt.Errorf("caller classified target: %w", store.ErrInvalidAssignmentCleanupTargets)
+	if _, err := databases[0].AcknowledgeAssignmentCollectionFailure(ctx, *lease, claimedInvalid, false, time.Second); !errors.Is(err, store.ErrAssignmentCollectionFenceLost) {
+		t.Fatalf("AcknowledgeAssignmentCollectionFailure() error = %v, want durable revalidation failure", err)
+	}
+
+	var generationStatus, jobStatus string
+	var handoffs int
+	if err := pool.QueryRow(ctx, `
+SELECT generation.status, job.status,
+       (SELECT count(*) FROM jobs AS handoff
+        WHERE handoff.workflow_id = generation.workflow_id
+          AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
+          AND handoff.payload->>'reason' = 'assignment_collection_invalid_targets')
+FROM assignment_retention_generations AS generation
+JOIN jobs AS job ON job.id = generation.collection_job_id
+WHERE generation.workflow_id = $1`, fixture.workflowID).Scan(&generationStatus, &jobStatus, &handoffs); err != nil {
+		t.Fatal(err)
+	}
+	if generationStatus != "SCHEDULED" || jobStatus != string(store.JobLeased) || handoffs != 0 {
+		t.Fatalf("caller-claimed invalid target outcome = generation %s, Job %s, handoffs %d",
+			generationStatus, jobStatus, handoffs)
+	}
+}
+
+func TestAssignmentCollectionFinalizationSurvivesWallClockRollbackAfterAuthorization(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 36)
+	makeFixtureRuntimePathCanonical(t, pool, fixture)
+	prepareClosableFixture(t, pool, fixture)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	observedAt := time.Now().UTC()
+	retainUntil := observedAt.Add(time.Hour)
+	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 36,
+		"51000000-0000-4000-8000-000000000361", "closure-clock-rollback", "retention-clock-rollback",
+		observedAt, retainUntil)
+	if _, err := pool.Exec(ctx, `
+UPDATE jobs
+SET available_at = clock_timestamp()
+WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS'`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "clock-rollback-collector", time.Minute)
+	if err != nil || lease == nil {
+		t.Fatalf("claim collection Job = (%#v, %v)", lease, err)
+	}
+	provedDueAt := retainUntil.Add(time.Minute)
+	if _, err := pool.Exec(ctx, `
+UPDATE assignment_retention_generations
+SET status = 'COLLECTING', authorized_attempt_number = $2,
+    authorized_lease_owner = $3, authorized_lease_token = $4,
+    authorized_at = $5
+WHERE collection_job_id = $1`, lease.ID, lease.Attempt, lease.LeaseOwner, lease.LeaseToken, provedDueAt); err != nil {
+		t.Fatalf("represent pre-rollback authorization: %v", err)
+	}
+	targets := []store.AssignmentCleanupTarget{
+		{AssignmentID: fixture.assignmentID, RuntimeStatePath: canonicalRuntimePath(fixture.assignmentID), RuntimeImageDigest: "sha256:test"},
+		{AssignmentID: fixture.assignmentID, SessionID: fixture.sessionID, RuntimeStatePath: canonicalRuntimePath(fixture.assignmentID), RuntimeImageDigest: "sha256:test"},
+	}
+
+	collected, err := databases[0].FinalizeAssignmentCollection(ctx, *lease, targets)
+	if err != nil {
+		t.Fatalf("FinalizeAssignmentCollection() after clock rollback error = %v", err)
+	}
+	if collected.CollectedAt.Before(retainUntil) || collected.CollectedAt.Before(provedDueAt) {
+		t.Fatalf("CollectedAt = %v, want no earlier than deadline %v and proven due time %v",
+			collected.CollectedAt, retainUntil, provedDueAt)
+	}
+}
+
 func TestConcurrentAssignmentCollectionAuthorizationAndReopenHasOneWinner(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	fixture := seedAgentSession(t, pool, 34)
+	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	prepareClosableFixture(t, pool, fixture)

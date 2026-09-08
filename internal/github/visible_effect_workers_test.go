@@ -329,7 +329,8 @@ func TestHumanHandoffWorkerSanitizesAndRedactsDiagnostic(t *testing.T) {
 		t.Fatalf("ProcessNext() error = %v", err)
 	}
 	request := api.issueRequests[0]
-	if strings.Contains(request.Body, testCredential) || strings.Contains(request.Body, "<!--") || strings.ContainsRune(request.Body, '\x00') || !strings.Contains(request.Body, "[REDACTED]") {
+	if strings.Contains(request.Body, testCredential) || strings.Contains(request.Body, "<!--") || strings.ContainsRune(request.Body, '\x00') ||
+		!strings.Contains(request.Body, "Human handoff required: agent_blocked.") || !strings.Contains(request.Body, "blocked with [REDACTED]") {
 		t.Errorf("unsafe handoff body = %q", request.Body)
 	}
 	if len([]rune(strings.SplitN(request.Body, "\n\n", 2)[1])) > maximumHandoffDiagnosticRunes {

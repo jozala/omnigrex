@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/jozala/omnigrex/internal/agentprofile"
 )
 
 type Role string
@@ -50,7 +52,7 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		!utf8.ValidString(profile.Instructions) ||
 		!validReference(profile.Model) ||
 		(profile.Variant != "" && containsWhitespaceOrControl(profile.Variant)) ||
-		profile.Steps == 0 || profile.Steps > 1000 {
+		profile.Steps == 0 || profile.Steps > agentprofile.MaxSteps {
 		return nil, ErrInvalidProfile
 	}
 	if role == RoleReviewer && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {

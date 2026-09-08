@@ -1180,13 +1180,57 @@ func TestNewRejectsInvalidMutationOperationTimeout(t *testing.T) {
 	}
 }
 
-func TestRegisteredTokenFollowsLiveStoreFencePastCapturedExpiry(t *testing.T) {
+func TestRegisteredTokenIsAcceptedOnlyBeforeItsExpiry(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		current time.Time
+		want    int
+	}{
+		{name: "before expiry", current: now.Add(30*time.Minute - time.Nanosecond), want: http.StatusOK},
+		{name: "at expiry", current: now.Add(30 * time.Minute), want: http.StatusUnauthorized},
+		{name: "after expiry", current: now.Add(30*time.Minute + time.Nanosecond), want: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := now
+
+			durable := &fakeStore{}
+			gateway, err := mcp.New(mcp.Config{
+				EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: fakeBackend{},
+				Now: func() time.Time { return current }, Random: bytes.NewReader(bytes.Repeat([]byte{0x45}, 32)),
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			registration, err := gateway.Register(validScope(now))
+			if err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+
+			current = test.current
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
+			if response.Code != test.want {
+				t.Fatalf("initialize status = %d, want %d; body = %s", response.Code, test.want, response.Body.String())
+			}
+			wantValidations := 1
+			if test.want == http.StatusUnauthorized {
+				wantValidations = 0
+			}
+			if durable.validationCount() != wantValidations {
+				t.Fatalf("ValidateTurnFence calls = %d, want %d", durable.validationCount(), wantValidations)
+			}
+		})
+	}
+}
+
+func TestRenewedRegistrationIsAcceptedPastItsOriginalExpiry(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	current := now
 	durable := &fakeStore{}
 	gateway, err := mcp.New(mcp.Config{
 		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: fakeBackend{},
-		Now: func() time.Time { return current }, Random: bytes.NewReader(bytes.Repeat([]byte{0x45}, 32)),
+		Now: func() time.Time { return current }, Random: bytes.NewReader(bytes.Repeat([]byte{0x46}, 32)),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1195,15 +1239,30 @@ func TestRegisteredTokenFollowsLiveStoreFencePastCapturedExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
+	if !gateway.Renew(registration, now.Add(2*time.Hour)) {
+		t.Fatal("Renew() = false, want true")
+	}
 
-	current = now.Add(2 * time.Hour)
+	current = now.Add(90 * time.Minute)
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"protocolVersion":"2025-11-25"`) {
-		t.Fatalf("heartbeat-extended token response = %d, body = %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("renewed initialize status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if durable.validationCount() != 1 {
-		t.Fatalf("ValidateTurnFence calls = %d, want one", durable.validationCount())
+}
+
+func TestRenewRejectsStaleRegistration(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	gateway := newTestGateway(t, now, &fakeStore{}, fakeBackend{})
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if !gateway.Revoke(registration) {
+		t.Fatal("Revoke() = false, want true")
+	}
+	if gateway.Renew(registration, now.Add(2*time.Hour)) {
+		t.Fatal("Renew() = true for revoked registration")
 	}
 }
 

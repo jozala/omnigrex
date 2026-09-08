@@ -837,7 +837,8 @@ func operationMarker(invocation Invocation) (string, error) {
 }
 
 func markerFree(body string) bool {
-	return !strings.Contains(strings.ToLower(body), "<!-- omnigrex:")
+	inspection := githubapi.InspectMarkers(body)
+	return !inspection.Untrusted && len(inspection.Markers) == 0
 }
 
 func encodeCommentResult(comment githubapi.IssueComment) (json.RawMessage, error) {

@@ -24,6 +24,8 @@ var (
 	ErrAssignmentCollectionIncomplete = errors.New("assignment collection confirmation is incomplete")
 	// ErrAssignmentCollectionIrrevocable means physical deletion was already authorized for this generation.
 	ErrAssignmentCollectionIrrevocable = errors.New("assignment collection is irrevocably authorized")
+	// ErrInvalidAssignmentCleanupTargets means deletion cannot be safely authorized for the captured target set.
+	ErrInvalidAssignmentCleanupTargets = errors.New("invalid Assignment collection cleanup targets")
 )
 
 const CollectAssignmentsJobKind = "COLLECT_ASSIGNMENTS"
@@ -66,7 +68,7 @@ type AssignmentCollection struct {
 	CollectedAt             time.Time
 }
 
-// AcknowledgeAssignmentCollectionFailure preserves retry authority after irreversible collection authorization.
+// AcknowledgeAssignmentCollectionFailure terminally hands off unsafe targets or preserves retry authority after authorization.
 func (store *Store) AcknowledgeAssignmentCollectionFailure(ctx context.Context, lease JobLease, cause error, retryable bool, retryDelay time.Duration) (WorkflowActionFailureAcknowledgement, error) {
 	if err := validateWorkflowActionFailure(cause, retryDelay); err != nil {
 		return WorkflowActionFailureAcknowledgement{}, err
@@ -83,13 +85,35 @@ func (store *Store) AcknowledgeAssignmentCollectionFailure(ctx context.Context, 
 	if err != nil {
 		return WorkflowActionFailureAcknowledgement{}, err
 	}
-	_, generation, err := lockRetentionGeneration(ctx, tx, job)
+	payload, generation, err := lockRetentionGeneration(ctx, tx, job)
 	if err != nil {
 		return WorkflowActionFailureAcknowledgement{}, err
 	}
 	retryScheduled := retryable && job.AttemptCount < job.MaxAttempts
 	acknowledgement := WorkflowActionFailureAcknowledgement{JobID: job.ID, WorkflowID: job.WorkflowID}
-	if generation.Status == retentionCollecting {
+	invalidTargets := errors.Is(cause, ErrInvalidAssignmentCleanupTargets)
+	if invalidTargets {
+		if generation.Status != retentionScheduled {
+			return WorkflowActionFailureAcknowledgement{}, ErrAssignmentCollectionFenceLost
+		}
+		targets, err := readRetentionTargets(ctx, tx, generation.ID)
+		if err != nil {
+			return WorkflowActionFailureAcknowledgement{}, err
+		}
+		validationErr := validateDurableAssignmentCleanupTargets(ctx, tx, payload, generation, targets)
+		if validationErr == nil {
+			return WorkflowActionFailureAcknowledgement{}, ErrAssignmentCollectionFenceLost
+		}
+		if !errors.Is(validationErr, ErrInvalidAssignmentCleanupTargets) {
+			return WorkflowActionFailureAcknowledgement{}, validationErr
+		}
+		retryable, retryScheduled = false, false
+		scheduled, err := enqueueSafetyHandoffTx(ctx, tx, job, retentionInvalidTargetsHandoffReason, retentionInvalidTargetsDiagnostic)
+		if err != nil {
+			return WorkflowActionFailureAcknowledgement{}, err
+		}
+		acknowledgement.EscalationScheduled = scheduled
+	} else if generation.Status == retentionCollecting {
 		retryScheduled = true
 		if job.AttemptCount >= job.MaxAttempts {
 			continued, scheduled, err := continueIrreversibleJobAfterExhaustionTx(ctx, tx, job)
@@ -340,12 +364,19 @@ func (store *Store) AuthorizeAssignmentCollection(ctx context.Context, lease Job
 	if err != nil {
 		return AssignmentCollectionAuthorization{}, err
 	}
+	targets, err := readRetentionTargets(ctx, tx, generation.ID)
+	if err != nil {
+		return AssignmentCollectionAuthorization{}, err
+	}
 	if generation.Status == retentionScheduled {
-		var due bool
-		if err := tx.QueryRow(ctx, `SELECT clock_timestamp() >= $1`, generation.Deadline).Scan(&due); err != nil {
+		if err := validateDurableAssignmentCleanupTargets(ctx, tx, payload, generation, targets); err != nil {
 			return AssignmentCollectionAuthorization{}, err
 		}
-		if !due {
+		var dueAt time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dueAt); err != nil {
+			return AssignmentCollectionAuthorization{}, err
+		}
+		if dueAt.Before(generation.Deadline) {
 			return AssignmentCollectionAuthorization{}, ErrAssignmentCollectionNotDue
 		}
 		var state workflow.State
@@ -359,22 +390,22 @@ func (store *Store) AuthorizeAssignmentCollection(ctx context.Context, lease Job
 UPDATE assignment_retention_generations
 SET status = 'COLLECTING', authorized_attempt_number = $2,
     authorized_lease_owner = $3, authorized_lease_token = $4,
-    authorized_at = clock_timestamp(), updated_at = clock_timestamp()
+    authorized_at = $5, updated_at = clock_timestamp()
 WHERE id = $1 AND status = 'SCHEDULED'`, generation.ID, job.AttemptCount,
-			job.LeaseOwner, job.LeaseToken); err != nil {
+			job.LeaseOwner, job.LeaseToken, dueAt); err != nil {
 			return AssignmentCollectionAuthorization{}, err
 		}
 		generation.Status = retentionCollecting
 		generation.AuthorizedAttempt = job.AttemptCount
 		generation.AuthorizedOwner = job.LeaseOwner
 		generation.AuthorizedToken = job.LeaseToken
+		generation.AuthorizedAt = &dueAt
 	} else if generation.Status == retentionCollecting {
 		if generation.AuthorizedAttempt != job.AttemptCount || generation.AuthorizedOwner != job.LeaseOwner || generation.AuthorizedToken != job.LeaseToken {
 			if _, err := tx.Exec(ctx, `
 UPDATE assignment_retention_generations
 SET authorized_attempt_number = $2, authorized_lease_owner = $3,
-    authorized_lease_token = $4, authorized_at = clock_timestamp(),
-    updated_at = clock_timestamp()
+    authorized_lease_token = $4, updated_at = clock_timestamp()
 WHERE id = $1 AND status = 'COLLECTING'`, generation.ID, job.AttemptCount,
 				job.LeaseOwner, job.LeaseToken); err != nil {
 				return AssignmentCollectionAuthorization{}, err
@@ -385,10 +416,6 @@ WHERE id = $1 AND status = 'COLLECTING'`, generation.ID, job.AttemptCount,
 		}
 	} else {
 		return AssignmentCollectionAuthorization{}, ErrAssignmentCollectionFenceLost
-	}
-	targets, err := readRetentionTargets(ctx, tx, generation.ID)
-	if err != nil {
-		return AssignmentCollectionAuthorization{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AssignmentCollectionAuthorization{}, fmt.Errorf("commit Assignment collection authorization: %w", err)
@@ -439,7 +466,11 @@ func (store *Store) FinalizeAssignmentCollection(ctx context.Context, lease JobL
 		return AssignmentCollection{}, err
 	}
 	var collectedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&collectedAt); err != nil {
+	if generation.AuthorizedAt == nil {
+		return AssignmentCollection{}, ErrAssignmentCollectionFenceLost
+	}
+	if err := tx.QueryRow(ctx, `SELECT GREATEST(clock_timestamp(), $1::timestamptz, $2::timestamptz)`,
+		*generation.AuthorizedAt, generation.Deadline).Scan(&collectedAt); err != nil {
 		return AssignmentCollection{}, err
 	}
 	internalEventID, err := randomUUID()
@@ -541,23 +572,25 @@ FROM assignment_retention_generations WHERE id = $1 FOR UPDATE`, payload.Generat
 		generation.WorkflowRevision != payload.WorkflowRevision {
 		return collectAssignmentsPayload{}, lockedRetentionGeneration{}, ErrAssignmentCollectionFenceLost
 	}
-	targets, err := readRetentionTargets(ctx, tx, generation.ID)
-	if err != nil {
-		return collectAssignmentsPayload{}, lockedRetentionGeneration{}, err
-	}
-	assignmentSet := make(map[string]struct{})
-	for _, target := range targets {
-		assignmentSet[target.AssignmentID] = struct{}{}
-	}
-	actualIDs := make([]string, 0, len(assignmentSet))
-	for id := range assignmentSet {
-		actualIDs = append(actualIDs, id)
-	}
-	sort.Strings(actualIDs)
-	wantIDs := append([]string(nil), payload.AssignmentIDs...)
-	sort.Strings(wantIDs)
-	if !reflect.DeepEqual(actualIDs, wantIDs) {
-		return collectAssignmentsPayload{}, lockedRetentionGeneration{}, ErrAssignmentCollectionFenceLost
+	if generation.Status != retentionScheduled {
+		targets, err := readRetentionTargets(ctx, tx, generation.ID)
+		if err != nil {
+			return collectAssignmentsPayload{}, lockedRetentionGeneration{}, err
+		}
+		assignmentSet := make(map[string]struct{})
+		for _, target := range targets {
+			assignmentSet[target.AssignmentID] = struct{}{}
+		}
+		actualIDs := make([]string, 0, len(assignmentSet))
+		for id := range assignmentSet {
+			actualIDs = append(actualIDs, id)
+		}
+		sort.Strings(actualIDs)
+		wantIDs := append([]string(nil), payload.AssignmentIDs...)
+		sort.Strings(wantIDs)
+		if !reflect.DeepEqual(actualIDs, wantIDs) {
+			return collectAssignmentsPayload{}, lockedRetentionGeneration{}, ErrAssignmentCollectionFenceLost
+		}
 	}
 	return payload, generation, nil
 }
@@ -568,7 +601,8 @@ SELECT assignment_id::text, COALESCE(session_id::text, ''), runtime_state_path,
        runtime_image_digest
 FROM assignment_retention_targets
 WHERE retention_generation_id = $1
-ORDER BY assignment_id, session_id NULLS FIRST`, generationID)
+ORDER BY assignment_id, session_id NULLS FIRST
+FOR SHARE`, generationID)
 	if err != nil {
 		return nil, err
 	}
@@ -582,6 +616,159 @@ ORDER BY assignment_id, session_id NULLS FIRST`, generationID)
 		targets = append(targets, target)
 	}
 	return targets, rows.Err()
+}
+
+// ValidateAssignmentCleanupTargets verifies that a complete immutable target set maps to canonical Assignment paths.
+func ValidateAssignmentCleanupTargets(targets []AssignmentCleanupTarget) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("%w: target set is empty", ErrInvalidAssignmentCleanupTargets)
+	}
+	type assignmentIdentity struct {
+		path, imageDigest string
+		hasRoot           bool
+	}
+	assignments := make(map[string]assignmentIdentity)
+	for _, target := range targets {
+		if !validCanonicalUUID(target.AssignmentID) || target.SessionID != "" && !validCanonicalUUID(target.SessionID) ||
+			strings.TrimSpace(target.RuntimeImageDigest) == "" {
+			return fmt.Errorf("%w: target identity is malformed", ErrInvalidAssignmentCleanupTargets)
+		}
+		canonicalPath := "assignment-" + target.AssignmentID + "/runtime-state"
+		if target.RuntimeStatePath != canonicalPath {
+			return fmt.Errorf("%w: runtime-state path is not canonical for its Assignment", ErrInvalidAssignmentCleanupTargets)
+		}
+		identity, exists := assignments[target.AssignmentID]
+		if exists && (identity.path != target.RuntimeStatePath || identity.imageDigest != target.RuntimeImageDigest) {
+			return fmt.Errorf("%w: Session target does not match its immutable Assignment", ErrInvalidAssignmentCleanupTargets)
+		}
+		if !exists {
+			identity = assignmentIdentity{path: target.RuntimeStatePath, imageDigest: target.RuntimeImageDigest}
+		}
+		if target.SessionID == "" {
+			if identity.hasRoot {
+				return fmt.Errorf("%w: Assignment target is duplicated", ErrInvalidAssignmentCleanupTargets)
+			}
+			identity.hasRoot = true
+		}
+		assignments[target.AssignmentID] = identity
+	}
+	for _, identity := range assignments {
+		if !identity.hasRoot {
+			return fmt.Errorf("%w: Assignment-level target is missing", ErrInvalidAssignmentCleanupTargets)
+		}
+	}
+	return nil
+}
+
+func validateDurableAssignmentCleanupTargets(ctx context.Context, tx pgx.Tx, payload collectAssignmentsPayload, generation lockedRetentionGeneration, targets []AssignmentCleanupTarget) error {
+	if err := ValidateAssignmentCleanupTargets(targets); err != nil {
+		return err
+	}
+	var valid bool
+	err := tx.QueryRow(ctx, `
+WITH payload_assignments AS MATERIALIZED (
+    SELECT DISTINCT assignment_id
+    FROM unnest($3::uuid[]) AS payload(assignment_id)
+), required_assignments AS MATERIALIZED (
+    SELECT assignment.id AS assignment_id, assignment.runtime_state_path,
+           assignment.runtime_image_digest
+    FROM agent_assignments AS assignment
+    WHERE assignment.workflow_id = $2
+      AND assignment.status = 'COMPLETED'
+      AND assignment.state_deleted_at IS NULL
+    FOR UPDATE OF assignment
+), required_sessions AS MATERIALIZED (
+    SELECT session.id AS session_id,
+           session.agent_assignment_id AS assignment_id,
+           session.runtime_state_path, session.runtime_image_digest
+    FROM agent_sessions AS session
+    JOIN required_assignments AS assignment
+      ON assignment.assignment_id = session.agent_assignment_id
+    WHERE session.state_deleted_at IS NULL
+    FOR SHARE OF session
+), targets AS MATERIALIZED (
+    SELECT target.assignment_id, target.session_id,
+           target.runtime_state_path, target.runtime_image_digest
+    FROM assignment_retention_targets AS target
+    WHERE target.retention_generation_id = $1
+    FOR SHARE OF target
+)
+SELECT
+    (SELECT count(*) FROM payload_assignments) = cardinality($3::uuid[])
+    AND NOT EXISTS (
+        SELECT assignment_id FROM payload_assignments
+        EXCEPT
+        SELECT assignment_id FROM required_assignments
+    )
+    AND NOT EXISTS (
+        SELECT assignment_id FROM required_assignments
+        EXCEPT
+        SELECT assignment_id FROM payload_assignments
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM required_assignments AS assignment
+        WHERE NOT EXISTS (
+            SELECT 1 FROM targets AS target
+            WHERE target.assignment_id = assignment.assignment_id
+              AND target.session_id IS NULL
+              AND target.runtime_state_path = assignment.runtime_state_path
+              AND target.runtime_image_digest = assignment.runtime_image_digest
+        )
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM required_sessions AS session
+        WHERE NOT EXISTS (
+            SELECT 1 FROM targets AS target
+            WHERE target.assignment_id = session.assignment_id
+              AND target.session_id = session.session_id
+              AND target.runtime_state_path = session.runtime_state_path
+              AND target.runtime_image_digest = session.runtime_image_digest
+        )
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM targets AS target
+        LEFT JOIN required_assignments AS assignment
+          ON assignment.assignment_id = target.assignment_id
+        LEFT JOIN required_sessions AS session
+          ON session.session_id = target.session_id
+         AND session.assignment_id = target.assignment_id
+        WHERE assignment.assignment_id IS NULL
+           OR (target.session_id IS NULL AND (
+               target.runtime_state_path <> assignment.runtime_state_path
+               OR target.runtime_image_digest <> assignment.runtime_image_digest
+           ))
+           OR (target.session_id IS NOT NULL AND (
+               session.session_id IS NULL
+               OR target.runtime_state_path <> session.runtime_state_path
+               OR target.runtime_image_digest <> session.runtime_image_digest
+           ))
+    )`, generation.ID, generation.WorkflowID, payload.AssignmentIDs).Scan(&valid)
+	if err != nil {
+		return fmt.Errorf("validate durable Assignment cleanup targets: %w", err)
+	}
+	if !valid {
+		return fmt.Errorf("%w: target set does not match its durable Workflow hierarchy", ErrInvalidAssignmentCleanupTargets)
+	}
+	return nil
+}
+
+func validCanonicalUUID(value string) bool {
+	if value == "00000000-0000-0000-0000-000000000000" || len(value) != 36 ||
+		value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func equalCleanupTargets(left, right []AssignmentCleanupTarget) bool {
