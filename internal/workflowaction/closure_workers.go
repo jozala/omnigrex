@@ -12,6 +12,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
 const (
@@ -257,8 +258,8 @@ func closureRuntimeLabels(lease store.JobLease, identity store.AgentTurnRuntimeI
 	if lease.Queue != store.WorkflowActionQueue || lease.Kind != store.StopAgentTurnJobKind ||
 		identity.AssignmentID != lease.AgentAssignmentID || identity.AgentSessionID != lease.AgentSessionID ||
 		identity.AgentTurnID != lease.AgentTurnID || identity.ExecutionEpoch != lease.ExecutionEpoch ||
-		!validClosureUUID(identity.AssignmentID) || !validClosureUUID(identity.AgentSessionID) ||
-		!validClosureUUID(identity.AgentTurnID) || identity.ExecutionEpoch <= 0 ||
+		!uuidtext.ValidCanonicalNonNil(identity.AssignmentID) || !uuidtext.ValidCanonicalNonNil(identity.AgentSessionID) ||
+		!uuidtext.ValidCanonicalNonNil(identity.AgentTurnID) || identity.ExecutionEpoch <= 0 ||
 		!validRuntimeProfilePart(identity.RuntimeProfileName) || !validRuntimeProfilePart(identity.RuntimeProfileVersion) {
 		return nil, ErrInvalidClosureRuntimeIdentity
 	}
@@ -351,21 +352,6 @@ func retryableClosureFailure(err error) bool {
 
 func staleClosureFence(err error) bool {
 	return errors.Is(err, store.ErrJobLeaseLost) || errors.Is(err, store.ErrClosureSettlementFenceLost)
-}
-
-func validClosureUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return value != "00000000-0000-0000-0000-000000000000"
 }
 
 func validRuntimeProfilePart(value string) bool {

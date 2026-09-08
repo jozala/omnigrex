@@ -19,6 +19,33 @@ import (
 )
 
 const testImage = "omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestValidImageDigestUsesDistributionGrammar(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, image := range []string{
+		"sha256:" + digest,
+		"omnigrex/opencode@sha256:" + digest,
+		"alpine:3.24@sha256:" + digest,
+		"registry.example:5000/namespace/image__name@sha256:" + digest,
+	} {
+		if !validImageDigest(image) {
+			t.Errorf("validImageDigest(%q) = false", image)
+		}
+	}
+	for _, image := range []string{
+		"alpine:3.24",
+		digest,
+		"sha256:aaaa",
+		"not an image@sha256:" + digest,
+		"registry.example/image@sha256:" + strings.ToUpper(digest),
+		"registry.example/image@sha512:" + strings.Repeat("a", 128),
+	} {
+		if validImageDigest(image) {
+			t.Errorf("validImageDigest(%q) = true", image)
+		}
+	}
+}
+
 const testWorkspacePath = "/workspace"
 
 func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {

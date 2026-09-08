@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -629,7 +630,8 @@ func ValidateAssignmentCleanupTargets(targets []AssignmentCleanupTarget) error {
 	}
 	assignments := make(map[string]assignmentIdentity)
 	for _, target := range targets {
-		if !validCanonicalUUID(target.AssignmentID) || target.SessionID != "" && !validCanonicalUUID(target.SessionID) ||
+		if !uuidtext.ValidCanonicalNonNil(target.AssignmentID) ||
+			target.SessionID != "" && !uuidtext.ValidCanonicalNonNil(target.SessionID) ||
 			strings.TrimSpace(target.RuntimeImageDigest) == "" {
 			return fmt.Errorf("%w: target identity is malformed", ErrInvalidAssignmentCleanupTargets)
 		}
@@ -753,22 +755,6 @@ SELECT
 		return fmt.Errorf("%w: target set does not match its durable Workflow hierarchy", ErrInvalidAssignmentCleanupTargets)
 	}
 	return nil
-}
-
-func validCanonicalUUID(value string) bool {
-	if value == "00000000-0000-0000-0000-000000000000" || len(value) != 36 ||
-		value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return true
 }
 
 func equalCleanupTargets(left, right []AssignmentCleanupTarget) bool {

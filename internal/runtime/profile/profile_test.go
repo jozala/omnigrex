@@ -12,6 +12,31 @@ import (
 
 const testImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestIsExactRegistryImageUsesCanonicalDistributionGrammar(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, image := range []string{
+		"registry.example:5000/namespace/image@sha256:" + digest,
+		"[2001:db8::1]:5000/namespace/image@sha256:" + digest,
+		"registry.example/namespace/image__name@sha256:" + digest,
+		"registry.example/namespace/image---name@sha256:" + digest,
+	} {
+		if !profile.IsExactRegistryImage(image) {
+			t.Errorf("IsExactRegistryImage(%q) = false", image)
+		}
+	}
+	for _, image := range []string{
+		"namespace/image@sha256:" + digest,
+		"registry.example/namespace/image:latest@sha256:" + digest,
+		"registry.example/namespace/image@sha512:" + strings.Repeat("a", 128),
+		"registry.example/namespace/image@sha256:" + strings.ToUpper(digest),
+		"not an image@sha256:" + digest,
+	} {
+		if profile.IsExactRegistryImage(image) {
+			t.Errorf("IsExactRegistryImage(%q) = true", image)
+		}
+	}
+}
+
 func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 	got, err := profile.NewOpenCodeV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {

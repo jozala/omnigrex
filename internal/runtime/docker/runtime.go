@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	distribution "github.com/distribution/reference"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	mobyclient "github.com/moby/moby/client"
+	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -696,27 +698,19 @@ func validPlatform(platform Platform) bool {
 }
 
 func validImageDigest(image string) bool {
-	digest := image
-	if _, value, found := strings.Cut(image, "@sha256:"); found {
-		digest = value
-	} else if strings.HasPrefix(image, "sha256:") {
-		digest = strings.TrimPrefix(image, "sha256:")
-	} else {
+	if !strings.HasPrefix(image, "sha256:") && !strings.Contains(image, "@sha256:") {
 		return false
 	}
-	if len(digest) != 64 {
-		return false
-	}
-	_, err := strconv.ParseUint(digest[:16], 16, 64)
+	reference, err := distribution.ParseAnyReference(image)
 	if err != nil {
 		return false
 	}
-	for _, character := range digest[16:] {
-		if !strings.ContainsRune("0123456789abcdef", character) {
-			return false
-		}
+	digested, ok := reference.(distribution.Digested)
+	if !ok {
+		return false
 	}
-	return true
+	imageDigest := digested.Digest()
+	return imageDigest.Algorithm() == digest.SHA256 && imageDigest.Validate() == nil
 }
 
 func compareAPIVersion(left, right string) int {

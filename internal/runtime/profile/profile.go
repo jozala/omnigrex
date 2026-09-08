@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
+
+	distribution "github.com/distribution/reference"
+	digest "github.com/opencontainers/go-digest"
 )
 
 var (
@@ -18,8 +20,6 @@ var (
 	ErrConflict = errors.New("Runtime Profile reference conflict")
 	ErrNotFound = errors.New("Runtime Profile not found")
 )
-
-var registryImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 
 // Platform identifies the operating system and architecture for an image digest.
 type Platform struct {
@@ -284,7 +284,19 @@ func (binding Binding) Validate() error {
 
 // IsExactRegistryImage reports whether image is a registry reference pinned by sha256 digest.
 func IsExactRegistryImage(image string) bool {
-	return registryImagePattern.MatchString(image)
+	named, err := distribution.ParseNamed(image)
+	if err != nil || named.String() != image {
+		return false
+	}
+	canonical, ok := named.(distribution.Canonical)
+	if !ok {
+		return false
+	}
+	if _, tagged := named.(distribution.Tagged); tagged {
+		return false
+	}
+	imageDigest := canonical.Digest()
+	return imageDigest.Algorithm() == digest.SHA256 && imageDigest.Validate() == nil
 }
 
 // IsSupportedPlatform reports whether platform is supported by opencode-acp/v1.
@@ -310,7 +322,7 @@ func validate(contract Contract) error {
 	if contract.Name != "opencode-acp" || contract.Version != "v1" {
 		return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)
 	}
-	if !registryImagePattern.MatchString(contract.Image) {
+	if !IsExactRegistryImage(contract.Image) {
 		return invalid("image must be a registry name with an exact sha256 digest")
 	}
 	if !IsSupportedPlatform(contract.Platform) {

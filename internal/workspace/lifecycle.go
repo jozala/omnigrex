@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
 var (
@@ -85,7 +87,7 @@ func (lifecycle *Lifecycle) Paths(assignmentID string) (Paths, error) {
 	if lifecycle == nil {
 		return Paths{}, fmt.Errorf("%w: nil lifecycle", ErrInvalidOptions)
 	}
-	if !validUUID(assignmentID) {
+	if !uuidtext.Valid(assignmentID) {
 		return Paths{}, ErrInvalidAssignmentID
 	}
 	assignmentRoot := "assignment-" + assignmentID
@@ -153,21 +155,6 @@ func normalizeRoot(name, value string) (string, error) {
 		return "", fmt.Errorf("%w: %s root must be a clean absolute path", ErrInvalidOptions, name)
 	}
 	return value, nil
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
-			return false
-		}
-	}
-	return true
 }
 
 func pathsOverlap(first, second string) bool {

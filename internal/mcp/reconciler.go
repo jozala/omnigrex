@@ -14,6 +14,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -543,21 +544,7 @@ func hasAssignmentMarker(body, workflowID, assignmentID string) bool {
 }
 
 func validArtifactOperationID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if character < '0' || character > '9' {
-			lower := character | 0x20
-			if lower < 'a' || lower > 'f' {
-				return false
-			}
-		}
-	}
-	return true
+	return uuidtext.Valid(value)
 }
 
 func joinVisibleParts(parts ...string) string {

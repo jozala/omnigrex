@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -128,9 +129,9 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (bool, error) {
 
 func recoveryRuntimeLabels(lease store.JobLease) (map[string]string, error) {
 	if lease.Queue != store.AgentTurnRecoveryQueue || lease.Kind != store.StopStaleRuntimeJobKind ||
-		!validRuntimeLabelIdentity(lease.AgentAssignmentID) ||
-		!validRuntimeLabelIdentity(lease.AgentSessionID) ||
-		!validRuntimeLabelIdentity(lease.AgentTurnID) ||
+		!uuidtext.Valid(lease.AgentAssignmentID) ||
+		!uuidtext.Valid(lease.AgentSessionID) ||
+		!uuidtext.Valid(lease.AgentTurnID) ||
 		lease.ExecutionEpoch <= 0 {
 		return nil, errors.New("stale Runtime Process stop job has invalid identity")
 	}
@@ -140,21 +141,6 @@ func recoveryRuntimeLabels(lease store.JobLease) (map[string]string, error) {
 		store.RuntimeLabelTurnID:       lease.AgentTurnID,
 		store.RuntimeLabelEpoch:        strconv.FormatInt(lease.ExecutionEpoch, 10),
 	}, nil
-}
-
-func validRuntimeLabelIdentity(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
-			return false
-		}
-	}
-	return true
 }
 
 func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, labels map[string]string) error {

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
 const maxPayloadBytes = 1 << 20
@@ -150,16 +151,5 @@ func validSignature(secret, body []byte, signature string) bool {
 }
 
 func canonicalUUID(value string) (string, bool) {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return "", false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
-			return "", false
-		}
-	}
-	return strings.ToLower(value), true
+	return uuidtext.Canonicalize(value)
 }

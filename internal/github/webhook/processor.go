@@ -2,8 +2,6 @@ package webhook
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -243,14 +242,11 @@ func invalidNormalizedDecision(snapshot workflow.Snapshot) workflow.Decision {
 }
 
 func randomEventUUID() (string, error) {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
+	value, err := uuidtext.NewRandom()
+	if err != nil {
 		return "", fmt.Errorf("generate Workflow event identity: %w", err)
 	}
-	value[6] = value[6]&0x0f | 0x40
-	value[8] = value[8]&0x3f | 0x80
-	encoded := hex.EncodeToString(value)
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32], nil
+	return value, nil
 }
 
 // Run processes deliveries until the context ends or a durable store operation fails.

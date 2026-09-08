@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jozala/omnigrex/internal/uuidtext"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -234,18 +235,7 @@ func runtimeProcessCandidateLabels(labels map[string]string) bool {
 }
 
 func validCanonicalRuntimeUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	for index, character := range value {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			continue
-		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return value != "00000000-0000-0000-0000-000000000000"
+	return uuidtext.ValidCanonicalNonNil(value)
 }
 
 func parseRuntimeProfileIdentity(value string) (RuntimeProfileIdentity, bool) {
