@@ -1119,7 +1119,7 @@ func reviewingSnapshot(usedReviews uint8, head string) workflow.Snapshot {
 func baseSnapshot(state workflow.State, usedReviews uint8) workflow.Snapshot {
 	attempt := workflow.WorkflowAttempt{
 		ID: "attempt-1", Number: 1, StartedAt: observedAt.Add(-time.Hour), Lifecycle: workflow.AttemptActive,
-		ReviewBudget: workflow.Budget{Used: usedReviews, Limit: 3}, InfrastructureRetryBudget: workflow.Budget{Limit: 1},
+		ReviewBudget: workflow.AttemptBudget{Used: usedReviews, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 	}
 	return workflow.Snapshot{
 		State: state, Revision: 7,

@@ -84,7 +84,7 @@ type WorkItem struct {
 	IssueNumber  int64
 }
 
-type Budget struct {
+type AttemptBudget struct {
 	Used  uint8
 	Limit uint8
 }
@@ -98,8 +98,8 @@ type WorkflowAttempt struct {
 	Number                    uint64
 	StartedAt                 time.Time
 	Lifecycle                 AttemptLifecycle
-	ReviewBudget              Budget
-	InfrastructureRetryBudget Budget
+	ReviewBudget              AttemptBudget
+	InfrastructureRetryBudget AttemptBudget
 }
 
 type AttemptCompletionReason string

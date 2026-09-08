@@ -208,7 +208,7 @@ func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
 	}
 	attempt := WorkflowAttempt{
 		ID: event.AttemptID, Number: event.AttemptNumber, StartedAt: event.ObservedAt, Lifecycle: AttemptActive,
-		ReviewBudget: Budget{Limit: 3}, InfrastructureRetryBudget: Budget{Limit: 1},
+		ReviewBudget: AttemptBudget{Limit: 3}, InfrastructureRetryBudget: AttemptBudget{Limit: 1},
 	}
 	next := cloneSnapshot(snapshot)
 	next.WorkItem = event.WorkItem

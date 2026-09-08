@@ -605,7 +605,7 @@ func reviewingSnapshot() workflow.Snapshot {
 		CurrentAttempt: &workflow.WorkflowAttempt{
 			ID: "50000000-0000-4000-8000-000000000001", Number: 1,
 			StartedAt: time.Date(2026, time.August, 30, 10, 0, 0, 0, time.UTC), Lifecycle: workflow.AttemptActive,
-			ReviewBudget: workflow.Budget{Used: 1, Limit: 3}, InfrastructureRetryBudget: workflow.Budget{Limit: 1},
+			ReviewBudget: workflow.AttemptBudget{Used: 1, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 		},
 		ChangeProposal:    &workflow.ChangeProposal{ID: 654, Number: 21, HeadSHA: "old-head", Open: true},
 		Assignments:       workflow.Assignments{Status: workflow.AssignmentActive, RuntimeState: workflow.RuntimeStateActive},
