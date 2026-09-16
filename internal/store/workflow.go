@@ -800,14 +800,6 @@ type preparedTurnIntent struct {
 	set  bool
 }
 
-func persistWorkflowActions(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, decision workflow.Decision, actionNamespace string) error {
-	return persistWorkflowActionsWithProvenance(ctx, tx, deliveryID, "", workflowID, decision, actionNamespace)
-}
-
-func persistWorkflowActionsWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, decision workflow.Decision, actionNamespace string) error {
-	return persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, decision, actionNamespace)
-}
-
 func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, decision workflow.Decision, actionNamespace string) error {
 	intent := preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 	labels := false

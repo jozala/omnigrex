@@ -11,9 +11,6 @@ func Reduce(snapshot Snapshot, event Event) Decision {
 	if !ok || !validEvent(event, metadata) {
 		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
-	if metadata.Duplicate {
-		return Decision{Snapshot: base, Disposition: DispositionDuplicate, Reason: ReasonEventDuplicate}
-	}
 	if snapshot.State == StateAbsent {
 		if kind != EventKindTrigger {
 			return Decision{Snapshot: base, Disposition: DispositionUnrelated, Reason: ReasonWorkflowAbsent}
@@ -21,30 +18,6 @@ func Reduce(snapshot Snapshot, event Event) Decision {
 	} else if metadata.WorkItem != snapshot.WorkItem {
 		return Decision{Snapshot: base, Disposition: DispositionUnrelated, Reason: ReasonWorkItemUnrelated}
 	}
-	if reviewDecision, ok := existingReviewDecision(snapshot, event); ok {
-		return reviewDecision
-	}
-	if metadata.ExpectedRevision < snapshot.Revision {
-		return Decision{Snapshot: base, Disposition: DispositionStale, Reason: ReasonStateRevisionStale}
-	}
-	if metadata.ExpectedRevision > snapshot.Revision {
-		return Decision{Snapshot: base, Disposition: DispositionStale, Reason: ReasonEventOutOfOrder}
-	}
-	if (kind == EventKindReviewObserved || kind == EventKindChangeProposalObserved) && snapshot.ActiveTurn == nil {
-		return Decision{Snapshot: base, Disposition: DispositionUnrelated, Reason: ReasonCorroborationWithoutActiveTurn}
-	}
-	if shouldDefer(snapshot, kind) {
-		return Decision{Snapshot: base, Disposition: DispositionDeferred, Reason: ReasonActiveTurn, Actions: []Action{
-			RecordPendingEventAction{EventID: metadata.ID, Kind: kind, ObservedAt: metadata.ObservedAt},
-		}}
-	}
-	if kind == EventKindTrigger && (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
-		return Decision{Snapshot: base, Disposition: DispositionDuplicate, Reason: ReasonAttemptAlreadyActive}
-	}
-	if !legalInState(snapshot.State, kind) {
-		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonEventIllegalInState}
-	}
-
 	decision := dispatch(snapshot, event)
 	if decision.Disposition != DispositionApplied {
 		decision.Snapshot.Revision = snapshot.Revision
@@ -91,7 +64,33 @@ func dispatch(snapshot Snapshot, event Event) Decision {
 	}
 }
 
+func illegalInState(snapshot Snapshot) Decision {
+	return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonEventIllegalInState}
+}
+
+func expectedRevisionDecision(snapshot Snapshot, metadata EventMetadata) (Decision, bool) {
+	if metadata.ExpectedRevision < snapshot.Revision {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonStateRevisionStale}, true
+	}
+	if metadata.ExpectedRevision > snapshot.Revision {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonEventOutOfOrder}, true
+	}
+	return Decision{}, false
+}
+
+func deferForActiveTurn(snapshot Snapshot, metadata EventMetadata, kind EventKind) Decision {
+	return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDeferred, Reason: ReasonActiveTurn, Actions: []Action{
+		RecordPendingEventAction{EventID: metadata.ID, Kind: kind, ObservedAt: metadata.ObservedAt},
+	}}
+}
+
 func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaustedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindWorkflowActionExhausted) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.State == StateNeedsHuman {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonWorkflowActionExhausted}
 	}
@@ -125,6 +124,12 @@ func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaus
 }
 
 func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event AgentTurnMutationReconciliationExhaustedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindAgentTurnMutationReconciliationExhausted) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
@@ -150,6 +155,12 @@ func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event Age
 }
 
 func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparationFailedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindAgentTurnPreparationFailed) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
@@ -178,6 +189,12 @@ func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparat
 }
 
 func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentConfigurationConflictEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindAssignmentConfigurationConflict) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
@@ -203,6 +220,18 @@ func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentCo
 }
 
 func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.State == StateDeveloping || snapshot.State == StateReviewing {
+		if snapshot.ActiveTurn != nil {
+			return deferForActiveTurn(snapshot, event.EventMetadata, EventKindTrigger)
+		}
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonAttemptAlreadyActive}
+	}
+	if !legalInState(snapshot.State, EventKindTrigger) {
+		return illegalInState(snapshot)
+	}
 	if event.AttemptNumber != snapshot.LastAttemptNumber+1 || (snapshot.CurrentAttempt != nil && event.AttemptID == snapshot.CurrentAttempt.ID) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
@@ -260,6 +289,18 @@ func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
 }
 
 func reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
+	if event.ExistingReview != nil {
+		if event.ExistingReview.ID != event.Review.ID || *event.ExistingReview != *event.Review {
+			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonReviewIdentityConflict}
+		}
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonReviewDuplicate}
+	}
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindTurnSettled) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.ActiveTurn == nil || !turnMatches(*snapshot.ActiveTurn, event.Turn) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
@@ -279,17 +320,6 @@ func reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
-}
-
-func existingReviewDecision(snapshot Snapshot, event Event) (Decision, bool) {
-	settled, ok := event.(TurnSettledEvent)
-	if !ok || (settled.Outcome != TurnOutcomeChangesRequested && settled.Outcome != TurnOutcomeApproved) || settled.ExistingReview == nil {
-		return Decision{}, false
-	}
-	if settled.ExistingReview.ID != settled.Review.ID || *settled.ExistingReview != *settled.Review {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonReviewIdentityConflict}, true
-	}
-	return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonReviewDuplicate}, true
 }
 
 func reduceDeveloperSettled(snapshot, next Snapshot, event TurnSettledEvent) Decision {
@@ -425,6 +455,15 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 }
 
 func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.ActiveTurn != nil && (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
+		return deferForActiveTurn(snapshot, event.EventMetadata, EventKindSynchronization)
+	}
+	if !legalInState(snapshot.State, EventKindSynchronization) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.ChangeProposal == nil || snapshot.ChangeProposal.ID != event.ChangeProposalID {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
 	}
@@ -463,18 +502,38 @@ func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decisi
 }
 
 func reduceReviewObserved(snapshot Snapshot, event ReviewObservedEvent) Decision {
-	return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDeferred, Reason: ReasonActiveTurn, Actions: []Action{
-		RecordPendingEventAction{EventID: event.ID, Kind: EventKindReviewObserved, ObservedAt: event.ObservedAt},
-	}}
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.ActiveTurn == nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonCorroborationWithoutActiveTurn}
+	}
+	if !legalInState(snapshot.State, EventKindReviewObserved) {
+		return illegalInState(snapshot)
+	}
+	return deferForActiveTurn(snapshot, event.EventMetadata, EventKindReviewObserved)
 }
 
 func reduceChangeProposalObserved(snapshot Snapshot, event ChangeProposalObservedEvent) Decision {
-	return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDeferred, Reason: ReasonActiveTurn, Actions: []Action{
-		RecordPendingEventAction{EventID: event.ID, Kind: EventKindChangeProposalObserved, ObservedAt: event.ObservedAt},
-	}}
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.ActiveTurn == nil {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonCorroborationWithoutActiveTurn}
+	}
+	if !legalInState(snapshot.State, EventKindChangeProposalObserved) {
+		return illegalInState(snapshot)
+	}
+	return deferForActiveTurn(snapshot, event.EventMetadata, EventKindChangeProposalObserved)
 }
 
 func reduceIssueClosed(snapshot Snapshot, event IssueClosedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindIssueClosed) {
+		return illegalInState(snapshot)
+	}
 	next := cloneSnapshot(snapshot)
 	next.State = StateClosing
 	next.Closure = &Closure{ID: event.ClosureID, RetainUntil: event.RetainUntil, RetentionToken: event.RetentionToken}
@@ -502,6 +561,12 @@ func reduceIssueClosed(snapshot Snapshot, event IssueClosedEvent) Decision {
 }
 
 func reduceClosureSettled(snapshot Snapshot, event ClosureSettledEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindClosureSettled) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.Closure == nil || snapshot.Closure.ID != event.ClosureID {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
@@ -549,7 +614,16 @@ func reduceClosureSettled(snapshot Snapshot, event ClosureSettledEvent) Decision
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonClosureSettled, Actions: actions}
 }
 
-func reduceIssueReopened(snapshot Snapshot, _ IssueReopenedEvent) Decision {
+func reduceIssueReopened(snapshot Snapshot, event IssueReopenedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.ActiveTurn != nil && (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
+		return deferForActiveTurn(snapshot, event.EventMetadata, EventKindIssueReopened)
+	}
+	if !legalInState(snapshot.State, EventKindIssueReopened) {
+		return illegalInState(snapshot)
+	}
 	next := cloneSnapshot(snapshot)
 	if snapshot.State == StateClosing {
 		if next.Closure.ReopenRequested {
@@ -578,6 +652,12 @@ func reduceIssueReopened(snapshot Snapshot, _ IssueReopenedEvent) Decision {
 }
 
 func reduceAssignmentsCollected(snapshot Snapshot, event AssignmentsCollectedEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if !legalInState(snapshot.State, EventKindAssignmentsCollected) {
+		return illegalInState(snapshot)
+	}
 	if snapshot.State == StateDormant {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonRetentionCancelled}
 	}

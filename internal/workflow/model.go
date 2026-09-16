@@ -197,18 +197,20 @@ type Decision struct {
 	Actions     []Action
 }
 
+// Event is the closed set of observations accepted by the Workflow reducer.
 type Event interface {
 	isWorkflowEvent()
 }
 
+// EventMetadata identifies when and against which Work Item revision an Event was observed.
 type EventMetadata struct {
 	ID               string
 	ObservedAt       time.Time
 	WorkItem         WorkItem
 	ExpectedRevision uint64
-	Duplicate        bool
 }
 
+// TriggerEvent records an accepted human command to start a new Workflow Attempt.
 type TriggerEvent struct {
 	EventMetadata
 	AttemptID     string
@@ -233,6 +235,7 @@ type PendingEventsObservation struct {
 	LatestObservedHeadSHA  string
 }
 
+// TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
 type TurnSettledEvent struct {
 	EventMetadata
 	Turn                      TurnGuard
@@ -247,6 +250,7 @@ type TurnSettledEvent struct {
 
 func (TurnSettledEvent) isWorkflowEvent() {}
 
+// SynchronizationEvent records that the linked Change Proposal head moved to a new commit.
 type SynchronizationEvent struct {
 	EventMetadata
 	ChangeProposalID int64
@@ -256,6 +260,7 @@ type SynchronizationEvent struct {
 
 func (SynchronizationEvent) isWorkflowEvent() {}
 
+// ReviewObservedEvent records a GitHub review observed for the linked Change Proposal.
 type ReviewObservedEvent struct {
 	EventMetadata
 	Review ReviewIdentity
@@ -263,6 +268,7 @@ type ReviewObservedEvent struct {
 
 func (ReviewObservedEvent) isWorkflowEvent() {}
 
+// ChangeProposalObservedEvent records a GitHub Pull Request observed as the Workflow's Change Proposal.
 type ChangeProposalObservedEvent struct {
 	EventMetadata
 	ChangeProposal ChangeProposal
@@ -270,6 +276,7 @@ type ChangeProposalObservedEvent struct {
 
 func (ChangeProposalObservedEvent) isWorkflowEvent() {}
 
+// IssueClosedEvent records that the Work Item's GitHub Issue was closed.
 type IssueClosedEvent struct {
 	EventMetadata
 	ClosureID      string
@@ -279,6 +286,7 @@ type IssueClosedEvent struct {
 
 func (IssueClosedEvent) isWorkflowEvent() {}
 
+// ClosureSettledEvent records completion of the durable coordination required after Issue closure.
 type ClosureSettledEvent struct {
 	EventMetadata
 	ClosureID        string
@@ -288,12 +296,14 @@ type ClosureSettledEvent struct {
 
 func (ClosureSettledEvent) isWorkflowEvent() {}
 
+// IssueReopenedEvent records that the Work Item's GitHub Issue was reopened.
 type IssueReopenedEvent struct {
 	EventMetadata
 }
 
 func (IssueReopenedEvent) isWorkflowEvent() {}
 
+// AssignmentsCollectedEvent records deletion of retained Assignment runtime state after its retention period.
 type AssignmentsCollectedEvent struct {
 	EventMetadata
 	RetentionToken string
@@ -303,6 +313,7 @@ type AssignmentsCollectedEvent struct {
 
 func (AssignmentsCollectedEvent) isWorkflowEvent() {}
 
+// AssignmentConfigurationConflictEvent records that current Role configuration conflicts with an existing Assignment's immutable binding.
 type AssignmentConfigurationConflictEvent struct {
 	EventMetadata
 	Role Role
@@ -310,6 +321,7 @@ type AssignmentConfigurationConflictEvent struct {
 
 func (AssignmentConfigurationConflictEvent) isWorkflowEvent() {}
 
+// AgentTurnPreparationFailedEvent records terminal failure to prepare the next Agent Turn for a Role.
 type AgentTurnPreparationFailedEvent struct {
 	EventMetadata
 	Role             Role
@@ -319,6 +331,7 @@ type AgentTurnPreparationFailedEvent struct {
 
 func (AgentTurnPreparationFailedEvent) isWorkflowEvent() {}
 
+// AgentTurnMutationReconciliationExhaustedEvent records exhausted recovery of uncertain mutations from an Agent Turn.
 type AgentTurnMutationReconciliationExhaustedEvent struct {
 	EventMetadata
 	Role       Role
@@ -327,7 +340,7 @@ type AgentTurnMutationReconciliationExhaustedEvent struct {
 
 func (AgentTurnMutationReconciliationExhaustedEvent) isWorkflowEvent() {}
 
-// WorkflowActionExhaustedEvent records terminal failure of durable Workflow coordination or an effect.
+// WorkflowActionExhaustedEvent records that durable Workflow coordination or an effect exhausted its retry budget.
 type WorkflowActionExhaustedEvent struct {
 	EventMetadata
 	ResumeRole Role

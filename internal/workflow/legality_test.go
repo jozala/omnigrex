@@ -86,6 +86,28 @@ func TestStateEventLegalityIsExhaustive(t *testing.T) {
 	}
 }
 
+func TestActiveTurnDefersExternalEvents(t *testing.T) {
+	events := map[string]func(workflow.Snapshot) workflow.Event{
+		"trigger":                  matrixTrigger,
+		"synchronization":          matrixSynchronization,
+		"review observed":          matrixReviewObserved,
+		"Change Proposal observed": matrixChangeProposalObserved,
+		"Issue reopened":           matrixIssueReopened,
+	}
+	for _, state := range []workflow.State{workflow.StateDeveloping, workflow.StateReviewing} {
+		for name, event := range events {
+			t.Run(string(state)+"/"+name, func(t *testing.T) {
+				snapshot := snapshotForState(state)
+				decision := workflow.Reduce(snapshot, event(snapshot))
+				assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, state, snapshot.Revision)
+				if actionCount[workflow.RecordPendingEventAction](decision.Actions) != 1 {
+					t.Errorf("actions = %#v, want one pending Event record", decision.Actions)
+				}
+			})
+		}
+	}
+}
+
 func TestTurnSettlementGuardsSessionEpochControlAndChangeProposal(t *testing.T) {
 	mutations := map[string]func(*workflow.TurnGuard){
 		"turn ID":          func(g *workflow.TurnGuard) { g.TurnID = "other-turn" },
@@ -109,14 +131,6 @@ func TestTurnSettlementGuardsSessionEpochControlAndChangeProposal(t *testing.T) 
 }
 
 func TestDuplicateOutOfOrderUnrelatedAndIllegalEvents(t *testing.T) {
-	t.Run("duplicate delivery observation", func(t *testing.T) {
-		snapshot := developingSnapshot(nil)
-		event := settledEvent(snapshot, "duplicate", workflow.TurnOutcomeBlocked)
-		event.Duplicate = true
-		decision := workflow.Reduce(snapshot, event)
-		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonEventDuplicate, snapshot.State, snapshot.Revision)
-	})
-
 	t.Run("out of order revision", func(t *testing.T) {
 		snapshot := developingSnapshot(nil)
 		event := settledEvent(snapshot, "future", workflow.TurnOutcomeBlocked)

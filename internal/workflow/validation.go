@@ -218,13 +218,6 @@ func legalInState(state State, kind EventKind) bool {
 	}
 }
 
-func shouldDefer(snapshot Snapshot, kind EventKind) bool {
-	if snapshot.ActiveTurn == nil || (snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
-		return false
-	}
-	return kind == EventKindTrigger || kind == EventKindSynchronization || kind == EventKindReviewObserved || kind == EventKindChangeProposalObserved || kind == EventKindIssueReopened
-}
-
 func validWorkItem(workItem WorkItem) bool {
 	return workItem.RepositoryID > 0 && workItem.IssueID > 0 && workItem.IssueNumber > 0
 }
