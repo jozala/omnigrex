@@ -1081,12 +1081,16 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		profileName = "reviewer"
 		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"opencode-acp/v1","steps":50}`)
 	}
+	stage := workflow.StageImplementation
+	if role == workflow.RoleReviewer {
+		stage = workflow.StageReview
+	}
 	binding := store.AssignmentRuntimeBinding{
 		AgentProfileName: profileName, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
 		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeTestImage,
 	}
 	turn := store.AgentTurn{
-		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, ControlRevision: 9, AgentProfileConfig: config},
+		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, Stage: stage, ControlRevision: 9, AgentProfileConfig: config},
 		ID:            runtimeTestTurn, AgentAssignmentID: runtimeTestAssignment, ExecutionEpoch: 7, CreatedAt: now,
 	}
 	if proposal != nil {
@@ -1105,7 +1109,7 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		WorkflowID: runtimeTestWorkflow,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 17}, ChangeProposal: proposal,
-		Assignment: store.AgentAssignment{AssignmentRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Status: store.AgentAssignmentActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
+		Assignment: store.AgentAssignment{AssignmentRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Generation: 1, Status: store.AgentAssignmentActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
 		Session: store.AgentSession{ID: runtimeTestSession, AgentAssignmentID: runtimeTestAssignment, RuntimeProfileName: binding.RuntimeProfileName,
 			RuntimeProfileVersion: binding.RuntimeProfileVersion, RuntimeProfileContentSHA256: binding.RuntimeProfileContentSHA256,
 			RuntimeImageDigest: binding.RuntimeImageDigest, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state",

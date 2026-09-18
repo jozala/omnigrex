@@ -21,8 +21,7 @@ var composeSecretNames = []string{
 	"omnigrex-github-developer-private-key",
 	"omnigrex-github-reviewer-private-key",
 	"omnigrex-github-webhook-secret",
-	"omnigrex-developer-provider-credentials",
-	"omnigrex-reviewer-provider-credentials",
+	"omnigrex-provider-credentials",
 }
 
 type composeConfig struct {
@@ -119,11 +118,8 @@ func TestComposeTopology(t *testing.T) {
 	if readinessImage == testDeploymentImage {
 		t.Fatal("local readiness image and deployment Runtime Profile image must be separate settings")
 	}
-	if got := orchestrator.Environment["OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-developer-provider-credentials" {
-		t.Errorf("Developer provider credentials path = %q", got)
-	}
-	if got := orchestrator.Environment["OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-reviewer-provider-credentials" {
-		t.Errorf("Reviewer provider credentials path = %q", got)
+	if got := orchestrator.Environment["OMNIGREX_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-provider-credentials" {
+		t.Errorf("provider credentials path = %q", got)
 	}
 	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"]; got != "2" {
 		t.Errorf("Agent Turn concurrency limit = %q, want 2", got)

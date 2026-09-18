@@ -78,7 +78,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 				},
 				Turn: workflow.TurnGuard{
 					TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-					Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
+					Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 				},
 				Outcome: workflow.TurnOutcomeInfrastructureFailed,
 				PendingEvents: workflow.PendingEventsObservation{
@@ -203,9 +203,9 @@ VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 3, $4, clock_timestam
 	jobID := "48000000-0000-4000-8000-000000000003"
 	payload, err := json.Marshal(map[string]any{
 		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID,
-		"count": 1, "latest_observed_head_sha": "", "fallback_role": workflow.RoleDeveloper,
+		"count": 1, "latest_observed_head_sha": "", "fallback_stage": workflow.StageImplementation, "fallback_role": workflow.RoleDeveloper,
 		"fallback_purpose": workflow.TurnPurposeRetry, "fallback_expected_head_sha": "",
-		"retry_of_turn_id": turn.ID, "revision": 4, "source_turn_id": turn.ID,
+		"retry_of_turn_id": turn.ID, "revision": 4, "source_turn_id": turn.ID, "source_stage": workflow.StageImplementation,
 		"source_execution_epoch": turn.ExecutionEpoch, "source_control_revision": turn.ControlRevision,
 		"deferred_normalized_event_ids": []string{deferredID},
 	})
@@ -304,7 +304,7 @@ WHERE workflow.id = $1`, fixture.workflowID, originID, jobID, deferredID).Scan(
 
 func TestPendingEventReconciliationReplaysSynchronizationAndSupersedesFallback(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
-	fixture := seedAgentSession(t, pool, 22)
+	fixture := seedAgentSessionForRole(t, pool, 22, workflow.RoleReviewer)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	proposalRowID := "62000000-0000-4000-8000-000000000022"
@@ -313,11 +313,11 @@ UPDATE workflows SET status = 'REVIEWING', desired_assignment_status = 'ACTIVE',
     desired_runtime_state = 'ACTIVE' WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatalf("prepare reviewing Workflow: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, fixture.workflowID); err != nil {
+		t.Fatalf("prepare reviewing Workflow Stage: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare reviewing Workflow Attempt: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER', agent_profile_name = 'reviewer' WHERE id = $1`, fixture.assignmentID); err != nil {
-		t.Fatalf("prepare Reviewer Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO change_proposals (
@@ -329,6 +329,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 		t.Fatalf("seed synchronized Change Proposal: %v", err)
 	}
 	turnSpec := fixture.turnSpec()
+	turnSpec.Stage = workflow.StageReview
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.ChangeProposalID = proposalRowID
 	turnSpec.ExpectedHeadSHA = "head-old"
@@ -390,7 +391,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 				},
 				Turn: workflow.TurnGuard{
 					TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-					Role: workflow.RoleReviewer, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
+					Stage: workflow.StageReview, Role: workflow.RoleReviewer, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 					ChangeProposalID: 220, ExpectedHeadSHA: "head-old",
 				},
 				Outcome: workflow.TurnOutcomeInfrastructureFailed,
@@ -526,9 +527,9 @@ VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 1, $4, clock_timestam
 	reconciliationJobID := "44000000-0000-4000-8000-000000000003"
 	payload, err := json.Marshal(map[string]any{
 		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID,
-		"count": 1, "latest_observed_head_sha": "", "fallback_role": workflow.RoleDeveloper,
+		"count": 1, "latest_observed_head_sha": "", "fallback_stage": workflow.StageImplementation, "fallback_role": workflow.RoleDeveloper,
 		"fallback_purpose": workflow.TurnPurposeRetry, "fallback_expected_head_sha": "",
-		"retry_of_turn_id": turn.ID, "revision": 1, "source_turn_id": turn.ID,
+		"retry_of_turn_id": turn.ID, "revision": 1, "source_turn_id": turn.ID, "source_stage": workflow.StageImplementation,
 		"source_execution_epoch": turn.ExecutionEpoch, "source_control_revision": turn.ControlRevision,
 		"deferred_normalized_event_ids": []string{deferredID},
 	})
@@ -563,7 +564,7 @@ INSERT INTO jobs (
     id, queue, kind, payload, max_attempts, idempotency_key, workflow_id, workflow_attempt_id
 )
 VALUES ('44000000-0000-4000-8000-000000000004', 'workflow', 'PREPARE_AGENT_TURN',
-        '{"mode":"CURRENT","role":"DEVELOPER","purpose":"RETRY","revision":2}'::jsonb,
+        '{"mode":"CURRENT","stage":"implementation","role":"DEVELOPER","purpose":"RETRY","revision":2}'::jsonb,
         3, 'intervening-successor', $1, $2)`, fixture.workflowID, fixture.attemptID); err != nil {
 		t.Fatalf("seed intervening successor: %v", err)
 	}
@@ -643,9 +644,9 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	reconciliationJobID := "44000000-0000-4000-8000-000000000045"
 	payload, err := json.Marshal(map[string]any{
 		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID,
-		"count": 1, "latest_observed_head_sha": "", "fallback_role": workflow.RoleDeveloper,
+		"count": 1, "latest_observed_head_sha": "", "fallback_stage": workflow.StageImplementation, "fallback_role": workflow.RoleDeveloper,
 		"fallback_purpose": workflow.TurnPurposeRetry, "fallback_expected_head_sha": "",
-		"retry_of_turn_id": turn.ID, "revision": 1, "source_turn_id": turn.ID,
+		"retry_of_turn_id": turn.ID, "revision": 1, "source_turn_id": turn.ID, "source_stage": workflow.StageImplementation,
 		"source_execution_epoch": turn.ExecutionEpoch, "source_control_revision": turn.ControlRevision,
 		"deferred_normalized_event_ids": []string{"44000000-0000-4000-8000-000000000046"},
 	})
@@ -754,7 +755,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 		func(snapshot workflow.Snapshot) workflow.Decision {
 			guard := workflow.TurnGuard{
 				TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-				Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
+				Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 			}
 			return workflow.Reduce(snapshot, workflow.ClosureSettledEvent{
 				EventMetadata: workflow.EventMetadata{

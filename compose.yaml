@@ -135,15 +135,13 @@ services:
       OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL: "${OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL:-250ms}"
       OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY: "${OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY:-5s}"
       OMNIGREX_ASSIGNMENT_RETENTION_DURATION: "${OMNIGREX_ASSIGNMENT_RETENTION_DURATION:-720h}"
-      OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-developer-provider-credentials
-      OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-reviewer-provider-credentials
+      OMNIGREX_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-provider-credentials
     secrets:
       - omnigrex-database-password
       - omnigrex-github-developer-private-key
       - omnigrex-github-reviewer-private-key
       - omnigrex-github-webhook-secret
-      - omnigrex-developer-provider-credentials
-      - omnigrex-reviewer-provider-credentials
+      - omnigrex-provider-credentials
     volumes:
       - type: bind
         source: /var/run/docker.sock
@@ -215,7 +213,5 @@ secrets:
     file: "${OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE:?set OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE to a secret file}"
   omnigrex-github-webhook-secret:
     file: "${OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE:?set OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE to a secret file}"
-  omnigrex-developer-provider-credentials:
-    file: "${OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE:?set OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE to a secret file}"
-  omnigrex-reviewer-provider-credentials:
-    file: "${OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE:?set OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE to a secret file}"
+  omnigrex-provider-credentials:
+    file: "${OMNIGREX_PROVIDER_CREDENTIALS_FILE:?set OMNIGREX_PROVIDER_CREDENTIALS_FILE to a secret file}"

@@ -30,6 +30,7 @@ type ProcessorConfig struct {
 	LeaseDuration               time.Duration
 	IdlePollInterval            time.Duration
 	AssignmentRetentionDuration time.Duration
+	Reducer                     *workflow.Reducer
 	OnError                     func(error)
 }
 
@@ -40,6 +41,7 @@ type Processor struct {
 	leaseDuration               time.Duration
 	idlePollInterval            time.Duration
 	assignmentRetentionDuration time.Duration
+	reducer                     workflow.Reducer
 	onError                     func(error)
 }
 
@@ -60,12 +62,17 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 	if config.AssignmentRetentionDuration <= 0 {
 		return nil, errors.New("webhook processor assignment retention duration must be positive")
 	}
+	reducer := workflow.BuiltinReducer()
+	if config.Reducer != nil {
+		reducer = *config.Reducer
+	}
 	return &Processor{
 		store:                       processorStore,
 		claimOwner:                  config.ClaimOwner,
 		leaseDuration:               config.LeaseDuration,
 		idlePollInterval:            config.IdlePollInterval,
 		assignmentRetentionDuration: config.AssignmentRetentionDuration,
+		reducer:                     reducer,
 		onError:                     config.OnError,
 	}, nil
 }
@@ -207,29 +214,29 @@ func (processor *Processor) transition(event NormalizedEvent, observedAt time.Ti
 			if event.Issue == nil || event.Label != "omnigrex:run" {
 				return invalidNormalizedDecision(snapshot)
 			}
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
+			return processor.reducer.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
 		case "issues.closed":
 			if event.Issue == nil {
 				return invalidNormalizedDecision(snapshot)
 			}
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: metadata, ClosureID: closureID, RetainUntil: observedAt.Add(processor.assignmentRetentionDuration), RetentionToken: retentionToken})
+			return processor.reducer.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: metadata, ClosureID: closureID, RetainUntil: observedAt.Add(processor.assignmentRetentionDuration), RetentionToken: retentionToken})
 		case "issues.reopened":
-			return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata})
+			return processor.reducer.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata})
 		case "pull_request.opened":
 			if event.PullRequest == nil {
 				return invalidNormalizedDecision(snapshot)
 			}
-			return workflow.Reduce(snapshot, workflow.ChangeProposalObservedEvent{EventMetadata: metadata, ChangeProposal: workflow.ChangeProposal{ID: event.PullRequest.ID, Number: event.PullRequest.Number, HeadSHA: event.PullRequest.HeadSHA, Open: true}})
+			return processor.reducer.Reduce(snapshot, workflow.ChangeProposalObservedEvent{EventMetadata: metadata, ChangeProposal: workflow.ChangeProposal{ID: event.PullRequest.ID, Number: event.PullRequest.Number, HeadSHA: event.PullRequest.HeadSHA, Open: true}})
 		case "pull_request.synchronize":
 			if event.PullRequest == nil {
 				return invalidNormalizedDecision(snapshot)
 			}
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{EventMetadata: metadata, ChangeProposalID: event.PullRequest.ID, PreviousHeadSHA: event.PullRequest.BeforeSHA, HeadSHA: event.PullRequest.HeadSHA})
+			return processor.reducer.Reduce(snapshot, workflow.SynchronizationEvent{EventMetadata: metadata, ChangeProposalID: event.PullRequest.ID, PreviousHeadSHA: event.PullRequest.BeforeSHA, HeadSHA: event.PullRequest.HeadSHA})
 		case "pull_request_review.submitted":
 			if event.PullRequest == nil || event.Review == nil || event.Review.User == nil {
 				return invalidNormalizedDecision(snapshot)
 			}
-			return workflow.Reduce(snapshot, workflow.ReviewObservedEvent{EventMetadata: metadata, Review: workflow.ReviewIdentity{ID: event.Review.ID, NodeID: event.Review.NodeID, ChangeProposalID: event.PullRequest.ID, ActorID: event.Review.User.ID, HeadSHA: event.Review.CommitID}})
+			return processor.reducer.Reduce(snapshot, workflow.ReviewObservedEvent{EventMetadata: metadata, Review: workflow.ReviewIdentity{ID: event.Review.ID, NodeID: event.Review.NodeID, ChangeProposalID: event.PullRequest.ID, ActorID: event.Review.User.ID, HeadSHA: event.Review.CommitID}})
 		default:
 			return invalidNormalizedDecision(snapshot)
 		}

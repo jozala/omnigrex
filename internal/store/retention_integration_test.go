@@ -611,19 +611,13 @@ WHERE workflow.id = $1`, application.WorkflowID, preparation.ID, preparation.Att
 func TestClosureRetainsAndCollectsPreparedCreatingSessionWithoutFabricatingACPIdentity(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
-	fixture := seedAgentSession(t, pool, 35)
-	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	prepareClosableFixture(t, pool, fixture)
 	contentSHA := strings.Repeat("a", 64)
 	image := "registry.example/runtime@sha256:" + strings.Repeat("b", 64)
-	if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments
-SET runtime_profile_content_sha256 = $2, runtime_image_digest = $3
-WHERE id = $1`, fixture.assignmentID, contentSHA, image); err != nil {
-		t.Fatalf("prepare immutable Assignment binding: %v", err)
-	}
+	binding := runtimeprofile.Binding{Name: "runtime", Version: "1", ContentSHA256: contentSHA, Image: image}
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 35, workflow.RoleDeveloper, binding, binding)
+	prepareClosableFixture(t, pool, fixture)
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_sessions
 SET status = 'CREATING', acp_session_id = NULL,
@@ -685,18 +679,15 @@ FROM agent_sessions AS session WHERE session.id = $1`, fixture.sessionID, fixtur
 func TestReopenBeforeCollectionReusesPreparedCreatingSessionAndBindsACPOnLaunch(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
-	fixture := seedAgentSession(t, pool, 73)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	bindings := preparationBindings()
 	developerBinding := bindings[workflow.RoleDeveloper]
-	setFixtureRuntimeBinding(t, pool, fixture, runtimeprofile.Binding{
+	pinnedDeveloperBinding := runtimeprofile.Binding{
 		Name: developerBinding.RuntimeProfileName, Version: developerBinding.RuntimeProfileVersion,
 		ContentSHA256: developerBinding.RuntimeProfileContentSHA256, Image: developerBinding.RuntimeImageDigest,
-	}, runtimeprofile.Binding{
-		Name: developerBinding.RuntimeProfileName, Version: developerBinding.RuntimeProfileVersion,
-		ContentSHA256: developerBinding.RuntimeProfileContentSHA256, Image: developerBinding.RuntimeImageDigest,
-	})
+	}
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 73, workflow.RoleDeveloper, pinnedDeveloperBinding, pinnedDeveloperBinding)
 	reviewerBinding := bindings[workflow.RoleReviewer]
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_assignments (
@@ -811,8 +802,6 @@ func TestReopenBeforeCollectionAuthorizationCancelsLeasedGenerationAndRetainedTr
 
 func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollectorCrash(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
-	fixture := seedAgentSession(t, pool, 33)
-	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	preparationBinding := preparationBindings()[workflow.RoleDeveloper]
@@ -820,7 +809,7 @@ func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollector
 		Name: preparationBinding.RuntimeProfileName, Version: preparationBinding.RuntimeProfileVersion,
 		ContentSHA256: preparationBinding.RuntimeProfileContentSHA256, Image: preparationBinding.RuntimeImageDigest,
 	}
-	setFixtureRuntimeBinding(t, pool, fixture, pinnedBinding, pinnedBinding)
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 33, workflow.RoleDeveloper, pinnedBinding, pinnedBinding)
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-31 * 24 * time.Hour)
 	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 33,

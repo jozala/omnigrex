@@ -121,6 +121,44 @@ func TestProductionReconcilerFindsExactPullRequestAndReviewArtifacts(t *testing.
 	})
 }
 
+func TestProductionReconcilerRecoversMutationsForRoleRemovedFromPolicyCatalog(t *testing.T) {
+	const retiredRole workflow.Role = "RETIRED_REVIEWER"
+	marker := reconciliationMarker(t, reconciliationMutationID)
+
+	t.Run("orchestrator-authority operation", func(t *testing.T) {
+		api := &reconciliationGitHub{issueComments: []githubapi.IssueComment{{
+			ID: 703, NodeID: "IC_703", Body: "Retired update\n\n" + marker,
+			HTMLURL: "https://github.test/acme/widgets/issues/12#issuecomment-703",
+		}}}
+		reconciliation := reconciliationContext()
+		reconciliation.Role = retiredRole
+		mutation := reconciliationMutation(mcp.ToolCommentOnIssue, `{"operation_id":"retired-comment","body":"Retired update"}`)
+		mutation.ExternalResourceID = "9123:456"
+
+		result, err := newProductionReconciler(t, api, &reconciliationPublications{}).Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationFound || api.credential != "developer-secret" {
+			t.Fatalf("Reconcile(retired comment) = (%#v, %v), credential %q", result, err, api.credential)
+		}
+	})
+
+	t.Run("reviewer-authority operation", func(t *testing.T) {
+		api := &reconciliationGitHub{reviews: []githubapi.Review{{
+			ID: 802, NodeID: "PRR_802", State: "APPROVED", Body: marker,
+			CommitID: productionHeadSHA, User: githubapi.User{ID: 92, Login: "retired-reviewer-app"},
+			HTMLURL: "https://github.test/acme/widgets/pull/23#pullrequestreview-802",
+		}}}
+		reconciliation := reconciliationContext()
+		reconciliation.Role = retiredRole
+		mutation := reconciliationMutation(mcp.ToolSubmitReview, `{"operation_id":"retired-review","event":"APPROVE","body":"","comments":[]}`)
+		mutation.ExternalResourceID = "9123:654"
+
+		result, err := newProductionReconciler(t, api, &reconciliationPublications{}).Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationFound || api.credential != "reviewer-secret" {
+			t.Fatalf("Reconcile(retired review) = (%#v, %v), credential %q", result, err, api.credential)
+		}
+	})
+}
+
 func TestProductionReconcilerFindsTurnScopedArtifactsAfterProposalHeadAdvances(t *testing.T) {
 	reconciliation := reconciliationContext()
 	reconciliation.ChangeProposal.HeadSHA = advancedHeadSHA

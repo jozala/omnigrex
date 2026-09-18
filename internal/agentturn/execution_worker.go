@@ -12,6 +12,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -89,21 +90,22 @@ type ExecutionWorkerDependencies struct {
 	Sessions             ExecutionPrompter
 	Outcomes             ExecutionOutcomeReconciler
 	Workspace            ExecutionWorkspace
+	Policies             role.PolicyCatalog
+	Reducer              workflow.Reducer
 }
 
 // ExecutionWorkerConfig controls execution ownership, deadlines, capacity, and in-memory provider credentials.
 type ExecutionWorkerConfig struct {
-	ClaimOwner                      string
-	LeaseDuration                   time.Duration
-	HeartbeatInterval               time.Duration
-	IdlePollInterval                time.Duration
-	TurnTimeout                     time.Duration
-	CleanupTimeout                  time.Duration
-	ConcurrencyLimit                int
-	DeveloperProviderCredentialJSON json.RawMessage
-	ReviewerProviderCredentialJSON  json.RawMessage
-	GitRemoteBaseURL                string
-	OnError                         func(error)
+	ClaimOwner             string
+	LeaseDuration          time.Duration
+	HeartbeatInterval      time.Duration
+	IdlePollInterval       time.Duration
+	TurnTimeout            time.Duration
+	CleanupTimeout         time.Duration
+	ConcurrencyLimit       int
+	ProviderCredentialJSON json.RawMessage
+	GitRemoteBaseURL       string
+	OnError                func(error)
 }
 
 func (ExecutionWorkerConfig) String() string { return "Agent Turn execution Worker config" }
@@ -121,6 +123,8 @@ type ExecutionWorker struct {
 	sessions             ExecutionPrompter
 	outcomes             ExecutionOutcomeReconciler
 	workspace            ExecutionWorkspace
+	policies             role.PolicyCatalog
+	reducer              workflow.Reducer
 	claimOwner           string
 	leaseDuration        time.Duration
 	heartbeatInterval    time.Duration
@@ -128,8 +132,7 @@ type ExecutionWorker struct {
 	turnTimeout          time.Duration
 	cleanupTimeout       time.Duration
 	concurrencyLimit     int
-	developerProvider    json.RawMessage
-	reviewerProvider     json.RawMessage
+	providerCredential   json.RawMessage
 	gitRemoteBase        gitremote.BaseURL
 	onError              func(error)
 }
@@ -156,30 +159,30 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 	if config.ConcurrencyLimit <= 0 || config.ConcurrencyLimit > 10_000 {
 		return nil, fmt.Errorf("%w: concurrency limit", ErrInvalidExecutionWorker)
 	}
-	developerProvider, err := copyProviderCredential(config.DeveloperProviderCredentialJSON)
+	providerCredential, err := copyProviderCredential(config.ProviderCredentialJSON)
 	if err != nil {
-		return nil, err
-	}
-	reviewerProvider, err := copyProviderCredential(config.ReviewerProviderCredentialJSON)
-	if err != nil {
-		zeroBytes(developerProvider)
 		return nil, err
 	}
 	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
 	if err != nil {
-		zeroBytes(developerProvider)
-		zeroBytes(reviewerProvider)
+		zeroBytes(providerCredential)
 		return nil, fmt.Errorf("%w: Git remote base URL", ErrInvalidExecutionWorker)
+	}
+	if len(dependencies.Policies.Roles()) == 0 {
+		dependencies.Policies = role.BuiltinPolicyCatalog()
+	}
+	if !dependencies.Reducer.Valid() {
+		dependencies.Reducer = workflow.BuiltinReducer()
 	}
 	return &ExecutionWorker{
 		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
 		launcher: dependencies.Launcher, sessions: dependencies.Sessions, outcomes: dependencies.Outcomes,
-		workspace: dependencies.Workspace, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
+		workspace: dependencies.Workspace, policies: dependencies.Policies, reducer: dependencies.Reducer, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		turnTimeout: config.TurnTimeout, cleanupTimeout: config.CleanupTimeout,
-		concurrencyLimit: config.ConcurrencyLimit, developerProvider: developerProvider,
-		reviewerProvider: reviewerProvider, gitRemoteBase: remoteBase, onError: config.OnError,
+		concurrencyLimit: config.ConcurrencyLimit, providerCredential: providerCredential,
+		gitRemoteBase: remoteBase, onError: config.OnError,
 	}, nil
 }
 
@@ -193,7 +196,7 @@ func (worker *ExecutionWorker) ProcessNext(ctx context.Context) (processed bool,
 		return false, nil
 	}
 
-	secrets := append(providerCredentialSecrets(worker.developerProvider), providerCredentialSecrets(worker.reviewerProvider)...)
+	secrets := providerCredentialSecrets(worker.providerCredential)
 	defer func() {
 		if err != nil {
 			err = sanitizeLaunchError(err, secrets)
@@ -229,18 +232,21 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		operationErr = fmt.Errorf("resolve Agent Turn workspace paths: %w", operationErr)
 	}
 
-	var repositoryCredential string
-	var providerCredential json.RawMessage
+	var repositoryCredential, reviewerOutcomeCredential string
+	providerCredential := worker.providerCredential
 	if operationErr == nil {
-		switch execution.Assignment.Role {
-		case workflow.RoleDeveloper:
-			providerCredential = worker.developerProvider
-			repositoryCredential, operationErr = worker.developerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-		case workflow.RoleReviewer:
-			providerCredential = worker.reviewerProvider
-			repositoryCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-		default:
-			operationErr = errors.New("Agent Turn has an invalid Role")
+		policy, ok := worker.policies.Lookup(execution.Assignment.Role)
+		if !ok {
+			operationErr = errors.New("Agent Turn has no Role policy")
+		} else {
+			switch policy.RepositoryCredentialAuthority {
+			case role.OrchestratorAuthority:
+				repositoryCredential, operationErr = worker.developerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+			case role.ReviewerAuthority:
+				repositoryCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+			default:
+				operationErr = errors.New("Agent Turn has an invalid repository credential authority")
+			}
 		}
 		if repositoryCredential != "" {
 			*secrets = append(*secrets, repositoryCredential)
@@ -249,6 +255,17 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			operationErr = fmt.Errorf("obtain Role repository credential: %w", operationErr)
 		} else if strings.TrimSpace(repositoryCredential) == "" {
 			operationErr = errors.New("Role repository credential is empty")
+		}
+		if operationErr == nil {
+			if authority, granted := policy.CredentialAuthorityForTool(mcp.ToolSubmitReview); granted && authority == role.ReviewerAuthority {
+				reviewerOutcomeCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+				if strings.TrimSpace(reviewerOutcomeCredential) == "" && operationErr == nil {
+					operationErr = errors.New("Reviewer repository credential is empty")
+				}
+				if reviewerOutcomeCredential != "" {
+					*secrets = append(*secrets, reviewerOutcomeCredential)
+				}
+			}
 		}
 	}
 
@@ -311,7 +328,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		if execution.ChangeProposal != nil {
 			currentHead = execution.ChangeProposal.HeadSHA
 		}
-		content, envelopeErr := BuildEventEnvelope(execution, currentHead)
+		content, envelopeErr := BuildEventEnvelopeWithConfiguration(execution, currentHead, worker.reducer, worker.policies)
 		if envelopeErr != nil {
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
@@ -328,10 +345,10 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		}
 	}
 
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, runtime, promptResponse, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, operationErr)
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(runtime))
 	}
@@ -369,7 +386,8 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	}
 
 	reconciliation := OutcomeReconciliation{
-		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential, Paths: paths,
+		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
+		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
 	}
 	if combinedErr == nil && promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
@@ -379,8 +397,8 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			classification = ClassifyPromptError(operationErr)
 		}
 		reconciliation.PromptError = classification
-		diagnosticSecrets := append(providerCredentialSecrets(worker.developerProvider), providerCredentialSecrets(worker.reviewerProvider)...)
-		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential)
+		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
+		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential, reviewerOutcomeCredential)
 		reconciliation.PromptDiagnostic = sanitizeLaunchError(combinedErr, diagnosticSecrets).Error()
 	}
 	var observation store.AgentTurnSettlementObservation

@@ -33,24 +33,28 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	}
 	binding := profile.Binding()
 
-	expiredFixture := seedAgentSession(t, pool, 91)
-	expiredTurn, err := database.AllocateAgentTurn(ctx, expiredFixture.turnSpec())
+	expiredFixture := seedAgentSessionWithRuntimeBindings(t, pool, 91, workflow.RoleDeveloper, binding, binding)
+	expiredSpec := expiredFixture.turnSpec()
+	expiredSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
+		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
+	expiredTurn, err := database.AllocateAgentTurn(ctx, expiredSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setFixtureRuntimeBinding(t, pool, expiredFixture, binding, binding)
 	expiredJob := claimAgentTurnJob(t, database, ctx, expiredTurn, time.Second)
 	if _, err := database.AcquireAgentTurn(ctx, expiredJob, expiredTurn.ControlRevision, "expired-runtime", time.Second, 2); err != nil {
 		t.Fatal(err)
 	}
 	expireAgentTurnExecution(t, pool, ctx, expiredJob.ID, expiredTurn.ID)
 
-	queuedFixture := seedAgentSession(t, pool, 92)
-	queuedTurn, err := database.AllocateAgentTurn(ctx, queuedFixture.turnSpec())
+	queuedFixture := seedAgentSessionWithRuntimeBindings(t, pool, 92, workflow.RoleDeveloper, binding, binding)
+	queuedSpec := queuedFixture.turnSpec()
+	queuedSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
+		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
+	queuedTurn, err := database.AllocateAgentTurn(ctx, queuedSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setFixtureRuntimeBinding(t, pool, queuedFixture, binding, binding)
 
 	runtimes := emptyStartupRuntimes{}
 	startupReconciler, err := startup.NewReconciler(database, runtimes, runtimes, runtimes, startup.ReconcilerOptions{
@@ -74,14 +78,15 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 		t.Fatalf("execution claim after startup recovery = (%#v, %t, %v), want queued Turn %s", executionLease, acquired, err, queuedTurn.ID)
 	}
 
-	closureFixture := seedAgentSession(t, pool, 93)
-	makeFixtureRuntimePathCanonical(t, pool, closureFixture)
+	closureFixture := seedAgentSessionWithRuntimeBindings(t, pool, 93, workflow.RoleDeveloper, binding, binding)
 	prepareClosableFixture(t, pool, closureFixture)
-	closureTurn, err := database.AllocateAgentTurn(ctx, closureFixture.turnSpec())
+	closureSpec := closureFixture.turnSpec()
+	closureSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
+		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
+	closureTurn, err := database.AllocateAgentTurn(ctx, closureSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setFixtureRuntimeBinding(t, pool, closureFixture, binding, binding)
 	closureJob := claimAgentTurnJob(t, database, ctx, closureTurn, time.Second)
 	if _, err := database.AcquireAgentTurn(ctx, closureJob, closureTurn.ControlRevision, "closure-runtime", time.Second, 2); err != nil {
 		t.Fatal(err)

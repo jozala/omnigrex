@@ -8,13 +8,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/role"
 )
 
-type Role string
+type Role = role.ID
 
 const (
-	RoleDeveloper Role = "developer"
-	RoleReviewer  Role = "reviewer"
+	RoleDeveloper = role.Developer
+	RoleReviewer  = role.Reviewer
 )
 
 type Permission string
@@ -46,16 +47,25 @@ type RenderedProfile struct {
 	session      SessionConfiguration
 }
 
-func Render(role Role, profile Profile) (*RenderedProfile, error) {
-	if (role != RoleDeveloper && role != RoleReviewer) ||
-		strings.TrimSpace(profile.Instructions) == "" ||
+func Render(roleID Role, profile Profile) (*RenderedProfile, error) {
+	policy, ok := role.BuiltinPolicyCatalog().Lookup(roleID)
+	if !ok {
+		return nil, ErrInvalidProfile
+	}
+	return RenderWithPolicy(policy, profile)
+}
+
+// RenderWithPolicy compiles an OpenCode profile under its startup-validated Role policy.
+func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, error) {
+	roleID := policy.Role
+	if !role.ValidID(roleID) || strings.TrimSpace(profile.Instructions) == "" ||
 		!utf8.ValidString(profile.Instructions) ||
 		!validReference(profile.Model) ||
 		(profile.Variant != "" && containsWhitespaceOrControl(profile.Variant)) ||
 		profile.Steps == 0 || profile.Steps > agentprofile.MaxSteps {
 		return nil, ErrInvalidProfile
 	}
-	if role == RoleReviewer && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {
+	if !policy.OpenCode.AllowFileEdits && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {
 		return nil, ErrInvalidProfile
 	}
 	if edit, hasEdit := profile.Permissions["edit"]; hasEdit {
@@ -65,7 +75,7 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 	}
 
 	permission := map[string]string{"*": "deny"}
-	policy := make(PermissionPolicy, len(profile.Permissions))
+	permissionPolicy := make(PermissionPolicy, len(profile.Permissions))
 	for name, action := range profile.Permissions {
 		if !knownPermission(name) || (action != PermissionAllow && action != PermissionDeny) {
 			return nil, ErrInvalidProfile
@@ -73,7 +83,7 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		if name == "*" {
 			continue
 		}
-		policy[name] = action
+		permissionPolicy[name] = action
 		openCodeName := name
 		if name == "patch" {
 			openCodeName = "edit"
@@ -96,7 +106,7 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		permission[name] = "allow"
 	}
 
-	agentID := "omnigrex-" + string(role)
+	agentID := "omnigrex-" + strings.ToLower(string(roleID))
 	type agentConfig struct {
 		Mode       string            `json:"mode,omitempty"`
 		Permission map[string]string `json:"permission,omitempty"`
@@ -139,7 +149,7 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		"OPENCODE_CONFIG_CONTENT=" + string(config),
 		"OPENCODE_DISABLE_AUTOUPDATE=1",
 	}
-	if role == RoleReviewer {
+	if policy.OpenCode.HardenProjectConfiguration {
 		environ = append(environ,
 			"OPENCODE_DISABLE_CLAUDE_CODE=true",
 			"OPENCODE_DISABLE_DEFAULT_PLUGINS=true",
@@ -148,15 +158,15 @@ func Render(role Role, profile Profile) (*RenderedProfile, error) {
 		)
 	}
 	environ = append(environ, "OPENCODE_DISABLE_SHARE=1")
-	if role == RoleReviewer {
+	if policy.OpenCode.HardenProjectConfiguration {
 		environ = append(environ, "OPENCODE_PURE=true")
 	}
 
 	return &RenderedProfile{
-		role:         role,
+		role:         roleID,
 		config:       config,
 		environ:      environ,
-		policy:       policy,
+		policy:       permissionPolicy,
 		runtimeTools: seenRuntimeTools,
 		session:      SessionConfiguration{Model: profile.Model, Variant: profile.Variant, Mode: agentID},
 	}, nil

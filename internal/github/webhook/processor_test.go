@@ -274,7 +274,7 @@ func TestProcessorMapsSynchronizationAndReviewAsObservations(t *testing.T) {
 			if test.eventName == "pull_request_review" {
 				snapshot.ActiveTurn = &workflow.ActiveTurn{
 					ID: "turn", SessionID: "session", AttemptID: snapshot.CurrentAttempt.ID,
-					Role: workflow.RoleReviewer, Epoch: 1, ControlRevision: 1,
+					Stage: workflow.StageReview, Role: workflow.RoleReviewer, Epoch: 1, ControlRevision: 1,
 					ChangeProposalID: snapshot.ChangeProposal.ID, ExpectedHeadSHA: snapshot.ChangeProposal.HeadSHA,
 				}
 			}
@@ -605,6 +605,7 @@ func reviewingSnapshot() workflow.Snapshot {
 		CurrentAttempt: &workflow.WorkflowAttempt{
 			ID: "50000000-0000-4000-8000-000000000001", Number: 1,
 			StartedAt: time.Date(2026, time.August, 30, 10, 0, 0, 0, time.UTC), Lifecycle: workflow.AttemptActive,
+			CurrentStage: workflow.StageReview, ReviewUsage: map[workflow.StageID]uint8{workflow.StageReview: 1},
 			ReviewBudget: workflow.AttemptBudget{Used: 1, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 		},
 		ChangeProposal:    &workflow.ChangeProposal{ID: 654, Number: 21, HeadSHA: "old-head", Open: true},

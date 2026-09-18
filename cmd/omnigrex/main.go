@@ -25,6 +25,7 @@ import (
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/retention"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
@@ -33,6 +34,7 @@ import (
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workflowaction"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -133,8 +135,21 @@ func runDoctorCommand(ctx context.Context, args []string, getenv func(string) st
 }
 
 func run(ctx context.Context, settings config.Config, logger *slog.Logger) error {
+	roleCatalog := role.BuiltinCatalog()
+	definition, err := workflow.NewBuiltinDefinition(roleCatalog)
+	if err != nil {
+		return fmt.Errorf("configure Workflow Definition: %w", err)
+	}
+	rolePolicies, err := role.NewBuiltinPolicyCatalog(definition.Roles())
+	if err != nil {
+		return fmt.Errorf("configure Role Policy Catalog: %w", err)
+	}
+	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
+	if err != nil {
+		return fmt.Errorf("configure Workflow Reducer: %w", err)
+	}
 	startupCtx, startupCancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
-	database, err := store.Open(startupCtx, settings.DatabaseURL, settings.DatabasePasswordSecretFile)
+	database, err := store.OpenWithReducerAndPolicies(startupCtx, settings.DatabaseURL, settings.DatabasePasswordSecretFile, reducer, rolePolicies)
 	startupCancel()
 	if err != nil {
 		return fmt.Errorf("initialize database: %w", err)
@@ -147,7 +162,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, openCodeV1); err != nil {
 		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
 	}
-	githubServices, err := configureGitHub(settings, database, logger)
+	githubServices, err := configureGitHub(settings, database, reducer, logger)
 	if err != nil {
 		return err
 	}
@@ -167,8 +182,20 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
-	preparer := agentturn.NewPreparer(agentprofile.NewLoader(githubServices.api), runtimeRegistry, database)
-	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, reviewerRepositoryCredentials, preparer, agentturn.WorkerConfig{
+	profileCatalog, err := agentprofile.NewCatalogFromPolicies(rolePolicies)
+	if err != nil {
+		return fmt.Errorf("configure Agent Profile catalog: %w", err)
+	}
+	profileSelection, err := agentprofile.NewSelectionFromPolicies(profileCatalog, rolePolicies)
+	if err != nil {
+		return fmt.Errorf("configure Agent Profile selection: %w", err)
+	}
+	profileLoader, err := agentprofile.NewConfiguredLoader(githubServices.api, profileCatalog, profileSelection)
+	if err != nil {
+		return fmt.Errorf("configure Agent Profile loader: %w", err)
+	}
+	preparer := agentturn.NewPreparer(profileLoader, runtimeRegistry, database)
+	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
 		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnPreparationHeartbeatInterval,
@@ -201,6 +228,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
+		Policies:         rolePolicies,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP tool backend: %w", err)
@@ -209,13 +237,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		EndpointURL: settings.MCPEndpointURL, Store: database, Backend: toolBackend,
 		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
 		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
+		Policies:                 rolePolicies,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP Tool Gateway: %w", err)
 	}
 	mutationReconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
 		GitHub: githubServices.api, Credentials: repositoryCredentials, Publications: workspaces,
-		GitRemoteBaseURL: settings.GitRemoteBaseURL,
+		GitRemoteBaseURL: settings.GitRemoteBaseURL, Policies: rolePolicies,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP mutation reconciler: %w", err)
@@ -305,6 +334,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		HeartbeatInterval:    settings.AgentTurnPreparationHeartbeatInterval,
 		IdlePollInterval:     settings.AgentTurnPreparationPollInterval,
 		CleanupRetryInterval: settings.AgentTurnPreparationRetryDelay,
+		Policies:             rolePolicies,
 		OnError: func(err error) {
 			logger.Error("stop stale Runtime Process", "error", err)
 		},
@@ -321,26 +351,21 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
+		Policies: rolePolicies,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
 	}
-	developerProviderCredentialJSON, err := readNonemptyJSONObject(settings.DeveloperProviderCredentialsFile)
+	providerCredentialJSON, err := readNonemptyJSONObject(settings.ProviderCredentialsFile)
 	if err != nil {
-		return fmt.Errorf("read Developer provider credentials: %w", err)
-	}
-	reviewerProviderCredentialJSON, err := readNonemptyJSONObject(settings.ReviewerProviderCredentialsFile)
-	if err != nil {
-		zeroBytes(developerProviderCredentialJSON)
-		return fmt.Errorf("read Reviewer provider credentials: %w", err)
+		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: database, GitHub: githubServices.api,
-		ProviderCredentialJSON: []json.RawMessage{developerProviderCredentialJSON, reviewerProviderCredentialJSON},
+		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
-		zeroBytes(developerProviderCredentialJSON)
-		zeroBytes(reviewerProviderCredentialJSON)
+		zeroBytes(providerCredentialJSON)
 		return fmt.Errorf("configure Agent Turn outcome reconciler: %w", err)
 	}
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
@@ -349,18 +374,19 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Launcher: runtimeLauncher, Sessions: sessions,
 		Outcomes:  loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
 		Workspace: workspaces,
+		Policies:  rolePolicies,
+		Reducer:   reducer,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
 		TurnTimeout: settings.AgentTurnExecutionTurnTimeout, CleanupTimeout: settings.AgentTurnExecutionCleanupTimeout,
-		ConcurrencyLimit: settings.AgentTurnConcurrencyLimit, DeveloperProviderCredentialJSON: developerProviderCredentialJSON,
-		ReviewerProviderCredentialJSON: reviewerProviderCredentialJSON, GitRemoteBaseURL: settings.GitRemoteBaseURL,
+		ConcurrencyLimit: settings.AgentTurnConcurrencyLimit, ProviderCredentialJSON: providerCredentialJSON,
+		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		OnError: func(err error) {
 			logger.Error("execute Agent Turn", "error", err)
 		},
 	})
-	zeroBytes(developerProviderCredentialJSON)
-	zeroBytes(reviewerProviderCredentialJSON)
+	zeroBytes(providerCredentialJSON)
 	if executionWorkerErr != nil {
 		return fmt.Errorf("configure Agent Turn execution Worker: %w", executionWorkerErr)
 	}
@@ -679,7 +705,7 @@ type configuredGitHub struct {
 	claimOwner       string
 }
 
-func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*configuredGitHub, error) {
+func configureGitHub(settings config.Config, database *store.Store, reducer workflow.Reducer, logger *slog.Logger) (*configuredGitHub, error) {
 	developerKey, err := os.ReadFile(settings.GitHubDeveloperPrivateKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read Developer GitHub App private key: %w", err)
@@ -722,6 +748,7 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 		LeaseDuration:               settings.WebhookLeaseDuration,
 		IdlePollInterval:            settings.WebhookPollInterval,
 		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
+		Reducer:                     &reducer,
 		OnError: func(err error) {
 			logger.Error("process GitHub webhook delivery", "error", err)
 		},

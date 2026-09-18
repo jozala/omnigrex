@@ -13,6 +13,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -80,16 +81,17 @@ func (OutcomeReconcilerConfig) GoString() string {
 	return "agentturn.OutcomeReconcilerConfig{<credentials redacted>}"
 }
 
-// OutcomeReconciliation contains the exact acquired turn context and ephemeral Role credential.
+// OutcomeReconciliation contains the exact acquired turn context and ephemeral operation credentials.
 // Exactly one of PromptResponse and PromptError must be supplied.
 type OutcomeReconciliation struct {
-	Lease                store.AgentTurnLease
-	Execution            store.AgentTurnExecutionContext
-	PromptResponse       *acp.PromptResponse
-	PromptError          PromptErrorClassification
-	PromptDiagnostic     string
-	RepositoryCredential string
-	Paths                workspace.Paths
+	Lease                        store.AgentTurnLease
+	Execution                    store.AgentTurnExecutionContext
+	PromptResponse               *acp.PromptResponse
+	PromptError                  PromptErrorClassification
+	PromptDiagnostic             string
+	RepositoryCredential         string
+	ReviewerRepositoryCredential string
+	Paths                        workspace.Paths
 }
 
 func (OutcomeReconciliation) String() string { return "Agent Turn outcome reconciliation" }
@@ -140,6 +142,7 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 	}
 	defer func() {
 		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
+		observation = reconciler.sanitizeObservation(observation, request.ReviewerRepositoryCredential)
 	}()
 	mutations, err := reconciler.store.ListAgentTurnMutationInvocations(ctx, request.Lease)
 	if err != nil {
@@ -181,19 +184,14 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		return blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID), nil
 	}
 
-	switch request.Execution.Assignment.Role {
-	case workflow.RoleDeveloper:
-		if intent.ToolName != mcp.ToolRequestReview {
-			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Developer mutation ledger contains an invalid terminal intent"), nil
-		}
+	switch intent.ToolName {
+	case mcp.ToolRequestReview:
 		return reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent), nil
-	case workflow.RoleReviewer:
-		if intent.ToolName != mcp.ToolSubmitReview {
-			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Reviewer mutation ledger contains an invalid terminal intent"), nil
-		}
+	case mcp.ToolSubmitReview:
+		request.RepositoryCredential = request.ReviewerRepositoryCredential
 		return reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent), nil
 	default:
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent Turn has an invalid Role"), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
 	}
 }
 
@@ -498,8 +496,7 @@ func validOutcomeBinding(lease store.AgentTurnLease, execution store.AgentTurnEx
 		execution.Session.ID == lease.AgentSessionID && execution.Session.AgentAssignmentID == execution.Assignment.ID &&
 		execution.Turn.ID == lease.ID && execution.Turn.AgentAssignmentID == lease.AgentAssignmentID &&
 		execution.Turn.AgentSessionID == lease.AgentSessionID && execution.Turn.ExecutionEpoch == lease.ExecutionEpoch &&
-		execution.Turn.ControlRevision == lease.ControlRevision &&
-		(execution.Assignment.Role == workflow.RoleDeveloper || execution.Assignment.Role == workflow.RoleReviewer)
+		execution.Turn.ControlRevision == lease.ControlRevision && role.ValidID(execution.Assignment.Role)
 }
 
 func validPromptInput(request OutcomeReconciliation) bool {

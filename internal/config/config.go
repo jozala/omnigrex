@@ -76,8 +76,7 @@ type Config struct {
 	GitHubDeveloperPrivateKeyFile          string
 	GitHubReviewerPrivateKeyFile           string
 	GitHubWebhookSecretFile                string
-	DeveloperProviderCredentialsFile       string
-	ReviewerProviderCredentialsFile        string
+	ProviderCredentialsFile                string
 	WebhookLeaseDuration                   time.Duration
 	WebhookPollInterval                    time.Duration
 	AgentTurnPreparationLeaseDuration      time.Duration
@@ -144,8 +143,7 @@ func Load(getenv func(string) string) (Config, error) {
 		GitHubDeveloperPrivateKeyFile:          getenv("OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"),
 		GitHubReviewerPrivateKeyFile:           getenv("OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"),
 		GitHubWebhookSecretFile:                getenv("OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"),
-		DeveloperProviderCredentialsFile:       getenv("OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"),
-		ReviewerProviderCredentialsFile:        getenv("OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"),
+		ProviderCredentialsFile:                getenv("OMNIGREX_PROVIDER_CREDENTIALS_FILE"),
 		WebhookLeaseDuration:                   defaultWebhookLeaseDuration,
 		WebhookPollInterval:                    defaultWebhookPollInterval,
 		AgentTurnPreparationLeaseDuration:      defaultPreparationLeaseDuration,
@@ -246,8 +244,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE", value: config.GitHubDeveloperPrivateKeyFile},
 		{name: "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE", value: config.GitHubReviewerPrivateKeyFile},
 		{name: "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE", value: config.GitHubWebhookSecretFile},
-		{name: "OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE", value: config.DeveloperProviderCredentialsFile},
-		{name: "OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE", value: config.ReviewerProviderCredentialsFile},
+		{name: "OMNIGREX_PROVIDER_CREDENTIALS_FILE", value: config.ProviderCredentialsFile},
 	} {
 		if !filepath.IsAbs(path.value) {
 			problems = append(problems, fmt.Errorf("%s must be an absolute path", path.name))

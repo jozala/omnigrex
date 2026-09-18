@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	rolepolicy "github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -152,16 +153,29 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
+	compatible := store.reducer.DefinitionCompatible(snapshot)
+	settlementObservation := canonicalObservation
+	if !compatible {
+		settlementObservation = canonicalSettlementObservation{
+			ObservedAt: canonicalObservation.ObservedAt, Outcome: workflow.TurnOutcomeInfrastructureFailed,
+			Diagnostic:     "Durable Workflow state is incompatible with the deployed Workflow Definition",
+			TerminalStatus: AgentTurnInterrupted, TerminalLastError: "Workflow Definition incompatible",
+		}
+	}
 	pending, err := derivePendingEventsObservation(ctx, tx, job.WorkflowID, turn.ID)
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
-	proposalID, proposal, err := validateSettlementChangeProposal(ctx, tx, job, turn, role, snapshot, canonicalObservation)
-	if err != nil {
-		return AgentTurnSettlement{}, err
-	}
-	if err := validateSettlementReviewerActor(ctx, tx, job, role, canonicalObservation); err != nil {
-		return AgentTurnSettlement{}, err
+	proposalID := turn.ChangeProposalID
+	var proposal *workflow.ChangeProposal
+	if compatible {
+		proposalID, proposal, err = store.validateSettlementChangeProposal(ctx, tx, job, turn, role, snapshot, canonicalObservation)
+		if err != nil {
+			return AgentTurnSettlement{}, err
+		}
+		if err := store.validateSettlementReviewerActor(ctx, tx, job, role, canonicalObservation); err != nil {
+			return AgentTurnSettlement{}, err
+		}
 	}
 
 	event := workflow.TurnSettledEvent{
@@ -171,7 +185,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		},
 		Turn: workflow.TurnGuard{
 			TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-			Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
+			Stage: turn.Stage, Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
 			ExpectedHeadSHA:  turn.ExpectedHeadSHA,
 		},
@@ -180,7 +194,10 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		AuthorizedReviewerActorID: canonicalObservation.AuthorizedReviewerActorID,
 		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic,
 	}
-	decision := workflow.Reduce(snapshot, event)
+	decision := store.reducer.DefinitionIncompatible(snapshot)
+	if compatible {
+		decision = store.reducer.Reduce(snapshot, event)
+	}
 	if err := validateWorkflowDecision(snapshot, decision); err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("validate Agent Turn settlement decision: %w", err)
 	}
@@ -188,7 +205,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		return AgentTurnSettlement{}, fmt.Errorf("%w: disposition %s, reason %s", ErrAgentTurnSettlementRejected, decision.Disposition, decision.Reason)
 	}
 
-	if snapshot.ChangeProposal == nil && canonicalObservation.ChangeProposal != nil {
+	if compatible && snapshot.ChangeProposal == nil && canonicalObservation.ChangeProposal != nil {
 		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, job, turn, *canonicalObservation.ChangeProposal)
 		if err != nil {
 			return AgentTurnSettlement{}, err
@@ -210,9 +227,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 		settlementID, job.WorkflowID, job.WorkflowAttemptID, job.AgentAssignmentID,
 		job.AgentSessionID, turn.ID, turn.ExecutionEpoch, turn.ControlRevision, job.ID,
 		job.AttemptCount, job.LeaseOwner, job.LeaseToken, lease.OwnerID, ownerHash[:],
-		observationJSON, observationHash[:], canonicalObservation.Outcome,
-		canonicalObservation.TerminalStatus, nullableJSON(canonicalObservation.TerminalOutcome),
-		nullableString(canonicalObservation.TerminalLastError), int64(pending.Count),
+		observationJSON, observationHash[:], settlementObservation.Outcome,
+		settlementObservation.TerminalStatus, nullableJSON(settlementObservation.TerminalOutcome),
+		nullableString(settlementObservation.TerminalLastError), int64(pending.Count),
 		nullableString(pending.LatestObservedHeadSHA), decision.Disposition, decision.Reason,
 		decision.Snapshot.State, int64(decision.Snapshot.Revision), nullableString(proposalID))
 	if err != nil {
@@ -226,7 +243,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 		ID: settlementID, WorkflowID: job.WorkflowID, AgentTurnID: turn.ID,
 		ExecutionEpoch: turn.ExecutionEpoch, Authority: AgentTurnSettlementLive, Disposition: decision.Disposition,
 		Reason: decision.Reason, State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
-		TerminalStatus: canonicalObservation.TerminalStatus, ChangeProposalID: proposalID,
+		TerminalStatus: settlementObservation.TerminalStatus, ChangeProposalID: proposalID,
 		PendingEventCount: pending.Count, LatestObservedHeadSHA: pending.LatestObservedHeadSHA,
 	}
 	if err := resolveSettlementActionJobs(ctx, tx, settlementID, &result); err != nil {
@@ -239,7 +256,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 	if err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("encode Agent Turn settlement result: %w", err)
 	}
-	if err := finalizeSettledAgentTurn(ctx, tx, lease, job, turn, canonicalObservation, settlementID); err != nil {
+	if err := finalizeSettledAgentTurn(ctx, tx, lease, job, turn, settlementObservation, settlementID); err != nil {
 		return AgentTurnSettlement{}, err
 	}
 	updated, err := tx.Exec(ctx, `
@@ -261,7 +278,7 @@ WHERE id = $1 AND settled_at IS NULL`, settlementID, nullableString(result.Succe
 
 // settleAgentTurnRecoveryTx applies the one recovery-owned infrastructure transition when
 // the caller's exact recovery job acknowledgement completes the final barrier.
-func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, authority Job) (bool, error) {
+func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, reducer workflow.Reducer, authority Job) (bool, error) {
 	if authority.Kind != StopStaleRuntimeJobKind && authority.Kind != ReconcileAgentTurnMutationsJobKind {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
@@ -321,7 +338,8 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`,
 		return false, nil
 	}
 
-	if continuation == recoveryContinuationMutationHandoff || continuation == recoveryContinuationMigrationHandoff {
+	if continuation == recoveryContinuationMutationHandoff || continuation == recoveryContinuationMigrationHandoff ||
+		continuation == recoveryContinuationDefinitionHandoff {
 		result, err := tx.Exec(ctx, `
 UPDATE agent_turns
 SET status = 'INTERRUPTED', recovery_settled_at = clock_timestamp()
@@ -381,12 +399,12 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	}
 	guard := workflow.TurnGuard{
 		TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-		Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
+		Stage: turn.Stage, Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 		ChangeProposalID: changeProposalID, ExpectedHeadSHA: turn.ExpectedHeadSHA,
 	}
 	snapshot.ActiveTurn = &workflow.ActiveTurn{
 		ID: guard.TurnID, SessionID: guard.SessionID, AttemptID: guard.AttemptID,
-		Role: guard.Role, Epoch: guard.Epoch, ControlRevision: guard.ControlRevision,
+		Stage: guard.Stage, Role: guard.Role, Epoch: guard.Epoch, ControlRevision: guard.ControlRevision,
 		ChangeProposalID: guard.ChangeProposalID, ExpectedHeadSHA: guard.ExpectedHeadSHA,
 	}
 	pending, err := derivePendingEventsObservation(ctx, tx, authority.WorkflowID, turn.ID)
@@ -405,14 +423,17 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	if err != nil {
 		return false, fmt.Errorf("generate recovered Agent Turn settlement identity: %w", err)
 	}
-	decision := workflow.Reduce(snapshot, workflow.TurnSettledEvent{
-		EventMetadata: workflow.EventMetadata{
-			ID: settlementID, ObservedAt: observation.ObservedAt,
-			WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-		},
-		Turn: guard, Outcome: workflow.TurnOutcomeInfrastructureFailed,
-		PendingEvents: pending, Diagnostic: observation.Diagnostic,
-	})
+	decision := reducer.DefinitionIncompatible(snapshot)
+	if reducer.DefinitionCompatible(snapshot) {
+		decision = reducer.Reduce(snapshot, workflow.TurnSettledEvent{
+			EventMetadata: workflow.EventMetadata{
+				ID: settlementID, ObservedAt: observation.ObservedAt,
+				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
+			},
+			Turn: guard, Outcome: workflow.TurnOutcomeInfrastructureFailed,
+			PendingEvents: pending, Diagnostic: observation.Diagnostic,
+		})
+	}
 	if err := validateWorkflowDecision(snapshot, decision); err != nil {
 		return false, fmt.Errorf("validate recovered Agent Turn settlement decision: %w", err)
 	}
@@ -593,6 +614,7 @@ func lockLiveAgentTurnSettlement(ctx context.Context, tx pgx.Tx, lease AgentTurn
 	if err != nil {
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, err
 	}
+	turn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentAssignmentID = job.AgentAssignmentID
 	if !hierarchy.allowsActiveTurn() || hierarchy.controlRevision != lease.ControlRevision ||
 		!turn.active || turn.Status != AgentTurnSettling || turn.MutationAdmissionOpen ||
@@ -715,7 +737,7 @@ FOR UPDATE OF event, delivery`, workflowID, turnID)
 	return pending, nil
 }
 
-func validateSettlementChangeProposal(ctx context.Context, tx pgx.Tx, job Job, turn lockedTurn, role workflow.Role, snapshot workflow.Snapshot, observation canonicalSettlementObservation) (string, *workflow.ChangeProposal, error) {
+func (store *Store) validateSettlementChangeProposal(ctx context.Context, tx pgx.Tx, job Job, turn lockedTurn, role workflow.Role, snapshot workflow.Snapshot, observation canonicalSettlementObservation) (string, *workflow.ChangeProposal, error) {
 	if observation.ChangeProposal == nil {
 		return turn.ChangeProposalID, nil, nil
 	}
@@ -737,7 +759,8 @@ func validateSettlementChangeProposal(ctx context.Context, tx pgx.Tx, job Job, t
 	}
 	proposal := &workflow.ChangeProposal{ID: observed.PullRequestID, Number: observed.PullRequestNumber, HeadSHA: observed.HeadSHA, Open: true}
 	if snapshot.ChangeProposal == nil {
-		if role != workflow.RoleDeveloper || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || turn.ChangeProposalID != "" {
+		policy, ok := store.policies.Lookup(role)
+		if !ok || policy.RequiresChangeProposal || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || turn.ChangeProposalID != "" {
 			return "", nil, ErrAgentTurnChangeProposalConflict
 		}
 		return "", proposal, nil
@@ -765,18 +788,20 @@ FROM change_proposals WHERE id = $1 FOR UPDATE`, turn.ChangeProposalID).Scan(
 	return proposalID, proposal, nil
 }
 
-func validateSettlementReviewerActor(ctx context.Context, tx pgx.Tx, job Job, role workflow.Role, observation canonicalSettlementObservation) error {
+func (store *Store) validateSettlementReviewerActor(ctx context.Context, tx pgx.Tx, job Job, role workflow.Role, observation canonicalSettlementObservation) error {
 	if observation.Outcome != workflow.TurnOutcomeChangesRequested && observation.Outcome != workflow.TurnOutcomeApproved {
 		return nil
 	}
-	if role != workflow.RoleReviewer || observation.Review == nil {
+	policy, ok := store.policies.Lookup(role)
+	authority, granted := policy.CredentialAuthorityForTool("submit_review")
+	if !ok || !granted || authority != rolepolicy.ReviewerAuthority || observation.Review == nil {
 		return fmt.Errorf("%w: Reviewer outcome has no Reviewer turn", ErrAgentTurnSettlementInvalid)
 	}
 	var actorID int64
 	err := tx.QueryRow(ctx, `
 SELECT COALESCE(github_app_actor_id, 0) FROM agent_assignments
-WHERE id = $1 AND workflow_id = $2 AND role = 'REVIEWER'
-  AND status = 'ACTIVE' AND state_deleted_at IS NULL`, job.AgentAssignmentID, job.WorkflowID).Scan(&actorID)
+WHERE id = $1 AND workflow_id = $2 AND role = $3
+	  AND status = 'ACTIVE' AND state_deleted_at IS NULL`, job.AgentAssignmentID, job.WorkflowID, role).Scan(&actorID)
 	if err != nil || actorID <= 0 || actorID != observation.AuthorizedReviewerActorID || actorID != observation.Review.ActorID {
 		return ErrReviewerActorConflict
 	}

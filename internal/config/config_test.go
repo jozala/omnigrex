@@ -67,8 +67,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.GitHubDeveloperPrivateKeyFile != "/secrets/developer.pem" || got.GitHubReviewerPrivateKeyFile != "/secrets/reviewer.pem" || got.GitHubWebhookSecretFile != "/secrets/webhook" {
 		t.Errorf("GitHub secret files = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
 	}
-	if got.DeveloperProviderCredentialsFile != "/secrets/developer-provider.json" || got.ReviewerProviderCredentialsFile != "/secrets/reviewer-provider.json" {
-		t.Errorf("provider credential files = (%q, %q)", got.DeveloperProviderCredentialsFile, got.ReviewerProviderCredentialsFile)
+	if got.ProviderCredentialsFile != "/secrets/provider.json" {
+		t.Errorf("provider credential file = %q", got.ProviderCredentialsFile)
 	}
 	if got.WebhookLeaseDuration != 30*time.Second || got.WebhookPollInterval != 250*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (30s, 250ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
@@ -120,8 +120,7 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":          "/secrets/custom-developer.pem",
 		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":           "/secrets/custom-reviewer.pem",
 		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":                 "/secrets/custom-webhook",
-		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE":        "/secrets/custom-developer-provider.json",
-		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":         "/secrets/custom-reviewer-provider.json",
+		"OMNIGREX_PROVIDER_CREDENTIALS_FILE":                  "/secrets/custom-provider.json",
 		"OMNIGREX_WEBHOOK_LEASE_DURATION":                     "45s",
 		"OMNIGREX_WEBHOOK_POLL_INTERVAL":                      "500ms",
 		"OMNIGREX_AGENT_TURN_PREPARATION_LEASE_DURATION":      "1m",
@@ -189,8 +188,8 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.GitHubDeveloperPrivateKeyFile != values["OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"] || got.GitHubReviewerPrivateKeyFile != values["OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE"] || got.GitHubWebhookSecretFile != values["OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE"] {
 		t.Errorf("GitHub secret file config = (%q, %q, %q)", got.GitHubDeveloperPrivateKeyFile, got.GitHubReviewerPrivateKeyFile, got.GitHubWebhookSecretFile)
 	}
-	if got.DeveloperProviderCredentialsFile != values["OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE"] || got.ReviewerProviderCredentialsFile != values["OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE"] {
-		t.Errorf("provider credential file config = (%q, %q)", got.DeveloperProviderCredentialsFile, got.ReviewerProviderCredentialsFile)
+	if got.ProviderCredentialsFile != values["OMNIGREX_PROVIDER_CREDENTIALS_FILE"] {
+		t.Errorf("provider credential file config = %q", got.ProviderCredentialsFile)
 	}
 	if got.WebhookLeaseDuration != 45*time.Second || got.WebhookPollInterval != 500*time.Millisecond {
 		t.Errorf("webhook timing = (%s, %s), want (45s, 500ms)", got.WebhookLeaseDuration, got.WebhookPollInterval)
@@ -249,8 +248,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "Developer private key file", key: "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE", value: "relative.pem"},
 		{name: "Reviewer private key file", key: "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE", value: "relative.pem"},
 		{name: "webhook secret file", key: "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE", value: "relative"},
-		{name: "Developer provider credentials file", key: "OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE", value: "relative.json"},
-		{name: "Reviewer provider credentials file", key: "OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE", value: "relative.json"},
+		{name: "provider credentials file", key: "OMNIGREX_PROVIDER_CREDENTIALS_FILE", value: "relative.json"},
 		{name: "webhook lease syntax", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "later"},
 		{name: "webhook lease value", key: "OMNIGREX_WEBHOOK_LEASE_DURATION", value: "1s"},
 		{name: "webhook poll syntax", key: "OMNIGREX_WEBHOOK_POLL_INTERVAL", value: "often"},
@@ -465,15 +463,14 @@ func TestLoadRejectsSameGitHubAppIdentity(t *testing.T) {
 
 func environment(overrides map[string]string) func(string) string {
 	values := map[string]string{
-		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":               deploymentImage,
-		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":            "linux/arm64",
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":             "101",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":              "202",
-		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":   "/secrets/developer.pem",
-		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":    "/secrets/reviewer.pem",
-		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":          "/secrets/webhook",
-		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE": "/secrets/developer-provider.json",
-		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":  "/secrets/reviewer-provider.json",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":             deploymentImage,
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":          "linux/arm64",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "101",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "202",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/secrets/reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/secrets/webhook",
+		"OMNIGREX_PROVIDER_CREDENTIALS_FILE":         "/secrets/provider.json",
 	}
 	for key, value := range overrides {
 		values[key] = value

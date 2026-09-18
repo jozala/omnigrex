@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -125,6 +126,7 @@ type LauncherConfig struct {
 	MiseVolume         string
 	ACPOptions         acp.ClientOptions
 	StopTimeout        time.Duration
+	Policies           role.PolicyCatalog
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -162,6 +164,7 @@ type Launcher struct {
 	miseVolume         string
 	acpOptions         acp.ClientOptions
 	stopTimeout        time.Duration
+	policies           role.PolicyCatalog
 }
 
 // RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
@@ -212,12 +215,15 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if config.StopTimeout == 0 {
 		config.StopTimeout = defaultStopTimeout
 	}
+	if len(config.Policies.Roles()) == 0 {
+		config.Policies = role.BuiltinPolicyCatalog()
+	}
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
 		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
 		network: config.Network, workspaceVolume: config.WorkspaceVolume,
 		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
-		acpOptions: config.ACPOptions, stopTimeout: config.StopTimeout,
+		acpOptions: config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 	}, nil
 }
 
@@ -246,6 +252,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := validateExecutionBinding(execution, request.Lease); err != nil {
 		return nil, err
 	}
+	rolePolicy, ok := launcher.policies.Lookup(execution.Assignment.Role)
+	if !ok {
+		return nil, fmt.Errorf("%w: Role policy", ErrRuntimeBinding)
+	}
 
 	runtimeProfile, err := launcher.registry.ResolveBinding(runtimeprofile.Binding{
 		Name: execution.Assignment.RuntimeProfileName, Version: execution.Assignment.RuntimeProfileVersion,
@@ -258,11 +268,11 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := validateRuntimeProfileBinding(runtimeProfile, execution); err != nil {
 		return nil, err
 	}
-	rendered, role, err := renderTurnProfile(execution)
+	rendered, roleID, err := renderTurnProfile(execution, rolePolicy)
 	if err != nil {
 		return nil, err
 	}
-	revision, branch, headSHA, pullRequest, err := checkoutSelection(execution, request)
+	revision, branch, headSHA, pullRequest, err := checkoutSelection(execution, request, rolePolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +288,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		gateway: launcher.gateway, stopTimeout: launcher.stopTimeout, lease: request.Lease,
 		secrets: append([]string(nil), secrets...),
 	}
-	if execution.Assignment.Role == workflow.RoleReviewer {
+	if rolePolicy.DiscardWorkspace {
 		resources.workspace = launcher.workspace
 		resources.assignmentID = execution.Assignment.ID
 	}
@@ -297,7 +307,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		}
 	}()
 	miseRevision := revision
-	if execution.Assignment.Role == workflow.RoleReviewer {
+	if rolePolicy.TrustedToolsRevision == role.DefaultBranchTrustedTools {
 		miseRevision = request.DefaultBranchSHA
 	}
 	activation, err := launcher.workspace.ProvisionMise(ctx, workspace.MiseProvision{
@@ -345,7 +355,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("%w: runtime state path", ErrRuntimeBinding)
 	}
 	policy, spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
-		Role: role, Content: append([]byte(nil), request.ProviderCredentialJSON...),
+		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
 	}, opencode.ProcessOptions{
 		Name:    "omnigrex-turn-" + execution.Turn.ID + "-epoch-" + strconv.FormatInt(execution.Turn.ExecutionEpoch, 10),
 		Network: launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
@@ -599,7 +609,7 @@ func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execut
 	return nil
 }
 
-func renderTurnProfile(execution store.AgentTurnExecutionContext) (*opencode.RenderedProfile, opencode.Role, error) {
+func renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Policy) (*opencode.RenderedProfile, opencode.Role, error) {
 	var snapshot struct {
 		Name         string            `json:"name"`
 		Path         string            `json:"path"`
@@ -616,13 +626,8 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext) (*opencode.Ren
 	if err := decoder.Decode(&snapshot); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, "", fmt.Errorf("%w: Agent Profile snapshot", ErrRuntimeBinding)
 	}
-	role := opencode.RoleDeveloper
-	wantPath := ".omnigrex/team/developer.md"
-	if execution.Assignment.Role == workflow.RoleReviewer {
-		role = opencode.RoleReviewer
-		wantPath = ".omnigrex/team/reviewer.md"
-	}
-	if snapshot.Name != execution.Assignment.AgentProfileName || snapshot.Path != wantPath || snapshot.Role != execution.Assignment.Role ||
+	if policy.Role != execution.Assignment.Role || snapshot.Name != execution.Assignment.AgentProfileName ||
+		snapshot.Name != policy.AgentProfile.Name || snapshot.Path != policy.AgentProfile.Path || snapshot.Role != execution.Assignment.Role ||
 		snapshot.Runtime != execution.Assignment.RuntimeProfileName+"/"+execution.Assignment.RuntimeProfileVersion {
 		return nil, "", ErrRuntimeBinding
 	}
@@ -630,28 +635,24 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext) (*opencode.Ren
 	for name, value := range snapshot.Permissions {
 		permissions[name] = opencode.Permission(value)
 	}
-	capabilities, err := mcp.CapabilitiesForRole(execution.Assignment.Role)
-	if err != nil {
-		return nil, "", ErrRuntimeBinding
-	}
-	runtimeTools := make([]string, len(capabilities))
-	for index, capability := range capabilities {
+	runtimeTools := make([]string, len(policy.MCPTools))
+	for index, capability := range policy.MCPTools {
 		runtimeTools[index] = mcp.ServerName + "_" + capability
 	}
-	rendered, err := opencode.Render(role, opencode.Profile{
+	rendered, err := opencode.RenderWithPolicy(policy, opencode.Profile{
 		Instructions: snapshot.Instructions, Model: snapshot.Model, Variant: snapshot.Variant,
 		Steps: snapshot.Steps, Permissions: permissions, RuntimeTools: runtimeTools,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("render assigned Agent Profile: %w", err)
 	}
-	return rendered, role, nil
+	return rendered, opencode.Role(policy.Role), nil
 }
 
-func checkoutSelection(execution store.AgentTurnExecutionContext, request LaunchRequest) (string, string, string, *mcp.PullRequestScope, error) {
+func checkoutSelection(execution store.AgentTurnExecutionContext, request LaunchRequest, policy role.Policy) (string, string, string, *mcp.PullRequestScope, error) {
 	if execution.ChangeProposal == nil {
-		if execution.Assignment.Role != workflow.RoleDeveloper {
-			return "", "", "", nil, fmt.Errorf("%w: Reviewer requires a Change Proposal", ErrRuntimeBinding)
+		if policy.Role != execution.Assignment.Role || policy.RequiresChangeProposal {
+			return "", "", "", nil, fmt.Errorf("%w: Role requires a Change Proposal", ErrRuntimeBinding)
 		}
 		if strings.TrimSpace(request.InitialFeatureBranch) == "" {
 			return "", "", "", nil, fmt.Errorf("%w: initial Developer branch", ErrRuntimeBinding)

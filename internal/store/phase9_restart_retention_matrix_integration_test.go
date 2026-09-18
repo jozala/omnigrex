@@ -387,10 +387,17 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	fixture := seedAgentSession(t, pool, 706)
-	makeFixtureRuntimePathCanonical(t, pool, fixture)
+	preparationBinding := preparationBindings()[workflow.RoleDeveloper]
+	pinnedBinding := runtimeprofile.Binding{
+		Name: preparationBinding.RuntimeProfileName, Version: preparationBinding.RuntimeProfileVersion,
+		ContentSHA256: preparationBinding.RuntimeProfileContentSHA256, Image: preparationBinding.RuntimeImageDigest,
+	}
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 706, workflow.RoleDeveloper, pinnedBinding, pinnedBinding)
 	prepareClosableFixture(t, pool, fixture)
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turnSpec := fixture.turnSpec()
+	turnSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
+		pinnedBinding.Name+"/"+pinnedBinding.Version, "provider/test", "", 10, "Test instructions.", nil)
+	turn, err := database.AllocateAgentTurn(ctx, turnSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,12 +428,6 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 	if err := database.FinalizeAgentTurn(ctx, lease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "test terminal"}); err != nil {
 		t.Fatal(err)
 	}
-	preparationBinding := preparationBindings()[workflow.RoleDeveloper]
-	pinnedBinding := runtimeprofile.Binding{
-		Name: preparationBinding.RuntimeProfileName, Version: preparationBinding.RuntimeProfileVersion,
-		ContentSHA256: preparationBinding.RuntimeProfileContentSHA256, Image: preparationBinding.RuntimeImageDigest,
-	}
-	setFixtureRuntimeBinding(t, pool, fixture, pinnedBinding, pinnedBinding)
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
 	closeAndSettleWithoutTurn(t, database, ctx, fixture, 706,
 		"7b600000-0000-4000-8000-000000000001", "history-close", "history-retention",
@@ -474,8 +475,6 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	fixture := seedAgentSession(t, pool, 707)
-	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	profile, err := runtimeprofile.NewOpenCodeV1(
 		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("7", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
@@ -484,7 +483,7 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 		t.Fatal(err)
 	}
 	binding := profile.Binding()
-	setFixtureRuntimeBinding(t, pool, fixture, binding, binding)
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 707, workflow.RoleDeveloper, binding, binding)
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
 	closeAndSettleWithoutTurn(t, database, ctx, fixture, 707,
@@ -548,7 +547,7 @@ func newPhaseNinePreparationWorker(t *testing.T, workerStore agentturn.WorkerSto
 	t.Helper()
 	worker, err := agentturn.NewWorker(workerStore,
 		&integrationCredentialProvider{credential: "developer-token"},
-		&integrationCredentialProvider{credential: "reviewer-token"}, preparer,
+		preparer,
 		agentturn.WorkerConfig{
 			ClaimOwner: owner, LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
 			IdlePollInterval: time.Millisecond, RetryDelay: time.Millisecond,
@@ -601,7 +600,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 		&assignments, &sessions, &turns, &executionJobs); err != nil {
 		t.Fatal(err)
 	}
-	if assignments != 2 || sessions != 1 || turns != 1 || executionJobs != 1 {
+	if assignments != 1 || sessions != 1 || turns != 1 || executionJobs != 1 {
 		t.Fatalf("durable preparation rows = Assignments %d, Sessions %d, Turns %d, execution Jobs %d",
 			assignments, sessions, turns, executionJobs)
 	}
@@ -681,8 +680,7 @@ func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWo
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: "phase-nine-execution", LeaseDuration: 2 * time.Second, HeartbeatInterval: 200 * time.Millisecond,
 		IdlePollInterval: time.Millisecond, TurnTimeout: 5 * time.Second, CleanupTimeout: 100 * time.Millisecond,
-		ConcurrencyLimit: 1, DeveloperProviderCredentialJSON: json.RawMessage(`{"token":"developer"}`),
-		ReviewerProviderCredentialJSON: json.RawMessage(`{"token":"reviewer"}`), GitRemoteBaseURL: "https://github.com",
+		ConcurrencyLimit: 1, ProviderCredentialJSON: json.RawMessage(`{"token":"provider"}`), GitRemoteBaseURL: "https://github.com",
 	})
 	if err != nil {
 		t.Fatal(err)

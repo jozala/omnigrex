@@ -26,7 +26,6 @@ const (
 	executionDeveloperRepositoryCredential = "developer-repository-secret"
 	executionReviewerRepositoryCredential  = "reviewer-repository-secret"
 	executionDeveloperProviderSecret       = "developer-provider-secret"
-	executionReviewerProviderSecret        = "reviewer-provider-secret"
 )
 
 func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.T) {
@@ -709,16 +708,17 @@ func TestExecutionWorkerPersistentResidualRepairStopsOnlyAfterFenceLoss(t *testi
 	}
 }
 
-func TestExecutionWorkerUsesRoleCredentialsAndDeterministicRepositoryInputs(t *testing.T) {
+func TestExecutionWorkerUsesPolicyCredentialsAndDeterministicRepositoryInputs(t *testing.T) {
 	tests := []struct {
 		name               string
 		role               workflow.Role
 		wantRepository     string
 		wantProviderSecret string
 		wantCurrentHead    string
+		wantReviewerCalls  int
 	}{
 		{name: "Developer", role: workflow.RoleDeveloper, wantRepository: executionDeveloperRepositoryCredential, wantProviderSecret: executionDeveloperProviderSecret, wantCurrentHead: runtimeTestDefaultSHA},
-		{name: "Reviewer", role: workflow.RoleReviewer, wantRepository: executionReviewerRepositoryCredential, wantProviderSecret: executionReviewerProviderSecret, wantCurrentHead: runtimeTestPRHeadSHA},
+		{name: "Reviewer", role: workflow.RoleReviewer, wantRepository: executionDeveloperRepositoryCredential, wantProviderSecret: executionDeveloperProviderSecret, wantCurrentHead: runtimeTestPRHeadSHA, wantReviewerCalls: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -740,8 +740,11 @@ func TestExecutionWorkerUsesRoleCredentialsAndDeterministicRepositoryInputs(t *t
 			if err := json.Unmarshal([]byte(fixture.prompter.request.Content[0].Text), &envelope); err != nil || envelope.CurrentHeadSHA != test.wantCurrentHead {
 				t.Fatalf("event envelope current head = %q, error = %v", envelope.CurrentHeadSHA, err)
 			}
-			if test.role == workflow.RoleDeveloper && fixture.reviewerCredentials.calls != 0 || test.role == workflow.RoleReviewer && fixture.developerCredentials.calls != 0 {
-				t.Fatalf("Role credential calls = Developer %d, Reviewer %d", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
+			if fixture.developerCredentials.calls != 1 || fixture.reviewerCredentials.calls != test.wantReviewerCalls {
+				t.Fatalf("policy credential calls = Orchestrator %d, Reviewer %d", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
+			}
+			if test.role == workflow.RoleReviewer && fixture.outcomes.request.ReviewerRepositoryCredential != executionReviewerRepositoryCredential {
+				t.Fatalf("review reconciliation credential = %q", fixture.outcomes.request.ReviewerRepositoryCredential)
 			}
 			if fixture.defaultBranch.credential != test.wantRepository {
 				t.Fatal("default branch resolver did not receive the selected Role credential")
@@ -765,13 +768,13 @@ func TestExecutionWorkerDefaultsGitRemoteToGitHub(t *testing.T) {
 
 func TestExecutionWorkerDeepCopiesAndRedactsProviderCredentials(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	developerConfig := fixture.config.DeveloperProviderCredentialJSON
+	providerConfig := fixture.config.ProviderCredentialJSON
 	worker := fixture.worker(t)
-	if rendered := fmt.Sprintf("%#v", worker); strings.Contains(rendered, executionDeveloperProviderSecret) || strings.Contains(rendered, executionReviewerProviderSecret) {
+	if rendered := fmt.Sprintf("%#v", worker); strings.Contains(rendered, executionDeveloperProviderSecret) {
 		t.Fatalf("formatted worker leaks provider credentials: %s", rendered)
 	}
-	for index := range developerConfig {
-		developerConfig[index] = 'x'
+	for index := range providerConfig {
+		providerConfig[index] = 'x'
 	}
 	fixture.launcher.err = errors.New("failed with " + executionDeveloperProviderSecret + " and " + executionDeveloperRepositoryCredential)
 	fixture.outcomes.observation = executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
@@ -929,14 +932,14 @@ func TestNewExecutionWorkerValidatesConfiguration(t *testing.T) {
 		}()},
 		{name: "zero timeout", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig { value := validConfig; value.TurnTimeout = 0; return value }()},
 		{name: "invalid concurrency", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig { value := validConfig; value.ConcurrencyLimit = 0; return value }()},
-		{name: "array Developer provider", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
+		{name: "array provider", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
 			value := validConfig
-			value.DeveloperProviderCredentialJSON = json.RawMessage(`[]`)
+			value.ProviderCredentialJSON = json.RawMessage(`[]`)
 			return value
 		}()},
-		{name: "empty Reviewer provider", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
+		{name: "empty provider", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
 			value := validConfig
-			value.ReviewerProviderCredentialJSON = json.RawMessage(`{}`)
+			value.ProviderCredentialJSON = json.RawMessage(`{}`)
 			return value
 		}()},
 		{name: "non-HTTPS remote", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
@@ -961,7 +964,7 @@ func TestNewExecutionWorkerValidatesConfiguration(t *testing.T) {
 			if worker != nil || !errors.Is(err, agentturn.ErrInvalidExecutionWorker) {
 				t.Fatalf("NewExecutionWorker() = (%#v, %v)", worker, err)
 			}
-			if strings.Contains(err.Error(), executionDeveloperProviderSecret) || strings.Contains(err.Error(), executionReviewerProviderSecret) {
+			if strings.Contains(err.Error(), executionDeveloperProviderSecret) {
 				t.Fatalf("configuration error leaks provider credential: %v", err)
 			}
 			if strings.Contains(err.Error(), "credential-sentinel") {
@@ -1031,10 +1034,9 @@ func newExecutionWorkerFixture(t *testing.T, role workflow.Role) *executionWorke
 		config: agentturn.ExecutionWorkerConfig{
 			ClaimOwner: "execution-worker", LeaseDuration: 2 * time.Hour, HeartbeatInterval: time.Hour,
 			IdlePollInterval: time.Millisecond, TurnTimeout: time.Second, CleanupTimeout: time.Second,
-			ConcurrencyLimit:                3,
-			DeveloperProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"` + executionDeveloperProviderSecret + `"}}`),
-			ReviewerProviderCredentialJSON:  json.RawMessage(`{"openai":{"apiKey":"` + executionReviewerProviderSecret + `"}}`),
-			GitRemoteBaseURL:                "https://git.example.test/source/",
+			ConcurrencyLimit:       3,
+			ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"` + executionDeveloperProviderSecret + `"}}`),
+			GitRemoteBaseURL:       "https://git.example.test/source/",
 		},
 	}
 	return fixture

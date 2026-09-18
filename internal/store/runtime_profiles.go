@@ -16,9 +16,12 @@ var ErrProtectedRuntimeConfigurationConflict = errors.New("protected Runtime Pro
 // AgentTurnPreparationRuntimeBindings identifies whether preparation must use current configuration
 // or exact bindings already owned by an existing generation.
 type AgentTurnPreparationRuntimeBindings struct {
-	Mode      workflow.AssignmentGeneration
-	Developer *AssignmentRuntimeBinding
-	Reviewer  *AssignmentRuntimeBinding
+	Mode        workflow.AssignmentGeneration
+	Stage       workflow.StageID
+	Role        workflow.Role
+	Participant *ParticipantRuntimeBinding
+	Developer   *AssignmentRuntimeBinding
+	Reviewer    *AssignmentRuntimeBinding
 }
 
 // ListProtectedRuntimeBindings returns distinct launchable immutable bindings for every generation
@@ -54,7 +57,7 @@ ORDER BY id`)
 			continue
 		}
 		binding.ContentSHA256 = *contentSHA256
-		if status == AgentAssignmentSuperseded || binding.Validate() != nil {
+		if binding.Validate() != nil {
 			rows.Close()
 			return nil, fmt.Errorf("%w: invalid Assignment binding", ErrProtectedRuntimeConfigurationConflict)
 		}
@@ -142,36 +145,40 @@ WHERE id = $1 AND kind = $2 AND status = 'LEASED' AND lease_token = $3
 		return AgentTurnPreparationRuntimeBindings{}, fmt.Errorf("read Agent Turn preparation mode: %w", err)
 	}
 	payload, err := decodeAgentTurnPreparationPayload(payloadBytes)
-	if err != nil || !validAgentTurnPreparationPayload(payload, lease.Job) {
+	if err != nil || !store.validAgentTurnPreparationPayload(payload, lease.Job) {
 		return AgentTurnPreparationRuntimeBindings{}, ErrAgentTurnPreparationFenceLost
 	}
-	result := AgentTurnPreparationRuntimeBindings{Mode: payload.Mode}
+	result := AgentTurnPreparationRuntimeBindings{Mode: payload.Mode, Stage: payload.Stage, Role: payload.Role}
 	if payload.Mode == workflow.AssignmentGenerationNew {
 		return result, nil
 	}
-	assignments, err := store.ListAgentAssignments(ctx, lease.WorkflowID)
+	var binding ParticipantRuntimeBinding
+	err = store.pool.QueryRow(ctx, `
+SELECT participant.agent_profile_name, participant.runtime_profile_name,
+       participant.runtime_profile_version, participant.runtime_profile_content_sha256,
+       participant.runtime_image_digest
+FROM stage_assignments AS stage_assignment
+JOIN agent_assignments AS participant ON participant.id = stage_assignment.agent_participant_id
+WHERE stage_assignment.workflow_id = $1
+  AND stage_assignment.assignment_generation = (
+      SELECT MAX(generation) FROM agent_assignments
+      WHERE workflow_id = $1 AND state_deleted_at IS NULL
+  )
+  AND stage_assignment.stage_id = $2`, lease.WorkflowID, payload.Stage).Scan(
+		&binding.AgentProfileName, &binding.RuntimeProfileName, &binding.RuntimeProfileVersion,
+		&binding.RuntimeProfileContentSHA256, &binding.RuntimeImageDigest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return result, nil
+	}
 	if err != nil {
-		return AgentTurnPreparationRuntimeBindings{}, err
+		return AgentTurnPreparationRuntimeBindings{}, fmt.Errorf("read Stage Participant Runtime binding: %w", err)
 	}
-	generation := 0
-	for _, assignment := range assignments {
-		if assignment.StateDeletedAt != nil || assignment.Status == AgentAssignmentSuperseded {
-			continue
-		}
-		if generation != 0 && assignment.Generation != generation {
-			return AgentTurnPreparationRuntimeBindings{}, ErrProtectedRuntimeConfigurationConflict
-		}
-		generation = assignment.Generation
-		binding := assignment.AssignmentRuntimeBinding
-		switch assignment.Role {
-		case workflow.RoleDeveloper:
-			result.Developer = &binding
-		case workflow.RoleReviewer:
-			result.Reviewer = &binding
-		}
-	}
-	if result.Developer == nil || result.Reviewer == nil {
-		return AgentTurnPreparationRuntimeBindings{}, ErrAgentTurnPreparationFenceLost
+	result.Participant = &binding
+	switch payload.Role {
+	case workflow.RoleDeveloper:
+		result.Developer = (*AssignmentRuntimeBinding)(&binding)
+	case workflow.RoleReviewer:
+		result.Reviewer = (*AssignmentRuntimeBinding)(&binding)
 	}
 	return result, nil
 }
@@ -182,14 +189,19 @@ type runtimeProfileCompatibilityQuerier interface {
 }
 
 func runtimeProfileCompatibilityMissing(ctx context.Context, querier runtimeProfileCompatibilityQuerier, spec AgentTurnPreparationSpec) (bool, error) {
-	targets := map[workflow.Role]RolePreparation{
-		workflow.RoleDeveloper: spec.Developer,
-		workflow.RoleReviewer:  spec.Reviewer,
+	targets := make(map[string]ParticipantPreparation, len(spec.Stages)+2)
+	for _, preparation := range spec.Stages {
+		targets[preparation.Binding.AgentProfileName] = preparation
+	}
+	for _, preparation := range []ParticipantPreparation{spec.Developer, spec.Reviewer} {
+		if preparation.Binding.AgentProfileName != "" {
+			targets[preparation.Binding.AgentProfileName] = preparation
+		}
 	}
 	// Qualified history remains relevant permanently. Unresolvable legacy history remains a barrier
 	// only while its state can still be selected by a future Workflow Attempt.
 	rows, err := querier.Query(ctx, `
-SELECT role, runtime_profile_name, runtime_profile_version,
+SELECT agent_profile_name, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest
 FROM agent_assignments
 WHERE runtime_profile_content_sha256 IS NOT NULL
@@ -199,23 +211,23 @@ ORDER BY workflow_id, generation, role, id`)
 		return false, fmt.Errorf("query historical Runtime Profile bindings: %w", err)
 	}
 	type historicalBinding struct {
-		role   workflow.Role
-		source runtimeprofile.Binding
-		legacy bool
+		profile string
+		source  runtimeprofile.Binding
+		legacy  bool
 	}
 	history := make([]historicalBinding, 0)
 	for rows.Next() {
-		var role workflow.Role
+		var profile string
 		var source runtimeprofile.Binding
 		var contentSHA256 *string
-		if err := rows.Scan(&role, &source.Name, &source.Version, &contentSHA256, &source.Image); err != nil {
+		if err := rows.Scan(&profile, &source.Name, &source.Version, &contentSHA256, &source.Image); err != nil {
 			rows.Close()
 			return false, fmt.Errorf("scan historical Runtime Profile binding: %w", err)
 		}
 		if contentSHA256 != nil {
 			source.ContentSHA256 = *contentSHA256
 		}
-		history = append(history, historicalBinding{role: role, source: source, legacy: contentSHA256 == nil})
+		history = append(history, historicalBinding{profile: profile, source: source, legacy: contentSHA256 == nil})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -223,7 +235,7 @@ ORDER BY workflow_id, generation, role, id`)
 	}
 	rows.Close()
 	for _, historical := range history {
-		targetPreparation, ok := targets[historical.role]
+		targetPreparation, ok := targets[historical.profile]
 		if !ok {
 			return false, ErrProtectedRuntimeConfigurationConflict
 		}
@@ -294,6 +306,57 @@ ORDER BY workflow_id, generation, role, id`)
 			return true, nil
 		}
 		qualified, err := hasRuntimeProfileCompatibilityResult(ctx, querier, historical.source, target, requirement)
+		if err != nil {
+			return false, err
+		}
+		if !qualified {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func runtimeProfileCompatibilityMissingForParticipant(ctx context.Context, querier runtimeProfileCompatibilityQuerier, role workflow.Role, target runtimeprofile.Binding, requirement RuntimeCompatibilityRequirement) (bool, error) {
+	rows, err := querier.Query(ctx, `
+SELECT runtime_profile_name, runtime_profile_version,
+       runtime_profile_content_sha256, runtime_image_digest
+FROM agent_assignments
+WHERE role = $1 AND (
+    runtime_profile_content_sha256 IS NOT NULL
+    OR (status <> 'SUPERSEDED' AND state_deleted_at IS NULL)
+)
+ORDER BY workflow_id, generation, agent_profile_name, id`, role)
+	if err != nil {
+		return false, fmt.Errorf("query historical Participant Runtime bindings: %w", err)
+	}
+	var history []runtimeprofile.Binding
+	for rows.Next() {
+		var source runtimeprofile.Binding
+		var contentSHA256 *string
+		if err := rows.Scan(&source.Name, &source.Version, &contentSHA256, &source.Image); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("scan historical Participant Runtime binding: %w", err)
+		}
+		if contentSHA256 == nil {
+			rows.Close()
+			return true, nil
+		}
+		source.ContentSHA256 = *contentSHA256
+		history = append(history, source)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
+	for _, source := range history {
+		if source == target {
+			continue
+		}
+		if source.Validate() != nil || target.Validate() != nil || !validRuntimeCompatibilityRequirement(requirement) {
+			return true, nil
+		}
+		qualified, err := hasRuntimeProfileCompatibilityResult(ctx, querier, source, target, requirement)
 		if err != nil {
 			return false, err
 		}

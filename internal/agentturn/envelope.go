@@ -7,54 +7,69 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
-const EventEnvelopeSchemaVersion = 1
+const EventEnvelopeSchemaVersion = 2
 
 var ErrInvalidEventEnvelope = errors.New("invalid Agent Turn event envelope")
 
 type triggeringEvent struct {
+	Stage       workflow.StageID     `json:"stage"`
 	Role        workflow.Role        `json:"role"`
 	TurnPurpose workflow.TurnPurpose `json:"turn_purpose"`
 }
 
 type eventEnvelope struct {
-	SchemaVersion     int                    `json:"schema_version"`
-	WorkflowID        string                 `json:"workflow_id"`
-	IssueNumber       int64                  `json:"issue_number"`
-	RepositoryID      int64                  `json:"repository_id"`
-	AgentAssignmentID string                 `json:"agent_assignment_id"`
-	AgentSessionID    string                 `json:"agent_session_id"`
-	AgentTurnID       string                 `json:"agent_turn_id"`
-	TriggeringEvent   triggeringEvent        `json:"triggering_event"`
-	PullRequestNumber *int64                 `json:"pull_request_number,omitempty"`
-	CurrentHeadSHA    string                 `json:"current_head_sha"`
-	ExpectedHeadSHA   string                 `json:"expected_head_sha"`
-	ExpectedOutcomes  []workflow.TurnOutcome `json:"expected_outcomes"`
-	AllowedOutcomes   []workflow.TurnOutcome `json:"allowed_outcomes"`
-	MCPCapabilities   []string               `json:"mcp_capabilities"`
+	SchemaVersion        int                    `json:"schema_version"`
+	WorkflowID           string                 `json:"workflow_id"`
+	IssueNumber          int64                  `json:"issue_number"`
+	RepositoryID         int64                  `json:"repository_id"`
+	AgentParticipantID   string                 `json:"agent_participant_id"`
+	AssignmentGeneration int                    `json:"assignment_generation"`
+	AgentSessionID       string                 `json:"agent_session_id"`
+	AgentTurnID          string                 `json:"agent_turn_id"`
+	TriggeringEvent      triggeringEvent        `json:"triggering_event"`
+	PullRequestNumber    *int64                 `json:"pull_request_number,omitempty"`
+	CurrentHeadSHA       string                 `json:"current_head_sha"`
+	ExpectedHeadSHA      string                 `json:"expected_head_sha"`
+	ExpectedOutcomes     []workflow.TurnOutcome `json:"expected_outcomes"`
+	AllowedOutcomes      []workflow.TurnOutcome `json:"allowed_outcomes"`
+	MCPCapabilities      []string               `json:"mcp_capabilities"`
 }
 
 // BuildEventEnvelope projects durable Agent Turn context into one canonical JSON ACP text block.
 func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string) ([]acp.ContentBlock, error) {
-	if err := validateEventEnvelopeContext(execution, currentHeadSHA); err != nil {
+	return BuildEventEnvelopeWithConfiguration(execution, currentHeadSHA, workflow.BuiltinReducer(), role.BuiltinPolicyCatalog())
+}
+
+// BuildEventEnvelopeWithPolicies projects a Turn using the deployment's Role capabilities.
+func BuildEventEnvelopeWithPolicies(execution store.AgentTurnExecutionContext, currentHeadSHA string, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
+	return BuildEventEnvelopeWithConfiguration(execution, currentHeadSHA, workflow.BuiltinReducer(), policies)
+}
+
+// BuildEventEnvelopeWithConfiguration projects a Turn using the deployment's Workflow and Role policies.
+func BuildEventEnvelopeWithConfiguration(execution store.AgentTurnExecutionContext, currentHeadSHA string, reducer workflow.Reducer, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
+	policy, ok := policies.Lookup(execution.Assignment.Role)
+	if !ok {
+		return nil, fmt.Errorf("%w: Role policy", ErrInvalidEventEnvelope)
+	}
+	if err := validateEventEnvelopeContext(execution, currentHeadSHA, reducer, policy); err != nil {
 		return nil, err
 	}
 
-	expectedOutcomes, allowedOutcomes := eventEnvelopeOutcomes(execution.Assignment.Role)
-	capabilities, err := mcp.CapabilitiesForRole(execution.Assignment.Role)
-	if err != nil {
-		return nil, fmt.Errorf("%w: capabilities", ErrInvalidEventEnvelope)
-	}
+	expectedOutcomes := reducer.ExpectedOutcomes(execution.Turn.Stage)
+	allowedOutcomes := append(append([]workflow.TurnOutcome(nil), expectedOutcomes...), workflow.TurnOutcomeBlocked)
+	capabilities := append([]string(nil), policy.MCPTools...)
 	envelope := eventEnvelope{
 		SchemaVersion: EventEnvelopeSchemaVersion,
 		WorkflowID:    execution.WorkflowID, IssueNumber: execution.Issue.Number, RepositoryID: execution.Repository.ID,
-		AgentAssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID, AgentTurnID: execution.Turn.ID,
-		TriggeringEvent: triggeringEvent{Role: execution.Assignment.Role, TurnPurpose: execution.Turn.Purpose},
+		AgentParticipantID: execution.Assignment.ID, AssignmentGeneration: execution.Assignment.Generation,
+		AgentSessionID: execution.Session.ID, AgentTurnID: execution.Turn.ID,
+		TriggeringEvent: triggeringEvent{Stage: execution.Turn.Stage, Role: execution.Assignment.Role, TurnPurpose: execution.Turn.Purpose},
 		CurrentHeadSHA:  currentHeadSHA, ExpectedHeadSHA: execution.Turn.ExpectedHeadSHA,
 		ExpectedOutcomes: expectedOutcomes, AllowedOutcomes: allowedOutcomes, MCPCapabilities: capabilities,
 	}
@@ -70,19 +85,20 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	return []acp.ContentBlock{acp.TextContent(string(encoded))}, nil
 }
 
-func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string) error {
+func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string, reducer workflow.Reducer, policy role.Policy) error {
 	assignment := execution.Assignment
 	session := execution.Session
 	turn := execution.Turn
+	stage, stageExists := reducer.Stage(turn.Stage)
 	if !validEnvelopeString(execution.WorkflowID) || execution.Repository.ID <= 0 || execution.Issue.ID <= 0 || execution.Issue.Number <= 0 ||
-		!validEnvelopeString(assignment.ID) || assignment.WorkflowID != execution.WorkflowID ||
+		!validEnvelopeString(assignment.ID) || assignment.WorkflowID != execution.WorkflowID || assignment.Generation <= 0 ||
 		!validEnvelopeString(session.ID) || session.AgentAssignmentID != assignment.ID ||
 		!validEnvelopeString(turn.ID) || turn.AgentAssignmentID != assignment.ID || turn.AgentSessionID != session.ID ||
-		!validEnvelopeString(currentHeadSHA) || !validEnvelopePurpose(assignment.Role, turn.Purpose) {
+		!validEnvelopeString(currentHeadSHA) || policy.Role != assignment.Role || !stageExists || stage.Role != assignment.Role || !reducer.AcceptsPurpose(turn.Stage, turn.Purpose) {
 		return ErrInvalidEventEnvelope
 	}
 	if execution.ChangeProposal == nil {
-		if turn.ChangeProposalID != "" || turn.ExpectedHeadSHA != "" || assignment.Role == workflow.RoleReviewer ||
+		if turn.ChangeProposalID != "" || turn.ExpectedHeadSHA != "" || policy.RequiresChangeProposal ||
 			turn.Purpose == workflow.TurnPurposeRequestedChanges {
 			return ErrInvalidEventEnvelope
 		}
@@ -96,24 +112,6 @@ func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, cur
 	return nil
 }
 
-func validEnvelopePurpose(role workflow.Role, purpose workflow.TurnPurpose) bool {
-	switch role {
-	case workflow.RoleDeveloper:
-		switch purpose {
-		case workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRequestedChanges,
-			workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation:
-			return true
-		}
-	case workflow.RoleReviewer:
-		switch purpose {
-		case workflow.TurnPurposeReview, workflow.TurnPurposeRetry,
-			workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
-			return true
-		}
-	}
-	return false
-}
-
 func validEnvelopeString(value string) bool {
 	if strings.TrimSpace(value) == "" || strings.TrimSpace(value) != value {
 		return false
@@ -124,15 +122,4 @@ func validEnvelopeString(value string) bool {
 		}
 	}
 	return true
-}
-
-func eventEnvelopeOutcomes(role workflow.Role) ([]workflow.TurnOutcome, []workflow.TurnOutcome) {
-	if role == workflow.RoleDeveloper {
-		return []workflow.TurnOutcome{workflow.TurnOutcomeChangeProposalReady}, []workflow.TurnOutcome{
-			workflow.TurnOutcomeChangeProposalReady, workflow.TurnOutcomeBlocked,
-		}
-	}
-	return []workflow.TurnOutcome{workflow.TurnOutcomeApproved, workflow.TurnOutcomeChangesRequested}, []workflow.TurnOutcome{
-		workflow.TurnOutcomeApproved, workflow.TurnOutcomeChangesRequested, workflow.TurnOutcomeBlocked,
-	}
 }

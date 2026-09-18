@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -87,24 +88,18 @@ var toolCatalog = []ToolDefinition{
 	}, "operation_id", "reason"), Class: MutationTool},
 }
 
-var roleTools = map[workflow.Role][]string{
-	workflow.RoleDeveloper: {
-		ToolGetIssue, ToolListIssueComments, ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads, ToolGetCheckRuns,
-		ToolPublishChanges, ToolOpenPR, ToolRequestReview, ToolCommentOnIssue, ToolCommentOnPullRequest, ToolReportBlocked,
-	},
-	workflow.RoleReviewer: {
-		ToolGetIssue, ToolListIssueComments, ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads, ToolGetCheckRuns,
-		ToolSubmitReview, ToolCommentOnIssue, ToolCommentOnPullRequest, ToolReportBlocked,
-	},
+// CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.
+// New code should use the startup-injected catalog at its trust boundary.
+func CapabilitiesForRole(roleID workflow.Role) ([]string, error) {
+	return capabilitiesForRole(role.BuiltinPolicyCatalog(), roleID)
 }
 
-// CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.
-func CapabilitiesForRole(role workflow.Role) ([]string, error) {
-	capabilities, ok := roleTools[role]
+func capabilitiesForRole(policies role.PolicyCatalog, roleID workflow.Role) ([]string, error) {
+	policy, ok := policies.Lookup(roleID)
 	if !ok {
 		return nil, fmt.Errorf("%w: Role capabilities", ErrInvalidConfiguration)
 	}
-	return slices.Clone(capabilities), nil
+	return slices.Clone(policy.MCPTools), nil
 }
 
 func emptyObjectSchema() map[string]any {
@@ -143,8 +138,8 @@ func definition(name string) (ToolDefinition, bool) {
 	return ToolDefinition{}, false
 }
 
-func toolsForScope(scope TokenScope) ([]ToolDefinition, error) {
-	allowedForRole, err := CapabilitiesForRole(scope.Role)
+func toolsForScope(policies role.PolicyCatalog, scope TokenScope) ([]ToolDefinition, error) {
+	allowedForRole, err := capabilitiesForRole(policies, scope.Role)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +164,24 @@ func toolsForScope(scope TokenScope) ([]ToolDefinition, error) {
 		}
 	}
 	return result, nil
+}
+
+func validatePolicyTools(policies role.PolicyCatalog) error {
+	if len(policies.Roles()) == 0 {
+		return fmt.Errorf("%w: Role Policy Catalog", ErrInvalidConfiguration)
+	}
+	for _, roleID := range policies.Roles() {
+		policy, ok := policies.Lookup(roleID)
+		if !ok {
+			return fmt.Errorf("%w: Role Policy Catalog", ErrInvalidConfiguration)
+		}
+		for _, name := range policy.MCPTools {
+			if _, known := definition(name); !known {
+				return fmt.Errorf("%w: unknown policy tool %q", ErrInvalidConfiguration, name)
+			}
+		}
+	}
+	return nil
 }
 
 func validateArguments(raw json.RawMessage, schema map[string]any) error {

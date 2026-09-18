@@ -1,6 +1,10 @@
 package workflow
 
-import "time"
+import (
+	"time"
+
+	"github.com/jozala/omnigrex/internal/role"
+)
 
 type State string
 
@@ -15,12 +19,14 @@ const (
 	StateClosed     State = "CLOSED"
 )
 
-type Role string
+type Role = role.ID
 
 const (
-	RoleDeveloper Role = "DEVELOPER"
-	RoleReviewer  Role = "REVIEWER"
+	RoleDeveloper = role.Developer
+	RoleReviewer  = role.Reviewer
 )
+
+var builtinRoleCatalog = role.BuiltinCatalog()
 
 type Disposition string
 
@@ -76,6 +82,7 @@ const (
 	ReasonAgentTurnPreparationFailed               Reason = "agent_turn_preparation_failed"
 	ReasonAgentTurnMutationReconciliationExhausted Reason = "agent_turn_mutation_reconciliation_exhausted"
 	ReasonWorkflowActionExhausted                  Reason = "workflow_action_exhausted"
+	ReasonWorkflowDefinitionIncompatible           Reason = "workflow_definition_incompatible"
 )
 
 type WorkItem struct {
@@ -98,6 +105,8 @@ type WorkflowAttempt struct {
 	Number                    uint64
 	StartedAt                 time.Time
 	Lifecycle                 AttemptLifecycle
+	CurrentStage              StageID
+	ReviewUsage               map[StageID]uint8
 	ReviewBudget              AttemptBudget
 	InfrastructureRetryBudget AttemptBudget
 }
@@ -113,6 +122,7 @@ type ActiveTurn struct {
 	ID               string
 	SessionID        string
 	AttemptID        string
+	Stage            StageID
 	Role             Role
 	Epoch            uint64
 	ControlRevision  uint64
@@ -124,6 +134,7 @@ type TurnGuard struct {
 	TurnID           string
 	SessionID        string
 	AttemptID        string
+	Stage            StageID
 	Role             Role
 	Epoch            uint64
 	ControlRevision  uint64
@@ -184,6 +195,7 @@ type Snapshot struct {
 	CurrentAttempt    *WorkflowAttempt
 	ChangeProposal    *ChangeProposal
 	ActiveTurn        *ActiveTurn
+	ContinuationStage StageID
 	ResumeRole        Role
 	Assignments       Assignments
 	Closure           *Closure
@@ -418,6 +430,7 @@ type ConsumeRunLabelAction struct{}
 func (ConsumeRunLabelAction) isWorkflowAction() {}
 
 type EnqueueTurnAction struct {
+	Stage           StageID
 	Role            Role
 	Purpose         TurnPurpose
 	ExpectedHeadSHA string
@@ -501,6 +514,7 @@ type ReconcilePendingEventsAction struct {
 	Count                 uint32
 	LatestObservedHeadSHA string
 	FallbackRole          Role
+	FallbackStage         StageID
 	FallbackPurpose       TurnPurpose
 	FallbackExpectedHead  string
 	RetryOfTurnID         string

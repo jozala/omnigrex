@@ -514,7 +514,7 @@ func TestAgentTurnMutationReconciliationExhaustionCreatesHumanHandoff(t *testing
 	}
 }
 
-func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsResumeRole(t *testing.T) {
+func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsCurrentStageRole(t *testing.T) {
 	prReady := reviewingSnapshot(1, "ready-head")
 	prReady.State = workflow.StatePRReady
 	prReady.ActiveTurn = nil
@@ -529,7 +529,7 @@ func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsResumeRole(t *test
 			snapshot := developingSnapshot(nil)
 			snapshot.ActiveTurn = nil
 			return snapshot
-		}(), resumeRole: workflow.RoleReviewer, wantRole: workflow.RoleReviewer},
+		}(), resumeRole: workflow.RoleReviewer, wantRole: workflow.RoleDeveloper},
 		{name: "reviewing inference", snapshot: func() workflow.Snapshot {
 			snapshot := reviewingSnapshot(1, "review-head")
 			snapshot.ActiveTurn = nil
@@ -699,7 +699,10 @@ func TestPRReadyAttemptIsSupersededAtomicallyOnRetrigger(t *testing.T) {
 
 	decision := workflow.Reduce(snapshot, event)
 
-	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateReviewing, snapshot.Revision+1)
+	if decision.Snapshot.CurrentAttempt.CurrentStage != workflow.StageReview {
+		t.Errorf("continuation Stage = %q, want review", decision.Snapshot.CurrentAttempt.CurrentStage)
+	}
 	if actionIndex[workflow.CompleteAttemptAction](decision.Actions) >= actionIndex[workflow.CreateAttemptAction](decision.Actions) {
 		t.Errorf("actions = %#v, want supersession before creation", decision.Actions)
 	}
@@ -1064,7 +1067,8 @@ func closedSnapshot(token string) workflow.Snapshot {
 			Status:       workflow.AssignmentCompleted,
 			RuntimeState: workflow.RuntimeStateRetained, RetentionToken: token, RetainedUntil: observedAt.Add(30 * 24 * time.Hour),
 		},
-		ResumeRole: workflow.RoleDeveloper, LastAttemptNumber: 1,
+		ContinuationStage: workflow.StageImplementation,
+		ResumeRole:        workflow.RoleDeveloper, LastAttemptNumber: 1,
 	}
 }
 
@@ -1117,8 +1121,13 @@ func reviewingSnapshot(usedReviews uint8, head string) workflow.Snapshot {
 }
 
 func baseSnapshot(state workflow.State, usedReviews uint8) workflow.Snapshot {
+	stage := workflow.StageImplementation
+	if state == workflow.StateReviewing || state == workflow.StatePRReady {
+		stage = workflow.StageReview
+	}
 	attempt := workflow.WorkflowAttempt{
 		ID: "attempt-1", Number: 1, StartedAt: observedAt.Add(-time.Hour), Lifecycle: workflow.AttemptActive,
+		CurrentStage: stage, ReviewUsage: map[workflow.StageID]uint8{workflow.StageReview: usedReviews},
 		ReviewBudget: workflow.AttemptBudget{Used: usedReviews, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 	}
 	return workflow.Snapshot{
@@ -1132,7 +1141,8 @@ func baseSnapshot(state workflow.State, usedReviews uint8) workflow.Snapshot {
 
 func activeTurn(snapshot workflow.Snapshot, role workflow.Role) *workflow.ActiveTurn {
 	turn := &workflow.ActiveTurn{
-		ID: "turn-active", SessionID: "session-active", AttemptID: snapshot.CurrentAttempt.ID, Role: role,
+		ID: "turn-active", SessionID: "session-active", AttemptID: snapshot.CurrentAttempt.ID,
+		Stage: snapshot.CurrentAttempt.CurrentStage, Role: role,
 		Epoch: 4, ControlRevision: 9,
 	}
 	if snapshot.ChangeProposal != nil {
@@ -1149,7 +1159,7 @@ func metadata(snapshot workflow.Snapshot, id string) workflow.EventMetadata {
 func guard(snapshot workflow.Snapshot) workflow.TurnGuard {
 	turn := snapshot.ActiveTurn
 	return workflow.TurnGuard{
-		TurnID: turn.ID, SessionID: turn.SessionID, AttemptID: turn.AttemptID, Role: turn.Role,
+		TurnID: turn.ID, SessionID: turn.SessionID, AttemptID: turn.AttemptID, Stage: turn.Stage, Role: turn.Role,
 		Epoch: turn.Epoch, ControlRevision: turn.ControlRevision, ChangeProposalID: turn.ChangeProposalID, ExpectedHeadSHA: turn.ExpectedHeadSHA,
 	}
 }

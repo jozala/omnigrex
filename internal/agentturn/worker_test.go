@@ -118,9 +118,8 @@ func TestWorkerProcessNextClaimsOnlyPreparationJobsAndPreparesRepository(t *test
 	lease := preparationWorkerLease()
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
 	developerCredentials := &repositoryCredentialProvider{credential: "developer-installation-token"}
-	reviewerCredentials := &repositoryCredentialProvider{credential: "reviewer-installation-token"}
 	var gotRequest agentturn.Request
-	worker := newPreparationWorker(t, database, developerCredentials, reviewerCredentials, turnPreparerFunc(func(_ context.Context, request agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, developerCredentials, turnPreparerFunc(func(_ context.Context, request agentturn.Request) (agentturn.Result, error) {
 		gotRequest = request
 		return agentturn.Result{}, nil
 	}), 10*time.Second)
@@ -132,9 +131,8 @@ func TestWorkerProcessNextClaimsOnlyPreparationJobsAndPreparesRepository(t *test
 	if database.claimQueue != store.WorkflowActionQueue || database.claimKind != store.PrepareAgentTurnJobKind || database.claimOwner != "preparation-worker" || database.claimDuration != 30*time.Second {
 		t.Errorf("claim = (%q, %q, %q, %s)", database.claimQueue, database.claimKind, database.claimOwner, database.claimDuration)
 	}
-	if developerCredentials.owner != "acme" || developerCredentials.repository != "widgets" || developerCredentials.calls != 1 ||
-		reviewerCredentials.owner != "acme" || reviewerCredentials.repository != "widgets" || reviewerCredentials.calls != 1 {
-		t.Errorf("credential providers = Developer %#v, Reviewer %#v", developerCredentials, reviewerCredentials)
+	if developerCredentials.owner != "acme" || developerCredentials.repository != "widgets" || developerCredentials.calls != 1 {
+		t.Errorf("credential provider = %#v", developerCredentials)
 	}
 	if gotRequest.Lease.ID != lease.ID || gotRequest.InstallationCredential != "developer-installation-token" || gotRequest.RepositoryOwner != "acme" || gotRequest.RepositoryName != "widgets" {
 		t.Errorf("Prepare() request = %#v", gotRequest)
@@ -150,7 +148,7 @@ func TestWorkerProcessNextClaimsOnlyPreparationJobsAndPreparesRepository(t *test
 func TestWorkerProcessNextReturnsIdleWithoutPreparation(t *testing.T) {
 	database := &workerStore{}
 	credentials := &repositoryCredentialProvider{}
-	worker := newPreparationWorker(t, database, credentials, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, credentials, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		t.Fatal("Prepare() called without a job")
 		return agentturn.Result{}, nil
 	}), time.Second)
@@ -167,7 +165,7 @@ func TestWorkerHeartbeatsWhilePreparationLoadsProfiles(t *testing.T) {
 	database := &workerStore{
 		lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}, heartbeatReady: heartbeat,
 	}
-	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(ctx context.Context, _ agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(ctx context.Context, _ agentturn.Request) (agentturn.Result, error) {
 		select {
 		case <-heartbeat:
 			return agentturn.Result{}, nil
@@ -194,7 +192,7 @@ func TestWorkerCancelsPreparationWhenHeartbeatLosesLease(t *testing.T) {
 		lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}, heartbeatErr: store.ErrJobLeaseLost,
 	}
 	prepareCanceled := make(chan struct{})
-	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(ctx context.Context, _ agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(ctx context.Context, _ agentturn.Request) (agentturn.Result, error) {
 		<-ctx.Done()
 		close(prepareCanceled)
 		return agentturn.Result{}, ctx.Err()
@@ -226,7 +224,7 @@ func TestWorkerCancellationOfInFlightHeartbeatDoesNotSuppressFailureAcknowledgem
 		},
 	}
 	failure := errors.New("Agent Profile API unavailable")
-	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		<-heartbeatStarted
 		return agentturn.Result{}, failure
 	}), time.Millisecond)
@@ -247,7 +245,7 @@ func TestWorkerAcknowledgesAssignmentConfigurationConflict(t *testing.T) {
 	lease := preparationWorkerLease()
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
 	spec := store.AgentTurnPreparationSpec{Developer: store.RolePreparation{Binding: store.AssignmentRuntimeBinding{AgentProfileName: "developer"}}}
-	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		return agentturn.Result{}, &agentturn.AssignmentConfigurationConflictError{Preparation: spec, Cause: store.ErrAssignmentConfigurationConflict}
 	}), 10*time.Second)
 
@@ -263,13 +261,13 @@ func TestWorkerAcknowledgesAssignmentConfigurationConflict(t *testing.T) {
 	}
 }
 
-func TestWorkerCreatesHumanHandoffWhenReviewerAppIsNotInstalled(t *testing.T) {
+func TestWorkerDoesNotRequireReviewerAppForPreparation(t *testing.T) {
 	lease := preparationWorkerLease()
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
 	developerCredentials := &repositoryCredentialProvider{credential: "developer-token-secret"}
-	reviewerCredentials := &repositoryCredentialProvider{err: &githubapi.NotInstalledError{Owner: "acme", Repository: "widgets"}}
-	worker := newPreparationWorker(t, database, developerCredentials, reviewerCredentials, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
-		t.Fatal("Prepare() called without a Reviewer installation")
+	prepared := false
+	worker := newPreparationWorker(t, database, developerCredentials, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+		prepared = true
 		return agentturn.Result{}, nil
 	}), 10*time.Second)
 
@@ -277,18 +275,8 @@ func TestWorkerCreatesHumanHandoffWhenReviewerAppIsNotInstalled(t *testing.T) {
 	if !processed {
 		t.Fatal("ProcessNext() did not process preparation")
 	}
-	if err == nil || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
-		t.Fatalf("ProcessNext() error = %v, want permanent Reviewer installation failure", err)
-	}
-	var notInstalled *githubapi.NotInstalledError
-	if errors.As(err, &notInstalled) {
-		t.Fatalf("ProcessNext() exposed Reviewer NotInstalledError: %#v", notInstalled)
-	}
-	if len(database.failures) != 1 || database.failures[0].retryable {
-		t.Fatalf("preparation failure acknowledgement = %#v, want terminal", database.failures)
-	}
-	if strings.Contains(err.Error(), "developer-token-secret") || strings.Contains(database.failures[0].cause.Error(), "developer-token-secret") {
-		t.Fatalf("Reviewer installation failure exposed Developer token: returned %v, durable %v", err, database.failures[0].cause)
+	if err != nil || !prepared || len(database.failures) != 0 {
+		t.Fatalf("ProcessNext() = (%t, %v), prepared %t, failures %#v", processed, err, prepared, database.failures)
 	}
 }
 
@@ -311,7 +299,7 @@ func TestWorkerClassifiesPreparationFailuresAndRedactsCredential(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lease := preparationWorkerLease()
 			database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
-			worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token-secret"}, &repositoryCredentialProvider{credential: "reviewer-token-secret"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+			worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token-secret"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 				return agentturn.Result{}, test.failure
 			}), 10*time.Second)
 
@@ -340,7 +328,7 @@ func TestWorkerUsesGitHubRateLimitResetWhenRetryAfterIsAbsent(t *testing.T) {
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
 	resetAt := time.Now().Add(5 * time.Second)
 	rateLimit := &githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 429, Message: "rate limited"}, ResetAt: resetAt}
-	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "developer-token"}, &repositoryCredentialProvider{credential: "reviewer-token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "developer-token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		return agentturn.Result{}, rateLimit
 	}), 10*time.Second)
 
@@ -360,7 +348,7 @@ func TestWorkerUsesGitHubRateLimitResetWhenRetryAfterIsAbsent(t *testing.T) {
 func TestWorkerRunPollsUntilContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	database := &workerStore{}
-	worker, err := agentturn.NewWorker(database, &repositoryCredentialProvider{}, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	worker, err := agentturn.NewWorker(database, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		return agentturn.Result{}, nil
 	}), agentturn.WorkerConfig{
 		ClaimOwner: "preparation-worker", LeaseDuration: 30 * time.Second, HeartbeatInterval: time.Second,
@@ -410,7 +398,7 @@ func TestNewWorkerEnforcesStoreDurationBounds(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			settings := valid
 			test.mutate(&settings)
-			if _, err := agentturn.NewWorker(&workerStore{}, &repositoryCredentialProvider{}, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+			if _, err := agentturn.NewWorker(&workerStore{}, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 				return agentturn.Result{}, nil
 			}), settings); err == nil {
 				t.Fatal("NewWorker() error = nil, want duration validation error")
@@ -421,16 +409,16 @@ func TestNewWorkerEnforcesStoreDurationBounds(t *testing.T) {
 	valid.HeartbeatInterval = maximum - time.Microsecond
 	valid.IdlePollInterval = maximum
 	valid.RetryDelay = maximum
-	if _, err := agentturn.NewWorker(&workerStore{}, &repositoryCredentialProvider{}, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
+	if _, err := agentturn.NewWorker(&workerStore{}, &repositoryCredentialProvider{}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		return agentturn.Result{}, nil
 	}), valid); err != nil {
 		t.Fatalf("NewWorker() maximum boundaries error = %v", err)
 	}
 }
 
-func newPreparationWorker(t *testing.T, database agentturn.WorkerStore, developerCredentials, reviewerCredentials agentturn.RepositoryCredentialProvider, preparer agentturn.TurnPreparer, heartbeat time.Duration) *agentturn.Worker {
+func newPreparationWorker(t *testing.T, database agentturn.WorkerStore, repositoryCredentials agentturn.RepositoryCredentialProvider, preparer agentturn.TurnPreparer, heartbeat time.Duration) *agentturn.Worker {
 	t.Helper()
-	worker, err := agentturn.NewWorker(database, developerCredentials, reviewerCredentials, preparer, agentturn.WorkerConfig{
+	worker, err := agentturn.NewWorker(database, repositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner: "preparation-worker", LeaseDuration: 30 * time.Second, HeartbeatInterval: heartbeat,
 		IdlePollInterval: time.Millisecond, RetryDelay: 2 * time.Second,
 	})

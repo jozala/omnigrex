@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/role"
 )
 
 type sourceCall struct {
@@ -83,6 +84,44 @@ func TestLoaderLoadsBothProfilesFromOneDefaultBranchCommit(t *testing.T) {
 	}
 	if strings.Contains(string(snapshot.Developer().CanonicalJSON()), "installation-secret") || strings.Contains(string(snapshot.Reviewer().CanonicalJSON()), "installation-secret") {
 		t.Error("canonical profile JSON contains repository credential")
+	}
+}
+
+func TestConfiguredLoaderUsesSelectedProfileForRole(t *testing.T) {
+	const commitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	catalog, err := agentprofile.NewCatalog(role.BuiltinCatalog(), []agentprofile.Identity{
+		{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"},
+		{Name: "release-developer", Role: role.Developer, Path: ".omnigrex/team/release-developer.md"},
+		{Name: "reviewer", Role: role.Reviewer, Path: ".omnigrex/team/reviewer.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := agentprofile.NewSelection(catalog, []role.ID{role.Developer, role.Reviewer}, map[role.ID]agentprofile.Name{
+		role.Developer: "release-developer",
+		role.Reviewer:  "reviewer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeSource{commitSHA: commitSHA, contents: map[string][]byte{
+		".omnigrex/team/release-developer.md": profileContent("openai/gpt-5.2", "Release safely.\n"),
+		".omnigrex/team/reviewer.md":          profileContent("anthropic/reviewer", "Review.\n"),
+	}, fetchErr: map[string]error{}}
+	loader, err := agentprofile.NewConfiguredLoader(source, catalog, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loader.Load(context.Background(), "credential", "owner", "repo")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	developer, ok := snapshot.ForRole(role.Developer)
+	if !ok || developer.Name() != "release-developer" || developer.Path() != ".omnigrex/team/release-developer.md" {
+		t.Fatalf("ForRole(Developer) = (%#v, %t)", developer, ok)
+	}
+	if _, loaded := snapshot.Profile(agentprofile.Developer); loaded {
+		t.Fatal("unselected Developer profile was loaded")
 	}
 }
 

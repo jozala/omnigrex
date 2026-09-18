@@ -482,7 +482,7 @@ func (store *Store) FinalizeAssignmentCollection(ctx context.Context, lease JobL
 		ID: internalEventID, ObservedAt: collectedAt, WorkItem: snapshot.WorkItem,
 		ExpectedRevision: snapshot.Revision,
 	}, RetentionToken: payload.RetentionToken, RetainUntil: payload.RetainUntil, CollectedAt: collectedAt}
-	decision := workflow.Reduce(snapshot, event)
+	decision := store.reducer.Reduce(snapshot, event)
 	if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonAssignmentsCollected {
 		return AssignmentCollection{}, ErrAssignmentCollectionFenceLost
 	}

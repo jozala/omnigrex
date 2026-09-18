@@ -69,6 +69,9 @@ VALUES ('7a000000-0000-4000-8000-000000000002', $1, 91, 'acme', 'widgets',
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING', state_revision = 8, human_handoff_reason = NULL WHERE id = $1`, workflowID); err != nil {
 		t.Fatalf("advance Workflow: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, workflowID); err != nil {
+		t.Fatalf("advance Workflow Stage: %v", err)
+	}
 	acknowledgement, err := databases[0].AcknowledgeWorkflowGitHubEffect(ctx, *lease, effect, json.RawMessage(`{"comment_id":99}`))
 	if err != nil {
 		t.Fatalf("AcknowledgeWorkflowGitHubEffect() error = %v", err)
@@ -362,6 +365,9 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING', state_revision = 8, human_handoff_reason = NULL WHERE id = $1`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, workflowID); err != nil {
 		t.Fatal(err)
 	}
 	acknowledgement, err := databases[0].AcknowledgeWorkflowGitHubEffect(ctx, *first, effect, json.RawMessage(`{"issue":{"id":101},"pull_request":{"id":102}}`))

@@ -856,6 +856,40 @@ VALUES ('78100000-0000-4000-8000-000000000001', 'workflow', 'PREPARE_AGENT_TURN'
 	})
 }
 
+func TestSettlementFailsClosedWhenWorkflowDefinitionIsIncompatible(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, lease, _ := prepareSettlementTurn(t, databases[0], pool, ctx, 811, workflow.RoleDeveloper, "")
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'removed-stage' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+
+	settled, err := databases[0].SettleAgentTurn(ctx, lease, failedSettlementObservation("runtime completed under an old Definition"))
+	if err != nil {
+		t.Fatalf("SettleAgentTurn() error = %v", err)
+	}
+	if settled.State != workflow.StateNeedsHuman || settled.Reason != workflow.ReasonWorkflowDefinitionIncompatible ||
+		settled.TerminalStatus != store.AgentTurnInterrupted || settled.SuccessorJobID != "" {
+		t.Fatalf("incompatible settlement = %#v", settled)
+	}
+	var status, handoffReason, turnStatus string
+	var active bool
+	if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.human_handoff_reason, turn.status, turn.active
+FROM workflows AS workflow
+JOIN agent_turns AS turn ON turn.workflow_id = workflow.id
+WHERE workflow.id = $1 AND turn.id = $2`, fixture.workflowID, lease.ID).Scan(
+		&status, &handoffReason, &turnStatus, &active,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflow.StateNeedsHuman) || handoffReason != string(workflow.ReasonWorkflowDefinitionIncompatible) ||
+		turnStatus != string(store.AgentTurnInterrupted) || active {
+		t.Fatalf("durable incompatible settlement = Workflow %s/%s, Turn %s/%t", status, handoffReason, turnStatus, active)
+	}
+}
+
 func TestPendingEventCausalReplayIsSerializedAcrossStores(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -938,10 +972,12 @@ func prepareSettlementTurn(t *testing.T, database *store.Store, pool *pgxpool.Po
 
 func prepareOpenSettlementTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, number int, role workflow.Role, head string) (agentFixture, store.AgentTurnLease, *store.AgentTurnSettlementChangeProposal) {
 	t.Helper()
-	fixture := seedAgentSession(t, pool, number)
+	fixture := seedAgentSessionForRole(t, pool, number, role)
 	state := workflow.StateDeveloping
+	stage := workflow.StageImplementation
 	if role == workflow.RoleReviewer {
 		state = workflow.StateReviewing
+		stage = workflow.StageReview
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE workflows SET status = $2, state_revision = 1,
@@ -951,7 +987,7 @@ WHERE id = $1`, fixture.workflowID, state); err != nil {
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
-    review_cycle_limit = 3 WHERE id = $1`, fixture.attemptID); err != nil {
+	    review_cycle_limit = 3, current_stage = $2 WHERE id = $1`, fixture.attemptID, stage); err != nil {
 		t.Fatal(err)
 	}
 	var proposal *store.AgentTurnSettlementChangeProposal
@@ -959,8 +995,7 @@ UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 	if role == workflow.RoleReviewer {
 		actorID := int64(number*100 + 2)
 		if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET role = 'REVIEWER', agent_profile_name = 'reviewer',
-    github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
+UPDATE agent_assignments SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
 			t.Fatal(err)
 		}
 		proposalRowID = fmt.Sprintf("79%04d00-0000-4000-8000-000000000001", number)
@@ -982,6 +1017,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 	}
 	spec := fixture.turnSpec()
 	if role == workflow.RoleReviewer {
+		spec.Stage = workflow.StageReview
 		spec.Purpose = workflow.TurnPurposeReview
 		spec.ChangeProposalID = proposalRowID
 		spec.ExpectedHeadSHA = head

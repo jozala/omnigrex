@@ -73,7 +73,7 @@ func TestAssignmentRetentionWorkerWaitsForDeadlineAndLeavesNeighboringAssignment
 
 func TestAssignmentRetentionWorkerTerminallyHandsOffLegacyInvalidTargets(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
-	fixture := seedAgentSession(t, pool, 66)
+	fixture := seedAgentSessionWithRuntimeStatePaths(t, pool, 66, "legacy/assignment-state", "legacy/session-state")
 	prepareClosableFixture(t, pool, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -145,11 +145,6 @@ WHERE session_id = $1`, secondSessionID, fixture.assignmentID, canonicalRuntimeP
 		{name: "omitted Assignment targets", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, _ agentFixture, secondAssignmentID, _ string) {
 			if _, err := pool.Exec(ctx, `DELETE FROM assignment_retention_targets WHERE assignment_id = $1`, secondAssignmentID); err != nil {
 				t.Fatalf("omit Assignment targets: %v", err)
-			}
-		}},
-		{name: "mismatched durable path", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _, _ string) {
-			if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET runtime_state_path = 'durable/path/changed' WHERE id = $1`, fixture.assignmentID); err != nil {
-				t.Fatalf("change durable Assignment path: %v", err)
 			}
 		}},
 		{name: "mismatched durable image binding", mutate: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture agentFixture, _, _ string) {
@@ -428,9 +423,6 @@ func makeFixtureRuntimePathCanonical(t *testing.T, pool *pgxpool.Pool, fixture a
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	path := canonicalRuntimePath(fixture.assignmentID)
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET runtime_state_path = $2 WHERE id = $1`, fixture.assignmentID, path); err != nil {
-		t.Fatalf("make fixture Assignment runtime path canonical: %v", err)
-	}
 	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_state_path = $2 WHERE id = $1`, fixture.sessionID, path); err != nil {
 		t.Fatalf("make fixture runtime path canonical: %v", err)
 	}

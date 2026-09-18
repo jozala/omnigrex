@@ -167,7 +167,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1)`, workflowID).Scan(&assignments, &sessions, &turns); err != nil {
 			t.Fatal(err)
 		}
-		if assignments != 4 || sessions != 2 || turns != 2 {
+		if assignments != 2 || sessions != 2 || turns != 2 {
 			t.Fatalf("qualified durable generations = Assignments %d, Sessions %d, Turns %d", assignments, sessions, turns)
 		}
 	})
@@ -180,8 +180,7 @@ func TestNewAssignmentCandidateRequiresQualificationAgainstOtherWorkflowHistory(
 	defer cancel()
 	source := compatibilityProfile(t, "a", "amd64")
 	target := compatibilityProfile(t, "b", "amd64")
-	historical := seedAgentSession(t, pool, 212)
-	setFixtureRuntimeBinding(t, pool, historical, source.Binding(), source.Binding())
+	historical := seedAgentSessionWithRuntimeBindings(t, pool, 212, workflow.RoleDeveloper, source.Binding(), source.Binding())
 	application := triggerPreparationWorkflow(t, database, ctx,
 		"61000000-0000-4000-8000-000000000212", "62000000-0000-4000-8000-000000000212")
 	lease := claimPreparationJob(t, database, ctx)
@@ -384,7 +383,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
        (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'runtime_profile_compatibility_results')`).Scan(&version, &tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 17 || tables != 1 {
+	if version != 21 || tables != 1 {
 		t.Fatalf("migrated current schema = version %d, compatibility tables %d", version, tables)
 	}
 }
@@ -446,6 +445,7 @@ func compatibilityPreparationSpec(commitSHA string, profile runtimeprofile.Profi
 	reviewerHash := sha256.Sum256([]byte(commitSHA + "-reviewer"))
 	return store.AgentTurnPreparationSpec{
 		Developer: store.RolePreparation{
+			ProfilePath: ".omnigrex/team/developer.md",
 			Binding: store.AssignmentRuntimeBinding{
 				AgentProfileName: "developer", RuntimeProfileName: binding.Name, RuntimeProfileVersion: binding.Version,
 				RuntimeProfileContentSHA256: binding.ContentSHA256, RuntimeImageDigest: binding.Image,
@@ -455,6 +455,7 @@ func compatibilityPreparationSpec(commitSHA string, profile runtimeprofile.Profi
 				Config: agentProfileConfig("developer", workflow.RoleDeveloper, binding.Name+"/"+binding.Version, "openai/compatibility", "", 40, "Perform development.", nil)},
 		},
 		Reviewer: store.RolePreparation{
+			ProfilePath: ".omnigrex/team/reviewer.md",
 			Binding: store.AssignmentRuntimeBinding{
 				AgentProfileName: "reviewer", RuntimeProfileName: binding.Name, RuntimeProfileVersion: binding.Version,
 				RuntimeProfileContentSHA256: binding.ContentSHA256, RuntimeImageDigest: binding.Image,
@@ -546,7 +547,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 		&assignments, &sessions, &turns, &generationTwo, &queuedRuns); err != nil {
 		t.Fatal(err)
 	}
-	if assignments != 2 || sessions != 1 || turns != 1 || generationTwo != 0 || queuedRuns != 0 {
+	if assignments != 1 || sessions != 1 || turns != 1 || generationTwo != 0 || queuedRuns != 0 {
 		t.Fatalf("partial candidate generation = Assignments %d, Sessions %d, Turns %d, generation 2 %d, queued runs %d",
 			assignments, sessions, turns, generationTwo, queuedRuns)
 	}

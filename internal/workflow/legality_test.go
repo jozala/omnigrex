@@ -292,7 +292,7 @@ func matrixTrigger(snapshot workflow.Snapshot) workflow.Event {
 }
 
 func matrixTurnSettled(snapshot workflow.Snapshot) workflow.Event {
-	turn := workflow.TurnGuard{TurnID: "matrix-turn", SessionID: "matrix-session", AttemptID: "matrix-attempt", Role: workflow.RoleDeveloper, Epoch: 1, ControlRevision: 1}
+	turn := workflow.TurnGuard{TurnID: "matrix-turn", SessionID: "matrix-session", AttemptID: "matrix-attempt", Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper, Epoch: 1, ControlRevision: 1}
 	if snapshot.ActiveTurn != nil {
 		turn = guard(snapshot)
 	}

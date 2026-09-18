@@ -46,8 +46,9 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *testing.T) {
 	lease := staleRuntimeLease()
 	cleanup := store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: "60000000-0000-4000-8000-000000000001",
-		Role:         workflow.RoleReviewer,
+		AssignmentID:     "60000000-0000-4000-8000-000000000001",
+		Role:             workflow.RoleReviewer,
+		DiscardWorkspace: true,
 	}
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: cleanup}
 	discarder := &recordingWorkspaceDiscarder{}
@@ -89,8 +90,9 @@ func TestStopWorkerRetainsRecoveredDeveloperWorkspace(t *testing.T) {
 func TestStopWorkerReviewerDiscardFailureConsumesOneClaimedAttempt(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: lease.AgentAssignmentID,
-		Role:         workflow.RoleReviewer,
+		AssignmentID:     lease.AgentAssignmentID,
+		Role:             workflow.RoleReviewer,
+		DiscardWorkspace: true,
 	}}
 	failure := errors.New("workspace temporarily unavailable")
 	discarder := &recordingWorkspaceDiscarder{results: []error{failure}}

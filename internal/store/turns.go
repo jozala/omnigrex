@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -42,10 +43,11 @@ const (
 	stopStaleRuntimeJobPriority        = 100
 	reconcileTurnMutationsJobPriority  = 90
 
-	RuntimeLabelAssignmentID = "io.omnigrex.assignment"
-	RuntimeLabelSessionID    = "io.omnigrex.agent-session"
-	RuntimeLabelTurnID       = "io.omnigrex.agent-turn"
-	RuntimeLabelEpoch        = "io.omnigrex.execution-epoch"
+	RuntimeLabelAssignmentID  = "io.omnigrex.assignment"
+	RuntimeLabelParticipantID = "io.omnigrex.agent-participant"
+	RuntimeLabelSessionID     = "io.omnigrex.agent-session"
+	RuntimeLabelTurnID        = "io.omnigrex.agent-turn"
+	RuntimeLabelEpoch         = "io.omnigrex.execution-epoch"
 
 	agentTurnSlotsLockID = int64(0x4f4d4e49534c4f54)
 
@@ -53,6 +55,7 @@ const (
 	recoveryContinuationInfrastructureApplied = "INFRASTRUCTURE_FAILURE_APPLIED"
 	recoveryContinuationMutationHandoff       = "MUTATION_RECONCILIATION_HANDOFF_APPLIED"
 	recoveryContinuationMigrationHandoff      = "MIGRATION_HANDOFF_APPLIED"
+	recoveryContinuationDefinitionHandoff     = "WORKFLOW_DEFINITION_HANDOFF_APPLIED"
 )
 
 // AgentTurnStatus is the durable lifecycle state of an Agent Turn.
@@ -76,6 +79,7 @@ type AgentTurnSpec struct {
 	AgentSessionID            string
 	WorkflowAttemptID         string
 	RetryOfTurnID             string
+	Stage                     workflow.StageID
 	Purpose                   workflow.TurnPurpose
 	ChangeProposalID          string
 	ExpectedHeadSHA           string
@@ -89,6 +93,7 @@ type AgentTurnSpec struct {
 type AgentTurn struct {
 	AgentTurnSpec
 	ID                    string
+	AgentParticipantID    string
 	AgentAssignmentID     string
 	operationLineageID    string
 	TurnNumber            int64
@@ -143,6 +148,7 @@ type AgentTurnExecutionContext struct {
 	Repository     AgentTurnRepository
 	Issue          AgentTurnIssue
 	ChangeProposal *AgentTurnChangeProposal
+	Participant    AgentParticipant
 	Assignment     AgentAssignment
 	Session        AgentSession
 	Turn           AgentTurn
@@ -285,7 +291,7 @@ func (store *Store) AllocateAgentTurn(ctx context.Context, spec AgentTurnSpec) (
 	if err != nil {
 		return AgentTurn{}, fmt.Errorf("read Agent Turn Assignment: %w", err)
 	}
-	profileConfig, err := validateAgentProfileConfig(spec.AgentProfileConfig, AgentTurnPreparation{
+	profileConfig, err := store.validateAgentProfileConfig(spec.AgentProfileConfig, AgentTurnPreparation{
 		Role: assignment.Role, Assignment: assignment,
 	})
 	if err != nil {
@@ -318,6 +324,27 @@ SELECT EXISTS (
 	}
 	if livePreparation {
 		return AgentTurn{}, ErrWorkflowSuccessorConflict
+	}
+	stage, ok := store.reducer.Stage(spec.Stage)
+	if !ok || stage.Role != assignment.Role || !store.reducer.AcceptsPurpose(spec.Stage, spec.Purpose) {
+		return AgentTurn{}, ErrAgentTurnFenceLost
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO stage_assignments (
+    workflow_id, assignment_generation, stage_id, role, agent_participant_id
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (workflow_id, assignment_generation, stage_id) DO NOTHING`, hierarchy.workflowID,
+		assignment.Generation, spec.Stage, assignment.Role, assignment.ID); err != nil {
+		return AgentTurn{}, fmt.Errorf("bind legacy Agent Turn Stage Assignment: %w", err)
+	}
+	stageAssignment, assignedParticipant, err := readStageAssignment(ctx, tx, hierarchy.workflowID, assignment.Generation, spec.Stage, true)
+	if err != nil || stageAssignment.Role != assignment.Role || assignedParticipant.ID != assignment.ID {
+		return AgentTurn{}, ErrAgentTurnFenceLost
+	}
+	var currentStage workflow.StageID
+	if err := tx.QueryRow(ctx, `SELECT current_stage FROM workflow_attempts WHERE id = $1`, spec.WorkflowAttemptID).Scan(&currentStage); err != nil || currentStage != spec.Stage {
+		return AgentTurn{}, ErrAgentTurnFenceLost
 	}
 	var proposalID, headSHA string
 	err = tx.QueryRow(ctx, `
@@ -361,13 +388,13 @@ FROM agent_turns WHERE id = $1 FOR UPDATE`, spec.RetryOfTurnID).Scan(
 	INSERT INTO agent_turns (
 	    id, workflow_id, agent_session_id, workflow_attempt_id, turn_number, execution_epoch,
 	    retry_of_turn_id, operation_lineage_id, status, active, control_revision, agent_profile_commit_sha,
-	    agent_profile_content_sha256, agent_profile_config, purpose, change_proposal_id, expected_head_sha
+	    agent_profile_content_sha256, agent_profile_config, stage_id, purpose, change_proposal_id, expected_head_sha
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', TRUE, $9, $10, $11, $12, $13, $14, $15)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', TRUE, $9, $10, $11, $12, $13, $14, $15, $16)
 	RETURNING created_at`, turnID, hierarchy.workflowID, hierarchy.sessionID, spec.WorkflowAttemptID, locked.nextTurnNumber,
 		locked.nextExecutionEpoch, nullableString(spec.RetryOfTurnID), operationLineageID, spec.ControlRevision,
 		spec.AgentProfileCommitSHA, spec.AgentProfileContentSHA256, spec.AgentProfileConfig,
-		spec.Purpose, nullableString(spec.ChangeProposalID), nullableString(spec.ExpectedHeadSHA)).Scan(&createdAt)
+		spec.Stage, spec.Purpose, nullableString(spec.ChangeProposalID), nullableString(spec.ExpectedHeadSHA)).Scan(&createdAt)
 	if err != nil {
 		return AgentTurn{}, fmt.Errorf("insert agent turn: %w", err)
 	}
@@ -402,7 +429,8 @@ VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 1,
 		return AgentTurn{}, fmt.Errorf("commit agent turn allocation: %w", err)
 	}
 	return AgentTurn{
-		AgentTurnSpec: spec, ID: turnID, AgentAssignmentID: hierarchy.assignmentID,
+		AgentTurnSpec: spec, ID: turnID, AgentParticipantID: hierarchy.assignmentID,
+		AgentAssignmentID:  hierarchy.assignmentID,
 		operationLineageID: operationLineageID,
 		TurnNumber:         locked.nextTurnNumber, ExecutionEpoch: locked.nextExecutionEpoch,
 		Status: AgentTurnQueued, CreatedAt: createdAt,
@@ -548,6 +576,7 @@ WHERE id = $1 AND execution_epoch = $5 AND control_revision = $6 AND active
 	}
 	turn.AgentTurn.Status = AgentTurnRunning
 	turn.AgentTurn.MutationAdmissionOpen = false
+	turn.AgentTurn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentTurn.AgentAssignmentID = job.AgentAssignmentID
 	jobLease := JobLease{Job: job, Attempt: attempt}
 	return AgentTurnLease{
@@ -662,6 +691,7 @@ WHERE id = $1 AND status IN ('QUEUED', 'STARTING') AND owner_id IS NULL AND owne
 	}
 	turn.AgentTurn.Status = AgentTurnRunning
 	turn.AgentTurn.MutationAdmissionOpen = false
+	turn.AgentTurn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentTurn.AgentAssignmentID = job.AgentAssignmentID
 	return AgentTurnLease{
 		AgentTurn: turn.AgentTurn, JobLease: jobLease, OwnerID: ownerID,
@@ -788,6 +818,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	if err != nil {
 		return AgentTurnRecovery{}, err
 	}
+	turn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentAssignmentID = job.AgentAssignmentID
 	if !turn.active || turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling || turn.MutationAdmissionOpen || !turn.leaseLive ||
 		turn.AgentAssignmentID != lease.AgentAssignmentID || turn.AgentSessionID != lease.AgentSessionID ||
@@ -989,7 +1020,7 @@ func recoverExpiredAgentTurnTx(ctx context.Context, tx pgx.Tx, claimedJob Job) (
 	}
 	if !turn.active || turn.ExecutionEpoch != executionEpoch || turn.ownerID == "" || turn.ownerToken == "" ||
 		turn.Status != AgentTurnQueued && turn.Status != AgentTurnStarting && turn.Status != AgentTurnRunning &&
-			turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
+			turn.Status != AgentTurnCancelling && turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
 	}
 	if turn.leaseLive {
@@ -1141,7 +1172,7 @@ WHERE id = $1 AND agent_session_id = $2 AND execution_epoch = $3
 	if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"runtime_stopped":true}`)); err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	if _, err := settleAgentTurnRecoveryTx(ctx, tx, job); err != nil {
+	if _, err := settleAgentTurnRecoveryTx(ctx, tx, store.reducer, job); err != nil {
 		return AgentTurnRecovery{}, err
 	}
 	recovery, err := readAgentTurnRecovery(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)
@@ -1209,7 +1240,7 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 		return MutationReservation{}, fmt.Errorf("read reconciled mutation: %w", err)
 	}
 	if outcome.State == MutationSucceeded {
-		if err := bindReviewerActorForSubmitReview(ctx, tx, job.AgentAssignmentID, mutation.ToolName, result); err != nil {
+		if err := store.bindReviewerActorForSubmitReview(ctx, tx, job.AgentAssignmentID, mutation.ToolName, result, true); err != nil {
 			return MutationReservation{}, err
 		}
 	}
@@ -1310,7 +1341,7 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		); err != nil {
 			return err
 		}
-		assignment, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+		participant, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
 		if err != nil {
 			return err
 		}
@@ -1318,7 +1349,8 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		if err != nil {
 			return err
 		}
-		execution.Assignment = assignment
+		execution.Participant = participant
+		execution.Assignment = participant
 		execution.Session = session
 		execution.Turn = turn.AgentTurn
 
@@ -1692,11 +1724,16 @@ WHERE id = $1 AND execution_epoch = $2 AND control_revision = $3 AND owner_token
 
 // RuntimeLabels returns non-secret Runtime Process labels carrying mandatory turn identity.
 func RuntimeLabels(turn AgentTurn) map[string]string {
+	participantID := turn.AgentParticipantID
+	if participantID == "" {
+		participantID = turn.AgentAssignmentID
+	}
 	return map[string]string{
-		RuntimeLabelAssignmentID: turn.AgentAssignmentID,
-		RuntimeLabelSessionID:    turn.AgentSessionID,
-		RuntimeLabelTurnID:       turn.ID,
-		RuntimeLabelEpoch:        strconv.FormatInt(turn.ExecutionEpoch, 10),
+		RuntimeLabelParticipantID: participantID,
+		RuntimeLabelAssignmentID:  participantID,
+		RuntimeLabelSessionID:     turn.AgentSessionID,
+		RuntimeLabelTurnID:        turn.ID,
+		RuntimeLabelEpoch:         strconv.FormatInt(turn.ExecutionEpoch, 10),
 	}
 }
 
@@ -2142,13 +2179,13 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	turn_number, execution_epoch, control_revision, status, mutation_admission_open, active,
 	COALESCE(owner_id, ''), COALESCE(owner_token::text, ''), lease_expires_at IS NOT NULL,
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
-	COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
+	stage_id, COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
 	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, created_at
 FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
 		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,
 		&turn.ExecutionEpoch, &turn.ControlRevision, &turn.Status, &turn.MutationAdmissionOpen,
 		&turn.active, &turn.ownerID, &turn.ownerToken, &turn.leasePresent, &turn.leaseLive,
-		&turn.RetryOfTurnID, &turn.Purpose, &turn.ChangeProposalID, &turn.ExpectedHeadSHA,
+		&turn.RetryOfTurnID, &turn.Stage, &turn.Purpose, &turn.ChangeProposalID, &turn.ExpectedHeadSHA,
 		&turn.AgentProfileCommitSHA, &turn.AgentProfileContentSHA256,
 		&profileConfig, &turn.CreatedAt,
 	)
@@ -2205,6 +2242,7 @@ func (store *Store) withLockedAgentTurnLeaseOptions(ctx context.Context, lease A
 	if err != nil {
 		return err
 	}
+	turn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentAssignmentID = job.AgentAssignmentID
 	if requireExact && (turn.AgentAssignmentID != lease.AgentAssignmentID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
 		return ErrAgentTurnFenceLost
@@ -2269,13 +2307,13 @@ RETURNING tool_name`, mutationID, lease.ID, lease.ExecutionEpoch, to, resultValu
 			return err
 		}
 		if to == MutationSucceeded {
-			return bindReviewerActorForSubmitReview(ctx, tx, turn.AgentAssignmentID, toolName, result)
+			return store.bindReviewerActorForSubmitReview(ctx, tx, turn.AgentAssignmentID, toolName, result, false)
 		}
 		return nil
 	})
 }
 
-func bindReviewerActorForSubmitReview(ctx context.Context, tx pgx.Tx, assignmentID, toolName string, result json.RawMessage) error {
+func (store *Store) bindReviewerActorForSubmitReview(ctx context.Context, tx pgx.Tx, assignmentID, toolName string, result json.RawMessage, recovery bool) error {
 	if toolName != "submit_review" {
 		return nil
 	}
@@ -2285,11 +2323,24 @@ func bindReviewerActorForSubmitReview(ctx context.Context, tx pgx.Tx, assignment
 	if err := json.Unmarshal(result, &review); err != nil || review.ActorID <= 0 {
 		return errors.New("bind reviewer actor: submit_review result has no valid actor_id")
 	}
+	var assignmentRole workflow.Role
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, assignmentID).Scan(&assignmentRole); err != nil {
+		return ErrReviewerActorConflict
+	}
+	policy, ok := store.policies.Lookup(assignmentRole)
+	authority, granted := policy.CredentialAuthorityForTool("submit_review")
+	if ok && (!granted || authority != role.ReviewerAuthority) {
+		return ErrReviewerActorConflict
+	}
+	if !ok && (!recovery || !role.ValidID(assignmentRole)) {
+		return ErrReviewerActorConflict
+	}
 	updated, err := tx.Exec(ctx, `
 UPDATE agent_assignments
 SET github_app_actor_id = COALESCE(github_app_actor_id, $2), updated_at = clock_timestamp()
-WHERE id = $1 AND role = 'REVIEWER' AND status = 'ACTIVE' AND state_deleted_at IS NULL
-  AND (github_app_actor_id IS NULL OR github_app_actor_id = $2)`, assignmentID, review.ActorID)
+WHERE id = $1 AND (status = 'ACTIVE' OR ($3 AND status = 'WAITING_FOR_HUMAN'))
+  AND state_deleted_at IS NULL
+  AND (github_app_actor_id IS NULL OR github_app_actor_id = $2)`, assignmentID, review.ActorID, recovery)
 	if err != nil {
 		return fmt.Errorf("bind reviewer actor: %w", err)
 	}

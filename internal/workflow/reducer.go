@@ -1,14 +1,183 @@
 package workflow
 
-import "time"
+import (
+	"fmt"
+	"time"
 
+	"github.com/jozala/omnigrex/internal/role"
+)
+
+// Reducer deterministically applies Events under one immutable Workflow Definition.
+type Reducer struct {
+	definition               Definition
+	reviewLimit              uint8
+	infrastructureRetryLimit uint8
+}
+
+// NewReducer validates the coordinator policy around an immutable Workflow Definition.
+func NewReducer(definition Definition, infrastructureRetryLimit uint8) (Reducer, error) {
+	if len(definition.StageIDs()) == 0 || infrastructureRetryLimit == 0 {
+		return Reducer{}, fmt.Errorf("%w: reducer policy", ErrInvalidDefinition)
+	}
+	var reviewLimit uint8
+	for _, stageID := range definition.StageIDs() {
+		stage, _ := definition.Stage(stageID)
+		if stage.ReviewLimit > reviewLimit {
+			reviewLimit = stage.ReviewLimit
+		}
+	}
+	if reviewLimit == 0 {
+		reviewLimit = 1
+	}
+	return Reducer{definition: definition, reviewLimit: reviewLimit, infrastructureRetryLimit: infrastructureRetryLimit}, nil
+}
+
+var builtinReducer = func() Reducer {
+	definition, err := NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		panic(err)
+	}
+	reducer, err := NewReducer(definition, BuiltinInfrastructureRetryLimit)
+	if err != nil {
+		panic(err)
+	}
+	return reducer
+}()
+
+// BuiltinReducer returns the immutable Reducer used by the deployment's built-in Definition.
+func BuiltinReducer() Reducer {
+	return builtinReducer
+}
+
+// Valid reports whether the Reducer was constructed from a Definition.
+func (reducer Reducer) Valid() bool {
+	return len(reducer.definition.StageIDs()) > 0 && reducer.infrastructureRetryLimit > 0
+}
+
+// Stage returns the immutable Definition entry for a Stage ID.
+func (reducer Reducer) Stage(id StageID) (StageDefinition, bool) {
+	return reducer.definition.Stage(id)
+}
+
+// AcceptsPurpose reports whether a normal Turn Purpose is valid for a Stage.
+func (reducer Reducer) AcceptsPurpose(stage StageID, purpose TurnPurpose) bool {
+	return reducer.definition.AcceptsPurpose(stage, purpose)
+}
+
+// ExpectedOutcomes returns the business outcomes declared by a Stage.
+func (reducer Reducer) ExpectedOutcomes(stage StageID) []TurnOutcome {
+	return reducer.definition.ExpectedOutcomes(stage)
+}
+
+// Roles returns the canonical Roles referenced by the Reducer's Workflow Definition.
+func (reducer Reducer) Roles() []role.ID {
+	return reducer.definition.Roles()
+}
+
+// ValidateRolePolicies verifies that every Stage Role can emit all outcomes the Definition accepts.
+func (reducer Reducer) ValidateRolePolicies(policies role.PolicyCatalog) error {
+	for _, stageID := range reducer.definition.StageIDs() {
+		stage, _ := reducer.definition.Stage(stageID)
+		policy, ok := policies.Lookup(stage.Role)
+		if !ok {
+			return fmt.Errorf("%w: Stage %q has no Role policy", ErrInvalidDefinition, stageID)
+		}
+		required := map[string]struct{}{"report_blocked": {}}
+		for _, transition := range stage.Transitions {
+			switch transition.Outcome {
+			case TurnOutcomeChangeProposalReady:
+				required["request_review"] = struct{}{}
+			case TurnOutcomeChangesRequested, TurnOutcomeApproved:
+				required["submit_review"] = struct{}{}
+			}
+		}
+		for tool := range required {
+			if _, granted := policy.CredentialAuthorityForTool(tool); !granted {
+				return fmt.Errorf("%w: Stage %q Role %q cannot emit outcomes because %q is not granted", ErrInvalidDefinition, stageID, stage.Role, tool)
+			}
+		}
+	}
+	return nil
+}
+
+// DefinitionCompatible reports whether durable Stage and Role identities are known to this deployment.
+func (reducer Reducer) DefinitionCompatible(snapshot Snapshot) bool {
+	if snapshot.State == StateAbsent {
+		return true
+	}
+	if snapshot.CurrentAttempt != nil {
+		stage, ok := reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+		if !ok || (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) && stage.State != snapshot.State {
+			return false
+		}
+		for stageID, used := range snapshot.CurrentAttempt.ReviewUsage {
+			configured, ok := reducer.Stage(stageID)
+			if !ok || configured.ReviewLimit == 0 || used > configured.ReviewLimit {
+				return false
+			}
+		}
+	}
+	if snapshot.ContinuationStage != "" {
+		if _, ok := reducer.Stage(snapshot.ContinuationStage); !ok {
+			return false
+		}
+	}
+	if snapshot.ActiveTurn != nil {
+		stage, ok := reducer.Stage(snapshot.ActiveTurn.Stage)
+		if !ok || stage.Role != snapshot.ActiveTurn.Role {
+			return false
+		}
+	}
+	if snapshot.ResumeRole != "" {
+		known := false
+		for _, roleID := range reducer.Roles() {
+			known = known || roleID == snapshot.ResumeRole
+		}
+		if !known {
+			return false
+		}
+	}
+	return true
+}
+
+// DefinitionIncompatible returns a deterministic Human Handoff for durable state this deployment cannot interpret.
+func (reducer Reducer) DefinitionIncompatible(snapshot Snapshot) Decision {
+	if snapshot.State == StateNeedsHuman {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDuplicate, Reason: ReasonWorkflowDefinitionIncompatible}
+	}
+	next := cloneSnapshot(snapshot)
+	next.State = StateNeedsHuman
+	next.Assignments.Status = AssignmentWaitingForHuman
+	if next.ActiveTurn != nil {
+		next.ResumeRole = next.ActiveTurn.Role
+		next.ActiveTurn = nil
+	}
+	next.Revision++
+	actions := make([]Action, 0, 4)
+	if snapshot.ActiveTurn != nil {
+		turn := guardFromTurn(*snapshot.ActiveTurn)
+		actions = append(actions, CloseMutationAdmissionAction{Turn: turn}, InterruptTurnForHumanHandoffAction{Turn: turn})
+	}
+	actions = append(actions,
+		MarkHumanHandoffAction{Reason: ReasonWorkflowDefinitionIncompatible, Diagnostic: "Durable Workflow state is incompatible with the deployed Workflow Definition"},
+		ReconcileLabelsAction{State: StateNeedsHuman},
+	)
+	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonWorkflowDefinitionIncompatible, Actions: actions}
+}
+
+// Reduce applies an Event using the built-in deployment Workflow Definition.
 func Reduce(snapshot Snapshot, event Event) Decision {
+	return builtinReducer.Reduce(snapshot, event)
+}
+
+// Reduce applies an Event using the Reducer's immutable Workflow Definition.
+func (reducer Reducer) Reduce(snapshot Snapshot, event Event) Decision {
 	base := cloneSnapshot(snapshot)
-	if !validSnapshot(snapshot) {
+	if !validSnapshot(reducer.definition, reducer.infrastructureRetryLimit, snapshot) {
 		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
 	metadata, kind, ok := eventDetails(event)
-	if !ok || !validEvent(event, metadata) {
+	if !ok || !validEvent(reducer.definition, event, metadata) {
 		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
 	if snapshot.State == StateAbsent {
@@ -18,33 +187,33 @@ func Reduce(snapshot Snapshot, event Event) Decision {
 	} else if metadata.WorkItem != snapshot.WorkItem {
 		return Decision{Snapshot: base, Disposition: DispositionUnrelated, Reason: ReasonWorkItemUnrelated}
 	}
-	decision := dispatch(snapshot, event)
+	decision := reducer.dispatch(snapshot, event)
 	if decision.Disposition != DispositionApplied {
 		decision.Snapshot.Revision = snapshot.Revision
 	}
 	if decision.Reason == "" {
 		decision.Reason = ReasonInvalidEvent
 	}
-	if !validSnapshot(decision.Snapshot) {
+	if !validSnapshot(reducer.definition, reducer.infrastructureRetryLimit, decision.Snapshot) {
 		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
 	return decision
 }
 
-func dispatch(snapshot Snapshot, event Event) Decision {
+func (reducer Reducer) dispatch(snapshot Snapshot, event Event) Decision {
 	switch event := event.(type) {
 	case TriggerEvent:
-		return reduceTrigger(snapshot, event)
+		return reducer.reduceTrigger(snapshot, event)
 	case TurnSettledEvent:
-		return reduceTurnSettled(snapshot, event)
+		return reducer.reduceTurnSettled(snapshot, event)
 	case SynchronizationEvent:
-		return reduceSynchronization(snapshot, event)
+		return reducer.reduceSynchronization(snapshot, event)
 	case ReviewObservedEvent:
 		return reduceReviewObserved(snapshot, event)
 	case ChangeProposalObservedEvent:
 		return reduceChangeProposalObserved(snapshot, event)
 	case IssueClosedEvent:
-		return reduceIssueClosed(snapshot, event)
+		return reducer.reduceIssueClosed(snapshot, event)
 	case ClosureSettledEvent:
 		return reduceClosureSettled(snapshot, event)
 	case IssueReopenedEvent:
@@ -52,13 +221,13 @@ func dispatch(snapshot Snapshot, event Event) Decision {
 	case AssignmentsCollectedEvent:
 		return reduceAssignmentsCollected(snapshot, event)
 	case AssignmentConfigurationConflictEvent:
-		return reduceAssignmentConfigurationConflict(snapshot, event)
+		return reducer.reduceAssignmentConfigurationConflict(snapshot, event)
 	case AgentTurnPreparationFailedEvent:
-		return reduceAgentTurnPreparationFailed(snapshot, event)
+		return reducer.reduceAgentTurnPreparationFailed(snapshot, event)
 	case AgentTurnMutationReconciliationExhaustedEvent:
-		return reduceAgentTurnMutationReconciliationExhausted(snapshot, event)
+		return reducer.reduceAgentTurnMutationReconciliationExhausted(snapshot, event)
 	case WorkflowActionExhaustedEvent:
-		return reduceWorkflowActionExhausted(snapshot, event)
+		return reducer.reduceWorkflowActionExhausted(snapshot, event)
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
@@ -84,7 +253,7 @@ func deferForActiveTurn(snapshot Snapshot, metadata EventMetadata, kind EventKin
 	}}
 }
 
-func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaustedEvent) Decision {
+func (reducer Reducer) reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaustedEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -97,12 +266,9 @@ func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaus
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionDeferred, Reason: ReasonActiveTurn}
 	}
-	role := event.ResumeRole
-	if role == "" {
-		role = RoleDeveloper
-		if snapshot.State == StateReviewing || snapshot.State == StatePRReady {
-			role = RoleReviewer
-		}
+	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	next := cloneSnapshot(snapshot)
 	actions := make([]Action, 0, 2)
@@ -110,7 +276,7 @@ func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaus
 		next.ChangeProposal.ReadyForSHA = ""
 	}
 	next.State = StateNeedsHuman
-	next.ResumeRole = role
+	next.ResumeRole = stage.Role
 	next.Assignments.Status = AssignmentWaitingForHuman
 	next.Revision++
 	actions = append(actions,
@@ -123,7 +289,7 @@ func reduceWorkflowActionExhausted(snapshot Snapshot, event WorkflowActionExhaus
 	}
 }
 
-func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event AgentTurnMutationReconciliationExhaustedEvent) Decision {
+func (reducer Reducer) reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event AgentTurnMutationReconciliationExhaustedEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -133,11 +299,8 @@ func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event Age
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
-	expectedRole := RoleDeveloper
-	if snapshot.State == StateReviewing {
-		expectedRole = RoleReviewer
-	}
-	if event.Role != expectedRole {
+	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok || event.Role != stage.Role {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	next := cloneSnapshot(snapshot)
@@ -154,7 +317,7 @@ func reduceAgentTurnMutationReconciliationExhausted(snapshot Snapshot, event Age
 	}
 }
 
-func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparationFailedEvent) Decision {
+func (reducer Reducer) reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparationFailedEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -164,11 +327,8 @@ func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparat
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
-	expectedRole := RoleDeveloper
-	if snapshot.State == StateReviewing {
-		expectedRole = RoleReviewer
-	}
-	if event.Role != expectedRole {
+	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok || event.Role != stage.Role {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	next := cloneSnapshot(snapshot)
@@ -188,7 +348,7 @@ func reduceAgentTurnPreparationFailed(snapshot Snapshot, event AgentTurnPreparat
 	}
 }
 
-func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentConfigurationConflictEvent) Decision {
+func (reducer Reducer) reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentConfigurationConflictEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -198,11 +358,8 @@ func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentCo
 	if snapshot.ActiveTurn != nil {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonActiveTurn}
 	}
-	expectedRole := RoleDeveloper
-	if snapshot.State == StateReviewing {
-		expectedRole = RoleReviewer
-	}
-	if event.Role != expectedRole {
+	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok || event.Role != stage.Role {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	next := cloneSnapshot(snapshot)
@@ -219,7 +376,7 @@ func reduceAssignmentConfigurationConflict(snapshot Snapshot, event AssignmentCo
 	}
 }
 
-func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
+func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -235,15 +392,38 @@ func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
 	if event.AttemptNumber != snapshot.LastAttemptNumber+1 || (snapshot.CurrentAttempt != nil && event.AttemptID == snapshot.CurrentAttempt.ID) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
+	entry := reducer.definition.InitialEntry()
+	purpose := entry.Purpose
+	if snapshot.State != StateAbsent {
+		purpose = TurnPurposeReactivation
+		switch {
+		case snapshot.CurrentAttempt != nil:
+			entry.Stage = snapshot.CurrentAttempt.CurrentStage
+		case snapshot.ContinuationStage != "":
+			entry.Stage = snapshot.ContinuationStage
+		}
+	}
+	stage, ok := reducer.definition.Stage(entry.Stage)
+	if !ok || !reducer.definition.AcceptsPurpose(entry.Stage, purpose) {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+	}
+	if stage.State == StateReviewing && snapshot.ChangeProposal == nil {
+		entry = reducer.definition.InitialEntry()
+		purpose = entry.Purpose
+		stage, _ = reducer.definition.Stage(entry.Stage)
+	}
 	attempt := WorkflowAttempt{
 		ID: event.AttemptID, Number: event.AttemptNumber, StartedAt: event.ObservedAt, Lifecycle: AttemptActive,
-		ReviewBudget: AttemptBudget{Limit: 3}, InfrastructureRetryBudget: AttemptBudget{Limit: 1},
+		CurrentStage: entry.Stage, ReviewUsage: make(map[StageID]uint8),
+		ReviewBudget:              AttemptBudget{Limit: reducer.reviewLimit},
+		InfrastructureRetryBudget: AttemptBudget{Limit: reducer.infrastructureRetryLimit},
 	}
 	next := cloneSnapshot(snapshot)
 	next.WorkItem = event.WorkItem
 	next.CurrentAttempt = &attempt
 	next.LastAttemptNumber = event.AttemptNumber
 	next.ActiveTurn = nil
+	next.ContinuationStage = ""
 	next.Closure = nil
 	if next.ChangeProposal != nil {
 		next.ChangeProposal.ReadyForSHA = ""
@@ -260,35 +440,23 @@ func reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
 	}
 	next.Assignments = Assignments{Status: AssignmentActive, RuntimeState: RuntimeStateActive}
 	actions = append(actions, EnsureAssignmentsAction{Mode: assignmentMode})
-	role := snapshot.ResumeRole
-	if role == "" || (role == RoleReviewer && next.ChangeProposal == nil) {
-		role = RoleDeveloper
-	}
 	head := ""
 	if next.ChangeProposal != nil {
 		head = next.ChangeProposal.HeadSHA
 	}
 	next.ResumeRole = ""
-	if role == RoleReviewer {
-		next.State = StateReviewing
-	} else {
-		next.State = StateDeveloping
-	}
+	next.State = stage.State
 	next.Revision++
-	purpose := TurnPurposeInitialDevelopment
-	if snapshot.State != StateAbsent {
-		purpose = TurnPurposeReactivation
-	}
 	actions = append(actions,
 		CreateAttemptAction{Attempt: attempt},
 		ConsumeRunLabelAction{},
-		EnqueueTurnAction{Role: role, Purpose: purpose, ExpectedHeadSHA: head},
+		EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: purpose, ExpectedHeadSHA: head},
 		ReconcileLabelsAction{State: next.State},
 	)
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonTriggered, Actions: actions}
 }
 
-func reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
+func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
 	if event.ExistingReview != nil {
 		if event.ExistingReview.ID != event.Review.ID || *event.ExistingReview != *event.Review {
 			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonReviewIdentityConflict}
@@ -308,11 +476,16 @@ func reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
 	next.ActiveTurn = nil
 	next.ResumeRole = ""
 
+	if event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomeInfrastructureFailed {
+		if _, ok := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome); !ok {
+			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
+		}
+	}
 	switch event.Outcome {
 	case TurnOutcomeChangeProposalReady:
-		return reduceDeveloperSettled(snapshot, next, event)
+		return reducer.reduceDeveloperSettled(snapshot, next, event)
 	case TurnOutcomeChangesRequested, TurnOutcomeApproved:
-		return reduceReviewSettled(snapshot, next, event)
+		return reducer.reduceReviewSettled(snapshot, next, event)
 	case TurnOutcomeBlocked:
 		return reduceBlocked(next, event)
 	case TurnOutcomeInfrastructureFailed:
@@ -322,10 +495,7 @@ func reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
 	}
 }
 
-func reduceDeveloperSettled(snapshot, next Snapshot, event TurnSettledEvent) Decision {
-	if event.Turn.Role != RoleDeveloper {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
-	}
+func (reducer Reducer) reduceDeveloperSettled(snapshot, next Snapshot, event TurnSettledEvent) Decision {
 	if snapshot.ChangeProposal != nil && (event.ChangeProposal.ID != snapshot.ChangeProposal.ID || event.Turn.ChangeProposalID != snapshot.ChangeProposal.ID) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
 	}
@@ -335,17 +505,23 @@ func reduceDeveloperSettled(snapshot, next Snapshot, event TurnSettledEvent) Dec
 	proposal := *event.ChangeProposal
 	proposal.ReadyForSHA = ""
 	next.ChangeProposal = &proposal
-	next.State = StateReviewing
+	transition, _ := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome)
+	target, ok := reducer.definition.Stage(transition.NextStage)
+	if !ok {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+	}
+	next.CurrentAttempt.CurrentStage = target.ID
+	next.State = target.State
 	next.CurrentAttempt.InfrastructureRetryBudget.Used = 0
 	next.Revision++
-	intent := EnqueueTurnAction{Role: RoleReviewer, Purpose: TurnPurposeReview, ExpectedHeadSHA: proposal.HeadSHA}
+	intent := EnqueueTurnAction{Stage: target.ID, Role: target.Role, Purpose: transition.NextPurpose, ExpectedHeadSHA: proposal.HeadSHA}
 	actions := successorActions(event.Turn, event.PendingEvents, intent)
-	actions = append(actions, ReconcileLabelsAction{State: StateReviewing})
+	actions = append(actions, ReconcileLabelsAction{State: target.State})
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonChangeProposalReady, Actions: actions}
 }
 
-func reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decision {
-	if event.Turn.Role != RoleReviewer || snapshot.ChangeProposal == nil || event.Turn.ChangeProposalID != snapshot.ChangeProposal.ID || event.Review.ChangeProposalID != snapshot.ChangeProposal.ID || event.ChangeProposal.ID != snapshot.ChangeProposal.ID {
+func (reducer Reducer) reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decision {
+	if snapshot.ChangeProposal == nil || event.Turn.ChangeProposalID != snapshot.ChangeProposal.ID || event.Review.ChangeProposalID != snapshot.ChangeProposal.ID || event.ChangeProposal.ID != snapshot.ChangeProposal.ID {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
 	}
 	if event.Review.ActorID != event.AuthorizedReviewerActorID {
@@ -360,18 +536,30 @@ func reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decisi
 	staleHead := event.Review.HeadSHA != event.Turn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
 		snapshot.ChangeProposal.HeadSHA != event.Turn.ExpectedHeadSHA || pendingHeadReplaced
 	if staleHead {
-		next.State = StateReviewing
+		stage, _ := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+		next.State = stage.State
 		next.Revision++
-		intent := EnqueueTurnAction{Role: RoleReviewer, Purpose: TurnPurposeSynchronization, ExpectedHeadSHA: proposal.HeadSHA}
+		intent := EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: TurnPurposeSynchronization, ExpectedHeadSHA: proposal.HeadSHA}
 		actions := []Action{RecordReviewAction{Review: *event.Review}}
 		actions = append(actions, successorActions(event.Turn, event.PendingEvents, intent)...)
-		actions = append(actions, ReconcileLabelsAction{State: StateReviewing})
+		actions = append(actions, ReconcileLabelsAction{State: stage.State})
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: actions}
 	}
 
-	next.CurrentAttempt.ReviewBudget.Used++
+	sourceStage := snapshot.CurrentAttempt.CurrentStage
+	stage, _ := reducer.definition.Stage(sourceStage)
+	transition, _ := reducer.definition.Transition(sourceStage, event.Outcome)
+	if transition.ConsumesReviewCycle {
+		if next.CurrentAttempt.ReviewUsage == nil {
+			next.CurrentAttempt.ReviewUsage = make(map[StageID]uint8)
+		}
+		next.CurrentAttempt.ReviewUsage[sourceStage]++
+		next.CurrentAttempt.ReviewBudget.Used = next.CurrentAttempt.ReviewUsage[sourceStage]
+		next.CurrentAttempt.ReviewBudget.Limit = stage.ReviewLimit
+	}
 	if event.Outcome == TurnOutcomeApproved {
-		next.State = StatePRReady
+		next.State = transition.TerminalState
+		next.CurrentAttempt.CurrentStage = transition.ContinuationStage
 		next.ChangeProposal.ReadyForSHA = event.Review.HeadSHA
 		next.Revision++
 		actions := []Action{RecordReviewAction{Review: *event.Review, Accepted: true}, ReconcileLabelsAction{State: StatePRReady, ReadyForSHA: event.Review.HeadSHA}}
@@ -380,9 +568,14 @@ func reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decisi
 		}
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonApproved, Actions: actions}
 	}
-	if next.CurrentAttempt.ReviewBudget.Used >= next.CurrentAttempt.ReviewBudget.Limit {
+	target, ok := reducer.definition.Stage(transition.NextStage)
+	if !ok {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+	}
+	next.CurrentAttempt.CurrentStage = target.ID
+	if transition.ConsumesReviewCycle && next.CurrentAttempt.ReviewUsage[sourceStage] >= stage.ReviewLimit {
 		next.State = StateNeedsHuman
-		next.ResumeRole = RoleDeveloper
+		next.ResumeRole = target.Role
 		next.Assignments.Status = AssignmentWaitingForHuman
 		next.Revision++
 		actions := []Action{RecordReviewAction{Review: *event.Review, Accepted: true}, MarkHumanHandoffAction{Reason: ReasonReviewBudgetExhausted}, ReconcileLabelsAction{State: StateNeedsHuman}}
@@ -391,12 +584,12 @@ func reduceReviewSettled(snapshot, next Snapshot, event TurnSettledEvent) Decisi
 		}
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewBudgetExhausted, Actions: actions}
 	}
-	next.State = StateDeveloping
+	next.State = target.State
 	next.Revision++
-	intent := EnqueueTurnAction{Role: RoleDeveloper, Purpose: TurnPurposeRequestedChanges, ExpectedHeadSHA: proposal.HeadSHA}
+	intent := EnqueueTurnAction{Stage: target.ID, Role: target.Role, Purpose: transition.NextPurpose, ExpectedHeadSHA: proposal.HeadSHA}
 	actions := []Action{RecordReviewAction{Review: *event.Review, Accepted: true}}
 	actions = append(actions, successorActions(event.Turn, event.PendingEvents, intent)...)
-	actions = append(actions, ReconcileLabelsAction{State: StateDeveloping})
+	actions = append(actions, ReconcileLabelsAction{State: target.State})
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonChangesRequested, Actions: actions}
 }
 
@@ -414,7 +607,8 @@ func pendingRequiresReconciliation(pending PendingEventsObservation) bool {
 func reconcilePendingAction(sourceTurn TurnGuard, pending PendingEventsObservation, fallback EnqueueTurnAction) ReconcilePendingEventsAction {
 	return ReconcilePendingEventsAction{
 		SourceTurn: sourceTurn, Count: pending.Count, LatestObservedHeadSHA: pending.LatestObservedHeadSHA,
-		FallbackRole: fallback.Role, FallbackPurpose: fallback.Purpose, FallbackExpectedHead: fallback.ExpectedHeadSHA, RetryOfTurnID: fallback.RetryOfTurnID,
+		FallbackStage: fallback.Stage, FallbackRole: fallback.Role, FallbackPurpose: fallback.Purpose,
+		FallbackExpectedHead: fallback.ExpectedHeadSHA, RetryOfTurnID: fallback.RetryOfTurnID,
 	}
 }
 
@@ -437,7 +631,7 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 	if next.CurrentAttempt.InfrastructureRetryBudget.Used < next.CurrentAttempt.InfrastructureRetryBudget.Limit {
 		next.CurrentAttempt.InfrastructureRetryBudget.Used++
 		next.Revision++
-		intent := EnqueueTurnAction{Role: event.Turn.Role, Purpose: TurnPurposeRetry, ExpectedHeadSHA: event.Turn.ExpectedHeadSHA, RetryOfTurnID: event.Turn.TurnID}
+		intent := EnqueueTurnAction{Stage: event.Turn.Stage, Role: event.Turn.Role, Purpose: TurnPurposeRetry, ExpectedHeadSHA: event.Turn.ExpectedHeadSHA, RetryOfTurnID: event.Turn.TurnID}
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonInfrastructureRetry, Actions: successorActions(event.Turn, event.PendingEvents, intent)}
 	}
 	next.State = StateNeedsHuman
@@ -454,7 +648,7 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonInfrastructureRetriesExhausted, Actions: actions}
 }
 
-func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decision {
+func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -477,15 +671,19 @@ func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decisi
 	next.ChangeProposal.HeadSHA = event.HeadSHA
 	next.ChangeProposal.ReadyForSHA = ""
 	next.ActiveTurn = nil
-	if snapshot.State == StateDeveloping {
+	stage, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !stageExists {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+	}
+	if stage.State == StateDeveloping {
 		next.Revision++
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
 			ReconcileLabelsAction{State: StateDeveloping},
 		}}
 	}
-	if next.CurrentAttempt.ReviewBudget.Used >= next.CurrentAttempt.ReviewBudget.Limit {
+	if stage.ReviewLimit > 0 && next.CurrentAttempt.ReviewUsage[stage.ID] >= stage.ReviewLimit {
 		next.State = StateNeedsHuman
-		next.ResumeRole = RoleReviewer
+		next.ResumeRole = stage.Role
 		next.Assignments.Status = AssignmentWaitingForHuman
 		next.Revision++
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewBudgetExhausted, Actions: []Action{
@@ -493,11 +691,11 @@ func reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decisi
 			ReconcileLabelsAction{State: StateNeedsHuman},
 		}}
 	}
-	next.State = StateReviewing
+	next.State = stage.State
 	next.Revision++
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
-		EnqueueTurnAction{Role: RoleReviewer, Purpose: TurnPurposeSynchronization, ExpectedHeadSHA: event.HeadSHA},
-		ReconcileLabelsAction{State: StateReviewing},
+		EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: TurnPurposeSynchronization, ExpectedHeadSHA: event.HeadSHA},
+		ReconcileLabelsAction{State: stage.State},
 	}}
 }
 
@@ -527,7 +725,7 @@ func reduceChangeProposalObserved(snapshot Snapshot, event ChangeProposalObserve
 	return deferForActiveTurn(snapshot, event.EventMetadata, EventKindChangeProposalObserved)
 }
 
-func reduceIssueClosed(snapshot Snapshot, event IssueClosedEvent) Decision {
+func (reducer Reducer) reduceIssueClosed(snapshot Snapshot, event IssueClosedEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
@@ -536,15 +734,15 @@ func reduceIssueClosed(snapshot Snapshot, event IssueClosedEvent) Decision {
 	}
 	next := cloneSnapshot(snapshot)
 	next.State = StateClosing
+	if next.CurrentAttempt != nil {
+		next.ContinuationStage = next.CurrentAttempt.CurrentStage
+	}
 	next.Closure = &Closure{ID: event.ClosureID, RetainUntil: event.RetainUntil, RetentionToken: event.RetentionToken}
 	if next.ActiveTurn != nil {
 		next.ResumeRole = next.ActiveTurn.Role
-	} else {
-		switch snapshot.State {
-		case StateDeveloping:
-			next.ResumeRole = RoleDeveloper
-		case StateReviewing, StatePRReady:
-			next.ResumeRole = RoleReviewer
+	} else if next.ContinuationStage != "" {
+		if stage, ok := reducer.Stage(next.ContinuationStage); ok {
+			next.ResumeRole = stage.Role
 		}
 	}
 	if next.ChangeProposal != nil {
@@ -679,12 +877,12 @@ func reduceAssignmentsCollected(snapshot Snapshot, event AssignmentsCollectedEve
 }
 
 func turnMatches(turn ActiveTurn, guard TurnGuard) bool {
-	return turn.ID == guard.TurnID && turn.SessionID == guard.SessionID && turn.AttemptID == guard.AttemptID && turn.Role == guard.Role && turn.Epoch == guard.Epoch && turn.ControlRevision == guard.ControlRevision && turn.ChangeProposalID == guard.ChangeProposalID && turn.ExpectedHeadSHA == guard.ExpectedHeadSHA
+	return turn.ID == guard.TurnID && turn.SessionID == guard.SessionID && turn.AttemptID == guard.AttemptID && turn.Stage == guard.Stage && turn.Role == guard.Role && turn.Epoch == guard.Epoch && turn.ControlRevision == guard.ControlRevision && turn.ChangeProposalID == guard.ChangeProposalID && turn.ExpectedHeadSHA == guard.ExpectedHeadSHA
 }
 
 func guardFromTurn(turn ActiveTurn) TurnGuard {
 	return TurnGuard{
-		TurnID: turn.ID, SessionID: turn.SessionID, AttemptID: turn.AttemptID, Role: turn.Role,
+		TurnID: turn.ID, SessionID: turn.SessionID, AttemptID: turn.AttemptID, Stage: turn.Stage, Role: turn.Role,
 		Epoch: turn.Epoch, ControlRevision: turn.ControlRevision, ChangeProposalID: turn.ChangeProposalID, ExpectedHeadSHA: turn.ExpectedHeadSHA,
 	}
 }
@@ -693,6 +891,12 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	clone := snapshot
 	if snapshot.CurrentAttempt != nil {
 		attempt := *snapshot.CurrentAttempt
+		if snapshot.CurrentAttempt.ReviewUsage != nil {
+			attempt.ReviewUsage = make(map[StageID]uint8, len(snapshot.CurrentAttempt.ReviewUsage))
+			for stage, used := range snapshot.CurrentAttempt.ReviewUsage {
+				attempt.ReviewUsage[stage] = used
+			}
+		}
 		clone.CurrentAttempt = &attempt
 	}
 	if snapshot.ChangeProposal != nil {

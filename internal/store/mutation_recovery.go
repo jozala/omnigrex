@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -26,8 +27,9 @@ type AgentTurnMutationReconciliationContext struct {
 
 // AgentTurnRuntimeCleanupContext identifies the recovered Assignment whose Runtime Process is being stopped.
 type AgentTurnRuntimeCleanupContext struct {
-	AssignmentID string
-	Role         workflow.Role
+	AssignmentID     string
+	Role             workflow.Role
+	DiscardWorkspace bool
 }
 
 // AgentTurnRuntimeStopFailureAcknowledgement is the durable retry outcome of one stale-runtime stop attempt.
@@ -76,8 +78,8 @@ WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan
 		}
 		return AgentTurnRuntimeCleanupContext{}, fmt.Errorf("read Agent Turn runtime cleanup Assignment: %w", err)
 	}
-	if cleanup.Role != workflow.RoleDeveloper && cleanup.Role != workflow.RoleReviewer {
-		return AgentTurnRuntimeCleanupContext{}, ErrAgentTurnRecoveryFenceLost
+	if policy, ok := store.policies.Lookup(cleanup.Role); ok {
+		cleanup.DiscardWorkspace = policy.DiscardWorkspace
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentTurnRuntimeCleanupContext{}, fmt.Errorf("commit Agent Turn runtime cleanup context: %w", err)
@@ -153,22 +155,26 @@ FROM workflows WHERE id = $1`, job.WorkflowID).Scan(
 	); err != nil {
 		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("read mutation reconciliation Work Item: %w", err)
 	}
+	reviewerRoles := store.rolesUsingToolAuthority("submit_review", role.ReviewerAuthority)
 	if err := tx.QueryRow(ctx, `
-SELECT source.role, COALESCE(reviewer.github_app_actor_id, 0)
+SELECT source.role, COALESCE(source.github_app_actor_id, (
+	SELECT reviewer.github_app_actor_id
+	FROM agent_assignments AS reviewer
+	WHERE reviewer.workflow_id = source.workflow_id
+	  AND reviewer.role = ANY($3::text[])
+	  AND reviewer.status <> 'SUPERSEDED'
+	  AND reviewer.state_deleted_at IS NULL
+	  AND reviewer.github_app_actor_id IS NOT NULL
+	ORDER BY reviewer.generation DESC, reviewer.created_at DESC
+	LIMIT 1
+), 0)
 FROM agent_assignments AS source
-LEFT JOIN agent_assignments AS reviewer
-  ON reviewer.workflow_id = source.workflow_id
- AND reviewer.role = 'REVIEWER'
- AND reviewer.status <> 'SUPERSEDED'
- AND reviewer.state_deleted_at IS NULL
-WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(
+WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID, reviewerRoles).Scan(
 		&reconciliation.Role, &reconciliation.ReviewerActorID,
 	); err != nil {
 		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("read mutation reconciliation Role actors: %w", err)
 	}
-	if reconciliation.Role != workflow.RoleDeveloper && reconciliation.Role != workflow.RoleReviewer {
-		return AgentTurnMutationReconciliationContext{}, ErrAgentTurnRecoveryFenceLost
-	}
+	turn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentAssignmentID = job.AgentAssignmentID
 	reconciliation.Turn = turn.AgentTurn
 
@@ -313,43 +319,65 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("rehydrate mutation reconciliation Workflow: %w", err)
 	}
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+	var continuation string
+	if err := tx.QueryRow(ctx, `
+SELECT assignment.role, turn.recovery_continuation
+FROM agent_assignments AS assignment
+JOIN agent_turns AS turn ON turn.id = $3 AND turn.execution_epoch = $4
+WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID,
+		job.AgentTurnID, job.ExecutionEpoch).Scan(&role, &continuation); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}
 	observedAt := job.CreatedAt
 	if job.LeasedAt != nil {
 		observedAt = *job.LeasedAt
 	}
-	decision := workflow.Reduce(snapshot, workflow.AgentTurnMutationReconciliationExhaustedEvent{
-		EventMetadata: workflow.EventMetadata{
-			ID: job.ID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
-			ExpectedRevision: snapshot.Revision,
-		},
-		Role: role, Diagnostic: diagnostic,
-	})
-	if err := validateWorkflowDecision(snapshot, decision); err != nil ||
-		decision.Disposition != workflow.DispositionApplied ||
-		decision.Reason != workflow.ReasonAgentTurnMutationReconciliationExhausted {
+	workflowRevision := snapshot.Revision
+	nextContinuation := continuation
+	if continuation == recoveryContinuationPendingInfrastructure {
+		stage, stageKnown := store.reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+		definitionCompatible := store.reducer.DefinitionCompatible(snapshot) && stageKnown && stage.Role == role
+		decision := store.reducer.DefinitionIncompatible(snapshot)
+		nextContinuation = recoveryContinuationDefinitionHandoff
+		if definitionCompatible {
+			decision = store.reducer.Reduce(snapshot, workflow.AgentTurnMutationReconciliationExhaustedEvent{
+				EventMetadata: workflow.EventMetadata{
+					ID: job.ID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
+					ExpectedRevision: snapshot.Revision,
+				},
+				Role: role, Diagnostic: diagnostic,
+			})
+			nextContinuation = recoveryContinuationMutationHandoff
+		}
+		if err := validateWorkflowDecision(snapshot, decision); err != nil ||
+			decision.Disposition != workflow.DispositionApplied ||
+			definitionCompatible && decision.Reason != workflow.ReasonAgentTurnMutationReconciliationExhausted ||
+			!definitionCompatible && decision.Reason != workflow.ReasonWorkflowDefinitionIncompatible {
+			return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
+		}
+		if err := persistAppliedDecision(ctx, tx, "", job.WorkflowID, snapshot, decision, "agent-turn-mutation-reconciliation:"+job.ID); err != nil {
+			return AgentTurnMutationReconciliationAcknowledgement{}, err
+		}
+		workflowRevision = decision.Snapshot.Revision
+	} else if continuation != recoveryContinuationDefinitionHandoff {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}
-	if err := persistAppliedDecision(ctx, tx, "", job.WorkflowID, snapshot, decision, "agent-turn-mutation-reconciliation:"+job.ID); err != nil {
-		return AgentTurnMutationReconciliationAcknowledgement{}, err
-	}
-	continuation, err := tx.Exec(ctx, `
+	continuationResult, err := tx.Exec(ctx, `
 UPDATE agent_turns
-SET recovery_continuation = 'MUTATION_RECONCILIATION_HANDOFF_APPLIED'
+SET recovery_continuation = $3
 WHERE id = $1 AND execution_epoch = $2
-  AND recovery_continuation = 'PENDING_INFRASTRUCTURE_FAILURE'
-  AND recovery_settlement_id IS NULL`, job.AgentTurnID, job.ExecutionEpoch)
+  AND recovery_continuation = $4
+  AND recovery_settlement_id IS NULL`, job.AgentTurnID, job.ExecutionEpoch,
+		nextContinuation, continuation)
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("record mutation reconciliation Workflow continuation: %w", err)
 	}
-	if continuation.RowsAffected() != 1 {
+	if continuationResult.RowsAffected() != 1 {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}
 	jobResult, err := json.Marshal(map[string]any{
 		"escalated": true, "diagnostic": diagnostic,
-		"unresolved_mutation_count": candidates, "workflow_revision": decision.Snapshot.Revision,
+		"unresolved_mutation_count": candidates, "workflow_revision": workflowRevision,
 	})
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
@@ -357,7 +385,7 @@ WHERE id = $1 AND execution_epoch = $2
 	if err := completeRecoveryJobTx(ctx, tx, job, jobResult); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
-	_, err = settleAgentTurnRecoveryTx(ctx, tx, job)
+	_, err = settleAgentTurnRecoveryTx(ctx, tx, store.reducer, job)
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
@@ -366,7 +394,7 @@ WHERE id = $1 AND execution_epoch = $2
 	}
 	acknowledgement.Escalated = true
 	acknowledgement.Diagnostic = diagnostic
-	acknowledgement.WorkflowRevision = decision.Snapshot.Revision
+	acknowledgement.WorkflowRevision = workflowRevision
 	return acknowledgement, nil
 }
 
@@ -401,7 +429,7 @@ SELECT EXISTS (
 	if err := completeRecoveryJobTx(ctx, tx, job, json.RawMessage(`{"mutations_reconciled":true}`)); err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	if _, err := settleAgentTurnRecoveryTx(ctx, tx, job); err != nil {
+	if _, err := settleAgentTurnRecoveryTx(ctx, tx, store.reducer, job); err != nil {
 		return AgentTurnRecovery{}, err
 	}
 	recovery, err := readAgentTurnRecovery(ctx, tx, job.AgentTurnID, job.ExecutionEpoch)

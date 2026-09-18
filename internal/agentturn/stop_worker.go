@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
-	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 // StopWorkerStore is the durable recovery-job boundary used by StopWorker.
@@ -39,6 +39,7 @@ type StopWorkerConfig struct {
 	HeartbeatInterval    time.Duration
 	IdlePollInterval     time.Duration
 	CleanupRetryInterval time.Duration
+	Policies             role.PolicyCatalog
 	OnError              func(error)
 }
 
@@ -52,6 +53,7 @@ type StopWorker struct {
 	heartbeatInterval    time.Duration
 	idlePollInterval     time.Duration
 	cleanupRetryInterval time.Duration
+	policies             role.PolicyCatalog
 	onError              func(error)
 }
 
@@ -72,10 +74,13 @@ func NewStopWorker(workerStore StopWorkerStore, cleaner ExactRuntimeCleaner, wor
 	if !validStopWorkerDuration(config.IdlePollInterval) || !validStopWorkerDuration(config.CleanupRetryInterval) {
 		return nil, errors.New("stale Runtime Process stop Worker polling and retry timing is invalid")
 	}
+	if len(config.Policies.Roles()) == 0 {
+		config.Policies = role.BuiltinPolicyCatalog()
+	}
 	return &StopWorker{
 		store: workerStore, cleaner: cleaner, workspaces: workspaces, claimOwner: config.ClaimOwner,
 		leaseDuration: config.LeaseDuration, heartbeatInterval: config.HeartbeatInterval,
-		idlePollInterval: config.IdlePollInterval, cleanupRetryInterval: config.CleanupRetryInterval,
+		idlePollInterval: config.IdlePollInterval, cleanupRetryInterval: config.CleanupRetryInterval, policies: config.Policies,
 		onError: config.OnError,
 	}, nil
 }
@@ -153,9 +158,9 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
 	}
 
-	if cleanup.Role == workflow.RoleReviewer {
+	if cleanup.DiscardWorkspace {
 		if err := worker.workspaces.DiscardWorkspace(cleanup.AssignmentID); err != nil {
-			return fmt.Errorf("discard recovered Reviewer workspace: %w", err)
+			return fmt.Errorf("discard recovered Agent workspace: %w", err)
 		}
 	}
 

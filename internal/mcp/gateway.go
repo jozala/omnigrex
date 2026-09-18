@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -89,6 +90,7 @@ type Config struct {
 	MaxRequestBytes             int64
 	Now                         func() time.Time
 	Random                      io.Reader
+	Policies                    role.PolicyCatalog
 }
 
 type RepositoryScope struct {
@@ -211,6 +213,7 @@ type Gateway struct {
 	mutationFenceCheckInterval  time.Duration
 	mutationFinalizationTimeout time.Duration
 	mutationOperationTimeout    time.Duration
+	policies                    role.PolicyCatalog
 
 	mutex         sync.RWMutex
 	randomMutex   sync.Mutex
@@ -251,6 +254,12 @@ func New(config Config) (*Gateway, error) {
 	}
 	if config.Store == nil || config.Backend == nil {
 		return nil, fmt.Errorf("%w: Store and Backend are required", ErrInvalidConfiguration)
+	}
+	if len(config.Policies.Roles()) == 0 {
+		config.Policies = role.BuiltinPolicyCatalog()
+	}
+	if err := validatePolicyTools(config.Policies); err != nil {
+		return nil, err
 	}
 	if config.MaxRequestBytes < 0 {
 		return nil, fmt.Errorf("%w: request size limit", ErrInvalidConfiguration)
@@ -297,20 +306,25 @@ func New(config Config) (*Gateway, error) {
 		mutationFenceCheckInterval:  config.MutationFenceCheckInterval,
 		mutationFinalizationTimeout: config.MutationFinalizationTimeout,
 		mutationOperationTimeout:    config.MutationOperationTimeout,
+		policies:                    config.Policies,
 		registrations:               make(map[[sha256.Size]byte]*grant),
 		gates:                       make(map[string]*mutationGate),
 	}, nil
 }
 
 func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
-	if err := validateTokenScope(scope); err != nil {
+	policy, ok := gateway.policies.Lookup(scope.Role)
+	if !ok {
+		return Registration{}, fmt.Errorf("%w: token scope Role policy", ErrInvalidConfiguration)
+	}
+	if err := validateTokenScope(policy, scope); err != nil {
 		return Registration{}, err
 	}
 	now := gateway.now()
 	if !now.Before(scope.ExpiresAt) || !now.Before(scope.Lease.LeaseExpiresAt) {
 		return Registration{}, fmt.Errorf("%w: expired token scope", ErrInvalidConfiguration)
 	}
-	tools, err := toolsForScope(scope)
+	tools, err := toolsForScope(gateway.policies, scope)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -475,7 +489,7 @@ func (gateway *Gateway) retireGrant(registration *grant) {
 	})
 }
 
-func validateTokenScope(scope TokenScope) error {
+func validateTokenScope(policy role.Policy, scope TokenScope) error {
 	lease := scope.Lease
 	var profile struct {
 		Role workflow.Role `json:"role"`
@@ -490,18 +504,17 @@ func validateTokenScope(scope TokenScope) error {
 		lease.JobLease.ExecutionEpoch != lease.ExecutionEpoch || lease.OwnerID == "" || lease.OwnerToken == "" ||
 		scope.Repository.ID <= 0 || strings.TrimSpace(scope.Repository.Owner) == "" || strings.TrimSpace(scope.Repository.Name) == "" ||
 		scope.Issue.ID <= 0 || scope.Issue.Number <= 0 || scope.ExpiresAt.IsZero() ||
-		lease.LeaseExpiresAt.IsZero() || scope.ExpiresAt.After(lease.LeaseExpiresAt) ||
-		(scope.Role != workflow.RoleDeveloper && scope.Role != workflow.RoleReviewer) {
+		lease.LeaseExpiresAt.IsZero() || scope.ExpiresAt.After(lease.LeaseExpiresAt) || policy.Role != scope.Role {
 		return fmt.Errorf("%w: token scope", ErrInvalidConfiguration)
 	}
 	if scope.PullRequest != nil && (scope.PullRequest.ID <= 0 || scope.PullRequest.Number <= 0) {
 		return fmt.Errorf("%w: Pull Request scope", ErrInvalidConfiguration)
 	}
-	if scope.Role == workflow.RoleReviewer && scope.PullRequest == nil {
-		return fmt.Errorf("%w: Reviewer requires Pull Request scope", ErrInvalidConfiguration)
+	if policy.RequiresChangeProposal && scope.PullRequest == nil {
+		return fmt.Errorf("%w: Role requires Pull Request scope", ErrInvalidConfiguration)
 	}
-	if scope.Role == workflow.RoleReviewer && (lease.ChangeProposalID == "" || lease.ExpectedHeadSHA == "") {
-		return fmt.Errorf("%w: Reviewer Agent Turn has no Change Proposal", ErrInvalidConfiguration)
+	if policy.RequiresChangeProposal && (lease.ChangeProposalID == "" || lease.ExpectedHeadSHA == "") {
+		return fmt.Errorf("%w: Role Agent Turn has no Change Proposal", ErrInvalidConfiguration)
 	}
 	if !validBranchResourceName(scope.Branch) || !validBranchResourceName(scope.DefaultBranch) || strings.TrimSpace(scope.HeadSHA) == "" {
 		return fmt.Errorf("%w: repository revision scope", ErrInvalidConfiguration)
@@ -1151,7 +1164,7 @@ func (gateway *Gateway) listTools(response http.ResponseWriter, request *http.Re
 			return
 		}
 	}
-	tools, _ := toolsForScope(registration.scope)
+	tools, _ := toolsForScope(gateway.policies, registration.scope)
 	writeRPCResult(response, rpc.ID, map[string]any{"tools": tools})
 }
 

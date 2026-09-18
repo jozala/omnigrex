@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
-	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -24,6 +26,320 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
+
+func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) {
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	followup := workflow.StageID("implementation-followup")
+	definition, err := workflow.NewDefinition(role.BuiltinCatalog(), workflow.StageEntry{
+		Stage: workflow.StageImplementation, Purpose: workflow.TurnPurposeInitialDevelopment,
+	}, []workflow.StageDefinition{
+		{
+			ID: workflow.StageImplementation, Role: workflow.RoleDeveloper, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: followup,
+				NextPurpose: workflow.TurnPurposeRequestedChanges,
+			}},
+		},
+		{
+			ID: followup, Role: workflow.RoleDeveloper, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: workflow.StageImplementation,
+				NextPurpose: workflow.TurnPurposeInitialDevelopment,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reducer, err := workflow.NewReducer(definition, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.OpenWithReducer(ctx, postgres.databaseURL(false), passwordFile, reducer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	pool := openPool(t, postgres.databaseURL(true))
+	application := triggerPreparationWorkflow(t, database, ctx,
+		"60000000-0000-4000-8000-000000000091", "60000000-0000-4000-8000-000000000092")
+	preparation := preparationSpec("shared-profile", "openai/shared")
+	preparation.Developer.Binding.AgentProfileName = "alternate-developer"
+	preparation.Developer.ProfilePath = ".omnigrex/team/alternate-developer.md"
+	preparation.Developer.Profile.Config = agentProfileConfig("alternate-developer", workflow.RoleDeveloper,
+		"opencode-acp/1", "openai/shared", "", 40, "Perform development.", nil)
+	preparation.Stages = map[workflow.StageID]store.ParticipantPreparation{
+		workflow.StageImplementation: preparation.Developer,
+		followup:                     preparation.Developer,
+	}
+	first, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE agent_turns SET status = 'SUCCEEDED', active = FALSE, completed_at = clock_timestamp()
+WHERE id = $1`, first.Turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE jobs SET status = 'SUCCEEDED', completed_at = clock_timestamp()
+WHERE id = $1`, first.Job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET state_revision = 2 WHERE id = $1`, application.WorkflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = $2 WHERE id = $1`,
+		first.Turn.WorkflowAttemptID, followup); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"mode": workflow.AssignmentGenerationCurrent, "stage": followup,
+		"role": workflow.RoleDeveloper, "purpose": workflow.TurnPurposeRequestedChanges,
+		"expected_head_sha": "", "retry_of_turn_id": "", "revision": 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id
+)
+VALUES ('60000000-0000-4000-8000-000000000093', $1, $2, $3, 'AVAILABLE',
+        clock_timestamp(), 3, 'shared-profile-followup', $4, $5)`,
+		store.WorkflowActionQueue, store.PrepareAgentTurnJobKind, payload,
+		application.WorkflowID, first.Turn.WorkflowAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Participant.ID != first.Participant.ID || second.Session.ID != first.Session.ID || second.Turn.TurnNumber != 2 {
+		t.Fatalf("shared profile identities = first %#v, second %#v", first, second)
+	}
+	participants, err := database.ListAgentParticipants(ctx, application.WorkflowID)
+	if err != nil || len(participants) != 1 {
+		t.Fatalf("Participants = (%#v, %v), want one", participants, err)
+	}
+	assignments, err := database.ListStageAssignments(ctx, application.WorkflowID)
+	if err != nil || len(assignments) != 2 || assignments[0].AgentParticipantID != assignments[1].AgentParticipantID {
+		t.Fatalf("Stage Assignments = (%#v, %v), want two bindings to one Participant", assignments, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE stage_assignments SET role = 'REVIEWER' WHERE workflow_id = $1`, application.WorkflowID); err == nil {
+		t.Fatal("mutable Stage Assignment update succeeded")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET runtime_image_digest = 'sha256:drift' WHERE id = $1`, first.Participant.ID); err == nil {
+		t.Fatal("assigned Participant Runtime binding update succeeded")
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO agent_assignments (
+    id, workflow_id, role, generation, status, agent_profile_name,
+    runtime_profile_name, runtime_profile_version, runtime_profile_content_sha256,
+    runtime_image_digest, runtime_state_path
+)
+VALUES ('60000000-0000-4000-8000-000000000094', $1, 'REVIEWER', 2, 'ACTIVE',
+        'alternate-developer', 'opencode-acp', '1', $2, 'sha256:reviewer',
+        'assignment-60000000-0000-4000-8000-000000000094/runtime-state')`,
+		application.WorkflowID, strings.Repeat("d", 64)); err == nil {
+		t.Fatal("cross-Role Agent Profile sharing succeeded")
+	}
+}
+
+func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
+	const architect role.ID = "ARCHITECT"
+	const architecture workflow.StageID = "architecture"
+	const validation workflow.StageID = "validation"
+	policies, err := role.NewPolicyCatalog([]role.ID{architect}, []role.Policy{{
+		Role: architect, AgentProfile: role.AgentProfileIdentity{Name: "architect", Path: ".omnigrex/team/architect.md"},
+		MCPTools: []string{"get_issue", "request_review", "submit_review", "comment_on_issue", "report_blocked"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
+		ToolCredentialAuthorities: map[string]role.CredentialAuthority{"submit_review": role.ReviewerAuthority},
+		TrustedToolsRevision:      role.TurnRevisionTrustedTools, AllowHumanSessionControl: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewDefinition(policies, workflow.StageEntry{
+		Stage: architecture, Purpose: workflow.TurnPurposeInitialDevelopment,
+	}, []workflow.StageDefinition{
+		{
+			ID: architecture, Role: architect, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: validation, NextPurpose: workflow.TurnPurposeReview,
+			}},
+		},
+		{
+			ID: validation, Role: architect, State: workflow.StateReviewing, ReviewLimit: 1,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeReview, workflow.TurnPurposeRetry, workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeApproved, TerminalState: workflow.StatePRReady, ContinuationStage: validation, ConsumesReviewCycle: true,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reducer, err := workflow.NewReducer(definition, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.OpenWithReducerAndPolicies(ctx, postgres.databaseURL(false), passwordFile, reducer, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	pool := openPool(t, postgres.databaseURL(true))
+	claim := claimWorkflowDelivery(t, database, ctx, workflowDelivery("60000000-0000-4000-8000-000000000095"))
+	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
+			return reducer.Reduce(snapshot, workflow.TriggerEvent{
+				EventMetadata: workflow.EventMetadata{
+					ID: claim.DeliveryID, ObservedAt: time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC),
+					WorkItem: workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12}, ExpectedRevision: snapshot.Revision,
+				},
+				AttemptID: "60000000-0000-4000-8000-000000000096", AttemptNumber: 1,
+			})
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparation := preparationSpec("architect-profile", "openai/architect")
+	architectPreparation := preparation.Developer
+	architectPreparation.Binding.AgentProfileName = "architect"
+	architectPreparation.ProfilePath = ".omnigrex/team/architect.md"
+	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "opencode-acp/1", "openai/architect", "", 40, "Design the change.", nil)
+	preparation = store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{architecture: architectPreparation}}
+
+	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
+	if err != nil {
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
+	}
+	if prepared.Participant.Role != architect || prepared.Participant.AgentProfileName != "architect" || prepared.Turn.Stage != architecture {
+		t.Fatalf("custom Role preparation = %#v", prepared)
+	}
+	assignments, err := database.ListStageAssignments(ctx, application.WorkflowID)
+	if err != nil || len(assignments) != 1 || assignments[0].Stage != architecture || assignments[0].Role != architect {
+		t.Fatalf("custom Stage Assignments = (%#v, %v)", assignments, err)
+	}
+	job := claimAgentTurnJob(t, database, ctx, prepared.Turn, 20*time.Second)
+	lease, err := database.AcquireAgentTurn(ctx, job, prepared.Turn.ControlRevision, "architect-runtime", 20*time.Second, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BindAgentSessionACP(ctx, lease, "architect-acp-session", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "architect-submit-review", ToolName: "submit_review", Request: json.RawMessage(`{"event":"APPROVE"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"review_id":1,"actor_id":9101}`)); err != nil {
+		t.Fatalf("custom Role submit_review completion error = %v", err)
+	}
+	var actorID int64
+	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_assignments WHERE id = $1`, prepared.Participant.ID).Scan(&actorID); err != nil || actorID != 9101 {
+		t.Fatalf("custom Role reviewer actor = (%d, %v)", actorID, err)
+	}
+	unknown, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "architect-unknown-comment", ToolName: "comment_on_issue",
+		Request: json.RawMessage(`{"operation_id":"architect-unknown-comment","body":"Update"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, unknown.ID); err != nil {
+		t.Fatal(err)
+	}
+	unknownReview, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "architect-unknown-review", ToolName: "submit_review",
+		Request: json.RawMessage(`{"operation_id":"architect-unknown-review","event":"APPROVE"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, unknownReview.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
+	database, err = store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	handoffDelivery := workflowDelivery("60000000-0000-4000-8000-000000000097")
+	handoffClaim := claimWorkflowDelivery(t, database, ctx, handoffDelivery)
+	handoff, err := database.CompleteWebhookTransition(ctx, handoffClaim.DeliveryID, handoffClaim.ClaimToken,
+		normalizedPayload(handoffClaim.DeliveryID, "edited"), workflowLocator(), func(workflow.Snapshot) workflow.Decision {
+			t.Fatal("transition callback ran for a removed custom Role")
+			return workflow.Decision{}
+		})
+	if err != nil || handoff.State != workflow.StateNeedsHuman {
+		t.Fatalf("retired Role definition handoff = (%#v, %v)", handoff, err)
+	}
+	stopLease, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "architect-stop", 5*time.Second)
+	if err != nil || stopLease == nil {
+		t.Fatalf("ClaimJobKind() custom Role stop = (%#v, %v)", stopLease, err)
+	}
+	reconcileLease, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.ReconcileAgentTurnMutationsJobKind, "architect-reconcile", 5*time.Second)
+	if err != nil || reconcileLease == nil {
+		t.Fatalf("ClaimJobKind() custom Role reconciliation = (%#v, %v)", reconcileLease, err)
+	}
+	cleanup, err := database.GetAgentTurnRuntimeCleanupContext(ctx, *stopLease)
+	if err != nil || cleanup.Role != architect || cleanup.AssignmentID != prepared.Participant.ID || cleanup.DiscardWorkspace {
+		t.Fatalf("custom Role runtime cleanup = (%#v, %v)", cleanup, err)
+	}
+	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopLease); err != nil {
+		t.Fatal(err)
+	}
+	reconciliation, err := database.GetAgentTurnMutationReconciliationContext(ctx, *reconcileLease)
+	if err != nil || reconciliation.Role != architect {
+		t.Fatalf("retired Role mutation reconciliation = (%#v, %v)", reconciliation, err)
+	}
+	if _, err := database.ReconcileRecoveredMutation(ctx, *reconcileLease, unknownReview.ID, store.RecoveredMutationOutcome{
+		State: store.MutationSucceeded, Result: json.RawMessage(`{"review_id":2,"actor_id":9101}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET max_attempts = attempt_count WHERE id = $1`, reconcileLease.ID); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgement, err := database.AcknowledgeAgentTurnMutationReconciliationFailure(ctx, *reconcileLease, errors.New("artifact lookup unavailable"), 0)
+	if err != nil || !acknowledgement.Escalated {
+		t.Fatalf("retired Role reconciliation exhaustion = (%#v, %v)", acknowledgement, err)
+	}
+	recovery, err := database.CompleteAgentTurnRecovery(ctx, prepared.Turn.ID, prepared.Turn.ExecutionEpoch)
+	if err != nil || recovery.RecoverySettledAt == nil {
+		t.Fatalf("retired Role recovery settlement = (%#v, %v)", recovery, err)
+	}
+}
 
 func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.T) {
 	databases, _ := openPhaseFiveStores(t, 1)
@@ -68,30 +384,19 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	if err != nil || completedPreparation.Status != store.JobSucceeded {
 		t.Fatalf("preparation Job = (%#v, %v), want SUCCEEDED", completedPreparation, err)
 	}
-	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
-	if err != nil || len(assignments) != 2 {
-		t.Fatalf("ListAgentAssignments() = (%#v, %v), want both Roles", assignments, err)
+	participants, err := database.ListAgentParticipants(ctx, application.WorkflowID)
+	if err != nil || len(participants) != 1 || participants[0].ID != prepared.Participant.ID {
+		t.Fatalf("ListAgentParticipants() = (%#v, %v), want only the prepared Stage Participant", participants, err)
 	}
-	var reviewer store.AgentAssignment
-	for _, assignment := range assignments {
-		if assignment.Role == workflow.RoleReviewer {
-			reviewer = assignment
-		}
-	}
-	if reviewer.ID == "" || reviewer.RuntimeStatePath == prepared.Assignment.RuntimeStatePath {
-		t.Fatalf("Assignment state paths are not isolated: %#v", assignments)
-	}
-	if reviewer.RuntimeProfileContentSHA256 != spec.Reviewer.Binding.RuntimeProfileContentSHA256 {
-		t.Fatalf("Reviewer Assignment Runtime Profile hash = %q, want %q", reviewer.RuntimeProfileContentSHA256, spec.Reviewer.Binding.RuntimeProfileContentSHA256)
+	stageAssignments, err := database.ListStageAssignments(ctx, application.WorkflowID)
+	if err != nil || len(stageAssignments) != 1 || stageAssignments[0].Stage != workflow.StageImplementation ||
+		stageAssignments[0].AgentParticipantID != prepared.Participant.ID {
+		t.Fatalf("ListStageAssignments() = (%#v, %v), want immutable implementation binding", stageAssignments, err)
 	}
 	storedSession, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil || storedSession.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 {
 		t.Fatalf("GetAgentSession() = (%#v, %v), want persisted Runtime Profile hash", storedSession, err)
 	}
-	if _, err := database.GetAgentSessionForAssignment(ctx, reviewer.ID); !errors.Is(err, store.ErrAgentSessionNotFound) {
-		t.Fatalf("Reviewer Session before its first turn error = %v, want ErrAgentSessionNotFound", err)
-	}
-
 	runJob := claimAgentTurnJob(t, database, ctx, prepared.Turn, time.Second)
 	turnLease, err := database.AcquireAgentTurn(ctx, runJob, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
@@ -129,6 +434,9 @@ func TestPrepareAgentTurnSelectsReviewerProfileFromFencedJobIntent(t *testing.T)
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING' WHERE id = $1`, application.WorkflowID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, application.WorkflowID); err != nil {
+		t.Fatal(err)
+	}
 	proposalID := "63000000-0000-4000-8000-000000000010"
 	if _, err := pool.Exec(ctx, `
 INSERT INTO change_proposals (
@@ -140,7 +448,7 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"mode": workflow.AssignmentGenerationNew, "role": workflow.RoleReviewer,
+		"mode": workflow.AssignmentGenerationNew, "stage": workflow.StageReview, "role": workflow.RoleReviewer,
 		"purpose": workflow.TurnPurposeReview, "expected_head_sha": "review-head",
 		"retry_of_turn_id": "", "revision": 1,
 	})
@@ -203,6 +511,9 @@ func TestPrepareAgentTurnBlocksReviewerWhileDeveloperRecoveryIsUnsettled(t *test
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING', state_revision = 2 WHERE id = $1`, application.WorkflowID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, application.WorkflowID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO change_proposals (
     id, workflow_id, repository_id, repository_owner, repository_name,
@@ -248,7 +559,6 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
 	for name, invalidate := range map[string]func(*store.AgentTurnPreparationSpec){
 		"Developer binding":            func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeImageDigest = "" },
-		"Reviewer binding":             func(spec *store.AgentTurnPreparationSpec) { spec.Reviewer.Binding.AgentProfileName = "" },
 		"missing Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeProfileContentSHA256 = "" },
 		"short Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) {
 			spec.Developer.Binding.RuntimeProfileContentSHA256 = "abcd"
@@ -365,6 +675,9 @@ VALUES ($1, 9123, 'owner', 'repo', $2, $2, $3)`, workflowID, sequence, status); 
 			if _, err := pool.Exec(ctx, `
 INSERT INTO workflow_attempts (id, workflow_id, attempt_number, status)
 VALUES ($1, $2, 1, 'ACTIVE')`, attemptID, workflowID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = $2 WHERE id = $1`, attemptID, stageForRole(test.role)); err != nil {
 				t.Fatal(err)
 			}
 			if test.role == workflow.RoleReviewer {
@@ -569,6 +882,88 @@ SELECT human_prompt_token IS NULL AND human_prompt_leased_at IS NULL
    AND human_prompt_lease_expires_at IS NULL AND human_prompt_heartbeat_at IS NULL
 FROM agent_sessions WHERE id = $1`, human.ID).Scan(&promptLeaseCleared); err != nil || !promptLeaseCleared {
 		t.Fatalf("human prompt lease after successful prompt = (%t, %v), want cleared", promptLeaseCleared, err)
+	}
+}
+
+func TestHumanControlIsUniquePerWorkflow(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	human := prepareHumanControlledSession(t, database, ctx,
+		"61000000-0000-4000-8000-000000000093", "62000000-0000-4000-8000-000000000093")
+	const participantID = "63000000-0000-4000-8000-000000000093"
+	const sessionID = "64000000-0000-4000-8000-000000000093"
+	if _, err := pool.Exec(ctx, `
+INSERT INTO agent_assignments (
+    id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
+    runtime_profile_version, runtime_image_digest, runtime_state_path
+)
+SELECT $2, workflow_id, 'REVIEWER', 'ACTIVE', 'reviewer', 'runtime', '1',
+       'sha256:test', $3
+FROM agent_sessions WHERE id = $1`, human.ID, participantID, "assignment-"+participantID+"/runtime-state"); err != nil {
+		t.Fatalf("insert second Agent Participant: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO agent_sessions (
+    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_image_digest, runtime_state_path, status
+)
+VALUES ($1, $2, 1, 'reviewer-acp', 'runtime', '1', 'sha256:test', $3, 'ACTIVE')`,
+		sessionID, participantID, "assignment-"+participantID+"/runtime-state"); err != nil {
+		t.Fatalf("insert second Agent Session: %v", err)
+	}
+
+	if _, err := database.TransferAgentSessionControl(ctx, sessionID, 1, store.SessionControlHuman, "human-2"); !errors.Is(err, store.ErrHumanSessionControlActive) {
+		t.Fatalf("second human control transfer error = %v, want ErrHumanSessionControlActive", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET control_owner = 'HUMAN' WHERE id = $1`, sessionID); err == nil {
+		t.Fatal("database allowed a second human-controlled Session in one Workflow")
+	}
+}
+
+func TestHumanControlHonorsRolePolicy(t *testing.T) {
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builtin := role.BuiltinPolicyCatalog()
+	developer, _ := builtin.Lookup(role.Developer)
+	reviewer, _ := builtin.Lookup(role.Reviewer)
+	developer.AllowHumanSessionControl = false
+	policies, err := role.NewPolicyCatalog(definition.Roles(), []role.Policy{developer, reviewer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.OpenWithReducerAndPolicies(ctx, postgres.databaseURL(false), passwordFile, reducer, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	triggerPreparationWorkflow(t, database, ctx,
+		"61000000-0000-4000-8000-000000000094", "62000000-0000-4000-8000-000000000094")
+	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "policy-profile", "openai/policy")
+	lease := acquireAndBindTurn(t, database, ctx, prepared, "policy-acp")
+	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
+	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.TransferAgentSessionControl(ctx, active.ID, active.ControlRevision, store.SessionControlHuman, "human"); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
+		t.Fatalf("human control with denied Role policy error = %v", err)
 	}
 }
 
@@ -861,9 +1256,6 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 	retainedLease := acquireAndBindTurn(t, database, ctx, retained, "developer-acp")
 	settleAcquiredTurn(t, database, ctx, retainedLease, store.AgentTurnSucceeded)
 
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET status = 'SUPERSEDED' WHERE workflow_id = $1`, application.WorkflowID); err != nil {
-		t.Fatal(err)
-	}
 	setWorkflowRevision(t, pool, application.WorkflowID, 4)
 	insertPreparationJob(t, pool, application.WorkflowID, first.Turn.WorkflowAttemptID, 4,
 		workflow.AssignmentGenerationNew, workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, "", "")
@@ -873,8 +1265,8 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 		t.Fatalf("new-generation preparation = %#v", newGeneration)
 	}
 	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
-	if err != nil || len(assignments) != 4 {
-		t.Fatalf("all Assignment generations = (%#v, %v), want four records", assignments, err)
+	if err != nil || len(assignments) != 2 {
+		t.Fatalf("all Participant generations = (%#v, %v), want two lazy records", assignments, err)
 	}
 }
 
@@ -1118,7 +1510,6 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	})
 	worker, err := agentturn.NewWorker(database,
 		&integrationCredentialProvider{credential: "developer-installation-token"},
-		&integrationCredentialProvider{credential: "reviewer-installation-token"},
 		preparer,
 		agentturn.WorkerConfig{
 			ClaimOwner: "repeated-conflict-worker", LeaseDuration: 5 * time.Second,
@@ -1362,8 +1753,12 @@ FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID).Scan(&wa
 		t.Fatalf("ListAgentAssignments() = (%#v, %v), want original pair", assignments, err)
 	}
 	for _, assignment := range assignments {
-		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != store.AgentAssignmentActive {
-			t.Errorf("reactivated Assignment = %#v, want original active identity", assignment)
+		wantStatus := store.AgentAssignmentWaitingForHuman
+		if assignment.Role == workflow.RoleDeveloper {
+			wantStatus = store.AgentAssignmentActive
+		}
+		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != wantStatus {
+			t.Errorf("reactivated Participant = %#v, want only selected Stage Participant active", assignment)
 		}
 	}
 	var correctlyReactivated, turns int
@@ -1375,8 +1770,8 @@ SELECT count(*) FILTER (
 FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID, retriggered.ID).Scan(&correctlyReactivated, &turns); err != nil {
 		t.Fatal(err)
 	}
-	if correctlyReactivated != 2 || turns != 1 {
-		t.Errorf("retrigger result = %d Assignments reactivated by new preparation and %d Turns, want 2 and 1", correctlyReactivated, turns)
+	if correctlyReactivated != 1 || turns != 1 {
+		t.Errorf("retrigger result = %d Participants reactivated by new preparation and %d Turns, want 1 and 1", correctlyReactivated, turns)
 	}
 	if _, err := database.PrepareAgentTurn(ctx, retriggered, preparationSpec("retriggered-profile", "openai/retriggered")); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
 		t.Fatalf("duplicate PrepareAgentTurn() error = %v, want ErrAgentTurnPreparationFenceLost", err)
@@ -1438,8 +1833,12 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 		t.Fatalf("ListAgentAssignments() = (%#v, %v), want original pair", assignments, err)
 	}
 	for _, assignment := range assignments {
-		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != store.AgentAssignmentActive {
-			t.Errorf("reactivated Assignment = %#v, want original active identity", assignment)
+		wantStatus := store.AgentAssignmentWaitingForHuman
+		if assignment.Role == workflow.RoleDeveloper {
+			wantStatus = store.AgentAssignmentActive
+		}
+		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != wantStatus {
+			t.Errorf("reactivated Participant = %#v, want only selected Stage Participant active", assignment)
 		}
 	}
 	var correctlyReactivated int
@@ -1449,8 +1848,8 @@ WHERE workflow_id = $1 AND status = 'ACTIVE' AND reactivated_by_preparation_job_
 		application.WorkflowID, retriggered.ID).Scan(&correctlyReactivated); err != nil {
 		t.Fatal(err)
 	}
-	if correctlyReactivated != 2 {
-		t.Errorf("Assignments reactivated by new preparation = %d, want 2", correctlyReactivated)
+	if correctlyReactivated != 1 {
+		t.Errorf("Participants reactivated by new preparation = %d, want 1", correctlyReactivated)
 	}
 }
 
@@ -1574,85 +1973,6 @@ WHERE workflow.id = $1`, application.WorkflowID, second.WorkflowAttemptID, secon
 	}
 }
 
-func TestPreparationWorkerDurablyHandsOffMissingReviewerInstallation(t *testing.T) {
-	databases, pool := openPhaseFiveStores(t, 1)
-	database := databases[0]
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000023", "62000000-0000-4000-8000-000000000023")
-	developerCredentials := &integrationCredentialProvider{credential: "developer-installation-token-secret"}
-	reviewerCredentials := &integrationCredentialProvider{
-		credential: "reviewer-installation-token-secret",
-		err: &githubapi.NotInstalledError{
-			Owner: "acme", Repository: "widgets", Cause: errors.New("reviewer-installation-token-secret"),
-		},
-	}
-	preparer := &integrationTurnPreparer{}
-	worker, err := agentturn.NewWorker(database, developerCredentials, reviewerCredentials, preparer, agentturn.WorkerConfig{
-		ClaimOwner: "preparation-worker", LeaseDuration: 5 * time.Second,
-		HeartbeatInterval: time.Second, IdlePollInterval: time.Millisecond, RetryDelay: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	processed, err := worker.ProcessNext(ctx)
-	metadata := githubapi.ExtractSafeErrorMetadata(err)
-	var notInstalled *githubapi.NotInstalledError
-	if !processed || err == nil || !metadata.Permanent || errors.As(err, &notInstalled) {
-		t.Fatalf("ProcessNext() = (%t, %v), metadata %#v, raw NotInstalled reachable %t; want safely classified missing Reviewer installation",
-			processed, err, metadata, notInstalled != nil)
-	}
-	if developerCredentials.calls != 1 || reviewerCredentials.calls != 1 || preparer.called {
-		t.Fatalf("preparation dependencies = Developer calls %d, Reviewer calls %d, Preparer called %t",
-			developerCredentials.calls, reviewerCredentials.calls, preparer.called)
-	}
-	var workflowStatus, desiredAssignmentStatus, workflowReason, attemptReason, preparationStatus, preparationError string
-	if err := pool.QueryRow(ctx, `
-SELECT workflow.status, workflow.desired_assignment_status, workflow.human_handoff_reason,
-       attempt.human_handoff_reason, preparation.status, preparation.last_error
-FROM workflows AS workflow
-JOIN workflow_attempts AS attempt ON attempt.id = $2
-JOIN jobs AS preparation ON preparation.workflow_id = workflow.id AND preparation.kind = 'PREPARE_AGENT_TURN'
-WHERE workflow.id = $1`, application.WorkflowID, "62000000-0000-4000-8000-000000000023").Scan(
-		&workflowStatus, &desiredAssignmentStatus, &workflowReason, &attemptReason, &preparationStatus, &preparationError,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if workflowStatus != string(workflow.StateNeedsHuman) || desiredAssignmentStatus != string(workflow.AssignmentWaitingForHuman) ||
-		workflowReason != string(workflow.ReasonAgentTurnPreparationFailed) || attemptReason != string(workflow.ReasonAgentTurnPreparationFailed) ||
-		preparationStatus != string(store.JobFailed) {
-		t.Errorf("missing Reviewer handoff = Workflow %s desired %s reasons %s/%s preparation %s",
-			workflowStatus, desiredAssignmentStatus, workflowReason, attemptReason, preparationStatus)
-	}
-	if strings.Contains(preparationError, "installation-token-secret") || strings.Contains(err.Error(), "installation-token-secret") {
-		t.Fatalf("missing Reviewer installation exposed credential: returned %v, durable %q", err, preparationError)
-	}
-	var credentialPersisted bool
-	if err := pool.QueryRow(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM jobs
-    WHERE workflow_id = $1
-      AND (payload::text LIKE '%' || $2 || '%'
-        OR payload::text LIKE '%' || $3 || '%'
-        OR COALESCE(last_error, '') LIKE '%' || $2 || '%'
-        OR COALESCE(last_error, '') LIKE '%' || $3 || '%')
-)`, application.WorkflowID, developerCredentials.credential, reviewerCredentials.credential).Scan(&credentialPersisted); err != nil {
-		t.Fatal(err)
-	}
-	if credentialPersisted {
-		t.Fatal("Developer or Reviewer installation credential was persisted")
-	}
-	var turns int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turns WHERE workflow_id = $1`, application.WorkflowID).Scan(&turns); err != nil {
-		t.Fatal(err)
-	}
-	if turns != 0 {
-		t.Errorf("missing Reviewer installation created %d Agent Turns", turns)
-	}
-}
-
 func TestInitialPreparationFailureRetriggersWithNewAssignments(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
@@ -1686,8 +2006,8 @@ GROUP BY workflow.id`, application.WorkflowID).Scan(&assignmentCount, &workflowS
 		t.Fatalf("retriggered preparation = %#v, want first-generation Developer reactivation", prepared)
 	}
 	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
-	if err != nil || len(assignments) != 2 {
-		t.Fatalf("retriggered Assignments = (%#v, %v), want Developer and Reviewer", assignments, err)
+	if err != nil || len(assignments) != 1 {
+		t.Fatalf("retriggered Participants = (%#v, %v), want only Developer", assignments, err)
 	}
 }
 
@@ -1732,14 +2052,16 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 	reviewerHash := sha256.Sum256([]byte(commitSHA + "-reviewer"))
 	spec := store.AgentTurnPreparationSpec{
 		Developer: store.RolePreparation{
-			Binding: bindings[workflow.RoleDeveloper],
+			ProfilePath: ".omnigrex/team/developer.md",
+			Binding:     bindings[workflow.RoleDeveloper],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA, ContentSHA256: developerHash[:],
 				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", developerModel, "", 40, "Perform development.", nil),
 			},
 		},
 		Reviewer: store.RolePreparation{
-			Binding: bindings[workflow.RoleReviewer],
+			ProfilePath: ".omnigrex/team/reviewer.md",
+			Binding:     bindings[workflow.RoleReviewer],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA + "-reviewer", ContentSHA256: reviewerHash[:],
 				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "opencode-acp/1", "anthropic/reviewer", "", 40, "Perform review.", nil),
@@ -1861,7 +2183,7 @@ func insertPreparationJob(t *testing.T, pool *pgxpool.Pool, workflowID, attemptI
 	t.Helper()
 	jobID := fmt.Sprintf("64000000-0000-4000-8000-%012d", revision)
 	payload, err := json.Marshal(map[string]any{
-		"mode": mode, "role": role, "purpose": purpose, "expected_head_sha": expectedHeadSHA,
+		"mode": mode, "stage": stageForRole(role), "role": role, "purpose": purpose, "expected_head_sha": expectedHeadSHA,
 		"retry_of_turn_id": retryOfTurnID, "revision": revision,
 	})
 	if err != nil {
@@ -1877,6 +2199,13 @@ VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 3, $5, $6, $7)`,
 		fmt.Sprintf("test-preparation:%s:%d", workflowID, revision), workflowID, attemptID); err != nil {
 		t.Fatalf("insert preparation Job: %v", err)
 	}
+}
+
+func stageForRole(role workflow.Role) workflow.StageID {
+	if role == workflow.RoleReviewer {
+		return workflow.StageReview
+	}
+	return workflow.StageImplementation
 }
 
 func setWorkflowRevision(t *testing.T, pool *pgxpool.Pool, workflowID string, revision int64) {

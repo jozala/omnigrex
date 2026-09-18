@@ -17,17 +17,33 @@ type Source interface {
 }
 
 type Loader struct {
-	source Source
+	source    Source
+	catalog   Catalog
+	selection Selection
 }
 
 func NewLoader(source Source) *Loader {
-	return &Loader{source: source}
+	return &Loader{source: source, catalog: BuiltinCatalog(), selection: BuiltinSelection()}
+}
+
+func NewConfiguredLoader(source Source, catalog Catalog, selection Selection) (*Loader, error) {
+	if len(catalog.entries) == 0 || len(selection.roles) == 0 {
+		return nil, ErrInvalidSelection
+	}
+	for _, roleID := range selection.roles {
+		name, ok := selection.Profile(roleID)
+		identity, exists := catalog.Identity(name)
+		if !ok || !exists || identity.Role != roleID {
+			return nil, ErrInvalidSelection
+		}
+	}
+	return &Loader{source: source, catalog: catalog, selection: selection}, nil
 }
 
 type Snapshot struct {
 	commitSHA string
-	developer Profile
-	reviewer  Profile
+	profiles  map[Name]Profile
+	byRole    map[Role]Name
 }
 
 func (loader *Loader) Load(ctx context.Context, credential, owner, repository string) (Snapshot, error) {
@@ -42,46 +58,60 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 		return Snapshot{}, ErrInvalidCommitSHA
 	}
 
-	developer, err := loader.loadProfile(ctx, credential, owner, repository, Developer, commitSHA)
-	if err != nil {
-		return Snapshot{}, err
+	snapshot := Snapshot{commitSHA: commitSHA, profiles: make(map[Name]Profile, len(loader.selection.roles)), byRole: make(map[Role]Name, len(loader.selection.roles))}
+	for _, roleID := range loader.selection.roles {
+		name, _ := loader.selection.Profile(roleID)
+		profile, err := loader.loadProfile(ctx, credential, owner, repository, name, commitSHA)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		snapshot.profiles[name] = profile
+		snapshot.byRole[roleID] = name
 	}
-	reviewer, err := loader.loadProfile(ctx, credential, owner, repository, Reviewer, commitSHA)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	return Snapshot{commitSHA: commitSHA, developer: developer, reviewer: reviewer}, nil
+	return snapshot, nil
 }
 
 func (loader *Loader) loadProfile(ctx context.Context, credential, owner, repository string, name Name, commitSHA string) (Profile, error) {
-	identity, err := identityFor(name)
-	if err != nil {
-		return Profile{}, err
+	identity, ok := loader.catalog.Identity(name)
+	if !ok {
+		return Profile{}, fmt.Errorf("%w: %q", ErrUnknownProfile, name)
 	}
-	content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, identity.path, commitSHA)
+	content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, identity.Path, commitSHA)
 	if err != nil {
 		return Profile{}, fmt.Errorf("fetch %s Agent Profile: %w", name, err)
 	}
-	profile, err := Parse(name, content)
+	policy, ok := loader.catalog.policy(name)
+	if !ok || policy.Role != identity.Role {
+		return Profile{}, fmt.Errorf("%w: missing Role policy for %q", ErrInvalidProfile, name)
+	}
+	profile, err := parse(identity, policy, content)
 	if err != nil {
 		return Profile{}, fmt.Errorf("parse %s Agent Profile: %w", name, err)
 	}
 	return profile, nil
 }
 
-func (snapshot Snapshot) CommitSHA() string  { return snapshot.commitSHA }
-func (snapshot Snapshot) Developer() Profile { return snapshot.developer }
-func (snapshot Snapshot) Reviewer() Profile  { return snapshot.reviewer }
+func (snapshot Snapshot) CommitSHA() string { return snapshot.commitSHA }
+func (snapshot Snapshot) Developer() Profile {
+	profile, _ := snapshot.ForRole(RoleDeveloper)
+	return profile
+}
+func (snapshot Snapshot) Reviewer() Profile {
+	profile, _ := snapshot.ForRole(RoleReviewer)
+	return profile
+}
 
 func (snapshot Snapshot) Profile(name Name) (Profile, bool) {
-	switch name {
-	case Developer:
-		return snapshot.developer, true
-	case Reviewer:
-		return snapshot.reviewer, true
-	default:
+	profile, ok := snapshot.profiles[name]
+	return profile, ok
+}
+
+func (snapshot Snapshot) ForRole(roleID Role) (Profile, bool) {
+	name, ok := snapshot.byRole[roleID]
+	if !ok {
 		return Profile{}, false
 	}
+	return snapshot.Profile(name)
 }
 
 func validObjectID(value string) bool {

@@ -13,6 +13,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -62,10 +63,30 @@ type preparationStore struct {
 }
 
 func (database *preparationStore) GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error) {
-	if database.bindings.Mode == "" {
-		return store.AgentTurnPreparationRuntimeBindings{Mode: workflow.AssignmentGenerationNew}, nil
+	bindings := database.bindings
+	if bindings.Mode == "" {
+		bindings.Mode = workflow.AssignmentGenerationNew
 	}
-	return database.bindings, nil
+	if bindings.Role == "" {
+		bindings.Role = database.selected
+		if bindings.Role == "" {
+			bindings.Role = workflow.RoleDeveloper
+		}
+	}
+	if bindings.Stage == "" {
+		bindings.Stage = workflow.StageImplementation
+		if bindings.Role == workflow.RoleReviewer {
+			bindings.Stage = workflow.StageReview
+		}
+	}
+	if bindings.Participant == nil {
+		if bindings.Role == workflow.RoleDeveloper {
+			bindings.Participant = bindings.Developer
+		} else if bindings.Role == workflow.RoleReviewer {
+			bindings.Participant = bindings.Reviewer
+		}
+	}
+	return bindings, nil
 }
 
 func (database *preparationStore) PrepareAgentTurn(_ context.Context, _ store.JobLease, spec store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error) {
@@ -73,13 +94,21 @@ func (database *preparationStore) PrepareAgentTurn(_ context.Context, _ store.Jo
 	if database.err != nil {
 		return store.AgentTurnPreparationCommit{}, database.err
 	}
-	selected := spec.Developer
-	if database.selected == workflow.RoleReviewer {
-		selected = spec.Reviewer
+	selectedRole := database.selected
+	if selectedRole == "" {
+		selectedRole = workflow.RoleDeveloper
 	}
+	stage := database.bindings.Stage
+	if stage == "" {
+		stage = workflow.StageImplementation
+	}
+	if database.bindings.Stage == "" && selectedRole == workflow.RoleReviewer {
+		stage = workflow.StageReview
+	}
+	selected := spec.Stages[stage]
 	return store.AgentTurnPreparationCommit{Assignment: store.AgentAssignment{
 		AssignmentRuntimeBinding: selected.Binding,
-		Role:                     database.selected,
+		Role:                     selectedRole,
 	}}, nil
 }
 
@@ -153,9 +182,9 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 		}
 	}
 	spec := database.calls[0]
-	assertRolePreparation(t, spec.Developer, wantBinding("developer"), testCommitSHA, developerContent)
 	assertRolePreparation(t, spec.Reviewer, wantBinding("reviewer"), testCommitSHA, reviewerContent)
-	if strings.Contains(string(spec.Developer.Profile.Config), "installation-secret") || strings.Contains(string(spec.Reviewer.Profile.Config), "installation-secret") {
+	assertRolePreparation(t, spec.Stages[workflow.StageReview], wantBinding("reviewer"), testCommitSHA, reviewerContent)
+	if spec.Developer.Binding.AgentProfileName != "" || len(spec.Stages) != 1 || strings.Contains(string(spec.Reviewer.Profile.Config), "installation-secret") {
 		t.Fatal("durable Agent Profile snapshots contain the installation credential")
 	}
 	if result.Commit.Assignment.Role != workflow.RoleReviewer || result.Commit.Assignment.AssignmentRuntimeBinding != wantBinding("reviewer") {
@@ -194,6 +223,51 @@ func TestPrepareReturnsRoleSelectedByStore(t *testing.T) {
 				t.Fatalf("selected runtime image = %q, want exact %q", result.RuntimeProfile.Contract().Image, testImage)
 			}
 		})
+	}
+}
+
+func TestPrepareSupportsPolicyDefinedRole(t *testing.T) {
+	const architect role.ID = "ARCHITECT"
+	const architecture workflow.StageID = "architecture"
+	policies, err := role.NewPolicyCatalog([]role.ID{architect}, []role.Policy{{
+		Role: architect, AgentProfile: role.AgentProfileIdentity{Name: "architect", Path: ".omnigrex/team/architect.md"},
+		MCPTools: []string{"get_issue"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
+		TrustedToolsRevision: role.TurnRevisionTrustedTools,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentprofile.NewCatalogFromPolicies(policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := agentprofile.NewSelectionFromPolicies(catalog, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &profileSource{commitSHA: testCommitSHA, contents: map[string][]byte{
+		".omnigrex/team/architect.md": agentProfileContent("openai/architect", "", 40, "Design the change.\n"),
+	}}
+	loader, err := agentprofile.NewConfiguredLoader(source, catalog, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := runtimeprofile.NewRegistry(runtimeProfile(t, testImage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := &preparationStore{selected: architect, bindings: store.AgentTurnPreparationRuntimeBindings{
+		Mode: workflow.AssignmentGenerationNew, Stage: architecture, Role: architect,
+	}}
+
+	result, err := agentturn.NewPreparer(loader, registry, database).Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	prepared, ok := database.calls[0].Stages[architecture]
+	if !ok || prepared.Binding.AgentProfileName != "architect" || database.calls[0].Developer.Binding.AgentProfileName != "" ||
+		database.calls[0].Reviewer.Binding.AgentProfileName != "" || result.Commit.Assignment.Role != architect {
+		t.Fatalf("custom Role preparation = %#v, result %#v", database.calls[0], result)
 	}
 }
 
@@ -259,7 +333,7 @@ func TestPrepareRejectsMissingAndUnknownRuntimeBeforeStore(t *testing.T) {
 			loader: profileLoaderFunc(func(context.Context, string, string, string) (agentprofile.Snapshot, error) {
 				return agentprofile.Snapshot{}, nil
 			}),
-			want: agentturn.ErrInvalidRuntimeProfileReference,
+			want: agentprofile.ErrUnknownProfile,
 		},
 		{
 			name: "unknown runtime",
@@ -341,20 +415,16 @@ func TestPrepareRefreshesMutableProfileSnapshotsWithoutChangingBindings(t *testi
 		t.Fatalf("PrepareAgentTurn() calls = %d, want two", len(database.calls))
 	}
 
-	first, second := database.calls[0], database.calls[1]
-	for role, preparations := range map[string][2]store.RolePreparation{
-		"Developer": {first.Developer, second.Developer},
-		"Reviewer":  {first.Reviewer, second.Reviewer},
-	} {
-		if preparations[0].Binding != preparations[1].Binding {
-			t.Errorf("%s binding changed from %#v to %#v", role, preparations[0].Binding, preparations[1].Binding)
-		}
-		if reflect.DeepEqual(preparations[0].Profile, preparations[1].Profile) {
-			t.Errorf("%s mutable snapshot did not change", role)
-		}
-		if preparations[0].Profile.CommitSHA != testCommitSHA || preparations[1].Profile.CommitSHA != source.commitSHA {
-			t.Errorf("%s commits = (%q, %q)", role, preparations[0].Profile.CommitSHA, preparations[1].Profile.CommitSHA)
-		}
+	first := database.calls[0].Stages[workflow.StageImplementation]
+	second := database.calls[1].Stages[workflow.StageImplementation]
+	if first.Binding != second.Binding {
+		t.Errorf("Developer binding changed from %#v to %#v", first.Binding, second.Binding)
+	}
+	if reflect.DeepEqual(first.Profile, second.Profile) {
+		t.Error("Developer mutable snapshot did not change")
+	}
+	if first.Profile.CommitSHA != testCommitSHA || second.Profile.CommitSHA != source.commitSHA {
+		t.Errorf("Developer commits = (%q, %q)", first.Profile.CommitSHA, second.Profile.CommitSHA)
 	}
 }
 
@@ -387,7 +457,7 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 	if retained.Commit.Assignment.RuntimeImageDigest != oldImage || retained.RuntimeProfile.ContentSHA256() != oldProfile.ContentSHA256() {
 		t.Fatalf("retained binding migrated: Assignment %#v, profile %s", retained.Commit.Assignment.AssignmentRuntimeBinding, retained.RuntimeProfile.ContentSHA256())
 	}
-	if retainedStore.calls[0].Developer.Binding != oldDeveloper || retainedStore.calls[0].Reviewer.Binding != oldReviewer {
+	if retainedStore.calls[0].Developer.Binding != oldDeveloper || retainedStore.calls[0].Stages[workflow.StageImplementation].Binding != oldDeveloper || retainedStore.calls[0].Reviewer.Binding.AgentProfileName != "" {
 		t.Fatalf("retained Store bindings = %#v", retainedStore.calls[0])
 	}
 
@@ -478,8 +548,9 @@ func TestPrepareClassifiesAssignmentConfigurationConflict(t *testing.T) {
 		t.Fatalf("Prepare() error = %v, want agentturn.ErrAssignmentConfigurationConflict", err)
 	}
 	var conflict *agentturn.AssignmentConfigurationConflictError
-	if !errors.As(err, &conflict) || conflict.Preparation.Developer.Binding.AgentProfileName != "developer" || conflict.Preparation.Reviewer.Binding.AgentProfileName != "reviewer" {
-		t.Fatalf("Prepare() conflict = %#v, want both credential-free Role preparations", conflict)
+	if !errors.As(err, &conflict) || conflict.Preparation.Developer.Binding.AgentProfileName != "developer" ||
+		conflict.Preparation.Stages[workflow.StageImplementation].Binding.AgentProfileName != "developer" || conflict.Preparation.Reviewer.Binding.AgentProfileName != "" {
+		t.Fatalf("Prepare() conflict = %#v, want the credential-free current Stage preparation", conflict)
 	}
 	if !reflect.DeepEqual(result, agentturn.Result{}) {
 		t.Fatalf("Prepare() result on conflict = %#v, want zero durable values", result)
@@ -558,6 +629,13 @@ func mutateRequest(request agentturn.Request, mutate func(*agentturn.Request)) a
 }
 
 func clonePreparationSpec(spec store.AgentTurnPreparationSpec) store.AgentTurnPreparationSpec {
+	stages := make(map[workflow.StageID]store.ParticipantPreparation, len(spec.Stages))
+	for stage, preparation := range spec.Stages {
+		preparation.Profile.ContentSHA256 = append([]byte(nil), preparation.Profile.ContentSHA256...)
+		preparation.Profile.Config = append(json.RawMessage(nil), preparation.Profile.Config...)
+		stages[stage] = preparation
+	}
+	spec.Stages = stages
 	spec.Developer.Profile.ContentSHA256 = append([]byte(nil), spec.Developer.Profile.ContentSHA256...)
 	spec.Developer.Profile.Config = append(json.RawMessage(nil), spec.Developer.Profile.Config...)
 	spec.Reviewer.Profile.ContentSHA256 = append([]byte(nil), spec.Reviewer.Profile.ContentSHA256...)

@@ -92,8 +92,8 @@ FOR EACH ROW EXECUTE FUNCTION reject_attempt_backfill()`); err != nil {
 	if err := retryPool.QueryRow(ctx, `SELECT max(version), count(*) FROM schema_migrations`).Scan(&latestVersion, &migrationCount); err != nil {
 		t.Fatalf("read migration history after retry: %v", err)
 	}
-	if latestVersion != 17 || migrationCount != 17 {
-		t.Errorf("migration history after retry = max %d, count %d; want max 17, count 17", latestVersion, migrationCount)
+	if latestVersion != 21 || migrationCount != 21 {
+		t.Errorf("migration history after retry = max %d, count %d; want max 21, count 21", latestVersion, migrationCount)
 	}
 	if err := retryPool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000001'`).Scan(&attemptLimit); err != nil {
 		t.Fatalf("read delivery after retry: %v", err)
@@ -196,8 +196,8 @@ func TestRunSerializesConcurrentCallsAndReleasesLock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("read migration history: %v", err)
 	}
-	if migrationCount != 17 {
-		t.Errorf("migration history count = %d, want 17", migrationCount)
+	if migrationCount != 21 {
+		t.Errorf("migration history count = %d, want 21", migrationCount)
 	}
 
 	observerPool := openPool(t, postgres.databaseURL(true))

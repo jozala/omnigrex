@@ -112,6 +112,7 @@ func TestOutcomeReconcilerRejectsDeveloperPullRequestMismatchAndDirtyTree(t *tes
 
 func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	request.ReviewerRepositoryCredential = "reviewer-repository-secret"
 	review := outcomeReview(outcomeHead, 701)
 	existing := &workflow.ReviewIdentity{ID: 801, NodeID: "PRR_node", ChangeProposalID: 901, ActorID: 701, HeadSHA: outcomeHead}
 	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)}, existing: existing}
@@ -126,7 +127,7 @@ func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *t
 		observation.AuthorizedReviewerActorID != 701 {
 		t.Fatalf("Reconcile() observation = %#v", observation)
 	}
-	if storeAPI.reviewRepositoryID != 41 || storeAPI.reviewID != 801 || github.listCredential != outcomeCredential {
+	if storeAPI.reviewRepositoryID != 41 || storeAPI.reviewID != 801 || github.listCredential != request.ReviewerRepositoryCredential {
 		t.Errorf("review corroboration scope = store(%d,%d), GitHub credential %q", storeAPI.reviewRepositoryID, storeAPI.reviewID, github.listCredential)
 	}
 }
@@ -385,10 +386,18 @@ func TestOutcomeReconcilerNeverLeaksRepositoryCredential(t *testing.T) {
 	}
 }
 
-func TestOutcomeReconcilerRejectsRoleSpecificTerminalIntent(t *testing.T) {
+func TestOutcomeReconcilerDispatchesTerminalIntentByEvidenceKind(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
-	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}}, &outcomeGitHub{}).Reconcile(context.Background(), request)
-	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "Reviewer")
+	observation, err := newOutcomeReconciler(t,
+		&outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+		&outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)},
+	).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {
+		t.Fatalf("Reconcile() observation = %#v", observation)
+	}
 }
 
 type outcomeStore struct {
@@ -481,7 +490,7 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
 	return agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptResponse: &response,
-		RepositoryCredential: outcomeCredential, Paths: paths,
+		RepositoryCredential: outcomeCredential, ReviewerRepositoryCredential: outcomeCredential, Paths: paths,
 	}
 }
 

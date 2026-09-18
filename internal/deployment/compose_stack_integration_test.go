@@ -31,8 +31,7 @@ func TestComposeFullStack(t *testing.T) {
 	secretDirectory := t.TempDir()
 	databaseSecret := writeTestSecret(t, secretDirectory, "database-password", []byte("compose-integration-secret\n"))
 	webhookSecret := writeTestSecret(t, secretDirectory, "webhook-secret", []byte("compose-webhook-secret\n"))
-	developerProviderCredentials := writeTestSecret(t, secretDirectory, "developer-provider-credentials.json", []byte(`{"provider":"compose-developer"}`))
-	reviewerProviderCredentials := writeTestSecret(t, secretDirectory, "reviewer-provider-credentials.json", []byte(`{"provider":"compose-reviewer"}`))
+	providerCredentials := writeTestSecret(t, secretDirectory, "provider-credentials.json", []byte(`{"provider":"compose"}`))
 	developerPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate Developer GitHub App test key: %v", err)
@@ -55,11 +54,10 @@ func TestComposeFullStack(t *testing.T) {
 	fixture := composeFixture{
 		root: repositoryRoot(t),
 		environment: composeEnvironment(databaseSecret, dockerGID, strconv.Itoa(os.Getgid()), httpPort, map[string]string{
-			"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":   developerPrivateKeyFile,
-			"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":    reviewerPrivateKeyFile,
-			"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":          webhookSecret,
-			"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE": developerProviderCredentials,
-			"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":  reviewerProviderCredentials,
+			"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": developerPrivateKeyFile,
+			"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  reviewerPrivateKeyFile,
+			"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        webhookSecret,
+			"OMNIGREX_PROVIDER_CREDENTIALS_FILE":         providerCredentials,
 		}),
 	}
 	t.Cleanup(func() { fixture.captureLogsAndClean(t) })

@@ -33,7 +33,7 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 	}
 }
 
-func validEvent(event Event, metadata EventMetadata) bool {
+func validEvent(definition Definition, event Event, metadata EventMetadata) bool {
 	if metadata.ID == "" || metadata.ObservedAt.IsZero() || !validWorkItem(metadata.WorkItem) {
 		return false
 	}
@@ -41,7 +41,7 @@ func validEvent(event Event, metadata EventMetadata) bool {
 	case TriggerEvent:
 		return event.AttemptID != "" && event.AttemptNumber > 0
 	case TurnSettledEvent:
-		if !validTurnGuard(event.Turn) || !validPendingObservation(event.PendingEvents) {
+		if !validTurnGuard(definition, event.Turn) || !validPendingObservation(event.PendingEvents) {
 			return false
 		}
 		switch event.Outcome {
@@ -63,35 +63,35 @@ func validEvent(event Event, metadata EventMetadata) bool {
 	case IssueClosedEvent:
 		return event.ClosureID != "" && event.RetentionToken != "" && event.RetainUntil.After(metadata.ObservedAt)
 	case ClosureSettledEvent:
-		return event.ClosureID != "" && (event.Turn == nil || validTurnGuard(*event.Turn))
+		return event.ClosureID != "" && (event.Turn == nil || validTurnGuard(definition, *event.Turn))
 	case IssueReopenedEvent:
 		return true
 	case AssignmentsCollectedEvent:
 		return event.RetentionToken != "" && !event.RetainUntil.IsZero() && !event.CollectedAt.IsZero()
 	case AssignmentConfigurationConflictEvent:
-		return validRole(event.Role)
+		return definition.ContainsRole(event.Role)
 	case AgentTurnPreparationFailedEvent:
-		return validRole(event.Role) && event.Diagnostic != ""
+		return definition.ContainsRole(event.Role) && event.Diagnostic != ""
 	case AgentTurnMutationReconciliationExhaustedEvent:
-		return validRole(event.Role) && event.Diagnostic != ""
+		return definition.ContainsRole(event.Role) && event.Diagnostic != ""
 	case WorkflowActionExhaustedEvent:
-		return (event.ResumeRole == "" || validRole(event.ResumeRole)) && event.Diagnostic != ""
+		return (event.ResumeRole == "" || definition.ContainsRole(event.ResumeRole)) && event.Diagnostic != ""
 	default:
 		return false
 	}
 }
 
-func validSnapshot(snapshot Snapshot) bool {
+func validSnapshot(definition Definition, infrastructureRetryLimit uint8, snapshot Snapshot) bool {
 	if !validState(snapshot.State) {
 		return false
 	}
 	if snapshot.State == StateAbsent {
 		return snapshot == (Snapshot{State: StateAbsent})
 	}
-	if !validWorkItem(snapshot.WorkItem) || !validAssignments(snapshot) || !validAttempt(snapshot) || !validStateShape(snapshot) {
+	if !validWorkItem(snapshot.WorkItem) || !validAssignments(snapshot) || !validAttempt(definition, infrastructureRetryLimit, snapshot) || !validStateShape(definition, snapshot) {
 		return false
 	}
-	if snapshot.ResumeRole != "" && !validRole(snapshot.ResumeRole) {
+	if snapshot.ResumeRole != "" && !definition.ContainsRole(snapshot.ResumeRole) {
 		return false
 	}
 	if snapshot.ChangeProposal != nil && snapshot.State != StatePRReady && snapshot.ChangeProposal.ReadyForSHA != "" {
@@ -126,7 +126,7 @@ func validAssignments(snapshot Snapshot) bool {
 	}
 }
 
-func validAttempt(snapshot Snapshot) bool {
+func validAttempt(definition Definition, infrastructureRetryLimit uint8, snapshot Snapshot) bool {
 	required := snapshot.State == StateDeveloping || snapshot.State == StateReviewing || snapshot.State == StatePRReady || snapshot.State == StateNeedsHuman
 	if required && snapshot.CurrentAttempt == nil {
 		return false
@@ -138,24 +138,35 @@ func validAttempt(snapshot Snapshot) bool {
 		return snapshot.LastAttemptNumber > 0
 	}
 	attempt := snapshot.CurrentAttempt
-	if attempt.ID == "" || attempt.Number == 0 || attempt.StartedAt.IsZero() || attempt.Lifecycle != AttemptActive || attempt.ReviewBudget.Limit != 3 || attempt.ReviewBudget.Used > attempt.ReviewBudget.Limit || attempt.InfrastructureRetryBudget.Limit != 1 || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
+	stage, stageExists := definition.Stage(attempt.CurrentStage)
+	if attempt.ID == "" || attempt.Number == 0 || attempt.StartedAt.IsZero() || attempt.Lifecycle != AttemptActive || !stageExists ||
+		attempt.InfrastructureRetryBudget.Limit != infrastructureRetryLimit || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
 		return false
 	}
-	return attempt.Number == snapshot.LastAttemptNumber && (snapshot.State != StateReviewing || attempt.ReviewBudget.Used < attempt.ReviewBudget.Limit)
+	for stageID, used := range attempt.ReviewUsage {
+		configured, ok := definition.Stage(stageID)
+		if !ok || configured.ReviewLimit == 0 || used > configured.ReviewLimit {
+			return false
+		}
+	}
+	return attempt.Number == snapshot.LastAttemptNumber &&
+		(snapshot.State != StateReviewing || stage.ReviewLimit == 0 || attempt.ReviewUsage[attempt.CurrentStage] < stage.ReviewLimit)
 }
 
-func validStateShape(snapshot Snapshot) bool {
+func validStateShape(definition Definition, snapshot Snapshot) bool {
 	switch snapshot.State {
 	case StateDormant, StateClosed:
 		return snapshot.CurrentAttempt == nil && snapshot.ActiveTurn == nil && snapshot.Closure == nil
 	case StateDeveloping:
-		return snapshot.Closure == nil && validOptionalActiveTurn(snapshot, RoleDeveloper)
+		return snapshot.Closure == nil && validActiveStageState(definition, snapshot) && validOptionalActiveTurn(definition, snapshot)
 	case StateReviewing:
-		return snapshot.Closure == nil && validChangeProposal(snapshot.ChangeProposal) && validOptionalActiveTurn(snapshot, RoleReviewer)
+		return snapshot.Closure == nil && validChangeProposal(snapshot.ChangeProposal) && validActiveStageState(definition, snapshot) && validOptionalActiveTurn(definition, snapshot)
 	case StatePRReady:
-		return snapshot.Closure == nil && snapshot.ActiveTurn == nil && validChangeProposal(snapshot.ChangeProposal) && snapshot.ChangeProposal.ReadyForSHA == snapshot.ChangeProposal.HeadSHA
+		_, stageExists := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil && validChangeProposal(snapshot.ChangeProposal) && snapshot.ChangeProposal.ReadyForSHA == snapshot.ChangeProposal.HeadSHA
 	case StateNeedsHuman:
-		return snapshot.Closure == nil && snapshot.ActiveTurn == nil && validRole(snapshot.ResumeRole)
+		_, stageExists := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil
 	case StateClosing:
 		return snapshot.Closure != nil && snapshot.Closure.ID != "" && snapshot.Closure.RetentionToken != "" && !snapshot.Closure.RetainUntil.IsZero() && validClosingTurn(snapshot)
 	default:
@@ -163,12 +174,21 @@ func validStateShape(snapshot Snapshot) bool {
 	}
 }
 
-func validOptionalActiveTurn(snapshot Snapshot, role Role) bool {
+func validActiveStageState(definition Definition, snapshot Snapshot) bool {
+	stage, ok := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	return ok && stage.State == snapshot.State
+}
+
+func validOptionalActiveTurn(definition Definition, snapshot Snapshot) bool {
 	if snapshot.ActiveTurn == nil {
 		return true
 	}
+	stage, ok := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok {
+		return false
+	}
 	turn := snapshot.ActiveTurn
-	if turn.ID == "" || turn.SessionID == "" || turn.AttemptID != snapshot.CurrentAttempt.ID || turn.Role != role || turn.Epoch == 0 || turn.ControlRevision == 0 {
+	if turn.ID == "" || turn.SessionID == "" || turn.AttemptID != snapshot.CurrentAttempt.ID || turn.Stage != stage.ID || turn.Role != stage.Role || turn.Epoch == 0 || turn.ControlRevision == 0 {
 		return false
 	}
 	if snapshot.ChangeProposal == nil {
@@ -182,7 +202,7 @@ func validClosingTurn(snapshot Snapshot) bool {
 		return true
 	}
 	turn := snapshot.ActiveTurn
-	return snapshot.CurrentAttempt != nil && turn.ID != "" && turn.SessionID != "" && turn.AttemptID == snapshot.CurrentAttempt.ID && validRole(turn.Role) && turn.Epoch > 0 && turn.ControlRevision > 0
+	return snapshot.CurrentAttempt != nil && turn.ID != "" && turn.SessionID != "" && turn.AttemptID == snapshot.CurrentAttempt.ID && turn.Stage == snapshot.CurrentAttempt.CurrentStage && turn.Epoch > 0 && turn.ControlRevision > 0
 }
 
 func legalInState(state State, kind EventKind) bool {
@@ -222,10 +242,6 @@ func validWorkItem(workItem WorkItem) bool {
 	return workItem.RepositoryID > 0 && workItem.IssueID > 0 && workItem.IssueNumber > 0
 }
 
-func validRole(role Role) bool {
-	return role == RoleDeveloper || role == RoleReviewer
-}
-
 func validState(state State) bool {
 	switch state {
 	case StateAbsent, StateDormant, StateDeveloping, StateReviewing, StatePRReady, StateNeedsHuman, StateClosing, StateClosed:
@@ -235,8 +251,9 @@ func validState(state State) bool {
 	}
 }
 
-func validTurnGuard(turn TurnGuard) bool {
-	return turn.TurnID != "" && turn.SessionID != "" && turn.AttemptID != "" && validRole(turn.Role) && turn.Epoch > 0 && turn.ControlRevision > 0
+func validTurnGuard(definition Definition, turn TurnGuard) bool {
+	_, ok := definition.Stage(turn.Stage)
+	return ok && definition.ContainsRole(turn.Role) && turn.TurnID != "" && turn.SessionID != "" && turn.AttemptID != "" && turn.Epoch > 0 && turn.ControlRevision > 0
 }
 
 func validChangeProposal(proposal *ChangeProposal) bool {

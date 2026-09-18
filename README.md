@@ -37,12 +37,11 @@ cp .env.example .env
 install -m 0700 -d secrets
 openssl rand -base64 32 > secrets/database-password
 openssl rand -hex 32 > secrets/github-webhook-secret
-cp /secure/path/developer-opencode-auth.json secrets/developer-provider-credentials.json
-cp /secure/path/reviewer-opencode-auth.json secrets/reviewer-provider-credentials.json
+cp /secure/path/opencode-auth.json secrets/provider-credentials.json
 chmod 0640 secrets/*
 ```
 
-Each provider credential file must contain the nonempty OpenCode authentication JSON object for that Role; an empty file or `{}` is rejected.
+The provider credential file must contain the nonempty deployment-wide OpenCode authentication bundle; an empty file or `{}` is rejected.
 
 Place the downloaded Developer/Orchestrator and Reviewer GitHub App RSA private keys at `secrets/github-developer-private-key.pem` and `secrets/github-reviewer-private-key.pem` with mode `0640`.
 Set both numeric App IDs in `.env`.

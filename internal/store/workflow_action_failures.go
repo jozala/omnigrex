@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	rolepkg "github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -67,7 +68,7 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 	return nil
 }
 
-func applyWorkflowActionExhaustionTx(ctx context.Context, tx pgx.Tx, job Job, resumeRole workflow.Role, diagnostic string, observedAt time.Time) (workflow.Decision, error) {
+func applyWorkflowActionExhaustionTx(ctx context.Context, tx pgx.Tx, reducer workflow.Reducer, job Job, resumeRole workflow.Role, diagnostic string, observedAt time.Time) (workflow.Decision, error) {
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
 	if err != nil {
 		return workflow.Decision{}, fmt.Errorf("rehydrate exhausted Workflow action: %w", err)
@@ -76,7 +77,7 @@ func applyWorkflowActionExhaustionTx(ctx context.Context, tx pgx.Tx, job Job, re
 		snapshot.State != workflow.StatePRReady && snapshot.State != workflow.StateNeedsHuman {
 		return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonWorkflowActionExhausted}, nil
 	}
-	decision := workflow.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
+	decision := reducer.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
 		EventMetadata: workflow.EventMetadata{
 			ID: job.ID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
 			ExpectedRevision: snapshot.Revision,
@@ -271,7 +272,7 @@ FOR UPDATE`, leased.ID, payload.SourceJobID, leased.WorkflowID).Scan(&sourceKind
 	if err != nil || source.Status != JobFailed || source.Kind != sourceKind {
 		return nil, ErrWorkflowDecisionInvalid
 	}
-	decision, err := applyWorkflowActionExhaustionTx(ctx, tx, source, resumeRole, diagnostic, observedAt)
+	decision, err := applyWorkflowActionExhaustionTx(ctx, tx, store.reducer, source, resumeRole, diagnostic, observedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +371,7 @@ func exhaustExpiredWorkflowActionTx(ctx context.Context, tx pgx.Tx, job Job) err
 		var payload pendingEventReconciliationPayload
 		_ = json.Unmarshal(job.Payload, &payload)
 		role = payload.FallbackRole
-		if role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
+		if !rolepkg.ValidID(role) {
 			if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
 				return ErrPendingEventReconciliationFenceLost
 			}

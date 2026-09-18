@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 // PendingEventSuccessorIntent is the single fallback intent retained by reconciliation.
 // Phase 5 acknowledges the intent durably but leaves its execution to a future worker.
 type PendingEventSuccessorIntent struct {
+	Stage           workflow.StageID
 	Role            workflow.Role
 	Purpose         workflow.TurnPurpose
 	ExpectedHeadSHA string
@@ -63,7 +65,7 @@ func (store *Store) AcknowledgePendingEventReconciliationFailure(ctx context.Con
 	var payload pendingEventReconciliationPayload
 	_ = json.Unmarshal(job.Payload, &payload)
 	role := payload.FallbackRole
-	if role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
+	if !store.policies.Contains(role) {
 		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
 			return WorkflowActionFailureAcknowledgement{}, ErrPendingEventReconciliationFenceLost
 		}
@@ -87,12 +89,14 @@ type pendingEventReconciliationPayload struct {
 	WorkflowAttemptID         string               `json:"workflow_attempt_id"`
 	Count                     uint32               `json:"count"`
 	LatestObservedHeadSHA     string               `json:"latest_observed_head_sha"`
+	FallbackStage             workflow.StageID     `json:"fallback_stage"`
 	FallbackRole              workflow.Role        `json:"fallback_role"`
 	FallbackPurpose           workflow.TurnPurpose `json:"fallback_purpose"`
 	FallbackExpectedHeadSHA   string               `json:"fallback_expected_head_sha"`
 	RetryOfTurnID             string               `json:"retry_of_turn_id"`
 	Revision                  int64                `json:"revision"`
 	SourceTurnID              string               `json:"source_turn_id"`
+	SourceStage               workflow.StageID     `json:"source_stage"`
 	SourceExecutionEpoch      int64                `json:"source_execution_epoch"`
 	SourceControlRevision     int64                `json:"source_control_revision"`
 	DeferredNormalizedEventID []string             `json:"deferred_normalized_event_ids"`
@@ -115,7 +119,7 @@ func (store *Store) AcknowledgePendingEventReconciliation(ctx context.Context, l
 		return PendingEventReconciliation{}, err
 	}
 	var payload pendingEventReconciliationPayload
-	if err := json.Unmarshal(job.Payload, &payload); err != nil || !validPendingEventReconciliationPayload(payload, job) {
+	if err := json.Unmarshal(job.Payload, &payload); err != nil || !store.validPendingEventReconciliationPayload(payload, job) {
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationPayloadInvalid
 	}
 	var revision int64
@@ -123,20 +127,21 @@ func (store *Store) AcknowledgePendingEventReconciliation(ctx context.Context, l
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 	}
 	var workflowID, attemptID, assignmentID, sessionID string
+	var sourceStage workflow.StageID
 	var epoch, controlRevision int64
 	var active bool
 	if err := tx.QueryRow(ctx, `
 SELECT assignment.workflow_id::text, turn.workflow_attempt_id::text,
-       assignment.id::text, session.id::text, turn.execution_epoch,
-       turn.control_revision, turn.active
+	       assignment.id::text, session.id::text, turn.execution_epoch,
+	       turn.control_revision, turn.active, turn.stage_id
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
 JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
 WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
-		&workflowID, &attemptID, &assignmentID, &sessionID, &epoch, &controlRevision, &active,
+		&workflowID, &attemptID, &assignmentID, &sessionID, &epoch, &controlRevision, &active, &sourceStage,
 	); err != nil || workflowID != job.WorkflowID || attemptID != job.WorkflowAttemptID ||
 		assignmentID != job.AgentAssignmentID || sessionID != job.AgentSessionID ||
-		epoch != job.ExecutionEpoch || controlRevision != payload.SourceControlRevision || active {
+		epoch != job.ExecutionEpoch || controlRevision != payload.SourceControlRevision || sourceStage != payload.SourceStage || active {
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 	}
 
@@ -163,7 +168,7 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 	intent := preparedTurnIntent{
 		mode: workflow.AssignmentGenerationCurrent,
 		turn: workflow.EnqueueTurnAction{
-			Role: payload.FallbackRole, Purpose: payload.FallbackPurpose,
+			Stage: payload.FallbackStage, Role: payload.FallbackRole, Purpose: payload.FallbackPurpose,
 			ExpectedHeadSHA: payload.FallbackExpectedHeadSHA, RetryOfTurnID: payload.RetryOfTurnID,
 		},
 		set: payload.FallbackRole != "",
@@ -226,7 +231,7 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 		}
 		snapshot = decision.Snapshot
 	}
-	if err := normalizeSuccessorIntent(snapshot, &intent); err != nil {
+	if err := store.normalizeSuccessorIntent(snapshot, &intent); err != nil {
 		return PendingEventReconciliation{}, err
 	}
 	if live, err := hasLiveWorkflowSuccessor(ctx, tx, job.WorkflowID); err != nil {
@@ -236,7 +241,7 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 	}
 
 	successor := PendingEventSuccessorIntent{
-		Role: intent.turn.Role, Purpose: intent.turn.Purpose,
+		Stage: intent.turn.Stage, Role: intent.turn.Role, Purpose: intent.turn.Purpose,
 		ExpectedHeadSHA: intent.turn.ExpectedHeadSHA, RetryOfTurnID: intent.turn.RetryOfTurnID,
 	}
 	successorJobID := ""
@@ -247,7 +252,7 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 		}
 		if err := enqueueWorkflowJobWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, job.WorkflowAttemptID,
 			"prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
-				"mode": intent.mode, "role": successor.Role,
+				"mode": intent.mode, "stage": successor.Stage, "role": successor.Role,
 				"purpose": successor.Purpose, "expected_head_sha": successor.ExpectedHeadSHA,
 				"retry_of_turn_id": successor.RetryOfTurnID, "revision": snapshot.Revision,
 			}, nil); err != nil {
@@ -266,7 +271,7 @@ WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
 		"final_revision":   snapshot.Revision,
 		"successor_job_id": nullableString(successorJobID),
 		"successor": map[string]any{
-			"role": successor.Role, "purpose": successor.Purpose,
+			"stage": successor.Stage, "role": successor.Role, "purpose": successor.Purpose,
 			"expected_head_sha": successor.ExpectedHeadSHA, "retry_of_turn_id": successor.RetryOfTurnID,
 		},
 	})
@@ -285,7 +290,7 @@ WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
 	}, nil
 }
 
-func validPendingEventReconciliationPayload(payload pendingEventReconciliationPayload, job Job) bool {
+func (store *Store) validPendingEventReconciliationPayload(payload pendingEventReconciliationPayload, job Job) bool {
 	if payload.WorkflowID != job.WorkflowID || payload.WorkflowAttemptID != job.WorkflowAttemptID ||
 		payload.SourceTurnID != job.AgentTurnID || payload.SourceExecutionEpoch != job.ExecutionEpoch ||
 		payload.SourceControlRevision <= 0 || payload.Revision <= 0 || payload.Count == 0 ||
@@ -303,9 +308,10 @@ func validPendingEventReconciliationPayload(payload pendingEventReconciliationPa
 		seen[eventID] = struct{}{}
 	}
 	if payload.FallbackRole == "" {
-		return payload.FallbackPurpose == "" && payload.FallbackExpectedHeadSHA == "" && payload.RetryOfTurnID == ""
+		return payload.FallbackStage == "" && payload.FallbackPurpose == "" && payload.FallbackExpectedHeadSHA == "" && payload.RetryOfTurnID == ""
 	}
-	if payload.FallbackRole != workflow.RoleDeveloper && payload.FallbackRole != workflow.RoleReviewer {
+	stage, ok := store.reducer.Stage(payload.FallbackStage)
+	if !ok || stage.Role != payload.FallbackRole || !store.reducer.AcceptsPurpose(payload.FallbackStage, payload.FallbackPurpose) {
 		return false
 	}
 	switch payload.FallbackPurpose {
@@ -576,7 +582,7 @@ func workflowStateAllowsSuccessor(state workflow.State) bool {
 	return state == workflow.StateDeveloping || state == workflow.StateReviewing
 }
 
-func normalizeSuccessorIntent(snapshot workflow.Snapshot, intent *preparedTurnIntent) error {
+func (store *Store) normalizeSuccessorIntent(snapshot workflow.Snapshot, intent *preparedTurnIntent) error {
 	if !workflowStateAllowsSuccessor(snapshot.State) {
 		*intent = preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
 		return nil
@@ -584,15 +590,20 @@ func normalizeSuccessorIntent(snapshot workflow.Snapshot, intent *preparedTurnIn
 	if !intent.set {
 		return nil
 	}
-	expectedRole := workflow.RoleDeveloper
-	if snapshot.State == workflow.StateReviewing {
-		expectedRole = workflow.RoleReviewer
+	if snapshot.CurrentAttempt == nil {
+		return ErrWorkflowDecisionInvalid
 	}
+	stage, ok := store.reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+	if !ok {
+		return ErrWorkflowDecisionInvalid
+	}
+	expectedRole := stage.Role
 	if intent.turn.Role != expectedRole {
 		return ErrWorkflowDecisionInvalid
 	}
 	if snapshot.ChangeProposal == nil {
-		if expectedRole == workflow.RoleReviewer {
+		policy, ok := store.policies.Lookup(expectedRole)
+		if !ok || policy.RequiresChangeProposal {
 			return ErrWorkflowDecisionInvalid
 		}
 		intent.turn.ExpectedHeadSHA = ""
@@ -709,6 +720,7 @@ func (store *Store) GetClosureMutationReconciliationContext(ctx context.Context,
 		turn.ControlRevision != barrier.ControlRevision {
 		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
 	}
+	turn.AgentParticipantID = job.AgentAssignmentID
 	turn.AgentAssignmentID = job.AgentAssignmentID
 	reconciliation := AgentTurnMutationReconciliationContext{WorkflowID: job.WorkflowID, Turn: turn.AgentTurn}
 	if err := tx.QueryRow(ctx, `
@@ -720,17 +732,23 @@ FROM workflows WHERE id = $1`, job.WorkflowID).Scan(
 	); err != nil {
 		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("read closure mutation Work Item: %w", err)
 	}
+	reviewerRoles := store.rolesUsingToolAuthority("submit_review", role.ReviewerAuthority)
 	if err := tx.QueryRow(ctx, `
-SELECT source.role, COALESCE(reviewer.github_app_actor_id, 0)
+SELECT source.role, COALESCE((
+	SELECT reviewer.github_app_actor_id
+	FROM agent_assignments AS reviewer
+	WHERE reviewer.workflow_id = source.workflow_id
+	  AND reviewer.role = ANY($3::text[])
+	  AND reviewer.status <> 'SUPERSEDED'
+	  AND reviewer.state_deleted_at IS NULL
+	  AND reviewer.github_app_actor_id IS NOT NULL
+	ORDER BY reviewer.generation DESC, reviewer.created_at DESC
+	LIMIT 1
+), 0)
 FROM agent_assignments AS source
-LEFT JOIN agent_assignments AS reviewer
-  ON reviewer.workflow_id = source.workflow_id
- AND reviewer.role = 'REVIEWER'
- AND reviewer.status <> 'SUPERSEDED'
- AND reviewer.state_deleted_at IS NULL
-WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(
+WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID, reviewerRoles).Scan(
 		&reconciliation.Role, &reconciliation.ReviewerActorID,
-	); err != nil || reconciliation.Role != workflow.RoleDeveloper && reconciliation.Role != workflow.RoleReviewer {
+	); err != nil || !store.policies.Contains(reconciliation.Role) {
 		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
 	}
 	if turn.ChangeProposalID != "" {
@@ -1014,7 +1032,7 @@ SELECT EXISTS (
 		}
 		guard := workflow.TurnGuard{
 			TurnID: snapshot.ActiveTurn.ID, SessionID: snapshot.ActiveTurn.SessionID,
-			AttemptID: snapshot.ActiveTurn.AttemptID, Role: snapshot.ActiveTurn.Role,
+			AttemptID: snapshot.ActiveTurn.AttemptID, Stage: snapshot.ActiveTurn.Stage, Role: snapshot.ActiveTurn.Role,
 			Epoch: snapshot.ActiveTurn.Epoch, ControlRevision: snapshot.ActiveTurn.ControlRevision,
 			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
 			ExpectedHeadSHA:  snapshot.ActiveTurn.ExpectedHeadSHA,
@@ -1033,7 +1051,7 @@ SELECT EXISTS (
 		ID: internalEventID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
 		ExpectedRevision: snapshot.Revision,
 	}, ClosureID: barrier.ClosureID, Turn: turn, AssignmentsExist: assignmentsExist}
-	decision := workflow.Reduce(snapshot, event)
+	decision := store.reducer.Reduce(snapshot, event)
 	if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonClosureSettled {
 		return ClosureSettlement{}, fmt.Errorf("closure settlement reducer decision is %s/%s (validation %v): %w", decision.Disposition, decision.Reason, err, ErrClosureSettlementFenceLost)
 	}

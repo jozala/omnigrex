@@ -37,7 +37,7 @@ func (err *AssignmentConfigurationConflictError) Unwrap() []error {
 	return []error{ErrAssignmentConfigurationConflict, err.Cause}
 }
 
-// ProfileLoader loads both Role profiles from one repository snapshot.
+// ProfileLoader loads the deployment's selected Role profiles from one repository snapshot.
 type ProfileLoader interface {
 	Load(context.Context, string, string, string) (agentprofile.Snapshot, error)
 }
@@ -51,7 +51,7 @@ type runtimeBindingResolver interface {
 	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
 }
 
-// PreparationStore commits the complete two-Role preparation under a job fence.
+// PreparationStore commits one Stage-scoped preparation under a job fence.
 type PreparationStore interface {
 	GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error)
 	PrepareAgentTurn(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error)
@@ -88,7 +88,7 @@ func NewPreparer(loader ProfileLoader, registry RuntimeRegistry, preparationStor
 	return &Preparer{loader: loader, registry: registry, store: preparationStore}
 }
 
-// Prepare resolves both Role configurations and commits one fenced Agent Turn preparation.
+// Prepare resolves the current Stage's Role configuration and commits one fenced Agent Turn preparation.
 func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result Result, err error) {
 	defer func() {
 		if err != nil {
@@ -113,31 +113,31 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	if err != nil {
 		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
 	}
-	developer, developerRuntime, err := preparer.prepareRole(snapshot.Developer(), snapshot.CommitSHA(), bindings.Developer)
-	if err != nil {
-		return Result{}, fmt.Errorf("prepare Developer profile: %w", err)
+	profile, ok := snapshot.ForRole(bindings.Role)
+	if !ok {
+		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, agentprofile.ErrUnknownProfile)
 	}
-	reviewer, reviewerRuntime, err := preparer.prepareRole(snapshot.Reviewer(), snapshot.CommitSHA(), bindings.Reviewer)
+	preparation, selectedRuntime, err := preparer.prepareRole(profile, snapshot.CommitSHA(), bindings.Participant)
 	if err != nil {
-		return Result{}, fmt.Errorf("prepare Reviewer profile: %w", err)
+		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, err)
+	}
+	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
+	switch bindings.Role {
+	case workflow.RoleDeveloper:
+		spec.Developer = preparation
+	case workflow.RoleReviewer:
+		spec.Reviewer = preparation
 	}
 
-	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, store.AgentTurnPreparationSpec{
-		Developer: developer,
-		Reviewer:  reviewer,
-	})
+	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
 	if err != nil {
 		if errors.Is(err, store.ErrAssignmentConfigurationConflict) {
 			return Result{}, &AssignmentConfigurationConflictError{
-				Preparation: store.AgentTurnPreparationSpec{Developer: developer, Reviewer: reviewer},
+				Preparation: spec,
 				Cause:       err,
 			}
 		}
 		return Result{}, fmt.Errorf("commit Agent Turn preparation: %w", err)
-	}
-	selectedRuntime := developerRuntime
-	if commit.Assignment.Role == workflow.RoleReviewer {
-		selectedRuntime = reviewerRuntime
 	}
 	return Result{Commit: commit, RuntimeProfile: selectedRuntime}, nil
 }
@@ -170,6 +170,7 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 	}
 	hash := profile.ContentSHA256()
 	return store.RolePreparation{
+		ProfilePath: profile.Path(),
 		Binding: store.AssignmentRuntimeBinding{
 			AgentProfileName:            string(profile.Name()),
 			RuntimeProfileName:          contract.Name,

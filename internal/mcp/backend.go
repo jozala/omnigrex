@@ -17,6 +17,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -112,6 +113,7 @@ type ProductionBackendConfig struct {
 	Publisher        WorkspacePublisher
 	Workflow         WorkflowMutations
 	GitRemoteBaseURL string
+	Policies         role.PolicyCatalog
 }
 
 type ProductionBackend struct {
@@ -121,6 +123,7 @@ type ProductionBackend struct {
 	workflow    WorkflowMutations
 	remoteBase  gitremote.BaseURL
 	identity    workspace.CommitIdentity
+	policies    role.PolicyCatalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -160,13 +163,19 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	if config.GitHub == nil || config.Credentials == nil || config.Publisher == nil || config.Workflow == nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
+	if len(config.Policies.Roles()) == 0 {
+		config.Policies = role.BuiltinPolicyCatalog()
+	}
+	if err := validatePolicyTools(config.Policies); err != nil {
+		return nil, ErrInvalidBackendConfiguration
+	}
 	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
 	if err != nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
-		workflow: config.Workflow, remoteBase: remoteBase,
+		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies,
 		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
@@ -175,7 +184,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 }
 
 func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
-	tool, err := validateBackendInvocation(invocation)
+	tool, err := backend.validateInvocation(invocation)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +276,7 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 }
 
 func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Invocation) (MutationMetadata, error) {
-	tool, err := validateBackendInvocation(invocation)
+	tool, err := backend.validateInvocation(invocation)
 	if err != nil {
 		return MutationMetadata{}, err
 	}
@@ -295,7 +304,7 @@ func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Inv
 
 // RestoreMutationReplay validates durable ancestor evidence and restores only exact-turn derived publication state.
 func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invocation Invocation, source store.MutationReservation) error {
-	tool, err := validateMutationReplay(invocation, source)
+	tool, err := backend.validateMutationReplay(invocation, source)
 	if err != nil {
 		return err
 	}
@@ -557,7 +566,9 @@ func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invo
 }
 
 func (backend *ProductionBackend) submitReview(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
-	if invocation.Scope.Role != workflow.RoleReviewer || invocation.Scope.PullRequest == nil {
+	policy, ok := backend.policies.Lookup(invocation.Scope.Role)
+	authority, granted := policy.CredentialAuthorityForTool(ToolSubmitReview)
+	if !ok || !granted || authority != role.ReviewerAuthority || invocation.Scope.PullRequest == nil {
 		return nil, ErrToolNotAuthorized
 	}
 	var arguments struct {
@@ -969,8 +980,8 @@ func (backend *ProductionBackend) publicationLock(turnKey publicationTurn) *sync
 	return lock
 }
 
-func validateMutationReplay(invocation Invocation, source store.MutationReservation) (ToolDefinition, error) {
-	tool, err := validateBackendInvocation(invocation)
+func (backend *ProductionBackend) validateMutationReplay(invocation Invocation, source store.MutationReservation) (ToolDefinition, error) {
+	tool, err := backend.validateInvocation(invocation)
 	if err != nil || tool.Class != MutationTool || source.State != store.MutationSucceeded ||
 		source.ID == "" || invocation.OperationID != source.ID || source.AgentTurnID == "" ||
 		source.AgentTurnID == invocation.Scope.AgentTurnID || source.ExecutionEpoch <= 0 ||
@@ -1077,12 +1088,13 @@ func decodeExactResult(raw json.RawMessage, destination any) bool {
 	return decoder.Decode(destination) == nil && decoder.Decode(&struct{}{}) == io.EOF
 }
 
-func validateBackendInvocation(invocation Invocation) (ToolDefinition, error) {
+func (backend *ProductionBackend) validateInvocation(invocation Invocation) (ToolDefinition, error) {
 	tool, found := definition(invocation.Name)
-	if !found || tool.Class != invocation.Class || !slices.Contains(roleTools[invocation.Scope.Role], invocation.Name) {
+	policy, policyFound := backend.policies.Lookup(invocation.Scope.Role)
+	if !found || !policyFound || tool.Class != invocation.Class || !slices.Contains(policy.MCPTools, invocation.Name) {
 		return ToolDefinition{}, ErrToolNotAuthorized
 	}
-	if validateArguments(invocation.Arguments, tool.InputSchema) != nil || !validToolScope(invocation.Scope) {
+	if validateArguments(invocation.Arguments, tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
 		return ToolDefinition{}, ErrInvalidInvocation
 	}
 	if !scopeAllowsBackendTool(invocation.Scope, invocation.Name) {
@@ -1098,16 +1110,16 @@ func validateBackendInvocation(invocation Invocation) (ToolDefinition, error) {
 	return tool, nil
 }
 
-func validToolScope(scope ToolScope) bool {
+func validToolScope(policy role.Policy, scope ToolScope) bool {
 	valid := scope.WorkflowID != "" && scope.AgentAssignmentID != "" && scope.AgentSessionID != "" && scope.AgentTurnID != "" &&
-		scope.ExecutionEpoch > 0 && (scope.Role == workflow.RoleDeveloper || scope.Role == workflow.RoleReviewer) &&
+		scope.ExecutionEpoch > 0 && policy.Role == scope.Role &&
 		scope.Repository.ID > 0 && validRepositoryPart(scope.Repository.Owner) && validRepositoryPart(scope.Repository.Name) &&
 		scope.Issue.ID > 0 && scope.Issue.Number > 0 && scope.Issue.Number <= int64(^uint(0)>>1) &&
 		validBranchResourceName(scope.Branch) && validBranchResourceName(scope.DefaultBranch) && validRevision(scope.HeadSHA) && !scope.TurnCreatedAt.IsZero()
 	if !valid || scope.PullRequest != nil && (scope.PullRequest.ID <= 0 || scope.PullRequest.Number <= 0 || scope.PullRequest.Number > int64(^uint(0)>>1)) {
 		return false
 	}
-	return scope.Role != workflow.RoleReviewer || scope.PullRequest != nil
+	return !policy.RequiresChangeProposal || scope.PullRequest != nil
 }
 
 func validRepositoryPart(value string) bool {
@@ -1146,18 +1158,21 @@ func matchesScopedPullRequest(pullRequest githubapi.PullRequest, scope ToolScope
 		pullRequest.Head.SHA == scope.HeadSHA && pullRequest.Head.Ref == scope.Branch && pullRequest.Base.Ref == scope.DefaultBranch
 }
 
-func (backend *ProductionBackend) credential(ctx context.Context, tool string, role workflow.Role, repository RepositoryScope) (string, error) {
+func (backend *ProductionBackend) credential(ctx context.Context, tool string, roleID workflow.Role, repository RepositoryScope) (string, error) {
 	var credential string
 	var err error
-	developerPermission := role == workflow.RoleDeveloper
-	switch tool {
-	case ToolGetIssue, ToolListIssueComments, ToolGetCheckRuns, ToolCommentOnIssue, ToolCommentOnPullRequest:
-		developerPermission = true
+	policy, ok := backend.policies.Lookup(roleID)
+	if !ok {
+		return "", ErrToolDependency
 	}
-	if developerPermission {
-		credential, err = backend.credentials.DeveloperCredential(ctx, repository)
-	} else {
+	authority, granted := policy.CredentialAuthorityForTool(tool)
+	if !granted {
+		return "", ErrToolDependency
+	}
+	if authority == role.ReviewerAuthority {
 		credential, err = backend.credentials.ReviewerCredential(ctx, repository)
+	} else {
+		credential, err = backend.credentials.DeveloperCredential(ctx, repository)
 	}
 	if err != nil || credential == "" {
 		return "", ErrToolDependency

@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jozala/omnigrex/internal/role"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,11 +34,11 @@ const (
 	Reviewer  Name = "reviewer"
 )
 
-type Role string
+type Role = role.ID
 
 const (
-	RoleDeveloper Role = "DEVELOPER"
-	RoleReviewer  Role = "REVIEWER"
+	RoleDeveloper = role.Developer
+	RoleReviewer  = role.Reviewer
 )
 
 type PermissionAction string
@@ -76,10 +77,21 @@ type frontMatter struct {
 }
 
 func Parse(name Name, content []byte) (Profile, error) {
-	identity, err := identityFor(name)
-	if err != nil {
-		return Profile{}, err
+	catalog := BuiltinCatalog()
+	identity, ok := catalog.Identity(name)
+	if !ok {
+		return Profile{}, fmt.Errorf("%w: %q", ErrUnknownProfile, name)
 	}
+	policy, _ := catalog.policy(name)
+	return parse(identity, policy, content)
+}
+
+func parse(identity Identity, policy role.Policy, content []byte) (Profile, error) {
+	if !validName(identity.Name) || !role.ValidID(identity.Role) || !validPath(identity.Path) || policy.Role != identity.Role ||
+		policy.AgentProfile.Name != string(identity.Name) || policy.AgentProfile.Path != identity.Path {
+		return Profile{}, fmt.Errorf("%w: invalid identity", ErrInvalidProfile)
+	}
+	name := identity.Name
 	if len(content) > MaxContentSize {
 		return Profile{}, ErrProfileTooLarge
 	}
@@ -94,14 +106,14 @@ func Parse(name Name, content []byte) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
-	if err := validateConfiguration(identity.role, configuration, instructions); err != nil {
+	if err := validateConfiguration(policy, configuration, instructions); err != nil {
 		return Profile{}, err
 	}
 
 	profile := Profile{
 		name:         name,
-		role:         identity.role,
-		path:         identity.path,
+		role:         identity.Role,
+		path:         identity.Path,
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
 		variant:      configuration.Variant,
@@ -157,22 +169,6 @@ func (profile Profile) Permission(tool string) PermissionAction {
 		return action
 	}
 	return Deny
-}
-
-type profileIdentity struct {
-	role Role
-	path string
-}
-
-func identityFor(name Name) (profileIdentity, error) {
-	switch name {
-	case Developer:
-		return profileIdentity{role: RoleDeveloper, path: ".omnigrex/team/developer.md"}, nil
-	case Reviewer:
-		return profileIdentity{role: RoleReviewer, path: ".omnigrex/team/reviewer.md"}, nil
-	default:
-		return profileIdentity{}, fmt.Errorf("%w: %q", ErrUnknownProfile, name)
-	}
 }
 
 func splitDocument(content []byte) ([]byte, []byte, error) {
@@ -255,7 +251,7 @@ func validateYAMLNode(node *yaml.Node) error {
 	return nil
 }
 
-func validateConfiguration(role Role, configuration frontMatter, instructions []byte) error {
+func validateConfiguration(policy role.Policy, configuration frontMatter, instructions []byte) error {
 	if !validReference(configuration.Runtime) {
 		return fmt.Errorf("%w: runtime must use name/version syntax without whitespace or control characters", ErrInvalidProfile)
 	}
@@ -265,7 +261,7 @@ func validateConfiguration(role Role, configuration frontMatter, instructions []
 	if configuration.Variant != "" && containsWhitespaceOrControl(configuration.Variant) {
 		return fmt.Errorf("%w: variant contains whitespace or control characters", ErrInvalidProfile)
 	}
-	if err := ValidatePolicy(role, configuration.Steps, configuration.Permissions); err != nil {
+	if err := ValidateRolePolicy(policy, configuration.Steps, configuration.Permissions); err != nil {
 		return err
 	}
 	if strings.TrimSpace(string(instructions)) == "" {
@@ -279,7 +275,16 @@ func validateConfiguration(role Role, configuration frontMatter, instructions []
 
 // ValidatePolicy checks the execution limits and tool permissions shared by parsed and persisted Agent Profiles.
 func ValidatePolicy(role Role, steps int, permissions map[string]PermissionAction) error {
-	if role != RoleDeveloper && role != RoleReviewer {
+	policy, ok := rolepkgBuiltinPolicy(role)
+	if !ok {
+		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
+	}
+	return ValidateRolePolicy(policy, steps, permissions)
+}
+
+// ValidateRolePolicy checks mutable Agent Profile values against an immutable Role policy.
+func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]PermissionAction) error {
+	if !role.ValidID(policy.Role) {
 		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
 	}
 	if steps <= 0 || steps > MaxSteps {
@@ -295,11 +300,15 @@ func ValidatePolicy(role Role, steps int, permissions map[string]PermissionActio
 		if action != Allow && action != Deny {
 			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
 		}
-		if role == RoleReviewer && action == Allow && (tool == "edit" || tool == "patch") {
-			return fmt.Errorf("%w: Reviewer permission for %q must be deny", ErrInvalidProfile, tool)
+		if !policy.OpenCode.AllowFileEdits && action == Allow && (tool == "edit" || tool == "patch") {
+			return fmt.Errorf("%w: Role permission for %q must be deny", ErrInvalidProfile, tool)
 		}
 	}
 	return nil
+}
+
+func rolepkgBuiltinPolicy(roleID Role) (role.Policy, bool) {
+	return role.BuiltinPolicyCatalog().Lookup(roleID)
 }
 
 func validReference(value string) bool {

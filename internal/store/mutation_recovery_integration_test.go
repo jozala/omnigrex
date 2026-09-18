@@ -338,13 +338,14 @@ FROM workflow_attempts AS attempt WHERE attempt.id = $3`, fixture.workflowID, tu
 func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
-	fixture := seedAgentSession(t, pool, 34)
+	fixture := seedAgentSessionForRole(t, pool, 34, workflow.RoleReviewer)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER', agent_profile_name = 'reviewer' WHERE id = $1`, fixture.assignmentID); err != nil {
-		t.Fatalf("prepare Reviewer Assignment: %v", err)
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatalf("prepare review Stage: %v", err)
 	}
 	turnSpec := fixture.turnSpec()
+	turnSpec.Stage = workflow.StageReview
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
 	turn, err := database.AllocateAgentTurn(ctx, turnSpec)

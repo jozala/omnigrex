@@ -17,7 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
-func TestProductionBackendSelectsReviewerCredentialsByOperationPermission(t *testing.T) {
+func TestProductionBackendUsesDeveloperCredentialsForNonReviewOperations(t *testing.T) {
 	api := &backendGitHub{}
 	credentials := &backendCredentials{developer: "developer-secret", reviewer: "reviewer-secret"}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
@@ -40,15 +40,15 @@ func TestProductionBackendSelectsReviewerCredentialsByOperationPermission(t *tes
 	wantCalls := []backendGitHubCall{
 		{name: mcp.ToolGetIssue, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
 		{name: mcp.ToolListIssueComments, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
-		{name: mcp.ToolGetPullRequest, credential: "reviewer-secret", owner: "acme", repository: "widgets", number: 23},
-		{name: mcp.ToolListPullRequestReviews, credential: "reviewer-secret", owner: "acme", repository: "widgets", number: 23},
-		{name: mcp.ToolListReviewThreads, credential: "reviewer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolListPullRequestReviews, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolListReviewThreads, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolGetCheckRuns, credential: "developer-secret", owner: "acme", repository: "widgets", head: productionHeadSHA},
 	}
 	if !reflect.DeepEqual(api.calls, wantCalls) {
 		t.Fatalf("GitHub read calls = %#v, want %#v", api.calls, wantCalls)
 	}
-	if credentials.developerCalls != 3 || credentials.reviewerCalls != 3 {
+	if credentials.developerCalls != 6 || credentials.reviewerCalls != 0 {
 		t.Fatalf("credential calls = developer %d, reviewer %d", credentials.developerCalls, credentials.reviewerCalls)
 	}
 }

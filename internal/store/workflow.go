@@ -157,7 +157,7 @@ func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, c
 		return WorkflowApplication{}, fmt.Errorf("insert normalized event: %w", err)
 	}
 	record := NormalizedEventRecord{DeliveryID: deliveryID, Payload: payload, Status: NormalizedEventPending}
-	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, transition)
+	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, store.reducer, transition)
 	if err != nil {
 		return WorkflowApplication{}, err
 	}
@@ -269,7 +269,7 @@ RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptC
 	if err := validateWorkflowLocator(locator, envelope); err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
-	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, transition)
+	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, store.reducer, transition)
 	if err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
@@ -358,7 +358,7 @@ func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope)
 	return nil
 }
 
-func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedEventRecord, envelope workflowEnvelope, locator WorkflowLocator, transition WorkflowTransition) (WorkflowApplication, error) {
+func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedEventRecord, envelope workflowEnvelope, locator WorkflowLocator, reducer workflow.Reducer, transition WorkflowTransition) (WorkflowApplication, error) {
 	workflowID, err := resolveWorkflowID(ctx, tx, locator)
 	if err != nil {
 		return WorkflowApplication{}, err
@@ -390,7 +390,10 @@ func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedE
 			}, nil
 		}
 	}
-	decision := transition(snapshot)
+	decision := reducer.DefinitionIncompatible(snapshot)
+	if reducer.DefinitionCompatible(snapshot) {
+		decision = transition(snapshot)
+	}
 	if err := validateWorkflowDecision(snapshot, decision); err != nil {
 		return WorkflowApplication{}, err
 	}
@@ -528,25 +531,26 @@ WHERE repository_id = $1 AND pull_request_id = $2`, locator.RepositoryID, locato
 
 func rehydrateWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) (workflow.Snapshot, error) {
 	var snapshot workflow.Snapshot
-	var resumeRole, assignmentStatus, runtimeState, closureID, closureToken, retentionToken string
+	var resumeRole, continuationStage, assignmentStatus, runtimeState, closureID, closureToken, retentionToken string
 	var closureDeadline, retentionDeadline *time.Time
 	var closureReopen bool
 	err := tx.QueryRow(ctx, `
 SELECT status, state_revision, repository_id, issue_id, issue_number,
        COALESCE(resume_role, ''), COALESCE(desired_assignment_status, ''),
        COALESCE(desired_runtime_state, ''), COALESCE(closure_id, ''), closure_deadline,
-       COALESCE(closure_retention_token, ''), closure_reopen_requested,
-       retention_deadline, COALESCE(retention_token, '')
+	       COALESCE(closure_retention_token, ''), closure_reopen_requested,
+	       retention_deadline, COALESCE(retention_token, ''), COALESCE(continuation_stage, '')
 FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 		&snapshot.State, &snapshot.Revision, &snapshot.WorkItem.RepositoryID,
 		&snapshot.WorkItem.IssueID, &snapshot.WorkItem.IssueNumber, &resumeRole,
 		&assignmentStatus, &runtimeState, &closureID, &closureDeadline, &closureToken,
-		&closureReopen, &retentionDeadline, &retentionToken,
+		&closureReopen, &retentionDeadline, &retentionToken, &continuationStage,
 	)
 	if err != nil {
 		return workflow.Snapshot{}, fmt.Errorf("lock workflow: %w", err)
 	}
 	snapshot.ResumeRole = workflow.Role(resumeRole)
+	snapshot.ContinuationStage = workflow.StageID(continuationStage)
 	snapshot.Assignments.Status = workflow.AssignmentStatus(assignmentStatus)
 	snapshot.Assignments.RuntimeState = workflow.RuntimeState(runtimeState)
 	if retentionDeadline != nil {
@@ -560,14 +564,21 @@ FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 		return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt sequence: %w", err)
 	}
 	var attempt workflow.WorkflowAttempt
+	var reviewUsageJSON []byte
 	err = tx.QueryRow(ctx, `
 SELECT id::text, attempt_number, started_at, review_cycles_completed, review_cycle_limit,
-       infrastructure_failures, infrastructure_failure_limit
+	       infrastructure_failures, infrastructure_failure_limit, current_stage, review_usage
 FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.ReviewBudget.Used,
 		&attempt.ReviewBudget.Limit, &attempt.InfrastructureRetryBudget.Used,
-		&attempt.InfrastructureRetryBudget.Limit)
+		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON)
 	if err == nil {
+		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
+			return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt Stage usage: %w", err)
+		}
+		if attempt.ReviewUsage == nil {
+			return workflow.Snapshot{}, errors.New("rehydrate attempt Stage usage: null object")
+		}
 		attempt.Lifecycle = workflow.AttemptActive
 		snapshot.CurrentAttempt = &attempt
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -586,14 +597,14 @@ FROM change_proposals WHERE workflow_id = $1 AND active`, workflowID).Scan(
 	var turn workflow.ActiveTurn
 	err = tx.QueryRow(ctx, `
 SELECT turn.id::text, turn.agent_session_id::text, turn.workflow_attempt_id::text,
-       assignment.role, turn.execution_epoch, turn.control_revision,
+	       turn.stage_id, assignment.role, turn.execution_epoch, turn.control_revision,
        COALESCE(proposal.pull_request_id, 0), COALESCE(turn.expected_head_sha, '')
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
 JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
 LEFT JOIN change_proposals AS proposal ON proposal.id = turn.change_proposal_id
 WHERE assignment.workflow_id = $1 AND turn.active`, workflowID).Scan(
-		&turn.ID, &turn.SessionID, &turn.AttemptID, &turn.Role, &turn.Epoch,
+		&turn.ID, &turn.SessionID, &turn.AttemptID, &turn.Stage, &turn.Role, &turn.Epoch,
 		&turn.ControlRevision, &turn.ChangeProposalID, &turn.ExpectedHeadSHA)
 	if err == nil {
 		snapshot.ActiveTurn = &turn
@@ -677,28 +688,38 @@ WHERE id = $1 AND workflow_id = $2 AND active`, complete.AttemptID, workflowID, 
 	for _, action := range decision.Actions {
 		if create, ok := action.(workflow.CreateAttemptAction); ok {
 			attempt := create.Attempt
+			reviewUsage, err := json.Marshal(attempt.ReviewUsage)
+			if err != nil {
+				return fmt.Errorf("encode workflow attempt Stage usage: %w", err)
+			}
 			if _, err := tx.Exec(ctx, `
 INSERT INTO workflow_attempts (
-    id, workflow_id, attempt_number, trigger_delivery_id, status, active,
-    review_cycles_completed, review_cycle_limit, infrastructure_failures,
-    infrastructure_failure_limit, started_at
+	    id, workflow_id, attempt_number, trigger_delivery_id, status, active,
+	    review_cycles_completed, review_cycle_limit, infrastructure_failures,
+	    infrastructure_failure_limit, started_at, current_stage, review_usage
 )
-VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
+VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9, $10, $11)`, attempt.ID,
 				workflowID, int64(attempt.Number), deliveryID, int(attempt.ReviewBudget.Used),
 				int(attempt.ReviewBudget.Limit), int(attempt.InfrastructureRetryBudget.Used),
-				int(attempt.InfrastructureRetryBudget.Limit), attempt.StartedAt); err != nil {
+				int(attempt.InfrastructureRetryBudget.Limit), attempt.StartedAt, attempt.CurrentStage, reviewUsage); err != nil {
 				return fmt.Errorf("create workflow attempt: %w", err)
 			}
 		}
 	}
 	if decision.Snapshot.CurrentAttempt != nil {
 		attempt := decision.Snapshot.CurrentAttempt
+		reviewUsage, err := json.Marshal(attempt.ReviewUsage)
+		if err != nil {
+			return fmt.Errorf("encode workflow attempt Stage usage: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `
 UPDATE workflow_attempts SET review_cycles_completed = $3, review_cycle_limit = $4,
-    infrastructure_failures = $5, infrastructure_failure_limit = $6, updated_at = clock_timestamp()
+	    infrastructure_failures = $5, infrastructure_failure_limit = $6,
+	    current_stage = $7, review_usage = $8, updated_at = clock_timestamp()
 WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			int(attempt.ReviewBudget.Used), int(attempt.ReviewBudget.Limit),
-			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit)); err != nil {
+			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
+			attempt.CurrentStage, reviewUsage); err != nil {
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
@@ -751,16 +772,17 @@ func persistWorkflowSnapshot(ctx context.Context, tx pgx.Tx, workflowID string, 
 	}
 	result, err := tx.Exec(ctx, `
 UPDATE workflows SET status = $2, state_revision = $3, resume_role = $4,
-    desired_assignment_status = $5, desired_runtime_state = $6,
-    closure_id = $7, closure_deadline = $8, closure_retention_token = $9,
-    closure_reopen_requested = $10, retention_deadline = $11, retention_token = $12,
-    human_handoff_reason = $13, updated_at = clock_timestamp(),
+	    desired_assignment_status = $5, desired_runtime_state = $6,
+	    closure_id = $7, closure_deadline = $8, closure_retention_token = $9,
+	    closure_reopen_requested = $10, retention_deadline = $11, retention_token = $12,
+	    human_handoff_reason = $13, continuation_stage = $14, updated_at = clock_timestamp(),
     closed_at = CASE WHEN $2 = 'CLOSED' THEN COALESCE(closed_at, clock_timestamp()) ELSE NULL END
 WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
 		nullableString(string(snapshot.ResumeRole)), nullableString(string(snapshot.Assignments.Status)),
 		nullableString(string(snapshot.Assignments.RuntimeState)), nullableString(closureID), closureDeadline,
 		nullableString(closureToken), closureReopen, retentionDeadline,
-		nullableString(snapshot.Assignments.RetentionToken), handoffReason)
+		nullableString(snapshot.Assignments.RetentionToken), handoffReason,
+		nullableString(string(snapshot.ContinuationStage)))
 	if err != nil {
 		return fmt.Errorf("persist workflow snapshot: %w", err)
 	}
@@ -844,11 +866,19 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 				return err
 			}
 		case workflow.CloseMutationAdmissionAction:
-			if err := closeMutationAdmissionTx(ctx, tx, action.Turn); err != nil {
-				return err
+			if settlementID == "" {
+				if err := closeMutationAdmissionTx(ctx, tx, action.Turn); err != nil {
+					return err
+				}
+				turn := action.Turn
+				closureTurn = &turn
 			}
-			turn := action.Turn
-			closureTurn = &turn
+		case workflow.InterruptTurnForHumanHandoffAction:
+			if settlementID == "" {
+				if err := interruptTurnForHumanHandoffTx(ctx, tx, action.Turn); err != nil {
+					return err
+				}
+			}
 		case workflow.StopTurnAction:
 			if decision.Snapshot.Closure == nil {
 				return ErrWorkflowDecisionInvalid
@@ -889,7 +919,7 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 	}
 	if intent.set {
 		if err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
-			"mode": intent.mode, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
+			"mode": intent.mode, "stage": intent.turn.Stage, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
 			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
 			"revision": decision.Snapshot.Revision,
 		}, nil); err != nil {
@@ -921,8 +951,8 @@ func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID
 	rows, err := tx.Query(ctx, `
 SELECT event.delivery_id::text, event.deferred_for_turn_id::text,
 	   turn.execution_epoch, turn.control_revision, turn.agent_session_id::text,
-	   turn.workflow_attempt_id::text, session.agent_assignment_id::text,
-	   assignment.role
+	       turn.workflow_attempt_id::text, session.agent_assignment_id::text,
+	       assignment.role, turn.stage_id
 FROM normalized_events AS event
 JOIN agent_turns AS turn ON turn.id = event.deferred_for_turn_id
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
@@ -939,13 +969,14 @@ ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.Tur
 	for rows.Next() {
 		var eventID, turnID, sessionID, turnAttemptID, assignmentID string
 		var role workflow.Role
+		var stage workflow.StageID
 		var epoch, controlRevision int64
-		if err := rows.Scan(&eventID, &turnID, &epoch, &controlRevision, &sessionID, &turnAttemptID, &assignmentID, &role); err != nil {
+		if err := rows.Scan(&eventID, &turnID, &epoch, &controlRevision, &sessionID, &turnAttemptID, &assignmentID, &role, &stage); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan deferred normalized event: %w", err)
 		}
 		if turnID != action.SourceTurn.TurnID || sessionID != action.SourceTurn.SessionID ||
-			turnAttemptID != action.SourceTurn.AttemptID || turnAttemptID != attemptID || role != action.SourceTurn.Role ||
+			turnAttemptID != action.SourceTurn.AttemptID || turnAttemptID != attemptID || stage != action.SourceTurn.Stage || role != action.SourceTurn.Role ||
 			epoch != int64(action.SourceTurn.Epoch) || controlRevision != int64(action.SourceTurn.ControlRevision) {
 			rows.Close()
 			return ErrAgentTurnFenceLost
@@ -970,9 +1001,9 @@ ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.Tur
 	payload := map[string]any{
 		"workflow_id": workflowID, "workflow_attempt_id": attemptID,
 		"count": action.Count, "latest_observed_head_sha": action.LatestObservedHeadSHA,
-		"fallback_role": action.FallbackRole, "fallback_purpose": action.FallbackPurpose,
+		"fallback_stage": action.FallbackStage, "fallback_role": action.FallbackRole, "fallback_purpose": action.FallbackPurpose,
 		"fallback_expected_head_sha": action.FallbackExpectedHead, "retry_of_turn_id": action.RetryOfTurnID,
-		"revision": revision, "source_turn_id": sourceTurnID,
+		"revision": revision, "source_turn_id": sourceTurnID, "source_stage": action.SourceTurn.Stage,
 		"source_execution_epoch": sourceEpoch, "source_control_revision": sourceControlRevision,
 		"deferred_normalized_event_ids": deferredIDs,
 	}
@@ -1154,6 +1185,95 @@ SET state = 'UNKNOWN', updated_at = clock_timestamp(),
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
   AND state = 'IN_FLIGHT'`, guard.TurnID, int64(guard.Epoch)); err != nil {
 		return fmt.Errorf("mark in-flight closure mutations unknown: %w", err)
+	}
+	return nil
+}
+
+func interruptTurnForHumanHandoffTx(ctx context.Context, tx pgx.Tx, guard workflow.TurnGuard) error {
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+`
+WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2
+FOR UPDATE`, guard.TurnID, int64(guard.Epoch)))
+	if err != nil {
+		return fmt.Errorf("lock Human Handoff Agent Turn job: %w", err)
+	}
+	turn, err := lockAgentTurn(ctx, tx, guard.TurnID)
+	if err != nil {
+		return err
+	}
+	if !turn.active || turn.AgentSessionID != guard.SessionID || turn.WorkflowAttemptID != guard.AttemptID ||
+		turn.ExecutionEpoch != int64(guard.Epoch) || turn.ControlRevision != int64(guard.ControlRevision) ||
+		job.WorkflowAttemptID != guard.AttemptID || job.AgentSessionID != guard.SessionID {
+		return ErrAgentTurnFenceLost
+	}
+
+	if job.Status == JobAvailable {
+		result, err := tx.Exec(ctx, `
+UPDATE jobs
+SET status = 'CANCELLED', completed_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND status = 'AVAILABLE'`, job.ID)
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+		result, err = tx.Exec(ctx, `
+UPDATE agent_turns
+SET status = 'INTERRUPTED', active = FALSE, owner_id = NULL, owner_token = NULL,
+    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+    completed_at = clock_timestamp(), last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND execution_epoch = $2 AND active`, guard.TurnID, int64(guard.Epoch))
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM agent_turn_slots WHERE agent_turn_id = $1`, guard.TurnID); err != nil {
+			return fmt.Errorf("release Human Handoff Agent Turn slot: %w", err)
+		}
+		return nil
+	}
+	if job.Status != JobLeased || job.LeaseToken == "" || job.AttemptCount <= 0 {
+		return ErrAgentTurnFenceLost
+	}
+	if err := lockAgentTurnSlots(ctx, tx); err != nil {
+		return err
+	}
+	var slotExists bool
+	if err := tx.QueryRow(ctx, `SELECT TRUE FROM agent_turn_slots WHERE agent_turn_id = $1 FOR UPDATE`, guard.TurnID).Scan(&slotExists); err != nil {
+		return ErrAgentTurnFenceLost
+	}
+	var revokedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() - interval '1 microsecond'`).Scan(&revokedAt); err != nil {
+		return fmt.Errorf("calculate Human Handoff lease revocation: %w", err)
+	}
+	updates := []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE jobs SET lease_expires_at = $2 WHERE id = $1 AND status = 'LEASED'`, []any{job.ID, revokedAt}},
+		{`UPDATE job_attempts SET lease_expires_at = $4 WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`, []any{job.ID, job.AttemptCount, job.LeaseToken, revokedAt}},
+		{`UPDATE agent_turns SET lease_expires_at = $3 WHERE id = $1 AND execution_epoch = $2 AND active`, []any{guard.TurnID, int64(guard.Epoch), revokedAt}},
+		{`UPDATE agent_turn_slots SET lease_expires_at = $3 WHERE agent_turn_id = $1 AND execution_epoch = $2`, []any{guard.TurnID, int64(guard.Epoch), revokedAt}},
+	}
+	for _, update := range updates {
+		result, err := tx.Exec(ctx, update.query, update.args...)
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+	}
+	recovery, err := recoverExpiredAgentTurnTx(ctx, tx, job)
+	if err != nil {
+		return fmt.Errorf("recover Human Handoff Agent Turn: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
+UPDATE agent_turns
+SET recovery_continuation = $3, last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND stop_runtime_job_id = $2
+  AND recovery_continuation = $4 AND recovery_settled_at IS NULL`,
+		recovery.TurnID, recovery.StopRuntimeJobID, recoveryContinuationDefinitionHandoff, recoveryContinuationPendingInfrastructure)
+	if err != nil {
+		return fmt.Errorf("mark Workflow Definition recovery handoff: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("mark Workflow Definition recovery handoff for Turn %s, stop Job %s, continuation %s: %w",
+			recovery.TurnID, recovery.StopRuntimeJobID, recovery.Continuation, ErrAgentTurnRecoveryFenceLost)
 	}
 	return nil
 }

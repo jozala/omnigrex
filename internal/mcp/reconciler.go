@@ -13,6 +13,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -55,6 +56,7 @@ type ProductionReconcilerConfig struct {
 	Credentials      RepositoryCredentials
 	Publications     PublicationReconciler
 	GitRemoteBaseURL string
+	Policies         role.PolicyCatalog
 }
 
 // ProductionReconciler finds exact GitHub and Git publication artifacts from durable reservation data.
@@ -63,6 +65,7 @@ type ProductionReconciler struct {
 	credentials  RepositoryCredentials
 	publications PublicationReconciler
 	remoteBase   gitremote.BaseURL
+	policies     role.PolicyCatalog
 }
 
 var (
@@ -74,15 +77,18 @@ func NewProductionReconciler(config ProductionReconcilerConfig) (*ProductionReco
 	if interfaceNil(config.GitHub) || interfaceNil(config.Credentials) || interfaceNil(config.Publications) {
 		return nil, ErrInvalidReconcilerConfiguration
 	}
+	if len(config.Policies.Roles()) == 0 {
+		config.Policies = role.BuiltinPolicyCatalog()
+	}
 	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
 	if err != nil {
 		return nil, ErrInvalidReconcilerConfiguration
 	}
-	return &ProductionReconciler{github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase}, nil
+	return &ProductionReconciler{github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase, policies: config.Policies}, nil
 }
 
 func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
-	if !validReconciliationScope(reconciliation, mutation) {
+	if !reconciler.validReconciliationScope(reconciliation, mutation) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	callerOperationID, err := requiredStringArgument(mutation.Request, "operation_id")
@@ -118,10 +124,10 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 
 func (reconciler *ProductionReconciler) reconcilePublication(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
 	branch, ok := exactBranchResource(mutation.ExternalResourceID, reconciliation.Repository.ID)
-	if !ok || reconciliation.Role != workflow.RoleDeveloper || mutation.ExternalService != "git" || !validRevision(mutation.ExpectedSHA) {
+	if !ok || mutation.ExternalService != "git" || !validRevision(mutation.ExpectedSHA) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	credential, err := reconciler.developerCredential(ctx, reconciliation.Repository)
+	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolPublishChanges, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
@@ -170,7 +176,7 @@ func (reconciler *ProductionReconciler) reconcilePublication(ctx context.Context
 
 func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string) (MutationReconciliationResult, error) {
 	branch, base, ok := exactOpenPullRequestResource(mutation.ExternalResourceID, reconciliation.Repository.ID)
-	if !ok || reconciliation.Role != workflow.RoleDeveloper || mutation.ExternalService != "github" || !exactTurnExpectedHead(reconciliation, mutation) {
+	if !ok || mutation.ExternalService != "github" || !exactTurnExpectedHead(reconciliation, mutation) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	var request struct {
@@ -184,7 +190,7 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 		(proposal.HeadRef != branch || proposal.BaseRef != base) {
 		return unresolvedReconciliation(), nil
 	}
-	credential, err := reconciler.developerCredential(ctx, reconciliation.Repository)
+	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolOpenPR, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
@@ -243,7 +249,7 @@ func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, re
 	if !exactNumericResource(mutation.ExternalResourceID, reconciliation.Repository.ID, expectedResourceID) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	credential, err := reconciler.developerCredential(ctx, reconciliation.Repository)
+	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, mutation.ToolName, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
@@ -277,7 +283,7 @@ func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, re
 }
 
 func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string) (MutationReconciliationResult, error) {
-	if reconciliation.Role != workflow.RoleReviewer || reconciliation.ChangeProposal == nil || mutation.ExternalService != "github" ||
+	if reconciliation.ChangeProposal == nil || mutation.ExternalService != "github" ||
 		!exactNumericResource(mutation.ExternalResourceID, reconciliation.Repository.ID, reconciliation.ChangeProposal.PullRequestID) ||
 		!exactTurnExpectedHead(reconciliation, mutation) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -301,7 +307,7 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 	if err != nil || !strings.Contains(expectedBody, marker) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	credential, err := reconciler.reviewerCredential(ctx, reconciliation.Repository)
+	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolSubmitReview, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
@@ -339,7 +345,7 @@ func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Conte
 	var request struct {
 		Summary string `json:"summary"`
 	}
-	if reconciliation.Role != workflow.RoleDeveloper || mutation.ExternalService != "omnigrex" || !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Summary) == "" {
+	if mutation.ExternalService != "omnigrex" || !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Summary) == "" {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	branch, resourceOK := exactBranchResource(mutation.ExternalResourceID, reconciliation.Repository.ID)
@@ -353,7 +359,7 @@ func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Conte
 		return foundReviewRequest(proposal.PullRequestID, proposal.PullRequestNumber, mutation.ExpectedSHA)
 	}
 
-	credential, err := reconciler.developerCredential(ctx, reconciliation.Repository)
+	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolRequestReview, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
@@ -440,24 +446,42 @@ func encodeReviewResult(review githubapi.Review) (json.RawMessage, error) {
 	}{review.ID, review.NodeID, review.State, review.CommitID, review.User.ID, review.HTMLURL})
 }
 
-func (reconciler *ProductionReconciler) developerCredential(ctx context.Context, repository store.AgentTurnRepository) (string, error) {
-	credential, err := reconciler.credentials.DeveloperCredential(ctx, RepositoryScope{ID: repository.ID, Owner: repository.Owner, Name: repository.Name})
+func (reconciler *ProductionReconciler) credentialForTool(ctx context.Context, roleID workflow.Role, tool string, repository store.AgentTurnRepository) (string, error) {
+	policy, ok := reconciler.policies.Lookup(role.ID(roleID))
+	var authority role.CredentialAuthority
+	var granted bool
+	if ok {
+		authority, granted = policy.CredentialAuthorityForTool(tool)
+	} else {
+		authority, granted = retiredRoleRecoveryAuthority(role.ID(roleID), tool)
+	}
+	if !granted {
+		return "", ErrInvalidMutationReconciliation
+	}
+	scope := RepositoryScope{ID: repository.ID, Owner: repository.Owner, Name: repository.Name}
+	var credential string
+	var err error
+	switch authority {
+	case role.OrchestratorAuthority:
+		credential, err = reconciler.credentials.DeveloperCredential(ctx, scope)
+	case role.ReviewerAuthority:
+		credential, err = reconciler.credentials.ReviewerCredential(ctx, scope)
+	default:
+		return "", ErrInvalidMutationReconciliation
+	}
 	if err != nil || !safeCredential(credential) {
-		return "", dependencyError("resolve Developer credential")
+		return "", dependencyError("resolve repository credential")
 	}
 	return credential, nil
 }
 
-func (reconciler *ProductionReconciler) reviewerCredential(ctx context.Context, repository store.AgentTurnRepository) (string, error) {
-	credential, err := reconciler.credentials.ReviewerCredential(ctx, RepositoryScope{ID: repository.ID, Owner: repository.Owner, Name: repository.Name})
-	if err != nil || !safeCredential(credential) {
-		return "", dependencyError("resolve Reviewer credential")
+func (reconciler *ProductionReconciler) validReconciliationScope(reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) bool {
+	policy, knownRole := reconciler.policies.Lookup(role.ID(reconciliation.Role))
+	_, granted := policy.CredentialAuthorityForTool(mutation.ToolName)
+	if !knownRole {
+		_, granted = retiredRoleRecoveryAuthority(role.ID(reconciliation.Role), mutation.ToolName)
 	}
-	return credential, nil
-}
-
-func validReconciliationScope(reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) bool {
-	valid := reconciliation.WorkflowID != "" && (reconciliation.Role == workflow.RoleDeveloper || reconciliation.Role == workflow.RoleReviewer) &&
+	valid := reconciliation.WorkflowID != "" && granted &&
 		reconciliation.Repository.ID > 0 && validRepositoryPart(reconciliation.Repository.Owner) && validRepositoryPart(reconciliation.Repository.Name) &&
 		reconciliation.Issue.ID > 0 && reconciliation.Issue.Number > 0 && reconciliation.Turn.ID != "" && reconciliation.Turn.AgentAssignmentID != "" && reconciliation.Turn.ExecutionEpoch > 0 &&
 		validArtifactOperationID(mutation.ID) && mutation.AgentTurnID == reconciliation.Turn.ID && mutation.ExecutionEpoch == reconciliation.Turn.ExecutionEpoch && mutation.InvocationNumber > 0 &&
@@ -470,6 +494,22 @@ func validReconciliationScope(reconciliation store.AgentTurnMutationReconciliati
 		return reconciliation.Turn.ChangeProposalID == "" && reconciliation.Turn.ExpectedHeadSHA == ""
 	}
 	return reconciliation.Turn.ChangeProposalID == reconciliation.ChangeProposal.ID && validRevision(reconciliation.Turn.ExpectedHeadSHA)
+}
+
+func retiredRoleRecoveryAuthority(roleID role.ID, tool string) (role.CredentialAuthority, bool) {
+	// The fenced mutation ledger proves pre-deployment admission when its Role no longer exists.
+	// Credential authority remains an operation invariant across Role Policy changes.
+	if !role.ValidID(roleID) {
+		return "", false
+	}
+	switch tool {
+	case ToolSubmitReview:
+		return role.ReviewerAuthority, true
+	case ToolPublishChanges, ToolOpenPR, ToolCommentOnIssue, ToolCommentOnPullRequest, ToolRequestReview, ToolReportBlocked:
+		return role.OrchestratorAuthority, true
+	default:
+		return "", false
+	}
 }
 
 func exactTurnExpectedHead(reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) bool {

@@ -52,21 +52,20 @@ type WorkerConfig struct {
 
 // Worker makes PREPARE_AGENT_TURN actions reachable from the durable Workflow queue.
 type Worker struct {
-	store                WorkerStore
-	developerCredentials RepositoryCredentialProvider
-	reviewerCredentials  RepositoryCredentialProvider
-	preparer             TurnPreparer
-	claimOwner           string
-	leaseDuration        time.Duration
-	heartbeatInterval    time.Duration
-	idlePollInterval     time.Duration
-	retryDelay           time.Duration
-	onError              func(error)
+	store                 WorkerStore
+	repositoryCredentials RepositoryCredentialProvider
+	preparer              TurnPreparer
+	claimOwner            string
+	leaseDuration         time.Duration
+	heartbeatInterval     time.Duration
+	idlePollInterval      time.Duration
+	retryDelay            time.Duration
+	onError               func(error)
 }
 
 // NewWorker creates a preparation worker with explicit lease timing.
-func NewWorker(workerStore WorkerStore, developerCredentials, reviewerCredentials RepositoryCredentialProvider, preparer TurnPreparer, config WorkerConfig) (*Worker, error) {
-	if nilDependency(workerStore) || nilDependency(developerCredentials) || nilDependency(reviewerCredentials) || nilDependency(preparer) {
+func NewWorker(workerStore WorkerStore, repositoryCredentials RepositoryCredentialProvider, preparer TurnPreparer, config WorkerConfig) (*Worker, error) {
+	if nilDependency(workerStore) || nilDependency(repositoryCredentials) || nilDependency(preparer) {
 		return nil, errors.New("Agent Turn preparation Worker dependency is nil")
 	}
 	if strings.TrimSpace(config.ClaimOwner) == "" {
@@ -81,7 +80,7 @@ func NewWorker(workerStore WorkerStore, developerCredentials, reviewerCredential
 		return nil, errors.New("Agent Turn preparation Worker polling and retry timing is invalid")
 	}
 	return &Worker{
-		store: workerStore, developerCredentials: developerCredentials, reviewerCredentials: reviewerCredentials, preparer: preparer,
+		store: workerStore, repositoryCredentials: repositoryCredentials, preparer: preparer,
 		claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		retryDelay: config.RetryDelay, onError: config.OnError,
@@ -98,10 +97,10 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 		return false, nil
 	}
 
-	var developerCredential, reviewerCredential string
+	var repositoryCredential string
 	defer func() {
 		if err != nil {
-			err = redactCredentials(err, developerCredential, reviewerCredential)
+			err = redactCredentials(err, repositoryCredential)
 		}
 	}()
 	workCtx, cancelWork := context.WithCancel(ctx)
@@ -120,22 +119,15 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 		if err != nil {
 			return fmt.Errorf("resolve preparation Workflow repository: %w", err)
 		}
-		developerCredential, err = worker.developerCredentials.RepositoryCredential(workCtx, repository.Owner, repository.Name)
+		repositoryCredential, err = worker.repositoryCredentials.RepositoryCredential(workCtx, repository.Owner, repository.Name)
 		if err != nil {
-			return fmt.Errorf("obtain Developer repository credential: %w", err)
+			return fmt.Errorf("obtain preparation repository credential: %w", err)
 		}
-		if strings.TrimSpace(developerCredential) == "" {
-			return permanentError{cause: errors.New("Developer repository credential is empty")}
-		}
-		reviewerCredential, err = worker.reviewerCredentials.RepositoryCredential(workCtx, repository.Owner, repository.Name)
-		if err != nil {
-			return fmt.Errorf("obtain Reviewer repository credential: %w", err)
-		}
-		if strings.TrimSpace(reviewerCredential) == "" {
-			return permanentError{cause: errors.New("Reviewer repository credential is empty")}
+		if strings.TrimSpace(repositoryCredential) == "" {
+			return permanentError{cause: errors.New("preparation repository credential is empty")}
 		}
 		_, err = worker.preparer.Prepare(workCtx, Request{
-			Lease: *lease, InstallationCredential: developerCredential,
+			Lease: *lease, InstallationCredential: repositoryCredential,
 			RepositoryOwner: repository.Owner, RepositoryName: repository.Name,
 		})
 		if err == nil {
@@ -160,7 +152,7 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 	if operationErr == nil {
 		return true, nil
 	}
-	operationErr = redactCredentials(operationErr, developerCredential, reviewerCredential)
+	operationErr = redactCredentials(operationErr, repositoryCredential)
 	if heartbeatErr != nil {
 		return true, errors.Join(fmt.Errorf("heartbeat Agent Turn preparation: %w", heartbeatErr), operationErr)
 	}

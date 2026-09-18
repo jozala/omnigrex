@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 )
@@ -91,6 +93,29 @@ func TestRenderDeveloperEnvironmentAndDefensiveCopies(t *testing.T) {
 	environment[0] = "CHANGED=true"
 	if got := rendered.Environment(); !reflect.DeepEqual(got, wantEnvironment) {
 		t.Fatalf("Environment() changed through returned slice: %#v", got)
+	}
+}
+
+func TestRenderWithPolicyUsesOpenCodePolicyInsteadOfRoleName(t *testing.T) {
+	policy := role.Policy{
+		Role: "SECURITY_REVIEWER",
+		OpenCode: role.OpenCodePolicy{
+			HardenProjectConfiguration: true,
+			AllowFileEdits:             true,
+		},
+	}
+	rendered, err := opencode.RenderWithPolicy(policy, opencode.Profile{
+		Instructions: "Inspect and fix security defects.", Model: "provider/model", Steps: 1,
+		Permissions: opencode.PermissionPolicy{"edit": opencode.PermissionAllow},
+	})
+	if err != nil {
+		t.Fatalf("RenderWithPolicy() error = %v", err)
+	}
+	if !slices.Contains(rendered.Environment(), "OPENCODE_DISABLE_PROJECT_CONFIG=true") {
+		t.Fatalf("Environment() = %#v, want hardened project configuration", rendered.Environment())
+	}
+	if got := rendered.SessionConfiguration().Mode; got != "omnigrex-security_reviewer" {
+		t.Fatalf("Session Mode = %q", got)
 	}
 }
 

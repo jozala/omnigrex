@@ -48,8 +48,7 @@ jobs:
           OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /dev/null
           OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /dev/null
           OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /dev/null
-          OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE: /dev/null
-          OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE: /dev/null
+          OMNIGREX_PROVIDER_CREDENTIALS_FILE: /dev/null
         run: docker compose config --quiet
 
       - name: Build image

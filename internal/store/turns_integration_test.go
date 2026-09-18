@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/mcp"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -1305,6 +1306,7 @@ VALUES ($1, $2, 1, 'reviewer-session', 'runtime', '1', 'sha256:reviewer', $3, 'A
 	developerSpec := fixture.turnSpec()
 	reviewerSpec := fixture.turnSpec()
 	reviewerSpec.AgentSessionID = reviewerSessionID
+	reviewerSpec.Stage = workflow.StageReview
 	reviewerSpec.Purpose = workflow.TurnPurposeReview
 	reviewerSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
 	for role, spec := range map[workflow.Role]store.AgentTurnSpec{
@@ -1780,13 +1782,14 @@ func TestAgentTurnMutationLifecycleAllowsFinalizationAfterTerminalStates(t *test
 
 func TestSuccessfulSubmitReviewBindsReviewerActorWithCompareOrSet(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
-	fixture := seedAgentSession(t, pool, 33)
+	fixture := seedAgentSessionForRole(t, pool, 33, workflow.RoleReviewer)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER', agent_profile_name = 'reviewer' WHERE id = $1`, fixture.assignmentID); err != nil {
-		t.Fatalf("prepare Reviewer Assignment: %v", err)
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatalf("prepare review Stage: %v", err)
 	}
 	turnSpec := fixture.turnSpec()
+	turnSpec.Stage = workflow.StageReview
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
 	turn, err := databases[0].AllocateAgentTurn(ctx, turnSpec)
@@ -2037,6 +2040,7 @@ func (fixture agentFixture) turnSpec() store.AgentTurnSpec {
 	digest := sha256.Sum256([]byte("agent profile"))
 	return store.AgentTurnSpec{
 		AgentSessionID: fixture.sessionID, WorkflowAttemptID: fixture.attemptID,
+		Stage:           workflow.StageImplementation,
 		Purpose:         workflow.TurnPurposeInitialDevelopment,
 		ControlRevision: 1, AgentProfileCommitSHA: "0123456789abcdef",
 		AgentProfileContentSHA256: digest[:],
@@ -2057,6 +2061,20 @@ func claimAgentTurnJob(t *testing.T, database *store.Store, ctx context.Context,
 }
 
 func seedAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture {
+	return seedAgentSessionForRole(t, pool, number, workflow.RoleDeveloper)
+}
+
+func seedAgentSessionForRole(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role) agentFixture {
+	legacy := runtimeprofile.Binding{Name: "runtime", Version: "1", Image: "sha256:test"}
+	return seedAgentSessionWithRuntimeBindings(t, pool, number, participantRole, legacy, legacy)
+}
+
+func seedAgentSessionWithRuntimeStatePaths(t *testing.T, pool *pgxpool.Pool, number int, participantPath, sessionPath string) agentFixture {
+	legacy := runtimeprofile.Binding{Name: "runtime", Version: "1", Image: "sha256:test"}
+	return seedAgentSessionWithRuntimeBindings(t, pool, number, workflow.RoleDeveloper, legacy, legacy, participantPath, sessionPath)
+}
+
+func seedAgentSessionWithRuntimeBindings(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role, participantBinding, sessionBinding runtimeprofile.Binding, runtimeStatePaths ...string) agentFixture {
 	t.Helper()
 	fixture := agentFixture{
 		workflowID:   fmt.Sprintf("40000000-0000-4000-8000-%012d", number*10+1),
@@ -2078,25 +2096,49 @@ VALUES ($1, $2, 1, 'ACTIVE')`, fixture.attemptID, fixture.workflowID)
 	if err != nil {
 		t.Fatalf("seed workflow attempt: %v", err)
 	}
+	profileName := "developer"
+	if participantRole == workflow.RoleReviewer {
+		profileName = "reviewer"
+	}
+	participantPath := "assignment-" + fixture.assignmentID + "/runtime-state"
+	sessionPath := participantPath
+	if len(runtimeStatePaths) == 2 {
+		participantPath, sessionPath = runtimeStatePaths[0], runtimeStatePaths[1]
+	}
 	_, err = pool.Exec(ctx, `
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, 'DEVELOPER', 'ACTIVE', 'developer', 'runtime', '1', 'sha256:test', $3)`, fixture.assignmentID, fixture.workflowID, "/state/"+fixture.assignmentID)
+VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, NULLIF($7, ''), $8, $9)`, fixture.assignmentID, fixture.workflowID,
+		participantRole, profileName, participantBinding.Name, participantBinding.Version,
+		participantBinding.ContentSHA256, participantBinding.Image, participantPath)
 	if err != nil {
 		t.Fatalf("seed agent assignment: %v", err)
 	}
 	_, err = pool.Exec(ctx, `
 INSERT INTO agent_sessions (
     id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
 )
-VALUES ($1, $2, 1, $3, 'runtime', '1', 'sha256:test', $4, 'ACTIVE')`, fixture.sessionID, fixture.assignmentID, "session-"+fixture.sessionID, "/state/"+fixture.assignmentID)
+VALUES ($1, $2, 1, $3, $4, $5, NULLIF($6, ''), $7, $8, 'ACTIVE')`, fixture.sessionID, fixture.assignmentID,
+		"session-"+fixture.sessionID, sessionBinding.Name, sessionBinding.Version, sessionBinding.ContentSHA256,
+		sessionBinding.Image, sessionPath)
 	if err != nil {
 		t.Fatalf("seed agent session: %v", err)
 	}
 	return fixture
+}
+
+func TestAgentParticipantBindingIsImmutableWithoutStageAssignment(t *testing.T) {
+	_, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 98)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER' WHERE id = $1`, fixture.assignmentID); err == nil {
+		t.Fatal("Agent Participant Role mutation succeeded without a Stage Assignment")
+	}
 }
 
 type successfulMutationVerificationReconciler struct {

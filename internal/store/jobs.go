@@ -43,19 +43,20 @@ const (
 
 // JobSpec is the immutable definition used to enqueue a durable job.
 type JobSpec struct {
-	Queue             string
-	Kind              string
-	Payload           json.RawMessage
-	Priority          int
-	AvailableDelay    time.Duration
-	MaxAttempts       int
-	IdempotencyKey    string
-	WorkflowID        string
-	WorkflowAttemptID string
-	AgentAssignmentID string
-	AgentSessionID    string
-	AgentTurnID       string
-	ExecutionEpoch    int64
+	Queue              string
+	Kind               string
+	Payload            json.RawMessage
+	Priority           int
+	AvailableDelay     time.Duration
+	MaxAttempts        int
+	IdempotencyKey     string
+	WorkflowID         string
+	WorkflowAttemptID  string
+	AgentParticipantID string
+	AgentAssignmentID  string
+	AgentSessionID     string
+	AgentTurnID        string
+	ExecutionEpoch     int64
 }
 
 // Job is the current durable state of one job.
@@ -85,6 +86,9 @@ type JobLease struct {
 
 // EnqueueJob durably inserts a job or returns the identical definition already stored for its key.
 func (store *Store) EnqueueJob(ctx context.Context, spec JobSpec) (Job, bool, error) {
+	if err := normalizeJobParticipant(&spec); err != nil {
+		return Job{}, false, err
+	}
 	canonicalPayload, err := validateJobSpec(spec)
 	if err != nil {
 		return Job{}, false, err
@@ -546,6 +550,7 @@ func scanJob(row rowScanner) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
+	job.AgentParticipantID = job.AgentAssignmentID
 	job.Payload, err = canonicalJSON(payload)
 	if err != nil {
 		return Job{}, fmt.Errorf("decode job payload: %w", err)
@@ -594,6 +599,18 @@ func validateJobSpec(spec JobSpec) (json.RawMessage, error) {
 	return payload, nil
 }
 
+func normalizeJobParticipant(spec *JobSpec) error {
+	if spec.AgentParticipantID != "" && spec.AgentAssignmentID != "" && spec.AgentParticipantID != spec.AgentAssignmentID {
+		return errors.New("enqueue job: Participant identity is inconsistent")
+	}
+	if spec.AgentParticipantID != "" {
+		spec.AgentAssignmentID = spec.AgentParticipantID
+	} else {
+		spec.AgentParticipantID = spec.AgentAssignmentID
+	}
+	return nil
+}
+
 func validateJobScope(ctx context.Context, tx pgx.Tx, spec JobSpec) error {
 	checks := []struct {
 		present bool
@@ -637,7 +654,7 @@ func sameJobDefinition(left, right JobSpec) bool {
 		left.Priority == right.Priority && left.AvailableDelay == right.AvailableDelay &&
 		left.MaxAttempts == right.MaxAttempts && left.IdempotencyKey == right.IdempotencyKey &&
 		left.WorkflowID == right.WorkflowID && left.WorkflowAttemptID == right.WorkflowAttemptID &&
-		left.AgentAssignmentID == right.AgentAssignmentID && left.AgentSessionID == right.AgentSessionID &&
+		left.AgentParticipantID == right.AgentParticipantID && left.AgentAssignmentID == right.AgentAssignmentID && left.AgentSessionID == right.AgentSessionID &&
 		left.AgentTurnID == right.AgentTurnID && left.ExecutionEpoch == right.ExecutionEpoch
 }
 

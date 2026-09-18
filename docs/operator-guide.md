@@ -11,9 +11,10 @@ The operator must provide a registry for immutable Runtime Profile images, publi
 
 Only trusted repositories are supported.
 The orchestrator has effective host-root authority through the Docker socket and can read all deployment secrets.
-Runtime Processes do not receive the Docker socket or GitHub credentials, but they do receive Role-specific provider credentials and outbound network access.
+Runtime Processes do not receive the Docker socket or GitHub credentials, but they do receive the deployment-wide provider credential bundle and outbound network access.
 A malicious repository, dependency, plugin, instruction file, or agent command can expose provider credentials.
-Use separate Developer and Reviewer provider accounts, narrow their privileges, configure spending limits, and rotate credentials after any suspected repository compromise.
+The provider bundle is not isolated by Role.
+Narrow provider privileges, configure spending limits, and rotate the complete bundle after any suspected repository compromise.
 
 Omnigrex does not enforce required GitHub checks before `omnigrex:pr-ready`.
 Use GitHub branch protection when checks must be mandatory.
@@ -120,15 +121,14 @@ openssl rand -hex 32 > secrets/github-webhook-secret
 ```
 
 Copy the two GitHub App private keys into the paths described above.
-Copy one OpenCode authentication object for each Role:
+Copy one OpenCode authentication bundle for the deployment:
 
 ```sh
-cp /secure/path/developer-opencode-auth.json secrets/developer-provider-credentials.json
-cp /secure/path/reviewer-opencode-auth.json secrets/reviewer-provider-credentials.json
+cp /secure/path/opencode-auth.json secrets/provider-credentials.json
 chmod 0640 secrets/*
 ```
 
-Each provider credential file must contain the nonempty JSON object accepted by OpenCode's `OPENCODE_AUTH_CONTENT` setting.
+The provider credential file must contain the nonempty JSON object accepted by OpenCode's `OPENCODE_AUTH_CONTENT` setting.
 For example, an API-key provider commonly has this shape:
 
 ```json
@@ -191,7 +191,7 @@ Runtime-provided Omnigrex MCP tools are authorized separately from these local p
 
 Agent Profiles are loaded from the latest default-branch commit before each Agent Turn.
 A feature branch cannot replace the Reviewer Profile used to review that branch.
-Changing the Runtime Profile reference of an existing Assignment does not migrate its Agent Session and creates a configuration Human Handoff.
+Changing the Runtime Profile reference of an existing Agent Participant does not migrate its Agent Session and creates a configuration Human Handoff.
 
 Never place provider credentials, GitHub credentials, deployment secrets, or private endpoint credentials in an Agent Profile.
 
@@ -331,13 +331,13 @@ The default Agent Turn timeout is two hours, and the default global Agent Turn c
 
 ## Session Retention
 
-Closing an Issue fences new work, settles admitted mutations, completes its Assignments, and schedules Runtime Process state deletion.
+Closing an Issue fences new work, settles admitted mutations, completes its current Agent Participants, and schedules Runtime Process state deletion.
 The default retention period is 30 days and is configured with `OMNIGREX_ASSIGNMENT_RETENTION_DURATION`.
 Reopening before garbage collection cancels scheduled deletion but does not restart automation.
 Add `omnigrex:run` after reopening to create a new Workflow Attempt.
 
 Once physical collection starts, deletion is intentionally irrevocable.
-After collection, a new trigger creates new Assignments and Agent Sessions while PostgreSQL retains prior operational history.
+After collection, a new trigger creates a new Assignment Generation whose Stage Assignments lazily select new Agent Participants and Agent Sessions, while PostgreSQL retains prior operational history.
 
 Every active or retained Agent Session stays pinned to its original Runtime Profile image digest.
 Keep every referenced digest available until the corresponding state is garbage-collected.
@@ -521,7 +521,7 @@ Set `OMNIGREX_OPENCODE_ACP_V1_IMAGE` to the candidate digest and set `OMNIGREX_R
 Deploy and run `doctor` for every repository.
 Keep source and candidate digests available for every active and retained session.
 
-An in-place Runtime Profile rollback is unsupported after candidate Assignments exist unless the reverse direction has also been qualified.
+An in-place Runtime Profile rollback is unsupported after Agent Participants using the candidate Runtime Profile exist unless the reverse direction has also been qualified.
 The safe rollback is restoration of the coordinated pre-upgrade backup and previous deployment configuration.
 
 ## Manual Recovery
@@ -575,7 +575,7 @@ Never rotate both App identities to the same key.
 Webhook-secret rotation is not atomic across GitHub and the deployment.
 Stop the orchestrator, update the GitHub App and local secret during one maintenance window, recreate the orchestrator, and verify a real delivery before starting new work.
 
-For provider credentials, replace one Role's file, recreate the orchestrator, run preflight, and use a controlled test Work Item to verify the configured model.
+For provider credentials, replace the deployment bundle, recreate the orchestrator, run preflight, and use a controlled test Work Item to verify every configured model.
 Preflight checks JSON shape but cannot prove live provider authorization without making a paid request.
 
 After any secret rotation, securely remove superseded local and backup copies according to the operator's retention policy.

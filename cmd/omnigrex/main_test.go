@@ -97,15 +97,14 @@ func TestDoctorCommandSucceedsWhenEveryCheckPasses(t *testing.T) {
 
 func doctorTestEnvironment(name string) string {
 	values := map[string]string{
-		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":               "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64),
-		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":            "linux/amd64",
-		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":             "1",
-		"OMNIGREX_GITHUB_REVIEWER_APP_ID":              "2",
-		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE":   "/run/secrets/developer.pem",
-		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":    "/run/secrets/reviewer.pem",
-		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":          "/run/secrets/webhook",
-		"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE": "/run/secrets/developer.json",
-		"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE":  "/run/secrets/reviewer.json",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":             "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64),
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":          "linux/amd64",
+		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "1",
+		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "2",
+		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/run/secrets/developer.pem",
+		"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE":  "/run/secrets/reviewer.pem",
+		"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE":        "/run/secrets/webhook",
+		"OMNIGREX_PROVIDER_CREDENTIALS_FILE":         "/run/secrets/provider.json",
 	}
 	return values[name]
 }

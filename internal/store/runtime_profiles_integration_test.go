@@ -21,11 +21,10 @@ import (
 func TestProtectedRuntimeBindingsRemainUntilCollectionFinalization(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
-	fixture := seedAgentSession(t, pool, 61)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	binding := protectedTestBinding("a", "1")
-	setFixtureRuntimeBinding(t, pool, fixture, binding, binding)
+	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 61, "DEVELOPER", binding, binding)
 
 	assertProtectedBindings(t, database, ctx, []runtimeprofile.Binding{binding})
 	prepareClosableFixture(t, pool, fixture)
@@ -58,12 +57,10 @@ func TestProtectedRuntimeBindingsIncludeDistinctActiveAndRetainedDigests(t *test
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	active := seedAgentSession(t, pool, 62)
-	retained := seedAgentSession(t, pool, 63)
 	activeBinding := protectedTestBinding("b", "2")
 	retainedBinding := protectedTestBinding("c", "3")
-	setFixtureRuntimeBinding(t, pool, active, activeBinding, activeBinding)
-	setFixtureRuntimeBinding(t, pool, retained, retainedBinding, retainedBinding)
+	seedAgentSessionWithRuntimeBindings(t, pool, 62, "DEVELOPER", activeBinding, activeBinding)
+	retained := seedAgentSessionWithRuntimeBindings(t, pool, 63, "DEVELOPER", retainedBinding, retainedBinding)
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_assignments SET status = 'COMPLETED', completed_at = clock_timestamp(), retention_until = clock_timestamp() + interval '1 day'
 WHERE id = $1`, retained.assignmentID); err != nil {
@@ -81,10 +78,9 @@ func TestProtectedRuntimeBindingsRejectInconsistentAssignmentAndSession(t *testi
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fixture := seedAgentSession(t, pool, 64)
 	assignment := protectedTestBinding("d", "4")
 	session := protectedTestBinding("e", "5")
-	setFixtureRuntimeBinding(t, pool, fixture, assignment, session)
+	seedAgentSessionWithRuntimeBindings(t, pool, 64, "DEVELOPER", assignment, session)
 
 	if _, err := database.ListProtectedRuntimeBindings(ctx); !errors.Is(err, store.ErrProtectedRuntimeConfigurationConflict) {
 		t.Fatalf("ListProtectedRuntimeBindings() error = %v, want configuration conflict", err)
@@ -101,10 +97,9 @@ func TestProtectedRuntimeBindingsRejectMutableTagsAndLocalImageIDs(t *testing.T)
 			database := databases[0]
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			fixture := seedAgentSession(t, pool, 65+index)
 			binding := protectedTestBinding("f", "6")
 			binding.Image = image
-			setFixtureRuntimeBinding(t, pool, fixture, binding, binding)
+			seedAgentSessionWithRuntimeBindings(t, pool, 65+index, "DEVELOPER", binding, binding)
 			if _, err := database.ListProtectedRuntimeBindings(ctx); !errors.Is(err, store.ErrProtectedRuntimeConfigurationConflict) {
 				t.Fatalf("ListProtectedRuntimeBindings() error = %v, want configuration conflict", err)
 			}
@@ -119,25 +114,13 @@ func TestProtectedRuntimeBindingsRejectMixedLegacyAndQualifiedRows(t *testing.T)
 			database := databases[0]
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			fixture := seedAgentSession(t, pool, 70+index)
 			binding := protectedTestBinding("9", "8")
-			query := `
-UPDATE agent_assignments
-SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5
-WHERE id = $1`
-			id := fixture.assignmentID
+			legacy := runtimeprofile.Binding{Name: "runtime", Version: "1", Image: "sha256:test"}
+			assignment, session := binding, legacy
 			if qualifiedTarget == "session" {
-				query = `
-UPDATE agent_sessions
-SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5
-WHERE id = $1`
-				id = fixture.sessionID
+				assignment, session = legacy, binding
 			}
-			if _, err := pool.Exec(ctx, query, id, binding.Name, binding.Version, binding.ContentSHA256, binding.Image); err != nil {
-				t.Fatal(err)
-			}
+			seedAgentSessionWithRuntimeBindings(t, pool, 70+index, "DEVELOPER", assignment, session)
 			if _, err := database.ListProtectedRuntimeBindings(ctx); !errors.Is(err, store.ErrProtectedRuntimeConfigurationConflict) {
 				t.Fatalf("ListProtectedRuntimeBindings() mixed legacy/qualified error = %v, want configuration conflict", err)
 			}
@@ -308,30 +291,6 @@ func protectedTestBinding(hashDigit, imageDigit string) runtimeprofile.Binding {
 	return runtimeprofile.Binding{
 		Name: "opencode-acp", Version: "v1", ContentSHA256: strings.Repeat(hashDigit, 64),
 		Image: "registry.example/omnigrex/opencode@sha256:" + strings.Repeat(imageDigit, 64),
-	}
-}
-
-func setFixtureRuntimeBinding(t *testing.T, pool *pgxpool.Pool, fixture agentFixture, assignment, session runtimeprofile.Binding) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	runtimeStatePath := "assignment-" + fixture.assignmentID + "/runtime-state"
-	if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments
-SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5,
-    runtime_state_path = $6
-WHERE id = $1`, fixture.assignmentID, assignment.Name, assignment.Version,
-		assignment.ContentSHA256, assignment.Image, runtimeStatePath); err != nil {
-		t.Fatalf("set fixture Assignment Runtime Profile binding: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_sessions
-SET runtime_profile_name = $2, runtime_profile_version = $3,
-    runtime_profile_content_sha256 = $4, runtime_image_digest = $5,
-    runtime_state_path = $6
-WHERE id = $1`, fixture.sessionID, session.Name, session.Version,
-		session.ContentSHA256, session.Image, runtimeStatePath); err != nil {
-		t.Fatalf("set fixture Agent Session Runtime Profile binding: %v", err)
 	}
 }
 

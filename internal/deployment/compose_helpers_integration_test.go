@@ -19,8 +19,7 @@ var composeSecretEnvironment = []string{
 	"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE",
 	"OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE",
 	"OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE",
-	"OMNIGREX_DEVELOPER_PROVIDER_CREDENTIALS_FILE",
-	"OMNIGREX_REVIEWER_PROVIDER_CREDENTIALS_FILE",
+	"OMNIGREX_PROVIDER_CREDENTIALS_FILE",
 }
 
 const testDeploymentImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

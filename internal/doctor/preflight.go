@@ -47,8 +47,7 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 	checks := []Check{
 		{Name: "runtime-profile-contract", Run: state.checkRuntimeProfile},
 		{Name: "runtime-profile-compatibility-artifact", Run: state.checkCompatibilityArtifact},
-		{Name: "developer-provider-credentials", Run: func(context.Context) error { return validateJSONObjectFile(settings.DeveloperProviderCredentialsFile) }},
-		{Name: "reviewer-provider-credentials", Run: func(context.Context) error { return validateJSONObjectFile(settings.ReviewerProviderCredentialsFile) }},
+		{Name: "provider-credentials", Run: func(context.Context) error { return validateJSONObjectFile(settings.ProviderCredentialsFile) }},
 		{Name: "github-webhook-secret", Run: func(context.Context) error { return validateNonemptyFile(settings.GitHubWebhookSecretFile) }},
 		{Name: "developer-github-app-key", Run: state.checkDeveloperKey},
 		{Name: "reviewer-github-app-key", Run: state.checkReviewerKey},
@@ -63,7 +62,6 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		{Name: "developer-github-installation", Run: state.checkDeveloperInstallation},
 		{Name: "reviewer-github-installation", Run: state.checkReviewerInstallation},
 		{Name: "agent-profiles", Run: state.checkAgentProfiles},
-		{Name: "reviewer-repository-read", Run: state.checkReviewerRepositoryRead},
 		{Name: "effective-agent-profiles", Run: state.checkEffectiveProfiles},
 		{Name: "mcp-endpoint", Run: state.checkMCPEndpoint},
 	}
@@ -377,29 +375,6 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	}
 	state.profiles = snapshot
 	state.profilesLoaded = true
-	return nil
-}
-
-func (state *productionState) checkReviewerRepositoryRead(ctx context.Context) error {
-	if state.reviewerToken == "" || !state.profilesLoaded {
-		return errors.New("Reviewer installation and Agent Profile checks must pass first")
-	}
-	api, err := state.githubAPI()
-	if err != nil {
-		return err
-	}
-	want := state.profiles.Developer()
-	content, err := api.FetchRepositoryFile(ctx, state.reviewerToken, state.repo.Owner, state.repo.Name, want.Path(), state.profiles.CommitSHA())
-	if err != nil {
-		return err
-	}
-	got, err := agentprofile.Parse(agentprofile.Developer, content)
-	if err != nil {
-		return err
-	}
-	if got.ContentSHA256() != want.ContentSHA256() {
-		return errors.New("Reviewer read a different immutable Agent Profile")
-	}
 	return nil
 }
 

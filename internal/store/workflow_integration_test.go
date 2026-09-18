@@ -321,6 +321,9 @@ func TestReviewObservationWithoutActiveTurnIsUnrelatedWithoutConsumingBudget(t *
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING', state_revision = 4 WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatalf("make reviewing Workflow: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, fixture.workflowID); err != nil {
+		t.Fatalf("make reviewing Workflow Stage: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET review_cycles_completed = 1, infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set attempt budgets: %v", err)
 	}
@@ -361,6 +364,9 @@ func TestSynchronizationGuardsPreviousHeadAndUpdatesExistingChangeProposal(t *te
 	defer cancel()
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING' WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatalf("make reviewing Workflow: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, fixture.workflowID); err != nil {
+		t.Fatalf("make reviewing Workflow Stage: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set attempt budget: %v", err)
@@ -419,6 +425,9 @@ func TestInvalidWorkflowMarkerUsesExistingPullRequestMappingAndRejectsUnmappedPu
 	defer cancel()
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'REVIEWING' WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatalf("make reviewing Workflow: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, fixture.workflowID); err != nil {
+		t.Fatalf("make reviewing Workflow Stage: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set attempt budget: %v", err)
@@ -996,6 +1005,140 @@ func TestIssueClosureClosesMutationAdmissionBeforeEnqueuingStop(t *testing.T) {
 	}
 	if admissionOpen || turnStatus != "CANCELLING" || stopJobs != 1 {
 		t.Errorf("closed turn = admission %t, status %s, stop jobs %d; want false, CANCELLING, 1", admissionOpen, turnStatus, stopJobs)
+	}
+}
+
+func TestIncompatibleDefinitionInterruptsQueuedTurnAndHandsOff(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSession(t, pool, 31)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows
+SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE workflow_attempts
+SET infrastructure_failure_limit = 1
+WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'removed-stage' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	delivery := workflowDelivery("40000000-0000-4000-8000-000000000031")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 31, 31, 31
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
+	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 31, IssueID: 31, IssueNumber: 31}, func(workflow.Snapshot) workflow.Decision {
+			t.Fatal("transition callback ran for an incompatible Workflow Definition")
+			return workflow.Decision{}
+		})
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() error = %v", err)
+	}
+	var workflowStatus, handoffReason, turnStatus, jobStatus string
+	var turnActive bool
+	if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.human_handoff_reason, turn.status, turn.active, job.status
+FROM workflows AS workflow
+JOIN agent_turns AS turn ON turn.workflow_id = workflow.id
+JOIN jobs AS job ON job.agent_turn_id = turn.id AND job.kind = 'RUN_AGENT_TURN'
+WHERE workflow.id = $1 AND turn.id = $2`, fixture.workflowID, turn.ID).Scan(
+		&workflowStatus, &handoffReason, &turnStatus, &turnActive, &jobStatus,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if application.State != workflow.StateNeedsHuman || workflowStatus != string(workflow.StateNeedsHuman) ||
+		handoffReason != string(workflow.ReasonWorkflowDefinitionIncompatible) || turnStatus != string(store.AgentTurnInterrupted) ||
+		turnActive || jobStatus != string(store.JobCancelled) {
+		t.Fatalf("incompatible handoff = application %#v, Workflow %s/%s, Turn %s/%t, Job %s",
+			application, workflowStatus, handoffReason, turnStatus, turnActive, jobStatus)
+	}
+}
+
+func TestIncompatibleDefinitionFencesLeasedRuntimeIntoHandoffRecovery(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	fixture := seedAgentSession(t, pool, 32)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows
+SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := claimAgentTurnJob(t, database, ctx, turn, 20*time.Second)
+	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "incompatible-runtime", 20*time.Second, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'removed-stage' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	delivery := workflowDelivery("40000000-0000-4000-8000-000000000032")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 32, 32, 32
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, database, ctx, delivery)
+	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 32, IssueID: 32, IssueNumber: 32}, func(workflow.Snapshot) workflow.Decision {
+			t.Fatal("transition callback ran for an incompatible Workflow Definition")
+			return workflow.Decision{}
+		})
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() error = %v", err)
+	}
+	var turnStatus, executionStatus, continuation string
+	var active, recoveryStarted bool
+	var stopJobs int
+	if err := pool.QueryRow(ctx, `
+SELECT turn.status, turn.active, turn.recovery_started_at IS NOT NULL, turn.recovery_continuation,
+       execution.status,
+       (SELECT count(*) FROM jobs WHERE agent_turn_id = turn.id AND kind = 'STOP_STALE_RUNTIME')
+FROM agent_turns AS turn
+JOIN jobs AS execution ON execution.agent_turn_id = turn.id AND execution.kind = 'RUN_AGENT_TURN'
+WHERE turn.id = $1`, turn.ID).Scan(
+		&turnStatus, &active, &recoveryStarted, &continuation, &executionStatus, &stopJobs,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if application.State != workflow.StateNeedsHuman || turnStatus != string(store.AgentTurnInterrupted) || active || !recoveryStarted ||
+		continuation != "WORKFLOW_DEFINITION_HANDOFF_APPLIED" || executionStatus != string(store.JobFailed) || stopJobs != 1 {
+		t.Fatalf("leased incompatible handoff = application %#v, Turn %s/%t recovery %t/%s, execution %s, stop jobs %d",
+			application, turnStatus, active, recoveryStarted, continuation, executionStatus, stopJobs)
+	}
+	stopLease, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "definition-stop", 5*time.Second)
+	if err != nil || stopLease == nil {
+		t.Fatalf("ClaimJobKind() stop = (%#v, %v)", stopLease, err)
+	}
+	recovery, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, *stopLease)
+	if err != nil {
+		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() error = %v", err)
+	}
+	var successors int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil {
+		t.Fatal(err)
+	}
+	if recovery.RecoverySettledAt == nil || recovery.Continuation != "WORKFLOW_DEFINITION_HANDOFF_APPLIED" || successors != 0 {
+		t.Fatalf("settled definition recovery = %#v, successor jobs %d", recovery, successors)
 	}
 }
 

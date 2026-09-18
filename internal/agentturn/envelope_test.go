@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -24,7 +25,7 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	if len(content) != 1 || content[0].Type != "text" || content[0].Data != "" || content[0].MIMEType != "" || content[0].URI != "" {
 		t.Fatalf("BuildEventEnvelope() content = %#v, want one text block", content)
 	}
-	const want = `{"schema_version":1,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_assignment_id":"10000000-0000-4000-8000-000000000001","agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","publish_changes","open_pr","request_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
+	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","publish_changes","open_pr","request_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
 	if content[0] != acp.TextContent(want) {
 		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content[0].Text, want)
 	}
@@ -39,6 +40,48 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	}
 }
 
+func TestBuildEventEnvelopeUsesInjectedWorkflowDefinition(t *testing.T) {
+	const followup workflow.StageID = "implementation-followup"
+	definition, err := workflow.NewDefinition(role.BuiltinCatalog(), workflow.StageEntry{
+		Stage: workflow.StageImplementation, Purpose: workflow.TurnPurposeInitialDevelopment,
+	}, []workflow.StageDefinition{
+		{
+			ID: workflow.StageImplementation, Role: role.Developer, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: followup, NextPurpose: workflow.TurnPurposeRequestedChanges,
+			}},
+		},
+		{
+			ID: followup, Role: role.Developer, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: workflow.StageImplementation, NextPurpose: workflow.TurnPurposeInitialDevelopment,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reducer, err := workflow.NewReducer(definition, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23,
+		HeadSHA: "2222222222222222222222222222222222222222",
+	}
+	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, proposal)
+	execution.Turn.Stage = followup
+	content, err := agentturn.BuildEventEnvelopeWithConfiguration(execution, execution.ChangeProposal.HeadSHA, reducer, role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatalf("BuildEventEnvelopeWithConfiguration() error = %v", err)
+	}
+	if len(content) != 1 || !strings.Contains(content[0].Text, `"stage":"implementation-followup"`) {
+		t.Fatalf("custom Stage envelope = %#v", content)
+	}
+}
+
 func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23,
@@ -50,7 +93,7 @@ func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	const want = `{"schema_version":1,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_assignment_id":"10000000-0000-4000-8000-000000000001","agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["APPROVED","CHANGES_REQUESTED"],"allowed_outcomes":["APPROVED","CHANGES_REQUESTED","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","submit_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
+	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","submit_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
 	if len(content) != 1 || content[0] != acp.TextContent(want) {
 		t.Fatalf("BuildEventEnvelope() = %#v\nwant text = %s", content, want)
 	}
@@ -83,6 +126,7 @@ func TestBuildEventEnvelopeSupportsEveryDurableTurnTrigger(t *testing.T) {
 			}
 			var envelope struct {
 				TriggeringEvent struct {
+					Stage       workflow.StageID     `json:"stage"`
 					Role        workflow.Role        `json:"role"`
 					TurnPurpose workflow.TurnPurpose `json:"turn_purpose"`
 				} `json:"triggering_event"`
@@ -90,7 +134,11 @@ func TestBuildEventEnvelopeSupportsEveryDurableTurnTrigger(t *testing.T) {
 			if err := json.Unmarshal([]byte(content[0].Text), &envelope); err != nil {
 				t.Fatalf("decode event envelope: %v", err)
 			}
-			if envelope.TriggeringEvent.Role != test.role || envelope.TriggeringEvent.TurnPurpose != test.purpose {
+			stage := workflow.StageImplementation
+			if test.role == workflow.RoleReviewer {
+				stage = workflow.StageReview
+			}
+			if envelope.TriggeringEvent.Stage != stage || envelope.TriggeringEvent.Role != test.role || envelope.TriggeringEvent.TurnPurpose != test.purpose {
 				t.Fatalf("triggering event = %#v, want %s/%s", envelope.TriggeringEvent, test.role, test.purpose)
 			}
 		})
@@ -155,15 +203,19 @@ func TestBuildEventEnvelopeRejectsInvalidDurableContext(t *testing.T) {
 }
 
 func envelopeExecutionContext(role workflow.Role, purpose workflow.TurnPurpose, proposal *store.AgentTurnChangeProposal) store.AgentTurnExecutionContext {
+	stage := workflow.StageImplementation
+	if role == workflow.RoleReviewer {
+		stage = workflow.StageReview
+	}
 	execution := store.AgentTurnExecutionContext{
 		WorkflowID: "40000000-0000-4000-8000-000000000001",
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "owner-body", Name: "repository-comment"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 17},
-		Assignment: store.AgentAssignment{ID: "10000000-0000-4000-8000-000000000001", WorkflowID: "40000000-0000-4000-8000-000000000001", Role: role},
+		Assignment: store.AgentAssignment{ID: "10000000-0000-4000-8000-000000000001", WorkflowID: "40000000-0000-4000-8000-000000000001", Role: role, Generation: 3},
 		Session:    store.AgentSession{ID: "20000000-0000-4000-8000-000000000001", AgentAssignmentID: "10000000-0000-4000-8000-000000000001"},
 		Turn: store.AgentTurn{
 			ID: "30000000-0000-4000-8000-000000000001", AgentAssignmentID: "10000000-0000-4000-8000-000000000001",
-			AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "20000000-0000-4000-8000-000000000001", Purpose: purpose},
+			AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "20000000-0000-4000-8000-000000000001", Stage: stage, Purpose: purpose},
 		},
 		ChangeProposal: proposal,
 	}
