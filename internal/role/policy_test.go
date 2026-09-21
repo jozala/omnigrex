@@ -35,8 +35,7 @@ func TestPolicyCatalogRejectsInvalidPolicyDetails(t *testing.T) {
 		name   string
 		mutate func(*role.Policy)
 	}{
-		{name: "profile name", mutate: func(policy *role.Policy) { policy.AgentProfile.Name = "Developer" }},
-		{name: "profile path", mutate: func(policy *role.Policy) { policy.AgentProfile.Path = "../developer.md" }},
+		{name: "invalid Role", mutate: func(policy *role.Policy) { policy.Role = "developer" }},
 		{name: "no tools", mutate: func(policy *role.Policy) { policy.MCPTools = nil }},
 		{name: "duplicate tool", mutate: func(policy *role.Policy) { policy.MCPTools = []string{"get_issue", "get_issue"} }},
 		{name: "unknown authority", mutate: func(policy *role.Policy) { policy.RepositoryCredentialAuthority = "DEVELOPER" }},
@@ -122,7 +121,6 @@ func TestBuiltinPolicyCatalogSupportsReferencedSubset(t *testing.T) {
 func testPolicy(id role.ID) role.Policy {
 	return role.Policy{
 		Role:                          id,
-		AgentProfile:                  role.AgentProfileIdentity{Name: "developer", Path: ".omnigrex/team/developer.md"},
 		MCPTools:                      []string{"get_issue"},
 		RepositoryCredentialAuthority: role.OrchestratorAuthority,
 		TrustedToolsRevision:          role.TurnRevisionTrustedTools,

@@ -216,7 +216,8 @@ func isPermanentWorkerError(err error) bool {
 		errors.Is(err, ErrInvalidRuntimeProfileReference) || errors.Is(err, ErrRuntimeProfileReferenceMismatch) ||
 		errors.Is(err, agentprofile.ErrInvalidCommitSHA) || errors.Is(err, agentprofile.ErrMissingSource) ||
 		errors.Is(err, agentprofile.ErrInvalidProfile) || errors.Is(err, agentprofile.ErrProfileTooLarge) ||
-		errors.Is(err, agentprofile.ErrUnknownProfile) || errors.Is(err, runtimeprofile.ErrInvalid) ||
+		errors.Is(err, agentprofile.ErrUnknownProfile) || errors.Is(err, agentprofile.ErrInvalidCatalog) ||
+		errors.Is(err, agentprofile.ErrInvalidSelection) || errors.Is(err, runtimeprofile.ErrInvalid) ||
 		errors.Is(err, runtimeprofile.ErrConflict) || errors.Is(err, runtimeprofile.ErrNotFound) ||
 		errors.Is(err, store.ErrAgentTurnPreparationFenceLost) || errors.Is(err, store.ErrWorkflowNotFound)
 }

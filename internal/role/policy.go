@@ -25,12 +25,6 @@ const (
 	DefaultBranchTrustedTools TrustedToolsRevisionPolicy = "DEFAULT_BRANCH"
 )
 
-// AgentProfileIdentity is the code-owned identity and repository location of a Role's Agent Profile.
-type AgentProfileIdentity struct {
-	Name string
-	Path string
-}
-
 // OpenCodePolicy owns Role-specific adapter hardening independently from mutable Agent Profile permissions.
 type OpenCodePolicy struct {
 	HardenProjectConfiguration bool
@@ -40,7 +34,6 @@ type OpenCodePolicy struct {
 // Policy owns capability and isolation decisions for one canonical Role.
 type Policy struct {
 	Role                          ID
-	AgentProfile                  AgentProfileIdentity
 	MCPTools                      []string
 	RequiresChangeProposal        bool
 	RepositoryCredentialAuthority CredentialAuthority
@@ -109,7 +102,7 @@ func BuiltinPolicyCatalog() PolicyCatalog {
 func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 	builtin := map[ID]Policy{
 		Developer: {
-			Role: Developer, AgentProfile: AgentProfileIdentity{Name: "developer", Path: ".omnigrex/team/developer.md"},
+			Role: Developer,
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
 				"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked",
@@ -120,7 +113,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			AllowHumanSessionControl:      true,
 		},
 		Reviewer: {
-			Role: Reviewer, AgentProfile: AgentProfileIdentity{Name: "reviewer", Path: ".omnigrex/team/reviewer.md"},
+			Role: Reviewer,
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
 				"submit_review", "comment_on_issue", "comment_on_pull_request", "report_blocked",
@@ -175,8 +168,8 @@ func (policy Policy) CredentialAuthorityForTool(tool string) (CredentialAuthorit
 }
 
 func validatePolicy(policy Policy) error {
-	if !ValidID(policy.Role) || !validProfileName(policy.AgentProfile.Name) || !validProfilePath(policy.AgentProfile.Path) {
-		return errors.New("invalid Role or Agent Profile identity")
+	if !ValidID(policy.Role) {
+		return errors.New("invalid Role")
 	}
 	if len(policy.MCPTools) == 0 || policy.RepositoryCredentialAuthority != OrchestratorAuthority ||
 		(policy.TrustedToolsRevision != TurnRevisionTrustedTools && policy.TrustedToolsRevision != DefaultBranchTrustedTools) {
@@ -216,23 +209,6 @@ func clonePolicy(policy Policy) Policy {
 
 func validCredentialAuthority(authority CredentialAuthority) bool {
 	return authority == OrchestratorAuthority || authority == ReviewerAuthority
-}
-
-func validProfileName(value string) bool {
-	if len(value) == 0 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' || strings.TrimSpace(value) != value {
-		return false
-	}
-	for _, character := range value[1:] {
-		if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' || character == '_') {
-			return false
-		}
-	}
-	return true
-}
-
-func validProfilePath(value string) bool {
-	return strings.HasPrefix(value, ".omnigrex/team/") && strings.HasSuffix(value, ".md") &&
-		!strings.Contains(value, "..") && strings.TrimSpace(value) == value
 }
 
 func validToolName(value string) bool {

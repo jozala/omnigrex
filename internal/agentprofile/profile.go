@@ -29,17 +29,7 @@ var (
 
 type Name string
 
-const (
-	Developer Name = "developer"
-	Reviewer  Name = "reviewer"
-)
-
 type Role = role.ID
-
-const (
-	RoleDeveloper = role.Developer
-	RoleReviewer  = role.Reviewer
-)
 
 type PermissionAction string
 
@@ -69,6 +59,8 @@ type Profile struct {
 }
 
 type frontMatter struct {
+	Name        Name                        `yaml:"name"`
+	Role        Role                        `yaml:"role"`
 	Runtime     string                      `yaml:"runtime"`
 	Model       string                      `yaml:"model"`
 	Variant     string                      `yaml:"variant,omitempty"`
@@ -76,22 +68,10 @@ type frontMatter struct {
 	Permissions map[string]PermissionAction `yaml:"permissions"`
 }
 
-func Parse(name Name, content []byte) (Profile, error) {
-	catalog := BuiltinCatalog()
-	identity, ok := catalog.Identity(name)
-	if !ok {
-		return Profile{}, fmt.Errorf("%w: %q", ErrUnknownProfile, name)
+func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, error) {
+	if !validPath(path) {
+		return Profile{}, fmt.Errorf("%w: path must be a direct .md file under .omnigrex/team", ErrInvalidProfile)
 	}
-	policy, _ := catalog.policy(name)
-	return parse(identity, policy, content)
-}
-
-func parse(identity Identity, policy role.Policy, content []byte) (Profile, error) {
-	if !validName(identity.Name) || !role.ValidID(identity.Role) || !validPath(identity.Path) || policy.Role != identity.Role ||
-		policy.AgentProfile.Name != string(identity.Name) || policy.AgentProfile.Path != identity.Path {
-		return Profile{}, fmt.Errorf("%w: invalid identity", ErrInvalidProfile)
-	}
-	name := identity.Name
 	if len(content) > MaxContentSize {
 		return Profile{}, ErrProfileTooLarge
 	}
@@ -106,14 +86,21 @@ func parse(identity Identity, policy role.Policy, content []byte) (Profile, erro
 	if err != nil {
 		return Profile{}, err
 	}
+	if !validName(configuration.Name) {
+		return Profile{}, fmt.Errorf("%w: name must use safe lowercase syntax", ErrInvalidProfile)
+	}
+	policy, ok := policies.Lookup(configuration.Role)
+	if !ok {
+		return Profile{}, fmt.Errorf("%w: Role %q has no policy", ErrInvalidProfile, configuration.Role)
+	}
 	if err := validateConfiguration(policy, configuration, instructions); err != nil {
 		return Profile{}, err
 	}
 
 	profile := Profile{
-		name:         name,
-		role:         identity.Role,
-		path:         identity.Path,
+		name:         configuration.Name,
+		role:         configuration.Role,
+		path:         path,
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
 		variant:      configuration.Variant,

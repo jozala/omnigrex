@@ -244,6 +244,7 @@ type API interface {
 	SubmitReview(context.Context, string, string, string, int, ReviewRequest) (Review, error)
 	ResolveDefaultBranch(context.Context, string, string, string) (DefaultBranch, error)
 	ResolveDefaultBranchCommit(context.Context, string, string, string) (string, error)
+	ListRepositoryDirectoryFiles(context.Context, string, string, string, string, string) ([]string, error)
 	FetchRepositoryFile(context.Context, string, string, string, string, string) ([]byte, error)
 }
 

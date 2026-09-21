@@ -9,10 +9,10 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 )
 
-func TestCatalogAllowsMultipleProfilesForOneRole(t *testing.T) {
-	catalog, err := agentprofile.NewCatalog(role.BuiltinCatalog(), []agentprofile.Identity{
-		{Name: "primary-developer", Role: role.Developer, Path: ".omnigrex/team/primary-developer.md"},
-		{Name: "release-developer", Role: role.Developer, Path: ".omnigrex/team/release-developer.md"},
+func TestCatalogOwnsMultipleProfileIdentitiesPerRole(t *testing.T) {
+	catalog, err := agentprofile.NewCatalog([]agentprofile.Identity{
+		{Name: "primary-developer", Role: role.Developer, Path: ".omnigrex/team/primary.md"},
+		{Name: "release-developer", Role: role.Developer, Path: ".omnigrex/team/release.md"},
 		{Name: "reviewer", Role: role.Reviewer, Path: ".omnigrex/team/reviewer.md"},
 	})
 	if err != nil {
@@ -24,7 +24,7 @@ func TestCatalogAllowsMultipleProfilesForOneRole(t *testing.T) {
 	}
 	identities[0].Path = "changed"
 	identity, _ := catalog.Identity("primary-developer")
-	if identity.Path != ".omnigrex/team/primary-developer.md" {
+	if identity.Path != ".omnigrex/team/primary.md" {
 		t.Fatal("Catalog identity was mutated through returned slice")
 	}
 }
@@ -33,20 +33,22 @@ func TestCatalogRejectsInvalidAndDuplicateIdentities(t *testing.T) {
 	for _, identities := range [][]agentprofile.Identity{
 		nil,
 		{{Name: "Developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"}},
-		{{Name: "developer", Role: role.ID("UNKNOWN"), Path: ".omnigrex/team/developer.md"}},
+		{{Name: "developer", Role: role.ID("developer"), Path: ".omnigrex/team/developer.md"}},
 		{{Name: "developer", Role: role.Developer, Path: "../developer.md"}},
-		{{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"}, {Name: "developer", Role: role.Developer, Path: ".omnigrex/team/other.md"}},
+		{{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/nested/developer.md"}},
+		{{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.MD"}},
+		{{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"}, {Name: "developer", Role: role.Reviewer, Path: ".omnigrex/team/other.md"}},
 	} {
-		if _, err := agentprofile.NewCatalog(role.BuiltinCatalog(), identities); !errors.Is(err, agentprofile.ErrInvalidCatalog) {
+		if _, err := agentprofile.NewCatalog(identities); !errors.Is(err, agentprofile.ErrInvalidCatalog) {
 			t.Errorf("NewCatalog(%#v) error = %v", identities, err)
 		}
 	}
 }
 
 func TestSelectionRequiresExactReferencedRoleCoverage(t *testing.T) {
-	catalog, err := agentprofile.NewCatalog(role.BuiltinCatalog(), []agentprofile.Identity{
+	catalog, err := agentprofile.NewCatalog([]agentprofile.Identity{
 		{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"},
-		{Name: "alternate-developer", Role: role.Developer, Path: ".omnigrex/team/alternate-developer.md"},
+		{Name: "alternate-developer", Role: role.Developer, Path: ".omnigrex/team/alternate.md"},
 		{Name: "reviewer", Role: role.Reviewer, Path: ".omnigrex/team/reviewer.md"},
 	})
 	if err != nil {
@@ -81,5 +83,54 @@ func TestSelectionRequiresExactReferencedRoleCoverage(t *testing.T) {
 		if _, err := agentprofile.NewSelection(catalog, []role.ID{role.Developer, role.Reviewer}, selected); !errors.Is(err, agentprofile.ErrInvalidSelection) {
 			t.Errorf("NewSelection(%#v) error = %v", selected, err)
 		}
+	}
+	if _, err := agentprofile.NewSelection(catalog, []role.ID{role.Developer, role.Developer}, map[role.ID]agentprofile.Name{role.Developer: "developer"}); !errors.Is(err, agentprofile.ErrInvalidSelection) {
+		t.Errorf("NewSelection() duplicate Role error = %v", err)
+	}
+}
+
+func TestSingletonSelectionRequiresOneCandidateForEveryPolicyRole(t *testing.T) {
+	policies := role.BuiltinPolicyCatalog()
+	valid, err := agentprofile.NewCatalog([]agentprofile.Identity{
+		{Name: "implementation", Role: role.Developer, Path: ".omnigrex/team/dev.md"},
+		{Name: "quality", Role: role.Reviewer, Path: ".omnigrex/team/review.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := agentprofile.NewSingletonSelection(valid, policies)
+	if err != nil {
+		t.Fatalf("NewSingletonSelection() error = %v", err)
+	}
+	if name, _ := selection.Profile(role.Developer); name != "implementation" {
+		t.Errorf("Developer selection = %q", name)
+	}
+
+	tests := []struct {
+		name       string
+		identities []agentprofile.Identity
+	}{
+		{name: "missing candidate", identities: []agentprofile.Identity{{Name: "implementation", Role: role.Developer, Path: ".omnigrex/team/dev.md"}}},
+		{name: "multiple candidates", identities: []agentprofile.Identity{
+			{Name: "implementation", Role: role.Developer, Path: ".omnigrex/team/dev.md"},
+			{Name: "alternate", Role: role.Developer, Path: ".omnigrex/team/alternate.md"},
+			{Name: "quality", Role: role.Reviewer, Path: ".omnigrex/team/review.md"},
+		}},
+		{name: "unreferenced Role", identities: []agentprofile.Identity{
+			{Name: "implementation", Role: role.Developer, Path: ".omnigrex/team/dev.md"},
+			{Name: "quality", Role: role.Reviewer, Path: ".omnigrex/team/review.md"},
+			{Name: "architect", Role: role.ID("ARCHITECT"), Path: ".omnigrex/team/architect.md"},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			catalog, err := agentprofile.NewCatalog(test.identities)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agentprofile.NewSingletonSelection(catalog, policies); !errors.Is(err, agentprofile.ErrInvalidSelection) {
+				t.Fatalf("NewSingletonSelection() error = %v", err)
+			}
+		})
 	}
 }

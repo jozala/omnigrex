@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-const MaxRepositoryFileSize = 256 << 10
+const (
+	MaxRepositoryFileSize = 256 << 10
+	// A response at this limit may have been truncated by the Contents API.
+	MaxRepositoryDirectoryEntries = 1000
+)
 
 var (
 	ErrInvalidCommitSHA      = errors.New("invalid Git commit SHA")
@@ -56,6 +61,70 @@ func (client *APIClient) ResolveDefaultBranch(ctx context.Context, installationT
 		return DefaultBranch{}, fmt.Errorf("%w: default branch commit SHA is invalid", ErrInvalidAPIResponse)
 	}
 	return DefaultBranch{Name: metadata.DefaultBranch, CommitSHA: commit.SHA}, nil
+}
+
+// ListRepositoryDirectoryFiles returns regular files that are direct children of directoryPath.
+func (client *APIClient) ListRepositoryDirectoryFiles(ctx context.Context, installationToken, owner, repository, directoryPath, commitSHA string) ([]string, error) {
+	if err := validateRepository(owner, repository); err != nil {
+		return nil, err
+	}
+	if !validRepositoryPath(directoryPath) {
+		return nil, &ConfigurationError{Cause: ErrInvalidRepositoryPath}
+	}
+	if !validCommitSHA(commitSHA) {
+		return nil, &ConfigurationError{Cause: ErrInvalidCommitSHA}
+	}
+
+	var entries []struct {
+		Type            string  `json:"type"`
+		Path            string  `json:"path"`
+		Target          *string `json:"target"`
+		SubmoduleGitURL *string `json:"submodule_git_url"`
+	}
+	requestPath := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repository) + "/contents/" + escapeRepositoryPath(directoryPath)
+	requestPath += "?" + url.Values{"ref": []string{commitSHA}}.Encode()
+	if err := client.doJSON(ctx, http.MethodGet, requestPath, installationToken, nil, &entries); err != nil {
+		return nil, err
+	}
+	if entries == nil || len(entries) >= MaxRepositoryDirectoryEntries {
+		return nil, fmt.Errorf("%w: Contents directory response entry count is invalid", ErrInvalidAPIResponse)
+	}
+
+	prefix := directoryPath + "/"
+	files := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !validRepositoryPath(entry.Path) || !strings.HasPrefix(entry.Path, prefix) || strings.Contains(strings.TrimPrefix(entry.Path, prefix), "/") {
+			return nil, fmt.Errorf("%w: Contents directory entry is not a direct child", ErrInvalidAPIResponse)
+		}
+		if _, exists := seen[entry.Path]; exists {
+			return nil, fmt.Errorf("%w: duplicate Contents directory entry path", ErrInvalidAPIResponse)
+		}
+		seen[entry.Path] = struct{}{}
+
+		switch entry.Type {
+		case "file":
+			if entry.Target != nil || entry.SubmoduleGitURL != nil {
+				if strings.HasSuffix(entry.Path, ".md") {
+					return nil, fmt.Errorf("%w: Markdown Contents directory file entry is not a regular file", ErrInvalidAPIResponse)
+				}
+				continue
+			}
+			files = append(files, entry.Path)
+		case "dir":
+			if entry.Target != nil || entry.SubmoduleGitURL != nil {
+				return nil, fmt.Errorf("%w: Contents directory entry is invalid", ErrInvalidAPIResponse)
+			}
+		case "symlink", "submodule":
+			if strings.HasSuffix(entry.Path, ".md") {
+				return nil, fmt.Errorf("%w: Markdown Contents directory entry type %q is unsupported", ErrInvalidAPIResponse, entry.Type)
+			}
+		default:
+			return nil, fmt.Errorf("%w: Contents directory entry type is invalid", ErrInvalidAPIResponse)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 func (client *APIClient) FetchRepositoryFile(ctx context.Context, installationToken, owner, repository, filePath, commitSHA string) ([]byte, error) {

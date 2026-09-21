@@ -86,7 +86,7 @@ docker compose exec orchestrator /usr/local/bin/omnigrex doctor --repository OWN
 The command runs every independent check and prints one `PASS` or `FAIL` line for each prerequisite.
 It exits with status `0` when all checks pass, `1` when a prerequisite fails, and `2` for invalid command arguments.
 
-The checks cover configuration, secret formats, PostgreSQL connectivity and migration history, Docker API compatibility and required resources, exact Runtime Profile image availability, GitHub App identities, webhook settings and policies, repository installations, immutable Agent Profiles, effective Role permissions, ACP initialization, active OpenCode-to-MCP protocol compatibility, and configured MCP endpoint authentication.
+The checks cover configuration, secret formats, PostgreSQL connectivity and migration history, Docker API compatibility and required resources, exact Runtime Profile image availability, GitHub App identities, webhook settings and policies, repository installations, discovered Agent Profiles and their effective Role permissions, ACP initialization, active OpenCode-to-MCP protocol compatibility, and configured MCP endpoint authentication.
 The PostgreSQL connection is read-only and does not apply migrations.
 Docker resource inspection does not write to persistent volumes.
 The ACP check creates one isolated temporary container whose writable paths are tmpfs, initializes an authenticated diagnostic MCP connection through the agent network, and removes the container before returning.

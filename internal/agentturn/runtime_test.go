@@ -42,6 +42,14 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
+	execution.Assignment.AgentProfileName = "implementation-specialist"
+	var profileConfig map[string]any
+	if err := json.Unmarshal(execution.Turn.AgentProfileConfig, &profileConfig); err != nil {
+		t.Fatal(err)
+	}
+	profileConfig["name"] = "implementation-specialist"
+	profileConfig["path"] = ".omnigrex/team/arbitrary profile filename.md"
+	execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 	database := &runtimeStore{operations: &operations, execution: execution}
 	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 		DataDir:        "/srv/mise/assignment-" + runtimeTestAssignment + "/mise",

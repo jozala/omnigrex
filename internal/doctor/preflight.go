@@ -16,6 +16,7 @@ import (
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -27,16 +28,17 @@ type productionState struct {
 	settings config.Config
 	repo     Repository
 
-	runtimeProfile runtimeprofile.Profile
-	registry       runtimeprofile.Registry
-	database       *store.ReadOnlyStore
-	api            *githubapi.APIClient
-	developer      *githubapi.AppJWTSigner
-	reviewer       *githubapi.AppJWTSigner
-	developerToken string
-	reviewerToken  string
-	profiles       agentprofile.Snapshot
-	profilesLoaded bool
+	runtimeProfile   runtimeprofile.Profile
+	registry         runtimeprofile.Registry
+	database         *store.ReadOnlyStore
+	api              *githubapi.APIClient
+	developer        *githubapi.AppJWTSigner
+	reviewer         *githubapi.AppJWTSigner
+	developerToken   string
+	reviewerToken    string
+	profiles         agentprofile.Snapshot
+	profileSelection agentprofile.Selection
+	profilesLoaded   bool
 }
 
 // RunProduction runs read-only deployment and repository checks in deterministic order.
@@ -369,11 +371,16 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := agentprofile.NewLoader(api).Load(ctx, state.developerToken, state.repo.Owner, state.repo.Name)
+	snapshot, err := agentprofile.NewLoader(api, role.BuiltinPolicyCatalog()).Load(ctx, state.developerToken, state.repo.Owner, state.repo.Name)
+	if err != nil {
+		return err
+	}
+	selection, err := snapshot.Select(agentprofile.SingletonSelector{})
 	if err != nil {
 		return err
 	}
 	state.profiles = snapshot
+	state.profileSelection = selection
 	state.profilesLoaded = true
 	return nil
 }
@@ -382,11 +389,15 @@ func (state *productionState) checkEffectiveProfiles(context.Context) error {
 	if !state.profilesLoaded {
 		return errors.New("Agent Profile check did not pass")
 	}
-	if err := validateEffectiveProfile(state.registry, workflow.RoleDeveloper, state.profiles.Developer()); err != nil {
-		return fmt.Errorf("Developer: %w", err)
-	}
-	if err := validateEffectiveProfile(state.registry, workflow.RoleReviewer, state.profiles.Reviewer()); err != nil {
-		return fmt.Errorf("Reviewer: %w", err)
+	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+		name, selected := state.profileSelection.Profile(roleID)
+		profile, ok := state.profiles.Profile(name)
+		if !selected || !ok {
+			return fmt.Errorf("%s: Agent Profile is unavailable", roleID)
+		}
+		if err := validateEffectiveProfile(state.registry, roleID, profile); err != nil {
+			return fmt.Errorf("%s: %w", roleID, err)
+		}
 	}
 	return nil
 }

@@ -37,7 +37,7 @@ func (err *AssignmentConfigurationConflictError) Unwrap() []error {
 	return []error{ErrAssignmentConfigurationConflict, err.Cause}
 }
 
-// ProfileLoader loads the deployment's selected Role profiles from one repository snapshot.
+// ProfileLoader discovers all Agent Profiles from one repository snapshot.
 type ProfileLoader interface {
 	Load(context.Context, string, string, string) (agentprofile.Snapshot, error)
 }
@@ -80,12 +80,13 @@ type Result struct {
 // Preparer translates repository Agent Profiles into a durable preparation specification.
 type Preparer struct {
 	loader   ProfileLoader
+	selector agentprofile.Selector
 	registry RuntimeRegistry
 	store    PreparationStore
 }
 
-func NewPreparer(loader ProfileLoader, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
-	return &Preparer{loader: loader, registry: registry, store: preparationStore}
+func NewPreparer(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
+	return &Preparer{loader: loader, selector: selector, registry: registry, store: preparationStore}
 }
 
 // Prepare resolves the current Stage's Role configuration and commits one fenced Agent Turn preparation.
@@ -95,7 +96,7 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 			err = sanitizePreparationError(err, request.InstallationCredential)
 		}
 	}()
-	if preparer == nil || nilDependency(preparer.loader) || nilDependency(preparer.registry) || nilDependency(preparer.store) {
+	if preparer == nil || nilDependency(preparer.loader) || nilDependency(preparer.selector) || nilDependency(preparer.registry) || nilDependency(preparer.store) {
 		return Result{}, ErrDependencyNil
 	}
 	if strings.TrimSpace(request.InstallationCredential) == "" || strings.TrimSpace(request.RepositoryOwner) == "" ||
@@ -104,16 +105,29 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		return Result{}, ErrInvalidRequest
 	}
 
-	snapshot, err := preparer.loader.Load(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName)
-	if err != nil {
-		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)
-	}
-
 	bindings, err := preparer.store.GetAgentTurnPreparationRuntimeBindings(ctx, request.Lease)
 	if err != nil {
 		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
 	}
-	profile, ok := snapshot.ForRole(bindings.Role)
+	snapshot, err := preparer.loader.Load(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName)
+	if err != nil {
+		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)
+	}
+	var profile agentprofile.Profile
+	var ok bool
+	if bindings.Participant != nil {
+		profile, ok = snapshot.Profile(agentprofile.Name(bindings.Participant.AgentProfileName))
+		ok = ok && profile.Role() == bindings.Role
+	} else {
+		selection, selectionErr := snapshot.Select(preparer.selector)
+		if selectionErr != nil {
+			return Result{}, fmt.Errorf("select Agent Profiles: %w", selectionErr)
+		}
+		name, selected := selection.Profile(bindings.Role)
+		if selected {
+			profile, ok = snapshot.Profile(name)
+		}
+	}
 	if !ok {
 		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, agentprofile.ErrUnknownProfile)
 	}

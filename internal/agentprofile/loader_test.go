@@ -3,7 +3,6 @@ package agentprofile_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,9 +22,12 @@ type sourceCall struct {
 type fakeSource struct {
 	commitSHA    string
 	resolveErr   error
+	paths        []string
+	listErr      error
 	contents     map[string][]byte
 	fetchErr     map[string]error
 	resolveCalls []sourceCall
+	listCalls    []sourceCall
 	fetchCalls   []sourceCall
 }
 
@@ -34,113 +36,149 @@ func (source *fakeSource) ResolveDefaultBranchCommit(_ context.Context, credenti
 	return source.commitSHA, source.resolveErr
 }
 
+func (source *fakeSource) ListRepositoryDirectoryFiles(_ context.Context, credential, owner, repository, path, commitSHA string) ([]string, error) {
+	source.listCalls = append(source.listCalls, sourceCall{credential: credential, owner: owner, repository: repository, path: path, commitSHA: commitSHA})
+	return source.paths, source.listErr
+}
+
 func (source *fakeSource) FetchRepositoryFile(_ context.Context, credential, owner, repository, path, commitSHA string) ([]byte, error) {
 	source.fetchCalls = append(source.fetchCalls, sourceCall{credential: credential, owner: owner, repository: repository, path: path, commitSHA: commitSHA})
 	return source.contents[path], source.fetchErr[path]
 }
 
-func TestLoaderLoadsBothProfilesFromOneDefaultBranchCommit(t *testing.T) {
+func TestLoaderDiscoversAllProfilesAtOneCommit(t *testing.T) {
 	const commitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	developer := profileContent("openai/gpt-5.2", "Develop the Work Item.\n")
-	reviewer := profileContent("anthropic/claude-sonnet-4", "Review the Change Proposal.\n")
 	source := &fakeSource{
 		commitSHA: commitSHA,
+		paths: []string{
+			".omnigrex/team/implementation.md",
+			".omnigrex/team/quality.md",
+			".omnigrex/team/README",
+			".omnigrex/team/ignored.MD",
+			".omnigrex/team/notes.md.backup",
+		},
 		contents: map[string][]byte{
-			".omnigrex/team/developer.md": developer,
-			".omnigrex/team/reviewer.md":  reviewer,
+			".omnigrex/team/implementation.md": validProfileContent("primary-developer", role.Developer, "openai/gpt-5.2", "Develop the Work Item.\n"),
+			".omnigrex/team/quality.md":        validProfileContent("strict-reviewer", role.Reviewer, "anthropic/claude-sonnet-4", "Review the Change Proposal.\n"),
 		},
 		fetchErr: make(map[string]error),
 	}
 
-	snapshot, err := agentprofile.NewLoader(source).Load(context.Background(), "installation-secret", "acme", "widgets")
+	snapshot, err := agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()).Load(context.Background(), "installation-secret", "acme", "widgets")
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if snapshot.CommitSHA() != commitSHA {
 		t.Errorf("CommitSHA() = %q, want %q", snapshot.CommitSHA(), commitSHA)
 	}
-	if snapshot.Developer().Name() != agentprofile.Developer || snapshot.Developer().Model() != "openai/gpt-5.2" {
-		t.Errorf("Developer() = (%q, %q)", snapshot.Developer().Name(), snapshot.Developer().Model())
+	selection, err := snapshot.Select(agentprofile.SingletonSelector{})
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
 	}
-	if snapshot.Reviewer().Name() != agentprofile.Reviewer || snapshot.Reviewer().Model() != "anthropic/claude-sonnet-4" {
-		t.Errorf("Reviewer() = (%q, %q)", snapshot.Reviewer().Name(), snapshot.Reviewer().Model())
+	developerName, ok := selection.Profile(role.Developer)
+	developer, found := snapshot.Profile(developerName)
+	if !ok || !found || developer.Name() != "primary-developer" || developer.Path() != ".omnigrex/team/implementation.md" {
+		t.Errorf("selected Developer = (%#v, %t, %t)", developer, ok, found)
 	}
-	profile, ok := snapshot.Profile(agentprofile.Reviewer)
-	if !ok || profile.ContentSHA256() != snapshot.Reviewer().ContentSHA256() {
-		t.Errorf("Profile(Reviewer) = (%#v, %t)", profile, ok)
+	reviewerName, ok := selection.Profile(role.Reviewer)
+	reviewer, found := snapshot.Profile(reviewerName)
+	if !ok || !found || reviewer.Name() != "strict-reviewer" || reviewer.Model() != "anthropic/claude-sonnet-4" {
+		t.Errorf("selected Reviewer = (%#v, %t, %t)", reviewer, ok, found)
 	}
-	if _, ok := snapshot.Profile(agentprofile.Name("feature-branch")); ok {
-		t.Error("Profile(unknown) unexpectedly succeeded")
+	if profile, found := snapshot.Profile("primary-developer"); !found || profile.ContentSHA256() != developer.ContentSHA256() {
+		t.Errorf("Profile(primary-developer) = (%#v, %t)", profile, found)
 	}
-	if len(source.resolveCalls) != 1 {
-		t.Fatalf("resolve calls = %#v, want exactly one", source.resolveCalls)
+	if _, found := snapshot.Profile("implementation"); found {
+		t.Error("Profile path stem was incorrectly used as the Profile name")
+	}
+	if len(source.resolveCalls) != 1 || len(source.listCalls) != 1 {
+		t.Fatalf("source calls = resolve %#v, list %#v", source.resolveCalls, source.listCalls)
+	}
+	wantListCall := sourceCall{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team", commitSHA: commitSHA}
+	if source.listCalls[0] != wantListCall {
+		t.Errorf("list call = %#v, want %#v", source.listCalls[0], wantListCall)
 	}
 	wantFetchCalls := []sourceCall{
-		{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team/developer.md", commitSHA: commitSHA},
-		{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team/reviewer.md", commitSHA: commitSHA},
+		{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team/implementation.md", commitSHA: commitSHA},
+		{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team/quality.md", commitSHA: commitSHA},
 	}
 	if !reflect.DeepEqual(source.fetchCalls, wantFetchCalls) {
 		t.Errorf("fetch calls = %#v\nwant = %#v", source.fetchCalls, wantFetchCalls)
 	}
-	if strings.Contains(string(snapshot.Developer().CanonicalJSON()), "installation-secret") || strings.Contains(string(snapshot.Reviewer().CanonicalJSON()), "installation-secret") {
+	if strings.Contains(string(developer.CanonicalJSON()), "installation-secret") || strings.Contains(string(reviewer.CanonicalJSON()), "installation-secret") {
 		t.Error("canonical profile JSON contains repository credential")
 	}
 }
 
-func TestConfiguredLoaderUsesSelectedProfileForRole(t *testing.T) {
-	const commitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	catalog, err := agentprofile.NewCatalog(role.BuiltinCatalog(), []agentprofile.Identity{
-		{Name: "developer", Role: role.Developer, Path: ".omnigrex/team/developer.md"},
-		{Name: "release-developer", Role: role.Developer, Path: ".omnigrex/team/release-developer.md"},
-		{Name: "reviewer", Role: role.Reviewer, Path: ".omnigrex/team/reviewer.md"},
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestLoaderRejectsInvalidDiscoveredProfileSets(t *testing.T) {
+	const commitSHA = "0123456789abcdef0123456789abcdef01234567"
+	baseContents := map[string][]byte{
+		".omnigrex/team/developer.md": validProfileContent("developer", role.Developer, "openai/gpt-5.2", "Develop.\n"),
+		".omnigrex/team/reviewer.md":  validProfileContent("reviewer", role.Reviewer, "anthropic/reviewer", "Review.\n"),
 	}
-	selection, err := agentprofile.NewSelection(catalog, []role.ID{role.Developer, role.Reviewer}, map[role.ID]agentprofile.Name{
-		role.Developer: "release-developer",
-		role.Reviewer:  "reviewer",
-	})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name     string
+		paths    []string
+		contents map[string][]byte
+	}{
+		{name: "no markdown profiles"},
+		{name: "missing policy Role", paths: []string{".omnigrex/team/developer.md"}, contents: baseContents},
+		{name: "multiple profiles for Role", paths: []string{".omnigrex/team/developer.md", ".omnigrex/team/alternate.md", ".omnigrex/team/reviewer.md"}, contents: map[string][]byte{
+			".omnigrex/team/developer.md": validProfileContent("developer", role.Developer, "openai/gpt-5.2", "Develop.\n"),
+			".omnigrex/team/alternate.md": validProfileContent("alternate", role.Developer, "openai/gpt-5.2", "Develop.\n"),
+			".omnigrex/team/reviewer.md":  baseContents[".omnigrex/team/reviewer.md"],
+		}},
+		{name: "duplicate names", paths: []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md"}, contents: map[string][]byte{
+			".omnigrex/team/developer.md": baseContents[".omnigrex/team/developer.md"],
+			".omnigrex/team/reviewer.md":  validProfileContent("developer", role.Reviewer, "anthropic/reviewer", "Review.\n"),
+		}},
+		{name: "unreferenced Role", paths: []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md", ".omnigrex/team/architect.md"}, contents: map[string][]byte{
+			".omnigrex/team/developer.md": baseContents[".omnigrex/team/developer.md"],
+			".omnigrex/team/reviewer.md":  baseContents[".omnigrex/team/reviewer.md"],
+			".omnigrex/team/architect.md": validProfileContent("architect", role.ID("ARCHITECT"), "openai/gpt-5.2", "Design.\n"),
+		}},
+		{name: "unsafe listed path", paths: []string{".omnigrex/team/nested/developer.md"}, contents: map[string][]byte{
+			".omnigrex/team/nested/developer.md": baseContents[".omnigrex/team/developer.md"],
+		}},
+		{name: "invalid profile", paths: []string{".omnigrex/team/developer.md"}, contents: map[string][]byte{
+			".omnigrex/team/developer.md": []byte("invalid"),
+		}},
 	}
-	source := &fakeSource{commitSHA: commitSHA, contents: map[string][]byte{
-		".omnigrex/team/release-developer.md": profileContent("openai/gpt-5.2", "Release safely.\n"),
-		".omnigrex/team/reviewer.md":          profileContent("anthropic/reviewer", "Review.\n"),
-	}, fetchErr: map[string]error{}}
-	loader, err := agentprofile.NewConfiguredLoader(source, catalog, selection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := loader.Load(context.Background(), "credential", "owner", "repo")
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	developer, ok := snapshot.ForRole(role.Developer)
-	if !ok || developer.Name() != "release-developer" || developer.Path() != ".omnigrex/team/release-developer.md" {
-		t.Fatalf("ForRole(Developer) = (%#v, %t)", developer, ok)
-	}
-	if _, loaded := snapshot.Profile(agentprofile.Developer); loaded {
-		t.Fatal("unselected Developer profile was loaded")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &fakeSource{commitSHA: commitSHA, paths: test.paths, contents: test.contents, fetchErr: map[string]error{}}
+			snapshot, err := agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()).Load(context.Background(), "token", "acme", "widgets")
+			if err == nil {
+				_, err = snapshot.Select(agentprofile.SingletonSelector{})
+			}
+			if err == nil {
+				t.Fatal("Load() error = nil, want rejection")
+			}
+		})
 	}
 }
 
-func TestLoaderStopsOnResolutionAndProfileFailures(t *testing.T) {
+func TestLoaderStopsOnSourceFailures(t *testing.T) {
 	failure := errors.New("source unavailable")
+	validCommit := strings.Repeat("a", 40)
 	tests := []struct {
 		name          string
 		source        *fakeSource
+		wantListCalls int
 		wantFetchCall int
 	}{
 		{name: "nil source"},
-		{name: "resolution failure", source: &fakeSource{resolveErr: failure}, wantFetchCall: 0},
-		{name: "blank commit", source: &fakeSource{commitSHA: "  "}, wantFetchCall: 0},
-		{name: "unsafe commit", source: &fakeSource{commitSHA: "main~1"}, wantFetchCall: 0},
-		{name: "abbreviated commit", source: &fakeSource{commitSHA: "abc123"}, wantFetchCall: 0},
-		{name: "Developer fetch failure", source: &fakeSource{commitSHA: strings.Repeat("a", 40), contents: map[string][]byte{}, fetchErr: map[string]error{".omnigrex/team/developer.md": failure}}, wantFetchCall: 1},
-		{name: "invalid Developer profile", source: &fakeSource{commitSHA: strings.Repeat("a", 40), contents: map[string][]byte{".omnigrex/team/developer.md": []byte("invalid")}, fetchErr: map[string]error{}}, wantFetchCall: 1},
-		{name: "Reviewer fetch failure", source: &fakeSource{commitSHA: strings.Repeat("a", 40), contents: map[string][]byte{".omnigrex/team/developer.md": profileContent("openai/gpt-5.2", "Develop.\n")}, fetchErr: map[string]error{".omnigrex/team/reviewer.md": failure}}, wantFetchCall: 2},
-		{name: "invalid Reviewer profile", source: &fakeSource{commitSHA: strings.Repeat("a", 40), contents: map[string][]byte{".omnigrex/team/developer.md": profileContent("openai/gpt-5.2", "Develop.\n"), ".omnigrex/team/reviewer.md": []byte("invalid")}, fetchErr: map[string]error{}}, wantFetchCall: 2},
+		{name: "resolution failure", source: &fakeSource{resolveErr: failure}},
+		{name: "blank commit", source: &fakeSource{commitSHA: "  "}},
+		{name: "unsafe commit", source: &fakeSource{commitSHA: "main~1"}},
+		{name: "abbreviated commit", source: &fakeSource{commitSHA: "abc123"}},
+		{name: "list failure", source: &fakeSource{commitSHA: validCommit, listErr: failure}, wantListCalls: 1},
+		{name: "fetch failure", source: &fakeSource{
+			commitSHA: validCommit,
+			paths:     []string{".omnigrex/team/developer.md"},
+			contents:  map[string][]byte{},
+			fetchErr:  map[string]error{".omnigrex/team/developer.md": failure},
+		}, wantListCalls: 1, wantFetchCall: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -148,17 +186,13 @@ func TestLoaderStopsOnResolutionAndProfileFailures(t *testing.T) {
 			if test.source != nil {
 				source = test.source
 			}
-			loader := agentprofile.NewLoader(source)
+			loader := agentprofile.NewLoader(source, role.BuiltinPolicyCatalog())
 			if _, err := loader.Load(context.Background(), "token", "acme", "widgets"); err == nil {
 				t.Fatal("Load() error = nil, want failure")
 			}
-			if test.source != nil && len(test.source.fetchCalls) != test.wantFetchCall {
-				t.Errorf("fetch calls = %d, want %d", len(test.source.fetchCalls), test.wantFetchCall)
+			if test.source != nil && (len(test.source.listCalls) != test.wantListCalls || len(test.source.fetchCalls) != test.wantFetchCall) {
+				t.Errorf("calls = list %d, fetch %d; want list %d, fetch %d", len(test.source.listCalls), len(test.source.fetchCalls), test.wantListCalls, test.wantFetchCall)
 			}
 		})
 	}
-}
-
-func profileContent(model, instructions string) []byte {
-	return []byte(fmt.Sprintf("---\nruntime: opencode-acp/v1\nmodel: %s\nsteps: 50\npermissions:\n  read: allow\n---\n%s", model, instructions))
 }

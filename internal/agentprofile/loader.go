@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/jozala/omnigrex/internal/role"
 )
 
 var (
@@ -13,37 +17,24 @@ var (
 
 type Source interface {
 	ResolveDefaultBranchCommit(context.Context, string, string, string) (string, error)
+	ListRepositoryDirectoryFiles(context.Context, string, string, string, string, string) ([]string, error)
 	FetchRepositoryFile(context.Context, string, string, string, string, string) ([]byte, error)
 }
 
 type Loader struct {
-	source    Source
-	catalog   Catalog
-	selection Selection
+	source   Source
+	policies role.PolicyCatalog
 }
 
-func NewLoader(source Source) *Loader {
-	return &Loader{source: source, catalog: BuiltinCatalog(), selection: BuiltinSelection()}
-}
-
-func NewConfiguredLoader(source Source, catalog Catalog, selection Selection) (*Loader, error) {
-	if len(catalog.entries) == 0 || len(selection.roles) == 0 {
-		return nil, ErrInvalidSelection
-	}
-	for _, roleID := range selection.roles {
-		name, ok := selection.Profile(roleID)
-		identity, exists := catalog.Identity(name)
-		if !ok || !exists || identity.Role != roleID {
-			return nil, ErrInvalidSelection
-		}
-	}
-	return &Loader{source: source, catalog: catalog, selection: selection}, nil
+func NewLoader(source Source, policies role.PolicyCatalog) *Loader {
+	return &Loader{source: source, policies: policies}
 }
 
 type Snapshot struct {
 	commitSHA string
+	catalog   Catalog
+	policies  role.PolicyCatalog
 	profiles  map[Name]Profile
-	byRole    map[Role]Name
 }
 
 func (loader *Loader) Load(ctx context.Context, credential, owner, repository string) (Snapshot, error) {
@@ -58,60 +49,51 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 		return Snapshot{}, ErrInvalidCommitSHA
 	}
 
-	snapshot := Snapshot{commitSHA: commitSHA, profiles: make(map[Name]Profile, len(loader.selection.roles)), byRole: make(map[Role]Name, len(loader.selection.roles))}
-	for _, roleID := range loader.selection.roles {
-		name, _ := loader.selection.Profile(roleID)
-		profile, err := loader.loadProfile(ctx, credential, owner, repository, name, commitSHA)
-		if err != nil {
-			return Snapshot{}, err
+	paths, err := loader.source.ListRepositoryDirectoryFiles(ctx, credential, owner, repository, ".omnigrex/team", commitSHA)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("list Agent Profile directory: %w", err)
+	}
+	sort.Strings(paths)
+	profiles := make(map[Name]Profile)
+	identities := make([]Identity, 0, len(paths))
+	for _, path := range paths {
+		if !strings.HasSuffix(path, ".md") {
+			continue
 		}
-		snapshot.profiles[name] = profile
-		snapshot.byRole[roleID] = name
+		content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, path, commitSHA)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("fetch Agent Profile %s: %w", path, err)
+		}
+		profile, err := Parse(path, content, loader.policies)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("parse Agent Profile %s: %w", path, err)
+		}
+		if _, duplicate := profiles[profile.Name()]; duplicate {
+			return Snapshot{}, fmt.Errorf("%w: duplicate name %q", ErrInvalidCatalog, profile.Name())
+		}
+		profiles[profile.Name()] = profile
+		identities = append(identities, Identity{Name: profile.Name(), Role: profile.Role(), Path: profile.Path()})
 	}
-	return snapshot, nil
-}
-
-func (loader *Loader) loadProfile(ctx context.Context, credential, owner, repository string, name Name, commitSHA string) (Profile, error) {
-	identity, ok := loader.catalog.Identity(name)
-	if !ok {
-		return Profile{}, fmt.Errorf("%w: %q", ErrUnknownProfile, name)
-	}
-	content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, identity.Path, commitSHA)
+	catalog, err := NewCatalog(identities)
 	if err != nil {
-		return Profile{}, fmt.Errorf("fetch %s Agent Profile: %w", name, err)
+		return Snapshot{}, err
 	}
-	policy, ok := loader.catalog.policy(name)
-	if !ok || policy.Role != identity.Role {
-		return Profile{}, fmt.Errorf("%w: missing Role policy for %q", ErrInvalidProfile, name)
-	}
-	profile, err := parse(identity, policy, content)
-	if err != nil {
-		return Profile{}, fmt.Errorf("parse %s Agent Profile: %w", name, err)
-	}
-	return profile, nil
+	return Snapshot{commitSHA: commitSHA, catalog: catalog, policies: loader.policies, profiles: profiles}, nil
 }
 
 func (snapshot Snapshot) CommitSHA() string { return snapshot.commitSHA }
-func (snapshot Snapshot) Developer() Profile {
-	profile, _ := snapshot.ForRole(RoleDeveloper)
-	return profile
-}
-func (snapshot Snapshot) Reviewer() Profile {
-	profile, _ := snapshot.ForRole(RoleReviewer)
-	return profile
-}
 
 func (snapshot Snapshot) Profile(name Name) (Profile, bool) {
 	profile, ok := snapshot.profiles[name]
 	return profile, ok
 }
 
-func (snapshot Snapshot) ForRole(roleID Role) (Profile, bool) {
-	name, ok := snapshot.byRole[roleID]
-	if !ok {
-		return Profile{}, false
+// Select applies a selection policy to the complete discovered catalog.
+func (snapshot Snapshot) Select(selector Selector) (Selection, error) {
+	if selector == nil {
+		return Selection{}, ErrInvalidSelection
 	}
-	return snapshot.Profile(name)
+	return selector.Select(snapshot.catalog, snapshot.policies)
 }
 
 func validObjectID(value string) bool {

@@ -1,4 +1,6 @@
 ---
+name: developer
+role: DEVELOPER
 runtime: opencode-acp/v1
 model: opencode-go/muse-spark-1.3-contributor
 steps: 100

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -42,6 +43,15 @@ type profileSource struct {
 func (source *profileSource) ResolveDefaultBranchCommit(_ context.Context, credential, owner, repository string) (string, error) {
 	source.resolveCall = append(source.resolveCall, sourceCall{credential: credential, owner: owner, repository: repository})
 	return source.commitSHA, nil
+}
+
+func (source *profileSource) ListRepositoryDirectoryFiles(_ context.Context, _, _, _, _ string, _ string) ([]string, error) {
+	paths := make([]string, 0, len(source.contents))
+	for path := range source.contents {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func (source *profileSource) FetchRepositoryFile(_ context.Context, credential, owner, repository, path, commitSHA string) ([]byte, error) {
@@ -131,8 +141,8 @@ type secretBearingPreparationError struct {
 func (err *secretBearingPreparationError) Error() string { return err.message }
 
 func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
-	developerContent := agentProfileContent("openai/gpt-5.2", "high", 80, "Develop the Work Item.\n")
-	reviewerContent := agentProfileContent("anthropic/claude-sonnet-4", "", 40, "Review the Change Proposal.\n")
+	developerContent := agentProfileContent("developer", role.Developer, "openai/gpt-5.2", "high", 80, "Develop the Work Item.\n")
+	reviewerContent := agentProfileContent("reviewer", role.Reviewer, "anthropic/claude-sonnet-4", "", 40, "Review the Change Proposal.\n")
 	source := &profileSource{
 		commitSHA: testCommitSHA,
 		contents: map[string][]byte{
@@ -148,7 +158,7 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 	database := &preparationStore{selected: workflow.RoleReviewer}
 	lease := store.JobLease{Job: store.Job{ID: "preparation-job", JobSpec: store.JobSpec{Kind: store.PrepareAgentTurnJobKind}, Status: store.JobLeased}, Attempt: 1}
 
-	result, err := agentturn.NewPreparer(agentprofile.NewLoader(source), registry, database).Prepare(context.Background(), agentturn.Request{
+	result, err := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), agentturn.Request{
 		Lease:                  lease,
 		InstallationCredential: "installation-secret",
 		RepositoryOwner:        "acme",
@@ -205,7 +215,7 @@ func TestPrepareReturnsRoleSelectedByStore(t *testing.T) {
 			}
 			database := &preparationStore{selected: selected}
 
-			result, err := agentturn.NewPreparer(agentprofile.NewLoader(source), registry, database).Prepare(context.Background(), validRequest())
+			result, err := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 			if err != nil {
 				t.Fatalf("Prepare() error = %v", err)
 			}
@@ -230,28 +240,16 @@ func TestPrepareSupportsPolicyDefinedRole(t *testing.T) {
 	const architect role.ID = "ARCHITECT"
 	const architecture workflow.StageID = "architecture"
 	policies, err := role.NewPolicyCatalog([]role.ID{architect}, []role.Policy{{
-		Role: architect, AgentProfile: role.AgentProfileIdentity{Name: "architect", Path: ".omnigrex/team/architect.md"},
-		MCPTools: []string{"get_issue"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
+		Role: architect, MCPTools: []string{"get_issue"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
 		TrustedToolsRevision: role.TurnRevisionTrustedTools,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := agentprofile.NewCatalogFromPolicies(policies)
-	if err != nil {
-		t.Fatal(err)
-	}
-	selection, err := agentprofile.NewSelectionFromPolicies(catalog, policies)
-	if err != nil {
-		t.Fatal(err)
-	}
 	source := &profileSource{commitSHA: testCommitSHA, contents: map[string][]byte{
-		".omnigrex/team/architect.md": agentProfileContent("openai/architect", "", 40, "Design the change.\n"),
+		".omnigrex/team/architect.md": agentProfileContent("architect", architect, "openai/architect", "", 40, "Design the change.\n"),
 	}}
-	loader, err := agentprofile.NewConfiguredLoader(source, catalog, selection)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loader := agentprofile.NewLoader(source, policies)
 	registry, err := runtimeprofile.NewRegistry(runtimeProfile(t, testImage))
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +258,7 @@ func TestPrepareSupportsPolicyDefinedRole(t *testing.T) {
 		Mode: workflow.AssignmentGenerationNew, Stage: architecture, Role: architect,
 	}}
 
-	result, err := agentturn.NewPreparer(loader, registry, database).Prepare(context.Background(), validRequest())
+	result, err := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -291,14 +289,15 @@ func TestPrepareRejectsMissingDependenciesAndInvalidRequestBeforeLoadingProfiles
 		want     error
 	}{
 		{name: "nil Preparer", request: request, want: agentturn.ErrDependencyNil},
-		{name: "nil loader", preparer: agentturn.NewPreparer(nil, registry, database), request: request, want: agentturn.ErrDependencyNil},
-		{name: "nil registry", preparer: agentturn.NewPreparer(unusedLoader, nil, database), request: request, want: agentturn.ErrDependencyNil},
-		{name: "nil Store", preparer: agentturn.NewPreparer(unusedLoader, registry, nil), request: request, want: agentturn.ErrDependencyNil},
-		{name: "blank credential", preparer: agentturn.NewPreparer(unusedLoader, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.InstallationCredential = " \t" }), want: agentturn.ErrInvalidRequest},
-		{name: "blank owner", preparer: agentturn.NewPreparer(unusedLoader, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.RepositoryOwner = " " }), want: agentturn.ErrInvalidRequest},
-		{name: "blank repository", preparer: agentturn.NewPreparer(unusedLoader, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.RepositoryName = "" }), want: agentturn.ErrInvalidRequest},
-		{name: "wrong Job kind", preparer: agentturn.NewPreparer(unusedLoader, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.Lease.Kind = store.RunAgentTurnJobKind }), want: agentturn.ErrInvalidRequest},
-		{name: "Job not leased", preparer: agentturn.NewPreparer(unusedLoader, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.Lease.Status = store.JobAvailable }), want: agentturn.ErrInvalidRequest},
+		{name: "nil loader", preparer: agentturn.NewPreparer(nil, agentprofile.SingletonSelector{}, registry, database), request: request, want: agentturn.ErrDependencyNil},
+		{name: "nil selector", preparer: agentturn.NewPreparer(unusedLoader, nil, registry, database), request: request, want: agentturn.ErrDependencyNil},
+		{name: "nil registry", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, nil, database), request: request, want: agentturn.ErrDependencyNil},
+		{name: "nil Store", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, nil), request: request, want: agentturn.ErrDependencyNil},
+		{name: "blank credential", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.InstallationCredential = " \t" }), want: agentturn.ErrInvalidRequest},
+		{name: "blank owner", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.RepositoryOwner = " " }), want: agentturn.ErrInvalidRequest},
+		{name: "blank repository", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.RepositoryName = "" }), want: agentturn.ErrInvalidRequest},
+		{name: "wrong Job kind", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.Lease.Kind = store.RunAgentTurnJobKind }), want: agentturn.ErrInvalidRequest},
+		{name: "Job not leased", preparer: agentturn.NewPreparer(unusedLoader, agentprofile.SingletonSelector{}, registry, database), request: mutateRequest(request, func(value *agentturn.Request) { value.Lease.Status = store.JobAvailable }), want: agentturn.ErrInvalidRequest},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -333,24 +332,24 @@ func TestPrepareRejectsMissingAndUnknownRuntimeBeforeStore(t *testing.T) {
 			loader: profileLoaderFunc(func(context.Context, string, string, string) (agentprofile.Snapshot, error) {
 				return agentprofile.Snapshot{}, nil
 			}),
-			want: agentprofile.ErrUnknownProfile,
+			want: agentprofile.ErrInvalidSelection,
 		},
 		{
 			name: "unknown runtime",
 			loader: agentprofile.NewLoader(&profileSource{
 				commitSHA: testCommitSHA,
 				contents: map[string][]byte{
-					".omnigrex/team/developer.md": agentProfileContentWithRuntime("unknown-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
-					".omnigrex/team/reviewer.md":  agentProfileContent("anthropic/reviewer", "", 40, "Review.\n"),
+					".omnigrex/team/developer.md": agentProfileContentWithRuntime("developer", role.Developer, "unknown-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
+					".omnigrex/team/reviewer.md":  agentProfileContent("reviewer", role.Reviewer, "anthropic/reviewer", "", 40, "Review.\n"),
 				},
-			}),
+			}, role.BuiltinPolicyCatalog()),
 			want: runtimeprofile.ErrNotFound,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			database := &preparationStore{selected: workflow.RoleDeveloper}
-			_, err := agentturn.NewPreparer(test.loader, registry, database).Prepare(context.Background(), validRequest())
+			_, err := agentturn.NewPreparer(test.loader, agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 			if err == nil || !strings.Contains(err.Error(), test.want.Error()) || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
 				t.Fatalf("Prepare() error = %v, want %v", err, test.want)
 			}
@@ -368,8 +367,8 @@ func TestPrepareRejectsResolvedRuntimeWithDifferentReferenceBeforeStore(t *testi
 	source := &profileSource{
 		commitSHA: testCommitSHA,
 		contents: map[string][]byte{
-			".omnigrex/team/developer.md": agentProfileContentWithRuntime("other-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
-			".omnigrex/team/reviewer.md":  agentProfileContent("anthropic/reviewer", "", 40, "Review.\n"),
+			".omnigrex/team/developer.md": agentProfileContentWithRuntime("developer", role.Developer, "other-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
+			".omnigrex/team/reviewer.md":  agentProfileContent("reviewer", role.Reviewer, "anthropic/reviewer", "", 40, "Review.\n"),
 		},
 	}
 	resolved := runtimeProfile(t, testImage)
@@ -381,7 +380,7 @@ func TestPrepareRejectsResolvedRuntimeWithDifferentReferenceBeforeStore(t *testi
 	})
 	database := &preparationStore{selected: workflow.RoleDeveloper}
 
-	_, err := agentturn.NewPreparer(agentprofile.NewLoader(source), registry, database).Prepare(context.Background(), validRequest())
+	_, err := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 	if err == nil || !strings.Contains(err.Error(), agentturn.ErrRuntimeProfileReferenceMismatch.Error()) || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
 		t.Fatalf("Prepare() error = %v, want ErrRuntimeProfileReferenceMismatch", err)
 	}
@@ -400,14 +399,15 @@ func TestPrepareRefreshesMutableProfileSnapshotsWithoutChangingBindings(t *testi
 		t.Fatal(err)
 	}
 	database := &preparationStore{selected: workflow.RoleDeveloper}
-	preparer := agentturn.NewPreparer(agentprofile.NewLoader(source), registry, database)
+	preparer := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database)
 
 	if _, err := preparer.Prepare(context.Background(), validRequest()); err != nil {
 		t.Fatalf("Prepare() first error = %v", err)
 	}
 	source.commitSHA = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	source.contents[".omnigrex/team/developer.md"] = agentProfileContent("openai/gpt-5.3", "low", 25, "Apply the revised requirements.\n")
-	source.contents[".omnigrex/team/reviewer.md"] = agentProfileContent("anthropic/claude-opus-4", "high", 60, "Review the revised proposal.\n")
+	delete(source.contents, ".omnigrex/team/developer.md")
+	source.contents[".omnigrex/team/implementation specialist.md"] = agentProfileContent("developer", role.Developer, "openai/gpt-5.3", "low", 25, "Apply the revised requirements.\n")
+	source.contents[".omnigrex/team/reviewer.md"] = agentProfileContent("reviewer", role.Reviewer, "anthropic/claude-opus-4", "high", 60, "Review the revised proposal.\n")
 	if _, err := preparer.Prepare(context.Background(), validRequest()); err != nil {
 		t.Fatalf("Prepare() second error = %v", err)
 	}
@@ -419,6 +419,9 @@ func TestPrepareRefreshesMutableProfileSnapshotsWithoutChangingBindings(t *testi
 	second := database.calls[1].Stages[workflow.StageImplementation]
 	if first.Binding != second.Binding {
 		t.Errorf("Developer binding changed from %#v to %#v", first.Binding, second.Binding)
+	}
+	if first.ProfilePath == second.ProfilePath || second.ProfilePath != ".omnigrex/team/implementation specialist.md" {
+		t.Errorf("Developer Profile paths = (%q, %q), want moved source with stable identity", first.ProfilePath, second.ProfilePath)
 	}
 	if reflect.DeepEqual(first.Profile, second.Profile) {
 		t.Error("Developer mutable snapshot did not change")
@@ -449,8 +452,11 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 			Mode: workflow.AssignmentGenerationRetained, Developer: &oldDeveloper, Reviewer: &oldReviewer,
 		},
 	}
+	retainedSource := validProfileSource()
+	retainedSource.contents[".omnigrex/team/alternate implementation.md"] = agentProfileContent(
+		"alternate-developer", role.Developer, "openai/gpt-5.2", "", 40, "Develop alternatively.\n")
 
-	retained, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), catalog, retainedStore).Prepare(context.Background(), validRequest())
+	retained, err := agentturn.NewPreparer(agentprofile.NewLoader(retainedSource, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, retainedStore).Prepare(context.Background(), validRequest())
 	if err != nil {
 		t.Fatalf("Prepare() retained error = %v", err)
 	}
@@ -462,7 +468,7 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 	}
 
 	newStore := &preparationStore{selected: workflow.RoleDeveloper}
-	created, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), catalog, newStore).Prepare(context.Background(), validRequest())
+	created, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, newStore).Prepare(context.Background(), validRequest())
 	if err != nil {
 		t.Fatalf("Prepare() new error = %v", err)
 	}
@@ -487,7 +493,7 @@ func TestPrepareRedactsCredentialWithoutRetainingSourceError(t *testing.T) {
 	request := validRequest()
 	request.InstallationCredential = credential
 
-	_, err := agentturn.NewPreparer(loader, runtimeprofile.Registry{}, database).Prepare(context.Background(), request)
+	_, err := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, runtimeprofile.Registry{}, database).Prepare(context.Background(), request)
 	if strings.Contains(err.Error(), credential) {
 		t.Fatalf("Prepare() error leaked credential: %v", err)
 	}
@@ -506,7 +512,7 @@ func TestPrepareRedactsCredentialFromStoreErrors(t *testing.T) {
 	}
 	database := &preparationStore{selected: workflow.RoleDeveloper, err: storeErr}
 
-	result, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), registry, database).Prepare(context.Background(), validRequest())
+	result, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 	if strings.Contains(err.Error(), credential) {
 		t.Fatalf("Prepare() error leaked credential: %v", err)
 	}
@@ -542,7 +548,7 @@ func TestPrepareClassifiesAssignmentConfigurationConflict(t *testing.T) {
 	}
 	database := &preparationStore{selected: workflow.RoleDeveloper, err: store.ErrAssignmentConfigurationConflict}
 
-	result, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource()), registry, database).Prepare(context.Background(), validRequest())
+	result, err := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
 
 	if !errors.Is(err, agentturn.ErrAssignmentConfigurationConflict) {
 		t.Fatalf("Prepare() error = %v, want agentturn.ErrAssignmentConfigurationConflict", err)
@@ -566,8 +572,7 @@ func assertRolePreparation(t *testing.T, got store.RolePreparation, wantBinding 
 	if got.Profile.CommitSHA != commitSHA || !reflect.DeepEqual(got.Profile.ContentSHA256, wantHash[:]) {
 		t.Errorf("profile provenance = (%q, %x), want (%q, %x)", got.Profile.CommitSHA, got.Profile.ContentSHA256, commitSHA, wantHash)
 	}
-	name := agentprofile.Name(wantBinding.AgentProfileName)
-	wantProfile, err := agentprofile.Parse(name, content)
+	wantProfile, err := agentprofile.Parse(got.ProfilePath, content, role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatalf("Parse() expected profile error = %v", err)
 	}
@@ -585,16 +590,16 @@ func runtimeProfile(t *testing.T, image string) runtimeprofile.Profile {
 	return value
 }
 
-func agentProfileContent(model, variant string, steps int, instructions string) []byte {
+func agentProfileContent(name string, profileRole role.ID, model, variant string, steps int, instructions string) []byte {
 	variantLine := ""
 	if variant != "" {
 		variantLine = "variant: " + variant + "\n"
 	}
-	return []byte(fmt.Sprintf("---\nruntime: opencode-acp/v1\nmodel: %s\n%ssteps: %d\npermissions:\n  read: allow\n  edit: deny\n---\n%s", model, variantLine, steps, instructions))
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: opencode-acp/v1\nmodel: %s\n%ssteps: %d\npermissions:\n  read: allow\n  edit: deny\n---\n%s", name, profileRole, model, variantLine, steps, instructions))
 }
 
-func agentProfileContentWithRuntime(runtime, model, instructions string) []byte {
-	return []byte(fmt.Sprintf("---\nruntime: %s\nmodel: %s\nsteps: 40\npermissions:\n  read: allow\n---\n%s", runtime, model, instructions))
+func agentProfileContentWithRuntime(name string, profileRole role.ID, runtime, model, instructions string) []byte {
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: %s\nmodel: %s\nsteps: 40\npermissions:\n  read: allow\n---\n%s", name, profileRole, runtime, model, instructions))
 }
 
 func validRequest() agentturn.Request {
@@ -617,8 +622,8 @@ func validProfileSource() *profileSource {
 	return &profileSource{
 		commitSHA: testCommitSHA,
 		contents: map[string][]byte{
-			".omnigrex/team/developer.md": agentProfileContent("openai/gpt-5.2", "high", 80, "Develop the Work Item.\n"),
-			".omnigrex/team/reviewer.md":  agentProfileContent("anthropic/claude-sonnet-4", "", 40, "Review the Change Proposal.\n"),
+			".omnigrex/team/developer.md": agentProfileContent("developer", role.Developer, "openai/gpt-5.2", "high", 80, "Develop the Work Item.\n"),
+			".omnigrex/team/reviewer.md":  agentProfileContent("reviewer", role.Reviewer, "anthropic/claude-sonnet-4", "", 40, "Review the Change Proposal.\n"),
 		},
 	}
 }

@@ -48,7 +48,7 @@ A named set of responsibilities, goals, permissions, and decision boundaries wit
 _Avoid_: Job title, prompt
 
 **Agent Profile**:
-A named, versioned set of instructions and configuration used by an agent performing a Role.
+A repository-owned named, versioned set of instructions and configuration that declares the Role performed by an agent.
 _Avoid_: Persona, agent definition
 
 **Assignment Generation**:

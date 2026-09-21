@@ -257,8 +257,9 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 
 - Define and validate immutable deployment Runtime Profiles.
 - Add the initial `opencode-acp/v1` profile with exact image digest, ACP command, environment, persistent state mounts, required capabilities, supported platform, writable paths, and `/workspace`.
-- Parse `.omnigrex/team/developer.md` and `reviewer.md` from the latest default branch.
-- Validate YAML front matter, Role instructions, runtime reference, model, variant, steps, and permissions.
+- Discover direct Markdown files under `.omnigrex/team` from one exact latest default-branch commit.
+- Validate YAML front matter, repository-local Profile name, declared Role, Role instructions, runtime reference, model, variant, steps, and permissions.
+- Build a multi-Profile catalog separately from the initial selector that requires exactly one Profile per Workflow Role.
 - Persist the Agent Profile commit SHA and content hash used for every Agent Turn.
 - Bind an Assignment to its initial Runtime Profile version and reject a later profile runtime-reference change with a configuration Human Handoff.
 - Allow updated instructions, model, variant, steps, and permissions to apply without changing the Agent Session identity.

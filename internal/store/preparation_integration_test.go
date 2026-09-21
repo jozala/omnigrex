@@ -97,6 +97,93 @@ func TestCompleteWebhookTransitionUsesStoreReducerForSharedStageIDs(t *testing.T
 	}
 }
 
+func TestAgentProfileRoleIdentityIsScopedToRepository(t *testing.T) {
+	_, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, workflowSeed := range []struct {
+		id           string
+		repositoryID int64
+		issue        int
+	}{
+		{id: "60000000-0000-4000-8000-000000000081", repositoryID: 81, issue: 1},
+		{id: "60000000-0000-4000-8000-000000000082", repositoryID: 81, issue: 2},
+		{id: "60000000-0000-4000-8000-000000000083", repositoryID: 82, issue: 3},
+		{id: "60000000-0000-4000-8000-000000000087", repositoryID: 83, issue: 4},
+	} {
+		if _, err := pool.Exec(ctx, `
+INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
+VALUES ($1, $2, 'owner', 'repo', $3, $3, 'ACTIVE')`, workflowSeed.id, workflowSeed.repositoryID, workflowSeed.issue); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	insertParticipant := func(id, workflowID string, participantRole workflow.Role, statePath string) error {
+		_, err := pool.Exec(ctx, `
+INSERT INTO agent_assignments (
+    id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
+    runtime_profile_version, runtime_image_digest, runtime_state_path
+)
+VALUES ($1, $2, $3, 'ACTIVE', 'default', 'runtime', '1', 'runtime:image', $4)`,
+			id, workflowID, participantRole, statePath)
+		return err
+	}
+	if err := insertParticipant("60000000-0000-4000-8000-000000000084",
+		"60000000-0000-4000-8000-000000000081", workflow.RoleDeveloper, "profile-role/one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertParticipant("60000000-0000-4000-8000-000000000085",
+		"60000000-0000-4000-8000-000000000082", workflow.RoleReviewer, "profile-role/two"); err == nil {
+		t.Fatal("same repository accepted one Agent Profile name for different Roles")
+	}
+	if err := insertParticipant("60000000-0000-4000-8000-000000000086",
+		"60000000-0000-4000-8000-000000000083", workflow.RoleReviewer, "profile-role/three"); err != nil {
+		t.Fatalf("different repository rejected local Agent Profile name: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET repository_id = 81
+WHERE id = '60000000-0000-4000-8000-000000000083'`); err == nil {
+		t.Fatal("moving Workflow bypassed repository-local Agent Profile Role ownership")
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := pool.Exec(ctx, `
+UPDATE workflows SET repository_id = 81
+WHERE id = '60000000-0000-4000-8000-000000000087'`)
+		results <- err
+	}()
+	go func() {
+		<-start
+		results <- insertParticipant("60000000-0000-4000-8000-000000000088",
+			"60000000-0000-4000-8000-000000000087", workflow.RoleReviewer, "profile-role/four")
+	}()
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent Workflow move and Participant insert successes = %d, want exactly one", successes)
+	}
+	var destinationRoles int
+	if err := pool.QueryRow(ctx, `
+SELECT count(DISTINCT participant.role)
+FROM agent_assignments AS participant
+JOIN workflows AS workflow ON workflow.id = participant.workflow_id
+WHERE workflow.repository_id = 81 AND participant.agent_profile_name = 'default'`).Scan(&destinationRoles); err != nil {
+		t.Fatal(err)
+	}
+	if destinationRoles != 1 {
+		t.Fatalf("destination repository has %d Roles for Agent Profile default, want one", destinationRoles)
+	}
+}
+
 func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) {
 	postgres := startPostgres(t)
 	passwordFile := filepath.Join(t.TempDir(), "database-password")
@@ -230,7 +317,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	const architecture workflow.StageID = "architecture"
 	const validation workflow.StageID = "validation"
 	policies, err := role.NewPolicyCatalog([]role.ID{architect}, []role.Policy{{
-		Role: architect, AgentProfile: role.AgentProfileIdentity{Name: "architect", Path: ".omnigrex/team/architect.md"},
+		Role:     architect,
 		MCPTools: []string{"get_issue", "request_review", "submit_review", "comment_on_issue", "report_blocked"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
 		ToolCredentialAuthorities: map[string]role.CredentialAuthority{"submit_review": role.ReviewerAuthority},
 		TrustedToolsRevision:      role.TurnRevisionTrustedTools, AllowHumanSessionControl: true,

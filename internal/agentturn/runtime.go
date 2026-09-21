@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
@@ -627,7 +628,7 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Po
 		return nil, "", fmt.Errorf("%w: Agent Profile snapshot", ErrRuntimeBinding)
 	}
 	if policy.Role != execution.Assignment.Role || snapshot.Name != execution.Assignment.AgentProfileName ||
-		snapshot.Name != policy.AgentProfile.Name || snapshot.Path != policy.AgentProfile.Path || snapshot.Role != execution.Assignment.Role ||
+		!agentprofile.ValidPath(snapshot.Path) || snapshot.Role != execution.Assignment.Role ||
 		snapshot.Runtime != execution.Assignment.RuntimeProfileName+"/"+execution.Assignment.RuntimeProfileVersion {
 		return nil, "", ErrRuntimeBinding
 	}

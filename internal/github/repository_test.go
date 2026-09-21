@@ -70,6 +70,154 @@ func TestAPIClientResolvesDefaultBranchCommitAndFetchesExactFile(t *testing.T) {
 	}
 }
 
+func TestAPIClientListsSortedRegularDirectChildRepositoryFiles(t *testing.T) {
+	const commitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer installation-token" {
+			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.Method != http.MethodGet || request.URL.EscapedPath() != "/repos/acme/widgets/contents/.omnigrex/team%20profiles" {
+			t.Errorf("request = %s %s", request.Method, request.URL.EscapedPath())
+		}
+		if request.URL.Query().Get("ref") != commitSHA || len(request.URL.Query()) != 1 {
+			t.Errorf("query = %q", request.URL.RawQuery)
+		}
+		_, _ = fmt.Fprint(writer, `[
+			{"type":"file","path":".omnigrex/team profiles/reviewer.md"},
+			{"type":"dir","path":".omnigrex/team profiles/archive"},
+			{"type":"symlink","path":".omnigrex/team profiles/notes.txt","target":"../notes.txt"},
+			{"type":"file","path":".omnigrex/team profiles/vendor","submodule_git_url":"https://github.com/acme/vendor.git"},
+			{"type":"file","path":".omnigrex/team profiles/developer.md"}
+		]`)
+	}))
+	defer server.Close()
+
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("NewAPIClient() error = %v", err)
+	}
+	files, err := client.ListRepositoryDirectoryFiles(context.Background(), "installation-token", "acme", "widgets", ".omnigrex/team profiles", commitSHA)
+	if err != nil {
+		t.Fatalf("ListRepositoryDirectoryFiles() error = %v", err)
+	}
+	want := []string{".omnigrex/team profiles/developer.md", ".omnigrex/team profiles/reviewer.md"}
+	if fmt.Sprint(files) != fmt.Sprint(want) {
+		t.Errorf("files = %q, want %q", files, want)
+	}
+}
+
+func TestAPIClientListsEmptyRepositoryDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(writer, `[]`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("NewAPIClient() error = %v", err)
+	}
+
+	files, err := client.ListRepositoryDirectoryFiles(context.Background(), "token", "acme", "widgets", ".omnigrex/team", strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatalf("ListRepositoryDirectoryFiles() error = %v", err)
+	}
+	if files == nil || len(files) != 0 {
+		t.Errorf("files = %#v, want non-nil empty slice", files)
+	}
+}
+
+func TestAPIClientRejectsInvalidRepositoryDirectoryRequestsWithoutHTTP(t *testing.T) {
+	requests := 0
+	client, err := githubapi.NewAPIClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected HTTP request")
+	}), "https://api.github.test")
+	if err != nil {
+		t.Fatalf("NewAPIClient() error = %v", err)
+	}
+	validCommit := strings.Repeat("a", 40)
+	tests := []struct {
+		name       string
+		owner      string
+		repository string
+		path       string
+		commit     string
+		cause      error
+	}{
+		{name: "empty owner", repository: "widgets", path: ".omnigrex/team", commit: validCommit, cause: githubapi.ErrInvalidRepository},
+		{name: "empty repository", owner: "acme", path: ".omnigrex/team", commit: validCommit, cause: githubapi.ErrInvalidRepository},
+		{name: "owner with slash", owner: "acme/tools", repository: "widgets", path: ".omnigrex/team", commit: validCommit, cause: githubapi.ErrInvalidRepository},
+		{name: "repository with slash", owner: "acme", repository: "tools/widgets", path: ".omnigrex/team", commit: validCommit, cause: githubapi.ErrInvalidRepository},
+		{name: "empty path", owner: "acme", repository: "widgets", commit: validCommit, cause: githubapi.ErrInvalidRepositoryPath},
+		{name: "absolute path", owner: "acme", repository: "widgets", path: "/.omnigrex/team", commit: validCommit, cause: githubapi.ErrInvalidRepositoryPath},
+		{name: "trailing slash", owner: "acme", repository: "widgets", path: ".omnigrex/team/", commit: validCommit, cause: githubapi.ErrInvalidRepositoryPath},
+		{name: "parent traversal", owner: "acme", repository: "widgets", path: ".omnigrex/../team", commit: validCommit, cause: githubapi.ErrInvalidRepositoryPath},
+		{name: "empty commit", owner: "acme", repository: "widgets", path: ".omnigrex/team", cause: githubapi.ErrInvalidCommitSHA},
+		{name: "abbreviated commit", owner: "acme", repository: "widgets", path: ".omnigrex/team", commit: "abc123", cause: githubapi.ErrInvalidCommitSHA},
+		{name: "revision expression", owner: "acme", repository: "widgets", path: ".omnigrex/team", commit: "main^{tree}", cause: githubapi.ErrInvalidCommitSHA},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := client.ListRepositoryDirectoryFiles(context.Background(), "token", test.owner, test.repository, test.path, test.commit)
+			var configuration *githubapi.ConfigurationError
+			if !errors.Is(err, test.cause) || !errors.As(err, &configuration) || !configuration.Permanent() {
+				t.Errorf("error = %T %v, want ConfigurationError wrapping %v", err, err, test.cause)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Errorf("invalid requests made %d HTTP calls", requests)
+	}
+}
+
+func TestAPIClientRejectsInvalidRepositoryDirectoryResponses(t *testing.T) {
+	const path = ".omnigrex/team"
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	tooManyEntries := make([]string, githubapi.MaxRepositoryDirectoryEntries)
+	for index := range tooManyEntries {
+		tooManyEntries[index] = fmt.Sprintf(`{"type":"file","path":"%s/profile-%d.md"}`, path, index)
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "null response", body: `null`},
+		{name: "object response", body: `{"type":"dir","path":".omnigrex/team"}`},
+		{name: "response at API truncation limit", body: `[` + strings.Join(tooManyEntries, ",") + `]`},
+		{name: "null entry", body: `[null]`},
+		{name: "missing type", body: `[{"path":".omnigrex/team/developer.md"}]`},
+		{name: "missing path", body: `[{"type":"file"}]`},
+		{name: "absolute path", body: `[{"type":"file","path":"/.omnigrex/team/developer.md"}]`},
+		{name: "directory itself", body: `[{"type":"dir","path":".omnigrex/team"}]`},
+		{name: "sibling path", body: `[{"type":"file","path":".omnigrex/other/developer.md"}]`},
+		{name: "nested descendant", body: `[{"type":"file","path":".omnigrex/team/nested/developer.md"}]`},
+		{name: "parent traversal", body: `[{"type":"file","path":".omnigrex/team/../developer.md"}]`},
+		{name: "duplicate files", body: `[{"type":"file","path":".omnigrex/team/developer.md"},{"type":"file","path":".omnigrex/team/developer.md"}]`},
+		{name: "duplicate file and directory", body: `[{"type":"file","path":".omnigrex/team/developer.md"},{"type":"dir","path":".omnigrex/team/developer.md"}]`},
+		{name: "symlink", body: `[{"type":"symlink","path":".omnigrex/team/developer.md","target":"../developer.md"}]`},
+		{name: "Markdown submodule", body: `[{"type":"submodule","path":".omnigrex/team/profiles.md"}]`},
+		{name: "Markdown submodule reported as file", body: `[{"type":"file","path":".omnigrex/team/profiles.md","submodule_git_url":"https://github.com/acme/profiles.git"}]`},
+		{name: "symlink reported as file", body: `[{"type":"file","path":".omnigrex/team/developer.md","target":"../developer.md"}]`},
+		{name: "unsupported type", body: `[{"type":"commit","path":".omnigrex/team/developer.md"}]`},
+		{name: "directory with file metadata", body: `[{"type":"dir","path":".omnigrex/team/archive","target":"target"}]`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(writer, test.body)
+			}))
+			defer server.Close()
+			client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+			if err != nil {
+				t.Fatalf("NewAPIClient() error = %v", err)
+			}
+			_, err = client.ListRepositoryDirectoryFiles(context.Background(), "token", "acme", "widgets", path, commit)
+			if !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
+				t.Errorf("error = %T %v, want ErrInvalidAPIResponse", err, err)
+			}
+		})
+	}
+}
+
 func TestAPIClientRejectsInvalidRepositoryContentRequestsWithoutHTTP(t *testing.T) {
 	requests := 0
 	client, err := githubapi.NewAPIClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {

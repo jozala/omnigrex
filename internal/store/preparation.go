@@ -1165,7 +1165,7 @@ func (store *Store) validateAgentProfileConfig(value json.RawMessage, preparatio
 	if !ok {
 		return nil, errors.New("prepare Agent Turn: Role policy is unavailable")
 	}
-	return validateAgentProfileConfigForIdentity(value, policy.AgentProfile.Path, policy, preparation)
+	return validateAgentProfileConfigForIdentity(value, "", policy, preparation)
 }
 
 func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath string, policy role.Policy, preparation AgentTurnPreparation) (json.RawMessage, error) {
@@ -1185,8 +1185,8 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 	if strings.TrimSpace(snapshot.Name) == "" || snapshot.Name != preparation.Assignment.AgentProfileName {
 		return nil, errors.New("prepare Agent Turn: Agent Profile name does not match Assignment")
 	}
-	if strings.TrimSpace(expectedPath) == "" || snapshot.Path != expectedPath {
-		return nil, errors.New("prepare Agent Turn: Agent Profile path does not match Role")
+	if !agentprofile.ValidPath(snapshot.Path) || (expectedPath != "" && snapshot.Path != expectedPath) {
+		return nil, errors.New("prepare Agent Turn: Agent Profile path does not match selected Agent Profile")
 	}
 	if snapshot.Role != preparation.Role || policy.Role != preparation.Role {
 		return nil, errors.New("prepare Agent Turn: Agent Profile Role does not match preparation")
@@ -1284,9 +1284,13 @@ func ensurePreparationParticipant(ctx context.Context, tx pgx.Tx, preparationJob
 
 	var conflictingRole workflow.Role
 	err = tx.QueryRow(ctx, `
-SELECT role FROM agent_assignments
-WHERE agent_profile_name = $1 AND role <> $2
-LIMIT 1 FOR SHARE`, preparation.Binding.AgentProfileName, payload.Role).Scan(&conflictingRole)
+SELECT participant.role
+FROM agent_assignments AS participant
+JOIN workflows AS participant_workflow ON participant_workflow.id = participant.workflow_id
+JOIN workflows AS current_workflow ON current_workflow.id = $3
+WHERE participant.agent_profile_name = $1 AND participant.role <> $2
+  AND participant_workflow.repository_id = current_workflow.repository_id
+LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload.Role, workflowID).Scan(&conflictingRole)
 	if err == nil {
 		return AgentParticipant{}, StageAssignment{}, ErrAssignmentConfigurationConflict
 	}
@@ -1503,9 +1507,13 @@ func revalidateParticipantConfigurationConflict(ctx context.Context, tx pgx.Tx, 
 
 	var role workflow.Role
 	err = tx.QueryRow(ctx, `
-SELECT role FROM agent_assignments
-WHERE agent_profile_name = $1 AND role <> $2
-LIMIT 1 FOR SHARE`, preparation.Binding.AgentProfileName, payload.Role).Scan(&role)
+SELECT participant.role
+FROM agent_assignments AS participant
+JOIN workflows AS participant_workflow ON participant_workflow.id = participant.workflow_id
+JOIN workflows AS current_workflow ON current_workflow.id = $3
+WHERE participant.agent_profile_name = $1 AND participant.role <> $2
+  AND participant_workflow.repository_id = current_workflow.repository_id
+LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload.Role, job.WorkflowID).Scan(&role)
 	if err == nil {
 		return true, nil
 	}

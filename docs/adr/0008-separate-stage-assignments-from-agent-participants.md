@@ -15,5 +15,6 @@ Stage Assignment identity is unique by Workflow, Assignment Generation, and Stag
 A Stage Assignment may only select a Participant whose Profile Role matches the Stage Role.
 Participants and Stage Assignments are provisioned lazily when a Stage first needs them.
 Multiple Stages that select the same Profile reuse one Participant and its Agent Session lineage.
+An existing Participant keeps selecting its Profile by durable name even if the current selection policy later changes.
 A new Assignment Generation creates new immutable identities without rewriting earlier generations.
 Agent Session control follows [ADR 0003](./0003-orchestrator-owns-session-control.md).

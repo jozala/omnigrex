@@ -184,19 +184,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
-	profileCatalog, err := agentprofile.NewCatalogFromPolicies(rolePolicies)
-	if err != nil {
-		return fmt.Errorf("configure Agent Profile catalog: %w", err)
-	}
-	profileSelection, err := agentprofile.NewSelectionFromPolicies(profileCatalog, rolePolicies)
-	if err != nil {
-		return fmt.Errorf("configure Agent Profile selection: %w", err)
-	}
-	profileLoader, err := agentprofile.NewConfiguredLoader(githubServices.api, profileCatalog, profileSelection)
-	if err != nil {
-		return fmt.Errorf("configure Agent Profile loader: %w", err)
-	}
-	preparer := agentturn.NewPreparer(profileLoader, runtimeRegistry, database)
+	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies)
+	preparer := agentturn.NewPreparer(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
 		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,

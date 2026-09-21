@@ -163,21 +163,24 @@ Mounting the socket read-only prevents file writes through the mount but does no
 
 ## Agent Profiles
 
-Every managed repository must contain these files on its default branch before the first trigger:
+Every managed repository must contain one Agent Profile for every Workflow Role on its default branch before the first trigger.
+Profiles are discovered as direct lowercase `*.md` children of:
 
 ```text
-.omnigrex/team/developer.md
-.omnigrex/team/reviewer.md
+.omnigrex/team/
 ```
 
-This repository includes working profiles at those paths.
-Copy and adapt them when onboarding another repository.
+Filenames are arbitrary and do not define Profile identity or Role.
+The current selector requires exactly one discovered Profile for each Workflow Role.
+Additional Profiles for the same Role are rejected until multiple-Profile selection is configured.
 
 Each file starts with strict YAML front matter followed by Role instructions.
 The supported fields are:
 
 | Field | Requirement |
 | --- | --- |
+| `name` | Repository-local stable identity using lowercase letters, digits, hyphens, or underscores |
+| `role` | Role ID referenced by the active Workflow Definition, such as `DEVELOPER` or `REVIEWER` |
 | `runtime` | Runtime Profile in `name/version` form, currently `opencode-acp/v1` |
 | `model` | Provider model in `provider/model` form |
 | `variant` | Optional provider-specific variant without whitespace |
@@ -190,6 +193,9 @@ The Reviewer cannot allow `edit` or `patch`.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
 Agent Profiles are loaded from the latest default-branch commit before each Agent Turn.
+Directory listing and every Profile file are read from the same exact commit.
+Every direct Markdown file is treated as configuration; malformed files and unknown or unreferenced Roles fail discovery.
+A file can move without changing Profile identity when its front matter name remains unchanged.
 A feature branch cannot replace the Reviewer Profile used to review that branch.
 Changing the Runtime Profile reference of an existing Agent Participant does not migrate its Agent Session and creates a configuration Human Handoff.
 

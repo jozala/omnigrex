@@ -13,7 +13,7 @@ var (
 	ErrInvalidSelection = errors.New("invalid Agent Profile selection")
 )
 
-// Identity is the code-defined authority and repository location of an Agent Profile.
+// Identity identifies an Agent Profile and its repository location.
 type Identity struct {
 	Name Name
 	Role role.ID
@@ -22,22 +22,19 @@ type Identity struct {
 
 // Catalog is an immutable set of Agent Profile identities.
 type Catalog struct {
-	ordered  []Name
-	entries  map[Name]Identity
-	policies map[Name]role.Policy
+	ordered []Name
+	entries map[Name]Identity
 }
 
-func NewCatalog(roles role.Catalog, identities []Identity) (Catalog, error) {
-	if len(roles.IDs()) == 0 || len(identities) == 0 {
+func NewCatalog(identities []Identity) (Catalog, error) {
+	if len(identities) == 0 {
 		return Catalog{}, fmt.Errorf("%w: no identities", ErrInvalidCatalog)
 	}
 	catalog := Catalog{
 		ordered: make([]Name, 0, len(identities)), entries: make(map[Name]Identity, len(identities)),
-		policies: make(map[Name]role.Policy, len(identities)),
 	}
-	builtinPolicies := role.BuiltinPolicyCatalog()
 	for _, identity := range identities {
-		if !validName(identity.Name) || !roles.Contains(identity.Role) || !validPath(identity.Path) {
+		if !validName(identity.Name) || !role.ValidID(identity.Role) || !validPath(identity.Path) {
 			return Catalog{}, fmt.Errorf("%w: invalid identity %q", ErrInvalidCatalog, identity.Name)
 		}
 		if _, duplicate := catalog.entries[identity.Name]; duplicate {
@@ -45,58 +42,8 @@ func NewCatalog(roles role.Catalog, identities []Identity) (Catalog, error) {
 		}
 		catalog.ordered = append(catalog.ordered, identity.Name)
 		catalog.entries[identity.Name] = identity
-		policy, ok := builtinPolicies.Lookup(identity.Role)
-		if !ok {
-			return Catalog{}, fmt.Errorf("%w: no policy for identity %q", ErrInvalidCatalog, identity.Name)
-		}
-		policy.AgentProfile = role.AgentProfileIdentity{Name: string(identity.Name), Path: identity.Path}
-		catalog.policies[identity.Name] = policy
 	}
 	return catalog, nil
-}
-
-// NewCatalogFromPolicies derives Agent Profile identities from the startup-validated Role Policy Catalog.
-func NewCatalogFromPolicies(policies role.PolicyCatalog) (Catalog, error) {
-	identities := make([]Identity, 0, len(policies.Roles()))
-	byName := make(map[Name]Identity, len(policies.Roles()))
-	policyByName := make(map[Name]role.Policy, len(policies.Roles()))
-	for _, roleID := range policies.Roles() {
-		policy, ok := policies.Lookup(roleID)
-		if !ok {
-			return Catalog{}, fmt.Errorf("%w: missing Role policy %q", ErrInvalidCatalog, roleID)
-		}
-		identity := Identity{Name: Name(policy.AgentProfile.Name), Role: roleID, Path: policy.AgentProfile.Path}
-		if !validName(identity.Name) || !validPath(identity.Path) {
-			return Catalog{}, fmt.Errorf("%w: invalid identity %q", ErrInvalidCatalog, identity.Name)
-		}
-		if _, duplicate := byName[identity.Name]; duplicate {
-			return Catalog{}, fmt.Errorf("%w: duplicate name %q", ErrInvalidCatalog, identity.Name)
-		}
-		identities = append(identities, identity)
-		byName[identity.Name] = identity
-		policyByName[identity.Name] = policy
-	}
-	if len(identities) == 0 {
-		return Catalog{}, fmt.Errorf("%w: no identities", ErrInvalidCatalog)
-	}
-	ordered := make([]Name, len(identities))
-	for index, identity := range identities {
-		ordered[index] = identity.Name
-	}
-	return Catalog{ordered: ordered, entries: byName, policies: policyByName}, nil
-}
-
-func BuiltinCatalog() Catalog {
-	catalog, err := NewCatalogFromPolicies(role.BuiltinPolicyCatalog())
-	if err != nil {
-		panic(err)
-	}
-	return catalog
-}
-
-func (catalog Catalog) policy(name Name) (role.Policy, bool) {
-	policy, ok := catalog.policies[name]
-	return policy, ok
 }
 
 func (catalog Catalog) Identity(name Name) (Identity, bool) {
@@ -119,6 +66,18 @@ type Selection struct {
 	byName map[Name]role.ID
 }
 
+// Selector chooses one Agent Profile for every Role from a discovered catalog.
+type Selector interface {
+	Select(Catalog, role.PolicyCatalog) (Selection, error)
+}
+
+// SingletonSelector accepts a catalog only when exactly one Profile belongs to every Role.
+type SingletonSelector struct{}
+
+func (SingletonSelector) Select(catalog Catalog, policies role.PolicyCatalog) (Selection, error) {
+	return NewSingletonSelection(catalog, policies)
+}
+
 func NewSelection(catalog Catalog, roles []role.ID, selected map[role.ID]Name) (Selection, error) {
 	if len(roles) == 0 || len(catalog.entries) == 0 {
 		return Selection{}, fmt.Errorf("%w: empty catalog or Role set", ErrInvalidSelection)
@@ -127,7 +86,7 @@ func NewSelection(catalog Catalog, roles []role.ID, selected map[role.ID]Name) (
 	seenRoles := make(map[role.ID]struct{}, len(roles))
 	for _, roleID := range roles {
 		if _, duplicate := seenRoles[roleID]; duplicate {
-			continue
+			return Selection{}, fmt.Errorf("%w: duplicate Role %q", ErrInvalidSelection, roleID)
 		}
 		seenRoles[roleID] = struct{}{}
 		name, ok := selected[roleID]
@@ -148,26 +107,17 @@ func NewSelection(catalog Catalog, roles []role.ID, selected map[role.ID]Name) (
 	return selection, nil
 }
 
-func BuiltinSelection() Selection {
-	selection, err := NewSelection(BuiltinCatalog(), []role.ID{role.Developer, role.Reviewer}, map[role.ID]Name{
-		role.Developer: Developer,
-		role.Reviewer:  Reviewer,
-	})
-	if err != nil {
-		panic(err)
-	}
-	return selection
-}
-
-// NewSelectionFromPolicies selects each Role's policy-owned Agent Profile identity.
-func NewSelectionFromPolicies(catalog Catalog, policies role.PolicyCatalog) (Selection, error) {
+// NewSingletonSelection selects a Role only when exactly one catalog Profile belongs to it.
+func NewSingletonSelection(catalog Catalog, policies role.PolicyCatalog) (Selection, error) {
 	selected := make(map[role.ID]Name, len(policies.Roles()))
-	for _, roleID := range policies.Roles() {
-		policy, ok := policies.Lookup(roleID)
-		if !ok {
-			return Selection{}, fmt.Errorf("%w: missing Role policy %q", ErrInvalidSelection, roleID)
+	for _, identity := range catalog.Identities() {
+		if !policies.Contains(identity.Role) {
+			return Selection{}, fmt.Errorf("%w: Profile %q has unreferenced Role %q", ErrInvalidSelection, identity.Name, identity.Role)
 		}
-		selected[roleID] = Name(policy.AgentProfile.Name)
+		if existing, duplicate := selected[identity.Role]; duplicate {
+			return Selection{}, fmt.Errorf("%w: Role %q has multiple Profiles %q and %q", ErrInvalidSelection, identity.Role, existing, identity.Name)
+		}
+		selected[identity.Role] = identity.Name
 	}
 	return NewSelection(catalog, policies.Roles(), selected)
 }
@@ -195,6 +145,21 @@ func validName(name Name) bool {
 }
 
 func validPath(value string) bool {
-	return strings.HasPrefix(value, ".omnigrex/team/") && strings.HasSuffix(value, ".md") &&
-		!strings.Contains(value, "..") && strings.TrimSpace(value) == value
+	const prefix = ".omnigrex/team/"
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, ".md") || strings.TrimSpace(value) != value {
+		return false
+	}
+	name := strings.TrimPrefix(value, prefix)
+	if len(name) <= len(".md") || strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
+
+// ValidPath reports whether value is a direct Markdown file under the Agent Profile directory.
+func ValidPath(value string) bool { return validPath(value) }
