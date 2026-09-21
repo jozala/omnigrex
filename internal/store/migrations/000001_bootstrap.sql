@@ -69,16 +69,12 @@ CREATE TABLE workflow_attempts (
     trigger_delivery_id UUID REFERENCES webhook_deliveries (delivery_id),
     status TEXT NOT NULL CHECK (status <> ''),
     active BOOLEAN NOT NULL DEFAULT TRUE,
-    review_cycles_completed INTEGER NOT NULL DEFAULT 0 CHECK (review_cycles_completed >= 0),
-    review_cycle_limit INTEGER NOT NULL DEFAULT 3 CHECK (review_cycle_limit > 0),
     infrastructure_failures INTEGER NOT NULL DEFAULT 0 CHECK (infrastructure_failures >= 0),
     infrastructure_failure_limit INTEGER NOT NULL DEFAULT 2 CHECK (infrastructure_failure_limit > 0),
     started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     completed_at TIMESTAMPTZ,
     human_handoff_reason TEXT,
-    CONSTRAINT workflow_attempts_review_budget_check
-        CHECK (review_cycles_completed <= review_cycle_limit),
     CONSTRAINT workflow_attempts_failure_budget_check
         CHECK (infrastructure_failures <= infrastructure_failure_limit),
     CONSTRAINT workflow_attempts_active_check CHECK (NOT active OR completed_at IS NULL),

@@ -566,11 +566,10 @@ FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 	var attempt workflow.WorkflowAttempt
 	var reviewUsageJSON []byte
 	err = tx.QueryRow(ctx, `
-SELECT id::text, attempt_number, started_at, review_cycles_completed, review_cycle_limit,
-	       infrastructure_failures, infrastructure_failure_limit, current_stage, review_usage
+	SELECT id::text, attempt_number, started_at, infrastructure_failures,
+	       infrastructure_failure_limit, current_stage, review_usage
 FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
-		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.ReviewBudget.Used,
-		&attempt.ReviewBudget.Limit, &attempt.InfrastructureRetryBudget.Used,
+		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.InfrastructureRetryBudget.Used,
 		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON)
 	if err == nil {
 		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
@@ -695,12 +694,10 @@ WHERE id = $1 AND workflow_id = $2 AND active`, complete.AttemptID, workflowID, 
 			if _, err := tx.Exec(ctx, `
 INSERT INTO workflow_attempts (
 	    id, workflow_id, attempt_number, trigger_delivery_id, status, active,
-	    review_cycles_completed, review_cycle_limit, infrastructure_failures,
-	    infrastructure_failure_limit, started_at, current_stage, review_usage
+	    infrastructure_failures, infrastructure_failure_limit, started_at, current_stage, review_usage
 )
-VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9, $10, $11)`, attempt.ID,
-				workflowID, int64(attempt.Number), deliveryID, int(attempt.ReviewBudget.Used),
-				int(attempt.ReviewBudget.Limit), int(attempt.InfrastructureRetryBudget.Used),
+VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
+				workflowID, int64(attempt.Number), deliveryID, int(attempt.InfrastructureRetryBudget.Used),
 				int(attempt.InfrastructureRetryBudget.Limit), attempt.StartedAt, attempt.CurrentStage, reviewUsage); err != nil {
 				return fmt.Errorf("create workflow attempt: %w", err)
 			}
@@ -713,11 +710,9 @@ VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9, $10, $11)`, attempt.
 			return fmt.Errorf("encode workflow attempt Stage usage: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-UPDATE workflow_attempts SET review_cycles_completed = $3, review_cycle_limit = $4,
-	    infrastructure_failures = $5, infrastructure_failure_limit = $6,
-	    current_stage = $7, review_usage = $8, updated_at = clock_timestamp()
+		UPDATE workflow_attempts SET infrastructure_failures = $3, infrastructure_failure_limit = $4,
+		    current_stage = $5, review_usage = $6, updated_at = clock_timestamp()
 WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
-			int(attempt.ReviewBudget.Used), int(attempt.ReviewBudget.Limit),
 			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
 			attempt.CurrentStage, reviewUsage); err != nil {
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)

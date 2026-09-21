@@ -114,7 +114,7 @@ WHERE proposal.workflow_id = $1 AND review.review_id = $2`, fixture.workflowID, 
 		var used int
 		var role, purpose string
 		if err := pool.QueryRow(ctx, `
-SELECT attempt.review_cycles_completed, successor.payload->>'role', successor.payload->>'purpose'
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), successor.payload->>'role', successor.payload->>'purpose'
 FROM workflow_attempts AS attempt
 JOIN jobs AS successor ON successor.id = $2
 WHERE attempt.id = $1`, fixture.attemptID, settled.SuccessorJobID).Scan(&used, &role, &purpose); err != nil {
@@ -192,7 +192,7 @@ WHERE workflow.id = $1`, fixture.workflowID, fixture.assignmentID).Scan(&reason,
 		var used int
 		var head, expected, purpose string
 		if err := pool.QueryRow(ctx, `
-SELECT attempt.review_cycles_completed, proposal.head_sha,
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), proposal.head_sha,
        successor.payload->>'expected_head_sha', successor.payload->>'purpose'
 FROM workflow_attempts AS attempt
 JOIN change_proposals AS proposal ON proposal.workflow_id = attempt.workflow_id AND proposal.active
@@ -382,7 +382,7 @@ FROM jobs WHERE agent_turn_settlement_id = $1`, settled.ID, deferredID).Scan(
 				var accepted bool
 				var latest, fallbackRole, fallbackPurpose, fallbackHead string
 				if err := pool.QueryRow(ctx, `
-SELECT attempt.review_cycles_completed, review.accepted,
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), review.accepted,
        reconciliation.payload->>'latest_observed_head_sha',
        reconciliation.payload->>'fallback_role',
        reconciliation.payload->>'fallback_purpose',
@@ -535,7 +535,7 @@ ORDER BY applied_revision, delivery_id`, []string{
 		var used int
 		var accepted bool
 		if err := pool.QueryRow(ctx, `
-SELECT attempt.review_cycles_completed, review.accepted
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), review.accepted
 FROM workflow_attempts AS attempt
 JOIN change_proposals AS proposal ON proposal.workflow_id = attempt.workflow_id AND proposal.active
 JOIN change_proposal_reviews AS review ON review.change_proposal_id = proposal.id AND review.review_id = $2
@@ -987,7 +987,7 @@ WHERE id = $1`, fixture.workflowID, state); err != nil {
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
-	    review_cycle_limit = 3, current_stage = $2 WHERE id = $1`, fixture.attemptID, stage); err != nil {
+	    current_stage = $2 WHERE id = $1`, fixture.attemptID, stage); err != nil {
 		t.Fatal(err)
 	}
 	var proposal *store.AgentTurnSettlementChangeProposal

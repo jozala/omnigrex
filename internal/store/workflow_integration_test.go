@@ -324,7 +324,7 @@ func TestReviewObservationWithoutActiveTurnIsUnrelatedWithoutConsumingBudget(t *
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'review' WHERE workflow_id = $1 AND active`, fixture.workflowID); err != nil {
 		t.Fatalf("make reviewing Workflow Stage: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET review_cycles_completed = 1, infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET review_usage = '{"review":1}'::jsonb, infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set attempt budgets: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO change_proposals (id, workflow_id, repository_id, repository_owner, repository_name, pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha) VALUES ('60000000-0000-4000-8000-000000000005', $1, 5, 'owner', 'repo', 55, 15, 'OPEN', 'main', 'base', 'feature', 'head')`, fixture.workflowID); err != nil {
@@ -346,7 +346,7 @@ func TestReviewObservationWithoutActiveTurnIsUnrelatedWithoutConsumingBudget(t *
 		t.Fatalf("review application = (%#v, %v), want unrelated completion at revision 4", application, err)
 	}
 	var used, reviews int
-	if err := pool.QueryRow(ctx, `SELECT review_cycles_completed FROM workflow_attempts WHERE id = $1`, fixture.attemptID).Scan(&used); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COALESCE((review_usage->>'review')::int, 0) FROM workflow_attempts WHERE id = $1`, fixture.attemptID).Scan(&used); err != nil {
 		t.Fatalf("query review budget: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM change_proposal_reviews`).Scan(&reviews); err != nil {

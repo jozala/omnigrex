@@ -10,7 +10,6 @@ import (
 // Reducer deterministically applies Events under one immutable Workflow Definition.
 type Reducer struct {
 	definition               Definition
-	reviewLimit              uint8
 	infrastructureRetryLimit uint8
 }
 
@@ -19,17 +18,7 @@ func NewReducer(definition Definition, infrastructureRetryLimit uint8) (Reducer,
 	if len(definition.StageIDs()) == 0 || infrastructureRetryLimit == 0 {
 		return Reducer{}, fmt.Errorf("%w: reducer policy", ErrInvalidDefinition)
 	}
-	var reviewLimit uint8
-	for _, stageID := range definition.StageIDs() {
-		stage, _ := definition.Stage(stageID)
-		if stage.ReviewLimit > reviewLimit {
-			reviewLimit = stage.ReviewLimit
-		}
-	}
-	if reviewLimit == 0 {
-		reviewLimit = 1
-	}
-	return Reducer{definition: definition, reviewLimit: reviewLimit, infrastructureRetryLimit: infrastructureRetryLimit}, nil
+	return Reducer{definition: definition, infrastructureRetryLimit: infrastructureRetryLimit}, nil
 }
 
 var builtinReducer = func() Reducer {
@@ -415,7 +404,6 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	attempt := WorkflowAttempt{
 		ID: event.AttemptID, Number: event.AttemptNumber, StartedAt: event.ObservedAt, Lifecycle: AttemptActive,
 		CurrentStage: entry.Stage, ReviewUsage: make(map[StageID]uint8),
-		ReviewBudget:              AttemptBudget{Limit: reducer.reviewLimit},
 		InfrastructureRetryBudget: AttemptBudget{Limit: reducer.infrastructureRetryLimit},
 	}
 	next := cloneSnapshot(snapshot)
@@ -554,8 +542,6 @@ func (reducer Reducer) reduceReviewSettled(snapshot, next Snapshot, event TurnSe
 			next.CurrentAttempt.ReviewUsage = make(map[StageID]uint8)
 		}
 		next.CurrentAttempt.ReviewUsage[sourceStage]++
-		next.CurrentAttempt.ReviewBudget.Used = next.CurrentAttempt.ReviewUsage[sourceStage]
-		next.CurrentAttempt.ReviewBudget.Limit = stage.ReviewLimit
 	}
 	if event.Outcome == TurnOutcomeApproved {
 		next.State = transition.TerminalState

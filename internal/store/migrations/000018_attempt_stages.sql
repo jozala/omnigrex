@@ -33,11 +33,6 @@ SET current_stage = CASE
           )
         THEN 'review'
         ELSE 'implementation'
-    END,
-    review_usage = CASE
-        WHEN attempt.review_cycles_completed > 0
-        THEN jsonb_build_object('review', attempt.review_cycles_completed)
-        ELSE '{}'::jsonb
     END
 FROM workflows AS workflow
 WHERE workflow.id = attempt.workflow_id;

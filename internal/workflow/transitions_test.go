@@ -48,8 +48,8 @@ func TestAcceptedChangesRequestReturnsToDeveloper(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonChangesRequested, workflow.StateDeveloping, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 {
-		t.Errorf("used Review Cycles = %d, want 1", decision.Snapshot.CurrentAttempt.ReviewBudget.Used)
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 {
+		t.Errorf("used Review Cycles = %d, want 1", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview])
 	}
 	action := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
 	if action.Role != workflow.RoleDeveloper || action.Purpose != workflow.TurnPurposeRequestedChanges || action.ExpectedHeadSHA != "head-1" {
@@ -64,8 +64,8 @@ func TestAcceptedApprovalSetsReadyForSHA(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonApproved, workflow.StatePRReady, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 2 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-2" {
-		t.Errorf("approval state = (%d, %#v), want two Review Cycles and head-2 readiness", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-2" {
+		t.Errorf("approval state = (%d, %#v), want two Review Cycles and head-2 readiness", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview], decision.Snapshot.ChangeProposal)
 	}
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
 }
@@ -77,14 +77,14 @@ func TestThirdAcceptedChangesRequestCreatesHumanHandoff(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewBudgetExhausted, workflow.StateNeedsHuman, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 3 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
-		t.Errorf("handoff state = (%d, %q), want three Review Cycles and Developer resume", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ResumeRole)
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 3 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
+		t.Errorf("handoff state = (%d, %q), want three Review Cycles and Developer resume", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview], decision.Snapshot.ResumeRole)
 	}
 	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 1)
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
 }
 
-func TestStaleHeadReviewIsAppliedWithoutConsumingReviewBudget(t *testing.T) {
+func TestStaleHeadReviewIsAppliedWithoutConsumingReviewUsage(t *testing.T) {
 	for _, outcome := range []workflow.TurnOutcome{workflow.TurnOutcomeApproved, workflow.TurnOutcomeChangesRequested} {
 		t.Run(string(outcome), func(t *testing.T) {
 			snapshot := reviewingSnapshot(1, "head-old")
@@ -93,8 +93,8 @@ func TestStaleHeadReviewIsAppliedWithoutConsumingReviewBudget(t *testing.T) {
 			decision := workflow.Reduce(snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
-			if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 || decision.Snapshot.ChangeProposal.HeadSHA != "head-new" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
-				t.Errorf("stale review result = budget %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+			if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.HeadSHA != "head-new" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+				t.Errorf("stale review result = usage %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview], decision.Snapshot.ChangeProposal)
 			}
 			action := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
 			if action.Role != workflow.RoleReviewer || action.Purpose != workflow.TurnPurposeSynchronization || action.ExpectedHeadSHA != "head-new" {
@@ -137,7 +137,7 @@ func TestReviewWebhookIsPendingCorroborationNotTurnSettlement(t *testing.T) {
 	if action.EventID != "review-webhook" || action.Kind != workflow.EventKindReviewObserved {
 		t.Errorf("pending review action = %#v", action)
 	}
-	if decision.Snapshot.ActiveTurn == nil || decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 0 {
+	if decision.Snapshot.ActiveTurn == nil || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 {
 		t.Errorf("review webhook changed Workflow state: %#v", decision.Snapshot)
 	}
 }
@@ -174,7 +174,7 @@ func TestChangeProposalWebhookIsPendingCorroborationOnlyWithActiveTurn(t *testin
 			if decision.Snapshot.ActiveTurn != nil && snapshot.ActiveTurn != nil {
 				turnChanged = *decision.Snapshot.ActiveTurn != *snapshot.ActiveTurn
 			}
-			if decision.Snapshot.ChangeProposal != nil || decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 0 || turnChanged {
+			if decision.Snapshot.ChangeProposal != nil || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || turnChanged {
 				t.Errorf("Change Proposal webhook changed Workflow state: %#v", decision.Snapshot)
 			}
 		})
@@ -353,8 +353,8 @@ func TestPendingSynchronizedHeadMakesReviewStaleWithoutConsumingBudget(t *testin
 			decision := workflow.Reduce(snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
-			if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
-				t.Errorf("raced review result = budget %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+			if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+				t.Errorf("raced review result = usage %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview], decision.Snapshot.ChangeProposal)
 			}
 			recorded := onlyAction[workflow.RecordReviewAction](t, decision.Actions)
 			if recorded.Accepted {
@@ -381,8 +381,8 @@ func TestSameHeadPendingSynchronizationDoesNotMakeReviewStale(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonApproved, workflow.StatePRReady, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-reviewed" {
-		t.Errorf("same-head review result = budget %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewBudget.Used, decision.Snapshot.ChangeProposal)
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-reviewed" {
+		t.Errorf("same-head review result = usage %d, proposal %#v", decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview], decision.Snapshot.ChangeProposal)
 	}
 	if recorded := onlyAction[workflow.RecordReviewAction](t, decision.Actions); !recorded.Accepted {
 		t.Errorf("same-head review was not accepted: %#v", recorded)
@@ -617,7 +617,7 @@ func TestIssueCanCloseAfterInitialPreparationFailureWithoutAssignments(t *testin
 	}
 }
 
-func TestInfrastructureFailureRetriesOnceWithoutReviewBudget(t *testing.T) {
+func TestInfrastructureFailureRetriesOnceWithoutConsumingReviewUsage(t *testing.T) {
 	snapshot := reviewingSnapshot(2, "head-1")
 	event := settledEvent(snapshot, "infrastructure-first", workflow.TurnOutcomeInfrastructureFailed)
 	event.Diagnostic = "runtime exited"
@@ -625,7 +625,7 @@ func TestInfrastructureFailureRetriesOnceWithoutReviewBudget(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonInfrastructureRetry, workflow.StateReviewing, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 2 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 1 {
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 1 {
 		t.Errorf("budgets = %#v", decision.Snapshot.CurrentAttempt)
 	}
 	action := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
@@ -642,7 +642,7 @@ func TestSecondInfrastructureFailureCreatesHumanHandoff(t *testing.T) {
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonInfrastructureRetriesExhausted, workflow.StateNeedsHuman, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 0 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
 		t.Errorf("terminal infrastructure state = %#v", decision.Snapshot)
 	}
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
@@ -660,7 +660,7 @@ func TestRetriggerCompletesPriorAttemptBeforeCreatingFreshAttempt(t *testing.T) 
 	decision := workflow.Reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
-	if decision.Snapshot.CurrentAttempt.ID != "attempt-2" || decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 0 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 0 || decision.Snapshot.ActiveTurn != nil {
+	if decision.Snapshot.CurrentAttempt.ID != "attempt-2" || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 0 || decision.Snapshot.ActiveTurn != nil {
 		t.Errorf("new Workflow Attempt = %#v", decision.Snapshot.CurrentAttempt)
 	}
 	if decision.Snapshot.Assignments.Status != workflow.AssignmentActive || decision.Snapshot.ChangeProposal.HeadSHA != "existing-head" {
@@ -1128,7 +1128,7 @@ func baseSnapshot(state workflow.State, usedReviews uint8) workflow.Snapshot {
 	attempt := workflow.WorkflowAttempt{
 		ID: "attempt-1", Number: 1, StartedAt: observedAt.Add(-time.Hour), Lifecycle: workflow.AttemptActive,
 		CurrentStage: stage, ReviewUsage: map[workflow.StageID]uint8{workflow.StageReview: usedReviews},
-		ReviewBudget: workflow.AttemptBudget{Used: usedReviews, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
+		InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 	}
 	return workflow.Snapshot{
 		State: state, Revision: 7,

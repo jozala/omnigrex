@@ -262,7 +262,7 @@ func TestProcessorMapsSynchronizationAndReviewAsObservations(t *testing.T) {
 			eventName: "pull_request_review",
 			payload:   []byte(`{"action":"submitted","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"old-head"}},"review":{"id":987,"node_id":"PRR_node","state":"changes_requested","commit_id":"old-head","user":{"id":77,"login":"reviewer"}}}`),
 			assert: func(t *testing.T, decision workflow.Decision) {
-				if decision.Disposition != workflow.DispositionDeferred || decision.Snapshot.Revision != 4 || decision.Snapshot.CurrentAttempt.ReviewBudget.Used != 1 {
+				if decision.Disposition != workflow.DispositionDeferred || decision.Snapshot.Revision != 4 || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 {
 					t.Errorf("review decision = %#v, want deferred at unchanged revision and budget", decision)
 				}
 			},
@@ -606,7 +606,7 @@ func reviewingSnapshot() workflow.Snapshot {
 			ID: "50000000-0000-4000-8000-000000000001", Number: 1,
 			StartedAt: time.Date(2026, time.August, 30, 10, 0, 0, 0, time.UTC), Lifecycle: workflow.AttemptActive,
 			CurrentStage: workflow.StageReview, ReviewUsage: map[workflow.StageID]uint8{workflow.StageReview: 1},
-			ReviewBudget: workflow.AttemptBudget{Used: 1, Limit: 3}, InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
+			InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
 		},
 		ChangeProposal:    &workflow.ChangeProposal{ID: 654, Number: 21, HeadSHA: "old-head", Open: true},
 		Assignments:       workflow.Assignments{Status: workflow.AssignmentActive, RuntimeState: workflow.RuntimeStateActive},

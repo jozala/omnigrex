@@ -107,7 +107,6 @@ type WorkflowAttempt struct {
 	Lifecycle                 AttemptLifecycle
 	CurrentStage              StageID
 	ReviewUsage               map[StageID]uint8
-	ReviewBudget              AttemptBudget
 	InfrastructureRetryBudget AttemptBudget
 }
 

@@ -1597,11 +1597,11 @@ VALUES ('69000000-0000-4000-8000-000000000001', 1, 'owner', 'repo', 1, 1,
         'REVIEWING', 5, 'ACTIVE', 'ACTIVE');
 
 INSERT INTO workflow_attempts (
-    id, workflow_id, attempt_number, status, review_cycles_completed,
-    review_cycle_limit, infrastructure_failures, infrastructure_failure_limit
+    id, workflow_id, attempt_number, status,
+    infrastructure_failures, infrastructure_failure_limit
 )
 VALUES ('69000000-0000-4000-8000-000000000010', '69000000-0000-4000-8000-000000000001',
-        1, 'ACTIVE', 5, 7, 3, 5);
+        1, 'ACTIVE', 3, 5);
 
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
@@ -1662,26 +1662,24 @@ VALUES ('69000000-0000-4000-8000-000000000031', '69000000-0000-4000-8000-0000000
 
 	var status, resumeRole, workflowReason, attemptReason string
 	var revision int64
-	var reviewsUsed, reviewLimit, infrastructureFailures, infrastructureFailureLimit int
+	var infrastructureFailures, infrastructureFailureLimit int
 	if err := pool.QueryRow(ctx, `
 SELECT workflow.status, workflow.state_revision, workflow.resume_role,
        workflow.human_handoff_reason, attempt.human_handoff_reason,
-       attempt.review_cycles_completed, attempt.review_cycle_limit,
        attempt.infrastructure_failures, attempt.infrastructure_failure_limit
 FROM workflows AS workflow
 JOIN workflow_attempts AS attempt ON attempt.workflow_id = workflow.id AND attempt.active
 WHERE workflow.id = '69000000-0000-4000-8000-000000000001'`).Scan(
 		&status, &revision, &resumeRole, &workflowReason, &attemptReason,
-		&reviewsUsed, &reviewLimit, &infrastructureFailures, &infrastructureFailureLimit,
+		&infrastructureFailures, &infrastructureFailureLimit,
 	); err != nil {
 		t.Fatalf("read compatibility Human Handoff: %v", err)
 	}
 	if status != "NEEDS_HUMAN" || revision != 6 || resumeRole != "REVIEWER" ||
 		workflowReason != "migration_active_turn_incompatible_aggregate" || attemptReason != workflowReason ||
-		reviewsUsed != 3 || reviewLimit != 3 || infrastructureFailures != 1 || infrastructureFailureLimit != 1 {
-		t.Errorf("compatibility Human Handoff = %s@%d resume %s reason %q/%q budgets %d/%d and %d/%d",
-			status, revision, resumeRole, workflowReason, attemptReason, reviewsUsed, reviewLimit,
-			infrastructureFailures, infrastructureFailureLimit)
+		infrastructureFailures != 1 || infrastructureFailureLimit != 1 {
+		t.Errorf("compatibility Human Handoff = %s@%d resume %s reason %q/%q infrastructure budget %d/%d",
+			status, revision, resumeRole, workflowReason, attemptReason, infrastructureFailures, infrastructureFailureLimit)
 	}
 
 	var activeTurns, interruptedTurns, readyProposals int
@@ -1760,11 +1758,11 @@ VALUES ('68000000-0000-4000-8000-000000000001', 1, 'owner', 'repo', 1, 1,
         'REVIEWING', 7, 'ACTIVE', 'ACTIVE');
 
 INSERT INTO workflow_attempts (
-    id, workflow_id, attempt_number, status, review_cycles_completed,
-    review_cycle_limit, infrastructure_failures, infrastructure_failure_limit
+    id, workflow_id, attempt_number, status,
+    infrastructure_failures, infrastructure_failure_limit
 )
 VALUES ('68000000-0000-4000-8000-000000000010', '68000000-0000-4000-8000-000000000001',
-        1, 'ACTIVE', 2, 7, 3, 5);
+        1, 'ACTIVE', 3, 5);
 
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
@@ -1896,18 +1894,17 @@ VALUES ((md5('migration:000006:workflow:68000000-0000-4000-8000-000000000001:pub
 	var status, resumeRole, desiredAssignmentStatus, desiredRuntimeState, workflowReason, attemptReason string
 	var revision int64
 	var attemptActive bool
-	var reviewsUsed, reviewLimit, infrastructureFailures, infrastructureFailureLimit int
+	var infrastructureFailures, infrastructureFailureLimit int
 	if err := pool.QueryRow(ctx, `
 SELECT workflow.status, workflow.state_revision, workflow.resume_role,
        workflow.desired_assignment_status, workflow.desired_runtime_state,
        workflow.human_handoff_reason, attempt.active, attempt.human_handoff_reason,
-       attempt.review_cycles_completed, attempt.review_cycle_limit,
        attempt.infrastructure_failures, attempt.infrastructure_failure_limit
 FROM workflows AS workflow
 JOIN workflow_attempts AS attempt ON attempt.workflow_id = workflow.id AND attempt.active
 WHERE workflow.id = '68000000-0000-4000-8000-000000000001'`).Scan(
 		&status, &revision, &resumeRole, &desiredAssignmentStatus, &desiredRuntimeState,
-		&workflowReason, &attemptActive, &attemptReason, &reviewsUsed, &reviewLimit,
+		&workflowReason, &attemptActive, &attemptReason,
 		&infrastructureFailures, &infrastructureFailureLimit,
 	); err != nil {
 		t.Fatalf("read migration Human Handoff: %v", err)
@@ -1915,12 +1912,11 @@ WHERE workflow.id = '68000000-0000-4000-8000-000000000001'`).Scan(
 	if status != "NEEDS_HUMAN" || revision != 8 || resumeRole != "REVIEWER" ||
 		desiredAssignmentStatus != "WAITING_FOR_HUMAN" || desiredRuntimeState != "ACTIVE" ||
 		workflowReason == "" || !strings.Contains(workflowReason, "migration") ||
-		!attemptActive || attemptReason != workflowReason || reviewsUsed != 2 || reviewLimit != 3 ||
+		!attemptActive || attemptReason != workflowReason ||
 		infrastructureFailures != 1 || infrastructureFailureLimit != 1 {
-		t.Errorf("migration Human Handoff = %s@%d resume %s desired %s/%s reason %q attempt active %v reason %q budgets %d/%d and %d/%d",
+		t.Errorf("migration Human Handoff = %s@%d resume %s desired %s/%s reason %q attempt active %v reason %q infrastructure budget %d/%d",
 			status, revision, resumeRole, desiredAssignmentStatus, desiredRuntimeState,
-			workflowReason, attemptActive, attemptReason, reviewsUsed, reviewLimit,
-			infrastructureFailures, infrastructureFailureLimit)
+			workflowReason, attemptActive, attemptReason, infrastructureFailures, infrastructureFailureLimit)
 	}
 
 	var activeTurns, openAdmissions, ownedTurns, turnLeases, turnSlots, liveExecutionJobs, leasedAttempts int

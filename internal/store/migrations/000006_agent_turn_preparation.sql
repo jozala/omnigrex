@@ -291,10 +291,9 @@ WHERE NOT EXISTS (
 
 INSERT INTO workflow_attempts (
     id, workflow_id, attempt_number, status, active,
-    review_cycles_completed, review_cycle_limit,
     infrastructure_failures, infrastructure_failure_limit
 )
-SELECT id, workflow_id, attempt_number, 'ACTIVE', TRUE, 0, 3, 0, 1
+SELECT id, workflow_id, attempt_number, 'ACTIVE', TRUE, 0, 1
 FROM phase_six_missing_handoff_attempts;
 
 CREATE TEMPORARY TABLE phase_six_handoff_workflows ON COMMIT DROP AS
@@ -713,9 +712,7 @@ CREATE UNIQUE INDEX agent_assignments_active_runtime_state_path_idx
     WHERE status = 'ACTIVE' AND state_deleted_at IS NULL;
 
 UPDATE workflow_attempts AS attempt
-SET review_cycles_completed = LEAST(attempt.review_cycles_completed, 3),
-    review_cycle_limit = 3,
-    infrastructure_failures = LEAST(attempt.infrastructure_failures, 1),
+SET infrastructure_failures = LEAST(attempt.infrastructure_failures, 1),
     infrastructure_failure_limit = 1,
     human_handoff_reason = handoff.handoff_reason,
     updated_at = clock_timestamp()
