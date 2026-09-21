@@ -393,6 +393,7 @@ const (
 	TurnPurposeReactivation       TurnPurpose = "REACTIVATION"
 )
 
+// Action describes a durable side effect requested by a Workflow decision.
 type Action interface {
 	isWorkflowAction()
 }
@@ -405,12 +406,14 @@ const (
 	AssignmentGenerationNew      AssignmentGeneration = "NEW"
 )
 
+// EnsureAssignmentsAction requests the Agent Participants and Stage Assignments needed for a generation.
 type EnsureAssignmentsAction struct {
 	Mode AssignmentGeneration
 }
 
 func (EnsureAssignmentsAction) isWorkflowAction() {}
 
+// CompleteAttemptAction marks a Workflow Attempt complete for the specified reason.
 type CompleteAttemptAction struct {
 	AttemptID string
 	Reason    AttemptCompletionReason
@@ -418,16 +421,19 @@ type CompleteAttemptAction struct {
 
 func (CompleteAttemptAction) isWorkflowAction() {}
 
+// CreateAttemptAction persists a newly started Workflow Attempt.
 type CreateAttemptAction struct {
 	Attempt WorkflowAttempt
 }
 
 func (CreateAttemptAction) isWorkflowAction() {}
 
+// ConsumeRunLabelAction removes the label that requested a Workflow Attempt.
 type ConsumeRunLabelAction struct{}
 
 func (ConsumeRunLabelAction) isWorkflowAction() {}
 
+// EnqueueTurnAction schedules an Agent Turn for a Stage and Role.
 type EnqueueTurnAction struct {
 	Stage           StageID
 	Role            Role
@@ -438,6 +444,7 @@ type EnqueueTurnAction struct {
 
 func (EnqueueTurnAction) isWorkflowAction() {}
 
+// ReconcileLabelsAction synchronizes repository labels with the Workflow state.
 type ReconcileLabelsAction struct {
 	State       State
 	ReadyForSHA string
@@ -445,6 +452,7 @@ type ReconcileLabelsAction struct {
 
 func (ReconcileLabelsAction) isWorkflowAction() {}
 
+// RecordReviewAction persists an observed review and whether the Workflow accepted it.
 type RecordReviewAction struct {
 	Review   ReviewIdentity
 	Accepted bool
@@ -452,6 +460,7 @@ type RecordReviewAction struct {
 
 func (RecordReviewAction) isWorkflowAction() {}
 
+// MarkHumanHandoffAction records that autonomous progress has returned to a human.
 type MarkHumanHandoffAction struct {
 	Reason     Reason
 	Diagnostic string
@@ -459,34 +468,40 @@ type MarkHumanHandoffAction struct {
 
 func (MarkHumanHandoffAction) isWorkflowAction() {}
 
+// CloseMutationAdmissionAction prevents a Turn from starting further repository mutations.
 type CloseMutationAdmissionAction struct {
 	Turn TurnGuard
 }
 
 func (CloseMutationAdmissionAction) isWorkflowAction() {}
 
+// StopTurnAction requests a cooperative stop of an active Agent Turn.
 type StopTurnAction struct {
 	Turn TurnGuard
 }
 
 func (StopTurnAction) isWorkflowAction() {}
 
+// InterruptTurnForHumanHandoffAction terminates a Turn under a durable Human Handoff recovery barrier.
 type InterruptTurnForHumanHandoffAction struct {
 	Turn TurnGuard
 }
 
 func (InterruptTurnForHumanHandoffAction) isWorkflowAction() {}
 
+// SettleClosureAction schedules closure settlement for the identified closure request.
 type SettleClosureAction struct {
 	ClosureID string
 }
 
 func (SettleClosureAction) isWorkflowAction() {}
 
+// CompleteAssignmentsAction marks the current Agent Participants complete.
 type CompleteAssignmentsAction struct{}
 
 func (CompleteAssignmentsAction) isWorkflowAction() {}
 
+// ScheduleRetentionAction retains completed Agent state until the specified deadline.
 type ScheduleRetentionAction struct {
 	RetentionToken string
 	RetainUntil    time.Time
@@ -494,12 +509,14 @@ type ScheduleRetentionAction struct {
 
 func (ScheduleRetentionAction) isWorkflowAction() {}
 
+// CancelRetentionAction cancels the retention generation identified by its token.
 type CancelRetentionAction struct {
 	RetentionToken string
 }
 
 func (CancelRetentionAction) isWorkflowAction() {}
 
+// RecordPendingEventAction records an event that cannot be applied while a Turn is active.
 type RecordPendingEventAction struct {
 	EventID    string
 	Kind       EventKind
@@ -508,6 +525,7 @@ type RecordPendingEventAction struct {
 
 func (RecordPendingEventAction) isWorkflowAction() {}
 
+// ReconcilePendingEventsAction reconciles deferred events before scheduling its fallback Turn.
 type ReconcilePendingEventsAction struct {
 	SourceTurn            TurnGuard
 	Count                 uint32
