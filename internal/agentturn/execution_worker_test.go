@@ -14,6 +14,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	rolepkg "github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -924,6 +925,16 @@ func TestNewExecutionWorkerValidatesConfiguration(t *testing.T) {
 			value.Store = nil
 			return value
 		}(), config: validConfig},
+		{name: "missing Definition", deps: func() agentturn.ExecutionWorkerDependencies {
+			value := validDependencies
+			value.Definition = workflow.Definition{}
+			return value
+		}(), config: validConfig},
+		{name: "missing Role policies", deps: func() agentturn.ExecutionWorkerDependencies {
+			value := validDependencies
+			value.Policies = rolepkg.PolicyCatalog{}
+			return value
+		}(), config: validConfig},
 		{name: "empty owner", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig { value := validConfig; value.ClaimOwner = " "; return value }()},
 		{name: "heartbeat not shorter", deps: validDependencies, config: func() agentturn.ExecutionWorkerConfig {
 			value := validConfig
@@ -996,6 +1007,8 @@ type executionWorkerFixture struct {
 	prompter             *executionPrompter
 	outcomes             *executionOutcomes
 	workspace            *executionWorkspace
+	definition           workflow.Definition
+	policies             rolepkg.PolicyCatalog
 	config               agentturn.ExecutionWorkerConfig
 }
 
@@ -1031,6 +1044,8 @@ func newExecutionWorkerFixture(t *testing.T, role workflow.Role) *executionWorke
 		prompter:             &executionPrompter{operations: operations, response: acp.PromptResponse{StopReason: acp.StopReasonEndTurn}},
 		outcomes:             &executionOutcomes{operations: operations, observation: executionObservation(workflow.TurnOutcomeBlocked, store.AgentTurnSucceeded)},
 		workspace:            &executionWorkspace{operations: operations, paths: workspace.Paths{Workspace: "/workspace", Publication: "/publication", Mise: "/mise"}},
+		definition:           builtinDefinition(t),
+		policies:             rolepkg.BuiltinPolicyCatalog(),
 		config: agentturn.ExecutionWorkerConfig{
 			ClaimOwner: "execution-worker", LeaseDuration: 2 * time.Hour, HeartbeatInterval: time.Hour,
 			IdlePollInterval: time.Millisecond, TurnTimeout: time.Second, CleanupTimeout: time.Second,
@@ -1047,6 +1062,7 @@ func (fixture *executionWorkerFixture) dependencies() agentturn.ExecutionWorkerD
 		Store: fixture.store, DeveloperCredentials: fixture.developerCredentials,
 		ReviewerCredentials: fixture.reviewerCredentials, DefaultBranch: fixture.defaultBranch,
 		Launcher: fixture.launcher, Sessions: fixture.prompter, Outcomes: fixture.outcomes, Workspace: fixture.workspace,
+		Definition: fixture.definition, Policies: fixture.policies,
 	}
 }
 

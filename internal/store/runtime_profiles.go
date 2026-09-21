@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -27,7 +28,16 @@ type AgentTurnPreparationRuntimeBindings struct {
 // ListProtectedRuntimeBindings returns distinct launchable immutable bindings for every generation
 // whose opaque state has not been marked deleted by assignment collection finalization.
 func (store *Store) ListProtectedRuntimeBindings(ctx context.Context) ([]runtimeprofile.Binding, error) {
-	rows, err := store.pool.Query(ctx, `
+	return listProtectedRuntimeBindings(ctx, store.pool)
+}
+
+// ListProtectedRuntimeBindings returns protected bindings through the read-only Store.
+func (store *ReadOnlyStore) ListProtectedRuntimeBindings(ctx context.Context) ([]runtimeprofile.Binding, error) {
+	return listProtectedRuntimeBindings(ctx, store.pool)
+}
+
+func listProtectedRuntimeBindings(ctx context.Context, pool *pgxpool.Pool) ([]runtimeprofile.Binding, error) {
+	rows, err := pool.Query(ctx, `
 SELECT id::text, status, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest
 FROM agent_assignments
@@ -70,7 +80,7 @@ ORDER BY id`)
 	}
 	rows.Close()
 
-	rows, err = store.pool.Query(ctx, `
+	rows, err = pool.Query(ctx, `
 SELECT session.agent_assignment_id::text, session.status,
        session.runtime_profile_name, session.runtime_profile_version,
        session.runtime_profile_content_sha256, session.runtime_image_digest

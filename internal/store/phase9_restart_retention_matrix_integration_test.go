@@ -353,7 +353,7 @@ func TestPhaseNineRetentionFinalizationResponseLossIsResolvedAsCollected(t *test
 	makeFixtureRuntimePathCanonical(t, pool, fixture)
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 705,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 705,
 		"7b500000-0000-4000-8000-000000000001", "retention-loss-close", "retention-loss-token",
 		observedAt, observedAt.Add(time.Hour))
 	cleaner := &integrationRetentionCleaner{}
@@ -429,7 +429,7 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 		t.Fatal(err)
 	}
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 706,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 706,
 		"7b600000-0000-4000-8000-000000000001", "history-close", "history-retention",
 		observedAt, observedAt.Add(time.Hour))
 	collector := newPhaseNineRetentionWorker(t, database, &integrationRetentionCleaner{}, "history-collector")
@@ -486,7 +486,7 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 707, workflow.RoleDeveloper, binding, binding)
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 707,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 707,
 		"7b700000-0000-4000-8000-000000000001", "image-close", "image-retention",
 		observedAt, observedAt.Add(time.Hour))
 
@@ -673,10 +673,12 @@ func (phaseNineOutcomeReconciler) Reconcile(_ context.Context, request agentturn
 func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWorkerStore, launcher agentturn.ExecutionLauncher, prompter agentturn.ExecutionPrompter) *agentturn.ExecutionWorker {
 	t.Helper()
 	credential := &integrationCredentialProvider{credential: "repository-token"}
+	workflowConfig := builtinStoreConfig(t)
 	worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: workerStore, DeveloperCredentials: credential, ReviewerCredentials: credential,
 		DefaultBranch: phaseNineDefaultBranch{}, Launcher: launcher, Sessions: prompter,
 		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}},
+		Definition: workflowConfig.Reducer.Definition(), Policies: workflowConfig.Policies,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: "phase-nine-execution", LeaseDuration: 2 * time.Second, HeartbeatInterval: 200 * time.Millisecond,
 		IdlePollInterval: time.Millisecond, TurnTimeout: 5 * time.Second, CleanupTimeout: 100 * time.Millisecond,
@@ -814,11 +816,9 @@ func phaseNineCloseWorkflow(t *testing.T, database *store.Store, ctx context.Con
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "closed"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, ClosureID: closureID, RetainUntil: retainUntil, RetentionToken: retentionToken})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{EventMetadata: context.Metadata,
+				ClosureID: closureID, RetainUntil: retainUntil, RetentionToken: retentionToken}, nil
 		})
 	if err != nil || application.State != workflow.StateClosing {
 		t.Fatalf("close Workflow = (%#v, %v)", application, err)

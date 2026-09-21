@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -116,12 +117,21 @@ WHERE source_runtime_profile_name = $1 AND source_runtime_profile_version = $2
 
 // CheckPendingRuntimeProfileCompatibility reports pending new generations blocked by the current candidate.
 func (store *Store) CheckPendingRuntimeProfileCompatibility(ctx context.Context, target runtimeprofile.Profile) error {
+	return checkPendingRuntimeProfileCompatibility(ctx, store.pool, target)
+}
+
+// CheckPendingRuntimeProfileCompatibility checks pending generations through the read-only Store.
+func (store *ReadOnlyStore) CheckPendingRuntimeProfileCompatibility(ctx context.Context, target runtimeprofile.Profile) error {
+	return checkPendingRuntimeProfileCompatibility(ctx, store.pool, target)
+}
+
+func checkPendingRuntimeProfileCompatibility(ctx context.Context, pool *pgxpool.Pool, target runtimeprofile.Profile) error {
 	contract := target.Contract()
 	requirement := RuntimeCompatibilityRequirement{
 		Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
 		WorkspacePath: runtimeprofile.StableWorkspacePath,
 	}
-	rows, err := store.pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
 SELECT DISTINCT workflow_id::text
 FROM jobs
 WHERE kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')
@@ -145,7 +155,7 @@ ORDER BY workflow_id`)
 	}
 	rows.Close()
 	if len(workflowIDs) != 0 {
-		missing, err := runtimeProfileCompatibilityMissingForTarget(ctx, store.pool, target.Binding(), requirement)
+		missing, err := runtimeProfileCompatibilityMissingForTarget(ctx, pool, target.Binding(), requirement)
 		if err != nil {
 			return err
 		}

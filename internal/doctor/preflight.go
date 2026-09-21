@@ -29,7 +29,7 @@ type productionState struct {
 
 	runtimeProfile runtimeprofile.Profile
 	registry       runtimeprofile.Registry
-	database       *store.Store
+	database       *store.ReadOnlyStore
 	api            *githubapi.APIClient
 	developer      *githubapi.AppJWTSigner
 	reviewer       *githubapi.AppJWTSigner

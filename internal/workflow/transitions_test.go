@@ -13,7 +13,7 @@ func TestDeveloperOutcomeWithChangeProposalEnqueuesReviewerIntent(t *testing.T) 
 	event := settledEvent(snapshot, "developer-settled", workflow.TurnOutcomeChangeProposalReady)
 	event.ChangeProposal = proposal(64, "head-1")
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonChangeProposalReady, workflow.StateReviewing, snapshot.Revision+1)
 	if decision.Snapshot.ChangeProposal == nil || decision.Snapshot.ChangeProposal.ID != 64 || decision.Snapshot.ChangeProposal.HeadSHA != "head-1" {
@@ -33,7 +33,7 @@ func TestDeveloperCannotReplaceUnrelatedActiveChangeProposal(t *testing.T) {
 	event := settledEvent(snapshot, "developer-unrelated-pr", workflow.TurnOutcomeChangeProposalReady)
 	event.ChangeProposal = proposal(65, "other-head")
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonChangeProposalUnrelated, workflow.StateDeveloping, snapshot.Revision)
 	if decision.Snapshot.ChangeProposal.ID != 64 || decision.Snapshot.ChangeProposal.HeadSHA != "head-1" {
@@ -45,7 +45,7 @@ func TestAcceptedChangesRequestReturnsToDeveloper(t *testing.T) {
 	snapshot := reviewingSnapshot(0, "head-1")
 	event := reviewEvent(snapshot, "review-changes", workflow.TurnOutcomeChangesRequested, review(501, 64, "head-1"), proposal(64, "head-1"))
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonChangesRequested, workflow.StateDeveloping, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 {
@@ -61,7 +61,7 @@ func TestAcceptedApprovalSetsReadyForSHA(t *testing.T) {
 	snapshot := reviewingSnapshot(1, "head-2")
 	event := reviewEvent(snapshot, "review-approval", workflow.TurnOutcomeApproved, review(502, 64, "head-2"), proposal(64, "head-2"))
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonApproved, workflow.StatePRReady, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-2" {
@@ -74,7 +74,7 @@ func TestThirdAcceptedChangesRequestCreatesHumanHandoff(t *testing.T) {
 	snapshot := reviewingSnapshot(2, "head-3")
 	event := reviewEvent(snapshot, "review-third", workflow.TurnOutcomeChangesRequested, review(503, 64, "head-3"), proposal(64, "head-3"))
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewBudgetExhausted, workflow.StateNeedsHuman, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 3 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
@@ -90,7 +90,7 @@ func TestStaleHeadReviewIsAppliedWithoutConsumingReviewUsage(t *testing.T) {
 			snapshot := reviewingSnapshot(1, "head-old")
 			event := reviewEvent(snapshot, "stale-"+string(outcome), outcome, review(600, 64, "head-old"), proposal(64, "head-new"))
 
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
 			if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.HeadSHA != "head-new" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
@@ -111,14 +111,14 @@ func TestReviewDeduplicatesByDurableIDAndRejectsConflictingContent(t *testing.T)
 	t.Run("same identity", func(t *testing.T) {
 		event := reviewEvent(snapshot, "review-redelivery", workflow.TurnOutcomeApproved, identity, proposal(64, "head-1"))
 		event.ExistingReview = identity
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonReviewDuplicate, snapshot.State, snapshot.Revision)
 	})
 
 	t.Run("same durable ID with conflicting content", func(t *testing.T) {
 		event := reviewEvent(snapshot, "review-conflict", workflow.TurnOutcomeApproved, identity, proposal(64, "head-1"))
 		event.ExistingReview = review(700, 64, "different-head")
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonReviewIdentityConflict, snapshot.State, snapshot.Revision)
 	})
 }
@@ -130,7 +130,7 @@ func TestReviewWebhookIsPendingCorroborationNotTurnSettlement(t *testing.T) {
 		Review:        *review(750, 64, "head-1"),
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, workflow.StateReviewing, snapshot.Revision)
 	action := onlyAction[workflow.RecordPendingEventAction](t, decision.Actions)
@@ -158,7 +158,7 @@ func TestChangeProposalWebhookIsPendingCorroborationOnlyWithActiveTurn(t *testin
 				ChangeProposal: *proposal(64, "observed-head"),
 			}
 
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 
 			if active {
 				assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, workflow.StateDeveloping, snapshot.Revision)
@@ -189,7 +189,7 @@ func TestReviewWebhookWithoutActiveTurnIsUnrelated(t *testing.T) {
 		Review:        *review(751, 64, "head-1"),
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonCorroborationWithoutActiveTurn, snapshot.State, snapshot.Revision)
 	assertActionCount[workflow.RecordPendingEventAction](t, decision.Actions, 0)
@@ -201,14 +201,14 @@ func TestReviewSettlementRequiresTrustedAuthorizedActorObservation(t *testing.T)
 	t.Run("missing trusted actor", func(t *testing.T) {
 		event := reviewEvent(snapshot, "review-no-authorization", workflow.TurnOutcomeApproved, review(751, 64, "head-1"), proposal(64, "head-1"))
 		event.AuthorizedReviewerActorID = 0
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonInvalidEvent, snapshot.State, snapshot.Revision)
 	})
 
 	t.Run("actor mismatch", func(t *testing.T) {
 		event := reviewEvent(snapshot, "review-wrong-actor", workflow.TurnOutcomeApproved, review(752, 64, "head-1"), proposal(64, "head-1"))
 		event.AuthorizedReviewerActorID = 9999
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonReviewerActorUnrelated, snapshot.State, snapshot.Revision)
 	})
 }
@@ -216,7 +216,7 @@ func TestReviewSettlementRequiresTrustedAuthorizedActorObservation(t *testing.T)
 func TestReviewIDDeduplicationSurvivesTerminalAttemptState(t *testing.T) {
 	snapshot := reviewingSnapshot(0, "head-1")
 	identity := review(701, 64, "head-1")
-	applied := workflow.Reduce(snapshot, reviewEvent(snapshot, "review-first", workflow.TurnOutcomeApproved, identity, proposal(64, "head-1")))
+	applied := reduce(snapshot, reviewEvent(snapshot, "review-first", workflow.TurnOutcomeApproved, identity, proposal(64, "head-1")))
 	if applied.Snapshot.State != workflow.StatePRReady {
 		t.Fatal("approval did not leave REVIEWING")
 	}
@@ -234,7 +234,7 @@ func TestReviewIDDeduplicationSurvivesTerminalAttemptState(t *testing.T) {
 			event := reviewEvent(snapshot, "review-terminal-"+test.name, workflow.TurnOutcomeApproved, identity, proposal(64, "head-1"))
 			event.EventMetadata = metadata(applied.Snapshot, "review-terminal-"+test.name)
 			event.ExistingReview = test.existing
-			decision := workflow.Reduce(applied.Snapshot, event)
+			decision := reduce(applied.Snapshot, event)
 			assertDecision(t, decision, test.want, test.reason, workflow.StatePRReady, applied.Snapshot.Revision)
 		})
 	}
@@ -244,7 +244,7 @@ func TestReviewIDDeduplicationSurvivesTerminalAttemptState(t *testing.T) {
 		event.EventMetadata = metadata(applied.Snapshot, "review-terminal-stale-cas")
 		event.ExpectedRevision--
 		event.ExistingReview = identity
-		decision := workflow.Reduce(applied.Snapshot, event)
+		decision := reduce(applied.Snapshot, event)
 		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonReviewDuplicate, workflow.StatePRReady, applied.Snapshot.Revision)
 	})
 }
@@ -262,7 +262,7 @@ func TestPublishedReviewEmitsDurableIdentityRecord(t *testing.T) {
 			snapshot := reviewingSnapshot(0, "head-1")
 			identity := review(702, 64, "head-1")
 			event := reviewEvent(snapshot, "record-review-"+test.name, workflow.TurnOutcomeApproved, identity, proposal(64, test.observedHead))
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 			action := onlyAction[workflow.RecordReviewAction](t, decision.Actions)
 			if action.Review.ID != 702 || action.Review.ChangeProposalID != 64 || action.Accepted != test.accepted {
 				t.Errorf("record review action = %#v", action)
@@ -277,7 +277,7 @@ func TestWebhookDuringActiveTurnDefersWithoutCopyingPendingState(t *testing.T) {
 		EventMetadata: metadata(snapshot, "sync-pending"), ChangeProposalID: 64, PreviousHeadSHA: "head-old", HeadSHA: "head-new",
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, snapshot.State, snapshot.Revision)
 	action := onlyAction[workflow.RecordPendingEventAction](t, decision.Actions)
@@ -297,7 +297,7 @@ func TestTurnSettlementPreservesDifferingPendingHeadForAuthoritativeReconciliati
 		Count: 1, RequiresReconciliation: true, LatestObservedHeadSHA: "head-from-webhook",
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonChangeProposalReady, workflow.StateReviewing, snapshot.Revision+1)
 	action := onlyAction[workflow.ReconcilePendingEventsAction](t, decision.Actions)
@@ -315,7 +315,7 @@ func TestTurnSettlementReconcilesSameHeadCorroboration(t *testing.T) {
 	event := reviewEvent(snapshot, "same-head-pending", workflow.TurnOutcomeChangesRequested, review(711, 64, "head-1"), proposal(64, "head-1"))
 	event.PendingEvents = workflow.PendingEventsObservation{Count: 1, LatestObservedHeadSHA: "head-1"}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertActionCount[workflow.ReconcilePendingEventsAction](t, decision.Actions, 1)
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
@@ -328,7 +328,7 @@ func TestReviewOutcomesSuppressSuccessorWhenPendingEventsNeedReconciliation(t *t
 			event := reviewEvent(snapshot, "review-pending-"+string(outcome), outcome, review(710, 64, "head-1"), proposal(64, "head-1"))
 			event.PendingEvents = workflow.PendingEventsObservation{Count: 2, RequiresReconciliation: true, LatestObservedHeadSHA: "head-2"}
 
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 
 			if decision.Disposition != workflow.DispositionApplied {
 				t.Fatalf("disposition = %q (%q), want APPLIED", decision.Disposition, decision.Reason)
@@ -350,7 +350,7 @@ func TestPendingSynchronizedHeadMakesReviewStaleWithoutConsumingBudget(t *testin
 				Count: 2, RequiresReconciliation: true, LatestObservedHeadSHA: "head-pushed",
 			}
 
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
 			if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
@@ -378,7 +378,7 @@ func TestSameHeadPendingSynchronizationDoesNotMakeReviewStale(t *testing.T) {
 		Count: 1, RequiresReconciliation: true, LatestObservedHeadSHA: "head-reviewed",
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonApproved, workflow.StatePRReady, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 1 || decision.Snapshot.ChangeProposal.ReadyForSHA != "head-reviewed" {
@@ -395,7 +395,7 @@ func TestAgentBlockerCreatesHumanHandoff(t *testing.T) {
 	event := settledEvent(snapshot, "blocked", workflow.TurnOutcomeBlocked)
 	event.Diagnostic = "repository policy blocks the change"
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentBlocked, workflow.StateNeedsHuman, snapshot.Revision+1)
 	if decision.Snapshot.ResumeRole != workflow.RoleDeveloper || decision.Snapshot.CurrentAttempt.Lifecycle != workflow.AttemptActive {
@@ -420,7 +420,7 @@ func TestAssignmentConfigurationConflictCreatesHumanHandoff(t *testing.T) {
 				Role:          test.role,
 			}
 
-			decision := workflow.Reduce(test.snapshot, event)
+			decision := reduce(test.snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAssignmentConfigurationConflict, workflow.StateNeedsHuman, test.snapshot.Revision+1)
 			if decision.Snapshot.ResumeRole != test.role || decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman {
@@ -457,7 +457,7 @@ func TestAgentTurnPreparationFailureCreatesHumanHandoffWithoutFabricatingTurn(t 
 				AssignmentsExist: true,
 			}
 
-			decision := workflow.Reduce(test.snapshot, event)
+			decision := reduce(test.snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentTurnPreparationFailed, workflow.StateNeedsHuman, test.snapshot.Revision+1)
 			if decision.Snapshot.ActiveTurn != nil || decision.Snapshot.ResumeRole != test.role ||
@@ -494,7 +494,7 @@ func TestAgentTurnMutationReconciliationExhaustionCreatesHumanHandoff(t *testing
 				Diagnostic:    "outcome unknowable; escalated: GitHub reconciliation remained inconclusive",
 			}
 
-			decision := workflow.Reduce(test.snapshot, event)
+			decision := reduce(test.snapshot, event)
 
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentTurnMutationReconciliationExhausted, workflow.StateNeedsHuman, test.snapshot.Revision+1)
 			if decision.Snapshot.ActiveTurn != nil || decision.Snapshot.ResumeRole != test.role ||
@@ -539,7 +539,7 @@ func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsCurrentStageRole(t
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			decision := workflow.Reduce(test.snapshot, workflow.WorkflowActionExhaustedEvent{
+			decision := reduce(test.snapshot, workflow.WorkflowActionExhaustedEvent{
 				EventMetadata: metadata(test.snapshot, "workflow-action-exhausted"),
 				ResumeRole:    test.resumeRole,
 				Diagnostic:    "durable action reached its terminal attempt",
@@ -565,7 +565,7 @@ func TestWorkflowActionExhaustionCreatesHumanHandoffAndRetainsCurrentStageRole(t
 
 func TestWorkflowActionExhaustionDefersWithoutInterruptingActiveTurn(t *testing.T) {
 	snapshot := developingSnapshot(nil)
-	decision := workflow.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
+	decision := reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
 		EventMetadata: metadata(snapshot, "workflow-action-exhausted-during-turn"),
 		Diagnostic:    "unrelated GitHub acknowledgement exhausted",
 	})
@@ -579,11 +579,11 @@ func TestWorkflowActionExhaustionDefersWithoutInterruptingActiveTurn(t *testing.
 func TestWorkflowActionExhaustionDoesNotRecurseInHumanHandoff(t *testing.T) {
 	snapshot := developingSnapshot(nil)
 	snapshot.ActiveTurn = nil
-	first := workflow.Reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
+	first := reduce(snapshot, workflow.WorkflowActionExhaustedEvent{
 		EventMetadata: metadata(snapshot, "first-workflow-action-exhausted"),
 		Diagnostic:    "GitHub installation is missing",
 	})
-	second := workflow.Reduce(first.Snapshot, workflow.WorkflowActionExhaustedEvent{
+	second := reduce(first.Snapshot, workflow.WorkflowActionExhaustedEvent{
 		EventMetadata: metadata(first.Snapshot, "second-workflow-action-exhausted"),
 		Diagnostic:    "Human Handoff publication is also forbidden",
 	})
@@ -597,7 +597,7 @@ func TestWorkflowActionExhaustionDoesNotRecurseInHumanHandoff(t *testing.T) {
 func TestIssueCanCloseAfterInitialPreparationFailureWithoutAssignments(t *testing.T) {
 	snapshot := developingSnapshot(nil)
 	snapshot.ActiveTurn = nil
-	failure := workflow.Reduce(snapshot, workflow.AgentTurnPreparationFailedEvent{
+	failure := reduce(snapshot, workflow.AgentTurnPreparationFailedEvent{
 		EventMetadata: metadata(snapshot, "initial-preparation-failed"),
 		Role:          workflow.RoleDeveloper,
 		Diagnostic:    "Reviewer GitHub App is not installed",
@@ -606,7 +606,7 @@ func TestIssueCanCloseAfterInitialPreparationFailureWithoutAssignments(t *testin
 		t.Fatalf("preparation failure = %#v, want collected Human Handoff", failure)
 	}
 
-	closed := workflow.Reduce(failure.Snapshot, workflow.IssueClosedEvent{
+	closed := reduce(failure.Snapshot, workflow.IssueClosedEvent{
 		EventMetadata:  metadata(failure.Snapshot, "close-after-preparation-failure"),
 		ClosureID:      "closure-after-preparation-failure",
 		RetainUntil:    observedAt.Add(24 * time.Hour),
@@ -622,7 +622,7 @@ func TestInfrastructureFailureRetriesOnceWithoutConsumingReviewUsage(t *testing.
 	event := settledEvent(snapshot, "infrastructure-first", workflow.TurnOutcomeInfrastructureFailed)
 	event.Diagnostic = "runtime exited"
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonInfrastructureRetry, workflow.StateReviewing, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 1 {
@@ -639,7 +639,7 @@ func TestSecondInfrastructureFailureCreatesHumanHandoff(t *testing.T) {
 	snapshot.CurrentAttempt.InfrastructureRetryBudget.Used = 1
 	event := settledEvent(snapshot, "infrastructure-second", workflow.TurnOutcomeInfrastructureFailed)
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonInfrastructureRetriesExhausted, workflow.StateNeedsHuman, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || decision.Snapshot.ResumeRole != workflow.RoleDeveloper {
@@ -657,7 +657,7 @@ func TestRetriggerCompletesPriorAttemptBeforeCreatingFreshAttempt(t *testing.T) 
 		EventMetadata: metadata(snapshot, "retrigger"), AttemptID: "attempt-2", AttemptNumber: 2,
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.ID != "attempt-2" || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 0 || decision.Snapshot.ActiveTurn != nil {
@@ -684,7 +684,7 @@ func TestRetriggerCannotReusePriorAttemptIdentityOrSequence(t *testing.T) {
 		{EventMetadata: metadata(snapshot, "same-attempt-id"), AttemptID: "attempt-1", AttemptNumber: 2},
 		{EventMetadata: metadata(snapshot, "same-attempt-number"), AttemptID: "attempt-2", AttemptNumber: 1},
 	} {
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonInvalidEvent, snapshot.State, snapshot.Revision)
 	}
 }
@@ -697,7 +697,7 @@ func TestPRReadyAttemptIsSupersededAtomicallyOnRetrigger(t *testing.T) {
 		EventMetadata: metadata(snapshot, "retrigger-ready"), AttemptID: "attempt-2", AttemptNumber: 2,
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateReviewing, snapshot.Revision+1)
 	if decision.Snapshot.CurrentAttempt.CurrentStage != workflow.StageReview {
@@ -719,7 +719,7 @@ func TestSynchronizationAfterThirdReviewClearsReadinessAndCreatesHumanHandoff(t 
 		EventMetadata: metadata(snapshot, "sync-after-third"), ChangeProposalID: 64, PreviousHeadSHA: "head-old", HeadSHA: "head-new",
 	}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewBudgetExhausted, workflow.StateNeedsHuman, snapshot.Revision+1)
 	if decision.Snapshot.ChangeProposal.HeadSHA != "head-new" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" || decision.Snapshot.ResumeRole != workflow.RoleReviewer {
@@ -733,7 +733,7 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 		snapshot := reviewingSnapshot(1, "head-1")
 		snapshot.ActiveTurn = nil
 		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-valid"), ChangeProposalID: 64, PreviousHeadSHA: "head-1", HeadSHA: "head-2"}
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
 		if decision.Snapshot.ChangeProposal.HeadSHA != "head-2" {
 			t.Errorf("head = %q, want head-2", decision.Snapshot.ChangeProposal.HeadSHA)
@@ -744,7 +744,7 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 		snapshot := reviewingSnapshot(1, "head-2")
 		snapshot.ActiveTurn = nil
 		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-stale"), ChangeProposalID: 64, PreviousHeadSHA: "head-0", HeadSHA: "head-1"}
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonSynchronizationStale, snapshot.State, snapshot.Revision)
 		if decision.Snapshot.ChangeProposal.HeadSHA != "head-2" {
 			t.Errorf("head regressed to %q", decision.Snapshot.ChangeProposal.HeadSHA)
@@ -755,7 +755,7 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 		snapshot := reviewingSnapshot(1, "head-2")
 		snapshot.ActiveTurn = nil
 		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-duplicate"), ChangeProposalID: 64, PreviousHeadSHA: "head-1", HeadSHA: "head-2"}
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonSynchronizationDuplicate, snapshot.State, snapshot.Revision)
 	})
 }
@@ -766,11 +766,11 @@ func TestRevisionMismatchDoesNotMakeEventNonRetryable(t *testing.T) {
 	event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-cas"), ChangeProposalID: 64, PreviousHeadSHA: "head-1", HeadSHA: "head-2"}
 	event.ExpectedRevision--
 
-	stale := workflow.Reduce(snapshot, event)
+	stale := reduce(snapshot, event)
 	assertDecision(t, stale, workflow.DispositionStale, workflow.ReasonStateRevisionStale, snapshot.State, snapshot.Revision)
 
 	event.ExpectedRevision = snapshot.Revision
-	retried := workflow.Reduce(stale.Snapshot, event)
+	retried := reduce(stale.Snapshot, event)
 	assertDecision(t, retried, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
 }
 
@@ -778,7 +778,7 @@ func TestIssueClosureFencesTurnAndSettlementSchedulesSuppliedRetentionGeneration
 	snapshot := developingSnapshot(nil)
 	closeEvent := closeEvent(snapshot, "closure-1", "retention-token-1")
 
-	closing := workflow.Reduce(snapshot, closeEvent)
+	closing := reduce(snapshot, closeEvent)
 
 	assertDecision(t, closing, workflow.DispositionApplied, workflow.ReasonClosureStarted, workflow.StateClosing, snapshot.Revision+1)
 	if closing.Snapshot.Closure == nil || closing.Snapshot.Closure.RetentionToken != "retention-token-1" || !closing.Snapshot.Closure.RetainUntil.Equal(closeEvent.RetainUntil) {
@@ -792,7 +792,7 @@ func TestIssueClosureFencesTurnAndSettlementSchedulesSuppliedRetentionGeneration
 	assertActionCount[workflow.SettleClosureAction](t, closing.Actions, 1)
 
 	settledEvent := workflow.ClosureSettledEvent{EventMetadata: metadata(closing.Snapshot, "closure-settled"), ClosureID: "closure-1", Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true}
-	settled := workflow.Reduce(closing.Snapshot, settledEvent)
+	settled := reduce(closing.Snapshot, settledEvent)
 
 	assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateClosed, closing.Snapshot.Revision+1)
 	if settled.Snapshot.CurrentAttempt != nil || settled.Snapshot.ActiveTurn != nil || settled.Snapshot.Closure != nil {
@@ -814,9 +814,9 @@ func TestIssueClosureFencesTurnAndSettlementSchedulesSuppliedRetentionGeneration
 func TestClosureSettlementWithoutConcreteAssignmentsCollectsImmediately(t *testing.T) {
 	snapshot := developingSnapshot(nil)
 	snapshot.ActiveTurn = nil
-	closing := workflow.Reduce(snapshot, closeEvent(snapshot, "closure-empty", "retention-empty"))
+	closing := reduce(snapshot, closeEvent(snapshot, "closure-empty", "retention-empty"))
 
-	settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
+	settled := reduce(closing.Snapshot, workflow.ClosureSettledEvent{
 		EventMetadata: metadata(closing.Snapshot, "closure-empty-settled"),
 		ClosureID:     "closure-empty",
 	})
@@ -828,10 +828,10 @@ func TestClosureSettlementWithoutConcreteAssignmentsCollectsImmediately(t *testi
 	}
 	assertActionCount[workflow.ScheduleRetentionAction](t, settled.Actions, 0)
 
-	reopenedClosing := workflow.Reduce(closing.Snapshot, workflow.IssueReopenedEvent{
+	reopenedClosing := reduce(closing.Snapshot, workflow.IssueReopenedEvent{
 		EventMetadata: metadata(closing.Snapshot, "closure-empty-reopened"),
 	})
-	reopened := workflow.Reduce(reopenedClosing.Snapshot, workflow.ClosureSettledEvent{
+	reopened := reduce(reopenedClosing.Snapshot, workflow.ClosureSettledEvent{
 		EventMetadata: metadata(reopenedClosing.Snapshot, "closure-empty-reopen-settled"),
 		ClosureID:     "closure-empty",
 	})
@@ -868,7 +868,7 @@ func TestIssueClosureDerivesResumeRoleWithOrWithoutActiveTurn(t *testing.T) {
 		{name: "Human Handoff", snapshot: needsHuman, want: workflow.RoleDeveloper},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			decision := workflow.Reduce(test.snapshot, closeEvent(test.snapshot, "resume-"+test.name, "retention-"+test.name))
+			decision := reduce(test.snapshot, closeEvent(test.snapshot, "resume-"+test.name, "retention-"+test.name))
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonClosureStarted, workflow.StateClosing, test.snapshot.Revision+1)
 			if decision.Snapshot.ResumeRole != test.want {
 				t.Errorf("resume Role = %q, want %q", decision.Snapshot.ResumeRole, test.want)
@@ -893,8 +893,8 @@ func TestQueuedReviewOrReadyClosureReopenRetriggerResumesReviewer(t *testing.T) 
 		{name: "PR ready", snapshot: prReady, head: "ready-head"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			closing := workflow.Reduce(test.snapshot, closeEvent(test.snapshot, "closure-"+test.name, "retention-"+test.name))
-			settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
+			closing := reduce(test.snapshot, closeEvent(test.snapshot, "closure-"+test.name, "retention-"+test.name))
+			settled := reduce(closing.Snapshot, workflow.ClosureSettledEvent{
 				EventMetadata: metadata(closing.Snapshot, "settle-"+test.name), ClosureID: "closure-" + test.name, Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true,
 			})
 			assertDecision(t, settled, workflow.DispositionApplied, workflow.ReasonClosureSettled, workflow.StateClosed, closing.Snapshot.Revision+1)
@@ -902,14 +902,14 @@ func TestQueuedReviewOrReadyClosureReopenRetriggerResumesReviewer(t *testing.T) 
 				t.Fatalf("settled resume Role = %q, want REVIEWER", settled.Snapshot.ResumeRole)
 			}
 
-			reopened := workflow.Reduce(settled.Snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata(settled.Snapshot, "reopen-"+test.name)})
+			reopened := reduce(settled.Snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata(settled.Snapshot, "reopen-"+test.name)})
 			assertDecision(t, reopened, workflow.DispositionApplied, workflow.ReasonIssueReopened, workflow.StateDormant, settled.Snapshot.Revision+1)
 			if reopened.Snapshot.ResumeRole != workflow.RoleReviewer {
 				t.Fatalf("reopened resume Role = %q, want REVIEWER", reopened.Snapshot.ResumeRole)
 			}
 
 			trigger := workflow.TriggerEvent{EventMetadata: metadata(reopened.Snapshot, "trigger-"+test.name), AttemptID: "attempt-2", AttemptNumber: 2}
-			decision := workflow.Reduce(reopened.Snapshot, trigger)
+			decision := reduce(reopened.Snapshot, trigger)
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateReviewing, reopened.Snapshot.Revision+1)
 			intent := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
 			if intent.Role != workflow.RoleReviewer || intent.Purpose != workflow.TurnPurposeReactivation || intent.ExpectedHeadSHA != test.head {
@@ -921,10 +921,10 @@ func TestQueuedReviewOrReadyClosureReopenRetriggerResumesReviewer(t *testing.T) 
 
 func TestReopenWhileClosingCancelsClosureAndSettlesDormantWithoutRetention(t *testing.T) {
 	snapshot := reviewingSnapshot(1, "head-1")
-	closing := workflow.Reduce(snapshot, closeEvent(snapshot, "closure-reopen", "retention-reopen"))
+	closing := reduce(snapshot, closeEvent(snapshot, "closure-reopen", "retention-reopen"))
 	reopenEvent := workflow.IssueReopenedEvent{EventMetadata: metadata(closing.Snapshot, "reopen-during-closing")}
 
-	cancelled := workflow.Reduce(closing.Snapshot, reopenEvent)
+	cancelled := reduce(closing.Snapshot, reopenEvent)
 
 	assertDecision(t, cancelled, workflow.DispositionApplied, workflow.ReasonClosureCancellationRecorded, workflow.StateClosing, closing.Snapshot.Revision+1)
 	if cancelled.Snapshot.Closure == nil || !cancelled.Snapshot.Closure.ReopenRequested {
@@ -935,7 +935,7 @@ func TestReopenWhileClosingCancelsClosureAndSettlesDormantWithoutRetention(t *te
 		t.Errorf("cancel retention = %#v", cancel)
 	}
 
-	settled := workflow.Reduce(cancelled.Snapshot, workflow.ClosureSettledEvent{
+	settled := reduce(cancelled.Snapshot, workflow.ClosureSettledEvent{
 		EventMetadata: metadata(cancelled.Snapshot, "settled-after-reopen"), ClosureID: "closure-reopen", Turn: turnGuardPointer(cancelled.Snapshot), AssignmentsExist: true,
 	})
 
@@ -951,7 +951,7 @@ func TestReopenClosedCancelsRetentionWithoutStartingAutomation(t *testing.T) {
 	snapshot := closedSnapshot("retention-closed")
 	event := workflow.IssueReopenedEvent{EventMetadata: metadata(snapshot, "reopen-closed")}
 
-	decision := workflow.Reduce(snapshot, event)
+	decision := reduce(snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonIssueReopened, workflow.StateDormant, snapshot.Revision+1)
 	if decision.Snapshot.Assignments.RetentionToken != "" || !decision.Snapshot.Assignments.RetainedUntil.IsZero() {
@@ -963,16 +963,16 @@ func TestReopenClosedCancelsRetentionWithoutStartingAutomation(t *testing.T) {
 
 func TestTriggerAfterReviewClosureResumesReviewerAssignment(t *testing.T) {
 	snapshot := reviewingSnapshot(1, "review-head")
-	closing := workflow.Reduce(snapshot, closeEvent(snapshot, "closure-review", "retention-review"))
-	settled := workflow.Reduce(closing.Snapshot, workflow.ClosureSettledEvent{
+	closing := reduce(snapshot, closeEvent(snapshot, "closure-review", "retention-review"))
+	settled := reduce(closing.Snapshot, workflow.ClosureSettledEvent{
 		EventMetadata: metadata(closing.Snapshot, "settle-review"), ClosureID: "closure-review", Turn: turnGuardPointer(closing.Snapshot), AssignmentsExist: true,
 	})
-	reopened := workflow.Reduce(settled.Snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata(settled.Snapshot, "reopen-review")})
+	reopened := reduce(settled.Snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata(settled.Snapshot, "reopen-review")})
 	trigger := workflow.TriggerEvent{
 		EventMetadata: metadata(reopened.Snapshot, "trigger-review"), AttemptID: "attempt-2", AttemptNumber: 2,
 	}
 
-	decision := workflow.Reduce(reopened.Snapshot, trigger)
+	decision := reduce(reopened.Snapshot, trigger)
 
 	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateReviewing, reopened.Snapshot.Revision+1)
 	intent := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
@@ -986,7 +986,7 @@ func TestAssignmentsCollectionRequiresMatchingRetentionGenerationAndDeadline(t *
 
 	t.Run("matching generation after deadline", func(t *testing.T) {
 		event := collectionEvent(snapshot, "retention-live", snapshot.Assignments.RetainedUntil, snapshot.Assignments.RetainedUntil.Add(time.Minute))
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAssignmentsCollected, workflow.StateClosed, snapshot.Revision+1)
 		if decision.Snapshot.Assignments.RuntimeState != workflow.RuntimeStateCollected || decision.Snapshot.Assignments.RetentionToken != "" {
 			t.Errorf("collected Assignments = %#v", decision.Snapshot.Assignments)
@@ -995,13 +995,13 @@ func TestAssignmentsCollectionRequiresMatchingRetentionGenerationAndDeadline(t *
 
 	t.Run("wrong token", func(t *testing.T) {
 		event := collectionEvent(snapshot, "retention-old", snapshot.Assignments.RetainedUntil, snapshot.Assignments.RetainedUntil.Add(time.Minute))
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonRetentionGenerationStale, workflow.StateClosed, snapshot.Revision)
 	})
 
 	t.Run("before deadline", func(t *testing.T) {
 		event := collectionEvent(snapshot, "retention-live", snapshot.Assignments.RetainedUntil, snapshot.Assignments.RetainedUntil.Add(-time.Minute))
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonRetentionNotDue, workflow.StateClosed, snapshot.Revision)
 	})
 }
@@ -1009,10 +1009,10 @@ func TestAssignmentsCollectionRequiresMatchingRetentionGenerationAndDeadline(t *
 func TestCollectionAfterReopenCancellationIsStale(t *testing.T) {
 	closed := closedSnapshot("retention-cancelled")
 	deadline := closed.Assignments.RetainedUntil
-	reopened := workflow.Reduce(closed, workflow.IssueReopenedEvent{EventMetadata: metadata(closed, "reopen-before-gc")})
+	reopened := reduce(closed, workflow.IssueReopenedEvent{EventMetadata: metadata(closed, "reopen-before-gc")})
 	event := collectionEvent(reopened.Snapshot, "retention-cancelled", deadline, deadline.Add(time.Minute))
 
-	decision := workflow.Reduce(reopened.Snapshot, event)
+	decision := reduce(reopened.Snapshot, event)
 
 	assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonRetentionCancelled, workflow.StateDormant, reopened.Snapshot.Revision)
 }
@@ -1031,7 +1031,7 @@ func TestTriggerAfterReopenReactivatesRetainedOrCreatesCollectedAssignments(t *t
 			event := workflow.TriggerEvent{
 				EventMetadata: metadata(snapshot, "trigger-"+test.name), AttemptID: "attempt-2", AttemptNumber: 2,
 			}
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 			assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
 			if decision.Snapshot.Assignments.Status != workflow.AssignmentActive || decision.Snapshot.Assignments.RuntimeState != workflow.RuntimeStateActive {
 				t.Errorf("desired Assignment state = %#v", decision.Snapshot.Assignments)

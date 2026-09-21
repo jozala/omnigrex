@@ -71,7 +71,7 @@ func TestStateEventLegalityIsExhaustive(t *testing.T) {
 		for _, state := range states {
 			t.Run(test.name+"/"+string(state), func(t *testing.T) {
 				snapshot := snapshotForState(state)
-				decision := workflow.Reduce(snapshot, test.make(snapshot))
+				decision := reduce(snapshot, test.make(snapshot))
 				if decision.Disposition != test.want[state] {
 					t.Errorf("disposition = %q (%q), want %q", decision.Disposition, decision.Reason, test.want[state])
 				}
@@ -98,7 +98,7 @@ func TestActiveTurnDefersExternalEvents(t *testing.T) {
 		for name, event := range events {
 			t.Run(string(state)+"/"+name, func(t *testing.T) {
 				snapshot := snapshotForState(state)
-				decision := workflow.Reduce(snapshot, event(snapshot))
+				decision := reduce(snapshot, event(snapshot))
 				assertDecision(t, decision, workflow.DispositionDeferred, workflow.ReasonActiveTurn, state, snapshot.Revision)
 				if actionCount[workflow.RecordPendingEventAction](decision.Actions) != 1 {
 					t.Errorf("actions = %#v, want one pending Event record", decision.Actions)
@@ -124,7 +124,7 @@ func TestTurnSettlementGuardsSessionEpochControlAndChangeProposal(t *testing.T) 
 			snapshot := reviewingSnapshot(0, "head-1")
 			event := settledEvent(snapshot, "guard-"+name, workflow.TurnOutcomeBlocked)
 			mutate(&event.Turn)
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 			assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonTurnGuardStale, snapshot.State, snapshot.Revision)
 		})
 	}
@@ -135,7 +135,7 @@ func TestDuplicateOutOfOrderUnrelatedAndIllegalEvents(t *testing.T) {
 		snapshot := developingSnapshot(nil)
 		event := settledEvent(snapshot, "future", workflow.TurnOutcomeBlocked)
 		event.ExpectedRevision++
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonEventOutOfOrder, snapshot.State, snapshot.Revision)
 	})
 
@@ -143,14 +143,14 @@ func TestDuplicateOutOfOrderUnrelatedAndIllegalEvents(t *testing.T) {
 		snapshot := developingSnapshot(nil)
 		event := settledEvent(snapshot, "unrelated", workflow.TurnOutcomeBlocked)
 		event.WorkItem.IssueID++
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonWorkItemUnrelated, snapshot.State, snapshot.Revision)
 	})
 
 	t.Run("event illegal in state", func(t *testing.T) {
 		snapshot := closedSnapshot("retention-live")
 		event := matrixTrigger(snapshot)
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonEventIllegalInState, snapshot.State, snapshot.Revision)
 	})
 
@@ -158,7 +158,7 @@ func TestDuplicateOutOfOrderUnrelatedAndIllegalEvents(t *testing.T) {
 		snapshot := developingSnapshot(nil)
 		snapshot.ActiveTurn = nil
 		event := matrixTrigger(snapshot)
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonAttemptAlreadyActive, snapshot.State, snapshot.Revision)
 	})
 }
@@ -189,7 +189,7 @@ func TestAggregateInvariantsRejectImpossibleRelationalState(t *testing.T) {
 
 	for name, snapshot := range invalid {
 		t.Run(name, func(t *testing.T) {
-			decision := workflow.Reduce(snapshot, matrixIssueClosed(snapshot))
+			decision := reduce(snapshot, matrixIssueClosed(snapshot))
 			assertDecision(t, decision, workflow.DispositionIllegal, workflow.ReasonInvariantViolation, snapshot.State, snapshot.Revision)
 		})
 	}
@@ -201,7 +201,7 @@ func TestTerminalSettlementWithPendingReconciliationNeverEnqueues(t *testing.T) 
 			snapshot := developingSnapshot(nil)
 			event := settledEvent(snapshot, "terminal-pending-"+string(outcome), outcome)
 			event.PendingEvents = workflow.PendingEventsObservation{Count: 1, RequiresReconciliation: true, LatestObservedHeadSHA: "pending-head"}
-			decision := workflow.Reduce(snapshot, event)
+			decision := reduce(snapshot, event)
 			if decision.Disposition != workflow.DispositionApplied {
 				t.Fatalf("disposition = %q (%q), want APPLIED", decision.Disposition, decision.Reason)
 			}
@@ -232,7 +232,7 @@ func TestEveryTurnSettlementEmitsAtMostOneSuccessorIntent(t *testing.T) {
 		if event.Turn.Role == workflow.RoleReviewer {
 			snapshot = reviewer
 		}
-		decision := workflow.Reduce(snapshot, event)
+		decision := reduce(snapshot, event)
 		if got := actionCount[workflow.EnqueueTurnAction](decision.Actions); got > 1 {
 			t.Errorf("%s enqueue count = %d, want at most one", event.Outcome, got)
 		}
@@ -268,7 +268,7 @@ func snapshotForState(state workflow.State) workflow.Snapshot {
 		return snapshot
 	case workflow.StateClosing:
 		snapshot := developingSnapshot(nil)
-		decision := workflow.Reduce(snapshot, closeEvent(snapshot, "matrix-closure", "matrix-retention"))
+		decision := reduce(snapshot, closeEvent(snapshot, "matrix-closure", "matrix-retention"))
 		return decision.Snapshot
 	case workflow.StateClosed:
 		return closedSnapshot("matrix-retention")

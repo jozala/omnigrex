@@ -18,7 +18,7 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeInitialDevelopment, nil)
 	execution.Turn.AgentProfileConfig = json.RawMessage(`{"instructions":"sensitive-body-sentinel sensitive-comment-sentinel sensitive-review-sentinel sensitive-check-sentinel sensitive-finding-sentinel sensitive-credential-sentinel sensitive-model-sentinel"}`)
 
-	content, err := agentturn.BuildEventEnvelope(execution, "1111111111111111111111111111111111111111")
+	content, err := agentturn.BuildEventEnvelope(execution, "1111111111111111111111111111111111111111", builtinDefinition(t), role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
@@ -29,7 +29,7 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	if content[0] != acp.TextContent(want) {
 		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content[0].Text, want)
 	}
-	second, err := agentturn.BuildEventEnvelope(execution, "1111111111111111111111111111111111111111")
+	second, err := agentturn.BuildEventEnvelope(execution, "1111111111111111111111111111111111111111", builtinDefinition(t), role.BuiltinPolicyCatalog())
 	if err != nil || !reflect.DeepEqual(second, content) {
 		t.Fatalf("second BuildEventEnvelope() = (%#v, %v), want deterministic output", second, err)
 	}
@@ -63,19 +63,15 @@ func TestBuildEventEnvelopeUsesInjectedWorkflowDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reducer, err := workflow.NewReducer(definition, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23,
 		HeadSHA: "2222222222222222222222222222222222222222",
 	}
 	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, proposal)
 	execution.Turn.Stage = followup
-	content, err := agentturn.BuildEventEnvelopeWithConfiguration(execution, execution.ChangeProposal.HeadSHA, reducer, role.BuiltinPolicyCatalog())
+	content, err := agentturn.BuildEventEnvelope(execution, execution.ChangeProposal.HeadSHA, definition, role.BuiltinPolicyCatalog())
 	if err != nil {
-		t.Fatalf("BuildEventEnvelopeWithConfiguration() error = %v", err)
+		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
 	if len(content) != 1 || !strings.Contains(content[0].Text, `"stage":"implementation-followup"`) {
 		t.Fatalf("custom Stage envelope = %#v", content)
@@ -89,7 +85,7 @@ func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing
 	}
 	execution := envelopeExecutionContext(workflow.RoleReviewer, workflow.TurnPurposeReview, proposal)
 
-	content, err := agentturn.BuildEventEnvelope(execution, "3333333333333333333333333333333333333333")
+	content, err := agentturn.BuildEventEnvelope(execution, "3333333333333333333333333333333333333333", builtinDefinition(t), role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
@@ -120,7 +116,7 @@ func TestBuildEventEnvelopeSupportsEveryDurableTurnTrigger(t *testing.T) {
 		{name: "Reviewer synchronization", role: workflow.RoleReviewer, purpose: workflow.TurnPurposeSynchronization, proposal: proposal},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			content, err := agentturn.BuildEventEnvelope(envelopeExecutionContext(test.role, test.purpose, test.proposal), "1111111111111111111111111111111111111111")
+			content, err := agentturn.BuildEventEnvelope(envelopeExecutionContext(test.role, test.purpose, test.proposal), "1111111111111111111111111111111111111111", builtinDefinition(t), role.BuiltinPolicyCatalog())
 			if err != nil || len(content) != 1 {
 				t.Fatalf("BuildEventEnvelope() = (%#v, %v)", content, err)
 			}
@@ -194,7 +190,7 @@ func TestBuildEventEnvelopeRejectsInvalidDurableContext(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			content, err := agentturn.BuildEventEnvelope(test.execution, test.currentSHA)
+			content, err := agentturn.BuildEventEnvelope(test.execution, test.currentSHA, builtinDefinition(t), role.BuiltinPolicyCatalog())
 			if !errors.Is(err, agentturn.ErrInvalidEventEnvelope) || content != nil {
 				t.Fatalf("BuildEventEnvelope() = (%#v, %v), want ErrInvalidEventEnvelope", content, err)
 			}
@@ -224,4 +220,13 @@ func envelopeExecutionContext(role workflow.Role, purpose workflow.TurnPurpose, 
 		execution.Turn.ExpectedHeadSHA = proposal.HeadSHA
 	}
 	return execution
+}
+
+func builtinDefinition(t *testing.T) workflow.Definition {
+	t.Helper()
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatalf("NewBuiltinDefinition() error = %v", err)
+	}
+	return definition
 }

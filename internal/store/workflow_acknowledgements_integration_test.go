@@ -48,14 +48,11 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 		application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 			normalizedPayload(claim.DeliveryID, "corroboration"),
 			store.WorkflowLocator{RepositoryID: 20, IssueID: 20, IssueNumber: 20},
-			func(snapshot workflow.Snapshot) workflow.Decision {
-				return workflow.Reduce(snapshot, workflow.ChangeProposalObservedEvent{
-					EventMetadata: workflow.EventMetadata{
-						ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt,
-						WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-					},
+			func(context store.WorkflowEventContext) (workflow.Event, error) {
+				return workflow.ChangeProposalObservedEvent{
+					EventMetadata:  context.Metadata,
 					ChangeProposal: workflow.ChangeProposal{ID: 200, Number: 20, HeadSHA: "same-head", Open: true},
-				})
+				}, nil
 			})
 		if err != nil || application.Status != store.NormalizedEventDeferred {
 			t.Fatalf("defer corroborating event = (%#v, %v)", application, err)
@@ -70,12 +67,9 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "turn-settled"),
 		store.WorkflowLocator{RepositoryID: 20, IssueID: 20, IssueNumber: 20},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TurnSettledEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TurnSettledEvent{
+				EventMetadata: context.Metadata,
 				Turn: workflow.TurnGuard{
 					TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 					Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
@@ -84,7 +78,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 				PendingEvents: workflow.PendingEventsObservation{
 					Count: 2, LatestObservedHeadSHA: "same-head",
 				},
-			})
+			}, nil
 		})
 	if err != nil || application.Disposition != workflow.DispositionApplied {
 		t.Fatalf("settle turn with pending events = (%#v, %v)", application, err)
@@ -103,12 +97,12 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if err := databases[0].CompleteJob(ctx, *job, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowJobRequiresAcknowledgement) {
 		t.Errorf("generic CompleteJob() error = %v, want ErrWorkflowJobRequiresAcknowledgement", err)
 	}
-	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-		return store.WorkflowLocator{RepositoryID: 20, IssueID: 20, IssueNumber: 20}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Decision{
-				Snapshot: snapshot, Disposition: workflow.DispositionUnrelated,
-				Reason: workflow.ReasonCorroborationWithoutActiveTurn,
-			}
+	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return store.WorkflowLocator{RepositoryID: 20, IssueID: 20, IssueNumber: 20}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ChangeProposalObservedEvent{
+				EventMetadata:  context.Metadata,
+				ChangeProposal: workflow.ChangeProposal{ID: 200, Number: 20, HeadSHA: "same-head", Open: true},
+			}, nil
 		}, nil
 	}
 	stale := *job
@@ -361,15 +355,12 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	delivery.IssueID, delivery.IssueNumber = 0, 0
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		syncPayload, store.WorkflowLocator{RepositoryID: 22, PullRequestID: 220},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
+		syncPayload, store.WorkflowLocator{RepositoryID: 22, PullRequestID: 220, PullRequestNumber: 22},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata:    context.Metadata,
 				ChangeProposalID: 220, PreviousHeadSHA: "head-old", HeadSHA: "head-new",
-			})
+			}, nil
 		})
 	if err != nil || application.Status != store.NormalizedEventDeferred {
 		t.Fatalf("defer synchronization = (%#v, %v)", application, err)
@@ -383,12 +374,9 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	application, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "turn-settled"),
 		store.WorkflowLocator{RepositoryID: 22, IssueID: 22, IssueNumber: 22},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TurnSettledEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TurnSettledEvent{
+				EventMetadata: context.Metadata,
 				Turn: workflow.TurnGuard{
 					TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 					Stage: workflow.StageReview, Role: workflow.RoleReviewer, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
@@ -398,7 +386,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 				PendingEvents: workflow.PendingEventsObservation{
 					Count: 1, RequiresReconciliation: true, LatestObservedHeadSHA: "head-new",
 				},
-			})
+			}, nil
 		})
 	if err != nil || application.Disposition != workflow.DispositionApplied {
 		t.Fatalf("settle Reviewer turn = (%#v, %v)", application, err)
@@ -414,7 +402,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	if err != nil || job == nil || job.Kind != store.ReconcilePendingEventsJobKind {
 		t.Fatalf("ClaimJob() reconciliation = (%#v, %v)", job, err)
 	}
-	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		var payload struct {
 			DeliveryID  string `json:"delivery_id"`
 			PullRequest struct {
@@ -425,14 +413,11 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			return store.WorkflowLocator{}, nil, err
 		}
-		return store.WorkflowLocator{RepositoryID: 22, PullRequestID: 220}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: payload.DeliveryID, ObservedAt: record.CreatedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
+		return store.WorkflowLocator{RepositoryID: 22, PullRequestID: 220, PullRequestNumber: 22}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata:    context.Metadata,
 				ChangeProposalID: 220, PreviousHeadSHA: payload.PullRequest.Before, HeadSHA: payload.PullRequest.Head,
-			})
+			}, nil
 		}, nil
 	}
 	acknowledged, err := databases[0].AcknowledgePendingEventReconciliation(ctx, *job, factory)
@@ -569,7 +554,7 @@ VALUES ('44000000-0000-4000-8000-000000000004', 'workflow', 'PREPARE_AGENT_TURN'
 		t.Fatalf("seed intervening successor: %v", err)
 	}
 	factoryCalled := false
-	factory := func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	factory := func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		factoryCalled = true
 		return store.WorkflowLocator{}, nil, errors.New("must not replay across revision fence")
 	}
@@ -577,7 +562,7 @@ VALUES ('44000000-0000-4000-8000-000000000004', 'workflow', 'PREPARE_AGENT_TURN'
 		t.Fatalf("delayed reconciliation error = %v, want ErrPendingEventReconciliationFenceLost", err)
 	}
 	if factoryCalled {
-		t.Error("transition factory called after revision fence was lost")
+		t.Error("event factory called after revision fence was lost")
 	}
 	var deferredStatus, reconciliationStatus string
 	var successorCount int
@@ -668,14 +653,14 @@ VALUES ($1, $2, $3, $4, 3, 'pending-event-unsettled-recovery', $5, $6, $7, $8, $
 		t.Fatalf("ClaimJobKind() = (%#v, %v)", reconciliationJob, err)
 	}
 	factoryCalled := false
-	if _, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationJob, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	if _, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationJob, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		factoryCalled = true
 		return store.WorkflowLocator{}, nil, errors.New("must not replay while recovery is unsettled")
 	}); !errors.Is(err, store.ErrWorkflowSuccessorConflict) {
 		t.Fatalf("AcknowledgePendingEventReconciliation() error = %v, want ErrWorkflowSuccessorConflict", err)
 	}
 	if factoryCalled {
-		t.Error("transition factory called while recovery barrier was unsettled")
+		t.Error("event factory called while recovery barrier was unsettled")
 	}
 	var status string
 	var successors int
@@ -733,14 +718,11 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "closed"),
 		store.WorkflowLocator{RepositoryID: 21, IssueID: 21, IssueNumber: 21},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: closedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
-				ClosureID: "closure-21", RetainUntil: closedAt.Add(24 * time.Hour), RetentionToken: "retention-21",
-			})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{
+				EventMetadata: context.Metadata,
+				ClosureID:     "closure-21", RetainUntil: closedAt.Add(24 * time.Hour), RetentionToken: "retention-21",
+			}, nil
 		})
 	if err != nil || application.State != workflow.StateClosing {
 		t.Fatalf("close Workflow = (%#v, %v)", application, err)
@@ -752,18 +734,15 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	_, err = databases[0].CompleteWebhookTransition(ctx, prematureClaim.DeliveryID, prematureClaim.ClaimToken,
 		normalizedPayload(prematureClaim.DeliveryID, "closure-settled"),
 		store.WorkflowLocator{RepositoryID: 21, IssueID: 21, IssueNumber: 21},
-		func(snapshot workflow.Snapshot) workflow.Decision {
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
 			guard := workflow.TurnGuard{
 				TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 				Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 			}
-			return workflow.Reduce(snapshot, workflow.ClosureSettledEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: prematureClaim.DeliveryID, ObservedAt: prematureClaim.ReceivedAt,
-					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-				},
-				ClosureID: "closure-21", Turn: &guard, AssignmentsExist: true,
-			})
+			return workflow.ClosureSettledEvent{
+				EventMetadata: context.Metadata,
+				ClosureID:     "closure-21", Turn: &guard, AssignmentsExist: true,
+			}, nil
 		})
 	if !errors.Is(err, store.ErrClosureSettlementUnsettled) {
 		t.Fatalf("premature ClosureSettledEvent error = %v, want ErrClosureSettlementUnsettled", err)

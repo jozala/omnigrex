@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/store/migrations"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -30,6 +31,28 @@ const (
 	postgresPassword = "integration-secret"
 	postgresDatabase = "omnigrex"
 )
+
+func builtinStoreConfig(t *testing.T) store.Config {
+	t.Helper()
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatalf("NewBuiltinDefinition() error = %v", err)
+	}
+	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	return store.Config{Reducer: reducer, Policies: role.BuiltinPolicyCatalog()}
+}
+
+func storeConfigForReducer(t *testing.T, reducer workflow.Reducer) store.Config {
+	t.Helper()
+	policies, err := role.NewBuiltinPolicyCatalog(reducer.Definition().Roles())
+	if err != nil {
+		t.Fatalf("NewBuiltinPolicyCatalog() error = %v", err)
+	}
+	return store.Config{Reducer: reducer, Policies: policies}
+}
 
 func TestBoundedWebhookAttemptsMigrationPreservesExistingDeliveriesWithOneSafeRetry(t *testing.T) {
 	postgres := startPostgres(t)
@@ -934,7 +957,7 @@ CREATE TABLE schema_migrations (
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("open upgraded Store: %v", err)
 	}
@@ -1377,7 +1400,7 @@ CREATE TABLE schema_migrations (
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("open upgraded Store: %v", err)
 	}
@@ -2115,7 +2138,7 @@ CREATE TABLE schema_migrations (
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("open migrated Store for recovery consumers: %v", err)
 	}
@@ -2152,12 +2175,12 @@ CREATE TABLE schema_migrations (
 	if _, err := database.CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob); err != nil {
 		t.Fatalf("complete migrated mutation reconciliation Job under Human Handoff: %v", err)
 	}
-	application, applied, err := database.ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	application, applied, err := database.ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		if record.DeliveryID != "68000000-0000-4000-8000-000000000091" || record.Status != store.NormalizedEventPending {
 			t.Errorf("claimed migrated normalized event = %#v", record)
 		}
-		return store.WorkflowLocator{RepositoryID: 1, IssueID: 1, IssueNumber: 1}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionDuplicate, Reason: workflow.ReasonEventDuplicate}
+		return store.WorkflowLocator{RepositoryID: 1, IssueID: 1, IssueNumber: 1}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueReopenedEvent{EventMetadata: context.Metadata}, nil
 		}, nil
 	})
 	if err != nil || !applied || application.DeliveryID != "68000000-0000-4000-8000-000000000091" || application.Status != store.NormalizedEventCompleted {
@@ -2289,7 +2312,7 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -2345,7 +2368,7 @@ func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	writable, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	writable, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

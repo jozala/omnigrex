@@ -335,7 +335,7 @@ WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID
 	workflowRevision := snapshot.Revision
 	nextContinuation := continuation
 	if continuation == recoveryContinuationPendingInfrastructure {
-		stage, stageKnown := store.reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+		stage, stageKnown := store.reducer.Definition().Stage(snapshot.CurrentAttempt.CurrentStage)
 		definitionCompatible := store.reducer.DefinitionCompatible(snapshot) && stageKnown && stage.Role == role
 		decision := store.reducer.DefinitionIncompatible(snapshot)
 		nextContinuation = recoveryContinuationDefinitionHandoff

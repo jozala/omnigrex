@@ -325,8 +325,9 @@ SELECT EXISTS (
 	if livePreparation {
 		return AgentTurn{}, ErrWorkflowSuccessorConflict
 	}
-	stage, ok := store.reducer.Stage(spec.Stage)
-	if !ok || stage.Role != assignment.Role || !store.reducer.AcceptsPurpose(spec.Stage, spec.Purpose) {
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(spec.Stage)
+	if !ok || stage.Role != assignment.Role || !definition.AcceptsPurpose(spec.Stage, spec.Purpose) {
 		return AgentTurn{}, ErrAgentTurnFenceLost
 	}
 	if _, err := tx.Exec(ctx, `

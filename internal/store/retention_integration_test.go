@@ -490,7 +490,7 @@ func TestClosureSettlementWithoutActiveTurnCompletesAndRetainsConcreteHierarchy(
 
 	observedAt := time.Now().UTC()
 	retainUntil := observedAt.Add(30 * 24 * time.Hour)
-	settlement := closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 31,
+	settlement := closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 31,
 		"51000000-0000-4000-8000-000000000311", "closure-no-turn", "retention-no-turn", observedAt, retainUntil)
 	if settlement.SourceTurnID != "" || settlement.SettledAt == nil || settlement.CurrentWorkflowRevision != 3 {
 		t.Fatalf("closure settlement = %#v", settlement)
@@ -549,12 +549,10 @@ func TestClosureSettlementCancelsInitialPreparationWithoutCreatingEmptyRetention
 
 	delivery := workflowDelivery("51000000-0000-4000-8000-000000000361")
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
-	observedAt := time.Now().UTC()
 	closed, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "closed"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-			}, ClosureID: "closure-empty-preparation", RetainUntil: observedAt.Add(24 * time.Hour), RetentionToken: "retention-empty-preparation"})
+		normalizedPayload(claim.DeliveryID, "closed"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{EventMetadata: context.Metadata,
+				ClosureID: "closure-empty-preparation", RetainUntil: context.Metadata.ObservedAt.Add(24 * time.Hour), RetentionToken: "retention-empty-preparation"}, nil
 		})
 	if err != nil || closed.State != workflow.StateClosing {
 		t.Fatalf("close unprepared Workflow = (%#v, %v)", closed, err)
@@ -627,7 +625,7 @@ WHERE id = $1`, fixture.sessionID, contentSHA, image); err != nil {
 	}
 
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 35,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 35,
 		"51000000-0000-4000-8000-000000000351", "closure-creating", "retention-creating",
 		observedAt, observedAt.Add(time.Hour))
 	bindings, err := database.ListProtectedRuntimeBindings(ctx)
@@ -711,7 +709,7 @@ WHERE id = $1`, fixture.sessionID); err != nil {
 	prepareClosableFixture(t, pool, fixture)
 
 	observedAt := time.Now().UTC()
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 73,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 73,
 		"51000000-0000-4000-8000-000000000731", "closure-prepared", "retention-prepared",
 		observedAt, observedAt.Add(time.Hour))
 	applyReopen(t, database, ctx, 73, "51000000-0000-4000-8000-000000000732")
@@ -754,7 +752,7 @@ func TestReopenBeforeCollectionAuthorizationCancelsLeasedGenerationAndRetainedTr
 	prepareClosableFixture(t, pool, fixture)
 
 	observedAt := time.Now().UTC()
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 32,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 32,
 		"51000000-0000-4000-8000-000000000321", "closure-cancel", "retention-cancel", observedAt, observedAt.Add(time.Hour))
 	if _, err := pool.Exec(ctx, `UPDATE jobs SET available_at = clock_timestamp() WHERE workflow_id = $1 AND kind = 'COLLECT_ASSIGNMENTS'`, fixture.workflowID); err != nil {
 		t.Fatal(err)
@@ -812,7 +810,7 @@ func TestAssignmentCollectionAuthorizationIsIrrevocableAndRecoversAfterCollector
 	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 33, workflow.RoleDeveloper, pinnedBinding, pinnedBinding)
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-31 * 24 * time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 33,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 33,
 		"51000000-0000-4000-8000-000000000331", "closure-crash", "retention-crash", observedAt, observedAt.Add(30*24*time.Hour))
 	first, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "collector-crash", time.Minute)
 	if err != nil || first == nil {
@@ -848,12 +846,9 @@ WHERE delivery.delivery_id = $1`, reopenDeliveryID).Scan(&webhookStatus, &normal
 	if webhookStatus != "PROCESSED" || normalizedStatus != "PENDING" || normalizedAttempts != 0 {
 		t.Fatalf("deferred reopen durability = webhook %s, normalized event %s/%d", webhookStatus, normalizedStatus, normalizedAttempts)
 	}
-	reopenFactory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-		return store.WorkflowLocator{RepositoryID: 33, IssueID: 33, IssueNumber: 33}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: workflow.EventMetadata{
-				ID: record.DeliveryID, ObservedAt: record.CreatedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}})
+	reopenFactory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return store.WorkflowLocator{RepositoryID: 33, IssueID: 33, IssueNumber: 33}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueReopenedEvent{EventMetadata: context.Metadata}, nil
 		}, nil
 	}
 	if application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, reopenFactory); err != nil || applied {
@@ -958,11 +953,9 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 	triggerApplication, err := databases[0].CompleteWebhookTransition(ctx, triggerClaim.DeliveryID, triggerClaim.ClaimToken,
 		normalizedPayload(triggerClaim.DeliveryID, "trigger"),
 		store.WorkflowLocator{RepositoryID: 33, IssueID: 33, IssueNumber: 33},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: workflow.EventMetadata{
-				ID: triggerClaim.DeliveryID, ObservedAt: triggerClaim.ReceivedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, AttemptID: triggerAttemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{EventMetadata: context.Metadata,
+				AttemptID: triggerAttemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
 		})
 	if err != nil || triggerApplication.State != workflow.StateDeveloping {
 		t.Fatalf("apply trigger after deferred reopen = (%#v, %v)", triggerApplication, err)
@@ -981,7 +974,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 	turnLease := acquireAndBindTurn(t, databases[0], ctx, prepared, "post-collection-acp")
 	settleAcquiredTurn(t, databases[0], ctx, turnLease, store.AgentTurnSucceeded)
 	secondObservedAt := time.Now().UTC()
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 33,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 33,
 		"51000000-0000-4000-8000-000000000335", "closure-second-generation", "retention-second-generation",
 		secondObservedAt, secondObservedAt.Add(30*24*time.Hour))
 	var generations, scheduled, collectedGenerations, oldTargets int
@@ -1013,7 +1006,7 @@ func TestAssignmentCollectionFailureDoesNotTrustCallerClaimOfInvalidTargets(t *t
 	defer cancel()
 
 	observedAt := time.Now().UTC().Add(-time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 37,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 37,
 		"51000000-0000-4000-8000-000000000371", "closure-false-invalid", "retention-false-invalid",
 		observedAt, observedAt.Add(time.Minute))
 	lease, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "false-invalid-collector", time.Minute)
@@ -1054,7 +1047,7 @@ func TestAssignmentCollectionFinalizationSurvivesWallClockRollbackAfterAuthoriza
 
 	observedAt := time.Now().UTC()
 	retainUntil := observedAt.Add(time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 36,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 36,
 		"51000000-0000-4000-8000-000000000361", "closure-clock-rollback", "retention-clock-rollback",
 		observedAt, retainUntil)
 	if _, err := pool.Exec(ctx, `
@@ -1099,7 +1092,7 @@ func TestConcurrentAssignmentCollectionAuthorizationAndReopenHasOneWinner(t *tes
 	defer cancel()
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-31 * 24 * time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 34,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 34,
 		"51000000-0000-4000-8000-000000000341", "closure-race", "retention-race", observedAt, observedAt.Add(30*24*time.Hour))
 	lease, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "collector-race", time.Minute)
 	if err != nil || lease == nil {
@@ -1152,20 +1145,21 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	}
 }
 
-func closeAndSettleWithoutTurn(t *testing.T, database *store.Store, ctx context.Context, fixture agentFixture, number int, deliveryID, closureID, retentionToken string, observedAt, retainUntil time.Time) store.ClosureSettlement {
+func closeAndSettleWithoutTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, fixture agentFixture, number int, deliveryID, closureID, retentionToken string, observedAt, retainUntil time.Time) store.ClosureSettlement {
 	t.Helper()
 	delivery := workflowDelivery(deliveryID)
 	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = int64(number), int64(number), int64(number)
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
+	if _, err := pool.Exec(ctx, `UPDATE webhook_deliveries SET received_at = $2 WHERE delivery_id = $1`, claim.DeliveryID, observedAt); err != nil {
+		t.Fatal(err)
+	}
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "closed"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, ClosureID: closureID, RetainUntil: retainUntil, RetentionToken: retentionToken})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{EventMetadata: context.Metadata,
+				ClosureID: closureID, RetainUntil: retainUntil, RetentionToken: retentionToken}, nil
 		})
 	if err != nil || application.State != workflow.StateClosing {
 		t.Fatalf("close Workflow = (%#v, %v)", application, err)
@@ -1208,11 +1202,8 @@ func applyReopenApplication(database *store.Store, ctx context.Context, number i
 	return database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "reopened"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueReopenedEvent{EventMetadata: context.Metadata}, nil
 		})
 }
 
@@ -1225,11 +1216,9 @@ func applyTrigger(t *testing.T, database *store.Store, ctx context.Context, fixt
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "trigger"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{EventMetadata: context.Metadata,
+				AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
 		})
 	if err != nil || application.State != workflow.StateDeveloping {
 		t.Fatalf("trigger reopened Workflow = (%#v, %v)", application, err)

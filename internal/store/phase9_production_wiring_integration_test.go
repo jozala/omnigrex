@@ -97,14 +97,15 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
 	closedAt := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := pool.Exec(ctx, `UPDATE webhook_deliveries SET received_at = $2 WHERE delivery_id = $1`, claim.DeliveryID, closedAt); err != nil {
+		t.Fatal(err)
+	}
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "closed"),
 		store.WorkflowLocator{RepositoryID: 93, IssueID: 93, IssueNumber: 93},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: closedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, ClosureID: "production-wiring-closure", RetainUntil: closedAt.Add(time.Hour), RetentionToken: "production-wiring-retention"})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{EventMetadata: context.Metadata,
+				ClosureID: "production-wiring-closure", RetainUntil: closedAt.Add(time.Hour), RetentionToken: "production-wiring-retention"}, nil
 		})
 	if err != nil || application.State != workflow.StateClosing {
 		t.Fatalf("close Workflow = (%#v, %v)", application, err)

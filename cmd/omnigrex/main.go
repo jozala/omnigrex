@@ -149,7 +149,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Workflow Reducer: %w", err)
 	}
 	startupCtx, startupCancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
-	database, err := store.OpenWithReducerAndPolicies(startupCtx, settings.DatabaseURL, settings.DatabasePasswordSecretFile, reducer, rolePolicies)
+	database, err := store.Open(startupCtx, settings.DatabaseURL, settings.DatabasePasswordSecretFile, store.Config{
+		Reducer: reducer, Policies: rolePolicies,
+	})
 	startupCancel()
 	if err != nil {
 		return fmt.Errorf("initialize database: %w", err)
@@ -162,7 +164,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, openCodeV1); err != nil {
 		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
 	}
-	githubServices, err := configureGitHub(settings, database, reducer, logger)
+	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
 	}
@@ -372,10 +374,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
 		Launcher: runtimeLauncher, Sessions: sessions,
-		Outcomes:  loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
-		Workspace: workspaces,
-		Policies:  rolePolicies,
-		Reducer:   reducer,
+		Outcomes:   loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
+		Workspace:  workspaces,
+		Policies:   rolePolicies,
+		Definition: definition,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
@@ -705,7 +707,7 @@ type configuredGitHub struct {
 	claimOwner       string
 }
 
-func configureGitHub(settings config.Config, database *store.Store, reducer workflow.Reducer, logger *slog.Logger) (*configuredGitHub, error) {
+func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*configuredGitHub, error) {
 	developerKey, err := os.ReadFile(settings.GitHubDeveloperPrivateKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read Developer GitHub App private key: %w", err)
@@ -748,7 +750,6 @@ func configureGitHub(settings config.Config, database *store.Store, reducer work
 		LeaseDuration:               settings.WebhookLeaseDuration,
 		IdlePollInterval:            settings.WebhookPollInterval,
 		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
-		Reducer:                     &reducer,
 		OnError: func(err error) {
 			logger.Error("process GitHub webhook delivery", "error", err)
 		},

@@ -27,6 +27,76 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
+func TestCompleteWebhookTransitionUsesStoreReducerForSharedStageIDs(t *testing.T) {
+	definition, err := workflow.NewDefinition(role.BuiltinCatalog(), workflow.StageEntry{
+		Stage: workflow.StageImplementation, Purpose: workflow.TurnPurposeRetry,
+	}, []workflow.StageDefinition{
+		{
+			ID: workflow.StageImplementation, Role: workflow.RoleDeveloper, State: workflow.StateDeveloping,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeChangeProposalReady, NextStage: workflow.StageReview, NextPurpose: workflow.TurnPurposeReview,
+			}},
+		},
+		{
+			ID: workflow.StageReview, Role: workflow.RoleReviewer, State: workflow.StateReviewing, ReviewLimit: 1,
+			AcceptedPurposes: []workflow.TurnPurpose{workflow.TurnPurposeReview, workflow.TurnPurposeRetry, workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation},
+			Transitions: []workflow.OutcomeTransition{{
+				Outcome: workflow.TurnOutcomeApproved, TerminalState: workflow.StatePRReady, ContinuationStage: workflow.StageReview, ConsumesReviewCycle: true,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reducer, err := workflow.NewReducer(definition, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	pool := openPool(t, postgres.databaseURL(true))
+	claim := claimWorkflowDelivery(t, database, ctx, workflowDelivery("60000000-0000-4000-8000-000000000090"))
+	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(),
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "60000000-0000-4000-8000-000000000091", AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stage workflow.StageID
+	var jobPayload struct {
+		Purpose workflow.TurnPurpose `json:"purpose"`
+	}
+	var rawPayload []byte
+	if err := pool.QueryRow(ctx, `SELECT current_stage FROM workflow_attempts WHERE workflow_id = $1 AND active`, application.WorkflowID).Scan(&stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID).Scan(&rawPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(rawPayload, &jobPayload); err != nil {
+		t.Fatal(err)
+	}
+	if stage != workflow.StageImplementation || jobPayload.Purpose != workflow.TurnPurposeRetry {
+		t.Fatalf("Store reducer result = Stage %q Purpose %q, want shared implementation Stage with custom RETRY entry", stage, jobPayload.Purpose)
+	}
+}
+
 func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) {
 	postgres := startPostgres(t)
 	passwordFile := filepath.Join(t.TempDir(), "database-password")
@@ -63,7 +133,7 @@ func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.OpenWithReducer(ctx, postgres.databaseURL(false), passwordFile, reducer)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +270,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.OpenWithReducerAndPolicies(ctx, postgres.databaseURL(false), passwordFile, reducer, policies)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,14 +278,11 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	pool := openPool(t, postgres.databaseURL(true))
 	claim := claimWorkflowDelivery(t, database, ctx, workflowDelivery("60000000-0000-4000-8000-000000000095"))
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-			return reducer.Reduce(snapshot, workflow.TriggerEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC),
-					WorkItem: workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12}, ExpectedRevision: snapshot.Revision,
-				},
-				AttemptID: "60000000-0000-4000-8000-000000000096", AttemptNumber: 1,
-			})
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "60000000-0000-4000-8000-000000000096", AttemptNumber: 1,
+			}, nil
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +356,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	database.Close()
-	database, err = store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err = store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,9 +364,9 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	handoffDelivery := workflowDelivery("60000000-0000-4000-8000-000000000097")
 	handoffClaim := claimWorkflowDelivery(t, database, ctx, handoffDelivery)
 	handoff, err := database.CompleteWebhookTransition(ctx, handoffClaim.DeliveryID, handoffClaim.ClaimToken,
-		normalizedPayload(handoffClaim.DeliveryID, "edited"), workflowLocator(), func(workflow.Snapshot) workflow.Decision {
+		normalizedPayload(handoffClaim.DeliveryID, "edited"), workflowLocator(), func(store.WorkflowEventContext) (workflow.Event, error) {
 			t.Fatal("transition callback ran for a removed custom Role")
-			return workflow.Decision{}
+			return nil, nil
 		})
 	if err != nil || handoff.State != workflow.StateNeedsHuman {
 		t.Fatalf("retired Role definition handoff = (%#v, %v)", handoff, err)
@@ -947,7 +1014,7 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.OpenWithReducerAndPolicies(ctx, postgres.databaseURL(false), passwordFile, reducer, policies)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2155,14 +2222,11 @@ func triggerPreparationWorkflow(t *testing.T, database *store.Store, ctx context
 	t.Helper()
 	claim := claimWorkflowDelivery(t, database, ctx, workflowDelivery(deliveryID))
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC),
-					WorkItem: workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12}, ExpectedRevision: snapshot.Revision,
-				},
-				AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1,
-			})
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)

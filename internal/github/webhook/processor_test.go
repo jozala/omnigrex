@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/github/webhook"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -441,6 +442,7 @@ type processorInbox struct {
 	transitionErr  error
 	drainErr       error
 	operations     []string
+	claimedAt      time.Time
 }
 
 type recordedTransition struct {
@@ -476,10 +478,11 @@ func (inbox *processorInbox) ClaimWebhookDelivery(_ context.Context, owner strin
 	}
 	claim := inbox.claims[0]
 	inbox.claims = inbox.claims[1:]
+	inbox.claimedAt = claim.ReceivedAt
 	return claim, nil
 }
 
-func (inbox *processorInbox) ApplyNextPendingNormalizedEvent(_ context.Context, factory store.PendingTransitionFactory) (store.WorkflowApplication, bool, error) {
+func (inbox *processorInbox) ApplyNextPendingNormalizedEvent(_ context.Context, factory store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error) {
 	inbox.operations = append(inbox.operations, "drain")
 	if inbox.drainErr != nil {
 		return store.WorkflowApplication{}, false, inbox.drainErr
@@ -489,21 +492,58 @@ func (inbox *processorInbox) ApplyNextPendingNormalizedEvent(_ context.Context, 
 	}
 	record := inbox.pending[0]
 	inbox.pending = inbox.pending[1:]
-	locator, transition, err := factory(record)
+	locator, eventFactory, err := factory(record)
 	if err != nil {
 		return store.WorkflowApplication{}, false, err
 	}
-	decision := transition(inbox.drainSnapshot)
+	domainEvent, err := eventFactory(store.WorkflowEventContext{
+		Snapshot: inbox.drainSnapshot,
+		Metadata: testEventMetadata(record.DeliveryID, record.CreatedAt, inbox.drainSnapshot, locator),
+	})
+	if err != nil {
+		return store.WorkflowApplication{}, false, err
+	}
+	decision := webhookTestReducer.Reduce(inbox.drainSnapshot, domainEvent)
 	inbox.drained = append(inbox.drained, recordedTransition{deliveryID: record.DeliveryID, payload: record.Payload, locator: locator, decision: decision})
 	return store.WorkflowApplication{DeliveryID: record.DeliveryID}, true, nil
 }
 
-func (inbox *processorInbox) CompleteWebhookTransition(_ context.Context, deliveryID, _ string, payload json.RawMessage, locator store.WorkflowLocator, transition store.WorkflowTransition) (store.WorkflowApplication, error) {
+func (inbox *processorInbox) CompleteWebhookTransition(_ context.Context, deliveryID, _ string, payload json.RawMessage, locator store.WorkflowLocator, eventFactory store.WorkflowEventFactory) (store.WorkflowApplication, error) {
 	inbox.operations = append(inbox.operations, "transition")
-	decision := transition(inbox.atomicSnapshot)
+	domainEvent, err := eventFactory(store.WorkflowEventContext{
+		Snapshot: inbox.atomicSnapshot,
+		Metadata: testEventMetadata(deliveryID, inbox.claimedAt, inbox.atomicSnapshot, locator),
+	})
+	if err != nil {
+		return store.WorkflowApplication{}, err
+	}
+	decision := webhookTestReducer.Reduce(inbox.atomicSnapshot, domainEvent)
 	inbox.transitions = append(inbox.transitions, recordedTransition{deliveryID: deliveryID, payload: payload, locator: locator, decision: decision})
 	return store.WorkflowApplication{DeliveryID: deliveryID}, inbox.transitionErr
 }
+
+func testEventMetadata(deliveryID string, observedAt time.Time, snapshot workflow.Snapshot, locator store.WorkflowLocator) workflow.EventMetadata {
+	workItem := snapshot.WorkItem
+	if snapshot.State == workflow.StateAbsent {
+		workItem = workflow.WorkItem{RepositoryID: locator.RepositoryID, IssueID: locator.IssueID, IssueNumber: locator.IssueNumber}
+		if locator.IssueID == 0 {
+			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
+		}
+	}
+	return workflow.EventMetadata{ID: deliveryID, ObservedAt: observedAt, WorkItem: workItem, ExpectedRevision: snapshot.Revision}
+}
+
+var webhookTestReducer = func() workflow.Reducer {
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		panic(err)
+	}
+	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
+	if err != nil {
+		panic(err)
+	}
+	return reducer
+}()
 
 func (inbox *processorInbox) CompleteWebhookDelivery(_ context.Context, deliveryID, claimToken string, completion store.WebhookCompletion) error {
 	inbox.completions = append(inbox.completions, recordedCompletion{deliveryID: deliveryID, claimToken: claimToken, completion: completion})
@@ -538,11 +578,11 @@ func (*retryingInbox) CompleteWebhookDelivery(context.Context, string, string, s
 	return nil
 }
 
-func (*retryingInbox) ApplyNextPendingNormalizedEvent(context.Context, store.PendingTransitionFactory) (store.WorkflowApplication, bool, error) {
+func (*retryingInbox) ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error) {
 	return store.WorkflowApplication{}, false, nil
 }
 
-func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowTransition) (store.WorkflowApplication, error) {
+func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error) {
 	return store.WorkflowApplication{}, nil
 }
 
@@ -561,11 +601,11 @@ func (*pollingInbox) CompleteWebhookDelivery(context.Context, string, string, st
 	return nil
 }
 
-func (*pollingInbox) ApplyNextPendingNormalizedEvent(context.Context, store.PendingTransitionFactory) (store.WorkflowApplication, bool, error) {
+func (*pollingInbox) ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error) {
 	return store.WorkflowApplication{}, false, nil
 }
 
-func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowTransition) (store.WorkflowApplication, error) {
+func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error) {
 	return store.WorkflowApplication{}, nil
 }
 

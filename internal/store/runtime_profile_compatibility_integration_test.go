@@ -277,7 +277,7 @@ VALUES ('6b000000-0000-4000-8000-000000000004',
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("open Store over legacy Runtime Profile binding: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	first, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 		t.Fatal(err)
 	}
 	first.Close()
-	second, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	second, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

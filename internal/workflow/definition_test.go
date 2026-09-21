@@ -45,8 +45,8 @@ func TestBuiltinDefinitionDescribesCurrentWorkflow(t *testing.T) {
 }
 
 func TestReducerValidatesRoleCapabilitiesAgainstStageOutcomes(t *testing.T) {
-	reducer := workflow.BuiltinReducer()
-	if err := reducer.ValidateRolePolicies(role.BuiltinPolicyCatalog()); err != nil {
+	definition := builtinReducer(t).Definition()
+	if err := definition.ValidateRolePolicies(role.BuiltinPolicyCatalog()); err != nil {
 		t.Fatalf("ValidateRolePolicies() built-in error = %v", err)
 	}
 	builtin := role.BuiltinPolicyCatalog()
@@ -57,7 +57,7 @@ func TestReducerValidatesRoleCapabilitiesAgainstStageOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reducer.ValidateRolePolicies(policies); !errors.Is(err, workflow.ErrInvalidDefinition) {
+	if err := definition.ValidateRolePolicies(policies); !errors.Is(err, workflow.ErrInvalidDefinition) {
 		t.Fatalf("ValidateRolePolicies() error = %v, want ErrInvalidDefinition", err)
 	}
 }
@@ -151,7 +151,7 @@ func TestDefinitionResultsCannotMutateDefinition(t *testing.T) {
 	}
 }
 
-func TestBuiltinReducerPersistsAndTransitionsAttemptStage(t *testing.T) {
+func TestConfiguredReducerPersistsAndTransitionsAttemptStage(t *testing.T) {
 	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
 	if err != nil {
 		t.Fatalf("NewBuiltinDefinition() error = %v", err)
@@ -202,7 +202,7 @@ func TestBuiltinReducerPersistsAndTransitionsAttemptStage(t *testing.T) {
 }
 
 func TestReducerFailsClosedForIncompatibleDurableStage(t *testing.T) {
-	reducer := workflow.BuiltinReducer()
+	reducer := builtinReducer(t)
 	snapshot := workflow.Snapshot{
 		State: workflow.StateDeveloping, Revision: 7,
 		Assignments: workflow.Assignments{Status: workflow.AssignmentActive, RuntimeState: workflow.RuntimeStateActive},
@@ -228,7 +228,7 @@ func TestReducerFailsClosedForIncompatibleDurableStage(t *testing.T) {
 }
 
 func TestReducerInterruptsActiveTurnForIncompatibleDefinition(t *testing.T) {
-	reducer := workflow.BuiltinReducer()
+	reducer := builtinReducer(t)
 	snapshot := developingSnapshot(nil)
 	snapshot.CurrentAttempt.CurrentStage = "removed-stage"
 	snapshot.ActiveTurn.Stage = "removed-stage"
@@ -243,7 +243,7 @@ func TestReducerInterruptsActiveTurnForIncompatibleDefinition(t *testing.T) {
 }
 
 func TestDefinitionCompatibilityIncludesPersistedStageStateAndReviewUsage(t *testing.T) {
-	reducer := workflow.BuiltinReducer()
+	reducer := builtinReducer(t)
 	stateMismatch := developingSnapshot(nil)
 	stateMismatch.State = workflow.StateReviewing
 	stateMismatch.ChangeProposal = proposal(1, "head")

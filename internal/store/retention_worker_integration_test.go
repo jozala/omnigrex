@@ -27,7 +27,7 @@ func TestAssignmentRetentionWorkerWaitsForDeadlineAndLeavesNeighboringAssignment
 
 	observedAt := time.Now().UTC()
 	retainUntil := observedAt.Add(500 * time.Millisecond)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 61,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 61,
 		"71000000-0000-4000-8000-000000000611", "worker-deadline", "worker-deadline-retention",
 		observedAt, retainUntil)
 	cleaner := &integrationRetentionCleaner{}
@@ -79,7 +79,7 @@ func TestAssignmentRetentionWorkerTerminallyHandsOffLegacyInvalidTargets(t *test
 	defer cancel()
 
 	observedAt := time.Now().UTC().Add(-time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 66,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 66,
 		"71000000-0000-4000-8000-000000000661", "worker-invalid", "worker-invalid-retention",
 		observedAt, observedAt.Add(time.Minute))
 	cleaner := &integrationRetentionCleaner{}
@@ -163,7 +163,7 @@ WHERE session_id = $1`, secondSessionID, fixture.assignmentID, canonicalRuntimeP
 			defer cancel()
 
 			observedAt := time.Now().UTC().Add(-time.Hour)
-			closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 67,
+			closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 67,
 				"71000000-0000-4000-8000-000000000671", "worker-durable-invalid", "worker-durable-invalid-retention",
 				observedAt, observedAt.Add(time.Minute))
 			test.mutate(t, ctx, pool, fixture, secondAssignmentID, secondSessionID)
@@ -218,7 +218,7 @@ func TestAssignmentRetentionWorkerRetriesPartialCleanupIdempotentlyAcrossLeaseAt
 	defer cancel()
 
 	observedAt := time.Now().UTC().Add(-time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 63,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 63,
 		"71000000-0000-4000-8000-000000000631", "worker-partial", "worker-partial-retention",
 		observedAt, observedAt.Add(time.Minute))
 	cleanupFailure := errors.New("runtime-state volume temporarily unavailable")
@@ -293,7 +293,7 @@ func TestAssignmentRetentionWorkerExhaustionPublishesOnceAndContinuesUntilCollec
 	defer cancel()
 
 	observedAt := time.Now().UTC().Add(-time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 64,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 64,
 		"71000000-0000-4000-8000-000000000641", "worker-exhaustion", "worker-exhaustion-retention",
 		observedAt, observedAt.Add(time.Minute))
 	cleanupFailure := errors.New("runtime-state cleanup unavailable")
@@ -348,7 +348,7 @@ func TestAssignmentRetentionFinalAttemptCrashAfterDeletionContinuesToFinalize(t 
 	defer cancel()
 
 	observedAt := time.Now().UTC().Add(-time.Hour)
-	closeAndSettleWithoutTurn(t, databases[0], ctx, fixture, 65,
+	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 65,
 		"71000000-0000-4000-8000-000000000651", "worker-final-crash", "worker-final-crash-retention",
 		observedAt, observedAt.Add(time.Minute))
 	cleanupFailure := errors.New("runtime-state cleanup temporarily unavailable")

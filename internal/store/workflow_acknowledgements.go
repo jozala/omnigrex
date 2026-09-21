@@ -104,9 +104,9 @@ type pendingEventReconciliationPayload struct {
 
 // AcknowledgePendingEventReconciliation replays every exactly linked deferred event
 // and commits their outcomes, at most one coalesced successor, and job success atomically.
-func (store *Store) AcknowledgePendingEventReconciliation(ctx context.Context, lease JobLease, factory PendingTransitionFactory) (PendingEventReconciliation, error) {
+func (store *Store) AcknowledgePendingEventReconciliation(ctx context.Context, lease JobLease, factory PendingWorkflowEventFactory) (PendingEventReconciliation, error) {
 	if factory == nil {
-		return PendingEventReconciliation{}, fmt.Errorf("acknowledge pending-event reconciliation: transition factory is nil")
+		return PendingEventReconciliation{}, fmt.Errorf("acknowledge pending-event reconciliation: event factory is nil")
 	}
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -178,12 +178,12 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		next := nextLinkedDeferredEvent(remaining)
 		linked := remaining[next]
 		remaining = append(remaining[:next], remaining[next+1:]...)
-		locator, transition, err := factory(linked.record)
+		locator, eventFactory, err := factory(linked.record)
 		if err != nil {
-			return PendingEventReconciliation{}, fmt.Errorf("build reconciled transition %s: %w", linked.record.DeliveryID, err)
+			return PendingEventReconciliation{}, fmt.Errorf("build reconciled event factory %s: %w", linked.record.DeliveryID, err)
 		}
-		if transition == nil {
-			return PendingEventReconciliation{}, fmt.Errorf("build reconciled transition %s: transition is nil", linked.record.DeliveryID)
+		if eventFactory == nil {
+			return PendingEventReconciliation{}, fmt.Errorf("build reconciled event factory %s: factory is nil: %w", linked.record.DeliveryID, ErrPendingNormalizedEventInvalid)
 		}
 		if err := validateWorkflowLocator(locator, linked.envelope); err != nil {
 			return PendingEventReconciliation{}, err
@@ -195,9 +195,12 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		if resolvedWorkflowID != job.WorkflowID {
 			return PendingEventReconciliation{}, ErrWorkflowLocatorMismatch
 		}
-		decision := transition(snapshot)
-		if err := validateWorkflowDecision(snapshot, decision); err != nil {
-			return PendingEventReconciliation{}, err
+		decision, err := store.reduceWorkflowEvent(snapshot, workflow.EventMetadata{
+			ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
+			WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
+		}, eventFactory)
+		if err != nil {
+			return PendingEventReconciliation{}, fmt.Errorf("reduce reconciled event %s: %w", linked.record.DeliveryID, err)
 		}
 		if decision.Disposition == workflow.DispositionDeferred {
 			return PendingEventReconciliation{}, ErrWorkflowDecisionInvalid
@@ -310,8 +313,9 @@ func (store *Store) validPendingEventReconciliationPayload(payload pendingEventR
 	if payload.FallbackRole == "" {
 		return payload.FallbackStage == "" && payload.FallbackPurpose == "" && payload.FallbackExpectedHeadSHA == "" && payload.RetryOfTurnID == ""
 	}
-	stage, ok := store.reducer.Stage(payload.FallbackStage)
-	if !ok || stage.Role != payload.FallbackRole || !store.reducer.AcceptsPurpose(payload.FallbackStage, payload.FallbackPurpose) {
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(payload.FallbackStage)
+	if !ok || stage.Role != payload.FallbackRole || !definition.AcceptsPurpose(payload.FallbackStage, payload.FallbackPurpose) {
 		return false
 	}
 	switch payload.FallbackPurpose {
@@ -345,12 +349,12 @@ SELECT event.delivery_id::text, event.payload, event.status,
        delivery.status, delivery.event_name, COALESCE(delivery.action, ''),
        COALESCE(delivery.repository_id, 0),
        COALESCE(delivery.repository_owner, ''), COALESCE(delivery.repository_name, ''),
-       COALESCE(delivery.issue_id, 0), COALESCE(delivery.issue_number, 0)
+       COALESCE(delivery.issue_id, 0), COALESCE(delivery.issue_number, 0), delivery.received_at
 FROM job_normalized_events AS link
 JOIN normalized_events AS event ON event.delivery_id = link.normalized_event_id
 JOIN webhook_deliveries AS delivery USING (delivery_id)
 WHERE link.job_id = $1
-ORDER BY event.created_at, event.delivery_id
+ORDER BY delivery.received_at, delivery.delivery_id
 FOR UPDATE OF event, delivery`, job.ID)
 	if err != nil {
 		return nil, err
@@ -368,7 +372,7 @@ FOR UPDATE OF event, delivery`, job.ID)
 			&item.record.CreatedAt, &item.record.ProcessedAt,
 			&webhookStatus, &item.envelope.eventName, &item.envelope.action,
 			&item.envelope.repositoryID, &item.envelope.repositoryOwner,
-			&item.envelope.repositoryName, &item.envelope.issueID, &item.envelope.issueNumber,
+			&item.envelope.repositoryName, &item.envelope.issueID, &item.envelope.issueNumber, &item.envelope.receivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -593,7 +597,7 @@ func (store *Store) normalizeSuccessorIntent(snapshot workflow.Snapshot, intent 
 	if snapshot.CurrentAttempt == nil {
 		return ErrWorkflowDecisionInvalid
 	}
-	stage, ok := store.reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+	stage, ok := store.reducer.Definition().Stage(snapshot.CurrentAttempt.CurrentStage)
 	if !ok {
 		return ErrWorkflowDecisionInvalid
 	}

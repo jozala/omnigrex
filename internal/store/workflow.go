@@ -15,8 +15,8 @@ import (
 var (
 	// ErrWorkflowLocatorMismatch means normalized identity disagrees with the durable webhook envelope.
 	ErrWorkflowLocatorMismatch = errors.New("workflow locator does not match webhook delivery")
-	// ErrWorkflowDecisionInvalid means a transition returned an internally inconsistent decision.
-	ErrWorkflowDecisionInvalid = errors.New("workflow transition returned an invalid decision")
+	// ErrWorkflowDecisionInvalid means reduction produced an internally inconsistent decision.
+	ErrWorkflowDecisionInvalid = errors.New("workflow reducer returned an invalid decision")
 	// ErrPendingEventReconciliationFenceLost means reconciliation ownership or immutable identity is stale.
 	ErrPendingEventReconciliationFenceLost = errors.New("pending event reconciliation fence lost")
 	// ErrPendingEventReconciliationPayloadInvalid means a fenced reconciliation job has an invalid durable payload.
@@ -51,6 +51,7 @@ type WorkflowLocator struct {
 	IssueID               int64
 	IssueNumber           int64
 	PullRequestID         int64
+	PullRequestNumber     int64
 	WorkflowID            string
 	WorkflowMarkerInvalid bool
 }
@@ -100,8 +101,14 @@ WHERE review.repository_id = $1 AND review.review_id = $2`, repositoryID, review
 	return &review, nil
 }
 
-// WorkflowTransition applies a pure reducer transition to a relationally rehydrated Snapshot.
-type WorkflowTransition func(workflow.Snapshot) workflow.Decision
+// WorkflowEventContext contains the Store-owned state and metadata used to build one Event.
+type WorkflowEventContext struct {
+	Snapshot workflow.Snapshot
+	Metadata workflow.EventMetadata
+}
+
+// WorkflowEventFactory maps normalized external data to a domain Event without reducing it.
+type WorkflowEventFactory func(WorkflowEventContext) (workflow.Event, error)
 
 // WorkflowApplication is the durable outcome of applying one normalized event.
 type WorkflowApplication struct {
@@ -114,18 +121,19 @@ type WorkflowApplication struct {
 	Revision    uint64
 }
 
-// PendingTransitionFactory rebuilds a pure transition from one persisted normalized event.
-type PendingTransitionFactory func(NormalizedEventRecord) (WorkflowLocator, WorkflowTransition, error)
+// PendingWorkflowEventFactory rebuilds an Event factory from one persisted normalized event.
+type PendingWorkflowEventFactory func(NormalizedEventRecord) (WorkflowLocator, WorkflowEventFactory, error)
 
 type workflowEnvelope struct {
 	eventName, action               string
 	repositoryID                    int64
 	repositoryOwner, repositoryName string
 	issueID, issueNumber            int64
+	receivedAt                      time.Time
 }
 
-// CompleteWebhookTransition atomically applies a claimed webhook's normalized Workflow transition.
-func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, claimToken string, normalizedPayload json.RawMessage, locator WorkflowLocator, transition WorkflowTransition) (WorkflowApplication, error) {
+// CompleteWebhookTransition atomically applies a claimed webhook's normalized Workflow Event.
+func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, claimToken string, normalizedPayload json.RawMessage, locator WorkflowLocator, eventFactory WorkflowEventFactory) (WorkflowApplication, error) {
 	if !validUUID(deliveryID) || !validUUID(claimToken) {
 		return WorkflowApplication{}, ErrWebhookClaimLost
 	}
@@ -133,8 +141,8 @@ func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, c
 	if err != nil {
 		return WorkflowApplication{}, fmt.Errorf("complete webhook transition: normalized payload: %w", err)
 	}
-	if transition == nil {
-		return WorkflowApplication{}, errors.New("complete webhook transition: transition is nil")
+	if eventFactory == nil {
+		return WorkflowApplication{}, errors.New("complete webhook transition: event factory is nil")
 	}
 
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -157,7 +165,7 @@ func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, c
 		return WorkflowApplication{}, fmt.Errorf("insert normalized event: %w", err)
 	}
 	record := NormalizedEventRecord{DeliveryID: deliveryID, Payload: payload, Status: NormalizedEventPending}
-	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, store.reducer, transition)
+	application, err := store.applyWorkflowEventTx(ctx, tx, record, envelope, locator, eventFactory)
 	if err != nil {
 		return WorkflowApplication{}, err
 	}
@@ -181,7 +189,7 @@ WHERE delivery_id = $1 AND status = 'PROCESSING' AND claim_token = $2
 
 // ApplyNextPendingNormalizedEvent drains one historical Phase 4 event without polling DEFERRED rows.
 // Its inbox delivery was already completed, so this API cannot restore claim fencing for historical events.
-func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory PendingTransitionFactory) (WorkflowApplication, bool, error) {
+func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory PendingWorkflowEventFactory) (WorkflowApplication, bool, error) {
 	if factory == nil {
 		return WorkflowApplication{}, false, errors.New("apply pending normalized event: factory is nil")
 	}
@@ -197,7 +205,7 @@ func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory
 SELECT event.delivery_id::text, event.payload, event.status, event.created_at,
        COALESCE(delivery.repository_id, 0), COALESCE(delivery.repository_owner, ''),
        COALESCE(delivery.repository_name, ''), COALESCE(delivery.issue_id, 0),
-       COALESCE(delivery.issue_number, 0)
+       COALESCE(delivery.issue_number, 0), delivery.received_at
 FROM normalized_events AS event
 JOIN webhook_deliveries AS delivery USING (delivery_id)
 WHERE event.status = 'PENDING' AND event.attempt_count < event.max_attempts
@@ -230,7 +238,7 @@ ORDER BY delivery.received_at, event.delivery_id
 FOR UPDATE OF event SKIP LOCKED
 LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.CreatedAt,
 		&envelope.repositoryID, &envelope.repositoryOwner, &envelope.repositoryName,
-		&envelope.issueID, &envelope.issueNumber)
+		&envelope.issueID, &envelope.issueNumber, &envelope.receivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return WorkflowApplication{}, false, fmt.Errorf("commit empty pending event drain: %w", err)
@@ -257,19 +265,19 @@ RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptC
 		cause := fmt.Errorf("apply pending normalized event: %w", err)
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
-	locator, transition, err := factory(record)
+	locator, eventFactory, err := factory(record)
 	if err != nil {
-		cause := fmt.Errorf("build pending transition: %w", err)
+		cause := fmt.Errorf("build pending event factory: %w", err)
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
-	if transition == nil {
-		cause := fmt.Errorf("build pending transition: transition is nil: %w", ErrPendingNormalizedEventInvalid)
+	if eventFactory == nil {
+		cause := fmt.Errorf("build pending event factory: factory is nil: %w", ErrPendingNormalizedEventInvalid)
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
 	}
 	if err := validateWorkflowLocator(locator, envelope); err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
-	application, err := applyWorkflowTransitionTx(ctx, tx, record, envelope, locator, store.reducer, transition)
+	application, err := store.applyWorkflowEventTx(ctx, tx, record, envelope, locator, eventFactory)
 	if err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
@@ -328,10 +336,10 @@ func lockWebhookForTransition(ctx context.Context, tx pgx.Tx, deliveryID, claimT
 	err := tx.QueryRow(ctx, `
 SELECT status, claim_token::text, COALESCE(lease_expires_at > clock_timestamp(), FALSE),
        COALESCE(repository_id, 0), COALESCE(repository_owner, ''), COALESCE(repository_name, ''),
-       COALESCE(issue_id, 0), COALESCE(issue_number, 0)
+       COALESCE(issue_id, 0), COALESCE(issue_number, 0), received_at
 FROM webhook_deliveries WHERE delivery_id = $1 FOR UPDATE`, deliveryID).Scan(
 		&status, &currentToken, &leaseLive, &envelope.repositoryID, &envelope.repositoryOwner,
-		&envelope.repositoryName, &envelope.issueID, &envelope.issueNumber,
+		&envelope.repositoryName, &envelope.issueID, &envelope.issueNumber, &envelope.receivedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && (status != WebhookProcessing || currentToken == nil || *currentToken != claimToken || !leaseLive) {
 		return workflowEnvelope{}, ErrWebhookClaimLost
@@ -344,7 +352,8 @@ FROM webhook_deliveries WHERE delivery_id = $1 FOR UPDATE`, deliveryID).Scan(
 
 func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope) error {
 	if locator.RepositoryID <= 0 || locator.RepositoryID != envelope.repositoryID ||
-		(locator.IssueID == 0) != (locator.IssueNumber == 0) || locator.IssueID < 0 || locator.IssueNumber < 0 || locator.PullRequestID < 0 ||
+		(locator.IssueID == 0) != (locator.IssueNumber == 0) || locator.IssueID < 0 || locator.IssueNumber < 0 ||
+		(locator.PullRequestID == 0) != (locator.PullRequestNumber == 0) || locator.PullRequestID < 0 || locator.PullRequestNumber < 0 ||
 		(locator.WorkflowID != "" && !validUUID(locator.WorkflowID)) ||
 		(locator.WorkflowMarkerInvalid && locator.WorkflowID != "") {
 		return ErrWorkflowLocatorMismatch
@@ -358,7 +367,7 @@ func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope)
 	return nil
 }
 
-func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedEventRecord, envelope workflowEnvelope, locator WorkflowLocator, reducer workflow.Reducer, transition WorkflowTransition) (WorkflowApplication, error) {
+func (store *Store) applyWorkflowEventTx(ctx context.Context, tx pgx.Tx, event NormalizedEventRecord, envelope workflowEnvelope, locator WorkflowLocator, eventFactory WorkflowEventFactory) (WorkflowApplication, error) {
 	workflowID, err := resolveWorkflowID(ctx, tx, locator)
 	if err != nil {
 		return WorkflowApplication{}, err
@@ -390,11 +399,18 @@ func applyWorkflowTransitionTx(ctx context.Context, tx pgx.Tx, event NormalizedE
 			}, nil
 		}
 	}
-	decision := reducer.DefinitionIncompatible(snapshot)
-	if reducer.DefinitionCompatible(snapshot) {
-		decision = transition(snapshot)
+	workItem := snapshot.WorkItem
+	if snapshot.State == workflow.StateAbsent {
+		workItem = workflow.WorkItem{RepositoryID: locator.RepositoryID, IssueID: locator.IssueID, IssueNumber: locator.IssueNumber}
+		if locator.IssueID == 0 {
+			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
+		}
 	}
-	if err := validateWorkflowDecision(snapshot, decision); err != nil {
+	decision, err := store.reduceWorkflowEvent(snapshot, workflow.EventMetadata{
+		ID: event.DeliveryID, ObservedAt: envelope.receivedAt,
+		WorkItem: workItem, ExpectedRevision: snapshot.Revision,
+	}, eventFactory)
+	if err != nil {
 		return WorkflowApplication{}, err
 	}
 
@@ -442,6 +458,33 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
 		Disposition: decision.Disposition, Reason: decision.Reason,
 		State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
 	}, nil
+}
+
+func (store *Store) reduceWorkflowEvent(snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
+	decision := store.reducer.DefinitionIncompatible(snapshot)
+	if store.reducer.DefinitionCompatible(snapshot) {
+		event, err := factory(WorkflowEventContext{Snapshot: snapshot.Clone(), Metadata: metadata})
+		if err != nil {
+			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		if err := validateWorkflowEventMetadata(event, metadata); err != nil {
+			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		decision = store.reducer.Reduce(snapshot, event)
+	}
+	if err := validateWorkflowDecision(snapshot, decision); err != nil {
+		return workflow.Decision{}, err
+	}
+	return decision, nil
+}
+
+func validateWorkflowEventMetadata(event workflow.Event, expected workflow.EventMetadata) error {
+	metadata, ok := workflow.EventMetadataOf(event)
+	if !ok || metadata.ID != expected.ID || !metadata.ObservedAt.Equal(expected.ObservedAt) ||
+		metadata.WorkItem != expected.WorkItem || metadata.ExpectedRevision != expected.ExpectedRevision {
+		return fmt.Errorf("metadata mismatch: %w", ErrPendingNormalizedEventInvalid)
+	}
+	return nil
 }
 
 func workflowTransitionBlockedTx(ctx context.Context, tx pgx.Tx, workflowID, deliveryID string) (bool, error) {

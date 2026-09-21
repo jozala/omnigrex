@@ -678,7 +678,7 @@ FROM normalized_events AS event
 JOIN webhook_deliveries AS delivery USING (delivery_id)
 WHERE event.workflow_id = $1 AND event.deferred_for_turn_id = $2
   AND event.status = 'DEFERRED'
-ORDER BY event.created_at, event.delivery_id
+ORDER BY delivery.received_at, delivery.delivery_id
 FOR UPDATE OF event, delivery`, workflowID, turnID)
 	if err != nil {
 		return workflow.PendingEventsObservation{}, fmt.Errorf("lock deferred Agent Turn events: %w", err)

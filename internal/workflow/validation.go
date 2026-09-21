@@ -33,6 +33,12 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 	}
 }
 
+// EventMetadataOf returns the metadata carried by a concrete Workflow Event.
+func EventMetadataOf(event Event) (EventMetadata, bool) {
+	metadata, _, ok := eventDetails(event)
+	return metadata, ok
+}
+
 func validEvent(definition Definition, event Event, metadata EventMetadata) bool {
 	if metadata.ID == "" || metadata.ObservedAt.IsZero() || !validWorkItem(metadata.WorkItem) {
 		return false

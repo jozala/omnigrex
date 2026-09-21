@@ -1073,7 +1073,7 @@ func (store *Store) validAgentTurnPreparationPayload(payload agentTurnPreparatio
 	if payload.Mode != workflow.AssignmentGenerationCurrent && payload.Mode != workflow.AssignmentGenerationRetained && payload.Mode != workflow.AssignmentGenerationNew {
 		return false
 	}
-	if _, ok := store.reducer.Stage(payload.Stage); !ok {
+	if _, ok := store.reducer.Definition().Stage(payload.Stage); !ok {
 		return false
 	}
 	if !store.policies.Contains(payload.Role) {
@@ -1099,8 +1099,9 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(&status, &revisio
 		revision != payload.Revision || !workflowAllowsTurns(status) || assignmentStatus != "ACTIVE" || runtimeState != "ACTIVE" {
 		return "", ErrAgentTurnPreparationFenceLost
 	}
-	stage, ok := store.reducer.Stage(payload.Stage)
-	if !ok || string(stage.State) != status || stage.Role != payload.Role || !store.reducer.AcceptsPurpose(payload.Stage, payload.Purpose) {
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(payload.Stage)
+	if !ok || string(stage.State) != status || stage.Role != payload.Role || !definition.AcceptsPurpose(payload.Stage, payload.Purpose) {
 		return "", ErrAgentTurnPreparationFenceLost
 	}
 	var active bool

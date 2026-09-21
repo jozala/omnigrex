@@ -29,7 +29,7 @@ func TestProtectedRuntimeBindingsRemainUntilCollectionFinalization(t *testing.T)
 	assertProtectedBindings(t, database, ctx, []runtimeprofile.Binding{binding})
 	prepareClosableFixture(t, pool, fixture)
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
-	closeAndSettleWithoutTurn(t, database, ctx, fixture, 61,
+	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 61,
 		"61000000-0000-4000-8000-000000000611", "protected-closure", "protected-retention",
 		observedAt, observedAt.Add(time.Hour))
 	lease, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "protected-collector", time.Minute)
@@ -179,7 +179,7 @@ VALUES ('6a000000-0000-4000-8000-000000000021',
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatalf("write database password: %v", err)
 	}
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile)
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("open Store over pre-Phase-6 schema: %v", err)
 	}

@@ -184,15 +184,12 @@ func closeWorkflowForLiveness(t *testing.T, database *store.Store, ctx context.C
 	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = int64(number), int64(number), int64(number)
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
-	observedAt := time.Now().UTC()
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 		normalizedPayload(claim.DeliveryID, "closed"),
 		store.WorkflowLocator{RepositoryID: int64(number), IssueID: int64(number), IssueNumber: int64(number)},
-		func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: workflow.EventMetadata{
-				ID: claim.DeliveryID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: snapshot.Revision,
-			}, ClosureID: fmt.Sprintf("closure-liveness-%d", number), RetainUntil: observedAt.Add(time.Hour), RetentionToken: fmt.Sprintf("retention-liveness-%d", number)})
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{EventMetadata: context.Metadata,
+				ClosureID: fmt.Sprintf("closure-liveness-%d", number), RetainUntil: context.Metadata.ObservedAt.Add(time.Hour), RetentionToken: fmt.Sprintf("retention-liveness-%d", number)}, nil
 		})
 	if err != nil || application.State != workflow.StateClosing {
 		t.Fatalf("close Workflow = (%#v, %v)", application, err)

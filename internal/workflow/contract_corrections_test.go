@@ -21,7 +21,7 @@ func TestTriggerEmitsDeclarativeDeveloperIntentWithoutAllocatingTurn(t *testing.
 		AttemptNumber: 1,
 	}
 
-	decision := workflow.Reduce(workflow.Snapshot{State: workflow.StateAbsent}, event)
+	decision := reduce(workflow.Snapshot{State: workflow.StateAbsent}, event)
 
 	if decision.Disposition != workflow.DispositionApplied {
 		t.Fatalf("disposition = %q (%q), want APPLIED", decision.Disposition, decision.Reason)

@@ -22,7 +22,6 @@ func TestCompleteWebhookTransitionCreatesFirstWorkflowWithoutConcreteAssignments
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	claim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000001"))
-	observedAt := time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC)
 	var storedReceivedAt time.Time
 	if err := pool.QueryRow(ctx, `SELECT received_at FROM webhook_deliveries WHERE delivery_id = $1`, claim.DeliveryID).Scan(&storedReceivedAt); err != nil {
 		t.Fatalf("query original received_at: %v", err)
@@ -32,15 +31,11 @@ func TestCompleteWebhookTransitionCreatesFirstWorkflowWithoutConcreteAssignments
 	}
 
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: observedAt,
-					WorkItem:         workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12},
-					ExpectedRevision: snapshot.Revision,
-				},
-				AttemptID: "50000000-0000-4000-8000-000000000001", AttemptNumber: snapshot.LastAttemptNumber + 1,
-			})
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "50000000-0000-4000-8000-000000000001", AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)
@@ -58,7 +53,7 @@ func TestGetWorkflowRepositoryReturnsImmutableOwnerAndName(t *testing.T) {
 	defer cancel()
 	claim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000019"))
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), triggerTransition(claim.DeliveryID, "50000000-0000-4000-8000-000000000019"))
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000019"))
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)
 	}
@@ -88,7 +83,7 @@ func TestCompleteWebhookTransitionRollsBackEveryWriteAndLeavesInboxReclaimable(t
 		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
 	}
 	_, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), triggerTransition(claim.DeliveryID, "not-a-uuid"))
+		normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), triggerEventFactory("not-a-uuid"))
 	if err == nil {
 		t.Fatal("CompleteWebhookTransition() forced action failure error = nil")
 	}
@@ -118,9 +113,9 @@ func TestCompleteWebhookTransitionRejectsMismatchedNormalizedDeliveryTransaction
 	called := false
 
 	_, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload("40000000-0000-4000-8000-000000000099", "trigger"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
+		normalizedPayload("40000000-0000-4000-8000-000000000099", "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
 			called = true
-			return triggerTransition(claim.DeliveryID, "50000000-0000-4000-8000-000000000012")(snapshot)
+			return triggerEventFactory("50000000-0000-4000-8000-000000000012")(context)
 		})
 	if !errors.Is(err, store.ErrNormalizedEventDeliveryMismatch) {
 		t.Fatalf("CompleteWebhookTransition() error = %v, want ErrNormalizedEventDeliveryMismatch", err)
@@ -173,7 +168,7 @@ func TestConcurrentFirstTriggersCreateOnlyOneActiveAttempt(t *testing.T) {
 			<-start
 			application, err := databases[index].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
 				normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(),
-				triggerTransition(claim.DeliveryID, []string{"50000000-0000-4000-8000-000000000003", "50000000-0000-4000-8000-000000000004"}[index]))
+				triggerEventFactory([]string{"50000000-0000-4000-8000-000000000003", "50000000-0000-4000-8000-000000000004"}[index]))
 			applications <- application
 			errs <- err
 		}(index, claim)
@@ -207,18 +202,25 @@ func TestConcurrentFirstTriggersCreateOnlyOneActiveAttempt(t *testing.T) {
 }
 
 func TestSameWorkflowTransitionsSerializeByRevision(t *testing.T) {
-	databases, _ := openPhaseFiveStores(t, 2)
+	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	initialClaim := claimWorkflowDelivery(t, databases[0], ctx, workflowDelivery("40000000-0000-4000-8000-000000000005"))
-	if _, err := databases[0].CompleteWebhookTransition(ctx, initialClaim.DeliveryID, initialClaim.ClaimToken,
-		normalizedPayload(initialClaim.DeliveryID, "trigger"), workflowLocator(), triggerTransition(initialClaim.DeliveryID, "50000000-0000-4000-8000-000000000005")); err != nil {
+	initial, err := databases[0].CompleteWebhookTransition(ctx, initialClaim.DeliveryID, initialClaim.ClaimToken,
+		normalizedPayload(initialClaim.DeliveryID, "trigger"), workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000005"))
+	if err != nil {
 		t.Fatalf("initial CompleteWebhookTransition() error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_proposals (id, workflow_id, repository_id, repository_owner, repository_name, pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha) VALUES ('60000000-0000-4000-8000-000000000005', $1, 9123, 'jozala', 'omnigrex', 77, 7, 'OPEN', 'main', 'base', 'feature', 'head-1')`, initial.WorkflowID); err != nil {
+		t.Fatal(err)
 	}
 
 	claims := make([]*store.WebhookClaim, 0, 2)
 	for _, id := range []string{"40000000-0000-4000-8000-000000000006", "40000000-0000-4000-8000-000000000007"} {
-		if inserted, err := databases[0].InsertWebhookDelivery(ctx, workflowDelivery(id)); err != nil || !inserted {
+		delivery := workflowDelivery(id)
+		delivery.EventName, delivery.Action = "pull_request", "synchronize"
+		delivery.IssueID, delivery.IssueNumber = 0, 0
+		if inserted, err := databases[0].InsertWebhookDelivery(ctx, delivery); err != nil || !inserted {
 			t.Fatalf("insert serial delivery %s = (%t, %v)", id, inserted, err)
 		}
 	}
@@ -240,10 +242,12 @@ func TestSameWorkflowTransitionsSerializeByRevision(t *testing.T) {
 			defer wait.Done()
 			<-start
 			application, err := databases[index].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-				normalizedPayload(claim.DeliveryID, "serial"), workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-					next := snapshot
-					next.Revision++
-					return workflow.Decision{Snapshot: next, Disposition: workflow.DispositionApplied, Reason: workflow.ReasonTriggered}
+				normalizedPayload(claim.DeliveryID, "serial"), store.WorkflowLocator{RepositoryID: 9123, PullRequestID: 77, PullRequestNumber: 7}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+					return workflow.SynchronizationEvent{
+						EventMetadata: context.Metadata, ChangeProposalID: 77,
+						PreviousHeadSHA: context.Snapshot.ChangeProposal.HeadSHA,
+						HeadSHA:         []string{"head-2", "head-3"}[index],
+					}, nil
 				})
 			revisions <- application.Revision
 			errs <- err
@@ -289,14 +293,11 @@ func TestCorroboratingEventDuringActiveTurnIsDeferredForThatTurn(t *testing.T) {
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 	locator := store.WorkflowLocator{RepositoryID: 1, IssueID: 1, IssueNumber: 1}
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "synchronize"), locator, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: claim.DeliveryID, ObservedAt: time.Now(), WorkItem: snapshot.WorkItem,
-					ExpectedRevision: snapshot.Revision,
-				},
+		normalizedPayload(claim.DeliveryID, "synchronize"), locator, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata:    context.Metadata,
 				ChangeProposalID: 99, PreviousHeadSHA: "old", HeadSHA: "new",
-			})
+			}, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)
@@ -336,11 +337,11 @@ func TestReviewObservationWithoutActiveTurnIsUnrelatedWithoutConsumingBudget(t *
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "review"), store.WorkflowLocator{RepositoryID: 5, PullRequestID: 55}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.ReviewObservedEvent{
-				EventMetadata: workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+		normalizedPayload(claim.DeliveryID, "review"), store.WorkflowLocator{RepositoryID: 5, PullRequestID: 55, PullRequestNumber: 15}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ReviewObservedEvent{
+				EventMetadata: context.Metadata,
 				Review:        workflow.ReviewIdentity{ID: 77, NodeID: "PRR_node", ChangeProposalID: 55, ActorID: 88, HeadSHA: "head"},
-			})
+			}, nil
 		})
 	if err != nil || application.Status != store.NormalizedEventCompleted || application.Disposition != workflow.DispositionUnrelated || application.Reason != workflow.ReasonCorroborationWithoutActiveTurn || application.Revision != 4 {
 		t.Fatalf("review application = (%#v, %v), want unrelated completion at revision 4", application, err)
@@ -381,11 +382,11 @@ func TestSynchronizationGuardsPreviousHeadAndUpdatesExistingChangeProposal(t *te
 		delivery.IssueID, delivery.IssueNumber = 0, 0
 		claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 		application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-			normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 7, PullRequestID: 77}, func(snapshot workflow.Snapshot) workflow.Decision {
-				return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-					EventMetadata:    workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+			normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 7, PullRequestID: 77, PullRequestNumber: 17}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+				return workflow.SynchronizationEvent{
+					EventMetadata:    context.Metadata,
 					ChangeProposalID: 77, PreviousHeadSHA: previousHead, HeadSHA: "new-head",
-				})
+				}, nil
 			})
 		if err != nil {
 			t.Fatalf("CompleteWebhookTransition(%s) error = %v", previousHead, err)
@@ -441,11 +442,11 @@ func TestInvalidWorkflowMarkerUsesExistingPullRequestMappingAndRejectsUnmappedPu
 	delivery.IssueID, delivery.IssueNumber = 0, 0
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 88, WorkflowMarkerInvalid: true}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-				EventMetadata:    workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 88, PullRequestNumber: 18, WorkflowMarkerInvalid: true}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata:    context.Metadata,
 				ChangeProposalID: 88, PreviousHeadSHA: "old-head", HeadSHA: "new-head",
-			})
+			}, nil
 		})
 	if err != nil || application.WorkflowID != fixture.workflowID || application.Disposition != workflow.DispositionApplied {
 		t.Fatalf("mapped synchronization with invalid marker = (%#v, %v), want mapped Workflow application", application, err)
@@ -455,11 +456,11 @@ func TestInvalidWorkflowMarkerUsesExistingPullRequestMappingAndRejectsUnmappedPu
 	unmapped.DeliveryID = "40000000-0000-4000-8000-000000000022"
 	claim = claimWorkflowDelivery(t, databases[0], ctx, unmapped)
 	_, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 99, WorkflowMarkerInvalid: true}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
-				EventMetadata:    workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+		normalizedPayload(claim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 8, PullRequestID: 99, PullRequestNumber: 19, WorkflowMarkerInvalid: true}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata:    context.Metadata,
 				ChangeProposalID: 99, PreviousHeadSHA: "old-head", HeadSHA: "new-head",
-			})
+			}, nil
 		})
 	if !errors.Is(err, store.ErrWorkflowLocatorMismatch) {
 		t.Fatalf("unmapped synchronization with invalid marker error = %v, want ErrWorkflowLocatorMismatch", err)
@@ -473,7 +474,7 @@ func TestInvalidWorkflowMarkerUsesExistingPullRequestMappingAndRejectsUnmappedPu
 	}
 }
 
-func TestAppliedTransitionCannotManufactureChangeProposal(t *testing.T) {
+func TestEventFactoryCannotManufactureChangeProposal(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 6)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -489,16 +490,15 @@ func TestAppliedTransitionCannotManufactureChangeProposal(t *testing.T) {
 	delivery.IssueID, delivery.IssueNumber = 6, 6
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 
-	_, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "proposal"), store.WorkflowLocator{RepositoryID: 6, IssueID: 6, IssueNumber: 6}, func(snapshot workflow.Snapshot) workflow.Decision {
-			next := snapshot
-			next.State = workflow.StateReviewing
-			next.Revision++
-			next.ChangeProposal = &workflow.ChangeProposal{ID: 66, Number: 16, HeadSHA: "head", Open: true}
-			return workflow.Decision{Snapshot: next, Disposition: workflow.DispositionApplied, Reason: workflow.ReasonChangeProposalReady}
+	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "proposal"), store.WorkflowLocator{RepositoryID: 6, IssueID: 6, IssueNumber: 6}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ChangeProposalObservedEvent{
+				EventMetadata:  context.Metadata,
+				ChangeProposal: workflow.ChangeProposal{ID: 66, Number: 16, HeadSHA: "head", Open: true},
+			}, nil
 		})
-	if err == nil {
-		t.Fatal("CompleteWebhookTransition() error = nil, want missing relational Change Proposal error")
+	if err != nil || application.Disposition != workflow.DispositionUnrelated {
+		t.Fatalf("CompleteWebhookTransition() = (%#v, %v), want unrelated Event", application, err)
 	}
 	var proposals int
 	var state string
@@ -529,19 +529,19 @@ func TestApplyNextPendingNormalizedEventAppliesHistoricalEventOnce(t *testing.T)
 		t.Fatalf("CompleteWebhookDelivery() compatibility write error = %v", err)
 	}
 	factoryCalls := 0
-	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		factoryCalls++
 		var decoded map[string]string
 		decodeErr := json.Unmarshal(record.Payload, &decoded)
 		if record.Status != store.NormalizedEventPending || decodeErr != nil || decoded["kind"] != "trigger" {
 			t.Errorf("pending record = %#v, want original PENDING payload", record)
 		}
-		return workflowLocator(), triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000009"), nil
+		return workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000009"), nil
 	})
 	if err != nil || !applied || application.Disposition != workflow.DispositionApplied {
 		t.Fatalf("ApplyNextPendingNormalizedEvent() = (%#v, %t, %v), want applied", application, applied, err)
 	}
-	if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		return store.WorkflowLocator{}, nil, errors.New("must not be called")
 	}); err != nil || applied {
 		t.Errorf("second ApplyNextPendingNormalizedEvent() = (%t, %v), want (false, nil)", applied, err)
@@ -592,35 +592,28 @@ func TestApplyNextPendingNormalizedEventSerializesWorkItemWithoutBlockingOthers(
 	}
 	firstResult := make(chan applicationResult, 1)
 	go func() {
-		application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 			close(selected)
 			<-release
 			locator := store.WorkflowLocator{RepositoryID: 940, IssueID: 940, IssueNumber: 940, WorkflowID: fixture.workflowID}
-			return locator, func(snapshot workflow.Snapshot) workflow.Decision {
-				return workflow.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: workflow.EventMetadata{
-					ID: record.DeliveryID, ObservedAt: record.CreatedAt, WorkItem: snapshot.WorkItem,
-					ExpectedRevision: snapshot.Revision,
-				}})
+			return locator, func(context store.WorkflowEventContext) (workflow.Event, error) {
+				return workflow.IssueReopenedEvent{EventMetadata: context.Metadata}, nil
 			}, nil
 		})
 		firstResult <- applicationResult{application: application, applied: applied, err: err}
 	}()
 	<-selected
 
-	application, applied, err := databases[1].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	application, applied, err := databases[1].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		if record.DeliveryID != unrelated.DeliveryID {
 			return store.WorkflowLocator{}, nil, errors.New("later event overtook locked Work Item event")
 		}
 		locator := store.WorkflowLocator{RepositoryID: 9123, IssueID: 457, IssueNumber: 13}
-		return locator, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.TriggerEvent{
-				EventMetadata: workflow.EventMetadata{
-					ID: record.DeliveryID, ObservedAt: record.CreatedAt,
-					WorkItem:         workflow.WorkItem{RepositoryID: 9123, IssueID: 457, IssueNumber: 13},
-					ExpectedRevision: snapshot.Revision,
-				},
-				AttemptID: "50000000-0000-4000-8000-000000000012", AttemptNumber: snapshot.LastAttemptNumber + 1,
-			})
+		return locator, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "50000000-0000-4000-8000-000000000012", AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
 		}, nil
 	})
 	if err != nil || !applied || application.DeliveryID != unrelated.DeliveryID {
@@ -658,10 +651,10 @@ func TestCompleteWebhookTransitionDefersBehindEarlierWorkflowEvent(t *testing.T)
 	transitionCalled := false
 	application, err := database.CompleteWebhookTransition(ctx, laterClaim.DeliveryID, laterClaim.ClaimToken,
 		normalizedPayload(laterClaim.DeliveryID, "synchronization"),
-		store.WorkflowLocator{RepositoryID: 941, PullRequestID: 94100, WorkflowID: fixture.workflowID},
-		func(snapshot workflow.Snapshot) workflow.Decision {
+		store.WorkflowLocator{RepositoryID: 941, PullRequestID: 94100, PullRequestNumber: 941, WorkflowID: fixture.workflowID},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
 			transitionCalled = true
-			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonEventIllegalInState}
+			return workflow.SynchronizationEvent{EventMetadata: context.Metadata, ChangeProposalID: 94100, PreviousHeadSHA: "old", HeadSHA: "new"}, nil
 		})
 	if err != nil || application.Status != store.NormalizedEventPending || application.WorkflowID != fixture.workflowID {
 		t.Fatalf("later Workflow transition = (%#v, %v), want pending behind earlier event", application, err)
@@ -701,10 +694,10 @@ func TestCompleteWebhookTransitionDefersBehindEarlierClaimedReopen(t *testing.T)
 	transitionCalled := false
 	application, err := database.CompleteWebhookTransition(ctx, laterClaim.DeliveryID, laterClaim.ClaimToken,
 		normalizedPayload(laterClaim.DeliveryID, "synchronization"),
-		store.WorkflowLocator{RepositoryID: 942, PullRequestID: 94200, WorkflowID: fixture.workflowID},
-		func(snapshot workflow.Snapshot) workflow.Decision {
+		store.WorkflowLocator{RepositoryID: 942, PullRequestID: 94200, PullRequestNumber: 942, WorkflowID: fixture.workflowID},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
 			transitionCalled = true
-			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonEventIllegalInState}
+			return workflow.SynchronizationEvent{EventMetadata: context.Metadata, ChangeProposalID: 94200, PreviousHeadSHA: "old", HeadSHA: "new"}, nil
 		})
 	if err != nil || application.Status != store.NormalizedEventPending || application.WorkflowID != fixture.workflowID {
 		t.Fatalf("later Workflow transition = (%#v, %v), want pending behind claimed reopen", application, err)
@@ -737,9 +730,9 @@ func TestApplyNextPendingNormalizedEventTerminalizesMismatchedDeliveryAndContinu
 	}
 	called := false
 
-	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		called = true
-		return workflowLocator(), triggerTransition(delivery.DeliveryID, "50000000-0000-4000-8000-000000000013"), nil
+		return workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000013"), nil
 	})
 	if applied || !errors.Is(err, store.ErrNormalizedEventDeliveryMismatch) {
 		t.Fatalf("ApplyNextPendingNormalizedEvent() = (%t, %v), want mismatch without application", applied, err)
@@ -758,8 +751,8 @@ func TestApplyNextPendingNormalizedEventTerminalizesMismatchedDeliveryAndContinu
 		t.Errorf("failed normalized event attempts = %#v, want terminal attempt 1 of 3", event)
 	}
 
-	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-		return workflowLocator(), triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000023"), nil
+	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000023"), nil
 	})
 	if err != nil || !applied || application.DeliveryID != validClaim.DeliveryID || application.Disposition != workflow.DispositionApplied {
 		t.Errorf("ApplyNextPendingNormalizedEvent() after poison = (%#v, %t, %v), want valid event applied", application, applied, err)
@@ -778,7 +771,7 @@ func TestApplyNextPendingNormalizedEventLeavesTransientFactoryFailureRetryable(t
 	}
 	transient := errors.New("database unavailable")
 
-	if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+	if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		return store.WorkflowLocator{}, nil, transient
 	}); applied || !errors.Is(err, transient) {
 		t.Fatalf("ApplyNextPendingNormalizedEvent() transient failure = (%t, %v), want retryable error", applied, err)
@@ -793,8 +786,8 @@ func TestApplyNextPendingNormalizedEventLeavesTransientFactoryFailureRetryable(t
 	if event.AttemptCount != 1 || event.MaxAttempts != 3 || event.LastError == nil || !strings.Contains(*event.LastError, transient.Error()) {
 		t.Fatalf("transiently failed normalized event attempts = %#v, want retryable attempt 1 of 3", event)
 	}
-	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-		return workflowLocator(), triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000024"), nil
+	application, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return workflowLocator(), triggerEventFactory("50000000-0000-4000-8000-000000000024"), nil
 	})
 	if err != nil || !applied || application.Disposition != workflow.DispositionApplied {
 		t.Errorf("ApplyNextPendingNormalizedEvent() retry = (%#v, %t, %v), want applied", application, applied, err)
@@ -823,7 +816,7 @@ func TestApplyNextPendingNormalizedEventExhaustsTransientFailuresAndUnblocksInbo
 	transient := errors.New("temporary dependency failure")
 
 	for attempt := 1; attempt <= 3; attempt++ {
-		if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+		if _, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 			return store.WorkflowLocator{}, nil, transient
 		}); applied || !errors.Is(err, transient) {
 			t.Fatalf("historical attempt %d = (%t, %v), want transient failure", attempt, applied, err)
@@ -864,11 +857,9 @@ func TestApplyNextPendingNormalizedEventRollsBackWorkflowBeforeDeterministicFail
 		t.Fatalf("seed historical event: %v", err)
 	}
 
-	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-		return workflowLocator(), func(snapshot workflow.Snapshot) workflow.Decision {
-			decision := triggerTransition(record.DeliveryID, "50000000-0000-4000-8000-000000000027")(snapshot)
-			decision.Actions = append(decision.Actions, workflow.StopTurnAction{})
-			return decision
+	_, applied, err := databases[0].ApplyNextPendingNormalizedEvent(ctx, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return workflowLocator(), func(store.WorkflowEventContext) (workflow.Event, error) {
+			return nil, store.ErrWorkflowDecisionInvalid
 		}, nil
 	})
 	if applied || !errors.Is(err, store.ErrWorkflowDecisionInvalid) {
@@ -907,11 +898,11 @@ func TestWorkflowMarkerAssociatesPullRequestAndConflictsWithRelation(t *testing.
 	markerDelivery.IssueID, markerDelivery.IssueNumber = 0, 0
 	claim := claimWorkflowDelivery(t, databases[0], ctx, markerDelivery)
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 3, PullRequestID: 99, WorkflowID: first.workflowID}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.ChangeProposalObservedEvent{
-				EventMetadata:  workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 3, PullRequestID: 99, PullRequestNumber: 9, WorkflowID: first.workflowID}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ChangeProposalObservedEvent{
+				EventMetadata:  context.Metadata,
 				ChangeProposal: workflow.ChangeProposal{ID: 99, Number: 9, HeadSHA: "head", Open: true},
-			})
+			}, nil
 		})
 	if err != nil || application.WorkflowID != first.workflowID || application.Disposition != workflow.DispositionUnrelated {
 		t.Fatalf("marker application = (%#v, %v), want first Workflow unrelated without an active turn", application, err)
@@ -924,8 +915,8 @@ func TestWorkflowMarkerAssociatesPullRequestAndConflictsWithRelation(t *testing.
 	conflictDelivery.DeliveryID = "40000000-0000-4000-8000-000000000015"
 	claim = claimWorkflowDelivery(t, databases[0], ctx, conflictDelivery)
 	_, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 3, PullRequestID: 100, WorkflowID: second.workflowID}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonChangeProposalUnrelated}
+		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 3, PullRequestID: 100, PullRequestNumber: 10, WorkflowID: second.workflowID}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ChangeProposalObservedEvent{EventMetadata: context.Metadata, ChangeProposal: workflow.ChangeProposal{ID: 100, Number: 10, HeadSHA: "head", Open: true}}, nil
 		})
 	if !errors.Is(err, store.ErrWorkflowLocatorMismatch) {
 		t.Fatalf("relationship/marker conflict error = %v, want ErrWorkflowLocatorMismatch", err)
@@ -940,11 +931,11 @@ func TestMissingWorkflowMarkerDoesNotCreateWorkflowFromPullRequest(t *testing.T)
 	delivery.IssueID, delivery.IssueNumber = 0, 0
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 9123, PullRequestID: 99, WorkflowID: "70000000-0000-4000-8000-000000000001"}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.ChangeProposalObservedEvent{
-				EventMetadata:  workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: claim.ReceivedAt, WorkItem: workflow.WorkItem{RepositoryID: 9123, IssueID: 99, IssueNumber: 9}, ExpectedRevision: snapshot.Revision},
+		normalizedPayload(claim.DeliveryID, "opened"), store.WorkflowLocator{RepositoryID: 9123, PullRequestID: 99, PullRequestNumber: 9, WorkflowID: "70000000-0000-4000-8000-000000000001"}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.ChangeProposalObservedEvent{
+				EventMetadata:  context.Metadata,
 				ChangeProposal: workflow.ChangeProposal{ID: 99, Number: 9, HeadSHA: "head", Open: true},
-			})
+			}, nil
 		})
 	if err != nil || application.WorkflowID != "" || application.Disposition != workflow.DispositionUnrelated {
 		t.Fatalf("missing marker application = (%#v, %v), want unrelated without Workflow", application, err)
@@ -980,13 +971,12 @@ func TestIssueClosureClosesMutationAdmissionBeforeEnqueuingStop(t *testing.T) {
 	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 2, 2, 2
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
-	observedAt := time.Now().UTC()
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "closed"), store.WorkflowLocator{RepositoryID: 2, IssueID: 2, IssueNumber: 2}, func(snapshot workflow.Snapshot) workflow.Decision {
-			return workflow.Reduce(snapshot, workflow.IssueClosedEvent{
-				EventMetadata: workflow.EventMetadata{ID: claim.DeliveryID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
-				ClosureID:     "closure-2", RetainUntil: observedAt.Add(24 * time.Hour), RetentionToken: "retention-2",
-			})
+		normalizedPayload(claim.DeliveryID, "closed"), store.WorkflowLocator{RepositoryID: 2, IssueID: 2, IssueNumber: 2}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{
+				EventMetadata: context.Metadata,
+				ClosureID:     "closure-2", RetainUntil: context.Metadata.ObservedAt.Add(24 * time.Hour), RetentionToken: "retention-2",
+			}, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() close error = %v", err)
@@ -1037,9 +1027,9 @@ WHERE id = $1`, fixture.attemptID); err != nil {
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
 	application, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 31, IssueID: 31, IssueNumber: 31}, func(workflow.Snapshot) workflow.Decision {
+		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 31, IssueID: 31, IssueNumber: 31}, func(store.WorkflowEventContext) (workflow.Event, error) {
 			t.Fatal("transition callback ran for an incompatible Workflow Definition")
-			return workflow.Decision{}
+			return nil, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)
@@ -1099,9 +1089,9 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
-		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 32, IssueID: 32, IssueNumber: 32}, func(workflow.Snapshot) workflow.Decision {
+		normalizedPayload(claim.DeliveryID, "edited"), store.WorkflowLocator{RepositoryID: 32, IssueID: 32, IssueNumber: 32}, func(store.WorkflowEventContext) (workflow.Event, error) {
 			t.Fatal("transition callback ran for an incompatible Workflow Definition")
-			return workflow.Decision{}
+			return nil, nil
 		})
 	if err != nil {
 		t.Fatalf("CompleteWebhookTransition() error = %v", err)
@@ -1142,15 +1132,12 @@ WHERE turn.id = $1`, turn.ID).Scan(
 	}
 }
 
-func triggerTransition(deliveryID, attemptID string) store.WorkflowTransition {
-	return func(snapshot workflow.Snapshot) workflow.Decision {
-		return workflow.Reduce(snapshot, workflow.TriggerEvent{
-			EventMetadata: workflow.EventMetadata{
-				ID: deliveryID, ObservedAt: time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC),
-				WorkItem: workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12}, ExpectedRevision: snapshot.Revision,
-			},
-			AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1,
-		})
+func triggerEventFactory(attemptID string) store.WorkflowEventFactory {
+	return func(context store.WorkflowEventContext) (workflow.Event, error) {
+		return workflow.TriggerEvent{
+			EventMetadata: context.Metadata,
+			AttemptID:     attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+		}, nil
 	}
 }
 

@@ -99,7 +99,7 @@ func TestReconciliationWorkerDoesNotFailAfterHeartbeatLeaseLoss(t *testing.T) {
 	lease := pendingEventReconciliationLease(json.RawMessage(`{}`))
 	durable := &reconciliationWorkerStore{
 		lease: &lease, heartbeatErr: store.ErrJobLeaseLost,
-		acknowledge: func(ctx context.Context, _ store.JobLease, _ store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+		acknowledge: func(ctx context.Context, _ store.JobLease, _ store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 			<-ctx.Done()
 			return store.PendingEventReconciliation{}, ctx.Err()
 		},
@@ -127,28 +127,28 @@ func TestReconciliationWorkerClassifiesFailures(t *testing.T) {
 	}{
 		{
 			name: "transient acknowledgement", payload: json.RawMessage(`{}`), wantErrorIs: transientErr,
-			acknowledge: func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				return store.PendingEventReconciliation{}, transientErr
 			},
 			wantFailures: 1, wantRetryable: true,
 		},
 		{
 			name: "synchronization causal gap", payload: json.RawMessage(`{}`), wantErrorIs: store.ErrPendingEventCausalGap,
-			acknowledge: func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				return store.PendingEventReconciliation{}, store.ErrPendingEventCausalGap
 			},
 			wantFailures: 1, wantRetryable: true,
 		},
 		{
 			name: "malformed job payload", payload: json.RawMessage(`{}`), wantErrorIs: store.ErrPendingEventReconciliationPayloadInvalid,
-			acknowledge: func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				return store.PendingEventReconciliation{}, store.ErrPendingEventReconciliationPayloadInvalid
 			},
 			wantFailures: 1, wantRetryable: false,
 		},
 		{
 			name: "malformed normalized event", payload: json.RawMessage(`{}`),
-			acknowledge: func(_ context.Context, _ store.JobLease, factory store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(_ context.Context, _ store.JobLease, factory store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				_, _, err := factory(store.NormalizedEventRecord{DeliveryID: "bad-event", Payload: json.RawMessage(`{`), CreatedAt: time.Now()})
 				return store.PendingEventReconciliation{}, err
 			},
@@ -156,14 +156,14 @@ func TestReconciliationWorkerClassifiesFailures(t *testing.T) {
 		},
 		{
 			name: "successor conflict", payload: json.RawMessage(`{}`), wantErrorIs: store.ErrWorkflowSuccessorConflict,
-			acknowledge: func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				return store.PendingEventReconciliation{}, store.ErrWorkflowSuccessorConflict
 			},
 			wantFailures: 1, wantRetryable: false,
 		},
 		{
 			name: "stale reconciliation fence", payload: json.RawMessage(`{}`), wantErrorIs: store.ErrPendingEventReconciliationFenceLost,
-			acknowledge: func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+			acknowledge: func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 				return store.PendingEventReconciliation{}, store.ErrPendingEventReconciliationFenceLost
 			},
 		},
@@ -293,7 +293,7 @@ func pendingEventReconciliationLease(payload json.RawMessage) store.JobLease {
 	}, Attempt: 1}
 }
 
-type reconciliationAcknowledger func(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error)
+type reconciliationAcknowledger func(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error)
 
 type reconciliationFailure struct {
 	cause          error
@@ -353,7 +353,7 @@ func (durable *reconciliationWorkerStore) HeartbeatJob(_ context.Context, _ stor
 	return err
 }
 
-func (durable *reconciliationWorkerStore) AcknowledgePendingEventReconciliation(ctx context.Context, lease store.JobLease, factory store.PendingTransitionFactory) (store.PendingEventReconciliation, error) {
+func (durable *reconciliationWorkerStore) AcknowledgePendingEventReconciliation(ctx context.Context, lease store.JobLease, factory store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error) {
 	durable.mutex.Lock()
 	durable.acknowledgements++
 	durable.acknowledged = lease
@@ -374,11 +374,18 @@ func (durable *reconciliationWorkerStore) AcknowledgePendingEventReconciliation(
 			return store.PendingEventReconciliation{}, ctx.Err()
 		}
 	}
-	locator, transition, err := factory(record)
+	locator, eventFactory, err := factory(record)
 	if err != nil {
 		return store.PendingEventReconciliation{}, err
 	}
-	decision := transition(snapshot)
+	domainEvent, err := eventFactory(store.WorkflowEventContext{
+		Snapshot: snapshot,
+		Metadata: testEventMetadata(record.DeliveryID, record.CreatedAt, snapshot, locator),
+	})
+	if err != nil {
+		return store.PendingEventReconciliation{}, err
+	}
+	decision := webhookTestReducer.Reduce(snapshot, domainEvent)
 	durable.mutex.Lock()
 	durable.locator, durable.decision = locator, decision
 	durable.mutex.Unlock()

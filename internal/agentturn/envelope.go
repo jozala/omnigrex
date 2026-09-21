@@ -41,27 +41,17 @@ type eventEnvelope struct {
 	MCPCapabilities      []string               `json:"mcp_capabilities"`
 }
 
-// BuildEventEnvelope projects durable Agent Turn context into one canonical JSON ACP text block.
-func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string) ([]acp.ContentBlock, error) {
-	return BuildEventEnvelopeWithConfiguration(execution, currentHeadSHA, workflow.BuiltinReducer(), role.BuiltinPolicyCatalog())
-}
-
-// BuildEventEnvelopeWithPolicies projects a Turn using the deployment's Role capabilities.
-func BuildEventEnvelopeWithPolicies(execution store.AgentTurnExecutionContext, currentHeadSHA string, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
-	return BuildEventEnvelopeWithConfiguration(execution, currentHeadSHA, workflow.BuiltinReducer(), policies)
-}
-
-// BuildEventEnvelopeWithConfiguration projects a Turn using the deployment's Workflow and Role policies.
-func BuildEventEnvelopeWithConfiguration(execution store.AgentTurnExecutionContext, currentHeadSHA string, reducer workflow.Reducer, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
+// BuildEventEnvelope projects a Turn using the deployment's Workflow Definition and Role policies.
+func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
 	policy, ok := policies.Lookup(execution.Assignment.Role)
 	if !ok {
 		return nil, fmt.Errorf("%w: Role policy", ErrInvalidEventEnvelope)
 	}
-	if err := validateEventEnvelopeContext(execution, currentHeadSHA, reducer, policy); err != nil {
+	if err := validateEventEnvelopeContext(execution, currentHeadSHA, definition, policy); err != nil {
 		return nil, err
 	}
 
-	expectedOutcomes := reducer.ExpectedOutcomes(execution.Turn.Stage)
+	expectedOutcomes := definition.ExpectedOutcomes(execution.Turn.Stage)
 	allowedOutcomes := append(append([]workflow.TurnOutcome(nil), expectedOutcomes...), workflow.TurnOutcomeBlocked)
 	capabilities := append([]string(nil), policy.MCPTools...)
 	envelope := eventEnvelope{
@@ -85,16 +75,16 @@ func BuildEventEnvelopeWithConfiguration(execution store.AgentTurnExecutionConte
 	return []acp.ContentBlock{acp.TextContent(string(encoded))}, nil
 }
 
-func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string, reducer workflow.Reducer, policy role.Policy) error {
+func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policy role.Policy) error {
 	assignment := execution.Assignment
 	session := execution.Session
 	turn := execution.Turn
-	stage, stageExists := reducer.Stage(turn.Stage)
+	stage, stageExists := definition.Stage(turn.Stage)
 	if !validEnvelopeString(execution.WorkflowID) || execution.Repository.ID <= 0 || execution.Issue.ID <= 0 || execution.Issue.Number <= 0 ||
 		!validEnvelopeString(assignment.ID) || assignment.WorkflowID != execution.WorkflowID || assignment.Generation <= 0 ||
 		!validEnvelopeString(session.ID) || session.AgentAssignmentID != assignment.ID ||
 		!validEnvelopeString(turn.ID) || turn.AgentAssignmentID != assignment.ID || turn.AgentSessionID != session.ID ||
-		!validEnvelopeString(currentHeadSHA) || policy.Role != assignment.Role || !stageExists || stage.Role != assignment.Role || !reducer.AcceptsPurpose(turn.Stage, turn.Purpose) {
+		!validEnvelopeString(currentHeadSHA) || policy.Role != assignment.Role || !stageExists || stage.Role != assignment.Role || !definition.AcceptsPurpose(turn.Stage, turn.Purpose) {
 		return ErrInvalidEventEnvelope
 	}
 	if execution.ChangeProposal == nil {

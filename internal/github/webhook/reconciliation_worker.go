@@ -16,7 +16,7 @@ const maximumReconciliationWorkerDuration = 365 * 24 * time.Hour
 type ReconciliationWorkerStore interface {
 	ClaimJobKind(context.Context, string, string, string, time.Duration) (*store.JobLease, error)
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
-	AcknowledgePendingEventReconciliation(context.Context, store.JobLease, store.PendingTransitionFactory) (store.PendingEventReconciliation, error)
+	AcknowledgePendingEventReconciliation(context.Context, store.JobLease, store.PendingWorkflowEventFactory) (store.PendingEventReconciliation, error)
 	AcknowledgePendingEventReconciliationFailure(context.Context, store.JobLease, error, bool, time.Duration) (store.WorkflowActionFailureAcknowledgement, error)
 }
 
@@ -33,7 +33,7 @@ type ReconciliationWorkerConfig struct {
 // ReconciliationWorker makes RECONCILE_PENDING_EVENTS actions reachable from the Workflow queue.
 type ReconciliationWorker struct {
 	store             ReconciliationWorkerStore
-	transitionFactory store.PendingTransitionFactory
+	eventFactory      store.PendingWorkflowEventFactory
 	claimOwner        string
 	leaseDuration     time.Duration
 	heartbeatInterval time.Duration
@@ -44,7 +44,7 @@ type ReconciliationWorker struct {
 
 var _ ReconciliationWorkerStore = (*store.Store)(nil)
 
-// NewReconciliationWorker binds reconciliation to the exact transition semantics configured on processor.
+// NewReconciliationWorker binds reconciliation to the normalized Event semantics configured on processor.
 func NewReconciliationWorker(workerStore ReconciliationWorkerStore, processor *Processor, config ReconciliationWorkerConfig) (*ReconciliationWorker, error) {
 	if workerStore == nil || processor == nil {
 		return nil, errors.New("pending-event reconciliation Worker dependency is nil")
@@ -61,7 +61,7 @@ func NewReconciliationWorker(workerStore ReconciliationWorkerStore, processor *P
 		return nil, errors.New("pending-event reconciliation Worker polling and retry timing is invalid")
 	}
 	return &ReconciliationWorker{
-		store: workerStore, transitionFactory: processor.pendingTransition,
+		store: workerStore, eventFactory: processor.pendingEventFactory,
 		claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		retryDelay: config.RetryDelay, onError: config.OnError,
@@ -88,7 +88,7 @@ func (worker *ReconciliationWorker) ProcessNext(ctx context.Context) (bool, erro
 		heartbeatDone <- heartbeatErr
 	}()
 
-	_, operationErr := worker.store.AcknowledgePendingEventReconciliation(workCtx, *lease, worker.transitionFactory)
+	_, operationErr := worker.store.AcknowledgePendingEventReconciliation(workCtx, *lease, worker.eventFactory)
 	if operationErr != nil {
 		operationErr = fmt.Errorf("acknowledge pending-event reconciliation: %w", operationErr)
 	}

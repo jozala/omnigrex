@@ -20,50 +20,50 @@ type Store struct {
 	policies role.PolicyCatalog
 }
 
-// Open connects to PostgreSQL, verifies connectivity, and applies migrations.
-func Open(ctx context.Context, databaseURL, passwordFile string) (*Store, error) {
-	return OpenWithReducerAndPolicies(ctx, databaseURL, passwordFile, workflow.BuiltinReducer(), role.BuiltinPolicyCatalog())
+// Config contains the deployment semantics required by a writable Store.
+type Config struct {
+	Reducer  workflow.Reducer
+	Policies role.PolicyCatalog
 }
 
-// OpenWithReducer connects to PostgreSQL and installs the deployment's constructed Workflow Reducer.
-func OpenWithReducer(ctx context.Context, databaseURL, passwordFile string, reducer workflow.Reducer) (*Store, error) {
-	policies, err := role.NewBuiltinPolicyCatalog(reducer.Roles())
-	if err != nil {
-		return nil, fmt.Errorf("open database store: configure Role policies: %w", err)
-	}
-	return OpenWithReducerAndPolicies(ctx, databaseURL, passwordFile, reducer, policies)
+// ReadOnlyStore owns a read-only PostgreSQL pool used for readiness and schema inspection.
+type ReadOnlyStore struct {
+	pool *pgxpool.Pool
 }
 
-// OpenWithReducerAndPolicies connects to PostgreSQL and installs the deployment's Workflow and Role policies.
-func OpenWithReducerAndPolicies(ctx context.Context, databaseURL, passwordFile string, reducer workflow.Reducer, policies role.PolicyCatalog) (*Store, error) {
-	if !reducer.Valid() {
+// Open connects to PostgreSQL and installs the deployment's explicit Workflow and Role configuration.
+func Open(ctx context.Context, databaseURL, passwordFile string, config Config) (*Store, error) {
+	if !config.Reducer.Valid() {
 		return nil, errors.New("open database store: invalid Workflow Reducer")
 	}
-	if !sameRoles(reducer.Roles(), policies.Roles()) {
+	definition := config.Reducer.Definition()
+	if !sameRoles(definition.Roles(), config.Policies.Roles()) {
 		return nil, errors.New("open database store: Role policies do not match Workflow Definition")
 	}
-	if err := reducer.ValidateRolePolicies(policies); err != nil {
+	if err := definition.ValidateRolePolicies(config.Policies); err != nil {
 		return nil, fmt.Errorf("open database store: validate Role capabilities: %w", err)
 	}
-	store, err := open(ctx, databaseURL, passwordFile, false)
+	pool, err := openPool(ctx, databaseURL, passwordFile, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := migrations.Run(ctx, store.pool); err != nil {
-		store.Close()
+	if err := migrations.Run(ctx, pool); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
-	store.reducer = reducer
-	store.policies = policies
-	return store, nil
+	return &Store{pool: pool, reducer: config.Reducer, policies: config.Policies}, nil
 }
 
 // OpenReadOnly connects to PostgreSQL without applying migrations and makes every connection read-only.
-func OpenReadOnly(ctx context.Context, databaseURL, passwordFile string) (*Store, error) {
-	return open(ctx, databaseURL, passwordFile, true)
+func OpenReadOnly(ctx context.Context, databaseURL, passwordFile string) (*ReadOnlyStore, error) {
+	pool, err := openPool(ctx, databaseURL, passwordFile, true)
+	if err != nil {
+		return nil, err
+	}
+	return &ReadOnlyStore{pool: pool}, nil
 }
 
-func open(ctx context.Context, databaseURL, passwordFile string, readOnly bool) (*Store, error) {
+func openPool(ctx context.Context, databaseURL, passwordFile string, readOnly bool) (*pgxpool.Pool, error) {
 	password, err := readPassword(passwordFile)
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func open(ctx context.Context, databaseURL, passwordFile string, readOnly bool) 
 		pool.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-	return &Store{pool: pool, reducer: workflow.BuiltinReducer(), policies: role.BuiltinPolicyCatalog()}, nil
+	return pool, nil
 }
 
 func sameRoles(left, right []role.ID) bool {
@@ -121,28 +121,69 @@ func (store *Store) rolesUsingToolAuthority(tool string, authority role.Credenti
 
 // Ready reports whether PostgreSQL can answer a request through the pool.
 func (store *Store) Ready(ctx context.Context) error {
-	if store == nil || store.pool == nil {
+	return ready(ctx, storePool(store))
+}
+
+// CheckMigrations verifies that the database schema matches the bundled migration history.
+func (store *Store) CheckMigrations(ctx context.Context) error {
+	return checkMigrations(ctx, storePool(store))
+}
+
+// Close releases all PostgreSQL connections owned by the store.
+func (store *Store) Close() {
+	closePool(storePool(store))
+}
+
+// Ready reports whether PostgreSQL can answer a request through the read-only pool.
+func (store *ReadOnlyStore) Ready(ctx context.Context) error {
+	return ready(ctx, readOnlyStorePool(store))
+}
+
+// CheckMigrations verifies that the read-only database schema matches the bundled migration history.
+func (store *ReadOnlyStore) CheckMigrations(ctx context.Context) error {
+	return checkMigrations(ctx, readOnlyStorePool(store))
+}
+
+// Close releases all PostgreSQL connections owned by the read-only store.
+func (store *ReadOnlyStore) Close() {
+	closePool(readOnlyStorePool(store))
+}
+
+func ready(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
 		return errors.New("database store is not open")
 	}
-	if err := store.pool.Ping(ctx); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}
 	return nil
 }
 
-// CheckMigrations verifies that the database schema matches the bundled migration history.
-func (store *Store) CheckMigrations(ctx context.Context) error {
-	if store == nil || store.pool == nil {
+func checkMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
 		return errors.New("database store is not open")
 	}
-	return migrations.Check(ctx, store.pool)
+	return migrations.Check(ctx, pool)
 }
 
-// Close releases all PostgreSQL connections owned by the store.
-func (store *Store) Close() {
-	if store != nil && store.pool != nil {
-		store.pool.Close()
+func closePool(pool *pgxpool.Pool) {
+	if pool != nil {
+		pool.Close()
 	}
+}
+
+func storePool(store *Store) *pgxpool.Pool {
+	if store == nil {
+		return nil
+	}
+	return store.pool
+}
+
+func readOnlyStorePool(store *ReadOnlyStore) *pgxpool.Pool {
+	if store == nil {
+		return nil
+	}
+	return store.pool
 }
 
 func readPassword(path string) (string, error) {

@@ -234,9 +234,12 @@ FROM jobs WHERE agent_turn_settlement_id = $1`, settled.ID, deferredID).Scan(
 			t.Fatalf("claim settlement reconciliation = (%#v, %v)", reconciliationLease, err)
 		}
 		acknowledgement, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease,
-			func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
-				return store.WorkflowLocator{RepositoryID: 807, IssueID: 807, IssueNumber: 807}, func(snapshot workflow.Snapshot) workflow.Decision {
-					return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonCorroborationWithoutActiveTurn}
+			func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+				return store.WorkflowLocator{RepositoryID: 807, IssueID: 807, IssueNumber: 807}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+					return workflow.ChangeProposalObservedEvent{
+						EventMetadata:  context.Metadata,
+						ChangeProposal: workflow.ChangeProposal{ID: 80700, Number: 807, HeadSHA: "head", Open: true},
+					}, nil
 				}, nil
 			})
 		if err != nil || acknowledgement.SuccessorJobID == "" {
@@ -347,6 +350,32 @@ FROM jobs WHERE agent_turn_settlement_id = $1`, settled.ID, deferredID).Scan(
 					{deliveryID: "78320000-0000-4000-8000-000000000002", eventName: "pull_request", action: "synchronize", beforeSHA: "head-1", headSHA: "head-2"},
 				},
 			},
+			{
+				name: "receipt order wins over normalization order", number: 850,
+				latestObservedHead: "head-2", finalHead: "head-2", appliedSynchronizations: 1,
+				expectedFactoryOrder: []string{
+					"78500000-0000-4000-8000-000000000003",
+					"78500000-0000-4000-8000-000000000002",
+					"78500000-0000-4000-8000-000000000001",
+				},
+				events: []deferredSettlementEvent{
+					{deliveryID: "78500000-0000-4000-8000-000000000001", eventName: "pull_request_review", action: "submitted", headSHA: "head-1", receivedAt: time.Date(2026, time.September, 4, 10, 5, 0, 3_000_000, time.UTC)},
+					{deliveryID: "78500000-0000-4000-8000-000000000002", eventName: "pull_request", action: "opened", headSHA: "open-noise", receivedAt: time.Date(2026, time.September, 4, 10, 5, 0, 2_000_000, time.UTC)},
+					{deliveryID: "78500000-0000-4000-8000-000000000003", eventName: "pull_request", action: "synchronize", beforeSHA: "head-1", headSHA: "head-2", receivedAt: time.Date(2026, time.September, 4, 10, 5, 0, 1_000_000, time.UTC)},
+				},
+			},
+			{
+				name: "latest synchronization follows receipt order", number: 851,
+				latestObservedHead: "head-3", finalHead: "head-3", appliedSynchronizations: 2,
+				expectedFactoryOrder: []string{
+					"78510000-0000-4000-8000-000000000002",
+					"78510000-0000-4000-8000-000000000001",
+				},
+				events: []deferredSettlementEvent{
+					{deliveryID: "78510000-0000-4000-8000-000000000001", eventName: "pull_request", action: "synchronize", beforeSHA: "head-2", headSHA: "head-3", receivedAt: time.Date(2026, time.September, 4, 10, 5, 0, 2_000_000, time.UTC)},
+					{deliveryID: "78510000-0000-4000-8000-000000000002", eventName: "pull_request", action: "synchronize", beforeSHA: "head-1", headSHA: "head-2", receivedAt: time.Date(2026, time.September, 4, 10, 5, 0, 1_000_000, time.UTC)},
+				},
+			},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -410,11 +439,11 @@ WHERE attempt.id = $1`, fixture.attemptID, review.ID, settled.ReconciliationJobI
 					t.Fatalf("claim synchronization-race reconciliation = (%#v, %v)", reconciliationLease, err)
 				}
 				var factoryOrder []string
-				factory := settlementPendingTransitionFactory
+				factory := settlementPendingEventFactory
 				if len(test.expectedFactoryOrder) > 0 {
-					factory = func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+					factory = func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 						factoryOrder = append(factoryOrder, record.DeliveryID)
-						return settlementPendingTransitionFactory(record)
+						return settlementPendingEventFactory(record)
 					}
 				}
 				acknowledgement, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease, factory)
@@ -549,7 +578,7 @@ WHERE attempt.id = $1`, fixture.attemptID, review.ID).Scan(&used, &accepted); er
 		if err != nil || reconciliationLease == nil || reconciliationLease.ID != settled.ReconciliationJobID {
 			t.Fatalf("claim same-head review reconciliation = (%#v, %v)", reconciliationLease, err)
 		}
-		if _, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease, settlementPendingTransitionFactory); err != nil {
+		if _, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease, settlementPendingEventFactory); err != nil {
 			t.Fatalf("acknowledge same-head review reconciliation = %v", err)
 		}
 	})
@@ -574,7 +603,7 @@ WHERE attempt.id = $1`, fixture.attemptID, review.ID).Scan(&used, &accepted); er
 		if err != nil || reconciliationLease == nil || reconciliationLease.ID != settled.ReconciliationJobID {
 			t.Fatalf("claim same-head reconciliation = (%#v, %v)", reconciliationLease, err)
 		}
-		acknowledgement, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease, settlementPendingTransitionFactory)
+		acknowledgement, err := database.AcknowledgePendingEventReconciliation(ctx, *reconciliationLease, settlementPendingEventFactory)
 		if err != nil || acknowledgement.SuccessorJobID == "" || acknowledgement.Successor.ExpectedHeadSHA != "head-2" {
 			t.Fatalf("acknowledge same-head redelivery = (%#v, %v)", acknowledgement, err)
 		}
@@ -611,7 +640,7 @@ WHERE proposal.workflow_id = $1 AND proposal.active AND event.delivery_id = $2`,
 		if err != nil || lease == nil || lease.ID != settled.ReconciliationJobID {
 			t.Fatalf("claim malformed reconciliation = (%#v, %v)", lease, err)
 		}
-		if _, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingTransitionFactory); !errors.Is(err, store.ErrPendingNormalizedEventInvalid) {
+		if _, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingEventFactory); !errors.Is(err, store.ErrPendingNormalizedEventInvalid) {
 			t.Fatalf("malformed synchronization replay error = %v", err)
 		}
 		failure, err := database.AcknowledgePendingEventReconciliationFailure(ctx, *lease, store.ErrPendingNormalizedEventInvalid, false, 0)
@@ -687,15 +716,15 @@ JOIN jobs AS job ON job.id = $2 WHERE event.delivery_id = $1`, deliveryID, settl
 					t.Fatalf("claim ambiguous reconciliation = (%#v, %v)", lease, err)
 				}
 				factoryCalled := false
-				_, err = database.AcknowledgePendingEventReconciliation(ctx, *lease, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+				_, err = database.AcknowledgePendingEventReconciliation(ctx, *lease, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 					factoryCalled = true
-					return settlementPendingTransitionFactory(record)
+					return settlementPendingEventFactory(record)
 				})
 				if !errors.Is(err, store.ErrPendingEventCausalGap) {
 					t.Fatalf("ambiguous reconciliation error = %v, want ErrPendingEventCausalGap", err)
 				}
 				if factoryCalled {
-					t.Error("transition factory called for ambiguous synchronization topology")
+					t.Error("event factory called for ambiguous synchronization topology")
 				}
 				var head, jobStatus string
 				var deferred, handoffs int
@@ -736,7 +765,7 @@ WHERE proposal.workflow_id = $1 AND proposal.active`, fixture.workflowID, settle
 			if err != nil || lease == nil || lease.ID != settled.ReconciliationJobID || lease.Attempt != attempt {
 				t.Fatalf("claim causal-gap attempt %d = (%#v, %v)", attempt, lease, err)
 			}
-			if _, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingTransitionFactory); !errors.Is(err, store.ErrPendingEventCausalGap) {
+			if _, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingEventFactory); !errors.Is(err, store.ErrPendingEventCausalGap) {
 				t.Fatalf("causal-gap attempt %d error = %v", attempt, err)
 			}
 			var eventStatus, jobStatus string
@@ -924,7 +953,7 @@ func TestPendingEventCausalReplayIsSerializedAcrossStores(t *testing.T) {
 	for _, database := range databases {
 		go func(database *store.Store) {
 			<-start
-			ack, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingTransitionFactory)
+			ack, err := database.AcknowledgePendingEventReconciliation(ctx, *lease, settlementPendingEventFactory)
 			results <- result{ack: ack, err: err}
 		}(database)
 	}
@@ -1078,10 +1107,14 @@ type deferredSettlementEvent struct {
 	beforeSHA  string
 	headSHA    string
 	createdAt  time.Time
+	receivedAt time.Time
 }
 
 func insertDeferredSettlementNormalizedEvent(t *testing.T, pool *pgxpool.Pool, ctx context.Context, workflowID, turnID string, event deferredSettlementEvent) {
 	t.Helper()
+	if event.receivedAt.IsZero() {
+		event.receivedAt = event.createdAt
+	}
 	var repositoryID int64
 	var repositoryOwner, repositoryName string
 	if err := pool.QueryRow(ctx, `SELECT repository_id, repository_owner, repository_name FROM workflows WHERE id = $1`, workflowID).Scan(&repositoryID, &repositoryOwner, &repositoryName); err != nil {
@@ -1113,11 +1146,11 @@ func insertDeferredSettlementNormalizedEvent(t *testing.T, pool *pgxpool.Pool, c
 	if _, err := pool.Exec(ctx, `
 INSERT INTO webhook_deliveries (
     delivery_id, event_name, action, repository_id, repository_owner,
-    repository_name, headers, payload, status, processed_at
+	    repository_name, headers, payload, status, received_at, processed_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb,
-		'{}'::bytea, 'PROCESSED', clock_timestamp())`, event.deliveryID, event.eventName, event.action,
-		repositoryID, repositoryOwner, repositoryName); err != nil {
+		'{}'::bytea, 'PROCESSED', $7, clock_timestamp())`, event.deliveryID, event.eventName, event.action,
+		repositoryID, repositoryOwner, repositoryName, event.receivedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -1131,7 +1164,7 @@ VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 1, $4,
 	}
 }
 
-func settlementPendingTransitionFactory(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+func settlementPendingEventFactory(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 	var event struct {
 		EventName  string `json:"event"`
 		Action     string `json:"action"`
@@ -1156,33 +1189,33 @@ func settlementPendingTransitionFactory(record store.NormalizedEventRecord) (sto
 	if err := json.Unmarshal(record.Payload, &event); err != nil {
 		return store.WorkflowLocator{}, nil, err
 	}
-	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID, PullRequestID: event.PullRequest.ID}
-	transition := func(snapshot workflow.Snapshot) workflow.Decision {
-		metadata := workflow.EventMetadata{ID: record.DeliveryID, ObservedAt: record.CreatedAt, WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision}
+	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID, PullRequestID: event.PullRequest.ID, PullRequestNumber: event.PullRequest.Number}
+	eventFactory := func(context store.WorkflowEventContext) (workflow.Event, error) {
+		metadata := context.Metadata
 		switch event.EventName + "." + event.Action {
 		case "pull_request.synchronize":
-			return workflow.Reduce(snapshot, workflow.SynchronizationEvent{
+			return workflow.SynchronizationEvent{
 				EventMetadata: metadata, ChangeProposalID: event.PullRequest.ID,
 				PreviousHeadSHA: event.PullRequest.BeforeSHA, HeadSHA: event.PullRequest.HeadSHA,
-			})
+			}, nil
 		case "pull_request.opened":
-			return workflow.Reduce(snapshot, workflow.ChangeProposalObservedEvent{
+			return workflow.ChangeProposalObservedEvent{
 				EventMetadata:  metadata,
 				ChangeProposal: workflow.ChangeProposal{ID: event.PullRequest.ID, Number: event.PullRequest.Number, HeadSHA: event.PullRequest.HeadSHA, Open: true},
-			})
+			}, nil
 		case "pull_request_review.submitted":
-			return workflow.Reduce(snapshot, workflow.ReviewObservedEvent{
+			return workflow.ReviewObservedEvent{
 				EventMetadata: metadata,
 				Review: workflow.ReviewIdentity{
 					ID: event.Review.ID, NodeID: event.Review.NodeID, ChangeProposalID: event.PullRequest.ID,
 					ActorID: event.Review.User.ID, HeadSHA: event.Review.CommitID,
 				},
-			})
+			}, nil
 		default:
-			return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonInvalidEvent}
+			return nil, store.ErrPendingNormalizedEventInvalid
 		}
 	}
-	return locator, transition, nil
+	return locator, eventFactory, nil
 }
 
 func assertSettledExecution(t *testing.T, pool *pgxpool.Pool, ctx context.Context, lease store.AgentTurnLease, settled store.AgentTurnSettlement) {

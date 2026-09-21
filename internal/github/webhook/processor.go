@@ -19,8 +19,8 @@ var errInvalidPendingNormalizedEvent = store.ErrPendingNormalizedEventInvalid
 type ProcessorStore interface {
 	ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
 	CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error
-	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowTransition) (store.WorkflowApplication, error)
-	ApplyNextPendingNormalizedEvent(context.Context, store.PendingTransitionFactory) (store.WorkflowApplication, bool, error)
+	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error)
+	ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error)
 	AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error
 }
 
@@ -30,7 +30,6 @@ type ProcessorConfig struct {
 	LeaseDuration               time.Duration
 	IdlePollInterval            time.Duration
 	AssignmentRetentionDuration time.Duration
-	Reducer                     *workflow.Reducer
 	OnError                     func(error)
 }
 
@@ -41,7 +40,6 @@ type Processor struct {
 	leaseDuration               time.Duration
 	idlePollInterval            time.Duration
 	assignmentRetentionDuration time.Duration
-	reducer                     workflow.Reducer
 	onError                     func(error)
 }
 
@@ -62,17 +60,12 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 	if config.AssignmentRetentionDuration <= 0 {
 		return nil, errors.New("webhook processor assignment retention duration must be positive")
 	}
-	reducer := workflow.BuiltinReducer()
-	if config.Reducer != nil {
-		reducer = *config.Reducer
-	}
 	return &Processor{
 		store:                       processorStore,
 		claimOwner:                  config.ClaimOwner,
 		leaseDuration:               config.LeaseDuration,
 		idlePollInterval:            config.IdlePollInterval,
 		assignmentRetentionDuration: config.AssignmentRetentionDuration,
-		reducer:                     reducer,
 		onError:                     config.OnError,
 	}, nil
 }
@@ -80,7 +73,7 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 // ProcessNext durably applies at most one historical event or claimed delivery.
 // The returned boolean reports whether work was processed.
 func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
-	if _, applied, err := processor.store.ApplyNextPendingNormalizedEvent(ctx, processor.pendingTransition); err != nil {
+	if _, applied, err := processor.store.ApplyNextPendingNormalizedEvent(ctx, processor.pendingEventFactory); err != nil {
 		return false, fmt.Errorf("apply pending normalized event: %w", err)
 	} else if applied {
 		return true, nil
@@ -116,12 +109,12 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			cause := fmt.Errorf("encode normalized webhook delivery %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
-		locator, transition, err := processor.transition(*normalization.Event, claim.ReceivedAt)
+		locator, eventFactory, err := processor.eventFactory(*normalization.Event)
 		if err != nil {
 			cause := fmt.Errorf("map normalized webhook delivery %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
-		if _, err := processor.store.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, payload, locator, transition); err != nil {
+		if _, err := processor.store.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, payload, locator, eventFactory); err != nil {
 			cause := fmt.Errorf("complete webhook transition %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
@@ -158,24 +151,21 @@ func deterministicWebhookFailure(err error) bool {
 		errors.Is(err, store.ErrWorkflowDecisionInvalid)
 }
 
-func (processor *Processor) pendingTransition(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowTransition, error) {
+func (processor *Processor) pendingEventFactory(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 	var event NormalizedEvent
 	if err := json.Unmarshal(record.Payload, &event); err != nil {
 		return store.WorkflowLocator{}, nil, fmt.Errorf("%w: decode normalized event %s: %v", errInvalidPendingNormalizedEvent, record.DeliveryID, err)
 	}
-	return processor.transition(event, record.CreatedAt)
+	return processor.eventFactory(event)
 }
 
-func (processor *Processor) transition(event NormalizedEvent, observedAt time.Time) (store.WorkflowLocator, store.WorkflowTransition, error) {
-	if observedAt.IsZero() {
-		return store.WorkflowLocator{}, nil, fmt.Errorf("%w: normalized event observed timestamp is zero", errInvalidPendingNormalizedEvent)
-	}
+func (processor *Processor) eventFactory(event NormalizedEvent) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID}
 	if event.Issue != nil {
 		locator.IssueID, locator.IssueNumber = event.Issue.ID, event.Issue.Number
 	}
 	if event.PullRequest != nil {
-		locator.PullRequestID = event.PullRequest.ID
+		locator.PullRequestID, locator.PullRequestNumber = event.PullRequest.ID, event.PullRequest.Number
 		locator.WorkflowID = event.PullRequest.WorkflowMarkerID
 		locator.WorkflowMarkerInvalid = event.PullRequest.WorkflowMarkerInvalid
 	}
@@ -198,54 +188,41 @@ func (processor *Processor) transition(event NormalizedEvent, observedAt time.Ti
 		return store.WorkflowLocator{}, nil, err
 	}
 
-	transition := func(snapshot workflow.Snapshot) workflow.Decision {
-		workItem := snapshot.WorkItem
-		if snapshot.State == workflow.StateAbsent {
-			switch {
-			case event.Issue != nil:
-				workItem = workflow.WorkItem{RepositoryID: event.Repository.ID, IssueID: event.Issue.ID, IssueNumber: event.Issue.Number}
-			case event.PullRequest != nil:
-				workItem = workflow.WorkItem{RepositoryID: event.Repository.ID, IssueID: event.PullRequest.ID, IssueNumber: event.PullRequest.Number}
-			}
-		}
-		metadata := workflow.EventMetadata{ID: event.DeliveryID, ObservedAt: observedAt, WorkItem: workItem, ExpectedRevision: snapshot.Revision}
+	eventFactory := func(context store.WorkflowEventContext) (workflow.Event, error) {
+		metadata := context.Metadata
 		switch event.EventName + "." + event.Action {
 		case "issues.labeled":
 			if event.Issue == nil || event.Label != "omnigrex:run" {
-				return invalidNormalizedDecision(snapshot)
+				return nil, fmt.Errorf("%w: invalid issues.labeled event", errInvalidPendingNormalizedEvent)
 			}
-			return processor.reducer.Reduce(snapshot, workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: snapshot.LastAttemptNumber + 1})
+			return workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
 		case "issues.closed":
 			if event.Issue == nil {
-				return invalidNormalizedDecision(snapshot)
+				return nil, fmt.Errorf("%w: invalid issues.closed event", errInvalidPendingNormalizedEvent)
 			}
-			return processor.reducer.Reduce(snapshot, workflow.IssueClosedEvent{EventMetadata: metadata, ClosureID: closureID, RetainUntil: observedAt.Add(processor.assignmentRetentionDuration), RetentionToken: retentionToken})
+			return workflow.IssueClosedEvent{EventMetadata: metadata, ClosureID: closureID, RetainUntil: metadata.ObservedAt.Add(processor.assignmentRetentionDuration), RetentionToken: retentionToken}, nil
 		case "issues.reopened":
-			return processor.reducer.Reduce(snapshot, workflow.IssueReopenedEvent{EventMetadata: metadata})
+			return workflow.IssueReopenedEvent{EventMetadata: metadata}, nil
 		case "pull_request.opened":
 			if event.PullRequest == nil {
-				return invalidNormalizedDecision(snapshot)
+				return nil, fmt.Errorf("%w: invalid pull_request.opened event", errInvalidPendingNormalizedEvent)
 			}
-			return processor.reducer.Reduce(snapshot, workflow.ChangeProposalObservedEvent{EventMetadata: metadata, ChangeProposal: workflow.ChangeProposal{ID: event.PullRequest.ID, Number: event.PullRequest.Number, HeadSHA: event.PullRequest.HeadSHA, Open: true}})
+			return workflow.ChangeProposalObservedEvent{EventMetadata: metadata, ChangeProposal: workflow.ChangeProposal{ID: event.PullRequest.ID, Number: event.PullRequest.Number, HeadSHA: event.PullRequest.HeadSHA, Open: true}}, nil
 		case "pull_request.synchronize":
 			if event.PullRequest == nil {
-				return invalidNormalizedDecision(snapshot)
+				return nil, fmt.Errorf("%w: invalid pull_request.synchronize event", errInvalidPendingNormalizedEvent)
 			}
-			return processor.reducer.Reduce(snapshot, workflow.SynchronizationEvent{EventMetadata: metadata, ChangeProposalID: event.PullRequest.ID, PreviousHeadSHA: event.PullRequest.BeforeSHA, HeadSHA: event.PullRequest.HeadSHA})
+			return workflow.SynchronizationEvent{EventMetadata: metadata, ChangeProposalID: event.PullRequest.ID, PreviousHeadSHA: event.PullRequest.BeforeSHA, HeadSHA: event.PullRequest.HeadSHA}, nil
 		case "pull_request_review.submitted":
 			if event.PullRequest == nil || event.Review == nil || event.Review.User == nil {
-				return invalidNormalizedDecision(snapshot)
+				return nil, fmt.Errorf("%w: invalid pull_request_review.submitted event", errInvalidPendingNormalizedEvent)
 			}
-			return processor.reducer.Reduce(snapshot, workflow.ReviewObservedEvent{EventMetadata: metadata, Review: workflow.ReviewIdentity{ID: event.Review.ID, NodeID: event.Review.NodeID, ChangeProposalID: event.PullRequest.ID, ActorID: event.Review.User.ID, HeadSHA: event.Review.CommitID}})
+			return workflow.ReviewObservedEvent{EventMetadata: metadata, Review: workflow.ReviewIdentity{ID: event.Review.ID, NodeID: event.Review.NodeID, ChangeProposalID: event.PullRequest.ID, ActorID: event.Review.User.ID, HeadSHA: event.Review.CommitID}}, nil
 		default:
-			return invalidNormalizedDecision(snapshot)
+			return nil, fmt.Errorf("%w: unsupported normalized event %s.%s", errInvalidPendingNormalizedEvent, event.EventName, event.Action)
 		}
 	}
-	return locator, transition, nil
-}
-
-func invalidNormalizedDecision(snapshot workflow.Snapshot) workflow.Decision {
-	return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionIllegal, Reason: workflow.ReasonInvalidEvent}
+	return locator, eventFactory, nil
 }
 
 func randomEventUUID() (string, error) {

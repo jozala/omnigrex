@@ -3,8 +3,6 @@ package workflow
 import (
 	"fmt"
 	"time"
-
-	"github.com/jozala/omnigrex/internal/role"
 )
 
 // Reducer deterministically applies Events under one immutable Workflow Definition.
@@ -15,78 +13,20 @@ type Reducer struct {
 
 // NewReducer validates the coordinator policy around an immutable Workflow Definition.
 func NewReducer(definition Definition, infrastructureRetryLimit uint8) (Reducer, error) {
-	if len(definition.StageIDs()) == 0 || infrastructureRetryLimit == 0 {
+	if !definition.Valid() || infrastructureRetryLimit == 0 {
 		return Reducer{}, fmt.Errorf("%w: reducer policy", ErrInvalidDefinition)
 	}
 	return Reducer{definition: definition, infrastructureRetryLimit: infrastructureRetryLimit}, nil
 }
 
-var builtinReducer = func() Reducer {
-	definition, err := NewBuiltinDefinition(role.BuiltinCatalog())
-	if err != nil {
-		panic(err)
-	}
-	reducer, err := NewReducer(definition, BuiltinInfrastructureRetryLimit)
-	if err != nil {
-		panic(err)
-	}
-	return reducer
-}()
-
-// BuiltinReducer returns the immutable Reducer used by the deployment's built-in Definition.
-func BuiltinReducer() Reducer {
-	return builtinReducer
-}
-
 // Valid reports whether the Reducer was constructed from a Definition.
 func (reducer Reducer) Valid() bool {
-	return len(reducer.definition.StageIDs()) > 0 && reducer.infrastructureRetryLimit > 0
+	return reducer.definition.Valid() && reducer.infrastructureRetryLimit > 0
 }
 
-// Stage returns the immutable Definition entry for a Stage ID.
-func (reducer Reducer) Stage(id StageID) (StageDefinition, bool) {
-	return reducer.definition.Stage(id)
-}
-
-// AcceptsPurpose reports whether a normal Turn Purpose is valid for a Stage.
-func (reducer Reducer) AcceptsPurpose(stage StageID, purpose TurnPurpose) bool {
-	return reducer.definition.AcceptsPurpose(stage, purpose)
-}
-
-// ExpectedOutcomes returns the business outcomes declared by a Stage.
-func (reducer Reducer) ExpectedOutcomes(stage StageID) []TurnOutcome {
-	return reducer.definition.ExpectedOutcomes(stage)
-}
-
-// Roles returns the canonical Roles referenced by the Reducer's Workflow Definition.
-func (reducer Reducer) Roles() []role.ID {
-	return reducer.definition.Roles()
-}
-
-// ValidateRolePolicies verifies that every Stage Role can emit all outcomes the Definition accepts.
-func (reducer Reducer) ValidateRolePolicies(policies role.PolicyCatalog) error {
-	for _, stageID := range reducer.definition.StageIDs() {
-		stage, _ := reducer.definition.Stage(stageID)
-		policy, ok := policies.Lookup(stage.Role)
-		if !ok {
-			return fmt.Errorf("%w: Stage %q has no Role policy", ErrInvalidDefinition, stageID)
-		}
-		required := map[string]struct{}{"report_blocked": {}}
-		for _, transition := range stage.Transitions {
-			switch transition.Outcome {
-			case TurnOutcomeChangeProposalReady:
-				required["request_review"] = struct{}{}
-			case TurnOutcomeChangesRequested, TurnOutcomeApproved:
-				required["submit_review"] = struct{}{}
-			}
-		}
-		for tool := range required {
-			if _, granted := policy.CredentialAuthorityForTool(tool); !granted {
-				return fmt.Errorf("%w: Stage %q Role %q cannot emit outcomes because %q is not granted", ErrInvalidDefinition, stageID, stage.Role, tool)
-			}
-		}
-	}
-	return nil
+// Definition returns the immutable Workflow Definition used by the Reducer.
+func (reducer Reducer) Definition() Definition {
+	return reducer.definition
 }
 
 // DefinitionCompatible reports whether durable Stage and Role identities are known to this deployment.
@@ -95,31 +35,31 @@ func (reducer Reducer) DefinitionCompatible(snapshot Snapshot) bool {
 		return true
 	}
 	if snapshot.CurrentAttempt != nil {
-		stage, ok := reducer.Stage(snapshot.CurrentAttempt.CurrentStage)
+		stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 		if !ok || (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) && stage.State != snapshot.State {
 			return false
 		}
 		for stageID, used := range snapshot.CurrentAttempt.ReviewUsage {
-			configured, ok := reducer.Stage(stageID)
+			configured, ok := reducer.definition.Stage(stageID)
 			if !ok || configured.ReviewLimit == 0 || used > configured.ReviewLimit {
 				return false
 			}
 		}
 	}
 	if snapshot.ContinuationStage != "" {
-		if _, ok := reducer.Stage(snapshot.ContinuationStage); !ok {
+		if _, ok := reducer.definition.Stage(snapshot.ContinuationStage); !ok {
 			return false
 		}
 	}
 	if snapshot.ActiveTurn != nil {
-		stage, ok := reducer.Stage(snapshot.ActiveTurn.Stage)
+		stage, ok := reducer.definition.Stage(snapshot.ActiveTurn.Stage)
 		if !ok || stage.Role != snapshot.ActiveTurn.Role {
 			return false
 		}
 	}
 	if snapshot.ResumeRole != "" {
 		known := false
-		for _, roleID := range reducer.Roles() {
+		for _, roleID := range reducer.definition.Roles() {
 			known = known || roleID == snapshot.ResumeRole
 		}
 		if !known {
@@ -154,11 +94,6 @@ func (reducer Reducer) DefinitionIncompatible(snapshot Snapshot) Decision {
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonWorkflowDefinitionIncompatible, Actions: actions}
 }
 
-// Reduce applies an Event using the built-in deployment Workflow Definition.
-func Reduce(snapshot Snapshot, event Event) Decision {
-	return builtinReducer.Reduce(snapshot, event)
-}
-
 // Reduce applies an Event using the Reducer's immutable Workflow Definition.
 func (reducer Reducer) Reduce(snapshot Snapshot, event Event) Decision {
 	base := cloneSnapshot(snapshot)
@@ -187,6 +122,11 @@ func (reducer Reducer) Reduce(snapshot Snapshot, event Event) Decision {
 		return Decision{Snapshot: base, Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
 	return decision
+}
+
+// Clone returns a deep copy whose mutable fields do not alias the Snapshot.
+func (snapshot Snapshot) Clone() Snapshot {
+	return cloneSnapshot(snapshot)
 }
 
 func (reducer Reducer) dispatch(snapshot Snapshot, event Event) Decision {
@@ -727,7 +667,7 @@ func (reducer Reducer) reduceIssueClosed(snapshot Snapshot, event IssueClosedEve
 	if next.ActiveTurn != nil {
 		next.ResumeRole = next.ActiveTurn.Role
 	} else if next.ContinuationStage != "" {
-		if stage, ok := reducer.Stage(next.ContinuationStage); ok {
+		if stage, ok := reducer.definition.Stage(next.ContinuationStage); ok {
 			next.ResumeRole = stage.Role
 		}
 	}

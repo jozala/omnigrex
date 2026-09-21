@@ -91,7 +91,7 @@ type ExecutionWorkerDependencies struct {
 	Outcomes             ExecutionOutcomeReconciler
 	Workspace            ExecutionWorkspace
 	Policies             role.PolicyCatalog
-	Reducer              workflow.Reducer
+	Definition           workflow.Definition
 }
 
 // ExecutionWorkerConfig controls execution ownership, deadlines, capacity, and in-memory provider credentials.
@@ -124,7 +124,7 @@ type ExecutionWorker struct {
 	outcomes             ExecutionOutcomeReconciler
 	workspace            ExecutionWorkspace
 	policies             role.PolicyCatalog
-	reducer              workflow.Reducer
+	definition           workflow.Definition
 	claimOwner           string
 	leaseDuration        time.Duration
 	heartbeatInterval    time.Duration
@@ -168,17 +168,20 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 		zeroBytes(providerCredential)
 		return nil, fmt.Errorf("%w: Git remote base URL", ErrInvalidExecutionWorker)
 	}
-	if len(dependencies.Policies.Roles()) == 0 {
-		dependencies.Policies = role.BuiltinPolicyCatalog()
+	if !dependencies.Definition.Valid() || len(dependencies.Policies.Roles()) == 0 ||
+		!sameRoleSet(dependencies.Definition.Roles(), dependencies.Policies.Roles()) {
+		zeroBytes(providerCredential)
+		return nil, fmt.Errorf("%w: Workflow Definition and Role policies", ErrInvalidExecutionWorker)
 	}
-	if !dependencies.Reducer.Valid() {
-		dependencies.Reducer = workflow.BuiltinReducer()
+	if err := dependencies.Definition.ValidateRolePolicies(dependencies.Policies); err != nil {
+		zeroBytes(providerCredential)
+		return nil, fmt.Errorf("%w: Workflow Definition Role capabilities: %v", ErrInvalidExecutionWorker, err)
 	}
 	return &ExecutionWorker{
 		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
 		launcher: dependencies.Launcher, sessions: dependencies.Sessions, outcomes: dependencies.Outcomes,
-		workspace: dependencies.Workspace, policies: dependencies.Policies, reducer: dependencies.Reducer, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
+		workspace: dependencies.Workspace, policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		turnTimeout: config.TurnTimeout, cleanupTimeout: config.CleanupTimeout,
 		concurrencyLimit: config.ConcurrencyLimit, providerCredential: providerCredential,
@@ -328,7 +331,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		if execution.ChangeProposal != nil {
 			currentHead = execution.ChangeProposal.HeadSHA
 		}
-		content, envelopeErr := BuildEventEnvelopeWithConfiguration(execution, currentHead, worker.reducer, worker.policies)
+		content, envelopeErr := BuildEventEnvelope(execution, currentHead, worker.definition, worker.policies)
 		if envelopeErr != nil {
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
@@ -761,6 +764,22 @@ func copyProviderCredential(raw json.RawMessage) (json.RawMessage, error) {
 
 func validExecutionDuration(value time.Duration) bool {
 	return value >= time.Microsecond && value <= maximumWorkerDuration
+}
+
+func sameRoleSet(left, right []role.ID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	roles := make(map[role.ID]struct{}, len(left))
+	for _, roleID := range left {
+		roles[roleID] = struct{}{}
+	}
+	for _, roleID := range right {
+		if _, ok := roles[roleID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func providerCredentialSecrets(raw json.RawMessage) []string {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jozala/omnigrex/internal/role"
 )
 
 const maxStageIDLength = 64
@@ -135,6 +137,40 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 // InitialEntry returns the first normal Stage entry for a new Workflow.
 func (definition Definition) InitialEntry() StageEntry {
 	return definition.initial
+}
+
+// Valid reports whether the Definition was created by NewDefinition.
+func (definition Definition) Valid() bool {
+	return len(definition.ordered) > 0 && len(definition.stages) == len(definition.ordered)
+}
+
+// ValidateRolePolicies verifies that every Stage Role can emit all outcomes the Definition accepts.
+func (definition Definition) ValidateRolePolicies(policies role.PolicyCatalog) error {
+	if !definition.Valid() {
+		return fmt.Errorf("%w: empty Definition", ErrInvalidDefinition)
+	}
+	for _, stageID := range definition.ordered {
+		stage := definition.stages[stageID]
+		policy, ok := policies.Lookup(stage.Role)
+		if !ok {
+			return fmt.Errorf("%w: Stage %q has no Role policy", ErrInvalidDefinition, stageID)
+		}
+		required := map[string]struct{}{"report_blocked": {}}
+		for _, transition := range stage.Transitions {
+			switch transition.Outcome {
+			case TurnOutcomeChangeProposalReady:
+				required["request_review"] = struct{}{}
+			case TurnOutcomeChangesRequested, TurnOutcomeApproved:
+				required["submit_review"] = struct{}{}
+			}
+		}
+		for tool := range required {
+			if _, granted := policy.CredentialAuthorityForTool(tool); !granted {
+				return fmt.Errorf("%w: Stage %q Role %q cannot emit outcomes because %q is not granted", ErrInvalidDefinition, stageID, stage.Role, tool)
+			}
+		}
+	}
+	return nil
 }
 
 // Stage returns a defensive copy of one Stage definition.
