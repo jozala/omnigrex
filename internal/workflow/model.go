@@ -26,8 +26,6 @@ const (
 	RoleReviewer  = role.Reviewer
 )
 
-var builtinRoleCatalog = role.BuiltinCatalog()
-
 type Disposition string
 
 const (
@@ -85,6 +83,7 @@ const (
 	ReasonWorkflowDefinitionIncompatible           Reason = "workflow_definition_incompatible"
 )
 
+// WorkItem is a unit of software-development work supervised by a human and represented by a durable collaboration artifact
 type WorkItem struct {
 	RepositoryID int64
 	IssueID      int64
@@ -100,6 +99,7 @@ type AttemptLifecycle string
 
 const AttemptActive AttemptLifecycle = "ACTIVE"
 
+// WorkflowAttempt is a bounded period of autonomous work started or resumed by a human, with its own retry and review budgets
 type WorkflowAttempt struct {
 	ID                        string
 	Number                    uint64
@@ -363,24 +363,20 @@ func (WorkflowActionExhaustedEvent) isWorkflowEvent() {}
 type EventKind string
 
 const (
-	EventKindTrigger                EventKind = "TRIGGER"
-	EventKindTurnSettled            EventKind = "TURN_SETTLED"
-	EventKindSynchronization        EventKind = "SYNCHRONIZATION"
-	EventKindReviewObserved         EventKind = "REVIEW_OBSERVED"
-	EventKindChangeProposalObserved EventKind = "CHANGE_PROPOSAL_OBSERVED"
-	EventKindIssueClosed            EventKind = "ISSUE_CLOSED"
-	EventKindClosureSettled         EventKind = "CLOSURE_SETTLED"
-	EventKindIssueReopened          EventKind = "ISSUE_REOPENED"
-	EventKindAssignmentsCollected   EventKind = "ASSIGNMENTS_COLLECTED"
+	EventKindTrigger                                  EventKind = "TRIGGER"
+	EventKindTurnSettled                              EventKind = "TURN_SETTLED"
+	EventKindSynchronization                          EventKind = "SYNCHRONIZATION"
+	EventKindReviewObserved                           EventKind = "REVIEW_OBSERVED"
+	EventKindChangeProposalObserved                   EventKind = "CHANGE_PROPOSAL_OBSERVED"
+	EventKindIssueClosed                              EventKind = "ISSUE_CLOSED"
+	EventKindClosureSettled                           EventKind = "CLOSURE_SETTLED"
+	EventKindIssueReopened                            EventKind = "ISSUE_REOPENED"
+	EventKindAssignmentsCollected                     EventKind = "ASSIGNMENTS_COLLECTED"
+	EventKindAssignmentConfigurationConflict          EventKind = "ASSIGNMENT_CONFIGURATION_CONFLICT"
+	EventKindAgentTurnPreparationFailed               EventKind = "AGENT_TURN_PREPARATION_FAILED"
+	EventKindAgentTurnMutationReconciliationExhausted EventKind = "AGENT_TURN_MUTATION_RECONCILIATION_EXHAUSTED"
+	EventKindWorkflowActionExhausted                  EventKind = "WORKFLOW_ACTION_EXHAUSTED"
 )
-
-const EventKindAssignmentConfigurationConflict EventKind = "ASSIGNMENT_CONFIGURATION_CONFLICT"
-
-const EventKindAgentTurnPreparationFailed EventKind = "AGENT_TURN_PREPARATION_FAILED"
-
-const EventKindAgentTurnMutationReconciliationExhausted EventKind = "AGENT_TURN_MUTATION_RECONCILIATION_EXHAUSTED"
-
-const EventKindWorkflowActionExhausted EventKind = "WORKFLOW_ACTION_EXHAUSTED"
 
 type TurnPurpose string
 

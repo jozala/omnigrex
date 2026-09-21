@@ -53,6 +53,7 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 	}
 	definition := Definition{initial: initial, ordered: make([]StageID, 0, len(stages)), stages: make(map[StageID]StageDefinition, len(stages))}
 	for _, stage := range stages {
+		// stage validation
 		if !validStageID(stage.ID) || !catalog.Contains(stage.Role) ||
 			(stage.State != StateDeveloping && stage.State != StateReviewing) || len(stage.AcceptedPurposes) == 0 || len(stage.Transitions) == 0 {
 			return Definition{}, fmt.Errorf("%w: invalid Stage %q", ErrInvalidDefinition, stage.ID)
@@ -69,6 +70,11 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 				return Definition{}, fmt.Errorf("%w: duplicate Purpose for Stage %q", ErrInvalidDefinition, stage.ID)
 			}
 			purposeSet[purpose] = struct{}{}
+		}
+		if !containsPurpose(stage.AcceptedPurposes, TurnPurposeRetry) ||
+			!containsPurpose(stage.AcceptedPurposes, TurnPurposeReactivation) ||
+			stage.State == StateReviewing && !containsPurpose(stage.AcceptedPurposes, TurnPurposeSynchronization) {
+			return Definition{}, fmt.Errorf("%w: Stage %q omits an operational Purpose", ErrInvalidDefinition, stage.ID)
 		}
 		outcomeSet := make(map[TurnOutcome]struct{}, len(stage.Transitions))
 		for _, transition := range stage.Transitions {
@@ -97,19 +103,18 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 				}
 			}
 		}
+
+		// add stage to definition
 		definition.ordered = append(definition.ordered, stage.ID)
 		definition.stages[stage.ID] = cloneStageDefinition(stage)
 	}
+	// validate initial stage
 	initialStage, ok := definition.stages[initial.Stage]
 	if !ok || initialStage.State != StateDeveloping || !containsPurpose(initialStage.AcceptedPurposes, initial.Purpose) {
 		return Definition{}, fmt.Errorf("%w: initial entry is not accepted", ErrInvalidDefinition)
 	}
+	// validate relationships between stages
 	for _, stage := range definition.stages {
-		if !containsPurpose(stage.AcceptedPurposes, TurnPurposeRetry) ||
-			!containsPurpose(stage.AcceptedPurposes, TurnPurposeReactivation) ||
-			stage.State == StateReviewing && !containsPurpose(stage.AcceptedPurposes, TurnPurposeSynchronization) {
-			return Definition{}, fmt.Errorf("%w: Stage %q omits an operational Purpose", ErrInvalidDefinition, stage.ID)
-		}
 		for _, transition := range stage.Transitions {
 			if transition.NextStage != "" {
 				target, ok := definition.stages[transition.NextStage]
