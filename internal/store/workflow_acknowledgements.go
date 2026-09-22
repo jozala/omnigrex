@@ -253,20 +253,14 @@ WHERE delivery_id = $1 AND workflow_id = $5 AND deferred_for_turn_id = $6
 		if err != nil {
 			return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 		}
-		if err := enqueueWorkflowJobWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, job.WorkflowAttemptID,
+		successorJobID, err = enqueueWorkflowJobWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, job.WorkflowAttemptID,
 			"prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
 				"mode": intent.mode, "stage": successor.Stage, "role": successor.Role,
 				"purpose": successor.Purpose, "expected_head_sha": successor.ExpectedHeadSHA,
 				"retry_of_turn_id": successor.RetryOfTurnID, "revision": snapshot.Revision,
-			}, nil); err != nil {
+			})
+		if err != nil {
 			return PendingEventReconciliation{}, err
-		}
-		if err := tx.QueryRow(ctx, `
-SELECT id::text FROM jobs
-WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
-  AND action_key = 'prepare-agent-turn'`, nullableString(normalizedEventID),
-			nullableString(settlementID)).Scan(&successorJobID); err != nil {
-			return PendingEventReconciliation{}, fmt.Errorf("resolve reconciled successor job: %w", err)
 		}
 	}
 	jobResult, err := json.Marshal(map[string]any{

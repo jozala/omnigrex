@@ -263,10 +263,6 @@ func (store *Store) AllocateAgentTurn(ctx context.Context, spec AgentTurnSpec) (
 	if err != nil {
 		return AgentTurn{}, fmt.Errorf("allocate agent turn: %w", err)
 	}
-	jobID, err := randomUUID()
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("allocate agent turn job: %w", err)
-	}
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return AgentTurn{}, fmt.Errorf("begin agent turn allocation: %w", err)
@@ -414,16 +410,15 @@ WHERE id = $1`, hierarchy.sessionID); err != nil {
 	if err != nil {
 		return AgentTurn{}, fmt.Errorf("encode agent turn job: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 1,
-        $5, $6, $7, $8, $9, $10, $11)`, jobID, AgentTurnQueue, RunAgentTurnJobKind,
-		payload, "run-agent-turn:"+turnID, hierarchy.workflowID, spec.WorkflowAttemptID,
-		hierarchy.assignmentID, hierarchy.sessionID, turnID, locked.nextExecutionEpoch); err != nil {
+	if _, err := insertJobTx(ctx, tx, jobInsert{
+		queue: AgentTurnQueue, kind: RunAgentTurnJobKind, payload: payload,
+		maxAttempts: 1, idempotencyKey: "run-agent-turn:" + turnID,
+		scope: jobInsertScope{
+			workflowID: hierarchy.workflowID, workflowAttemptID: spec.WorkflowAttemptID,
+			agentAssignmentID: hierarchy.assignmentID, agentSessionID: hierarchy.sessionID,
+			agentTurnID: turnID, executionEpoch: locked.nextExecutionEpoch,
+		},
+	}); err != nil {
 		return AgentTurn{}, fmt.Errorf("enqueue agent turn job: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1992,10 +1987,6 @@ type recoveryJobIdentity struct {
 }
 
 func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Job, turn lockedTurn, kind string, priority int) (string, error) {
-	id, err := randomUUID()
-	if err != nil {
-		return "", fmt.Errorf("generate Agent Turn recovery job ID: %w", err)
-	}
 	identity := recoveryJobIdentity{
 		WorkflowID: executionJob.WorkflowID, WorkflowAttemptID: executionJob.WorkflowAttemptID,
 		AgentAssignmentID: executionJob.AgentAssignmentID, AgentSessionID: executionJob.AgentSessionID,
@@ -2008,36 +1999,19 @@ func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Jo
 		return "", fmt.Errorf("encode Agent Turn recovery job: %w", err)
 	}
 	idempotencyKey := fmt.Sprintf("agent-turn-recovery:%s:epoch:%d:%s", executionJob.AgentTurnID, executionJob.ExecutionEpoch, strings.ToLower(kind))
-	result, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', $5, clock_timestamp(), $6,
-        $7, $8, $9, $10, $11, $12, $13)
-ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
-		id, AgentTurnRecoveryQueue, kind, payload, priority, agentTurnRecoveryJobMaxAttempts,
-		idempotencyKey, executionJob.WorkflowID, executionJob.WorkflowAttemptID,
-		executionJob.AgentAssignmentID, executionJob.AgentSessionID, executionJob.AgentTurnID,
-		executionJob.ExecutionEpoch)
+	id, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: AgentTurnRecoveryQueue, kind: kind, payload: payload, priority: priority,
+		maxAttempts: agentTurnRecoveryJobMaxAttempts, idempotencyKey: idempotencyKey,
+		scope: jobInsertScope{
+			workflowID: executionJob.WorkflowID, workflowAttemptID: executionJob.WorkflowAttemptID,
+			agentAssignmentID: executionJob.AgentAssignmentID, agentSessionID: executionJob.AgentSessionID,
+			agentTurnID: executionJob.AgentTurnID, executionEpoch: executionJob.ExecutionEpoch,
+		},
+	})
 	if err != nil {
 		return "", fmt.Errorf("enqueue %s job: %w", kind, err)
 	}
-	if result.RowsAffected() == 1 {
-		return id, nil
-	}
-	var existingID, existingKind string
-	var existingPayload []byte
-	if err := tx.QueryRow(ctx, `SELECT id::text, kind, payload FROM jobs WHERE idempotency_key = $1`, idempotencyKey).Scan(&existingID, &existingKind, &existingPayload); err != nil {
-		return "", fmt.Errorf("read existing %s job: %w", kind, err)
-	}
-	canonicalExisting, _ := canonicalJSON(existingPayload)
-	canonicalPayload, _ := canonicalJSON(payload)
-	if existingKind != kind || !bytes.Equal(canonicalExisting, canonicalPayload) {
-		return "", ErrJobIdempotencyConflict
-	}
-	return existingID, nil
+	return id, nil
 }
 
 func lockAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, lease JobLease, expectedKind string) (Job, lockedTurn, error) {

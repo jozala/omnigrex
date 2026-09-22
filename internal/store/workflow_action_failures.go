@@ -150,24 +150,14 @@ ON CONFLICT (source_job_id) DO NOTHING`, job.ID, job.WorkflowID, job.Kind, diagn
 	if err != nil {
 		return false, fmt.Errorf("encode Workflow action failure escalation: %w", err)
 	}
-	escalationID, err := randomUUID()
-	if err != nil {
-		return false, err
-	}
 	idempotencyKey := fmt.Sprintf("workflow:%s:source-job:%s:escalate-action-failure", job.WorkflowID, job.ID)
-	if _, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', 100, clock_timestamp(), 1, $5, $6, $7)
-ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`, escalationID,
-		WorkflowActionQueue, EscalateWorkflowActionFailureJobKind, payload, idempotencyKey,
-		job.WorkflowID, nullableString(job.WorkflowAttemptID)); err != nil {
+	escalationID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: EscalateWorkflowActionFailureJobKind, payload: payload,
+		priority: 100, maxAttempts: 1, idempotencyKey: idempotencyKey,
+		scope: jobInsertScope{workflowID: job.WorkflowID, workflowAttemptID: job.WorkflowAttemptID},
+	})
+	if err != nil {
 		return false, fmt.Errorf("enqueue Workflow action failure escalation: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM jobs WHERE idempotency_key = $1`, idempotencyKey).Scan(&escalationID); err != nil {
-		return false, fmt.Errorf("resolve Workflow action failure escalation: %w", err)
 	}
 	result, err := tx.Exec(ctx, `
 INSERT INTO workflow_action_failures (

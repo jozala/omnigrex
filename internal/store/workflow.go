@@ -900,7 +900,7 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 			if decision.Snapshot.ChangeProposal != nil {
 				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
 			}
-			if err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload, nil); err != nil {
+			if _, err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload); err != nil {
 				return err
 			}
 		case workflow.CloseMutationAdmissionAction:
@@ -956,11 +956,11 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 		}
 	}
 	if intent.set {
-		if err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
+		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
 			"mode": intent.mode, "stage": intent.turn.Stage, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
 			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
 			"revision": decision.Snapshot.Revision,
-		}, nil); err != nil {
+		}); err != nil {
 			return err
 		}
 	}
@@ -968,10 +968,10 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 		if labelAction.State == "" {
 			labelAction.State = decision.Snapshot.State
 		}
-		if err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
+		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
 			"state": labelAction.State, "ready_for_sha": labelAction.ReadyForSHA,
 			"consume_run": consumeRun, "revision": decision.Snapshot.Revision,
-		}, nil); err != nil {
+		}); err != nil {
 			return err
 		}
 	}
@@ -1049,40 +1049,19 @@ ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.Tur
 	if err != nil {
 		return fmt.Errorf("encode pending-event reconciliation: %w", err)
 	}
-	jobID, err := randomUUID()
-	if err != nil {
-		return err
-	}
-	result, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id,
-    agent_turn_settlement_id, action_key
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 3,
-        $5, $6, $7, $8, $9, $10, $11, $12, $13, 'reconcile-pending-events')
-ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`,
-		jobID, WorkflowActionQueue, ReconcilePendingEventsJobKind, payloadJSON,
-		workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "", "reconcile-pending-events"),
-		workflowID, attemptID, sourceAssignmentID, sourceSessionID, sourceTurnID, sourceEpoch,
-		nullableString(deliveryID), nullableString(settlementID))
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: ReconcilePendingEventsJobKind, payload: payloadJSON, maxAttempts: 3,
+		idempotencyKey: workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "", "reconcile-pending-events"),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: sourceAssignmentID,
+			agentSessionID: sourceSessionID, agentTurnID: sourceTurnID, executionEpoch: sourceEpoch,
+		},
+		provenance: jobInsertProvenance{
+			normalizedEventID: deliveryID, agentTurnSettlementID: settlementID, actionKey: "reconcile-pending-events",
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("enqueue pending-event reconciliation: %w", err)
-	}
-	if result.RowsAffected() == 0 {
-		var existingPayload []byte
-		if err := tx.QueryRow(ctx, `
-SELECT id::text, payload FROM jobs
-WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2)
-  AND action_key = 'reconcile-pending-events'`, nullableString(deliveryID), nullableString(settlementID)).Scan(&jobID, &existingPayload); err != nil {
-			return fmt.Errorf("read pending-event reconciliation job: %w", err)
-		}
-		canonicalExisting, _ := canonicalJSON(existingPayload)
-		canonicalPayload, _ := canonicalJSON(payloadJSON)
-		if !reflect.DeepEqual(canonicalExisting, canonicalPayload) {
-			return ErrJobIdempotencyConflict
-		}
 	}
 	for _, eventID := range deferredIDs {
 		result, err := tx.Exec(ctx, `
@@ -1111,59 +1090,32 @@ func currentAttemptID(snapshot workflow.Snapshot) string {
 	return snapshot.CurrentAttempt.ID
 }
 
-func enqueueWorkflowJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
-	return enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, "", workflowID, attemptID, actionKey, kind, value, availableAt)
+func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID, actionKey, kind string, value any) (string, error) {
+	return enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, attemptID, actionKey, kind, value)
 }
 
-func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
-	return enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, attemptID, actionKey, kind, value, availableAt)
-}
-
-func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID, attemptID, actionKey, kind string, value any, availableAt *time.Time) error {
+func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID, attemptID, actionKey, kind string, value any) (string, error) {
 	payload, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("encode %s action: %w", actionKey, err)
-	}
-	jobID, err := randomUUID()
-	if err != nil {
-		return err
+		return "", fmt.Errorf("encode %s action: %w", actionKey, err)
 	}
 	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey)
-	normalizedEventID := nullableString(deliveryID)
-	settlementProvenanceID := nullableString(settlementID)
-	internalProvenanceID := nullableString(internalEventID)
-	provenanceActionKey := nullableString(actionKey)
+	provenanceActionKey := actionKey
 	if deliveryID == "" && settlementID == "" && internalEventID == "" {
-		provenanceActionKey = nil
+		provenanceActionKey = ""
 	}
-	query := `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, normalized_event_id,
-    agent_turn_settlement_id, workflow_internal_event_id, action_key
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, COALESCE($5, clock_timestamp()), 3,
-        $6, $7, $8, $9, $10, $11, $12)
-ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`
-	result, err := tx.Exec(ctx, query, jobID, WorkflowActionQueue, kind, payload, availableAt,
-		idempotencyKey, workflowID, nullableString(attemptID), normalizedEventID,
-		settlementProvenanceID, internalProvenanceID, provenanceActionKey)
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: kind, payload: payload, maxAttempts: 3, idempotencyKey: idempotencyKey,
+		scope: jobInsertScope{workflowID: workflowID, workflowAttemptID: attemptID},
+		provenance: jobInsertProvenance{
+			normalizedEventID: deliveryID, agentTurnSettlementID: settlementID,
+			workflowInternalEventID: internalEventID, actionKey: provenanceActionKey,
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("enqueue %s action: %w", actionKey, err)
+		return "", fmt.Errorf("enqueue %s action: %w", actionKey, err)
 	}
-	if result.RowsAffected() == 0 {
-		var existingKind string
-		var existingPayload []byte
-		if err := tx.QueryRow(ctx, `SELECT kind, payload FROM jobs WHERE (normalized_event_id = $1 OR agent_turn_settlement_id = $2 OR workflow_internal_event_id = $3) AND action_key = $4`, nullableString(deliveryID), nullableString(settlementID), nullableString(internalEventID), actionKey).Scan(&existingKind, &existingPayload); err != nil {
-			return fmt.Errorf("verify %s action: %w", actionKey, err)
-		}
-		canonical, _ := canonicalJSON(payload)
-		existingCanonical, _ := canonicalJSON(existingPayload)
-		if existingKind != kind || !reflect.DeepEqual(canonical, existingCanonical) {
-			return ErrJobIdempotencyConflict
-		}
-	}
-	return nil
+	return jobID, nil
 }
 
 func workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey string) string {
@@ -1335,23 +1287,16 @@ WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id =
 	if err != nil {
 		return "", err
 	}
-	jobID, err := randomUUID()
-	if err != nil {
-		return "", err
-	}
-	_, err = tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id, action_key
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', $5, clock_timestamp(), 3,
-		$6, $7, $8, $9, $10, $11, $12, $13, 'stop-agent-turn')
-ON CONFLICT (normalized_event_id, action_key) WHERE normalized_event_id IS NOT NULL DO NOTHING`,
-		jobID, WorkflowActionQueue, StopAgentTurnJobKind, payload, stopAgentTurnJobPriority,
-		fmt.Sprintf("workflow:%s:delivery:%s:action:stop-agent-turn", workflowID, deliveryID),
-		workflowID, guard.AttemptID, assignmentID, guard.SessionID, guard.TurnID,
-		int64(guard.Epoch), deliveryID)
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: StopAgentTurnJobKind, payload: payload,
+		priority: stopAgentTurnJobPriority, maxAttempts: 3,
+		idempotencyKey: fmt.Sprintf("workflow:%s:delivery:%s:action:stop-agent-turn", workflowID, deliveryID),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: guard.AttemptID, agentAssignmentID: assignmentID,
+			agentSessionID: guard.SessionID, agentTurnID: guard.TurnID, executionEpoch: int64(guard.Epoch),
+		},
+		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "stop-agent-turn"},
+	})
 	if err != nil {
 		return "", fmt.Errorf("enqueue stop Agent Turn: %w", err)
 	}
@@ -1389,22 +1334,16 @@ SELECT agent_assignment_id::text FROM agent_sessions WHERE id = $1`, guard.Sessi
 	if err != nil {
 		return "", fmt.Errorf("encode closure settlement job: %w", err)
 	}
-	jobID, err := randomUUID()
-	if err != nil {
-		return "", err
-	}
-	_, err = tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id, action_key
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', $5, clock_timestamp(), 3,
-        $6, $7, $8, $9, $10, $11, $12, $13, 'settle-closure')`,
-		jobID, WorkflowActionQueue, SettleClosureJobKind, payloadJSON, settleClosureJobPriority,
-		fmt.Sprintf("workflow:%s:closure:%s:settle", workflowID, closureID), workflowID,
-		nullableString(attemptID), nullableString(assignmentID), nullableString(sessionID),
-		nullableString(turnID), nullableEpoch(epoch), deliveryID)
+	jobID, err := insertJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: SettleClosureJobKind, payload: payloadJSON,
+		priority: settleClosureJobPriority, maxAttempts: 3,
+		idempotencyKey: fmt.Sprintf("workflow:%s:closure:%s:settle", workflowID, closureID),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: assignmentID,
+			agentSessionID: sessionID, agentTurnID: turnID, executionEpoch: epoch,
+		},
+		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "settle-closure"},
+	})
 	if err != nil {
 		return "", fmt.Errorf("enqueue closure settlement: %w", err)
 	}

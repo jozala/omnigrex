@@ -149,6 +149,77 @@ WHERE attempt.id = $1`, fixture.attemptID, settled.SuccessorJobID).Scan(&used, &
 		}
 	})
 
+	t.Run("settlement-provenanced preparation failure reuses matching label job", func(t *testing.T) {
+		fixture, lease, _ := prepareSettlementTurn(t, database, pool, ctx, 880, workflow.RoleDeveloper, "")
+		settled, err := database.SettleAgentTurn(ctx, lease, failedSettlementObservation("runtime transport failed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preparation := claimSettlementSuccessorJob(t, database, pool, ctx, settled.SuccessorJobID, "failing-preparer")
+		diagnostic := "Reviewer GitHub App is unavailable"
+		actionKey := "prepare-agent-turn:" + preparation.ID + ":reconcile-github-labels"
+		existingLabelJobID := "78800000-0000-4000-8000-000000000001"
+		payload, err := json.Marshal(map[string]any{
+			"state": workflow.StateNeedsHuman, "ready_for_sha": "", "consume_run": false, "revision": 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id, agent_turn_settlement_id, action_key
+)
+VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 3,
+        $5, $6, $7, $8, $9)`, existingLabelJobID, store.WorkflowActionQueue,
+			store.ReconcileGitHubLabelsJobKind, payload,
+			fmt.Sprintf("workflow:%s:settlement:%s:action:%s", fixture.workflowID, settled.ID, actionKey),
+			fixture.workflowID, fixture.attemptID, settled.ID, actionKey); err != nil {
+			t.Fatal(err)
+		}
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, *preparation, errors.New(diagnostic), false, 0)
+		if err != nil || acknowledgement.WorkflowRevision != 3 {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() = (%#v, %v), want revision 3", acknowledgement, err)
+		}
+		var labelJobID string
+		var labelJobs int
+		if err := pool.QueryRow(ctx, `
+SELECT id::text, count(*) OVER ()
+FROM jobs
+WHERE agent_turn_settlement_id = $1 AND action_key = $2
+LIMIT 1`, settled.ID, actionKey).Scan(&labelJobID, &labelJobs); err != nil {
+			t.Fatal(err)
+		}
+		if labelJobs != 1 || labelJobID != existingLabelJobID {
+			t.Errorf("settlement label jobs = %d with ID %s, want one existing %s", labelJobs, labelJobID, existingLabelJobID)
+		}
+	})
+
+	t.Run("settlement-provenanced preparation failure rejects conflicting label job", func(t *testing.T) {
+		fixture, lease, _ := prepareSettlementTurn(t, database, pool, ctx, 881, workflow.RoleDeveloper, "")
+		settled, err := database.SettleAgentTurn(ctx, lease, failedSettlementObservation("runtime transport failed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preparation := claimSettlementSuccessorJob(t, database, pool, ctx, settled.SuccessorJobID, "conflicting-preparer")
+		actionKey := "prepare-agent-turn:" + preparation.ID + ":reconcile-github-labels"
+		if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id, agent_turn_settlement_id, action_key
+)
+VALUES ('78810000-0000-4000-8000-000000000001', $1, $2, '{"revision":999}',
+        'AVAILABLE', 0, clock_timestamp(), 3, $3, $4, $5, $6, $7)`,
+			store.WorkflowActionQueue, store.ReconcileGitHubLabelsJobKind,
+			fmt.Sprintf("workflow:%s:settlement:%s:action:%s", fixture.workflowID, settled.ID, actionKey),
+			fixture.workflowID, fixture.attemptID, settled.ID, actionKey); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, *preparation, errors.New("Reviewer GitHub App is unavailable"), false, 0); !errors.Is(err, store.ErrJobIdempotencyConflict) {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v, want ErrJobIdempotencyConflict", err)
+		}
+	})
+
 	t.Run("blocked outcome creates Human Handoff with sanitized diagnostic", func(t *testing.T) {
 		fixture, lease, _ := prepareSettlementTurn(t, database, pool, ctx, 805, workflow.RoleDeveloper, "")
 		observation := successfulSettlementObservation(workflow.TurnOutcomeBlocked, nil)
@@ -997,6 +1068,18 @@ func prepareSettlementTurn(t *testing.T, database *store.Store, pool *pgxpool.Po
 		t.Fatalf("CloseMutationAdmission() error = %v", err)
 	}
 	return fixture, lease, proposal
+}
+
+func claimSettlementSuccessorJob(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, jobID, owner string) *store.JobLease {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET priority = 1000 WHERE id = $1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.PrepareAgentTurnJobKind, owner, time.Minute)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("ClaimJobKind() preparation = (%#v, %v), want %s", job, err, jobID)
+	}
+	return job
 }
 
 func prepareOpenSettlementTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, number int, role workflow.Role, head string) (agentFixture, store.AgentTurnLease, *store.AgentTurnSettlementChangeProposal) {

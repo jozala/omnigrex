@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -995,6 +996,81 @@ func TestIssueClosureClosesMutationAdmissionBeforeEnqueuingStop(t *testing.T) {
 	}
 	if admissionOpen || turnStatus != "CANCELLING" || stopJobs != 1 {
 		t.Errorf("closed turn = admission %t, status %s, stop jobs %d; want false, CANCELLING, 1", admissionOpen, turnStatus, stopJobs)
+	}
+}
+
+func TestPendingIssueClosureReusesExistingStopJob(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	fixture := seedAgentSession(t, pool, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE' WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET mutation_admission_open = TRUE, status = 'RUNNING' WHERE id = $1`, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	delivery := workflowDelivery("40000000-0000-4000-8000-000000000018")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 2, 2, 2
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, database, ctx, delivery)
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeProcessed, NormalizedPayload: normalizedPayload(claim.DeliveryID, "closed"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	existingStopJobID := "43000000-0000-4000-8000-000000000018"
+	payload, err := json.Marshal(map[string]any{
+		"workflow_id": fixture.workflowID, "workflow_attempt_id": fixture.attemptID, "closure_id": "closure-replay",
+		"turn_id": turn.ID, "session_id": fixture.sessionID, "execution_epoch": turn.ExecutionEpoch,
+		"control_revision": turn.ControlRevision, "workflow_revision": 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
+    agent_session_id, agent_turn_id, execution_epoch, normalized_event_id, action_key
+)
+VALUES ($1, $2, $3, $4, 'AVAILABLE', 100, clock_timestamp(), 3,
+        $5, $6, $7, $8, $9, $10, $11, $12, 'stop-agent-turn')`,
+		existingStopJobID, store.WorkflowActionQueue, store.StopAgentTurnJobKind, payload,
+		fmt.Sprintf("workflow:%s:delivery:%s:action:stop-agent-turn", fixture.workflowID, claim.DeliveryID),
+		fixture.workflowID, fixture.attemptID, fixture.assignmentID, fixture.sessionID, turn.ID,
+		turn.ExecutionEpoch, claim.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+
+	application, applied, err := database.ApplyNextPendingNormalizedEvent(ctx, func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		if record.DeliveryID != claim.DeliveryID {
+			t.Fatalf("pending delivery = %s, want %s", record.DeliveryID, claim.DeliveryID)
+		}
+		return store.WorkflowLocator{RepositoryID: 2, IssueID: 2, IssueNumber: 2}, func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.IssueClosedEvent{
+				EventMetadata: context.Metadata, ClosureID: "closure-replay",
+				RetainUntil: context.Metadata.ObservedAt.Add(24 * time.Hour), RetentionToken: "retention-replay",
+			}, nil
+		}, nil
+	})
+	if err != nil || !applied || application.State != workflow.StateClosing {
+		t.Fatalf("ApplyNextPendingNormalizedEvent() = (%#v, %t, %v), want CLOSING", application, applied, err)
+	}
+	var stopJobID string
+	if err := pool.QueryRow(ctx, `SELECT stop_job_id::text FROM workflow_closure_barriers WHERE workflow_id = $1`, fixture.workflowID).Scan(&stopJobID); err != nil {
+		t.Fatal(err)
+	}
+	if stopJobID != existingStopJobID {
+		t.Errorf("closure stop Job = %s, want existing %s", stopJobID, existingStopJobID)
 	}
 }
 

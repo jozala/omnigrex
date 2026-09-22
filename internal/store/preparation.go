@@ -367,10 +367,6 @@ SELECT EXISTS (
 	if operationLineageID == "" {
 		operationLineageID = turnID
 	}
-	executionJobID, err := randomUUID()
-	if err != nil {
-		return AgentTurnPreparationCommit{}, err
-	}
 	turnNumber := session.NextTurnNumber
 	executionEpoch := session.NextExecutionEpoch
 	if turnNumber <= 0 || executionEpoch <= 0 {
@@ -419,16 +415,16 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
-    agent_session_id, agent_turn_id, execution_epoch
-)
-VALUES ($1, $2, $3, $4, 'AVAILABLE', 0, clock_timestamp(), 1,
-        $5, $6, $7, $8, $9, $10, $11)`, executionJobID, AgentTurnQueue, RunAgentTurnJobKind,
-		executionPayload, "run-agent-turn:"+turn.ID, preparation.WorkflowID, preparation.WorkflowAttemptID,
-		participant.ID, session.ID, turn.ID, turn.ExecutionEpoch); err != nil {
+	executionJobID, err := insertJobTx(ctx, tx, jobInsert{
+		queue: AgentTurnQueue, kind: RunAgentTurnJobKind, payload: executionPayload,
+		maxAttempts: 1, idempotencyKey: "run-agent-turn:" + turn.ID,
+		scope: jobInsertScope{
+			workflowID: preparation.WorkflowID, workflowAttemptID: preparation.WorkflowAttemptID,
+			agentAssignmentID: participant.ID, agentSessionID: session.ID,
+			agentTurnID: turn.ID, executionEpoch: turn.ExecutionEpoch,
+		},
+	})
+	if err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("enqueue prepared Agent Turn: %w", err)
 	}
 	jobResult, err := json.Marshal(map[string]any{
