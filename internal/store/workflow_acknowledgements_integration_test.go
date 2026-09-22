@@ -90,9 +90,9 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 		t.Fatalf("FinalizeAgentTurn() error = %v", err)
 	}
 
-	job, err := databases[0].ClaimJob(ctx, store.WorkflowActionQueue, "reconciliation-worker", 10*time.Second)
+	job, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "reconciliation-worker", 10*time.Second)
 	if err != nil || job == nil || job.Kind != store.ReconcilePendingEventsJobKind {
-		t.Fatalf("ClaimJob() reconciliation = (%#v, %v)", job, err)
+		t.Fatalf("ClaimJobKind() reconciliation = (%#v, %v)", job, err)
 	}
 	if err := databases[0].CompleteJob(ctx, *job, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowJobRequiresAcknowledgement) {
 		t.Errorf("generic CompleteJob() error = %v, want ErrWorkflowJobRequiresAcknowledgement", err)
@@ -398,9 +398,9 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 		t.Fatalf("FinalizeAgentTurn() error = %v", err)
 	}
 
-	job, err := databases[0].ClaimJob(ctx, store.WorkflowActionQueue, "synchronization-reconciler", 10*time.Second)
+	job, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "synchronization-reconciler", 10*time.Second)
 	if err != nil || job == nil || job.Kind != store.ReconcilePendingEventsJobKind {
-		t.Fatalf("ClaimJob() reconciliation = (%#v, %v)", job, err)
+		t.Fatalf("ClaimJobKind() reconciliation = (%#v, %v)", job, err)
 	}
 	factory := func(record store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
 		var payload struct {
@@ -537,9 +537,9 @@ VALUES ($1, 'workflow', 'RECONCILE_PENDING_EVENTS', $2, 3, $3, $4,
 	if _, err := pool.Exec(ctx, `INSERT INTO job_normalized_events (job_id, normalized_event_id) VALUES ($1, $2)`, reconciliationJobID, deferredID); err != nil {
 		t.Fatalf("link delayed reconciliation event: %v", err)
 	}
-	job, err := databases[0].ClaimJob(ctx, store.WorkflowActionQueue, "delayed-reconciler", 10*time.Second)
+	job, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "delayed-reconciler", 10*time.Second)
 	if err != nil || job == nil || job.ID != reconciliationJobID {
-		t.Fatalf("ClaimJob() delayed reconciliation = (%#v, %v)", job, err)
+		t.Fatalf("ClaimJobKind() delayed reconciliation = (%#v, %v)", job, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET state_revision = 2 WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatalf("advance Workflow revision: %v", err)
@@ -747,13 +747,13 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if !errors.Is(err, store.ErrClosureSettlementUnsettled) {
 		t.Fatalf("premature ClosureSettledEvent error = %v, want ErrClosureSettlementUnsettled", err)
 	}
-	stopJob, err := databases[0].ClaimJob(ctx, store.WorkflowActionQueue, "stop-worker", 10*time.Second)
+	stopJob, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.StopAgentTurnJobKind, "stop-worker", 10*time.Second)
 	if err != nil || stopJob == nil || stopJob.Kind != store.StopAgentTurnJobKind {
-		t.Fatalf("ClaimJob() stop = (%#v, %v)", stopJob, err)
+		t.Fatalf("ClaimJobKind() stop = (%#v, %v)", stopJob, err)
 	}
-	settlementJob, err := databases[0].ClaimJob(ctx, store.WorkflowActionQueue, "settlement-worker", 10*time.Second)
+	settlementJob, err := databases[0].ClaimJobKind(ctx, store.WorkflowActionQueue, store.SettleClosureJobKind, "settlement-worker", 10*time.Second)
 	if err != nil || settlementJob == nil || settlementJob.Kind != store.SettleClosureJobKind {
-		t.Fatalf("ClaimJob() settlement = (%#v, %v)", settlementJob, err)
+		t.Fatalf("ClaimJobKind() settlement = (%#v, %v)", settlementJob, err)
 	}
 	runtimeIdentity, err := databases[0].GetClosureTurnRuntimeIdentity(ctx, *stopJob)
 	if err != nil {

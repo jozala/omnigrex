@@ -72,9 +72,9 @@ func TestAgentTurnAllocationIsMonotonicAndAllowsOnlyOneActiveTurnPerWorkflow(t *
 		t.Errorf("first turn identity = (%d, %d), want (1, 1)", allocated.TurnNumber, allocated.ExecutionEpoch)
 	}
 
-	job, err := databases[0].ClaimJob(ctx, store.AgentTurnQueue, "job-worker", time.Second)
+	job, err := databases[0].ClaimJobKind(ctx, store.AgentTurnQueue, store.RunAgentTurnJobKind, "job-worker", time.Second)
 	if err != nil || job == nil {
-		t.Fatalf("ClaimJob() for allocated turn = (%#v, %v), want job", job, err)
+		t.Fatalf("ClaimJobKind() for allocated turn = (%#v, %v), want job", job, err)
 	}
 	if job.Kind != store.RunAgentTurnJobKind || job.MaxAttempts != 1 || job.AgentTurnID != allocated.ID || job.ExecutionEpoch != 1 {
 		t.Errorf("allocated turn job = %#v, want single-attempt RUN_AGENT_TURN identity", job)
@@ -93,9 +93,9 @@ func TestAgentTurnAllocationIsMonotonicAndAllowsOnlyOneActiveTurnPerWorkflow(t *
 	if err := databases[0].FinalizeAgentTurn(ctx, lease, store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: json.RawMessage(`{"ok":true}`)}); err != nil {
 		t.Fatalf("FinalizeAgentTurn() error = %v", err)
 	}
-	completedJob, err := databases[0].GetJob(ctx, job.ID)
-	if err != nil || completedJob.Status != store.JobSucceeded {
-		t.Errorf("Agent Turn job after finalization = (%#v, %v), want SUCCEEDED", completedJob, err)
+	completedJob := readStoredJob(t, pool, ctx, job.ID)
+	if completedJob.Status != store.JobSucceeded {
+		t.Errorf("Agent Turn job after finalization = %#v, want SUCCEEDED", completedJob)
 	}
 	second, err := databases[1].AllocateAgentTurn(ctx, fixture.turnSpec())
 	if err != nil {
@@ -911,11 +911,8 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 		t.Fatalf("ReserveMutation() for unstarted operation error = %v", err)
 	}
 	time.Sleep(110 * time.Millisecond)
-	if reclaimed, err := databases[0].ReclaimExpiredJobs(ctx, 10); err != nil || reclaimed != 0 {
-		t.Errorf("ReclaimExpiredJobs() for Agent Turn job = (%d, %v), want (0, nil)", reclaimed, err)
-	}
-	if reclaimed, err := databases[0].ClaimJob(ctx, store.AgentTurnQueue, "replacement", time.Second); err != nil || reclaimed != nil {
-		t.Errorf("ClaimJob() for expired Agent Turn job = (%#v, %v), want (nil, nil)", reclaimed, err)
+	if reclaimed, err := databases[0].ClaimJobKind(ctx, store.AgentTurnQueue, store.RunAgentTurnJobKind, "replacement", time.Second); err != nil || reclaimed != nil {
+		t.Errorf("ClaimJobKind() for expired Agent Turn job = (%#v, %v), want (nil, nil)", reclaimed, err)
 	}
 	recovery, err := databases[0].RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil {
@@ -937,16 +934,16 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	if _, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 		t.Errorf("AllocateAgentTurn() with recovery barrier error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
-	stopJob, err := databases[0].ClaimJob(ctx, store.AgentTurnRecoveryQueue, "stop-worker", time.Second)
+	stopJob, err := databases[0].ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "stop-worker", time.Second)
 	if err != nil || stopJob == nil || stopJob.Kind != store.StopStaleRuntimeJobKind {
-		t.Fatalf("ClaimJob() for stale runtime stop = (%#v, %v), want STOP_STALE_RUNTIME", stopJob, err)
+		t.Fatalf("ClaimJobKind() for stale runtime stop = (%#v, %v), want STOP_STALE_RUNTIME", stopJob, err)
 	}
 	if err := databases[0].CompleteJob(ctx, *stopJob, json.RawMessage(`{}`)); !errors.Is(err, store.ErrAgentTurnJobRequiresTurnFence) {
 		t.Errorf("generic CompleteJob() for recovery job error = %v, want special-fence error", err)
 	}
-	reconcileJob, err := databases[0].ClaimJob(ctx, store.AgentTurnRecoveryQueue, "reconcile-worker", time.Second)
+	reconcileJob, err := databases[0].ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.ReconcileAgentTurnMutationsJobKind, "reconcile-worker", time.Second)
 	if err != nil || reconcileJob == nil || reconcileJob.Kind != store.ReconcileAgentTurnMutationsJobKind {
-		t.Fatalf("ClaimJob() for mutation reconciliation = (%#v, %v), want RECONCILE_AGENT_TURN_MUTATIONS", reconcileJob, err)
+		t.Fatalf("ClaimJobKind() for mutation reconciliation = (%#v, %v), want RECONCILE_AGENT_TURN_MUTATIONS", reconcileJob, err)
 	}
 	if _, err := databases[0].GetAgentTurnMutationReconciliationContext(ctx, *reconcileJob); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 		t.Errorf("GetAgentTurnMutationReconciliationContext() before runtime stop error = %v, want ErrAgentTurnRecoveryUnsettled", err)
@@ -1001,9 +998,9 @@ WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, settled.Se
 		t.Errorf("CompleteAgentTurnRecovery() after atomic settlement = (%#v, %v)", settled, err)
 	}
 	for _, jobID := range []string{recovery.StopRuntimeJobID, recovery.ReconcileMutationsJobID} {
-		job, err := databases[0].GetJob(ctx, jobID)
-		if err != nil || job.Status != store.JobSucceeded {
-			t.Errorf("recovery job %s = (%#v, %v), want SUCCEEDED", jobID, job, err)
+		job := readStoredJob(t, pool, ctx, jobID)
+		if job.Status != store.JobSucceeded {
+			t.Errorf("recovery job %s = %#v, want SUCCEEDED", jobID, job)
 		}
 	}
 }
@@ -1075,10 +1072,7 @@ func TestBeginAgentTurnMutationRecoveryHandsOffLiveTurnAndReleasesSlot(t *testin
 	if err := pool.QueryRow(ctx, `SELECT status FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`, job.ID, job.Attempt).Scan(&attemptStatus); err != nil {
 		t.Fatalf("read handed-off execution attempt: %v", err)
 	}
-	completedJob, err := database.GetJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetJob() after live handoff error = %v", err)
-	}
+	completedJob := readStoredJob(t, pool, ctx, job.ID)
 	var jobResult struct {
 		ControlledHandoff bool `json:"controlled_handoff"`
 	}
@@ -1615,9 +1609,9 @@ func TestAgentTurnExpiredOwnershipRequiresRecoveryAndNewEpoch(t *testing.T) {
 	if _, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 		t.Errorf("AllocateAgentTurn() before recovery completion error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
-	stopJob, err := databases[0].ClaimJob(ctx, store.AgentTurnRecoveryQueue, "stop-worker", time.Second)
+	stopJob, err := databases[0].ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "stop-worker", time.Second)
 	if err != nil || stopJob == nil || stopJob.Kind != store.StopStaleRuntimeJobKind {
-		t.Fatalf("ClaimJob() for stale runtime stop = (%#v, %v), want STOP_STALE_RUNTIME", stopJob, err)
+		t.Fatalf("ClaimJobKind() for stale runtime stop = (%#v, %v), want STOP_STALE_RUNTIME", stopJob, err)
 	}
 	acknowledged, err := databases[0].AcknowledgeRecoveredRuntimeStopped(ctx, *stopJob)
 	if err != nil {
@@ -2050,9 +2044,9 @@ func (fixture agentFixture) turnSpec() store.AgentTurnSpec {
 
 func claimAgentTurnJob(t *testing.T, database *store.Store, ctx context.Context, turn store.AgentTurn, lease time.Duration) store.JobLease {
 	t.Helper()
-	job, err := database.ClaimJob(ctx, store.AgentTurnQueue, "job-worker", lease)
+	job, err := database.ClaimJobKind(ctx, store.AgentTurnQueue, store.RunAgentTurnJobKind, "job-worker", lease)
 	if err != nil || job == nil {
-		t.Fatalf("ClaimJob() for Agent Turn = (%#v, %v), want lease", job, err)
+		t.Fatalf("ClaimJobKind() for Agent Turn = (%#v, %v), want lease", job, err)
 	}
 	if job.AgentTurnID != turn.ID || job.ExecutionEpoch != turn.ExecutionEpoch {
 		t.Fatalf("claimed Agent Turn job identity = (%s, %d), want (%s, %d)", job.AgentTurnID, job.ExecutionEpoch, turn.ID, turn.ExecutionEpoch)

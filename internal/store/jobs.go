@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,8 +16,6 @@ var (
 	ErrJobIdempotencyConflict = errors.New("job idempotency conflict")
 	// ErrJobLeaseLost means an operation was attempted by a stale or expired job owner.
 	ErrJobLeaseLost = errors.New("job lease lost")
-	// ErrJobNotFound means the requested durable job does not exist.
-	ErrJobNotFound = errors.New("job not found")
 	// ErrAgentTurnJobRequiresTurnFence prevents generic lease operations from bypassing turn fencing.
 	ErrAgentTurnJobRequiresTurnFence = errors.New("agent turn job requires agent turn fence")
 	// ErrWorkflowJobRequiresAcknowledgement prevents generic completion from bypassing workflow fences.
@@ -41,7 +38,7 @@ const (
 	JobCancelled JobStatus = "CANCELLED"
 )
 
-// JobSpec is the immutable definition used to enqueue a durable job.
+// JobSpec is the immutable definition of a durable job.
 type JobSpec struct {
 	Queue              string
 	Kind               string
@@ -84,92 +81,11 @@ type JobLease struct {
 	Attempt int
 }
 
-// EnqueueJob durably inserts a job or returns the identical definition already stored for its key.
-func (store *Store) EnqueueJob(ctx context.Context, spec JobSpec) (Job, bool, error) {
-	if err := normalizeJobParticipant(&spec); err != nil {
-		return Job{}, false, err
-	}
-	canonicalPayload, err := validateJobSpec(spec)
-	if err != nil {
-		return Job{}, false, err
-	}
-	spec.Payload = canonicalPayload
-	id, err := randomUUID()
-	if err != nil {
-		return Job{}, false, fmt.Errorf("enqueue job: %w", err)
-	}
-
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return Job{}, false, fmt.Errorf("begin enqueue job: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := validateJobScope(ctx, tx, spec); err != nil {
-		return Job{}, false, err
-	}
-	result, err := tx.Exec(ctx, `
-INSERT INTO jobs (
-    id, queue, kind, payload, priority, available_at, enqueue_delay_microseconds,
-    max_attempts, idempotency_key, workflow_id, workflow_attempt_id,
-    agent_assignment_id, agent_session_id, agent_turn_id, execution_epoch
-)
-VALUES (
-    $1, $2, $3, $4, $5, clock_timestamp() + $6 * interval '1 microsecond', $6,
-    $7, $8, $9, $10, $11, $12, $13, $14
-)
-ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
-		id, spec.Queue, spec.Kind, spec.Payload, spec.Priority, spec.AvailableDelay.Microseconds(),
-		spec.MaxAttempts, spec.IdempotencyKey, nullableString(spec.WorkflowID),
-		nullableString(spec.WorkflowAttemptID), nullableString(spec.AgentAssignmentID),
-		nullableString(spec.AgentSessionID), nullableString(spec.AgentTurnID), nullableEpoch(spec.ExecutionEpoch),
-	)
-	if err != nil {
-		return Job{}, false, fmt.Errorf("enqueue job: %w", err)
-	}
-	inserted := result.RowsAffected() == 1
-	job, err := getJobByIdempotencyKey(ctx, tx, spec.IdempotencyKey)
-	if err != nil {
-		return Job{}, false, err
-	}
-	if !sameJobDefinition(job.JobSpec, spec) {
-		return Job{}, false, ErrJobIdempotencyConflict
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Job{}, false, fmt.Errorf("commit enqueue job: %w", err)
-	}
-	return job, inserted, nil
-}
-
-// GetJob returns the current durable state of one job.
-func (store *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
-	if !validUUID(jobID) {
-		return Job{}, ErrJobNotFound
-	}
-	row := store.pool.QueryRow(ctx, jobSelect+` WHERE id = $1`, jobID)
-	job, err := scanJob(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Job{}, ErrJobNotFound
-	}
-	if err != nil {
-		return Job{}, fmt.Errorf("get job: %w", err)
-	}
-	return job, nil
-}
-
-// ClaimJob first reconciles a bounded set of expired attempts, then leases the next available job.
-func (store *Store) ClaimJob(ctx context.Context, queue, owner string, lease time.Duration) (*JobLease, error) {
-	return store.claimJob(ctx, queue, "", owner, lease)
-}
-
 // ClaimJobKind leases only jobs of one kind from a queue, without reclaiming or consuming other kinds.
 func (store *Store) ClaimJobKind(ctx context.Context, queue, kind, owner string, lease time.Duration) (*JobLease, error) {
 	if strings.TrimSpace(kind) == "" {
 		return nil, errors.New("claim job: kind is empty")
 	}
-	return store.claimJob(ctx, queue, kind, owner, lease)
-}
-
-func (store *Store) claimJob(ctx context.Context, queue, kind, owner string, lease time.Duration) (*JobLease, error) {
 	if strings.TrimSpace(queue) == "" {
 		return nil, errors.New("claim job: queue is empty")
 	}
@@ -197,7 +113,7 @@ func (store *Store) claimJob(ctx context.Context, queue, kind, owner string, lea
 SELECT id::text
 FROM jobs
 WHERE queue = $1
-  AND ($2 = '' OR kind = $2)
+  AND kind = $2
   AND status = 'AVAILABLE'
   AND available_at <= clock_timestamp()
   AND attempt_count < max_attempts
@@ -370,26 +286,6 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3`,
 	})
 }
 
-// ReclaimExpiredJobs settles up to limit expired attempts and makes retryable jobs available.
-func (store *Store) ReclaimExpiredJobs(ctx context.Context, limit int) (int, error) {
-	if limit <= 0 || limit > 10_000 {
-		return 0, errors.New("reclaim expired jobs: limit must be between 1 and 10000")
-	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("begin expired job reclaim: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	count, err := reclaimExpiredJobsTx(ctx, tx, limit, "", "")
-	if err != nil {
-		return 0, fmt.Errorf("reclaim expired jobs: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit expired job reclaim: %w", err)
-	}
-	return count, nil
-}
-
 func reclaimExpiredJobsTx(ctx context.Context, tx pgx.Tx, limit int, queue, kind string) (int, error) {
 	rows, err := tx.Query(ctx, `
 SELECT id::text, attempt_count, max_attempts, lease_token::text, kind
@@ -397,8 +293,8 @@ FROM jobs
 WHERE status = 'LEASED'
   AND kind <> 'RUN_AGENT_TURN'
   AND lease_expires_at <= clock_timestamp()
-  AND ($2 = '' OR queue = $2)
-  AND ($3 = '' OR kind = $3)
+  AND queue = $2
+  AND kind = $3
 ORDER BY lease_expires_at, id
 FOR UPDATE SKIP LOCKED
 LIMIT $1`, limit, queue, kind)
@@ -510,16 +406,6 @@ FOR UPDATE`, lease.ID, lease.LeaseToken, lease.Attempt).Scan(&kind, &live)
 	return nil
 }
 
-func getJobByIdempotencyKey(ctx context.Context, queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, key string) (Job, error) {
-	job, err := scanJob(queryer.QueryRow(ctx, jobSelect+` WHERE idempotency_key = $1`, key))
-	if err != nil {
-		return Job{}, fmt.Errorf("read enqueued job: %w", err)
-	}
-	return job, nil
-}
-
 const jobSelect = `
 SELECT id::text, queue, kind, payload, priority, enqueue_delay_microseconds,
        max_attempts, idempotency_key, COALESCE(workflow_id::text, ''),
@@ -560,83 +446,6 @@ func scanJob(row rowScanner) (Job, error) {
 	return job, nil
 }
 
-func validateJobSpec(spec JobSpec) (json.RawMessage, error) {
-	if strings.TrimSpace(spec.Queue) == "" || strings.TrimSpace(spec.Kind) == "" {
-		return nil, errors.New("enqueue job: queue and kind are required")
-	}
-	if strings.TrimSpace(spec.IdempotencyKey) == "" {
-		return nil, errors.New("enqueue job: idempotency key is required")
-	}
-	if spec.Kind == RunAgentTurnJobKind || spec.Kind == PrepareAgentTurnJobKind || isAgentTurnRecoveryJob(spec.Kind) {
-		return nil, errors.New("enqueue job: Agent Turn control job kind is reserved")
-	}
-	if spec.MaxAttempts <= 0 {
-		return nil, errors.New("enqueue job: max attempts must be positive")
-	}
-	if spec.AvailableDelay < 0 || spec.AvailableDelay > maximumJobDelay {
-		return nil, fmt.Errorf("enqueue job: available delay must be between zero and %s", maximumJobDelay)
-	}
-	ids := []string{spec.WorkflowID, spec.WorkflowAttemptID, spec.AgentAssignmentID, spec.AgentSessionID, spec.AgentTurnID}
-	for _, id := range ids {
-		if id != "" && !validUUID(id) {
-			return nil, errors.New("enqueue job: scope contains an invalid UUID")
-		}
-	}
-	if spec.WorkflowAttemptID != "" && spec.WorkflowID == "" ||
-		spec.AgentAssignmentID != "" && spec.WorkflowID == "" ||
-		spec.AgentSessionID != "" && spec.AgentAssignmentID == "" ||
-		spec.AgentTurnID != "" && spec.AgentSessionID == "" ||
-		(spec.AgentTurnID == "") != (spec.ExecutionEpoch == 0) {
-		return nil, errors.New("enqueue job: scope hierarchy is incomplete")
-	}
-	if spec.ExecutionEpoch < 0 {
-		return nil, errors.New("enqueue job: execution epoch must be positive")
-	}
-	payload, err := canonicalJSON(spec.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("enqueue job: payload: %w", err)
-	}
-	return payload, nil
-}
-
-func normalizeJobParticipant(spec *JobSpec) error {
-	if spec.AgentParticipantID != "" && spec.AgentAssignmentID != "" && spec.AgentParticipantID != spec.AgentAssignmentID {
-		return errors.New("enqueue job: Participant identity is inconsistent")
-	}
-	if spec.AgentParticipantID != "" {
-		spec.AgentAssignmentID = spec.AgentParticipantID
-	} else {
-		spec.AgentParticipantID = spec.AgentAssignmentID
-	}
-	return nil
-}
-
-func validateJobScope(ctx context.Context, tx pgx.Tx, spec JobSpec) error {
-	checks := []struct {
-		present bool
-		query   string
-		args    []any
-	}{
-		{spec.WorkflowID != "", `SELECT 1 FROM workflows WHERE id = $1 FOR KEY SHARE`, []any{spec.WorkflowID}},
-		{spec.WorkflowAttemptID != "", `SELECT 1 FROM workflow_attempts WHERE id = $1 AND workflow_id = $2 FOR KEY SHARE`, []any{spec.WorkflowAttemptID, spec.WorkflowID}},
-		{spec.AgentAssignmentID != "", `SELECT 1 FROM agent_assignments WHERE id = $1 AND workflow_id = $2 FOR KEY SHARE`, []any{spec.AgentAssignmentID, spec.WorkflowID}},
-		{spec.AgentSessionID != "", `SELECT 1 FROM agent_sessions WHERE id = $1 AND agent_assignment_id = $2 FOR KEY SHARE`, []any{spec.AgentSessionID, spec.AgentAssignmentID}},
-		{spec.AgentTurnID != "", `SELECT 1 FROM agent_turns WHERE id = $1 AND agent_session_id = $2 AND execution_epoch = $3 FOR KEY SHARE`, []any{spec.AgentTurnID, spec.AgentSessionID, spec.ExecutionEpoch}},
-	}
-	for _, check := range checks {
-		if !check.present {
-			continue
-		}
-		var ignored int
-		if err := tx.QueryRow(ctx, check.query, check.args...).Scan(&ignored); errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("enqueue job: scope identities are inconsistent")
-		} else if err != nil {
-			return fmt.Errorf("validate job scope: %w", err)
-		}
-	}
-	return nil
-}
-
 func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {
 	if !json.Valid(value) {
 		return nil, errors.New("not valid JSON")
@@ -647,15 +456,6 @@ func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {
 	}
 	canonical, err := json.Marshal(decoded)
 	return json.RawMessage(canonical), err
-}
-
-func sameJobDefinition(left, right JobSpec) bool {
-	return left.Queue == right.Queue && left.Kind == right.Kind && bytes.Equal(left.Payload, right.Payload) &&
-		left.Priority == right.Priority && left.AvailableDelay == right.AvailableDelay &&
-		left.MaxAttempts == right.MaxAttempts && left.IdempotencyKey == right.IdempotencyKey &&
-		left.WorkflowID == right.WorkflowID && left.WorkflowAttemptID == right.WorkflowAttemptID &&
-		left.AgentParticipantID == right.AgentParticipantID && left.AgentAssignmentID == right.AgentAssignmentID && left.AgentSessionID == right.AgentSessionID &&
-		left.AgentTurnID == right.AgentTurnID && left.ExecutionEpoch == right.ExecutionEpoch
 }
 
 func nullableString(value string) any {

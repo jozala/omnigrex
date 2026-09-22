@@ -56,9 +56,6 @@ func TestPhaseNinePreparationRestartBeforeAndAfterCommit(t *testing.T) {
 			t.Fatalf("ProcessNext() before commit loss = (%t, %v)", lost.processed, lost.err)
 		}
 		expirePhaseNineJob(t, pool, ctx, lease)
-		if reclaimed, err := database.ReclaimExpiredJobs(ctx, 1); err != nil || reclaimed != 1 {
-			t.Fatalf("ReclaimExpiredJobs() = (%d, %v), want one preparation", reclaimed, err)
-		}
 
 		replacement := newPhaseNineCommittingPreparationWorker(t, database, "preparation-before-replacement", nil)
 		if processed, err := replacement.ProcessNext(ctx); err != nil || !processed {

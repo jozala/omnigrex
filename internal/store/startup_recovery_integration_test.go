@@ -575,11 +575,8 @@ func TestStartupRecoveryRejectsGenericRunAgentTurnReclaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	expireAgentTurnExecution(t, pool, ctx, job.ID, turn.ID)
-	if count, err := databases[0].ReclaimExpiredJobs(ctx, 10); err != nil || count != 0 {
-		t.Fatalf("ReclaimExpiredJobs() = (%d, %v), want (0, nil)", count, err)
-	}
-	if job, err := databases[0].ClaimJob(ctx, store.AgentTurnQueue, "generic-worker", time.Second); err != nil || job != nil {
-		t.Fatalf("ClaimJob() generic RUN_AGENT_TURN reclaim = (%#v, %v), want nil", job, err)
+	if job, err := databases[0].ClaimJobKind(ctx, store.AgentTurnQueue, store.RunAgentTurnJobKind, "generic-worker", time.Second); err != nil || job != nil {
+		t.Fatalf("ClaimJobKind() RUN_AGENT_TURN reclaim = (%#v, %v), want nil", job, err)
 	}
 }
 

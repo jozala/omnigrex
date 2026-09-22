@@ -877,9 +877,6 @@ WHERE delivery.delivery_id = $1`, reopenDeliveryID).Scan(&webhookStatus, &normal
 	if _, err := pool.Exec(ctx, `UPDATE job_attempts SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE job_id = $1 AND attempt_number = $2`, first.ID, first.Attempt); err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed, err := databases[0].ReclaimExpiredJobs(ctx, 10); err != nil || reclaimed != 1 {
-		t.Fatalf("reclaim crashed collector = (%d, %v)", reclaimed, err)
-	}
 	second, err := databases[1].ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "collector-retry", time.Minute)
 	if err != nil || second == nil {
 		t.Fatalf("claim replacement collection Job = (%#v, %v)", second, err)

@@ -496,7 +496,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 }
 
 func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.T) {
-	databases, _ := openPhaseFiveStores(t, 1)
+	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -534,9 +534,9 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 		prepared.Job.Kind != store.RunAgentTurnJobKind || prepared.Job.AgentTurnID != prepared.Turn.ID {
 		t.Fatalf("PrepareAgentTurn() = %#v", prepared)
 	}
-	completedPreparation, err := database.GetJob(ctx, preparationJob.ID)
-	if err != nil || completedPreparation.Status != store.JobSucceeded {
-		t.Fatalf("preparation Job = (%#v, %v), want SUCCEEDED", completedPreparation, err)
+	completedPreparation := readStoredJob(t, pool, ctx, preparationJob.ID)
+	if completedPreparation.Status != store.JobSucceeded {
+		t.Fatalf("preparation Job = %#v, want SUCCEEDED", completedPreparation)
 	}
 	participants, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if err != nil || len(participants) != 1 || participants[0].ID != prepared.Participant.ID {
@@ -783,9 +783,9 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 	if listErr != nil || len(assignments) != 0 {
 		t.Fatalf("Assignments after rolled-back preparation = (%#v, %v), want none", assignments, listErr)
 	}
-	job, getErr := database.GetJob(ctx, lease.ID)
-	if getErr != nil || job.Status != store.JobLeased {
-		t.Fatalf("preparation Job after rollback = (%#v, %v), want LEASED", job, getErr)
+	job := readStoredJob(t, pool, ctx, lease.ID)
+	if job.Status != store.JobLeased {
+		t.Fatalf("preparation Job after rollback = %#v, want LEASED", job)
 	}
 	var executionJobs int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RUN_AGENT_TURN'`, application.WorkflowID).Scan(&executionJobs); err != nil || executionJobs != 0 {
@@ -872,10 +872,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 				workflowID).Scan(&assignments, &sessions, &turns, &executionJobs); err != nil {
 				t.Fatal(err)
 			}
-			job, err := database.GetJob(ctx, lease.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
+			job := readStoredJob(t, pool, ctx, lease.ID)
 			if assignments != 0 || sessions != 0 || turns != 0 || executionJobs != 0 || job.Status != store.JobLeased {
 				t.Fatalf("rejected preparation left assignments=%d sessions=%d turns=%d execution jobs=%d job=%s; want 0, 0, 0, 0, LEASED",
 					assignments, sessions, turns, executionJobs, job.Status)

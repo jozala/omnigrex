@@ -148,16 +148,12 @@ func TestStopRecoveryLeaseExpiryBeyondAttemptBudgetRetainsAuthorityAndEventually
 		t.Fatal(err)
 	}
 
+	lease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "crashing-stop")
 	for attempt := 1; attempt <= 4; attempt++ {
-		lease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "crashing-stop")
 		if lease.Attempt != attempt {
 			t.Fatalf("stop recovery attempt = %d, want %d", lease.Attempt, attempt)
 		}
-		expireAndReclaimRecoveryLease(t, database, pool, ctx, lease)
-		job, err := database.GetJob(ctx, lease.ID)
-		if err != nil || job.Status != store.JobAvailable || job.CompletedAt != nil || job.MaxAttempts <= job.AttemptCount {
-			t.Fatalf("reclaimed stop recovery attempt %d = (%#v, %v), want live retry authority", attempt, job, err)
-		}
+		lease = expireAndClaimRecoveryLease(t, database, pool, ctx, lease, "crashing-stop")
 		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
 		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed {
 			t.Fatalf("recovery after expired stop attempt %d = (%#v, %v)", attempt, unsettled, err)
@@ -165,12 +161,14 @@ func TestStopRecoveryLeaseExpiryBeyondAttemptBudgetRetainsAuthorityAndEventually
 	}
 	assertRecoverySafetyHandoffVisible(t, database, ctx, pool, original.JobLease.WorkflowID, recovery.StopRuntimeJobID)
 
-	finalLease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "restored-stop")
-	completed, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, finalLease)
+	if lease.Attempt != 5 {
+		t.Fatalf("restored stop attempt = %d, want 5", lease.Attempt)
+	}
+	completed, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, lease)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRecoverySettlement(t, pool, ctx, original, recovery, completed, finalLease, workflow.ReasonInfrastructureRetry, 1, 0)
+	assertRecoverySettlement(t, pool, ctx, original, recovery, completed, lease, workflow.ReasonInfrastructureRetry, 1, 0)
 	assertRecoverySafetyHandoffCount(t, pool, ctx, original.JobLease.WorkflowID, recovery.StopRuntimeJobID, 1)
 }
 
@@ -205,10 +203,10 @@ func TestStopRecoveryFailuresBeyondAttemptBudgetRetainAuthorityAndEventuallySett
 				t.Fatalf("stale stop failure acknowledgement error = %v, want ErrAgentTurnRecoveryFenceLost", err)
 			}
 		}
-		job, err := database.GetJob(ctx, lease.ID)
-		if err != nil || job.Status != store.JobAvailable || job.CompletedAt != nil ||
+		job := readStoredJob(t, pool, ctx, lease.ID)
+		if job.Status != store.JobAvailable || job.CompletedAt != nil ||
 			job.MaxAttempts <= job.AttemptCount || job.LastError != failure.Error() {
-			t.Fatalf("failed stop recovery attempt %d = (%#v, %v), want delayed live retry authority", attempt, job, err)
+			t.Fatalf("failed stop recovery attempt %d = %#v, want delayed live retry authority", attempt, job)
 		}
 		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
 		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed || unsettled.RuntimeStoppedAt != nil {
@@ -246,22 +244,15 @@ func TestMutationRecoveryLeaseExpiryBeyondAttemptBudgetRetainsAuthorityAndEventu
 		if lease.Attempt != attempt {
 			t.Fatalf("mutation recovery attempt = %d, want %d", lease.Attempt, attempt)
 		}
-		expireAndReclaimRecoveryLease(t, database, pool, ctx, lease)
-		job, err := database.GetJob(ctx, lease.ID)
-		if err != nil || job.Status != store.JobAvailable || job.CompletedAt != nil || job.MaxAttempts <= job.AttemptCount {
-			t.Fatalf("reclaimed mutation recovery attempt %d = (%#v, %v), want live retry authority", attempt, job, err)
-		}
+		lease = expireAndClaimRecoveryLease(t, database, pool, ctx, lease, "crashing-mutation")
 		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
 		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed {
 			t.Fatalf("recovery after expired mutation attempt %d = (%#v, %v)", attempt, unsettled, err)
 		}
-		if attempt < 4 {
-			lease = claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "crashing-mutation")
-		}
 	}
 	assertRecoverySafetyHandoffVisible(t, database, ctx, pool, original.JobLease.WorkflowID, recovery.ReconcileMutationsJobID)
 
-	finalLease := claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "restored-mutation")
+	finalLease := lease
 	if _, err := database.ReconcileRecoveredMutation(ctx, finalLease, mutation.ID, store.RecoveredMutationOutcome{
 		State: store.MutationSucceeded, Result: json.RawMessage(`{"comment_id":839}`),
 	}); err != nil {
@@ -620,7 +611,7 @@ func claimRecoveryJob(t *testing.T, database *store.Store, ctx context.Context, 
 	return *lease
 }
 
-func expireAndReclaimRecoveryLease(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, lease store.JobLease) {
+func expireAndClaimRecoveryLease(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, lease store.JobLease, owner string) store.JobLease {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, lease.ID); err != nil {
 		t.Fatal(err)
@@ -628,12 +619,23 @@ func expireAndReclaimRecoveryLease(t *testing.T, database *store.Store, pool *pg
 	if _, err := pool.Exec(ctx, `UPDATE job_attempts SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE job_id = $1 AND attempt_number = $2`, lease.ID, lease.Attempt); err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed, err := database.ReclaimExpiredJobs(ctx, 10); err != nil || reclaimed != 1 {
-		t.Fatalf("ReclaimExpiredJobs() = (%d, %v), want one recovery Job", reclaimed, err)
+	next, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, lease.Kind, owner, 10*time.Second)
+	if err != nil {
+		t.Fatalf("reclaim expired %s Job: %v", lease.Kind, err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1 AND status = 'AVAILABLE'`, lease.ID); err != nil {
-		t.Fatal(err)
+	if next == nil {
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1 AND status = 'AVAILABLE'`, lease.ID); err != nil {
+			t.Fatal(err)
+		}
+		next, err = database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, lease.Kind, owner, 10*time.Second)
+		if err != nil {
+			t.Fatalf("claim delayed %s retry: %v", lease.Kind, err)
+		}
 	}
+	if next == nil || next.ID != lease.ID || next.Attempt != lease.Attempt+1 {
+		t.Fatalf("replacement %s lease = %#v, want Job %s attempt %d", lease.Kind, next, lease.ID, lease.Attempt+1)
+	}
+	return *next
 }
 
 func assertRecoverySafetyHandoffCount(t *testing.T, pool *pgxpool.Pool, ctx context.Context, workflowID, sourceJobID string, want int) {

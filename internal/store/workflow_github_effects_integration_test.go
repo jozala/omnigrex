@@ -39,16 +39,13 @@ VALUES ('7a000000-0000-4000-8000-000000000002', $1, 91, 'acme', 'widgets',
         93, 23, 'OPEN', 'main', repeat('b', 40), 'feature', repeat('a', 40), repeat('a', 40))`, workflowID); err != nil {
 		t.Fatalf("seed Change Proposal: %v", err)
 	}
-	job, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+	jobID := insertJob(t, pool, ctx, jobSeed{
 		Queue: store.WorkflowActionQueue, Kind: store.PublishHumanHandoffJobKind,
 		Payload:     json.RawMessage(`{"reason":"review_budget_exhausted","diagnostic":"latest safe diagnostic","revision":7}`),
 		MaxAttempts: 3, IdempotencyKey: "handoff-effect-fence", WorkflowID: workflowID,
 	})
-	if err != nil {
-		t.Fatalf("EnqueueJob() error = %v", err)
-	}
 	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-worker", time.Second)
-	if err != nil || lease == nil || lease.ID != job.ID {
+	if err != nil || lease == nil || lease.ID != jobID {
 		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v)", lease, err)
 	}
 	if err := databases[0].CompleteJob(ctx, *lease, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowJobRequiresAcknowledgement) {
@@ -79,20 +76,20 @@ VALUES ('7a000000-0000-4000-8000-000000000002', $1, 91, 'acme', 'widgets',
 	if !acknowledgement.Superseded || !acknowledgement.CleanupRequired || acknowledgement.Revision != 8 || acknowledgement.State != workflow.StateReviewing {
 		t.Fatalf("acknowledgement = %#v, want superseded revision 8", acknowledgement)
 	}
-	stored, err := databases[0].GetJob(ctx, lease.ID)
-	if err != nil || stored.Status != store.JobLeased || len(stored.Result) != 0 {
-		t.Fatalf("stored cleanup-pending job = %#v, error %v", stored, err)
+	stored := readStoredJob(t, pool, ctx, lease.ID)
+	if stored.Status != store.JobLeased || len(stored.Result) != 0 {
+		t.Fatalf("stored cleanup-pending job = %#v", stored)
 	}
 	if _, err := databases[0].AcknowledgeWorkflowGitHubEffectCleanup(ctx, *lease); err != nil {
 		t.Fatalf("AcknowledgeWorkflowGitHubEffectCleanup() error = %v", err)
 	}
-	stored, err = databases[0].GetJob(ctx, lease.ID)
+	stored = readStoredJob(t, pool, ctx, lease.ID)
 	var cleanedResult struct {
 		CleanupVerified bool `json:"cleanup_verified"`
 	}
 	decodeErr := json.Unmarshal(stored.Result, &cleanedResult)
-	if err != nil || decodeErr != nil || stored.Status != store.JobSucceeded || !cleanedResult.CleanupVerified || strings.Contains(string(stored.Result), "comment_id") {
-		t.Fatalf("stored cleaned job = %#v, error %v", stored, err)
+	if decodeErr != nil || stored.Status != store.JobSucceeded || !cleanedResult.CleanupVerified || strings.Contains(string(stored.Result), "comment_id") {
+		t.Fatalf("stored cleaned job = %#v, decode error %v", stored, decodeErr)
 	}
 }
 
@@ -106,14 +103,11 @@ INSERT INTO workflows (id, repository_id, repository_owner, repository_name, iss
 VALUES ($1, 101, 'acme', 'widgets', 102, 17, 'DEVELOPING', 2)`, workflowID); err != nil {
 		t.Fatalf("seed Workflow: %v", err)
 	}
-	_, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+	insertJob(t, pool, ctx, jobSeed{
 		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
 		Payload: json.RawMessage(`{"state":"DEVELOPING","revision":2}`), MaxAttempts: 3,
 		IdempotencyKey: "label-effect-retry", WorkflowID: workflowID,
 	})
-	if err != nil {
-		t.Fatalf("EnqueueJob() error = %v", err)
-	}
 	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker", time.Second)
 	if err != nil || lease == nil {
 		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v)", lease, err)
@@ -126,9 +120,9 @@ VALUES ($1, 101, 'acme', 'widgets', 102, 17, 'DEVELOPING', 2)`, workflowID); err
 	if err != nil || !acknowledgement.RetryScheduled || acknowledgement.Superseded {
 		t.Fatalf("failure acknowledgement = (%#v, %v)", acknowledgement, err)
 	}
-	stored, err := databases[0].GetJob(ctx, lease.ID)
-	if err != nil || stored.Status != store.JobAvailable || stored.LastError != "GitHub unavailable" || stored.AttemptCount != 1 {
-		t.Fatalf("stored retry job = %#v, error %v", stored, err)
+	stored := readStoredJob(t, pool, ctx, lease.ID)
+	if stored.Status != store.JobAvailable || stored.LastError != "GitHub unavailable" || stored.AttemptCount != 1 {
+		t.Fatalf("stored retry job = %#v", stored)
 	}
 }
 
@@ -348,14 +342,11 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
     503, 23, 'OPEN', 'main', 'base', 'feature', 'head')`, workflowID); err != nil {
 		t.Fatal(err)
 	}
-	job, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+	jobID := insertJob(t, pool, ctx, jobSeed{
 		Queue: store.WorkflowActionQueue, Kind: store.PublishHumanHandoffJobKind,
 		Payload:     json.RawMessage(`{"reason":"agent_blocked","revision":7,"pull_request_number":23}`),
 		MaxAttempts: 3, IdempotencyKey: "handoff-cleanup-expiry", WorkflowID: workflowID,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	first, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-1", 30*time.Millisecond)
 	if err != nil || first == nil {
 		t.Fatalf("first claim = (%#v, %v)", first, err)
@@ -376,7 +367,7 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
 	}
 	time.Sleep(40 * time.Millisecond)
 	second, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-2", 5*time.Second)
-	if err != nil || second == nil || second.ID != job.ID || second.Attempt != 2 {
+	if err != nil || second == nil || second.ID != jobID || second.Attempt != 2 {
 		t.Fatalf("reclaimed cleanup claim = (%#v, %v)", second, err)
 	}
 	cleanup, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *second)
@@ -390,7 +381,7 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
 	}
 	time.Sleep(2 * time.Millisecond)
 	third, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-3", 5*time.Second)
-	if err != nil || third == nil || third.ID != job.ID || third.Attempt != 3 {
+	if err != nil || third == nil || third.ID != jobID || third.Attempt != 3 {
 		t.Fatalf("retried cleanup claim = (%#v, %v)", third, err)
 	}
 	if retriedCleanup, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *third); err != nil || !retriedCleanup.CleanupRequired {
@@ -422,14 +413,11 @@ WHERE id = $1`, workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	job, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+	jobID := insertJob(t, pool, ctx, jobSeed{
 		Queue: store.WorkflowActionQueue, Kind: store.PublishHumanHandoffJobKind,
 		Payload: json.RawMessage(`{"reason":"agent_blocked","revision":7}`), MaxAttempts: 1,
 		IdempotencyKey: "handoff-cleanup-final", WorkflowID: workflowID,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-worker", 5*time.Second)
 	if err != nil || lease == nil {
 		t.Fatalf("claim handoff = (%#v, %v)", lease, err)
@@ -461,7 +449,7 @@ SELECT cleanup.status, cleanup.last_error, cleanup.observed_revision, cleanup.cu
 FROM workflow_github_effect_cleanups AS cleanup
 JOIN jobs AS source ON source.id = cleanup.job_id
 JOIN workflow_action_failures AS action_failure ON action_failure.source_job_id = source.id
-WHERE cleanup.job_id = $1`, job.ID).Scan(&cleanupStatus, &cleanupDiagnostic, &observedRevision,
+WHERE cleanup.job_id = $1`, jobID).Scan(&cleanupStatus, &cleanupDiagnostic, &observedRevision,
 		&currentRevision, &sourceStatus, &failureStatus, &sourceKind); err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +463,7 @@ WHERE cleanup.job_id = $1`, job.ID).Scan(&cleanupStatus, &cleanupDiagnostic, &ob
 	}
 	var generated int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1
-    AND kind IN ('PUBLISH_HUMAN_HANDOFF', 'RECONCILE_GITHUB_LABELS') AND id <> $2`, workflowID, job.ID).Scan(&generated); err != nil {
+    AND kind IN ('PUBLISH_HUMAN_HANDOFF', 'RECONCILE_GITHUB_LABELS') AND id <> $2`, workflowID, jobID).Scan(&generated); err != nil {
 		t.Fatal(err)
 	}
 	if generated != 2 {
@@ -497,21 +485,18 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	job, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+	jobID := insertJob(t, pool, ctx, jobSeed{
 		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
 		Payload: json.RawMessage(`{"state":"DEVELOPING","revision":2}`), MaxAttempts: 1,
 		IdempotencyKey: "label-final-expiry-50", WorkflowID: fixture.workflowID,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "crashing-label-worker", 25*time.Millisecond)
-	if err != nil || lease == nil || lease.ID != job.ID {
+	if err != nil || lease == nil || lease.ID != jobID {
 		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v)", lease, err)
 	}
 	time.Sleep(35 * time.Millisecond)
-	if reclaimed, err := databases[0].ReclaimExpiredJobs(ctx, 10); err != nil || reclaimed != 1 {
-		t.Fatalf("ReclaimExpiredJobs() = (%d, %v)", reclaimed, err)
+	if reclaimed, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "replacement-label-worker", time.Second); err != nil || reclaimed != nil {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() after final expiry = (%#v, %v), want (nil, nil)", reclaimed, err)
 	}
 	escalation, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second)
 	if err != nil || escalation == nil || !escalation.HandoffApplied || escalation.WorkflowRevision != 3 {
@@ -524,7 +509,7 @@ SELECT workflow.status, workflow.state_revision, workflow.desired_assignment_sta
        (SELECT count(*) FROM jobs WHERE workflow_id = workflow.id
            AND kind IN ('PUBLISH_HUMAN_HANDOFF', 'RECONCILE_GITHUB_LABELS') AND id <> source.id)
 FROM workflows AS workflow JOIN jobs AS source ON source.id = $2
-WHERE workflow.id = $1`, fixture.workflowID, job.ID).Scan(&state, &revision, &assignmentStatus, &sourceStatus, &derived); err != nil {
+WHERE workflow.id = $1`, fixture.workflowID, jobID).Scan(&state, &revision, &assignmentStatus, &sourceStatus, &derived); err != nil {
 		t.Fatal(err)
 	}
 	if state != string(workflow.StateNeedsHuman) || revision != 3 || assignmentStatus != string(workflow.AssignmentWaitingForHuman) || sourceStatus != string(store.JobFailed) || derived != 2 {
@@ -547,17 +532,13 @@ VALUES ($1, 201, 'acme', 'widgets-a', 202, 17, 'REVIEWING', 3),
        ($2, 211, 'acme', 'widgets-b', 212, 18, 'DEVELOPING', 1)`, workflowA, workflowB); err != nil {
 		t.Fatalf("seed Workflows: %v", err)
 	}
-	enqueue := func(key, workflowID string, revision, priority int) store.Job {
+	enqueue := func(key, workflowID string, revision, priority int) string {
 		t.Helper()
-		job, _, err := databases[0].EnqueueJob(ctx, store.JobSpec{
+		return insertJob(t, pool, ctx, jobSeed{
 			Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
 			Payload:  json.RawMessage(fmt.Sprintf(`{"state":"DEVELOPING","revision":%d}`, revision)),
 			Priority: priority, MaxAttempts: 3, IdempotencyKey: key, WorkflowID: workflowID,
 		})
-		if err != nil {
-			t.Fatalf("EnqueueJob(%s) error = %v", key, err)
-		}
-		return job
 	}
 	oldA := enqueue("serialized-label-a-old", workflowA, 1, 20)
 	newA := enqueue("serialized-label-a-new", workflowA, 2, 10)
@@ -588,8 +569,8 @@ VALUES ($1, 201, 'acme', 'widgets-a', 202, 17, 'REVIEWING', 3),
 		}
 		claimed[result.lease.WorkflowID] = result.lease
 	}
-	if claimed[workflowA] == nil || claimed[workflowA].ID != oldA.ID || claimed[workflowB] == nil || claimed[workflowB].ID != jobB.ID {
-		t.Fatalf("concurrent claims = %#v, want oldest A %s and unrelated B %s", claimed, oldA.ID, jobB.ID)
+	if claimed[workflowA] == nil || claimed[workflowA].ID != oldA || claimed[workflowB] == nil || claimed[workflowB].ID != jobB {
+		t.Fatalf("concurrent claims = %#v, want oldest A %s and unrelated B %s", claimed, oldA, jobB)
 	}
 	if blocked, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker-2", 5*time.Second); err != nil || blocked != nil {
 		t.Fatalf("claim while both Workflows have live label effects = (%#v, %v), want nil", blocked, err)
@@ -608,8 +589,8 @@ VALUES ($1, 201, 'acme', 'widgets-a', 202, 17, 'REVIEWING', 3),
 		}
 	}
 	next, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker-2", 5*time.Second)
-	if err != nil || next == nil || next.ID != newA.ID {
-		t.Fatalf("next serialized A claim = (%#v, %v), want %s", next, err, newA.ID)
+	if err != nil || next == nil || next.ID != newA {
+		t.Fatalf("next serialized A claim = (%#v, %v), want %s", next, err, newA)
 	}
 	effect, err := databases[2].GetWorkflowGitHubEffectContext(ctx, *next)
 	if err != nil || effect.Revision != 3 || effect.State != workflow.StateReviewing {

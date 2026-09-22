@@ -211,9 +211,9 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	if !acknowledgement.RetryScheduled || acknowledgement.Escalated || acknowledgement.Attempt != 1 || acknowledgement.UnresolvedMutationCount != 2 {
 		t.Errorf("first acknowledgement = %#v, want delayed retry", acknowledgement)
 	}
-	retriedJob, err := database.GetJob(ctx, recovery.ReconcileMutationsJobID)
-	if err != nil || retriedJob.Status != store.JobAvailable || retriedJob.AvailableAt.Before(firstFailureAt.Add(retryDelay-time.Millisecond)) {
-		t.Errorf("first retried job = (%#v, %v), want delayed AVAILABLE", retriedJob, err)
+	retriedJob := readStoredJob(t, pool, ctx, recovery.ReconcileMutationsJobID)
+	if retriedJob.Status != store.JobAvailable || retriedJob.AvailableAt.Before(firstFailureAt.Add(retryDelay-time.Millisecond)) {
+		t.Errorf("first retried job = %#v, want delayed AVAILABLE", retriedJob)
 	}
 	if _, err := database.AcknowledgeAgentTurnMutationReconciliationFailure(ctx, *reconcileLease, errors.New("stale retry"), 0); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
 		t.Errorf("failure acknowledgement with stale lease error = %v, want ErrAgentTurnRecoveryFenceLost", err)
@@ -321,10 +321,10 @@ FROM workflow_attempts AS attempt WHERE attempt.id = $3`, fixture.workflowID, tu
 		t.Errorf("handoff actions = handoff %s, labels %s", handoffPayload, labelsPayload)
 	}
 
-	reconciliationJob, err := database.GetJob(ctx, recovery.ReconcileMutationsJobID)
-	if err != nil || reconciliationJob.Status != store.JobSucceeded ||
+	reconciliationJob := readStoredJob(t, pool, ctx, recovery.ReconcileMutationsJobID)
+	if reconciliationJob.Status != store.JobSucceeded ||
 		!strings.Contains(string(reconciliationJob.Result), `"escalated": true`) {
-		t.Errorf("completed reconciliation job = (%#v, %v), want escalated SUCCEEDED", reconciliationJob, err)
+		t.Errorf("completed reconciliation job = %#v, want escalated SUCCEEDED", reconciliationJob)
 	}
 	settled, err := database.CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil {
