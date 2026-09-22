@@ -61,14 +61,14 @@ VALUES ('40000000-0000-4000-8000-000000000218', $1, 21, 'owner', 'repo',
 	turnSpec := fixture.turnSpec()
 	turnSpec.ChangeProposalID = "40000000-0000-4000-8000-000000000218"
 	turnSpec.ExpectedHeadSHA = "head-sha"
-	turn, err := database.AllocateAgentTurn(ctx, turnSpec)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, turnSpec)
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
-	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime", 5*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	turnLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, executionJob, turn.ControlRevision, "runtime", 5*time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 	if err := database.OpenMutationAdmission(ctx, turnLease); err != nil {
 		t.Fatalf("OpenMutationAdmission() error = %v", err)
@@ -298,7 +298,8 @@ WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS 
 	if err := pool.QueryRow(ctx, `
 SELECT attempt.infrastructure_failures,
        (SELECT count(*) FROM agent_turn_settlements WHERE agent_turn_id = $2),
-       (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'),
+       (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'
+        AND status IN ('AVAILABLE', 'LEASED')),
        (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PUBLISH_HUMAN_HANDOFF')
 FROM workflow_attempts AS attempt WHERE attempt.id = $3`, fixture.workflowID, turn.ID, fixture.attemptID).Scan(
 		&infrastructureFailures, &settlements, &preparationJobs, &handoffJobs,
@@ -347,15 +348,18 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	turnSpec := fixture.turnSpec()
 	turnSpec.Stage = workflow.StageReview
 	turnSpec.Purpose = workflow.TurnPurposeReview
+	proposalID := seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, "review-head")
+	turnSpec.ChangeProposalID = proposalID
+	turnSpec.ExpectedHeadSHA = "review-head"
 	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
-	turn, err := database.AllocateAgentTurn(ctx, turnSpec)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, turnSpec)
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
-	turnLease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "review-runtime", 5*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	turnLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, executionJob, turn.ControlRevision, "review-runtime", 5*time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 	if err := database.OpenMutationAdmission(ctx, turnLease); err != nil {
 		t.Fatalf("OpenMutationAdmission() error = %v", err)
@@ -413,8 +417,8 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAgentTurnMutationReconciliationContext() error = %v", err)
 	}
-	if reconciliationContext.ChangeProposal != nil {
-		t.Fatalf("Change Proposal context = %#v, want nil for unbound Turn", reconciliationContext.ChangeProposal)
+	if reconciliationContext.ChangeProposal == nil || reconciliationContext.ChangeProposal.ID != proposalID || reconciliationContext.ChangeProposal.HeadSHA != "review-head" {
+		t.Fatalf("Change Proposal context = %#v, want prepared proposal %s", reconciliationContext.ChangeProposal, proposalID)
 	}
 	if _, err := database.ReconcileRecoveredMutation(ctx, *reconcileLease, mutation.ID, store.RecoveredMutationOutcome{
 		State: store.MutationSucceeded, Result: json.RawMessage(`{"review_id":2,"actor_id":9201}`),

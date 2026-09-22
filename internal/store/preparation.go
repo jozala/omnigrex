@@ -1156,14 +1156,6 @@ func validateAgentProfileSnapshot(profile AgentProfileSnapshot, expectedPath str
 	return validateAgentProfileConfigForIdentity(profile.Config, expectedPath, policy, preparation)
 }
 
-func (store *Store) validateAgentProfileConfig(value json.RawMessage, preparation AgentTurnPreparation) (json.RawMessage, error) {
-	policy, ok := store.policies.Lookup(preparation.Role)
-	if !ok {
-		return nil, errors.New("prepare Agent Turn: Role policy is unavailable")
-	}
-	return validateAgentProfileConfigForIdentity(value, "", policy, preparation)
-}
-
 func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath string, policy role.Policy, preparation AgentTurnPreparation) (json.RawMessage, error) {
 	config, err := canonicalJSON(value)
 	if err != nil {

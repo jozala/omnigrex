@@ -140,12 +140,12 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	activeTurn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	activeTurn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	executionJob := claimAgentTurnJob(t, databases[0], ctx, activeTurn, 10*time.Second)
-	turnLease, err := databases[0].AcquireAgentTurn(ctx, executionJob, activeTurn.ControlRevision, "runtime", 10*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, activeTurn)
+	turnLease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, executionJob, activeTurn.ControlRevision, "runtime", 10*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

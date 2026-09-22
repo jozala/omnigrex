@@ -1135,14 +1135,14 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 		spec.ExpectedHeadSHA = head
 		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
 	}
-	turn, err := database.AllocateAgentTurn(ctx, spec)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, 20*time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "settlement-runtime", 20*time.Second, 100)
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "settlement-runtime", 20*time.Second, 100)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 		t.Fatalf("OpenMutationAdmission() error = %v", err)

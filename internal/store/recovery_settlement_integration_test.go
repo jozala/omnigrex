@@ -312,7 +312,7 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	triggerPreparationWorkflow(t, database, ctx, "78350000-0000-4000-8000-000000000001", "78350000-0000-4000-8000-000000000002")
 	profile := preparationSpec("second-failure-profile", "openai/second-failure")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "second-failure-profile", "openai/second-failure")
-	rootLease := acquireAndBindTurn(t, database, ctx, root, "second-failure-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "second-failure-acp")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := database.AcquireAgentTurn(ctx, claimAgentTurnJob(t, database, ctx, retry.Turn, time.Second), retry.Turn.ControlRevision, "second-failure-runtime", time.Second, 1)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, retry.Turn), retry.Turn.ControlRevision, "second-failure-runtime", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,14 +485,14 @@ func TestConcurrentStopAcknowledgementAndRecoveryCompletionAreSingleAndIdempoten
 }
 
 func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testing.T) {
-	databases, _ := openPhaseFiveStores(t, 1)
+	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	triggerPreparationWorkflow(t, database, ctx, "78370000-0000-4000-8000-000000000001", "78370000-0000-4000-8000-000000000002")
 	profile := preparationSpec("recovery-replay-profile", "openai/recovery-replay")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovery-replay-profile", "openai/recovery-replay")
-	rootLease := acquireAndBindTurn(t, database, ctx, root, "recovery-replay-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "recovery-replay-acp")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	if retry.Session.ID != root.Session.ID || retry.Turn.RetryOfTurnID != root.Turn.ID {
 		t.Fatalf("prepared retry = session %s retry %s", retry.Session.ID, retry.Turn.RetryOfTurnID)
 	}
-	retryLease, err := database.AcquireAgentTurn(ctx, claimAgentTurnJob(t, database, ctx, retry.Turn, time.Second), retry.Turn.ControlRevision, "replay-retry", time.Second, 1)
+	retryLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, retry.Turn), retry.Turn.ControlRevision, "replay-retry", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

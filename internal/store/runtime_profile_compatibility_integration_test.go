@@ -215,7 +215,7 @@ func TestCurrentLegacyRuntimeBindingBlocksNewGenerationUntilExplicitlySuperseded
 		database := databases[0]
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		seedAgentSession(t, pool, 74)
+		seedLegacyAgentSession(t, pool, 74)
 
 		assertLegacyRuntimeBindingBlocksCandidate(t, database, pool, ctx,
 			compatibilityProfile(t, "c", "amd64"), 220)
@@ -226,7 +226,7 @@ func TestCurrentLegacyRuntimeBindingBlocksNewGenerationUntilExplicitlySuperseded
 		database := databases[0]
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		legacy := seedAgentSession(t, pool, 75)
+		legacy := seedLegacyAgentSession(t, pool, 75)
 		if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET status = 'SUPERSEDED' WHERE id = $1`, legacy.assignmentID); err != nil {
 			t.Fatalf("explicitly supersede legacy Assignment: %v", err)
 		}
@@ -399,7 +399,7 @@ func prepareCollectedCompatibilityGeneration(t *testing.T, database *store.Store
 	if err != nil {
 		t.Fatalf("prepare source generation: %v", err)
 	}
-	lease := acquireAndBindTurn(t, database, ctx, first, "compatibility-source-session")
+	lease := acquireAndBindTurn(t, database, pool, ctx, first, "compatibility-source-session")
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_sessions AS session

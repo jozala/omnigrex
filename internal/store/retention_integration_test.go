@@ -732,7 +732,7 @@ WHERE id = $1`, fixture.sessionID); err != nil {
 		t.Fatalf("Agent Sessions after retained preparation = %d, want exact retained identity", sessions)
 	}
 
-	lease := acquireAndBindTurn(t, database, ctx, prepared, "created-after-reactivation")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "created-after-reactivation")
 	bound, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -968,7 +968,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 	if prepared.Assignment.ID == fixture.assignmentID || prepared.Assignment.Generation != 2 {
 		t.Fatalf("post-collection Assignment = %#v, want new generation", prepared.Assignment)
 	}
-	turnLease := acquireAndBindTurn(t, databases[0], ctx, prepared, "post-collection-acp")
+	turnLease := acquireAndBindTurn(t, databases[0], pool, ctx, prepared, "post-collection-acp")
 	settleAcquiredTurn(t, databases[0], ctx, turnLease, store.AgentTurnSucceeded)
 	secondObservedAt := time.Now().UTC()
 	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 33,

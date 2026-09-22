@@ -606,7 +606,7 @@ func lockLiveAgentTurnSettlement(ctx context.Context, tx pgx.Tx, lease AgentTurn
 	if err != nil || job.LeaseOwner != lease.JobLease.LeaseOwner || !sameAgentTurnExecutionIdentity(job, lease) {
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, ErrAgentTurnFenceLost
 	}
-	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false)
+	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID)
 	if err != nil {
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, err
 	}

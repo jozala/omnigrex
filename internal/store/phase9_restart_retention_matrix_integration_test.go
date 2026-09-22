@@ -160,7 +160,7 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 	triggerPreparationWorkflow(t, database, ctx,
 		"7b200000-0000-4000-8000-000000000001", "7b200000-0000-4000-8000-000000000002")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "mutation-profile", "openai/mutation")
-	rootLease := acquireAndBindTurn(t, database, ctx, root, "mutation-session")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "mutation-session")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 	if retry.Session.ID != root.Session.ID || retry.Turn.RetryOfTurnID != root.Turn.ID {
 		t.Fatalf("mutation retry = Session %s, retry of %s", retry.Session.ID, retry.Turn.RetryOfTurnID)
 	}
-	retryLease := acquireAndBindTurn(t, database, ctx, retry, "mutation-session")
+	retryLease := acquireAndBindTurn(t, database, pool, ctx, retry, "mutation-session")
 	if err := database.OpenMutationAdmission(ctx, retryLease); err != nil {
 		t.Fatal(err)
 	}
@@ -277,12 +277,12 @@ func TestPhaseNineCloseActiveTurnSurvivesStopAndSettlementProcessLoss(t *testing
 	defer cancel()
 	fixture := seedAgentSession(t, pool, 704)
 	prepareClosableFixture(t, pool, fixture)
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, time.Second)
-	if _, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "closing-runtime", time.Second, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "closing-runtime", time.Second, 1); err != nil {
 		t.Fatal(err)
 	}
 	phaseNineCloseWorkflow(t, database, ctx, fixture, 704,
@@ -394,12 +394,12 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 	turnSpec := fixture.turnSpec()
 	turnSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
 		pinnedBinding.Name+"/"+pinnedBinding.Version, "provider/test", "", 10, "Test instructions.", nil)
-	turn, err := database.AllocateAgentTurn(ctx, turnSpec)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, turnSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "history-runtime", time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, executionJob, turn.ControlRevision, "history-runtime", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

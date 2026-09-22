@@ -392,8 +392,8 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	if err != nil || len(assignments) != 1 || assignments[0].Stage != architecture || assignments[0].Role != architect {
 		t.Fatalf("custom Stage Assignments = (%#v, %v)", assignments, err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, prepared.Turn, 20*time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, prepared.Turn.ControlRevision, "architect-runtime", 20*time.Second, 100)
+	job := agentTurnExecutionJob(t, pool, ctx, prepared.Turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, prepared.Turn.ControlRevision, "architect-runtime", 20*time.Second, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,10 +551,10 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	if err != nil || storedSession.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 {
 		t.Fatalf("GetAgentSession() = (%#v, %v), want persisted Runtime Profile hash", storedSession, err)
 	}
-	runJob := claimAgentTurnJob(t, database, ctx, prepared.Turn, time.Second)
-	turnLease, err := database.AcquireAgentTurn(ctx, runJob, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
+	runJob := agentTurnExecutionJob(t, pool, ctx, prepared.Turn)
+	turnLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, runJob, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() for CREATING Session error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() for CREATING Session error = %v", err)
 	}
 	labels := store.RuntimeLabels(turnLease.AgentTurn)
 	if labels[store.RuntimeLabelAssignmentID] != prepared.Assignment.ID || labels[store.RuntimeLabelSessionID] != prepared.Session.ID ||
@@ -638,7 +638,7 @@ func TestPrepareAgentTurnBlocksReviewerWhileDeveloperRecoveryIsUnsettled(t *test
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000042", "62000000-0000-4000-8000-000000000042")
 	developer := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovery-profile", "openai/developer")
-	lease := acquireAndBindTurn(t, database, ctx, developer, "developer-recovery-session")
+	lease := acquireAndBindTurn(t, database, pool, ctx, developer, "developer-recovery-session")
 	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +881,7 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 	}
 }
 
-func TestAcquireAgentTurnAllowsLaterTurnToRecoverUnboundCreatingSession(t *testing.T) {
+func TestClaimAndAcquireAgentTurnAllowsLaterTurnToRecoverUnboundCreatingSession(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -902,13 +902,13 @@ func TestAcquireAgentTurnAllowsLaterTurnToRecoverUnboundCreatingSession(t *testi
 	if second.Turn.TurnNumber != 2 || second.Session.Status != store.AgentSessionCreating {
 		t.Fatalf("second preparation = %#v, want turn 2 on CREATING Session", second)
 	}
-	job := claimAgentTurnJob(t, database, ctx, second.Turn, time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, second.Turn.ControlRevision, "runtime", time.Second, 1)
+	job := agentTurnExecutionJob(t, pool, ctx, second.Turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, second.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() for later CREATING turn error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() for later CREATING turn error = %v", err)
 	}
 	if lease.ID != second.Turn.ID || lease.AgentSessionID != first.Session.ID {
-		t.Fatalf("AcquireAgentTurn() lease = %#v, want second turn on original Session", lease)
+		t.Fatalf("ClaimAndAcquireAgentTurn() lease = %#v, want second turn on original Session", lease)
 	}
 }
 
@@ -920,7 +920,7 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000019", "62000000-0000-4000-8000-000000000019")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-1", "openai/one")
-	lease := acquireAndBindTurn(t, database, ctx, prepared, "developer-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "developer-acp")
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
 		t.Fatalf("GetAgentSession() error = %v", err)
@@ -1007,8 +1007,8 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 	}
 	blockedSpec := prepared.Turn.AgentTurnSpec
 	blockedSpec.ControlRevision = human.ControlRevision
-	if _, err := database.AllocateAgentTurn(ctx, blockedSpec); !errors.Is(err, store.ErrAgentTurnHierarchyInactive) {
-		t.Fatalf("AllocateAgentTurn() under human control error = %v, want ErrAgentTurnHierarchyInactive", err)
+	if _, err := prepareFixtureAgentTurn(t, database, pool, ctx, blockedSpec); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
+		t.Fatalf("PrepareAgentTurn() under human control error = %v, want ErrAgentTurnPreparationFenceLost", err)
 	}
 	close(client.releaseHuman)
 	if err := <-humanDone; err != nil {
@@ -1042,7 +1042,7 @@ func TestHumanControlIsUniquePerWorkflow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	human := prepareHumanControlledSession(t, database, ctx,
+	human := prepareHumanControlledSession(t, database, pool, ctx,
 		"61000000-0000-4000-8000-000000000093", "62000000-0000-4000-8000-000000000093")
 	const participantID = "63000000-0000-4000-8000-000000000093"
 	const sessionID = "64000000-0000-4000-8000-000000000093"
@@ -1103,11 +1103,12 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+	pool := openPool(t, postgres.databaseURL(true))
 
 	triggerPreparationWorkflow(t, database, ctx,
 		"61000000-0000-4000-8000-000000000094", "62000000-0000-4000-8000-000000000094")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "policy-profile", "openai/policy")
-	lease := acquireAndBindTurn(t, database, ctx, prepared, "policy-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "policy-acp")
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
@@ -1119,10 +1120,10 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 }
 
 func TestHumanPromptAdmissionLeaseEnforcesFencesAndFailsClosedAfterExpiry(t *testing.T) {
-	databases, _ := openPhaseFiveStores(t, 2)
+	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	human := prepareHumanControlledSession(t, databases[0], ctx,
+	human := prepareHumanControlledSession(t, databases[0], pool, ctx,
 		"61000000-0000-4000-8000-000000000020", "62000000-0000-4000-8000-000000000020")
 
 	if _, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision-1, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
@@ -1187,7 +1188,7 @@ func TestHumanPromptCoordinatorReleasesLeaseAfterACPError(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	human := prepareHumanControlledSession(t, databases[0], ctx,
+	human := prepareHumanControlledSession(t, databases[0], pool, ctx,
 		"61000000-0000-4000-8000-000000000021", "62000000-0000-4000-8000-000000000021")
 	replayClient := newBlockingReplayHumanPromptClient()
 	replayDone := make(chan error, 1)
@@ -1226,7 +1227,7 @@ func TestHumanPromptCoordinatorCancelsACPWhenHeartbeatLosesFence(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	human := prepareHumanControlledSession(t, databases[0], ctx,
+	human := prepareHumanControlledSession(t, databases[0], pool, ctx,
 		"61000000-0000-4000-8000-000000000022", "62000000-0000-4000-8000-000000000022")
 	client := newFakeHumanControllerClient()
 	done := make(chan error, 1)
@@ -1360,7 +1361,7 @@ func TestPrepareAgentTurnReusesReturningAndRetainedSessionsAndReplacesNewGenerat
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000008", "62000000-0000-4000-8000-000000000008")
 	first := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-1", "openai/one")
-	firstLease := acquireAndBindTurn(t, database, ctx, first, "developer-acp")
+	firstLease := acquireAndBindTurn(t, database, pool, ctx, first, "developer-acp")
 	settleAcquiredTurn(t, database, ctx, firstLease, store.AgentTurnSucceeded)
 
 	setWorkflowRevision(t, pool, application.WorkflowID, 2)
@@ -1385,7 +1386,7 @@ UPDATE agent_sessions SET runtime_profile_content_sha256 = $2 WHERE id = $1`,
 		returning.Session.ACPSessionID != "developer-acp" || returning.Turn.ExecutionEpoch != 2 {
 		t.Fatalf("returning preparation = %#v, want reused identity and epoch 2", returning)
 	}
-	returningLease := acquireAndBindTurn(t, database, ctx, returning, "developer-acp")
+	returningLease := acquireAndBindTurn(t, database, pool, ctx, returning, "developer-acp")
 	settleAcquiredTurn(t, database, ctx, returningLease, store.AgentTurnSucceeded)
 
 	if _, err := pool.Exec(ctx, `
@@ -1404,7 +1405,7 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 		retained.Session.Status != store.AgentSessionActive || retained.Session.ACPSessionID != "developer-acp" {
 		t.Fatalf("retained preparation = %#v, want reactivated durable identity", retained)
 	}
-	retainedLease := acquireAndBindTurn(t, database, ctx, retained, "developer-acp")
+	retainedLease := acquireAndBindTurn(t, database, pool, ctx, retained, "developer-acp")
 	settleAcquiredTurn(t, database, ctx, retainedLease, store.AgentTurnSucceeded)
 
 	setWorkflowRevision(t, pool, application.WorkflowID, 4)
@@ -1429,7 +1430,7 @@ func TestPrepareAgentTurnInheritsOperationLineageAcrossRetryChain(t *testing.T) 
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000043", "62000000-0000-4000-8000-000000000043")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "lineage-root", "openai/root")
-	rootLease := acquireAndBindTurn(t, database, ctx, root, "lineage-session")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "lineage-session")
 	settleAcquiredTurn(t, database, ctx, rootLease, store.AgentTurnFailed)
 
 	prepareRetry := func(revision int64, target store.AgentTurn, profile string) store.AgentTurnPreparationCommit {
@@ -1441,7 +1442,7 @@ func TestPrepareAgentTurnInheritsOperationLineageAcrossRetryChain(t *testing.T) 
 	}
 
 	firstRetry := prepareRetry(2, root.Turn, "lineage-retry-1")
-	firstRetryLease := acquireAndBindTurn(t, database, ctx, firstRetry, "lineage-session")
+	firstRetryLease := acquireAndBindTurn(t, database, pool, ctx, firstRetry, "lineage-session")
 	settleAcquiredTurn(t, database, ctx, firstRetryLease, store.AgentTurnFailed)
 	secondRetry := prepareRetry(3, firstRetry.Turn, "lineage-retry-2")
 
@@ -2222,12 +2223,12 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 	return spec
 }
 
-func acquireAndBindTurn(t *testing.T, database *store.Store, ctx context.Context, prepared store.AgentTurnPreparationCommit, acpSessionID string) store.AgentTurnLease {
+func acquireAndBindTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, prepared store.AgentTurnPreparationCommit, acpSessionID string) store.AgentTurnLease {
 	t.Helper()
-	job := claimAgentTurnJob(t, database, ctx, prepared.Turn, time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
+	job := agentTurnExecutionJob(t, pool, ctx, prepared.Turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 	if _, err := database.BindAgentSessionACP(ctx, lease, acpSessionID, json.RawMessage(`{"resume":true}`)); err != nil {
 		t.Fatalf("BindAgentSessionACP() error = %v", err)
@@ -2235,11 +2236,11 @@ func acquireAndBindTurn(t *testing.T, database *store.Store, ctx context.Context
 	return lease
 }
 
-func prepareHumanControlledSession(t *testing.T, database *store.Store, ctx context.Context, deliveryID, eventID string) store.AgentSession {
+func prepareHumanControlledSession(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, deliveryID, eventID string) store.AgentSession {
 	t.Helper()
 	triggerPreparationWorkflow(t, database, ctx, deliveryID, eventID)
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "human-profile", "openai/human")
-	lease := acquireAndBindTurn(t, database, ctx, prepared, "human-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "human-acp")
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {

@@ -158,12 +158,12 @@ func seedClosingWorkflowWithTurn(t *testing.T, database *store.Store, pool *pgxp
 	t.Helper()
 	fixture := seedAgentSession(t, pool, number)
 	prepareClosableFixture(t, pool, fixture)
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, time.Second)
-	if _, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "closure-liveness-runtime", time.Second, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "closure-liveness-runtime", time.Second, 1); err != nil {
 		t.Fatal(err)
 	}
 	closeWorkflowForLiveness(t, database, ctx, fixture, number)

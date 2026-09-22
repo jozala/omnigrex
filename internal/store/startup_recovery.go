@@ -166,7 +166,7 @@ FOR UPDATE`, job.ID, job.AttemptCount, job.LeaseToken).Scan(&attemptExists)
 			return AgentTurnRecovery{}, fmt.Errorf("lock duplicate Agent Turn execution attempt: %w", err)
 		}
 	}
-	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID); err != nil {
 		return AgentTurnRecovery{}, err
 	}
 	turn, err := lockAgentTurn(ctx, tx, identity.AgentTurnID)

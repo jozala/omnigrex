@@ -37,12 +37,12 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	expiredSpec := expiredFixture.turnSpec()
 	expiredSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
 		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
-	expiredTurn, err := database.AllocateAgentTurn(ctx, expiredSpec)
+	expiredTurn, err := prepareFixtureAgentTurn(t, database, pool, ctx, expiredSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expiredJob := claimAgentTurnJob(t, database, ctx, expiredTurn, time.Second)
-	if _, err := database.AcquireAgentTurn(ctx, expiredJob, expiredTurn.ControlRevision, "expired-runtime", time.Second, 2); err != nil {
+	expiredJob := agentTurnExecutionJob(t, pool, ctx, expiredTurn)
+	if _, err := acquireFixtureAgentTurn(t, database, pool, ctx, expiredJob, expiredTurn.ControlRevision, "expired-runtime", time.Second, 2); err != nil {
 		t.Fatal(err)
 	}
 	expireAgentTurnExecution(t, pool, ctx, expiredJob.ID, expiredTurn.ID)
@@ -51,7 +51,7 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	queuedSpec := queuedFixture.turnSpec()
 	queuedSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
 		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
-	queuedTurn, err := database.AllocateAgentTurn(ctx, queuedSpec)
+	queuedTurn, err := prepareFixtureAgentTurn(t, database, pool, ctx, queuedSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +83,12 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	closureSpec := closureFixture.turnSpec()
 	closureSpec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper,
 		binding.Name+"/"+binding.Version, "provider/test", "", 10, "Test instructions.", nil)
-	closureTurn, err := database.AllocateAgentTurn(ctx, closureSpec)
+	closureTurn, err := prepareFixtureAgentTurn(t, database, pool, ctx, closureSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	closureJob := claimAgentTurnJob(t, database, ctx, closureTurn, time.Second)
-	if _, err := database.AcquireAgentTurn(ctx, closureJob, closureTurn.ControlRevision, "closure-runtime", time.Second, 2); err != nil {
+	closureJob := agentTurnExecutionJob(t, pool, ctx, closureTurn)
+	if _, err := acquireFixtureAgentTurn(t, database, pool, ctx, closureJob, closureTurn.ControlRevision, "closure-runtime", time.Second, 2); err != nil {
 		t.Fatal(err)
 	}
 

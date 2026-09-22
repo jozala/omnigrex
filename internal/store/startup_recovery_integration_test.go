@@ -28,7 +28,7 @@ func TestStartupRecoveryClassifiesAndRecoversExactRuntimeIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +39,8 @@ func TestStartupRecoveryClassifiesAndRecoversExactRuntimeIdentity(t *testing.T) 
 	}
 	assertRuntimeDisposition(t, databases[0], ctx, identity, store.AgentTurnRuntimeActive)
 
-	job := claimAgentTurnJob(t, databases[0], ctx, turn, time.Second)
-	lease, err := databases[0].AcquireAgentTurn(ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1)
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,12 +155,12 @@ func TestStartupReconcilerFencesLiveDuplicateRuntimeProcessesBeforeCleanup(t *te
 		t.Fatal(err)
 	}
 
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "duplicate-live-runtime", 5*time.Second, 1)
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "duplicate-live-runtime", 5*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +239,8 @@ WHERE turn.id = $1`, turn.ID).Scan(&admissionOpen, &admissionClosed, &ownerClear
 		t.Errorf("duplicate fence = admission %t/%t owner-cleared %t next-epoch %d slots %d mutations %s/%s",
 			admissionOpen, admissionClosed, ownerCleared, nextExecutionEpoch, slots, inFlightState, reservedState)
 	}
-	if _, err := database.AllocateAgentTurn(ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
-		t.Errorf("AllocateAgentTurn() during duplicate recovery error = %v, want ErrAgentTurnRecoveryUnsettled", err)
+	if _, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+		t.Errorf("PrepareAgentTurn() during duplicate recovery error = %v, want ErrAgentTurnRecoveryUnsettled", err)
 	}
 }
 
@@ -394,12 +394,12 @@ WHERE id = $1`, lease.JobLease.ID)
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := seedAgentSession(t, pool, 110+index)
-			turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 			if err != nil {
 				t.Fatal(err)
 			}
-			job := claimAgentTurnJob(t, database, ctx, turn, time.Minute)
-			lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "runtime-owner", time.Minute, 100)
+			job := agentTurnExecutionJob(t, pool, ctx, turn)
+			lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "runtime-owner", time.Minute, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -419,12 +419,12 @@ func TestClassifyAgentTurnRuntimeObservesConcurrentLeaseChangeAtomically(t *test
 	fixture := seedAgentSession(t, pool, 130)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, time.Minute)
-	if _, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "concurrent-owner", time.Minute, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "concurrent-owner", time.Minute, 1); err != nil {
 		t.Fatal(err)
 	}
 	identity := runtimeIdentityForFixture(fixture, turn)
@@ -503,12 +503,12 @@ func TestStartupRecoveryExactCallsAreIdempotentAcrossStores(t *testing.T) {
 	fixture := seedAgentSession(t, pool, 102)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, databases[0], ctx, turn, time.Second)
-	if _, err := databases[0].AcquireAgentTurn(ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1); err != nil {
 		t.Fatal(err)
 	}
 	expireAgentTurnExecution(t, pool, ctx, job.ID, turn.ID)
@@ -566,12 +566,12 @@ func TestStartupRecoveryRejectsGenericRunAgentTurnReclaim(t *testing.T) {
 	fixture := seedAgentSession(t, pool, 103)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, databases[0], ctx, turn, time.Second)
-	if _, err := databases[0].AcquireAgentTurn(ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "startup-runtime", time.Second, 1); err != nil {
 		t.Fatal(err)
 	}
 	expireAgentTurnExecution(t, pool, ctx, job.ID, turn.ID)
@@ -585,13 +585,13 @@ func TestPeriodicExpiredTurnMonitorLeavesLiveOwnerThenRecoversAfterLeaseExpiry(t
 	fixture := seedAgentSession(t, pool, 104)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaseDuration := 250 * time.Millisecond
-	job := claimAgentTurnJob(t, databases[0], ctx, turn, leaseDuration)
-	if _, err := databases[0].AcquireAgentTurn(ctx, job, turn.ControlRevision, "live-at-startup", leaseDuration, 1); err != nil {
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	if _, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "live-at-startup", leaseDuration, 1); err != nil {
 		t.Fatal(err)
 	}
 	identity := store.AgentTurnRuntimeIdentity{

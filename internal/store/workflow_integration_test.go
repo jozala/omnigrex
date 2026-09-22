@@ -284,9 +284,9 @@ func TestCorroboratingEventDuringActiveTurnIsDeferredForThatTurn(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set reducer attempt budget: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
 	delivery := workflowDelivery("40000000-0000-4000-8000-000000000008")
 	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 1, 1, 1
@@ -961,9 +961,9 @@ func TestIssueClosureClosesMutationAdmissionBeforeEnqueuingStop(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("set reducer attempt budget: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET mutation_admission_open = TRUE, status = 'RUNNING' WHERE id = $1`, turn.ID); err != nil {
 		t.Fatalf("open mutation admission fixture: %v", err)
@@ -1011,7 +1011,7 @@ func TestPendingIssueClosureReusesExistingStopJob(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,7 +1091,7 @@ SET infrastructure_failure_limit = 1
 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1145,12 +1145,12 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, 20*time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "incompatible-runtime", 20*time.Second, 100)
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "incompatible-runtime", 20*time.Second, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1200,7 +1200,7 @@ WHERE turn.id = $1`, turn.ID).Scan(
 		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() error = %v", err)
 	}
 	var successors int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')`, fixture.workflowID).Scan(&successors); err != nil {
 		t.Fatal(err)
 	}
 	if recovery.RecoverySettledAt == nil || recovery.Continuation != "WORKFLOW_DEFINITION_HANDOFF_APPLIED" || successors != 0 {

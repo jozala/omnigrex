@@ -26,14 +26,14 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare reconciliation Workflow Attempt: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, databases[0], ctx, turn, 10*time.Second)
-	turnLease, err := databases[0].AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime", 10*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	turnLease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, executionJob, turn.ControlRevision, "runtime", 10*time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 
 	deferredIDs := []string{
@@ -137,7 +137,8 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if err := pool.QueryRow(ctx, `
 SELECT count(*) FILTER (WHERE status = 'COMPLETED' AND disposition = 'UNRELATED'
 		AND reason = 'corroboration_without_active_turn'),
-       (SELECT count(*) FROM jobs WHERE workflow_id = $2 AND kind = 'PREPARE_AGENT_TURN')
+       (SELECT count(*) FROM jobs WHERE workflow_id = $2 AND kind = 'PREPARE_AGENT_TURN'
+        AND status IN ('AVAILABLE', 'LEASED'))
 FROM normalized_events WHERE delivery_id = ANY($1)`, deferredIDs, fixture.workflowID).Scan(&completed, &successorJobs); err != nil {
 		t.Fatalf("query reconciliation outcome: %v", err)
 	}
@@ -160,7 +161,7 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,14 +329,14 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	turnSpec.ChangeProposalID = proposalRowID
 	turnSpec.ExpectedHeadSHA = "head-old"
 	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
-	turn, err := databases[0].AllocateAgentTurn(ctx, turnSpec)
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, turnSpec)
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, databases[0], ctx, turn, 10*time.Second)
-	turnLease, err := databases[0].AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "review-runtime", 10*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	turnLease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, executionJob, turn.ControlRevision, "review-runtime", 10*time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 
 	deferredID := "43000000-0000-4000-8000-000000000001"
@@ -471,9 +472,9 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare delayed reconciliation Workflow Attempt: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_turns
@@ -595,12 +596,12 @@ UPDATE workflows SET status = 'DEVELOPING', state_revision = 1,
 WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatal(err)
 	}
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	executionJob := claimAgentTurnJob(t, database, ctx, turn, 5*time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime-pending-recovery", 5*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, executionJob, turn.ControlRevision, "runtime-pending-recovery", 5*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +668,7 @@ VALUES ($1, $2, $3, $4, 3, 'pending-event-unsettled-recovery', $5, $6, $7, $8, $
 	if err := pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1`, reconciliationJobID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')`, fixture.workflowID).Scan(&successors); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(store.JobLeased) || successors != 0 {
@@ -688,14 +689,14 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1 WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare closure Workflow Attempt: %v", err)
 	}
-	turn, err := databases[0].AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatalf("AllocateAgentTurn() error = %v", err)
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	executionJob := claimAgentTurnJob(t, databases[0], ctx, turn, 10*time.Second)
-	turnLease, err := databases[0].AcquireAgentTurn(ctx, executionJob, turn.ControlRevision, "runtime", 10*time.Second, 1)
+	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
+	turnLease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, executionJob, turn.ControlRevision, "runtime", 10*time.Second, 1)
 	if err != nil {
-		t.Fatalf("AcquireAgentTurn() error = %v", err)
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
 	if err := databases[0].OpenMutationAdmission(ctx, turnLease); err != nil {
 		t.Fatalf("OpenMutationAdmission() error = %v", err)

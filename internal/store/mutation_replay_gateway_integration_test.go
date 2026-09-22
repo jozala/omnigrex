@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
@@ -46,7 +47,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatal(err)
 	}
 
-	root, rootLease, rootExecution := acquireReplayGatewayTurn(t, database, fixture, store.AgentTurn{}, "replay-root")
+	root, rootLease, rootExecution := acquireReplayGatewayTurn(t, database, pool, fixture, store.AgentTurn{}, "replay-root")
 	rootGateway, rootRegistration := openReplayGateway(t, database, backend, replayGatewayScope(rootLease, rootExecution, baseHead))
 	callReplayGatewayTool(t, rootGateway, rootRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1", "message": "First"}, false)
 	callReplayGatewayTool(t, rootGateway, rootRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2", "message": "Second"}, false)
@@ -61,7 +62,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatal(err)
 	}
 
-	_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, fixture, root, "replay-retry")
+	_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, pool, fixture, root, "replay-retry")
 	retryGateway, retryRegistration := openReplayGateway(t, database, backend, replayGatewayScope(retryLease, retryExecution, baseHead))
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1", "message": "First"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2", "message": "Second"}, false)
@@ -123,7 +124,7 @@ func TestGatewayMalformedAncestorReplayFailsClosedWithoutLedgerEvidence(t *testi
 	defer cancel()
 	const head = "3123456789abcdef0123456789abcdef01234567"
 
-	root, rootLease, rootExecution := acquireReplayGatewayTurn(t, database, fixture, store.AgentTurn{}, "malformed-root")
+	root, rootLease, rootExecution := acquireReplayGatewayTurn(t, database, pool, fixture, store.AgentTurn{}, "malformed-root")
 	spec := store.MutationSpec{
 		OperationID: "malformed-publish", ToolName: mcp.ToolPublishChanges,
 		Request:         json.RawMessage(`{"message":"Publish","operation_id":"malformed-publish"}`),
@@ -146,7 +147,7 @@ func TestGatewayMalformedAncestorReplayFailsClosedWithoutLedgerEvidence(t *testi
 		t.Fatal(err)
 	}
 
-	_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, fixture, root, "malformed-retry")
+	_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, pool, fixture, root, "malformed-retry")
 	publisher := &replayGatewayPublisher{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
 		GitHub: &replayGatewayGitHub{}, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{},
@@ -168,18 +169,18 @@ func TestGatewayMalformedAncestorReplayFailsClosedWithoutLedgerEvidence(t *testi
 	}
 }
 
-func acquireReplayGatewayTurn(t *testing.T, database *store.Store, fixture agentFixture, retryOf store.AgentTurn, owner string) (store.AgentTurn, store.AgentTurnLease, store.AgentTurnExecutionContext) {
+func acquireReplayGatewayTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, fixture agentFixture, retryOf store.AgentTurn, owner string) (store.AgentTurn, store.AgentTurnLease, store.AgentTurnExecutionContext) {
 	t.Helper()
 	spec := fixture.turnSpec()
 	if retryOf.ID != "" {
 		spec.Purpose = workflow.TurnPurposeRetry
 		spec.RetryOfTurnID = retryOf.ID
 	}
-	turn, err := database.AllocateAgentTurn(context.Background(), spec)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := database.AcquireAgentTurn(context.Background(), claimAgentTurnJob(t, database, context.Background(), turn, time.Minute), turn.ControlRevision, owner, time.Minute, 1)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, context.Background(), agentTurnExecutionJob(t, pool, context.Background(), turn), turn.ControlRevision, owner, time.Minute, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

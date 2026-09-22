@@ -24,12 +24,12 @@ func TestListAgentTurnMutationInvocationsRequiresClosedSettledLedgerAndPreserves
 	fixture := seedAgentSession(t, pool, 91)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	turn, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := claimAgentTurnJob(t, database, ctx, turn, time.Second)
-	lease, err := database.AcquireAgentTurn(ctx, job, turn.ControlRevision, "outcome-query", time.Second, 1)
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "outcome-query", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,11 +79,11 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	root, err := database.AllocateAgentTurn(ctx, fixture.turnSpec())
+	root, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootLease, err := database.AcquireAgentTurn(ctx, claimAgentTurnJob(t, database, ctx, root, time.Second), root.ControlRevision, "replay-root", time.Second, 1)
+	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, root), root.ControlRevision, "replay-root", time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,13 +125,13 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 		spec := fixture.turnSpec()
 		spec.Purpose = workflow.TurnPurposeRetry
 		spec.RetryOfTurnID = target.ID
-		turn, err := database.AllocateAgentTurn(ctx, spec)
+		turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 		if err != nil {
-			t.Fatalf("AllocateAgentTurn() retry error = %v", err)
+			t.Fatalf("PrepareAgentTurn() retry error = %v", err)
 		}
-		lease, err := database.AcquireAgentTurn(ctx, claimAgentTurnJob(t, database, ctx, turn, time.Second), turn.ControlRevision, owner, time.Second, 1)
+		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, owner, time.Second, 1)
 		if err != nil {
-			t.Fatalf("AcquireAgentTurn() retry error = %v", err)
+			t.Fatalf("ClaimAndAcquireAgentTurn() retry error = %v", err)
 		}
 		if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 			t.Fatal(err)

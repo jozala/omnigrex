@@ -21,7 +21,6 @@ var (
 	ErrAgentSessionNotFound        = errors.New("agent session not found")
 	ErrAgentTurnActive             = errors.New("agent turn already active")
 	ErrAgentTurnFenceLost          = errors.New("agent turn fence lost")
-	ErrAgentTurnConcurrencyLimit   = errors.New("agent turn concurrency limit reached")
 	ErrAgentTurnMutationsUnsettled = errors.New("agent turn mutations are unsettled")
 	ErrAgentTurnHierarchyInactive  = errors.New("agent turn hierarchy is inactive")
 	ErrAgentTurnNotExpired         = errors.New("agent turn ownership is not expired")
@@ -74,7 +73,7 @@ const (
 	AgentTurnTimedOut    AgentTurnStatus = "TIMED_OUT"
 )
 
-// AgentTurnSpec captures the immutable inputs used to allocate an Agent Turn.
+// AgentTurnSpec captures the immutable inputs of an Agent Turn.
 type AgentTurnSpec struct {
 	AgentSessionID            string
 	WorkflowAttemptID         string
@@ -252,187 +251,6 @@ type ReadInvocationRecord struct {
 	FinishedAt       time.Time
 }
 
-// AllocateAgentTurn locks the active hierarchy and allocates monotonic turn and epoch identities.
-func (store *Store) AllocateAgentTurn(ctx context.Context, spec AgentTurnSpec) (AgentTurn, error) {
-	config, err := validateAgentTurnSpec(spec)
-	if err != nil {
-		return AgentTurn{}, err
-	}
-	spec.AgentProfileConfig = config
-	turnID, err := randomUUID()
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("allocate agent turn: %w", err)
-	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("begin agent turn allocation: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	hierarchy, err := lookupSessionHierarchy(ctx, tx, spec.AgentSessionID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return AgentTurn{}, ErrAgentSessionNotFound
-	}
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("look up agent turn hierarchy: %w", err)
-	}
-	locked, err := lockHierarchy(ctx, tx, hierarchy, spec.WorkflowAttemptID, true)
-	if err != nil {
-		return AgentTurn{}, err
-	}
-	if locked.controlRevision != spec.ControlRevision {
-		return AgentTurn{}, ErrAgentTurnFenceLost
-	}
-	assignment, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1 FOR UPDATE`, hierarchy.assignmentID))
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("read Agent Turn Assignment: %w", err)
-	}
-	profileConfig, err := store.validateAgentProfileConfig(spec.AgentProfileConfig, AgentTurnPreparation{
-		Role: assignment.Role, Assignment: assignment,
-	})
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("allocate Agent Turn: %w", err)
-	}
-	spec.AgentProfileConfig = profileConfig
-	var active, unsettled bool
-	var recoveryUnsettled bool
-	if err := tx.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM agent_turns WHERE workflow_id = $1
-AND recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL)`, hierarchy.workflowID).Scan(&recoveryUnsettled); err != nil {
-		return AgentTurn{}, fmt.Errorf("check Agent Turn recovery barrier: %w", err)
-	}
-	if recoveryUnsettled {
-		return AgentTurn{}, ErrAgentTurnRecoveryUnsettled
-	}
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_turns WHERE workflow_id = $1 AND active)`, hierarchy.workflowID).Scan(&active); err != nil {
-		return AgentTurn{}, fmt.Errorf("check active agent turn: %w", err)
-	}
-	if active {
-		return AgentTurn{}, ErrAgentTurnActive
-	}
-	var livePreparation bool
-	if err := tx.QueryRow(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM jobs
-    WHERE workflow_id = $1 AND kind = $2 AND status IN ('AVAILABLE', 'LEASED')
-)`, hierarchy.workflowID, PrepareAgentTurnJobKind).Scan(&livePreparation); err != nil {
-		return AgentTurn{}, fmt.Errorf("check live Agent Turn preparation: %w", err)
-	}
-	if livePreparation {
-		return AgentTurn{}, ErrWorkflowSuccessorConflict
-	}
-	definition := store.reducer.Definition()
-	stage, ok := definition.Stage(spec.Stage)
-	if !ok || stage.Role != assignment.Role || !definition.AcceptsPurpose(spec.Stage, spec.Purpose) {
-		return AgentTurn{}, ErrAgentTurnFenceLost
-	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO stage_assignments (
-    workflow_id, assignment_generation, stage_id, role, agent_participant_id
-)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (workflow_id, assignment_generation, stage_id) DO NOTHING`, hierarchy.workflowID,
-		assignment.Generation, spec.Stage, assignment.Role, assignment.ID); err != nil {
-		return AgentTurn{}, fmt.Errorf("bind legacy Agent Turn Stage Assignment: %w", err)
-	}
-	stageAssignment, assignedParticipant, err := readStageAssignment(ctx, tx, hierarchy.workflowID, assignment.Generation, spec.Stage, true)
-	if err != nil || stageAssignment.Role != assignment.Role || assignedParticipant.ID != assignment.ID {
-		return AgentTurn{}, ErrAgentTurnFenceLost
-	}
-	var currentStage workflow.StageID
-	if err := tx.QueryRow(ctx, `SELECT current_stage FROM workflow_attempts WHERE id = $1`, spec.WorkflowAttemptID).Scan(&currentStage); err != nil || currentStage != spec.Stage {
-		return AgentTurn{}, ErrAgentTurnFenceLost
-	}
-	var proposalID, headSHA string
-	err = tx.QueryRow(ctx, `
-SELECT id::text, head_sha FROM change_proposals
-WHERE workflow_id = $1 AND active FOR UPDATE`, hierarchy.workflowID).Scan(&proposalID, &headSHA)
-	if errors.Is(err, pgx.ErrNoRows) {
-		if spec.ChangeProposalID != "" {
-			return AgentTurn{}, ErrAgentTurnFenceLost
-		}
-	} else if err != nil {
-		return AgentTurn{}, fmt.Errorf("lock Agent Turn Change Proposal: %w", err)
-	} else if spec.ChangeProposalID != proposalID || spec.ExpectedHeadSHA != headSHA {
-		return AgentTurn{}, ErrAgentTurnFenceLost
-	}
-	if err := tx.QueryRow(ctx, unsettledMutationsForSessionSQL, hierarchy.sessionID).Scan(&unsettled); err != nil {
-		return AgentTurn{}, fmt.Errorf("check prior agent turn mutations: %w", err)
-	}
-	if unsettled {
-		return AgentTurn{}, ErrAgentTurnMutationsUnsettled
-	}
-	operationLineageID := turnID
-	if spec.RetryOfTurnID != "" {
-		var retrySession, retryStatus string
-		var retryActive, retryRecoverySettled bool
-		err := tx.QueryRow(ctx, `
-SELECT agent_session_id::text, status, active, recovery_settled_at IS NOT NULL,
-       operation_lineage_id::text
-FROM agent_turns WHERE id = $1 FOR UPDATE`, spec.RetryOfTurnID).Scan(
-			&retrySession, &retryStatus, &retryActive, &retryRecoverySettled, &operationLineageID,
-		)
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && (retrySession != hierarchy.sessionID || retryActive || !retryableTurnStatus(AgentTurnStatus(retryStatus), retryRecoverySettled)) {
-			return AgentTurn{}, errors.New("allocate agent turn: retry target is not an inactive retryable turn in this session")
-		}
-		if err != nil {
-			return AgentTurn{}, fmt.Errorf("lock retry target: %w", err)
-		}
-	}
-
-	var createdAt time.Time
-	err = tx.QueryRow(ctx, `
-	INSERT INTO agent_turns (
-	    id, workflow_id, agent_session_id, workflow_attempt_id, turn_number, execution_epoch,
-	    retry_of_turn_id, operation_lineage_id, status, active, control_revision, agent_profile_commit_sha,
-	    agent_profile_content_sha256, agent_profile_config, stage_id, purpose, change_proposal_id, expected_head_sha
-	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', TRUE, $9, $10, $11, $12, $13, $14, $15, $16)
-	RETURNING created_at`, turnID, hierarchy.workflowID, hierarchy.sessionID, spec.WorkflowAttemptID, locked.nextTurnNumber,
-		locked.nextExecutionEpoch, nullableString(spec.RetryOfTurnID), operationLineageID, spec.ControlRevision,
-		spec.AgentProfileCommitSHA, spec.AgentProfileContentSHA256, spec.AgentProfileConfig,
-		spec.Stage, spec.Purpose, nullableString(spec.ChangeProposalID), nullableString(spec.ExpectedHeadSHA)).Scan(&createdAt)
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("insert agent turn: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-UPDATE agent_sessions
-SET next_turn_number = next_turn_number + 1,
-    next_execution_epoch = next_execution_epoch + 1,
-    updated_at = clock_timestamp()
-WHERE id = $1`, hierarchy.sessionID); err != nil {
-		return AgentTurn{}, fmt.Errorf("advance agent turn counters: %w", err)
-	}
-	payload, err := json.Marshal(map[string]any{
-		"agent_turn_id": turnID, "agent_session_id": hierarchy.sessionID,
-		"execution_epoch": locked.nextExecutionEpoch, "control_revision": spec.ControlRevision,
-	})
-	if err != nil {
-		return AgentTurn{}, fmt.Errorf("encode agent turn job: %w", err)
-	}
-	if _, err := insertJobTx(ctx, tx, jobInsert{
-		queue: AgentTurnQueue, kind: RunAgentTurnJobKind, payload: payload,
-		maxAttempts: 1, idempotencyKey: "run-agent-turn:" + turnID,
-		scope: jobInsertScope{
-			workflowID: hierarchy.workflowID, workflowAttemptID: spec.WorkflowAttemptID,
-			agentAssignmentID: hierarchy.assignmentID, agentSessionID: hierarchy.sessionID,
-			agentTurnID: turnID, executionEpoch: locked.nextExecutionEpoch,
-		},
-	}); err != nil {
-		return AgentTurn{}, fmt.Errorf("enqueue agent turn job: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return AgentTurn{}, fmt.Errorf("commit agent turn allocation: %w", err)
-	}
-	return AgentTurn{
-		AgentTurnSpec: spec, ID: turnID, AgentParticipantID: hierarchy.assignmentID,
-		AgentAssignmentID:  hierarchy.assignmentID,
-		operationLineageID: operationLineageID,
-		TurnNumber:         locked.nextTurnNumber, ExecutionEpoch: locked.nextExecutionEpoch,
-		Status: AgentTurnQueued, CreatedAt: createdAt,
-	}, nil
-}
-
 // ClaimAndAcquireAgentTurn atomically claims the next queued execution job and occupies a global slot.
 func (store *Store) ClaimAndAcquireAgentTurn(ctx context.Context, ownerID string, lease time.Duration, concurrencyLimit int) (AgentTurnLease, bool, error) {
 	if strings.TrimSpace(ownerID) == "" {
@@ -494,7 +312,7 @@ LIMIT 1`, AgentTurnQueue, RunAgentTurnJobKind))
 	if err != nil || !validAgentTurnJobPayload(payload, job) {
 		return AgentTurnLease{}, false, ErrAgentTurnFenceLost
 	}
-	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false)
+	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID)
 	if err != nil {
 		return AgentTurnLease{}, false, err
 	}
@@ -579,126 +397,6 @@ WHERE id = $1 AND execution_epoch = $5 AND control_revision = $6 AND active
 		AgentTurn: turn.AgentTurn, JobLease: jobLease, OwnerID: ownerID,
 		OwnerToken: ownerToken, LeaseExpiresAt: expiresAt,
 	}, true, nil
-}
-
-// AcquireAgentTurn binds an unowned queued turn to its live single-attempt execution job.
-func (store *Store) AcquireAgentTurn(ctx context.Context, jobLease JobLease, controlRevision int64, ownerID string, lease time.Duration, concurrencyLimit int) (AgentTurnLease, error) {
-	if strings.TrimSpace(ownerID) == "" {
-		return AgentTurnLease{}, errors.New("acquire agent turn: owner is empty")
-	}
-	if err := validatePositiveDuration("acquire agent turn lease", lease); err != nil {
-		return AgentTurnLease{}, err
-	}
-	if concurrencyLimit <= 0 || concurrencyLimit > 10_000 {
-		return AgentTurnLease{}, errors.New("acquire agent turn: concurrency limit must be between 1 and 10000")
-	}
-	ownerToken, err := randomUUID()
-	if err != nil {
-		return AgentTurnLease{}, fmt.Errorf("acquire agent turn: %w", err)
-	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return AgentTurnLease{}, fmt.Errorf("begin agent turn acquisition: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	job, err := lockAgentTurnJob(ctx, tx, jobLease, true)
-	if err != nil {
-		return AgentTurnLease{}, err
-	}
-	hierarchy := hierarchyFromJob(job)
-	locked, err := lockHierarchy(ctx, tx, hierarchy, job.WorkflowAttemptID, false)
-	if err != nil {
-		return AgentTurnLease{}, err
-	}
-	if controlRevision != locked.controlRevision {
-		return AgentTurnLease{}, ErrAgentTurnFenceLost
-	}
-	turn, err := lockAgentTurn(ctx, tx, job.AgentTurnID)
-	if err != nil {
-		return AgentTurnLease{}, err
-	}
-	if !locked.allowsAcquisition(turn.AgentTurn) {
-		return AgentTurnLease{}, ErrAgentTurnHierarchyInactive
-	}
-	if !turn.active || turn.AgentSessionID != job.AgentSessionID || turn.ExecutionEpoch != job.ExecutionEpoch ||
-		turn.ControlRevision != controlRevision || turn.Status != AgentTurnQueued && turn.Status != AgentTurnStarting ||
-		turn.ownerID != "" || turn.ownerToken != "" || turn.leasePresent {
-		return AgentTurnLease{}, ErrAgentTurnFenceLost
-	}
-	if err := lockAgentTurnSlots(ctx, tx); err != nil {
-		return AgentTurnLease{}, err
-	}
-	var occupied int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_turn_slots WHERE lease_expires_at > clock_timestamp()`).Scan(&occupied); err != nil {
-		return AgentTurnLease{}, fmt.Errorf("count agent turn slots: %w", err)
-	}
-	if occupied >= concurrencyLimit {
-		return AgentTurnLease{}, ErrAgentTurnConcurrencyLimit
-	}
-	var expiresAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() + $1 * interval '1 microsecond'`, lease.Microseconds()).Scan(&expiresAt); err != nil {
-		return AgentTurnLease{}, fmt.Errorf("calculate agent turn lease: %w", err)
-	}
-	jobUpdate, err := tx.Exec(ctx, `
-UPDATE jobs SET lease_expires_at = $4, heartbeat_at = clock_timestamp(), updated_at = clock_timestamp()
-WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`,
-		job.ID, job.LeaseToken, job.AttemptCount, expiresAt)
-	if err != nil {
-		return AgentTurnLease{}, fmt.Errorf("bind agent turn job lease: %w", err)
-	}
-	if jobUpdate.RowsAffected() != 1 {
-		return AgentTurnLease{}, ErrAgentTurnFenceLost
-	}
-	attemptUpdate, err := tx.Exec(ctx, `
-UPDATE job_attempts SET lease_expires_at = $4, heartbeat_at = clock_timestamp()
-WHERE job_id = $1 AND lease_token = $2 AND attempt_number = $3 AND status = 'LEASED'`,
-		job.ID, job.LeaseToken, job.AttemptCount, expiresAt)
-	if err != nil {
-		return AgentTurnLease{}, fmt.Errorf("bind agent turn job attempt lease: %w", err)
-	}
-	if attemptUpdate.RowsAffected() != 1 {
-		return AgentTurnLease{}, ErrAgentTurnFenceLost
-	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO agent_turn_slots (
-    agent_turn_id, agent_session_id, execution_epoch, control_revision,
-    owner_id, owner_token, lease_expires_at
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`, turn.ID, turn.AgentSessionID, turn.ExecutionEpoch,
-		turn.ControlRevision, ownerID, ownerToken, expiresAt); err != nil {
-		return AgentTurnLease{}, fmt.Errorf("occupy agent turn slot: %w", err)
-	}
-	result, err := tx.Exec(ctx, `
-UPDATE agent_turns
-SET status = 'RUNNING', owner_id = $2, owner_token = $3, leased_at = clock_timestamp(),
-    lease_expires_at = $4, heartbeat_at = NULL, mutation_admission_open = FALSE,
-    mutation_admission_closed_at = NULL, started_at = COALESCE(started_at, clock_timestamp())
-WHERE id = $1 AND status IN ('QUEUED', 'STARTING') AND owner_id IS NULL AND owner_token IS NULL`,
-		turn.ID, ownerID, ownerToken, expiresAt)
-	if err != nil || result.RowsAffected() != 1 {
-		if err == nil {
-			err = ErrAgentTurnFenceLost
-		}
-		return AgentTurnLease{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return AgentTurnLease{}, fmt.Errorf("commit agent turn acquisition: %w", err)
-	}
-	turn.AgentTurn.Status = AgentTurnRunning
-	turn.AgentTurn.MutationAdmissionOpen = false
-	turn.AgentTurn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentTurn.AgentAssignmentID = job.AgentAssignmentID
-	return AgentTurnLease{
-		AgentTurn: turn.AgentTurn, JobLease: jobLease, OwnerID: ownerID,
-		OwnerToken: ownerToken, LeaseExpiresAt: expiresAt,
-	}, nil
-}
-
-// HeartbeatAgentTurn atomically extends job, attempt, turn, and global-slot leases.
-func (store *Store) HeartbeatAgentTurn(ctx context.Context, lease AgentTurnLease, extension time.Duration) error {
-	_, err := store.RefreshAgentTurnLease(ctx, lease, extension)
-	return err
 }
 
 // RefreshAgentTurnLease atomically extends every execution fence and returns its database-derived expiration.
@@ -803,7 +501,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	if !jobLive {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
 	}
-	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false)
+	hierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID)
 	if err != nil {
 		return AgentTurnRecovery{}, err
 	}
@@ -1007,7 +705,7 @@ func recoverExpiredAgentTurnTx(ctx context.Context, tx pgx.Tx, claimedJob Job) (
 	}
 	turnID := job.AgentTurnID
 	executionEpoch := job.ExecutionEpoch
-	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID); err != nil {
 		return AgentTurnRecovery{}, err
 	}
 	turn, err := lockAgentTurn(ctx, tx, turnID)
@@ -1738,14 +1436,13 @@ type hierarchyIdentity struct {
 }
 
 type lockedHierarchy struct {
-	controlRevision                    int64
-	nextTurnNumber, nextExecutionEpoch int64
-	workflowStatus                     string
-	attemptActive                      bool
-	assignmentStatus                   string
-	sessionStatus                      AgentSessionStatus
-	controlOwner                       SessionControlOwner
-	acpSessionID                       string
+	controlRevision  int64
+	workflowStatus   string
+	attemptActive    bool
+	assignmentStatus string
+	sessionStatus    AgentSessionStatus
+	controlOwner     SessionControlOwner
+	acpSessionID     string
 }
 
 type lockedTurn struct {
@@ -1754,17 +1451,7 @@ type lockedTurn struct {
 	ownerID, ownerToken             string
 }
 
-func lookupSessionHierarchy(ctx context.Context, tx pgx.Tx, sessionID string) (hierarchyIdentity, error) {
-	var hierarchy hierarchyIdentity
-	err := tx.QueryRow(ctx, `
-SELECT assignment.workflow_id::text, assignment.id::text, session.id::text
-FROM agent_sessions AS session
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
-WHERE session.id = $1`, sessionID).Scan(&hierarchy.workflowID, &hierarchy.assignmentID, &hierarchy.sessionID)
-	return hierarchy, err
-}
-
-func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, attemptID string, requireActive bool) (lockedHierarchy, error) {
+func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, attemptID string) (lockedHierarchy, error) {
 	var locked lockedHierarchy
 	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1 FOR UPDATE`, hierarchy.workflowID).Scan(&locked.workflowStatus); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("workflow", err)
@@ -1776,15 +1463,11 @@ func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, 
 		return lockedHierarchy{}, hierarchyLockError("agent assignment", err)
 	}
 	if err := tx.QueryRow(ctx, `
-SELECT status, control_owner, control_revision, next_turn_number, next_execution_epoch,
-       COALESCE(acp_session_id, '')
+SELECT status, control_owner, control_revision, COALESCE(acp_session_id, '')
 FROM agent_sessions WHERE id = $1 AND agent_assignment_id = $2 FOR UPDATE`,
 		hierarchy.sessionID, hierarchy.assignmentID).Scan(&locked.sessionStatus, &locked.controlOwner,
-		&locked.controlRevision, &locked.nextTurnNumber, &locked.nextExecutionEpoch, &locked.acpSessionID); err != nil {
+		&locked.controlRevision, &locked.acpSessionID); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent session", err)
-	}
-	if requireActive && !locked.allowsActiveTurn() {
-		return lockedHierarchy{}, ErrAgentTurnHierarchyInactive
 	}
 	return locked, nil
 }
@@ -1926,7 +1609,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 		attemptToken != lease.JobLease.LeaseToken || !controlledHandoffResult(attemptResult) {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
 	}
-	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID); err != nil {
 		return AgentTurnRecovery{}, err
 	}
 	turn, err := lockAgentTurn(ctx, tx, lease.ID)
@@ -2041,7 +1724,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 		job.ID, lease.Attempt, lease.LeaseToken).Scan(&attemptLive); err != nil || !attemptLive {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
-	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false); err != nil {
+	if _, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID); err != nil {
 		return Job{}, lockedTurn{}, err
 	}
 	turn, err := lockAgentTurn(ctx, tx, job.AgentTurnID)
@@ -2209,7 +1892,7 @@ func (store *Store) withLockedAgentTurnLeaseOptions(ctx context.Context, lease A
 	if job.AgentTurnID != lease.ID || job.AgentSessionID != lease.AgentSessionID || job.ExecutionEpoch != lease.ExecutionEpoch {
 		return ErrAgentTurnFenceLost
 	}
-	lockedHierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, false)
+	lockedHierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID)
 	if err != nil {
 		return err
 	}
@@ -2462,43 +2145,6 @@ func sameMutationDefinition(existing MutationReservation, spec MutationSpec) boo
 
 func sameAgentMutationDefinition(existing MutationReservation, spec MutationSpec) bool {
 	return existing.OperationID == spec.OperationID && existing.ToolName == spec.ToolName && bytes.Equal(existing.Request, spec.Request)
-}
-
-func validateAgentTurnSpec(spec AgentTurnSpec) (json.RawMessage, error) {
-	if !validUUID(spec.AgentSessionID) || !validUUID(spec.WorkflowAttemptID) || spec.RetryOfTurnID != "" && !validUUID(spec.RetryOfTurnID) {
-		return nil, errors.New("allocate agent turn: invalid identity")
-	}
-	if spec.ControlRevision <= 0 {
-		return nil, errors.New("allocate agent turn: control revision must be positive")
-	}
-	switch spec.Purpose {
-	case workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
-		workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry,
-		workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
-	default:
-		return nil, errors.New("allocate agent turn: invalid purpose")
-	}
-	if (spec.ChangeProposalID == "") != (spec.ExpectedHeadSHA == "") || spec.ChangeProposalID != "" && !validUUID(spec.ChangeProposalID) {
-		return nil, errors.New("allocate agent turn: invalid Change Proposal relation")
-	}
-	if strings.TrimSpace(spec.AgentProfileCommitSHA) == "" || len(spec.AgentProfileContentSHA256) != 32 {
-		return nil, errors.New("allocate agent turn: invalid agent profile identity")
-	}
-	config, err := canonicalJSON(spec.AgentProfileConfig)
-	if err != nil {
-		return nil, fmt.Errorf("allocate agent turn: profile config: %w", err)
-	}
-	var decoded any
-	if err := json.Unmarshal(config, &decoded); err != nil {
-		return nil, errors.New("allocate agent turn: invalid profile config")
-	}
-	if _, ok := decoded.(map[string]any); !ok {
-		return nil, errors.New("allocate agent turn: profile config must be an object")
-	}
-	if containsCredential(decoded) {
-		return nil, errors.New("allocate agent turn: profile config contains credentials")
-	}
-	return config, nil
 }
 
 func validateMutationSpec(spec MutationSpec) (json.RawMessage, error) {
