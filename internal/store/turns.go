@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,11 +41,10 @@ const (
 	stopStaleRuntimeJobPriority        = 100
 	reconcileTurnMutationsJobPriority  = 90
 
-	RuntimeLabelAssignmentID  = "io.omnigrex.assignment"
-	RuntimeLabelParticipantID = "io.omnigrex.agent-participant"
-	RuntimeLabelSessionID     = "io.omnigrex.agent-session"
-	RuntimeLabelTurnID        = "io.omnigrex.agent-turn"
-	RuntimeLabelEpoch         = "io.omnigrex.execution-epoch"
+	RuntimeLabelAssignmentID = "io.omnigrex.assignment"
+	RuntimeLabelSessionID    = "io.omnigrex.agent-session"
+	RuntimeLabelTurnID       = "io.omnigrex.agent-turn"
+	RuntimeLabelEpoch        = "io.omnigrex.execution-epoch"
 
 	agentTurnSlotsLockID = int64(0x4f4d4e49534c4f54)
 
@@ -1393,21 +1391,6 @@ WHERE id = $1 AND execution_epoch = $2 AND control_revision = $3 AND owner_token
 		}
 		return err
 	})
-}
-
-// RuntimeLabels returns non-secret Runtime Process labels carrying mandatory turn identity.
-func RuntimeLabels(turn AgentTurn) map[string]string {
-	participantID := turn.AgentParticipantID
-	if participantID == "" {
-		participantID = turn.AgentAssignmentID
-	}
-	return map[string]string{
-		RuntimeLabelParticipantID: participantID,
-		RuntimeLabelAssignmentID:  participantID,
-		RuntimeLabelSessionID:     turn.AgentSessionID,
-		RuntimeLabelTurnID:        turn.ID,
-		RuntimeLabelEpoch:         strconv.FormatInt(turn.ExecutionEpoch, 10),
-	}
 }
 
 type hierarchyIdentity struct {

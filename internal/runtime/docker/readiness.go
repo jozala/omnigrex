@@ -56,14 +56,14 @@ func NewReadinessProbe(options ReadinessProbeOptions) (*ReadinessProbe, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Docker readiness client: %w", err)
 	}
-	return &ReadinessProbe{api: client, options: options, close: client.Close}, nil
+	return newReadinessProbe(client, client.Close, options)
 }
 
-func newReadinessProbe(api readinessAPI, options ReadinessProbeOptions) (*ReadinessProbe, error) {
+func newReadinessProbe(api readinessAPI, close func() error, options ReadinessProbeOptions) (*ReadinessProbe, error) {
 	if err := validateReadinessProbeOptions(options); err != nil {
 		return nil, err
 	}
-	return &ReadinessProbe{api: api, options: options, close: func() error { return nil }}, nil
+	return &ReadinessProbe{api: api, options: options, close: close}, nil
 }
 
 func validateReadinessProbeOptions(options ReadinessProbeOptions) error {

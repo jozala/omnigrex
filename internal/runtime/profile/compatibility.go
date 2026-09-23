@@ -1,7 +1,6 @@
 package profile
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -37,16 +36,6 @@ type CompatibilityResult struct {
 type CompatibilityResultsFile struct {
 	SchemaVersion string                `json:"schema_version"`
 	Results       []CompatibilityResult `json:"results"`
-}
-
-// NewCompatibilityResult constructs the supported successful qualification result.
-func NewCompatibilityResult(source, target Binding, platform Platform, qualifiedAt time.Time) CompatibilityResult {
-	return CompatibilityResult{
-		Source: source, Target: target, Platform: platform,
-		StateContractVersion: StateContractVersion, WorkspacePath: StableWorkspacePath,
-		QualificationSuite: CompatibilityQualificationSuite, QualificationVersion: CompatibilityQualificationVersion,
-		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
-	}
 }
 
 // DecodeCompatibilityResultsFile strictly decodes and validates a qualification artifact.
@@ -183,17 +172,4 @@ func (result CompatibilityResult) QualificationKey() (string, error) {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
-}
-
-// EncodeCompatibilityResultsFile returns canonical validated JSON with a trailing newline.
-func EncodeCompatibilityResultsFile(results []CompatibilityResult) ([]byte, error) {
-	file := CompatibilityResultsFile{SchemaVersion: CompatibilityResultsSchemaVersion, Results: results}
-	if err := file.Validate(); err != nil {
-		return nil, err
-	}
-	encoded, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode Runtime Profile compatibility results: %w", err)
-	}
-	return append(bytes.TrimSpace(encoded), '\n'), nil
 }

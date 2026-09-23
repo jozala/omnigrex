@@ -24,13 +24,17 @@ func (api *fakeImageAvailabilityAPI) ImageInspect(_ context.Context, image strin
 
 func TestExactImageAvailabilityInspectsRegistryDigestForPlatform(t *testing.T) {
 	api := &fakeImageAvailabilityAPI{}
-	availability := newExactImageAvailability(api)
+	closed := false
+	availability := newExactImageAvailability(api, func() error { closed = true; return nil })
 	image := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64)
 	if err := availability.Available(context.Background(), image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"}); err != nil {
 		t.Fatalf("Available() error = %v", err)
 	}
 	if api.image != image || api.optionCount != 1 {
 		t.Fatalf("ImageInspect() = (%q, %d options), want exact image and platform option", api.image, api.optionCount)
+	}
+	if err := availability.Close(); err != nil || !closed {
+		t.Fatalf("Close() = %v, closed %t", err, closed)
 	}
 }
 
@@ -40,7 +44,7 @@ func TestExactImageAvailabilityRejectsMutableTagsAndLocalIDs(t *testing.T) {
 		"sha256:" + strings.Repeat("a", 64),
 	} {
 		api := &fakeImageAvailabilityAPI{}
-		err := newExactImageAvailability(api).Available(context.Background(), image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
+		err := newExactImageAvailability(api, func() error { return nil }).Available(context.Background(), image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 		if !errors.Is(err, ErrInvalidExactImageAvailability) {
 			t.Errorf("Available(%q) error = %v, want ErrInvalidExactImageAvailability", image, err)
 		}

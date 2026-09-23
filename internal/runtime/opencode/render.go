@@ -40,7 +40,6 @@ type Profile struct {
 
 type RenderedProfile struct {
 	role         Role
-	config       []byte
 	environ      []string
 	policy       PermissionPolicy
 	runtimeTools map[string]struct{}
@@ -164,16 +163,11 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 
 	return &RenderedProfile{
 		role:         roleID,
-		config:       config,
 		environ:      environ,
 		policy:       permissionPolicy,
 		runtimeTools: seenRuntimeTools,
 		session:      SessionConfiguration{Model: profile.Model, Variant: profile.Variant, Mode: agentID},
 	}, nil
-}
-
-func (profile *RenderedProfile) ConfigJSON() []byte {
-	return append([]byte(nil), profile.config...)
 }
 
 func (profile *RenderedProfile) Environment() []string {

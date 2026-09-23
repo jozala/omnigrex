@@ -238,7 +238,6 @@ type API interface {
 	ListRepositoryLabels(context.Context, string, string, string) ([]Label, error)
 	ListIssueLabels(context.Context, string, string, string, int) ([]Label, error)
 	CreateRepositoryLabel(context.Context, string, string, string, Label) (Label, error)
-	ReplaceIssueLabels(context.Context, string, string, string, int, []string) ([]Label, error)
 	AddIssueLabels(context.Context, string, string, string, int, []string) ([]Label, error)
 	RemoveIssueLabel(context.Context, string, string, string, int, string) error
 	SubmitReview(context.Context, string, string, string, int, ReviewRequest) (Review, error)
@@ -1237,29 +1236,6 @@ func (client *APIClient) CreateRepositoryLabel(ctx context.Context, installation
 	return created, nil
 }
 
-func (client *APIClient) ReplaceIssueLabels(ctx context.Context, installationToken, owner, repository string, issueNumber int, labels []string) ([]Label, error) {
-	if err := validateRepository(owner, repository); err != nil {
-		return nil, err
-	}
-	if issueNumber <= 0 {
-		return nil, &ConfigurationError{Cause: ErrInvalidIssueNumber}
-	}
-	for _, label := range labels {
-		if !validLabelName(label) {
-			return nil, &ConfigurationError{Cause: ErrInvalidLabel}
-		}
-	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/labels", url.PathEscape(owner), url.PathEscape(repository), issueNumber)
-	body := struct {
-		Labels []string `json:"labels"`
-	}{Labels: labels}
-	var replaced []Label
-	if err := client.doJSON(ctx, http.MethodPut, path, installationToken, body, &replaced); err != nil {
-		return nil, err
-	}
-	return replaced, nil
-}
-
 func (client *APIClient) AddIssueLabels(ctx context.Context, installationToken, owner, repository string, issueNumber int, labels []string) ([]Label, error) {
 	if issueNumber <= 0 {
 		return nil, ErrInvalidIssueNumber
@@ -1621,22 +1597,6 @@ func validDecimal(value string) bool {
 		}
 	}
 	return true
-}
-
-func validReviewCommentResponseLocation(comment ReviewComment) bool {
-	if comment.SubjectType == "file" {
-		return comment.Line == nil && comment.StartLine == nil
-	}
-	if comment.Position != nil && (*comment.Position <= 0 || comment.Line == nil) {
-		return false
-	}
-	if comment.Line != nil && *comment.Line <= 0 || comment.Line == nil && comment.StartLine != nil {
-		return false
-	}
-	if comment.StartLine == nil {
-		return comment.StartSide == ""
-	}
-	return *comment.StartLine > 0 && comment.Line != nil && *comment.StartLine < *comment.Line && comment.StartSide == comment.Side
 }
 
 func validCheckRunResult(check CheckRun) bool {

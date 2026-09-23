@@ -556,11 +556,6 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() for CREATING Session error = %v", err)
 	}
-	labels := store.RuntimeLabels(turnLease.AgentTurn)
-	if labels[store.RuntimeLabelAssignmentID] != prepared.Assignment.ID || labels[store.RuntimeLabelSessionID] != prepared.Session.ID ||
-		labels[store.RuntimeLabelTurnID] != prepared.Turn.ID || labels[store.RuntimeLabelEpoch] != "1" {
-		t.Fatalf("RuntimeLabels() after acquire = %#v", labels)
-	}
 	bound, err := database.BindAgentSessionACP(ctx, turnLease, "opaque-acp-session", json.RawMessage(`{"z":true,"resume":true}`))
 	if err != nil {
 		t.Fatalf("BindAgentSessionACP() error = %v", err)

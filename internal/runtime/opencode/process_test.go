@@ -23,7 +23,7 @@ func TestBuildProcessCompilesExactReviewerDockerContract(t *testing.T) {
 		t.Fatalf("BuildProcess() error = %v", err)
 	}
 
-	config := string(rendered.ConfigJSON())
+	config := renderedConfig(t, rendered)
 	wantEnvironment := []string{
 		"HOME=/home/opencode",
 		"MISE_DATA_DIR=/home/opencode/.local/share/mise",
@@ -125,7 +125,7 @@ func TestBuildProcessCompilesExactDeveloperEnvironment(t *testing.T) {
 		"MISE_DATA_DIR=/home/opencode/.local/share/mise",
 		"OPENCODE_AUTH_CONTENT={}",
 		"OPENCODE_AUTO_SHARE=false",
-		"OPENCODE_CONFIG_CONTENT=" + string(rendered.ConfigJSON()),
+		"OPENCODE_CONFIG_CONTENT=" + renderedConfig(t, rendered),
 		"OPENCODE_DISABLE_AUTOUPDATE=1",
 		"OPENCODE_DISABLE_MODELS_FETCH=true",
 		"OPENCODE_DISABLE_SHARE=1",

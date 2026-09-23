@@ -687,7 +687,7 @@ type fakeVisibleEffectAPI struct {
 
 func newFakeVisibleEffectAPI() *fakeVisibleEffectAPI {
 	return &fakeVisibleEffectAPI{
-		repositoryLabels: ManagedLabels(), issueLabels: make(map[int][]Label), comments: make(map[int][]IssueComment),
+		repositoryLabels: append([]Label(nil), managedLabels[:]...), issueLabels: make(map[int][]Label), comments: make(map[int][]IssueComment),
 		createErrors: make(map[int]error), ambiguousCreate: make(map[int]bool), nextCommentID: 100,
 		listCommentErrors: make(map[int]error),
 		deleteErrors:      make(map[int64]error), ambiguousDelete: make(map[int64]bool),
@@ -712,11 +712,6 @@ func (fake *fakeVisibleEffectAPI) CreateRepositoryLabel(_ context.Context, _, _,
 }
 
 func (fake *fakeVisibleEffectAPI) ListIssueLabels(_ context.Context, _, _, _ string, number int) ([]Label, error) {
-	return append([]Label(nil), fake.issueLabels[number]...), nil
-}
-
-func (fake *fakeVisibleEffectAPI) ReplaceIssueLabels(_ context.Context, _, _, _ string, number int, names []string) ([]Label, error) {
-	fake.issueLabels[number] = labelsFromNames(names)
 	return append([]Label(nil), fake.issueLabels[number]...), nil
 }
 
@@ -785,14 +780,6 @@ func (fake *fakeVisibleEffectAPI) createComment(number int, request CommentReque
 		fake.comments[number] = append(fake.comments[number], comment)
 	}
 	return comment, err
-}
-
-func labelsFromNames(names []string) []Label {
-	labels := make([]Label, len(names))
-	for index, name := range names {
-		labels[index] = Label{Name: name}
-	}
-	return labels
 }
 
 func fakeHasLabel(labels []Label, name string) bool {

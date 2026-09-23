@@ -1182,7 +1182,7 @@ func TestAPIClientListsRepositoryAndIssueLabelsAcrossAllPages(t *testing.T) {
 	}
 }
 
-func TestAPIClientCreatesAndReplacesLabelsAndSubmitsNativeReviews(t *testing.T) {
+func TestAPIClientCreatesLabelsAndSubmitsNativeReviews(t *testing.T) {
 	const headSHA = "0123456789abcdef0123456789abcdef01234567"
 	requestNumber := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -1199,19 +1199,7 @@ func TestAPIClientCreatesAndReplacesLabelsAndSubmitsNativeReviews(t *testing.T) 
 			}
 			writer.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprint(writer, `{"name":"omnigrex:run","color":"1f6feb","description":"Start work"}`)
-		case 2:
-			if request.Method != http.MethodPut || request.URL.Path != "/repos/acme/widgets/issues/17/labels" {
-				t.Errorf("replace labels request = %s %s", request.Method, request.URL.Path)
-			}
-			var body struct {
-				Labels []string `json:"labels"`
-			}
-			decodeRequestJSON(t, request, &body)
-			if fmt.Sprint(body.Labels) != "[external omnigrex:reviewing]" {
-				t.Errorf("replacement labels = %v", body.Labels)
-			}
-			_, _ = fmt.Fprint(writer, `[{"name":"external"},{"name":"omnigrex:reviewing"}]`)
-		case 3, 4:
+		case 2, 3:
 			if request.Method != http.MethodPost || request.URL.Path != "/repos/acme/widgets/pulls/23/reviews" {
 				t.Errorf("review request = %s %s", request.Method, request.URL.Path)
 			}
@@ -1222,7 +1210,7 @@ func TestAPIClientCreatesAndReplacesLabelsAndSubmitsNativeReviews(t *testing.T) 
 			}
 			decodeRequestJSON(t, request, &body)
 			wantEvent := githubapi.ReviewApprove
-			if requestNumber == 4 {
+			if requestNumber == 3 {
 				wantEvent = githubapi.ReviewRequestChanges
 			}
 			if body.Body != "review body" || body.CommitID != headSHA || body.Event != wantEvent {
@@ -1249,10 +1237,6 @@ func TestAPIClientCreatesAndReplacesLabelsAndSubmitsNativeReviews(t *testing.T) 
 	})
 	if err != nil || created.Name != "omnigrex:run" {
 		t.Fatalf("CreateRepositoryLabel() = %#v, %v", created, err)
-	}
-	replaced, err := client.ReplaceIssueLabels(context.Background(), "installation-token", "acme", "widgets", 17, []string{"external", "omnigrex:reviewing"})
-	if err != nil || len(replaced) != 2 {
-		t.Fatalf("ReplaceIssueLabels() = %#v, %v", replaced, err)
 	}
 	for _, event := range []githubapi.ReviewEvent{githubapi.ReviewApprove, githubapi.ReviewRequestChanges} {
 		review, err := client.SubmitReview(context.Background(), "installation-token", "acme", "widgets", 23, githubapi.ReviewRequest{
@@ -1476,14 +1460,6 @@ func TestAPIClientRejectsInvalidRequestsAsPermanentConfigurationErrors(t *testin
 			cause: githubapi.ErrInvalidLabel,
 			call: func() error {
 				_, err := client.CreateRepositoryLabel(context.Background(), "token", "acme", "widgets", githubapi.Label{Name: "name", Color: "#ffffff"})
-				return err
-			},
-		},
-		{
-			name:  "empty replacement label",
-			cause: githubapi.ErrInvalidLabel,
-			call: func() error {
-				_, err := client.ReplaceIssueLabels(context.Background(), "token", "acme", "widgets", 1, []string{""})
 				return err
 			},
 		},

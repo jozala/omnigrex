@@ -36,8 +36,11 @@ var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC
 
 func TestOutcomeReconcilerConfigFormattingDoesNotExposeProviderCredentials(t *testing.T) {
 	config := agentturn.OutcomeReconcilerConfig{ProviderCredentialJSON: []json.RawMessage{json.RawMessage(`{"token":"provider-config-secret"}`)}}
-	if rendered := fmt.Sprintf("%v %#v", config, config); strings.Contains(rendered, "provider-config-secret") {
-		t.Fatalf("formatted Outcome reconciler config leaks provider credentials: %s", rendered)
+	if rendered := fmt.Sprint(config); rendered != "Agent Turn outcome reconciler config" {
+		t.Fatalf("formatted Outcome reconciler config = %q", rendered)
+	}
+	if rendered := fmt.Sprintf("%#v", config); rendered != "agentturn.OutcomeReconcilerConfig{<credentials redacted>}" {
+		t.Fatalf("Go-formatted Outcome reconciler config = %q", rendered)
 	}
 }
 

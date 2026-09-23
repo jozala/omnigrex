@@ -1890,45 +1890,6 @@ func TestAgentTurnHeartbeatAndCompetingAcquireSerializeGlobalSlot(t *testing.T) 
 	}
 }
 
-func TestAgentTurnRuntimeLabelsContainIdentityWithoutOwnerToken(t *testing.T) {
-	turn := store.AgentTurn{
-		ID: "30000000-0000-4000-8000-000000000004", AgentSessionID: "30000000-0000-4000-8000-000000000003",
-		AgentAssignmentID: "30000000-0000-4000-8000-000000000002", ExecutionEpoch: 9,
-	}
-	labels := store.RuntimeLabels(turn)
-	for name, value := range map[string]string{
-		"assignment": store.RuntimeLabelAssignmentID,
-		"session":    store.RuntimeLabelSessionID,
-		"turn":       store.RuntimeLabelTurnID,
-		"epoch":      store.RuntimeLabelEpoch,
-	} {
-		want := map[string]string{
-			"assignment": "io.omnigrex.assignment",
-			"session":    "io.omnigrex.agent-session",
-			"turn":       "io.omnigrex.agent-turn",
-			"epoch":      "io.omnigrex.execution-epoch",
-		}[name]
-		if value != want {
-			t.Errorf("RuntimeLabel%s = %q, want %q", name, value, want)
-		}
-	}
-	for key, want := range map[string]string{
-		store.RuntimeLabelAssignmentID: turn.AgentAssignmentID,
-		store.RuntimeLabelSessionID:    turn.AgentSessionID,
-		store.RuntimeLabelTurnID:       turn.ID,
-		store.RuntimeLabelEpoch:        "9",
-	} {
-		if labels[key] != want {
-			t.Errorf("RuntimeLabels()[%q] = %q, want %q", key, labels[key], want)
-		}
-	}
-	for key, value := range labels {
-		if key == "owner_token" || value == "30000000-0000-4000-8000-000000000099" {
-			t.Errorf("RuntimeLabels() exposed secret token in %q=%q", key, value)
-		}
-	}
-}
-
 type agentFixture struct {
 	workflowID, attemptID, assignmentID, sessionID string
 }

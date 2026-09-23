@@ -27,7 +27,7 @@ func TestRuntimeProfileCompatibilityResultRecordIsIdempotentAndConflictDetecting
 	defer cancel()
 	source := compatibilityProfile(t, "a", "amd64")
 	target := compatibilityProfile(t, "b", "amd64")
-	result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
+	result := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
 		time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
 
 	if err := database.RecordRuntimeProfileCompatibilityResult(ctx, result); err != nil {
@@ -90,7 +90,7 @@ func TestRuntimeProfileCompatibilityQualificationRequiresEveryExactAxis(t *testi
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			source, target, _, _ := prepareCollectedCompatibilityGeneration(t, database, pool, ctx, index+100)
-			result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
+			result := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
 				time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
 			test.mutate(&result)
 			if err := database.RecordRuntimeProfileCompatibilityResult(ctx, result); err != nil {
@@ -144,7 +144,7 @@ WHERE workflow.id = $1`, workflowID, lease.ID).Scan(&workflowStatus, &handoffRea
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		source, target, workflowID, lease := prepareCollectedCompatibilityGeneration(t, database, pool, ctx, 211)
-		result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
+		result := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
 			time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
 		if err := database.RecordRuntimeProfileCompatibilityResult(ctx, result); err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestNewAssignmentCandidateRequiresQualificationAgainstOtherWorkflowHistory(
 	if assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID); err != nil || len(assignments) != 0 {
 		t.Fatalf("candidate Workflow Assignments before qualification = (%#v, %v)", assignments, err)
 	}
-	result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
+	result := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
 		time.Date(2026, 9, 6, 12, 30, 0, 0, time.UTC))
 	if err := database.RecordRuntimeProfileCompatibilityResult(ctx, result); err != nil {
 		t.Fatal(err)
@@ -319,7 +319,7 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 	}
 	source := compatibilityProfile(t, "d", "amd64")
 	target := compatibilityProfile(t, "e", "amd64")
-	result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
+	result := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform,
 		time.Date(2026, 9, 6, 13, 0, 0, 0, time.UTC))
 	if err := first.RecordRuntimeProfileCompatibilityResult(ctx, result); err != nil {
 		t.Fatal(err)
@@ -474,6 +474,15 @@ func compatibilityProfile(t *testing.T, digestDigit, architecture string) runtim
 		t.Fatal(err)
 	}
 	return profile
+}
+
+func newRuntimeProfileCompatibilityResult(source, target runtimeprofile.Binding, platform runtimeprofile.Platform, qualifiedAt time.Time) runtimeprofile.CompatibilityResult {
+	return runtimeprofile.CompatibilityResult{
+		Source: source, Target: target, Platform: platform,
+		StateContractVersion: runtimeprofile.StateContractVersion, WorkspacePath: runtimeprofile.StableWorkspacePath,
+		QualificationSuite: runtimeprofile.CompatibilityQualificationSuite, QualificationVersion: runtimeprofile.CompatibilityQualificationVersion,
+		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+	}
 }
 
 func compatibilityImage(digestDigit string) string {

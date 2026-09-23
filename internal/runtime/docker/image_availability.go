@@ -27,11 +27,11 @@ func NewExactImageAvailability() (*ExactImageAvailability, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Docker image availability client: %w", err)
 	}
-	return &ExactImageAvailability{api: client, close: client.Close}, nil
+	return newExactImageAvailability(client, client.Close), nil
 }
 
-func newExactImageAvailability(api imageAvailabilityAPI) *ExactImageAvailability {
-	return &ExactImageAvailability{api: api, close: func() error { return nil }}
+func newExactImageAvailability(api imageAvailabilityAPI, close func() error) *ExactImageAvailability {
+	return &ExactImageAvailability{api: api, close: close}
 }
 
 func (availability *ExactImageAvailability) Available(ctx context.Context, image string, platform runtimeprofile.Platform) error {

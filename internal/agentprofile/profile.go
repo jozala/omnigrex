@@ -260,15 +260,6 @@ func validateConfiguration(policy role.Policy, configuration frontMatter, instru
 	return nil
 }
 
-// ValidatePolicy checks the execution limits and tool permissions shared by parsed and persisted Agent Profiles.
-func ValidatePolicy(role Role, steps int, permissions map[string]PermissionAction) error {
-	policy, ok := rolepkgBuiltinPolicy(role)
-	if !ok {
-		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
-	}
-	return ValidateRolePolicy(policy, steps, permissions)
-}
-
 // ValidateRolePolicy checks mutable Agent Profile values against an immutable Role policy.
 func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]PermissionAction) error {
 	if !role.ValidID(policy.Role) {
@@ -292,10 +283,6 @@ func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]Pe
 		}
 	}
 	return nil
-}
-
-func rolepkgBuiltinPolicy(roleID Role) (role.Policy, bool) {
-	return role.BuiltinPolicyCatalog().Lookup(roleID)
 }
 
 func validReference(value string) bool {

@@ -50,7 +50,7 @@ func NewAssignmentRuntimeStateCleaner(options AssignmentRuntimeStateCleanerOptio
 	if err != nil {
 		return nil, fmt.Errorf("create Assignment runtime-state cleanup Docker client: %w", err)
 	}
-	return &AssignmentRuntimeStateCleaner{api: client, options: options, close: client.Close}, nil
+	return newAssignmentRuntimeStateCleaner(client, client.Close, options)
 }
 
 func newAssignmentRuntimeStateCleaner(api assignmentRuntimeStateCleanupAPI, close func() error, options AssignmentRuntimeStateCleanerOptions) (*AssignmentRuntimeStateCleaner, error) {

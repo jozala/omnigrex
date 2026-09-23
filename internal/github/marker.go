@@ -26,7 +26,7 @@ type MarkerInspection struct {
 }
 
 func RenderMarker(marker Marker) (string, error) {
-	if err := validateMarker(marker, true); err != nil {
+	if err := validateMarker(marker); err != nil {
 		return "", err
 	}
 	var rendered strings.Builder
@@ -116,25 +116,6 @@ func EnsureMarker(text string, marker Marker) (string, error) {
 	return text + separator + rendered, nil
 }
 
-func FindMarker(text string, query Marker) (Marker, bool, error) {
-	if err := validateMarker(query, false); err != nil {
-		return Marker{}, false, err
-	}
-	for _, marker := range ParseMarkers(text) {
-		if query.WorkflowID != "" && marker.WorkflowID != query.WorkflowID {
-			continue
-		}
-		if query.AgentAssignmentID != "" && marker.AgentAssignmentID != query.AgentAssignmentID {
-			continue
-		}
-		if query.OperationID != "" && marker.OperationID != query.OperationID {
-			continue
-		}
-		return marker, true, nil
-	}
-	return Marker{}, false, nil
-}
-
 func parseMarkerComment(comment string) (Marker, bool) {
 	if len(comment) < 2 || comment[0] != ' ' || comment[len(comment)-1] != ' ' {
 		return Marker{}, false
@@ -161,7 +142,7 @@ func parseMarkerComment(comment string) (Marker, bool) {
 			index++
 		}
 	}
-	if index != len(fields) || validateMarker(marker, true) != nil {
+	if index != len(fields) || validateMarker(marker) != nil {
 		return Marker{}, false
 	}
 	return marker, true
@@ -175,12 +156,9 @@ func markerField(field, name string) (string, bool) {
 	return strings.TrimPrefix(field, prefix), true
 }
 
-func validateMarker(marker Marker, requireWorkflow bool) error {
-	if requireWorkflow && !validMarkerToken(marker.WorkflowID) {
+func validateMarker(marker Marker) error {
+	if !validMarkerToken(marker.WorkflowID) {
 		return fmt.Errorf("%w: workflow id", ErrInvalidMarkerToken)
-	}
-	if !requireWorkflow && marker.WorkflowID == "" && marker.AgentAssignmentID == "" && marker.OperationID == "" {
-		return fmt.Errorf("%w: empty lookup", ErrInvalidMarkerToken)
 	}
 	for name, value := range map[string]string{
 		"workflow id":         marker.WorkflowID,

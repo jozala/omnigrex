@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
@@ -221,10 +222,13 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 		t.Fatalf("malformed compatibility result import calls = %d, want 0", importer.calls)
 	}
 
-	result := runtimeprofile.NewCompatibilityResult(mainTestRuntimeProfile(t, "a").Binding(),
+	result := mainTestCompatibilityResult(mainTestRuntimeProfile(t, "a").Binding(),
 		mainTestRuntimeProfile(t, "c").Binding(), runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 		time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
-	encoded, err := runtimeprofile.EncodeCompatibilityResultsFile([]runtimeprofile.CompatibilityResult{result})
+	encoded, err := json.Marshal(runtimeprofile.CompatibilityResultsFile{
+		SchemaVersion: runtimeprofile.CompatibilityResultsSchemaVersion,
+		Results:       []runtimeprofile.CompatibilityResult{result},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,9 +254,12 @@ func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional
 		t.Fatalf("optional compatibility result import calls = %d, want 0", importer.calls)
 	}
 
-	result := runtimeprofile.NewCompatibilityResult(mainTestRuntimeProfile(t, "a").Binding(), target.Binding(),
+	result := mainTestCompatibilityResult(mainTestRuntimeProfile(t, "a").Binding(), target.Binding(),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"}, time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
-	encoded, err := runtimeprofile.EncodeCompatibilityResultsFile([]runtimeprofile.CompatibilityResult{result})
+	encoded, err := json.Marshal(runtimeprofile.CompatibilityResultsFile{
+		SchemaVersion: runtimeprofile.CompatibilityResultsSchemaVersion,
+		Results:       []runtimeprofile.CompatibilityResult{result},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,6 +272,15 @@ func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional
 	}
 	if importer.calls != 1 || len(importer.file.Results) != 1 || importer.file.Results[0] != result {
 		t.Fatalf("compatibility import = calls %d, file %#v", importer.calls, importer.file)
+	}
+}
+
+func mainTestCompatibilityResult(source, target runtimeprofile.Binding, platform runtimeprofile.Platform, qualifiedAt time.Time) runtimeprofile.CompatibilityResult {
+	return runtimeprofile.CompatibilityResult{
+		Source: source, Target: target, Platform: platform,
+		StateContractVersion: runtimeprofile.StateContractVersion, WorkspacePath: runtimeprofile.StableWorkspacePath,
+		QualificationSuite: runtimeprofile.CompatibilityQualificationSuite, QualificationVersion: runtimeprofile.CompatibilityQualificationVersion,
+		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
 	}
 }
 

@@ -613,10 +613,6 @@ func foundReconciliation(result json.RawMessage) MutationReconciliationResult {
 	return MutationReconciliationResult{Disposition: ReconciliationFound, Outcome: store.RecoveredMutationOutcome{State: store.MutationSucceeded, Result: result}}
 }
 
-func failedReconciliation(diagnostic string) MutationReconciliationResult {
-	return MutationReconciliationResult{Disposition: ReconciliationDefinitelyFailed, Outcome: store.RecoveredMutationOutcome{State: store.MutationFailed, LastError: diagnostic}}
-}
-
 func unresolvedReconciliation() MutationReconciliationResult {
 	return MutationReconciliationResult{Disposition: ReconciliationUnresolved}
 }

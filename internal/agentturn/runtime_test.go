@@ -138,13 +138,23 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 
 	spec := engineFactory.engine.spec
+	for _, label := range []struct{ got, want string }{
+		{store.RuntimeLabelAssignmentID, "io.omnigrex.assignment"},
+		{store.RuntimeLabelSessionID, "io.omnigrex.agent-session"},
+		{store.RuntimeLabelTurnID, "io.omnigrex.agent-turn"},
+		{store.RuntimeLabelEpoch, "io.omnigrex.execution-epoch"},
+	} {
+		if label.got != label.want {
+			t.Errorf("cleanup label constant = %q, want %q", label.got, label.want)
+		}
+	}
 	wantLabels := map[string]string{
-		"io.omnigrex.agent-session":   runtimeTestSession,
-		"io.omnigrex.agent-turn":      runtimeTestTurn,
-		"io.omnigrex.assignment":      runtimeTestAssignment,
-		"io.omnigrex.execution-epoch": "7",
-		"io.omnigrex.runtime-profile": "opencode-acp/v1",
-		"io.omnigrex.workflow":        runtimeTestWorkflow,
+		store.RuntimeLabelSessionID:    runtimeTestSession,
+		store.RuntimeLabelTurnID:       runtimeTestTurn,
+		store.RuntimeLabelAssignmentID: runtimeTestAssignment,
+		store.RuntimeLabelEpoch:        "7",
+		"io.omnigrex.runtime-profile":  "opencode-acp/v1",
+		"io.omnigrex.workflow":         runtimeTestWorkflow,
 	}
 	if !reflect.DeepEqual(spec.Labels, wantLabels) {
 		t.Errorf("Docker labels = %#v, want %#v", spec.Labels, wantLabels)

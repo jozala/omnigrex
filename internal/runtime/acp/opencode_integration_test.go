@@ -297,11 +297,24 @@ func emitRuntimeProfileCompatibilityResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("qualification output requires an exact target registry digest: %v", err)
 	}
-	result := runtimeprofile.NewCompatibilityResult(source.Binding(), target.Binding(), platform, time.Now())
-	encoded, err := runtimeprofile.EncodeCompatibilityResultsFile([]runtimeprofile.CompatibilityResult{result})
+	result := runtimeprofile.CompatibilityResult{
+		Source: source.Binding(), Target: target.Binding(), Platform: platform,
+		StateContractVersion: runtimeprofile.StateContractVersion, WorkspacePath: runtimeprofile.StableWorkspacePath,
+		QualificationSuite: runtimeprofile.CompatibilityQualificationSuite, QualificationVersion: runtimeprofile.CompatibilityQualificationVersion,
+		QualifiedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+	}
+	results := runtimeprofile.CompatibilityResultsFile{
+		SchemaVersion: runtimeprofile.CompatibilityResultsSchemaVersion,
+		Results:       []runtimeprofile.CompatibilityResult{result},
+	}
+	if err := results.Validate(); err != nil {
+		t.Fatalf("validate Runtime Profile compatibility qualification result: %v", err)
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		t.Fatalf("encode Runtime Profile compatibility qualification result: %v", err)
 	}
+	encoded = append(encoded, '\n')
 	file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		t.Fatalf("create Runtime Profile compatibility qualification result: %v", err)

@@ -2,6 +2,7 @@ package profile_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +12,12 @@ import (
 
 func TestCompatibilityResultsFileRoundTrip(t *testing.T) {
 	result := compatibilityResult(t)
-	encoded, err := profile.EncodeCompatibilityResultsFile([]profile.CompatibilityResult{result})
+	encoded, err := json.Marshal(profile.CompatibilityResultsFile{
+		SchemaVersion: profile.CompatibilityResultsSchemaVersion,
+		Results:       []profile.CompatibilityResult{result},
+	})
 	if err != nil {
-		t.Fatalf("EncodeCompatibilityResultsFile() error = %v", err)
+		t.Fatalf("encode compatibility results: %v", err)
 	}
 	decoded, err := profile.DecodeCompatibilityResultsFile(bytes.NewReader(encoded))
 	if err != nil {
@@ -44,8 +48,8 @@ func TestCompatibilityResultsRejectMutableImagesAndMalformedContracts(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			result := compatibilityResult(t)
 			test.mutate(&result)
-			if _, err := profile.EncodeCompatibilityResultsFile([]profile.CompatibilityResult{result}); err == nil {
-				t.Fatal("EncodeCompatibilityResultsFile() error = nil, want validation error")
+			if err := result.Validate(); err == nil {
+				t.Fatal("CompatibilityResult.Validate() error = nil, want validation error")
 			}
 		})
 	}
@@ -66,7 +70,7 @@ func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := profile.NewCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform, time.Date(2026, time.September, 7, 12, 0, 0, 0, time.UTC))
+	result := newCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform, time.Date(2026, time.September, 7, 12, 0, 0, 0, time.UTC))
 	file := profile.CompatibilityResultsFile{SchemaVersion: profile.CompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
 	if err := file.ValidateTarget(target); err != nil {
 		t.Fatalf("ValidateTarget() error = %v", err)
@@ -111,6 +115,15 @@ func compatibilityResult(t *testing.T) profile.CompatibilityResult {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return profile.NewCompatibilityResult(source.Binding(), target.Binding(),
+	return newCompatibilityResult(source.Binding(), target.Binding(),
 		profile.Platform{OS: "linux", Arch: "amd64"}, time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC))
+}
+
+func newCompatibilityResult(source, target profile.Binding, platform profile.Platform, qualifiedAt time.Time) profile.CompatibilityResult {
+	return profile.CompatibilityResult{
+		Source: source, Target: target, Platform: platform,
+		StateContractVersion: profile.StateContractVersion, WorkspacePath: profile.StableWorkspacePath,
+		QualificationSuite: profile.CompatibilityQualificationSuite, QualificationVersion: profile.CompatibilityQualificationVersion,
+		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+	}
 }

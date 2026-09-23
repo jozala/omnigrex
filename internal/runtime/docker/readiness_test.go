@@ -12,7 +12,7 @@ import (
 
 func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45"}
-	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 	if err != nil {
 		t.Fatalf("newReadinessProbe() error = %v", err)
 	}
@@ -54,7 +54,7 @@ func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 
 func TestReadinessProbeInspectDoesNotCreateContainers(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45"}
-	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestReadinessProbeInspectDoesNotCreateContainers(t *testing.T) {
 
 func TestReadinessProbeFailsWhenResourceIsUnavailable(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45", networkErr: errors.New("missing")}
-	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 	if err != nil {
 		t.Fatalf("newReadinessProbe() error = %v", err)
 	}
@@ -92,7 +92,7 @@ func TestReadinessProbeReportsEveryUnavailableResource(t *testing.T) {
 		networkErr:    errors.New("missing network"),
 		volumeErr:     errors.New("missing volume"),
 	}
-	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestReadinessProbeReportsEveryUnavailableResource(t *testing.T) {
 func TestReadinessProbeCleansPartialInitializationAndReportsCleanupFailure(t *testing.T) {
 	t.Run("partial initialization", func(t *testing.T) {
 		api := &fakeReadinessAPI{clientVersion: "1.45", waitStatuses: []int64{1, 0}}
-		probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+		probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 		if err != nil {
 			t.Fatalf("newReadinessProbe() error = %v", err)
 		}
@@ -127,7 +127,7 @@ func TestReadinessProbeCleansPartialInitializationAndReportsCleanupFailure(t *te
 
 	t.Run("cleanup failure", func(t *testing.T) {
 		api := &fakeReadinessAPI{clientVersion: "1.45", waitStatuses: []int64{0, 0, 1}}
-		probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+		probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 		if err != nil {
 			t.Fatalf("newReadinessProbe() error = %v", err)
 		}
@@ -139,7 +139,7 @@ func TestReadinessProbeCleansPartialInitializationAndReportsCleanupFailure(t *te
 
 func TestReadinessProbeReportsContainerRemovalFailure(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45", removeErr: errors.New("removal denied")}
-	probe, err := newReadinessProbe(api, testReadinessProbeOptions())
+	probe, err := newReadinessProbe(api, func() error { return nil }, testReadinessProbeOptions())
 	if err != nil {
 		t.Fatalf("newReadinessProbe() error = %v", err)
 	}
@@ -151,7 +151,7 @@ func TestReadinessProbeReportsContainerRemovalFailure(t *testing.T) {
 func TestReadinessProbeRejectsInvalidOptions(t *testing.T) {
 	options := testReadinessProbeOptions()
 	options.WorkspaceVolume = ""
-	if _, err := newReadinessProbe(&fakeReadinessAPI{}, options); err == nil {
+	if _, err := newReadinessProbe(&fakeReadinessAPI{}, func() error { return nil }, options); err == nil {
 		t.Fatal("newReadinessProbe() error = nil, want invalid options error")
 	}
 }

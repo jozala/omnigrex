@@ -770,9 +770,18 @@ func TestExecutionWorkerDefaultsGitRemoteToGitHub(t *testing.T) {
 func TestExecutionWorkerDeepCopiesAndRedactsProviderCredentials(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	providerConfig := fixture.config.ProviderCredentialJSON
+	if rendered := fmt.Sprint(fixture.config); rendered != "Agent Turn execution Worker config" {
+		t.Fatalf("formatted execution Worker config = %q", rendered)
+	}
+	if rendered := fmt.Sprintf("%#v", fixture.config); rendered != "agentturn.ExecutionWorkerConfig{<credentials redacted>}" {
+		t.Fatalf("Go-formatted execution Worker config = %q", rendered)
+	}
 	worker := fixture.worker(t)
-	if rendered := fmt.Sprintf("%#v", worker); strings.Contains(rendered, executionDeveloperProviderSecret) {
-		t.Fatalf("formatted worker leaks provider credentials: %s", rendered)
+	if rendered := fmt.Sprint(worker); rendered != "Agent Turn execution Worker" {
+		t.Fatalf("formatted execution Worker = %q", rendered)
+	}
+	if rendered := fmt.Sprintf("%#v", worker); rendered != "agentturn.ExecutionWorker{<credentials redacted>}" {
+		t.Fatalf("Go-formatted execution Worker = %q", rendered)
 	}
 	for index := range providerConfig {
 		providerConfig[index] = 'x'

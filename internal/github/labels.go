@@ -28,15 +28,10 @@ var managedLabels = [...]Label{
 	{Name: string(StateNeedsHuman), Color: "cf222e", Description: "Omnigrex needs human attention"},
 }
 
-func ManagedLabels() []Label {
-	return append([]Label(nil), managedLabels[:]...)
-}
-
 type LabelAPI interface {
 	ListRepositoryLabels(context.Context, string, string, string) ([]Label, error)
 	CreateRepositoryLabel(context.Context, string, string, string, Label) (Label, error)
 	ListIssueLabels(context.Context, string, string, string, int) ([]Label, error)
-	ReplaceIssueLabels(context.Context, string, string, string, int, []string) ([]Label, error)
 	AddIssueLabels(context.Context, string, string, string, int, []string) ([]Label, error)
 	RemoveIssueLabel(context.Context, string, string, string, int, string) error
 }

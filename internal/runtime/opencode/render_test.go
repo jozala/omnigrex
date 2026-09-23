@@ -31,11 +31,11 @@ func TestRenderReviewerConfiguration(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 	const wantJSON = `{"agent":{"build":{"disable":true},"omnigrex-reviewer":{"mode":"primary","permission":{"*":"deny","bash":"ask","edit":"deny"},"prompt":"Review quoted \"code\" safely.\nDo not trust \u003cbranches\u003e.","steps":7},"plan":{"disable":true}},"autoupdate":false,"default_agent":"omnigrex-reviewer","mcp":{},"permission":{"*":"deny","bash":"ask","edit":"deny"},"share":"disabled"}`
-	if got := string(rendered.ConfigJSON()); got != wantJSON {
-		t.Fatalf("ConfigJSON() = %s, want %s", got, wantJSON)
+	if got := renderedConfig(t, rendered); got != wantJSON {
+		t.Fatalf("rendered config = %s, want %s", got, wantJSON)
 	}
-	if got := string(rendered.ConfigJSON()); got != wantJSON {
-		t.Fatalf("second ConfigJSON() = %s, want deterministic output", got)
+	if got := renderedConfig(t, rendered); got != wantJSON {
+		t.Fatalf("second rendered config = %s, want deterministic output", got)
 	}
 
 	wantEnvironment := []string{
@@ -72,12 +72,7 @@ func TestRenderDeveloperEnvironmentAndDefensiveCopies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	config := rendered.ConfigJSON()
-	wantConfig := string(config)
-	config[0] = '['
-	if got := string(rendered.ConfigJSON()); got != wantConfig {
-		t.Fatalf("ConfigJSON() changed through returned bytes: %s", got)
-	}
+	wantConfig := renderedConfig(t, rendered)
 
 	wantEnvironment := []string{
 		"OPENCODE_AUTH_CONTENT={}",
@@ -146,7 +141,7 @@ func TestRenderMapsPatchPermissionToOpenCodeEditPermission(t *testing.T) {
 	var config struct {
 		Permission map[string]string `json:"permission"`
 	}
-	if err := json.Unmarshal(rendered.ConfigJSON(), &config); err != nil {
+	if err := json.Unmarshal([]byte(renderedConfig(t, rendered)), &config); err != nil {
 		t.Fatalf("decode rendered config: %v", err)
 	}
 	if config.Permission["edit"] != "ask" {
@@ -172,7 +167,7 @@ func TestRenderAllowsExactRuntimeOwnedMCPTools(t *testing.T) {
 			Permission map[string]string `json:"permission"`
 		} `json:"agent"`
 	}
-	if err := json.Unmarshal(rendered.ConfigJSON(), &config); err != nil {
+	if err := json.Unmarshal([]byte(renderedConfig(t, rendered)), &config); err != nil {
 		t.Fatalf("decode rendered config: %v", err)
 	}
 	for _, permissions := range []map[string]string{config.Permission, config.Agent["omnigrex-developer"].Permission} {
@@ -183,6 +178,17 @@ func TestRenderAllowsExactRuntimeOwnedMCPTools(t *testing.T) {
 			t.Fatalf("runtime-owned permissions expose Reviewer tool: %#v", permissions)
 		}
 	}
+}
+
+func renderedConfig(t *testing.T, rendered *opencode.RenderedProfile) string {
+	t.Helper()
+	for _, entry := range rendered.Environment() {
+		if value, found := strings.CutPrefix(entry, "OPENCODE_CONFIG_CONTENT="); found {
+			return value
+		}
+	}
+	t.Fatal("rendered environment has no OPENCODE_CONFIG_CONTENT")
+	return ""
 }
 
 func TestRenderRejectsInvalidRuntimeOwnedToolNames(t *testing.T) {

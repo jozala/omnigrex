@@ -86,9 +86,6 @@ func TestMarkerRejectsUnsafeTokensAndDoesNotTrustValidNeighborsOfMalformedText(t
 	if len(parsed) != 0 {
 		t.Errorf("ParseMarkers() = %#v, want no trusted markers from untrusted text", parsed)
 	}
-	if _, found, err := githubapi.FindMarker(text, githubapi.Marker{OperationID: "op-1"}); err != nil || found {
-		t.Errorf("FindMarker() = (_, %t, %v), want no binding from untrusted text", found, err)
-	}
 }
 
 func TestInspectMarkersMarksMalformedOmnigrexCommentsUntrusted(t *testing.T) {
@@ -136,7 +133,7 @@ func TestEnsureMarkerRejectsUntrustedOmnigrexLikeText(t *testing.T) {
 	}
 }
 
-func TestEnsureMarkerAvoidsIdenticalDuplicatesAndSupportsLookup(t *testing.T) {
+func TestEnsureMarkerAvoidsIdenticalDuplicates(t *testing.T) {
 	marker := githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "operation-1"}
 	withMarker, err := githubapi.EnsureMarker("review body", marker)
 	if err != nil {
@@ -154,34 +151,18 @@ func TestEnsureMarkerAvoidsIdenticalDuplicatesAndSupportsLookup(t *testing.T) {
 		t.Errorf("second EnsureMarker() duplicated marker: %q", again)
 	}
 
-	found, ok, err := githubapi.FindMarker(withMarker, githubapi.Marker{OperationID: "operation-1"})
-	if err != nil {
-		t.Fatalf("FindMarker() error = %v", err)
-	}
-	if !ok || found != marker {
-		t.Errorf("FindMarker() = %#v, %t; want %#v, true", found, ok, marker)
-	}
-	if _, ok, err := githubapi.FindMarker(withMarker, githubapi.Marker{WorkflowID: "other"}); err != nil || ok {
-		t.Errorf("FindMarker(other) found = %t, error = %v", ok, err)
-	}
-	if _, _, err := githubapi.FindMarker(withMarker, githubapi.Marker{OperationID: "unsafe value"}); !errors.Is(err, githubapi.ErrInvalidMarkerToken) {
-		t.Errorf("FindMarker(unsafe) error = %v, want ErrInvalidMarkerToken", err)
-	}
 }
 
-func TestMarkerLookupSurvivesUnrelatedUnclosedHTMLComment(t *testing.T) {
+func TestMarkerParsingSurvivesUnrelatedUnclosedHTMLComment(t *testing.T) {
 	marker := githubapi.Marker{WorkflowID: "workflow-123", OperationID: "operation-789"}
 	rendered, err := githubapi.RenderMarker(marker)
 	if err != nil {
 		t.Fatalf("RenderMarker() error = %v", err)
 	}
 	text := "<!-- unrelated comment without a terminator\nuser text\n" + rendered
-	got, found, err := githubapi.FindMarker(text, marker)
-	if err != nil {
-		t.Fatalf("FindMarker() error = %v", err)
-	}
-	if !found || got != marker {
-		t.Errorf("FindMarker() = (%#v, %v), want marker after unrelated comment", got, found)
+	parsed := githubapi.ParseMarkers(text)
+	if len(parsed) != 1 || parsed[0] != marker {
+		t.Errorf("ParseMarkers() = %#v, want marker after unrelated comment", parsed)
 	}
 	ensured, err := githubapi.EnsureMarker(text, marker)
 	if err != nil {

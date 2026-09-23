@@ -9,24 +9,6 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 )
 
-func TestManagedLabelsAreStable(t *testing.T) {
-	want := []githubapi.Label{
-		{Name: "omnigrex:run", Color: "1f6feb", Description: "Start or resume Omnigrex work"},
-		{Name: "omnigrex:developing", Color: "d4a72c", Description: "Omnigrex Developer is working"},
-		{Name: "omnigrex:reviewing", Color: "8250df", Description: "Omnigrex Reviewer is reviewing"},
-		{Name: "omnigrex:pr-ready", Color: "2da44e", Description: "Change Proposal is ready for human review"},
-		{Name: "omnigrex:needs-human", Color: "cf222e", Description: "Omnigrex needs human attention"},
-	}
-	got := githubapi.ManagedLabels()
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("ManagedLabels() = %#v, want %#v", got, want)
-	}
-	got[0].Name = "mutated"
-	if githubapi.ManagedLabels()[0].Name != "omnigrex:run" {
-		t.Error("ManagedLabels() returned mutable package state")
-	}
-}
-
 func TestLabelReconcilerEnsuresMissingLabelsAndConvergesDesiredState(t *testing.T) {
 	labels := &fakeLabelAPI{
 		repositoryLabels: []githubapi.Label{
@@ -68,14 +50,14 @@ func TestLabelReconcilerEnsuresMissingLabelsAndConvergesDesiredState(t *testing.
 	if fmt.Sprint(labelNames(labels.issueLabels)) != fmt.Sprint(wantIssueLabels) {
 		t.Errorf("reconciled labels = %v, want %v", labelNames(labels.issueLabels), wantIssueLabels)
 	}
-	if labels.replacements != 0 || len(labels.additions) != 0 || fmt.Sprint(labels.removals) != "[omnigrex:run omnigrex:pr-ready]" {
-		t.Errorf("label mutations = replacements %d, additions %v, removals %v", labels.replacements, labels.additions, labels.removals)
+	if len(labels.additions) != 0 || fmt.Sprint(labels.removals) != "[omnigrex:run omnigrex:pr-ready]" {
+		t.Errorf("label mutations = additions %v, removals %v", labels.additions, labels.removals)
 	}
 	if err := reconciler.ReconcileState(context.Background(), "installation-token", "acme", "widgets", 17, githubapi.StateReviewing); err != nil {
 		t.Fatalf("second ReconcileState() error = %v", err)
 	}
-	if labels.replacements != 0 || len(labels.additions) != 0 || len(labels.removals) != 2 {
-		t.Errorf("converged reconciliation made extra mutations: replacements %d, additions %v, removals %v", labels.replacements, labels.additions, labels.removals)
+	if len(labels.additions) != 0 || len(labels.removals) != 2 {
+		t.Errorf("converged reconciliation made extra mutations: additions %v, removals %v", labels.additions, labels.removals)
 	}
 }
 
@@ -126,8 +108,11 @@ func TestLabelReconcilerAcceptsConcurrentLabelCreation(t *testing.T) {
 	if err := reconciler.EnsureManagedLabels(context.Background(), "installation-token", "acme", "widgets"); err != nil {
 		t.Fatalf("EnsureManagedLabels() concurrent creation error = %v", err)
 	}
-	if len(labels.repositoryLabels) != len(githubapi.ManagedLabels()) {
-		t.Errorf("repository labels = %v, want all managed labels", labelNames(labels.repositoryLabels))
+	want := []string{
+		"omnigrex:run", "omnigrex:developing", "omnigrex:reviewing", "omnigrex:pr-ready", "omnigrex:needs-human",
+	}
+	if got := labelNames(labels.repositoryLabels); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("repository labels = %v, want %v", got, want)
 	}
 }
 
@@ -162,7 +147,6 @@ type fakeLabelAPI struct {
 	repositoryLabels   []githubapi.Label
 	issueLabels        []githubapi.Label
 	created            []githubapi.Label
-	replacements       int
 	additions          []string
 	removals           []string
 	concurrentLabel    string
@@ -187,15 +171,6 @@ func (api *fakeLabelAPI) CreateRepositoryLabel(_ context.Context, _, _, _ string
 }
 
 func (api *fakeLabelAPI) ListIssueLabels(context.Context, string, string, string, int) ([]githubapi.Label, error) {
-	return append([]githubapi.Label(nil), api.issueLabels...), nil
-}
-
-func (api *fakeLabelAPI) ReplaceIssueLabels(_ context.Context, _, _, _ string, _ int, names []string) ([]githubapi.Label, error) {
-	api.replacements++
-	api.issueLabels = make([]githubapi.Label, len(names))
-	for index, name := range names {
-		api.issueLabels[index] = githubapi.Label{Name: name}
-	}
 	return append([]githubapi.Label(nil), api.issueLabels...), nil
 }
 
