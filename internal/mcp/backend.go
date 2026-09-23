@@ -114,6 +114,7 @@ type ProductionBackendConfig struct {
 	Workflow         WorkflowMutations
 	GitRemoteBaseURL string
 	Policies         role.PolicyCatalog
+	RoleCatalog      role.Catalog
 }
 
 type ProductionBackend struct {
@@ -124,6 +125,7 @@ type ProductionBackend struct {
 	remoteBase  gitremote.BaseURL
 	identity    workspace.CommitIdentity
 	policies    role.PolicyCatalog
+	roleCatalog role.Catalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -166,6 +168,9 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	if len(config.Policies.Roles()) == 0 {
 		config.Policies = role.BuiltinPolicyCatalog()
 	}
+	if len(config.RoleCatalog.IDs()) == 0 {
+		config.RoleCatalog = role.BuiltinCatalog()
+	}
 	if err := validatePolicyTools(config.Policies); err != nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
@@ -175,7 +180,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	}
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
-		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies,
+		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
 		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
@@ -531,11 +536,14 @@ func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
+	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+		return nil, err
+	}
 	marker, err := operationMarker(invocation)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := signedAgentBody(invocation.Scope, arguments.Body)
+	signed, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -560,11 +568,14 @@ func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invo
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
+	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+		return nil, err
+	}
 	marker, err := operationMarker(invocation)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := signedAgentBody(invocation.Scope, arguments.Body)
+	signed, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -605,6 +616,9 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 			return nil, ErrInvalidInvocation
 		}
 	}
+	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+		return nil, err
+	}
 	current, err := backend.github.GetPullRequest(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
 		int(invocation.Scope.PullRequest.Number))
 	if err != nil {
@@ -621,11 +635,8 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !reviewCommentsMatchFiles(arguments.Comments, files) {
 		return nil, ErrToolPrecondition
 	}
-	signedBody, err := signedAgentBody(invocation.Scope, arguments.Body)
+	signedBody, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
 	if err != nil {
-		return nil, err
-	}
-	if err := checkSignedBodyLength(signedBody, ""); err != nil {
 		return nil, err
 	}
 	reviewBody, err := githubapi.EnsureMarker(signedBody, githubapi.Marker{
@@ -634,9 +645,12 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if err != nil {
 		return nil, ErrInvalidInvocation
 	}
+	if err := githubapi.CheckFinalBodyLength(reviewBody); err != nil {
+		return nil, ErrInvalidInvocation
+	}
 	comments := make([]githubapi.ReviewCommentRequest, len(arguments.Comments))
 	for index, comment := range arguments.Comments {
-		signedComment, signErr := signedAgentBody(invocation.Scope, comment.Body)
+		signedComment, signErr := backend.signedAgentBody(invocation.Scope, comment.Body)
 		if signErr != nil {
 			return nil, signErr
 		}
@@ -885,32 +899,59 @@ func markerFree(body string) bool {
 	return !inspection.Untrusted && len(inspection.Markers) == 0
 }
 
-func signedAgentBody(scope ToolScope, body string) (string, error) {
-	profile := scope.AgentProfileName
-	if profile == "" {
-		profile = scope.AgentAssignmentID
-	}
-	if profile == "" {
+// signedAgentBody appends the visible Agent Participant signature. The
+// profile name must come from the validated participant identity carried in
+// the tool scope; a missing name is rejected rather than substituted. The
+// display name prefers the scope value supplied by the gateway from the
+// deployment-configured Role catalog.
+func (backend *ProductionBackend) signedAgentBody(scope ToolScope, body string) (string, error) {
+	if scope.AgentProfileName == "" {
 		return "", ErrInvalidInvocation
 	}
-	display := scope.RoleDisplayName
-	if display == "" {
-		display = string(scope.Role)
+	return githubapi.AppendSignature(body, githubapi.RenderSignature(scope.AgentProfileName, backend.displayName(scope))), nil
+}
+
+// expectedSignature renders the footer the scope identity requires. A
+// reservation-supplied signature must match it exactly.
+func (backend *ProductionBackend) expectedSignature(scope ToolScope) (string, error) {
+	if scope.AgentProfileName == "" {
+		return "", ErrInvalidInvocation
 	}
-	return githubapi.AppendSignature(body, githubapi.RenderSignature(profile, display)), nil
+	return githubapi.RenderSignature(scope.AgentProfileName, backend.displayName(scope)), nil
+}
+
+func (backend *ProductionBackend) displayName(scope ToolScope) string {
+	if scope.RoleDisplayName != "" {
+		return scope.RoleDisplayName
+	}
+	if metadata, ok := backend.roleCatalog.Lookup(role.ID(scope.Role)); ok && metadata.DisplayName != "" {
+		return metadata.DisplayName
+	}
+	return string(scope.Role)
+}
+
+// checkReservedSignature rejects a reservation-supplied signature that does
+// not match the validated participant identity.
+func (backend *ProductionBackend) checkReservedSignature(scope ToolScope, args json.RawMessage) error {
+	var persisted struct {
+		Signature string `json:"signature"`
+	}
+	if json.Unmarshal(args, &persisted) != nil {
+		return ErrInvalidInvocation
+	}
+	if persisted.Signature == "" {
+		return nil
+	}
+	expected, err := backend.expectedSignature(scope)
+	if err != nil || persisted.Signature != expected {
+		return ErrInvalidInvocation
+	}
+	return nil
 }
 
 func checkSignedBodyLength(signedBody, marker string) error {
-	complete := signedBody
-	if marker != "" {
-		if strings.TrimSpace(signedBody) == "" {
-			complete = marker
-		} else {
-			complete = strings.TrimSpace(signedBody) + "\n\n" + marker
-		}
-	}
-	if len(complete) > 65536 {
-		return fmt.Errorf("%w: comment body with signature exceeds GitHub limit", ErrInvalidInvocation)
+	if err := githubapi.CheckPostedBodyLength(signedBody, marker); err != nil {
+		return ErrInvalidInvocation
 	}
 	return nil
 }

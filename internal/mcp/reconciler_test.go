@@ -49,6 +49,54 @@ func TestProductionReconcilerFindsExactCommentArtifactUsingReservationIdentity(t
 	}
 }
 
+func TestProductionReconcilerFindsSignedCommentFromPersistedSignature(t *testing.T) {
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: reconciliationMutationID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := "_By Omnigrex: `implementation-specialist` [Developer]_"
+	reservation := `{"operation_id":"caller-key","body":"Visible update","signature":"` + signature + `"}`
+
+	t.Run("signed match", func(t *testing.T) {
+		api := &reconciliationGitHub{issueComments: []githubapi.IssueComment{
+			{ID: 701, NodeID: "IC_701", Body: "Visible update\n\n" + signature + "\n\n" + marker, HTMLURL: "https://github.test/acme/widgets/issues/12#issuecomment-701"},
+		}}
+		reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
+		mutation := reconciliationMutation(mcp.ToolCommentOnIssue, reservation)
+		mutation.ExternalResourceID = "9123:456"
+		mutation.State = store.MutationSucceeded
+
+		result, err := reconciler.Reconcile(context.Background(), reconciliationContext(), mutation)
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if result.Disposition != mcp.ReconciliationFound || result.Outcome.State != store.MutationSucceeded ||
+			string(result.Outcome.Result) != `{"comment_id":701,"node_id":"IC_701","html_url":"https://github.test/acme/widgets/issues/12#issuecomment-701"}` {
+			t.Fatalf("Reconcile() = %#v", result)
+		}
+	})
+
+	t.Run("changed signature does not match", func(t *testing.T) {
+		api := &reconciliationGitHub{issueComments: []githubapi.IssueComment{
+			{ID: 703, NodeID: "IC_703", Body: "Visible update\n\n_By Omnigrex: `other-profile` [Developer]_\n\n" + marker, HTMLURL: "https://github.test/acme/widgets/issues/12#issuecomment-703"},
+		}}
+		reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
+		mutation := reconciliationMutation(mcp.ToolCommentOnIssue, reservation)
+		mutation.ExternalResourceID = "9123:456"
+		mutation.State = store.MutationSucceeded
+
+		result, err := reconciler.Reconcile(context.Background(), reconciliationContext(), mutation)
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if result.Disposition != mcp.ReconciliationUnresolved {
+			t.Fatalf("Reconcile() = %#v, want unresolved", result)
+		}
+	})
+}
+
 func TestProductionReconcilerUsesDeveloperCredentialsForReviewerPullRequestComments(t *testing.T) {
 	marker := reconciliationMarker(t, reconciliationMutationID)
 	api := &reconciliationGitHub{issueComments: []githubapi.IssueComment{{

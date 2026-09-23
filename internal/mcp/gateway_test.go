@@ -164,7 +164,7 @@ func TestReviewerCannotCallDeveloperMutation(t *testing.T) {
 	gateway := newTestGateway(t, now, durable, backend)
 	scope := validScope(now)
 	scope.Role = workflow.RoleReviewer
-	scope.Lease.AgentProfileConfig = json.RawMessage(`{"role":"REVIEWER"}`)
+	scope.Lease.AgentProfileConfig = json.RawMessage(`{"role":"REVIEWER","name":"review-specialist"}`)
 	scope.Lease.ChangeProposalID = "proposal-1"
 	scope.Lease.ExpectedHeadSHA = scope.HeadSHA
 	scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
@@ -1499,7 +1499,7 @@ func validScope(now time.Time) mcp.TokenScope {
 	return mcp.TokenScope{
 		Lease: store.AgentTurnLease{
 			AgentTurn: store.AgentTurn{
-				AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "session-1", AgentProfileConfig: json.RawMessage(`{"role":"DEVELOPER"}`)},
+				AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "session-1", AgentProfileConfig: json.RawMessage(`{"role":"DEVELOPER","name":"implementation-specialist"}`)},
 				ID:            "turn-1", AgentAssignmentID: "assignment-1", ExecutionEpoch: 4, CreatedAt: now,
 			},
 			JobLease: store.JobLease{Job: store.Job{JobSpec: store.JobSpec{WorkflowID: "workflow-1", AgentSessionID: "session-1", AgentTurnID: "turn-1", AgentAssignmentID: "assignment-1", ExecutionEpoch: 4}}},

@@ -546,6 +546,76 @@ func TestProductionBackendSignsBodylessApproval(t *testing.T) {
 	}
 }
 
+func TestProductionBackendAcceptsMatchingPersistedSignature(t *testing.T) {
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	arguments, err := json.Marshal(map[string]string{
+		"operation_id": "issue-comment-1", "body": "Issue update",
+		"signature": "_By Omnigrex: `implementation-specialist` [Developer]_",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolCommentOnIssue, Arguments: arguments, Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "issue-comment-1",
+	}); err != nil {
+		t.Fatalf("Execute(comment_on_issue) error = %v", err)
+	}
+	if api.issueCommentRequest.Body != "Issue update\n\n"+productionSignature(workflow.RoleDeveloper) {
+		t.Fatalf("Issue comment body = %q", api.issueCommentRequest.Body)
+	}
+}
+
+func TestProductionBackendRejectsForgedPersistedSignature(t *testing.T) {
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	arguments, err := json.Marshal(map[string]string{
+		"operation_id": "issue-comment-1", "body": "Issue update",
+		"signature": "_By Omnigrex: `someone-else` [Developer]_",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolCommentOnIssue, Arguments: arguments, Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "issue-comment-1",
+	}); !errors.Is(err, mcp.ErrInvalidInvocation) {
+		t.Fatalf("Execute(comment_on_issue) error = %v, want ErrInvalidInvocation", err)
+	}
+	if api.issueCommentRequest.Body != "" {
+		t.Fatalf("forged comment reached GitHub: %#v", api.issueCommentRequest)
+	}
+}
+
+func TestProductionBackendRejectsMissingParticipantIdentity(t *testing.T) {
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.AgentProfileName = ""
+	if _, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolCommentOnIssue, Arguments: json.RawMessage(`{"operation_id":"issue-comment-1","body":"Issue update"}`), Scope: scope, Class: mcp.MutationTool, OperationID: "issue-comment-1",
+	}); !errors.Is(err, mcp.ErrInvalidInvocation) {
+		t.Fatalf("Execute(comment_on_issue) error = %v, want ErrInvalidInvocation", err)
+	}
+	if api.issueCommentRequest.Body != "" {
+		t.Fatalf("unsigned comment reached GitHub: %#v", api.issueCommentRequest)
+	}
+}
+
 func TestProductionBackendRejectsOversizedSignedBody(t *testing.T) {
 	api := &backendGitHub{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{

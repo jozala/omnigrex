@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
@@ -39,7 +40,8 @@ const (
 var (
 	ErrInvalidConfiguration = errors.New("invalid MCP gateway configuration")
 	// ErrMutationDrainUnresolved indicates that at least one admitted mutation did not reach a durable terminal or recoverable state.
-	ErrMutationDrainUnresolved = errors.New("admitted mutation durable state is unresolved")
+	ErrMutationDrainUnresolved     = errors.New("admitted mutation durable state is unresolved")
+	errMissingAgentProfileIdentity = errors.New("agent profile identity is unavailable for signing")
 )
 
 // Store is the durable fencing and mutation ledger needed by the gateway.
@@ -91,6 +93,7 @@ type Config struct {
 	Now                         func() time.Time
 	Random                      io.Reader
 	Policies                    role.PolicyCatalog
+	RoleCatalog                 role.Catalog
 }
 
 type RepositoryScope struct {
@@ -216,6 +219,7 @@ type Gateway struct {
 	mutationFinalizationTimeout time.Duration
 	mutationOperationTimeout    time.Duration
 	policies                    role.PolicyCatalog
+	roleCatalog                 role.Catalog
 
 	mutex         sync.RWMutex
 	randomMutex   sync.Mutex
@@ -296,6 +300,9 @@ func New(config Config) (*Gateway, error) {
 	if config.LifecycleContext == nil {
 		config.LifecycleContext = context.Background()
 	}
+	if len(config.RoleCatalog.IDs()) == 0 {
+		config.RoleCatalog = role.BuiltinCatalog()
+	}
 	return &Gateway{
 		endpointURL:                 config.EndpointURL,
 		store:                       config.Store,
@@ -309,6 +316,7 @@ func New(config Config) (*Gateway, error) {
 		mutationFinalizationTimeout: config.MutationFinalizationTimeout,
 		mutationOperationTimeout:    config.MutationOperationTimeout,
 		policies:                    config.Policies,
+		roleCatalog:                 config.RoleCatalog,
 		registrations:               make(map[[sha256.Size]byte]*grant),
 		gates:                       make(map[string]*mutationGate),
 	}, nil
@@ -480,7 +488,7 @@ func (gateway *Gateway) closeGrant(registration *grant, cancelOperations bool) <
 func (gateway *Gateway) retireGrant(registration *grant) {
 	registration.retireOnce.Do(func() {
 		if releaser, ok := gateway.backend.(TurnReleaser); ok {
-			releaser.ReleaseTurn(backendScope(registration.scope))
+			releaser.ReleaseTurn(gateway.backendScope(registration.scope))
 		}
 		gateway.mutex.Lock()
 		defer gateway.mutex.Unlock()
@@ -692,7 +700,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	}
 	invocation := Invocation{
 		Name: params.Name, Arguments: append(json.RawMessage(nil), canonicalArguments...),
-		Scope: backendScope(registration.scope), Class: tool.Class,
+		Scope: gateway.backendScope(registration.scope), Class: tool.Class,
 	}
 	if tool.Class == MutationTool {
 		gateway.callMutation(response, request, registration, rpc.ID, invocation)
@@ -771,10 +779,12 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	}
 	invocation.OperationID = operationID
 	invocation.Mutation = mutationMetadata(invocation.Name, registration.scope)
-	if message := signedBodyTooLong(invocation, registration.scope); message != "" {
-		writeToolError(response, id, message)
+	signedArguments, toolErr := gateway.signReservationArguments(invocation.Name, invocation.Arguments, registration.scope)
+	if toolErr != "" {
+		writeToolError(response, id, toolErr)
 		return
 	}
+	invocation.Arguments = signedArguments
 	gate := registration.gate.channel
 	select {
 	case gate <- struct{}{}:
@@ -840,6 +850,9 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 			}
 			replayInvocation := cloneInvocation(invocation)
 			replayInvocation.OperationID = reservation.ID
+			// Retain the source operation's original signature on replay,
+			// including its rendered footer from reservation time.
+			replayInvocation.Arguments = append(json.RawMessage(nil), reservation.Request...)
 			replayInvocation.Mutation = MutationMetadata{
 				ExternalService: reservation.ExternalService, ExternalResourceID: reservation.ExternalResourceID,
 				ExpectedSHA: reservation.ExpectedSHA,
@@ -1097,55 +1110,91 @@ func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(value)
 }
 
-// signedBodyTooLong checks the complete body, including its signature footer
-// and hidden marker allowance, before posting. It never truncates agent text.
-func signedBodyTooLong(invocation Invocation, scope TokenScope) string {
-	var bodies []string
-	switch invocation.Name {
-	case ToolCommentOnIssue, ToolCommentOnPullRequest:
-		var arguments struct {
-			Body string `json:"body"`
-		}
-		if json.Unmarshal(invocation.Arguments, &arguments) != nil {
-			return ""
-		}
-		bodies = []string{arguments.Body}
-	case ToolSubmitReview:
-		var arguments struct {
-			Body     string `json:"body"`
+// signReservationArguments persists the rendered signature footer with each
+// new comment or review mutation reservation. The footer is stored in the
+// reservation request so recovery reconstructs the exact published body even
+// if a Role display name subsequently changes, and so pre-deployment
+// reservations without a signature stay distinguishable as unsigned. It also
+// checks the complete body, including its signature and hidden marker, before
+// posting, and never truncates agent text. Any agent-supplied signature is
+// replaced with the validated participant identity.
+func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessage, scope TokenScope) (json.RawMessage, string) {
+	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview {
+		return args, ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(args, &object) != nil {
+		return nil, "invalid tool arguments"
+	}
+	var body struct {
+		Body string `json:"body"`
+	}
+	if json.Unmarshal(args, &body) != nil {
+		return nil, "invalid tool arguments"
+	}
+	var inline []string
+	if tool == ToolSubmitReview {
+		var review struct {
 			Comments []struct {
 				Body string `json:"body"`
 			} `json:"comments"`
 		}
-		if json.Unmarshal(invocation.Arguments, &arguments) != nil {
-			return ""
+		if json.Unmarshal(args, &review) != nil {
+			return nil, "invalid tool arguments"
 		}
-		bodies = []string{arguments.Body}
-		for _, comment := range arguments.Comments {
-			bodies = append(bodies, comment.Body)
-		}
-	default:
-		return ""
-	}
-	profile, display := participantSignatureIdentity(scope)
-	if profile == "" {
-		profile = scope.Lease.AgentAssignmentID
-	}
-	if display == "" {
-		display = string(scope.Role)
-	}
-	overhead := len("_By Omnigrex: `` []_") + len(profile) + len(display) + 4 + 256
-	for _, body := range bodies {
-		if len(body)+overhead > 65536 {
-			return "comment body with signature exceeds GitHub limit; shorten the body without changing its meaning"
+		for _, comment := range review.Comments {
+			inline = append(inline, comment.Body)
 		}
 	}
-	return ""
+	profile, display, err := gateway.publicationIdentity(scope)
+	if err != nil {
+		return nil, err.Error()
+	}
+	signature := githubapi.RenderSignature(profile, display)
+	object["signature"] = json.RawMessage(strconv.Quote(signature))
+	signed, err := canonicalJSON(mustMarshalJSON(object))
+	if err != nil {
+		return nil, "invalid tool arguments"
+	}
+	markerIdentity := githubapi.Marker{
+		WorkflowID: scope.WorkflowID, AgentAssignmentID: scope.Lease.AgentAssignmentID, OperationID: placeholderMarkerOperationID,
+	}
+	marker, err := githubapi.RenderMarker(markerIdentity)
+	if err != nil {
+		return nil, "invalid tool arguments"
+	}
+	if tool == ToolSubmitReview {
+		final, err := githubapi.EnsureMarker(githubapi.AppendSignature(body.Body, signature), markerIdentity)
+		if err != nil {
+			return nil, "invalid tool arguments"
+		}
+		if err := githubapi.CheckFinalBodyLength(final); err != nil {
+			return nil, postedBodyTooLongMessage
+		}
+		for _, commentBody := range inline {
+			if err := githubapi.CheckPostedBodyLength(githubapi.AppendSignature(commentBody, signature), ""); err != nil {
+				return nil, postedBodyTooLongMessage
+			}
+		}
+		return signed, ""
+	}
+	if err := githubapi.CheckPostedBodyLength(githubapi.AppendSignature(body.Body, signature), marker); err != nil {
+		return nil, postedBodyTooLongMessage
+	}
+	return signed, ""
 }
 
-// participantSignatureIdentity takes the profile name from the Agent Turn
-// identity and pairs it with the configured Role display name.
-func participantSignatureIdentity(scope TokenScope) (string, string) {
+// placeholderMarkerOperationID stands in for the reservation UUID when
+// measuring the exact posted length. Reservation IDs are UUIDs, so the
+// placeholder renders a marker of exactly the posted length.
+const placeholderMarkerOperationID = "00000000-0000-4000-8000-000000000000"
+
+const postedBodyTooLongMessage = "comment body with signature exceeds GitHub limit; shorten the body without changing its meaning"
+
+// publicationIdentity takes the profile name from the Agent Participant's
+// validated Agent Turn identity and pairs it with the deployment-configured
+// Role display name. A missing name is rejected rather than substituted.
+func (gateway *Gateway) publicationIdentity(scope TokenScope) (string, string, error) {
 	var snapshot struct {
 		Name string `json:"name"`
 	}
@@ -1153,20 +1202,31 @@ func participantSignatureIdentity(scope TokenScope) (string, string) {
 	if json.Unmarshal(scope.Lease.AgentProfileConfig, &snapshot) == nil {
 		profileName = snapshot.Name
 	}
-	displayName := string(scope.Role)
-	if metadata, ok := role.BuiltinCatalog().Lookup(role.ID(scope.Role)); ok {
-		displayName = metadata.DisplayName
+	if profileName == "" {
+		return "", "", errMissingAgentProfileIdentity
 	}
-	return profileName, displayName
+	metadata, ok := gateway.roleCatalog.Lookup(role.ID(scope.Role))
+	if !ok || metadata.DisplayName == "" {
+		return "", "", errMissingAgentProfileIdentity
+	}
+	return profileName, metadata.DisplayName, nil
 }
 
-func backendScope(scope TokenScope) ToolScope {
+func mustMarshalJSON(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func (gateway *Gateway) backendScope(scope TokenScope) ToolScope {
 	var pullRequest *PullRequestScope
 	if scope.PullRequest != nil {
 		clone := *scope.PullRequest
 		pullRequest = &clone
 	}
-	profileName, displayName := participantSignatureIdentity(scope)
+	profileName, displayName, _ := gateway.publicationIdentity(scope)
 	return ToolScope{
 		WorkflowID: scope.WorkflowID, AgentAssignmentID: scope.Lease.AgentAssignmentID,
 		AgentSessionID: scope.Lease.AgentSessionID, AgentTurnID: scope.Lease.ID,

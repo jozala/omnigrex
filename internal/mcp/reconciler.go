@@ -231,12 +231,18 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 
 func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string, pullRequestComment bool) (MutationReconciliationResult, error) {
 	var request struct {
-		Body string `json:"body"`
+		Body      string `json:"body"`
+		Signature string `json:"signature"`
 	}
 	if mutation.ExternalService != "github" || !decodePersistedRequest(mutation.Request, &request) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
+	// Reconstruct the exact published body from the reservation. Reservations
+	// without a persisted signature predate signatures and stay unsigned.
 	expectedBody := joinVisibleParts(request.Body, marker)
+	if request.Signature != "" {
+		expectedBody = joinVisibleParts(githubapi.AppendSignature(request.Body, request.Signature), marker)
+	}
 	number := int(reconciliation.Issue.Number)
 	expectedResourceID := reconciliation.Issue.ID
 	if pullRequestComment {
@@ -263,12 +269,11 @@ func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, re
 		if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
 			continue
 		}
-		if comment.Body == expectedBody || matchesSignedComment(comment.Body, request.Body, marker) {
-			matches = append(matches, comment)
+		if comment.Body != expectedBody {
+			conflict = true
 			continue
 		}
-		conflict = true
-		continue
+		matches = append(matches, comment)
 	}
 	if len(matches) == 1 && !conflict {
 		result, err := encodeCommentResult(matches[0])
@@ -290,8 +295,9 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	var request struct {
-		Event githubapi.ReviewEvent `json:"event"`
-		Body  string                `json:"body"`
+		Event     githubapi.ReviewEvent `json:"event"`
+		Body      string                `json:"body"`
+		Signature string                `json:"signature"`
 	}
 	if !decodePersistedRequest(mutation.Request, &request) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -302,7 +308,11 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 	} else if request.Event != githubapi.ReviewApprove {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	expectedBody, err := githubapi.EnsureMarker(request.Body, githubapi.Marker{
+	visibleBody := request.Body
+	if request.Signature != "" {
+		visibleBody = githubapi.AppendSignature(request.Body, request.Signature)
+	}
+	expectedBody, err := githubapi.EnsureMarker(visibleBody, githubapi.Marker{
 		WorkflowID: reconciliation.WorkflowID, AgentAssignmentID: reconciliation.Turn.AgentAssignmentID, OperationID: mutation.ID,
 	})
 	if err != nil || !strings.Contains(expectedBody, marker) {
@@ -322,7 +332,7 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		if !hasExactOperationMarker(review.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
 			continue
 		}
-		if review.Body != expectedBody && !matchesSignedComment(review.Body, request.Body, marker) {
+		if review.Body != expectedBody {
 			conflict = true
 			continue
 		}
@@ -612,19 +622,6 @@ func safeCredential(credential string) bool {
 		}
 	}
 	return true
-}
-
-// matchesSignedComment accepts a published body whose hidden marker is intact
-// and whose visible text is the agent body with a signature footer, or the
-// legacy unsigned body. The signature itself is persisted in the published
-// body, so display-name changes and pre-deployment bodies remain recognizable
-// without duplicates, and replay retains the source signature.
-func matchesSignedComment(published, agentBody, marker string) bool {
-	withoutMarker := strings.TrimSpace(strings.Replace(published, marker, "", 1))
-	if strings.TrimSpace(withoutMarker) == strings.TrimSpace(agentBody) {
-		return true
-	}
-	return githubapi.MatchesSignedBody(withoutMarker, agentBody)
 }
 
 func foundReconciliation(result json.RawMessage) MutationReconciliationResult {

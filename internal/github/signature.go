@@ -1,11 +1,19 @@
 package github
 
 import (
+	"errors"
 	"strings"
 )
 
+// ErrPostedBodyTooLong reports a complete posted body that exceeds the GitHub limit.
+var ErrPostedBodyTooLong = errors.New("comment body with signature exceeds GitHub limit")
+
 // SignatureFooterPrefix introduces the visible Agent Participant signature.
 const SignatureFooterPrefix = "_By Omnigrex:"
+
+// MaxPostedBodyLength bounds the complete posted GitHub body, including the
+// visible signature footer and any hidden operation marker.
+const MaxPostedBodyLength = 65536
 
 // RenderSignature returns the visible footer identifying the Agent Profile.
 // The profile name is rendered verbatim in code spans; the Role display name
@@ -19,7 +27,7 @@ func EscapeSignatureDisplayName(display string) string {
 	var rendered strings.Builder
 	for _, character := range display {
 		switch character {
-		case '\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '|', '{', '}', '<', '>':
+		case '\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '|', '{', '}', '<', '>', '~':
 			rendered.WriteRune('\\')
 			rendered.WriteRune(character)
 		default:
@@ -43,6 +51,36 @@ func AppendSignature(body, signature string) string {
 		return signature
 	}
 	return trimmed + "\n\n" + signature
+}
+
+// JoinPostedBody assembles the exact posted body from the signed visible text
+// and the hidden operation marker, mirroring API body assembly.
+func JoinPostedBody(signedBody, marker string) string {
+	parts := make([]string, 0, 2)
+	for _, part := range []string{signedBody, marker} {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// CheckPostedBodyLength rejects an oversized complete body before posting
+// without truncating agent text.
+func CheckPostedBodyLength(signedBody, marker string) error {
+	if len(JoinPostedBody(signedBody, marker)) > MaxPostedBodyLength {
+		return ErrPostedBodyTooLong
+	}
+	return nil
+}
+
+// CheckFinalBodyLength rejects an oversized final posted body, used when the
+// body already contains its hidden marker.
+func CheckFinalBodyLength(final string) error {
+	if len(final) > MaxPostedBodyLength {
+		return ErrPostedBodyTooLong
+	}
+	return nil
 }
 
 // StripSignature removes one trailing signature footer, reporting whether one was present.
