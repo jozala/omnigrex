@@ -25,6 +25,11 @@ test "$GOFLAGS" = '-p=1 -modcacherw'
 test "$MISE_JOBS" = 1
 test "$MISE_GLOBAL_CONFIG_FILE" = /etc/omnigrex/mise-global.toml
 test "$MISE_SYSTEM_CONFIG_FILE" = /etc/omnigrex/mise-system.toml
+test "$TMPDIR" = "$MISE_DATA_DIR/tmp"
+test "$GOTMPDIR" = "$TMPDIR"
+test "$MISE_TMP_DIR" = "$TMPDIR"
+test -d "$TMPDIR"
+test -w "$TMPDIR"
 printf '%s|%s|' "$PWD" "$*" >> `+quoted(logPath)+`
 tr -d '\n' < mise.toml >> `+quoted(logPath)+`
 printf '\n' >> `+quoted(logPath)+`
@@ -83,7 +88,7 @@ fi
 			t.Errorf("activation environment %s = %q, want %q", name, got, want)
 		}
 	}
-	for _, name := range []string{"GOFLAGS", "MISE_JOBS"} {
+	for _, name := range []string{"GOFLAGS", "GOTMPDIR", "MISE_JOBS", "MISE_TMP_DIR", "TMPDIR"} {
 		if _, found := activation.Environment[name]; found {
 			t.Errorf("activation exposes provisioning-only setting %s", name)
 		}

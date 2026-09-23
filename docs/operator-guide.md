@@ -30,7 +30,8 @@ Install the following software on the deployment host:
 - A reverse proxy or tunnel that terminates publicly trusted HTTPS.
 
 The orchestrator installs repository tools inside its own container before launching Agent Turns, including compiling Go tools declared in `mise.toml`.
-Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Agent Runtime Processes.
+Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Runtime Processes.
+Tool installation uses scratch space in the per-assignment mise volume rather than the orchestrator's 16 MiB `/tmp` tmpfs, so that volume also needs room for Go compilation.
 
 Clone the repository and create the local configuration:
 

@@ -61,6 +61,9 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	if err := ensureOwnedDirectory(paths.Mise, 0o755); err != nil {
 		return MiseActivation{}, fmt.Errorf("recreate assignment mise data: %w", err)
 	}
+	if err := ensureOwnedDirectory(filepath.Join(paths.Mise, "tmp"), 0o700); err != nil {
+		return MiseActivation{}, fmt.Errorf("create assignment mise temporary data: %w", err)
+	}
 	source := filepath.Join(assignmentRoot, "mise-source")
 	if err := os.RemoveAll(source); err != nil {
 		return MiseActivation{}, fmt.Errorf("replace trusted mise source: %w", err)
@@ -238,8 +241,10 @@ func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory strin
 }
 
 func miseIsolation(dataDir, trustedSource string) map[string]string {
+	temporary := filepath.Join(dataDir, "tmp")
 	return map[string]string{
 		"GOFLAGS":                   "-p=1 -modcacherw",
+		"GOTMPDIR":                  temporary,
 		"HOME":                      filepath.Join(dataDir, "home"),
 		"MISE_CACHE_DIR":            filepath.Join(dataDir, "cache"),
 		"MISE_CONFIG_DIR":           filepath.Join(dataDir, "config"),
@@ -249,7 +254,9 @@ func miseIsolation(dataDir, trustedSource string) map[string]string {
 		"MISE_PROJECT_ROOT":         trustedSource,
 		"MISE_STATE_DIR":            filepath.Join(dataDir, "state"),
 		"MISE_SYSTEM_CONFIG_FILE":   "/etc/omnigrex/mise-system.toml",
+		"MISE_TMP_DIR":              temporary,
 		"MISE_TRUSTED_CONFIG_PATHS": trustedSource,
+		"TMPDIR":                    temporary,
 		"XDG_CACHE_HOME":            filepath.Join(dataDir, "xdg-cache"),
 		"XDG_CONFIG_HOME":           filepath.Join(dataDir, "xdg-config"),
 		"XDG_DATA_HOME":             filepath.Join(dataDir, "xdg-data"),
@@ -260,7 +267,7 @@ func miseIsolation(dataDir, trustedSource string) map[string]string {
 func runtimeMiseEnvironment(isolation map[string]string) map[string]string {
 	environment := make(map[string]string, len(isolation)-1)
 	for name, value := range isolation {
-		if name != "HOME" && name != "GOFLAGS" && name != "MISE_JOBS" && name != "MISE_PROJECT_ROOT" && name != "MISE_TRUSTED_CONFIG_PATHS" && !strings.HasPrefix(name, "XDG_") {
+		if name != "HOME" && name != "GOFLAGS" && name != "GOTMPDIR" && name != "MISE_JOBS" && name != "MISE_PROJECT_ROOT" && name != "MISE_TMP_DIR" && name != "MISE_TRUSTED_CONFIG_PATHS" && name != "TMPDIR" && !strings.HasPrefix(name, "XDG_") {
 			environment[name] = value
 		}
 	}
