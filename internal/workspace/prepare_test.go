@@ -74,6 +74,73 @@ func TestLifecyclePreparesExactCredentialFreeWorkspace(t *testing.T) {
 	}
 }
 
+func TestLifecycleReplacesReadOnlyAgentCacheWithoutFollowingSymlinks(t *testing.T) {
+	fixture := newGitFixture(t)
+	root := t.TempDir()
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(paths.Workspace, ".cache", "gopath", "pkg", "mod", "golang.org", "x", "text@v0.29.0")
+	file := filepath.Join(module, "unicode", "doc.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("cached"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(root, "external")
+	if err := os.Mkdir(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "marker"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(paths.Workspace, ".cache", "external")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(paths.Workspace, 0o755)
+		for _, directory := range []string{module, filepath.Dir(file)} {
+			_ = os.Chmod(directory, 0o755)
+		}
+		_ = os.Chmod(external, 0o755)
+	})
+	for _, directory := range []string{filepath.Dir(file), module, external, paths.Workspace} {
+		if err := os.Chmod(directory, 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkout.Revision = fixture.second
+	replaced, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatalf("PrepareWorkspace() replacing agent cache: %v", err)
+	}
+	if got := gitOutput(t, replaced.Workspace, "rev-parse", "HEAD"); got != fixture.second {
+		t.Errorf("replaced workspace HEAD = %q, want %q", got, fixture.second)
+	}
+	if _, err := os.Lstat(filepath.Join(replaced.Workspace, ".cache")); !os.IsNotExist(err) {
+		t.Errorf("agent cache survived replacement: %v", err)
+	}
+	info, err := os.Stat(external)
+	if err != nil || info.Mode().Perm() != 0 {
+		t.Fatalf("external symlink target permissions = %v, %v, want 000", info, err)
+	}
+	if err := os.Chmod(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(filepath.Join(external, "marker")); err != nil || string(content) != "outside" {
+		t.Errorf("external marker = %q, %v", content, err)
+	}
+}
+
 func TestLifecycleNeverReturnsGitCredentialsInErrors(t *testing.T) {
 	authorizations := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

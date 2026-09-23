@@ -11,7 +11,7 @@ import (
 
 // O_PATH pins an unreadable directory without traversing a symlink. The
 // procfd path names that pinned inode, even on kernels without fchmodat2.
-func restoreUnreadableMiseDirectory(parentFD int, name string, expected unix.Stat_t) error {
+func restoreUnreadableOwnedDirectory(parentFD int, name string, expected unix.Stat_t) error {
 	fd, err := unix.Openat(parentFD, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err

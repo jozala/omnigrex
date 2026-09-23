@@ -122,6 +122,9 @@ func (lifecycle *Lifecycle) DiscardWorkspace(assignmentID string) error {
 			return nil
 		}
 	}
+	if err := makeOwnedTreeDirectoriesWritable(paths.Workspace); err != nil {
+		return fmt.Errorf("prepare assignment workspace for discard: %w", err)
+	}
 	if err := os.RemoveAll(paths.Workspace); err != nil {
 		return fmt.Errorf("discard assignment workspace: %w", err)
 	}

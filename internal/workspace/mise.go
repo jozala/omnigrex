@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 var ErrInvalidMiseEnvironment = errors.New("mise returned an invalid activation environment")
@@ -52,7 +50,7 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	if err := ensureOwnedDirectory(paths.Mise, 0o755); err != nil {
 		return MiseActivation{}, fmt.Errorf("create assignment mise data: %w", err)
 	}
-	if err := makeMiseDirectoriesWritable(paths.Mise); err != nil {
+	if err := makeOwnedTreeDirectoriesWritable(paths.Mise); err != nil {
 		return MiseActivation{}, fmt.Errorf("prepare assignment mise data for replacement: %w", err)
 	}
 	if err := os.RemoveAll(paths.Mise); err != nil {
@@ -123,96 +121,6 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 		return MiseActivation{}, err
 	}
 	return activation, nil
-}
-
-// Go's module cache contains read-only directories. Restore only the owner's
-// directory permissions, using no-follow descriptors so an agent-created link
-// cannot redirect chmod outside its assignment data.
-func makeMiseDirectoriesWritable(path string) error {
-	parent, _, err := openDirectoryNoFollow(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer parent.Close()
-	var stat unix.Stat_t
-	name := filepath.Base(path)
-	if err := unix.Fstatat(int(parent.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return err
-	}
-	directory, err := openMiseDirectoryAtNoFollow(int(parent.Fd()), name, stat)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return makeMiseDirectoryWritable(directory)
-}
-
-func openMiseDirectoryAtNoFollow(parentFD int, name string, stat unix.Stat_t) (*os.File, error) {
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() {
-		return nil, fmt.Errorf("%w: mise directory is not owned by the orchestrator", ErrUnsafeAssignmentPath)
-	}
-	child, err := openDirectoryAtNoFollow(parentFD, name)
-	if errors.Is(err, unix.EACCES) && stat.Mode&0o500 != 0o500 {
-		if err := restoreUnreadableMiseDirectory(parentFD, name, stat); err != nil {
-			return nil, err
-		}
-		child, err = openDirectoryAtNoFollow(parentFD, name)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var opened unix.Stat_t
-	if err := unix.Fstat(int(child.Fd()), &opened); err != nil {
-		child.Close()
-		return nil, err
-	}
-	if opened.Dev != stat.Dev || opened.Ino != stat.Ino {
-		child.Close()
-		return nil, ErrUnsafeAssignmentPath
-	}
-	return child, nil
-}
-
-func makeMiseDirectoryWritable(directory *os.File) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
-		return err
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() {
-		return fmt.Errorf("%w: mise directory is not owned by the orchestrator", ErrUnsafeAssignmentPath)
-	}
-	mode := stat.Mode & 0o777
-	if mode&0o700 != 0o700 {
-		if err := unix.Fchmod(int(directory.Fd()), uint32(mode|0o700)); err != nil {
-			return err
-		}
-	}
-	names, err := directory.Readdirnames(-1)
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		var childStat unix.Stat_t
-		if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return err
-		}
-		if childStat.Mode&unix.S_IFMT != unix.S_IFDIR {
-			continue
-		}
-		child, err := openMiseDirectoryAtNoFollow(int(directory.Fd()), name, childStat)
-		if err != nil {
-			return err
-		}
-		err = makeMiseDirectoryWritable(child)
-		closeErr := child.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-	}
-	return nil
 }
 
 func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory string, environment map[string]string, arguments ...string) (string, error) {

@@ -45,8 +45,14 @@ func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Check
 	if err := ensureAssignmentDirectory(lifecycle.workspaceRoot, filepath.Dir(paths.Workspace)); err != nil {
 		return Paths{}, fmt.Errorf("create assignment workspace parent: %w", err)
 	}
-	if _, err := inspectOwnedDirectory(paths.Workspace); err != nil {
+	exists, err := inspectOwnedDirectory(paths.Workspace)
+	if err != nil {
 		return Paths{}, err
+	}
+	if exists {
+		if err := makeOwnedTreeDirectoriesWritable(paths.Workspace); err != nil {
+			return Paths{}, fmt.Errorf("prepare assignment workspace for replacement: %w", err)
+		}
 	}
 	if err := os.RemoveAll(paths.Workspace); err != nil {
 		return Paths{}, fmt.Errorf("replace assignment workspace: %w", err)
