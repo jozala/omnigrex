@@ -154,10 +154,10 @@ func TestStopRecoveryLeaseExpiryBeyondAttemptBudgetRetainsAuthorityAndEventually
 			t.Fatalf("stop recovery attempt = %d, want %d", lease.Attempt, attempt)
 		}
 		lease = expireAndClaimRecoveryLease(t, database, pool, ctx, lease, "crashing-stop")
-		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
-		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed {
-			t.Fatalf("recovery after expired stop attempt %d = (%#v, %v)", attempt, unsettled, err)
+		if _, err := database.CompleteAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+			t.Fatalf("CompleteAgentTurnRecovery() after expired stop attempt %d error = %v, want ErrAgentTurnRecoveryUnsettled", attempt, err)
 		}
+		assertAgentTurnRecoveryUnsettled(t, pool, ctx, original)
 	}
 	assertRecoverySafetyHandoffVisible(t, database, ctx, pool, original.JobLease.WorkflowID, recovery.StopRuntimeJobID)
 
@@ -208,9 +208,16 @@ func TestStopRecoveryFailuresBeyondAttemptBudgetRetainAuthorityAndEventuallySett
 			job.MaxAttempts <= job.AttemptCount || job.LastError != failure.Error() {
 			t.Fatalf("failed stop recovery attempt %d = %#v, want delayed live retry authority", attempt, job)
 		}
-		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
-		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed || unsettled.RuntimeStoppedAt != nil {
-			t.Fatalf("recovery after failed stop attempt %d = (%#v, %v)", attempt, unsettled, err)
+		if _, err := database.CompleteAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+			t.Fatalf("CompleteAgentTurnRecovery() after failed stop attempt %d error = %v, want ErrAgentTurnRecoveryUnsettled", attempt, err)
+		}
+		assertAgentTurnRecoveryUnsettled(t, pool, ctx, original)
+		var runtimeStopped bool
+		if err := pool.QueryRow(ctx, `SELECT runtime_stopped_at IS NOT NULL FROM agent_turns WHERE id = $1`, original.ID).Scan(&runtimeStopped); err != nil {
+			t.Fatal(err)
+		}
+		if runtimeStopped {
+			t.Fatalf("failed stop attempt %d recorded the Runtime Process as stopped", attempt)
 		}
 	}
 	assertRecoverySafetyHandoffVisible(t, database, ctx, pool, original.JobLease.WorkflowID, recovery.StopRuntimeJobID)
@@ -245,10 +252,10 @@ func TestMutationRecoveryLeaseExpiryBeyondAttemptBudgetRetainsAuthorityAndEventu
 			t.Fatalf("mutation recovery attempt = %d, want %d", lease.Attempt, attempt)
 		}
 		lease = expireAndClaimRecoveryLease(t, database, pool, ctx, lease, "crashing-mutation")
-		unsettled, err := database.GetAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch)
-		if err != nil || unsettled.RecoverySettledAt != nil || unsettled.SuccessorAllowed {
-			t.Fatalf("recovery after expired mutation attempt %d = (%#v, %v)", attempt, unsettled, err)
+		if _, err := database.CompleteAgentTurnRecovery(ctx, original.ID, original.ExecutionEpoch); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
+			t.Fatalf("CompleteAgentTurnRecovery() after expired mutation attempt %d error = %v, want ErrAgentTurnRecoveryUnsettled", attempt, err)
 		}
+		assertAgentTurnRecoveryUnsettled(t, pool, ctx, original)
 	}
 	assertRecoverySafetyHandoffVisible(t, database, ctx, pool, original.JobLease.WorkflowID, recovery.ReconcileMutationsJobID)
 
@@ -352,7 +359,7 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	recovery, err := database.BeginAgentTurnMutationRecovery(ctx, lease)
+	recovery, err := database.BeginAgentTurnRecovery(ctx, lease)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +521,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	if err := database.CloseMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.BeginAgentTurnMutationRecovery(ctx, rootLease); err != nil {
+	if _, err := database.BeginAgentTurnRecovery(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
 	stopLease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "replay-stop")
@@ -593,7 +600,7 @@ func beginControlledRecovery(t *testing.T, database *store.Store, pool *pgxpool.
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	recovery, err := database.BeginAgentTurnMutationRecovery(ctx, lease)
+	recovery, err := database.BeginAgentTurnRecovery(ctx, lease)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,6 +616,19 @@ func claimRecoveryJob(t *testing.T, database *store.Store, ctx context.Context, 
 		t.Fatalf("ClaimJobKind(%s) = (%#v, %v)", kind, lease, err)
 	}
 	return *lease
+}
+
+func assertAgentTurnRecoveryUnsettled(t *testing.T, pool *pgxpool.Pool, ctx context.Context, lease store.AgentTurnLease) {
+	t.Helper()
+	var unsettled bool
+	if err := pool.QueryRow(ctx, `
+SELECT recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL
+FROM agent_turns WHERE id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch).Scan(&unsettled); err != nil {
+		t.Fatal(err)
+	}
+	if !unsettled {
+		t.Fatal("Agent Turn recovery barrier settled unexpectedly")
+	}
 }
 
 func expireAndClaimRecoveryLease(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, lease store.JobLease, owner string) store.JobLease {

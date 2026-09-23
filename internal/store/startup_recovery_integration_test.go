@@ -202,10 +202,10 @@ func TestStartupReconcilerFencesLiveDuplicateRuntimeProcessesBeforeCleanup(t *te
 		t.Fatalf("Reconcile() live duplicates = (%#v, %v), cleanup calls %d absent %t", result, err, runtimes.cleanupCalls, runtimes.absent)
 	}
 	assertRuntimeDisposition(t, database, ctx, identity, store.AgentTurnRuntimeRecovery)
-	recovery, err := database.GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
+	recovery, err := database.FenceDuplicateAgentTurnRuntime(ctx, identity)
 	if err != nil || recovery.ExecutionEpoch != turn.ExecutionEpoch || recovery.SuccessorAllowed ||
 		recovery.StopRuntimeJobID == "" || recovery.ReconcileMutationsJobID == "" {
-		t.Fatalf("GetAgentTurnRecovery() = (%#v, %v), want unsettled same-epoch recovery", recovery, err)
+		t.Fatalf("repeated FenceDuplicateAgentTurnRuntime() = (%#v, %v), want unsettled same-epoch recovery", recovery, err)
 	}
 	repeated, err := database.FenceDuplicateAgentTurnRuntime(ctx, identity)
 	if err != nil || repeated.StopRuntimeJobID != recovery.StopRuntimeJobID ||

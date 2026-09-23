@@ -657,7 +657,7 @@ func TestPrepareAgentTurnBlocksReviewerWhileDeveloperRecoveryIsUnsettled(t *test
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.BeginAgentTurnMutationRecovery(ctx, lease); err != nil {
+	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
 

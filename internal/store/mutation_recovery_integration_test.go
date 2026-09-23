@@ -248,9 +248,9 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	if _, err := database.ListAgentTurnMutationsForReconciliation(ctx, *finalLease); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
 		t.Errorf("list with completed reconciliation lease error = %v, want ErrAgentTurnRecoveryFenceLost", err)
 	}
-	settledAfterEscalation, err := database.GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
+	settledAfterEscalation, err := database.CompleteAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil {
-		t.Fatalf("GetAgentTurnRecovery() after final escalation error = %v", err)
+		t.Fatalf("CompleteAgentTurnRecovery() after final escalation error = %v", err)
 	}
 	if !settledAfterEscalation.SuccessorAllowed || settledAfterEscalation.RecoverySettledAt == nil || settledAfterEscalation.MutationsUnsettled {
 		t.Errorf("recovery after final escalation = %#v, want settled", settledAfterEscalation)

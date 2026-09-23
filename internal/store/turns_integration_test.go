@@ -909,9 +909,9 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	if recovery.Status != store.AgentTurnReconciling || recovery.SuccessorAllowed || recovery.StopRuntimeJobID == "" || recovery.ReconcileMutationsJobID == "" {
 		t.Errorf("recovery = %#v, want RECONCILING with successor blocked", recovery)
 	}
-	observedRecovery, err := databases[0].GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
+	observedRecovery, err := databases[0].RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch)
 	if err != nil || observedRecovery.SuccessorAllowed || observedRecovery.StopRuntimeJobID != recovery.StopRuntimeJobID {
-		t.Errorf("GetAgentTurnRecovery() = (%#v, %v), want durable unsettled barrier", observedRecovery, err)
+		t.Errorf("repeated RecoverExpiredAgentTurn() = (%#v, %v), want durable unsettled barrier", observedRecovery, err)
 	}
 	if err := databases[0].ValidateTurnFence(ctx, lease); !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Errorf("old ValidateTurnFence() after recovery error = %v, want ErrAgentTurnFenceLost", err)
@@ -962,12 +962,9 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("ReconcileRecoveredMutation() error = %v", err)
 	}
-	if _, err := databases[0].CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob); err != nil {
-		t.Fatalf("CompleteAgentTurnMutationReconciliation() error = %v", err)
-	}
-	settled, err := databases[0].GetAgentTurnRecovery(ctx, turn.ID, turn.ExecutionEpoch)
+	settled, err := databases[0].CompleteAgentTurnMutationReconciliation(ctx, *reconcileJob)
 	if err != nil {
-		t.Fatalf("GetAgentTurnRecovery() after final mutation error = %v", err)
+		t.Fatalf("CompleteAgentTurnMutationReconciliation() error = %v", err)
 	}
 	if !settled.SuccessorAllowed || settled.RecoverySettledAt == nil {
 		t.Errorf("recovery after final mutation = %#v, want successor allowed", settled)
@@ -993,7 +990,7 @@ WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, settled.Se
 	}
 }
 
-func TestBeginAgentTurnMutationRecoveryHandsOffLiveTurnAndReleasesSlot(t *testing.T) {
+func TestBeginAgentTurnRecoveryHandsOffLiveTurnAndReleasesSlot(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 41)
@@ -1029,9 +1026,9 @@ func TestBeginAgentTurnMutationRecoveryHandsOffLiveTurnAndReleasesSlot(t *testin
 		t.Fatalf("CloseMutationAdmission() error = %v", err)
 	}
 
-	recovery, err := database.BeginAgentTurnMutationRecovery(ctx, lease)
+	recovery, err := database.BeginAgentTurnRecovery(ctx, lease)
 	if err != nil {
-		t.Fatalf("BeginAgentTurnMutationRecovery() before lease expiry error = %v", err)
+		t.Fatalf("BeginAgentTurnRecovery() before lease expiry error = %v", err)
 	}
 	if !time.Now().Before(lease.LeaseExpiresAt) {
 		t.Fatal("live handoff did not complete before the original lease expired")
@@ -1040,18 +1037,18 @@ func TestBeginAgentTurnMutationRecoveryHandsOffLiveTurnAndReleasesSlot(t *testin
 		recovery.Status != store.AgentTurnReconciling || !recovery.MutationsUnsettled || recovery.SuccessorAllowed ||
 		!recovery.RuntimeStopRequired || recovery.RecoveryStartedAt == nil || recovery.RuntimeStoppedAt != nil ||
 		recovery.RecoverySettledAt != nil || recovery.StopRuntimeJobID == "" || recovery.ReconcileMutationsJobID == "" {
-		t.Fatalf("BeginAgentTurnMutationRecovery() = %#v", recovery)
+		t.Fatalf("BeginAgentTurnRecovery() = %#v", recovery)
 	}
-	repeated, err := database.BeginAgentTurnMutationRecovery(ctx, lease)
+	repeated, err := database.BeginAgentTurnRecovery(ctx, lease)
 	if err != nil || repeated.StopRuntimeJobID != recovery.StopRuntimeJobID ||
 		repeated.ReconcileMutationsJobID != recovery.ReconcileMutationsJobID || repeated.RecoveryStartedAt == nil ||
 		!repeated.RecoveryStartedAt.Equal(*recovery.RecoveryStartedAt) {
-		t.Fatalf("idempotent BeginAgentTurnMutationRecovery() = (%#v, %v), want original barrier", repeated, err)
+		t.Fatalf("idempotent BeginAgentTurnRecovery() = (%#v, %v), want original barrier", repeated, err)
 	}
 	stale := lease
 	stale.OwnerToken = "30000000-0000-4000-8000-000000000099"
-	if _, err := database.BeginAgentTurnMutationRecovery(ctx, stale); !errors.Is(err, store.ErrAgentTurnFenceLost) {
-		t.Errorf("BeginAgentTurnMutationRecovery() with stale owner error = %v, want ErrAgentTurnFenceLost", err)
+	if _, err := database.BeginAgentTurnRecovery(ctx, stale); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Errorf("BeginAgentTurnRecovery() with stale owner error = %v, want ErrAgentTurnFenceLost", err)
 	}
 
 	var mutationState, attemptStatus string
@@ -1111,7 +1108,7 @@ FROM agent_turns WHERE id = $1`, turn.ID).Scan(
 	}
 }
 
-func TestBeginAgentTurnMutationRecoveryRejectsInvalidStateWithoutPartialJobs(t *testing.T) {
+func TestBeginAgentTurnRecoveryRejectsInvalidStateWithoutPartialJobs(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		setup func(*testing.T, *store.Store, context.Context, store.AgentTurnLease)
@@ -1202,8 +1199,8 @@ func TestBeginAgentTurnMutationRecoveryRejectsInvalidStateWithoutPartialJobs(t *
 			if test.stale != nil {
 				lease = test.stale(lease)
 			}
-			if _, err := database.BeginAgentTurnMutationRecovery(ctx, lease); err == nil {
-				t.Fatal("BeginAgentTurnMutationRecovery() succeeded")
+			if _, err := database.BeginAgentTurnRecovery(ctx, lease); err == nil {
+				t.Fatal("BeginAgentTurnRecovery() succeeded")
 			}
 			var recoveryJobs int
 			var active bool
@@ -1262,7 +1259,7 @@ func TestAgentTurnRecoveryBlocksSuccessorAndSchedulesExactRole(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.BeginAgentTurnMutationRecovery(ctx, lease); err != nil {
+	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
 

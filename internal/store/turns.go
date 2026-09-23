@@ -438,8 +438,7 @@ func (store *Store) RefreshAgentTurnLease(ctx context.Context, lease AgentTurnLe
 }
 
 // BeginAgentTurnRecovery transfers a live, MCP-drained Turn to durable recovery workers.
-// A retry with the exact original lease returns the live barrier. After an ambiguous commit that
-// cannot be authenticated, callers can use GetAgentTurnRecovery with the Turn identity and epoch.
+// A retry with the exact original lease returns the live barrier.
 func (store *Store) BeginAgentTurnRecovery(ctx context.Context, lease AgentTurnLease) (AgentTurnRecovery, error) {
 	if !validUUID(lease.ID) || !validUUID(lease.AgentAssignmentID) || !validUUID(lease.AgentSessionID) ||
 		!validUUID(lease.JobLease.ID) || !validUUID(lease.JobLease.LeaseToken) || !validUUID(lease.OwnerToken) ||
@@ -653,11 +652,6 @@ WHERE id = $1 AND execution_epoch = $2 AND control_revision = $3 AND owner_token
 	return recovery, nil
 }
 
-// BeginAgentTurnMutationRecovery preserves the original mutation-specific API.
-func (store *Store) BeginAgentTurnMutationRecovery(ctx context.Context, lease AgentTurnLease) (AgentTurnRecovery, error) {
-	return store.BeginAgentTurnRecovery(ctx, lease)
-}
-
 // RecoverExpiredAgentTurn terminally fences an expired job/turn ownership without reusing its epoch.
 // Repeating the exact recovery after an ambiguous commit returns the existing durable barrier.
 func (store *Store) RecoverExpiredAgentTurn(ctx context.Context, turnID string, executionEpoch int64) (AgentTurnRecovery, error) {
@@ -821,21 +815,6 @@ RETURNING recovery_started_at`, turnID, status, stopJobID, nullableString(reconc
 	}
 	if recovery.RecoveryStartedAt == nil || !recovery.RecoveryStartedAt.Equal(recoveryStartedAt) {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
-	}
-	return recovery, nil
-}
-
-// GetAgentTurnRecovery returns the durable recovery barrier for one fenced epoch.
-func (store *Store) GetAgentTurnRecovery(ctx context.Context, turnID string, executionEpoch int64) (AgentTurnRecovery, error) {
-	if !validUUID(turnID) || executionEpoch <= 0 {
-		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
-	}
-	recovery, err := readAgentTurnRecovery(ctx, store.pool, turnID, executionEpoch)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
-	}
-	if err != nil {
-		return AgentTurnRecovery{}, fmt.Errorf("get Agent Turn recovery: %w", err)
 	}
 	return recovery, nil
 }
