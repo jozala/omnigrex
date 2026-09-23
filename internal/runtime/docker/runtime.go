@@ -1,0 +1,837 @@
+package docker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/containerd/errdefs"
+	distribution "github.com/distribution/reference"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	mobyclient "github.com/moby/moby/client"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+const (
+	minimumDockerAPIVersion   = "1.45"
+	defaultRuntimeMemoryBytes = 512 << 20
+	defaultRuntimePIDsLimit   = 128
+	subpathHelperMemoryBytes  = 128 << 20
+	subpathHelperPIDsLimit    = 32
+)
+
+var (
+	ErrInvalidSpec           = errors.New("invalid Runtime Process specification")
+	ErrProcessAlreadyStarted = errors.New("Runtime Process start already attempted")
+)
+
+type Platform = ocispec.Platform
+
+type Spec struct {
+	Name        string
+	Image       string
+	Platform    Platform
+	User        string
+	WorkingDir  string
+	Command     []string
+	Environment []string
+	Labels      map[string]string
+	Volumes     []VolumeMount
+	Tmpfs       []TmpfsMount
+	Network     string
+	ExtraHosts  []string
+	MemoryBytes int64
+	PIDsLimit   int64
+}
+
+type VolumeMount struct {
+	Name     string
+	Subpath  string
+	Target   string
+	ReadOnly bool
+}
+
+type TmpfsMount struct {
+	Target     string
+	SizeBytes  int64
+	Executable bool
+}
+
+type dockerAPI interface {
+	ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error)
+	ContainerAttach(context.Context, string, mobyclient.ContainerAttachOptions) (mobyclient.ContainerAttachResult, error)
+	ContainerStart(context.Context, string, mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error)
+	ContainerStop(context.Context, string, mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error)
+	ContainerWait(context.Context, string, mobyclient.ContainerWaitOptions) mobyclient.ContainerWaitResult
+	ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error)
+}
+
+type Engine struct {
+	client       *mobyclient.Client
+	options      EngineOptions
+	validateLock sync.Mutex
+}
+
+type EngineOptions struct {
+	AgentNetwork     string
+	AllowHostGateway bool
+	RuntimePolicy    RuntimePolicy
+}
+
+type RuntimePolicy struct {
+	Image                         string
+	Platform                      Platform
+	User                          string
+	WorkingDir                    string
+	Command                       []string
+	Volumes                       []VolumeMount
+	Tmpfs                         []TmpfsMount
+	Environment                   map[string]string
+	Labels                        map[string]string
+	Network                       string
+	MemoryBytes                   int64
+	PIDsLimit                     int64
+	VolumeBindings                map[string]string
+	RequiredVolumeTargets         []string
+	RequiredWritableVolumeTargets []string
+	RequireVolumeSubpaths         bool
+	RequiredEnvironment           map[string]string
+	MaxMemoryBytes                int64
+	MaxPIDsLimit                  int64
+}
+
+func NewEngine(options EngineOptions) (*Engine, error) {
+	client, err := mobyclient.New(mobyclient.FromEnv)
+	if err != nil {
+		return nil, fmt.Errorf("create Docker client: %w", err)
+	}
+	return &Engine{client: client, options: cloneEngineOptions(options)}, nil
+}
+
+func cloneEngineOptions(options EngineOptions) EngineOptions {
+	options.RuntimePolicy.Platform.OSFeatures = slices.Clone(options.RuntimePolicy.Platform.OSFeatures)
+	options.RuntimePolicy.Command = slices.Clone(options.RuntimePolicy.Command)
+	options.RuntimePolicy.Volumes = slices.Clone(options.RuntimePolicy.Volumes)
+	options.RuntimePolicy.Tmpfs = slices.Clone(options.RuntimePolicy.Tmpfs)
+	options.RuntimePolicy.Environment = maps.Clone(options.RuntimePolicy.Environment)
+	options.RuntimePolicy.Labels = maps.Clone(options.RuntimePolicy.Labels)
+	options.RuntimePolicy.VolumeBindings = maps.Clone(options.RuntimePolicy.VolumeBindings)
+	options.RuntimePolicy.RequiredVolumeTargets = slices.Clone(options.RuntimePolicy.RequiredVolumeTargets)
+	options.RuntimePolicy.RequiredWritableVolumeTargets = slices.Clone(options.RuntimePolicy.RequiredWritableVolumeTargets)
+	options.RuntimePolicy.RequiredEnvironment = maps.Clone(options.RuntimePolicy.RequiredEnvironment)
+	return options
+}
+
+func (engine *Engine) Close() error {
+	return engine.client.Close()
+}
+
+// Create prepares volume subpaths, creates and attaches a container, but does not start it.
+func (engine *Engine) Create(ctx context.Context, spec Spec, stderr io.Writer) (*Process, error) {
+	if _, _, err := validateSpec(spec); err != nil {
+		return nil, err
+	}
+	if err := validateResources(engine.options, spec); err != nil {
+		return nil, err
+	}
+	if err := engine.validateAPI(ctx); err != nil {
+		return nil, err
+	}
+	if err := prepareVolumeSubpaths(ctx, engine.client, spec); err != nil {
+		return nil, err
+	}
+	return create(ctx, engine.client, spec, stderr)
+}
+
+// Start preserves the concrete Engine's all-in-one API for existing callers.
+func (engine *Engine) Start(ctx context.Context, spec Spec, stderr io.Writer) (*Process, error) {
+	process, err := engine.Create(ctx, spec, stderr)
+	if err != nil {
+		if process != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, process.Remove(cleanupCtx))
+		}
+		return nil, err
+	}
+	if err := process.Start(ctx); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return nil, errors.Join(err, process.Remove(cleanupCtx))
+	}
+	return process, nil
+}
+
+func (engine *Engine) validateAPI(ctx context.Context) error {
+	engine.validateLock.Lock()
+	defer engine.validateLock.Unlock()
+	ping, err := engine.client.Ping(ctx, mobyclient.PingOptions{
+		NegotiateAPIVersion: true,
+		ForceNegotiate:      true,
+	})
+	if err != nil {
+		return fmt.Errorf("negotiate Docker API version: %w", err)
+	}
+	if err := validateAPIVersions(ping.APIVersion, engine.client.ClientVersion()); err != nil {
+		return err
+	}
+	return nil
+}
+
+type Process struct {
+	ID             string
+	api            dockerAPI
+	transport      *attachTransport
+	demuxDone      chan struct{}
+	demuxLock      sync.Mutex
+	demuxErr       error
+	lifecycleLock  sync.Mutex
+	startAttempted bool
+	started        bool
+	removed        bool
+}
+
+func (process *Process) Transport() io.ReadWriteCloser {
+	return process.transport
+}
+
+// Start starts a created Runtime Process exactly once.
+func (process *Process) Start(ctx context.Context) error {
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
+	if process.startAttempted {
+		return ErrProcessAlreadyStarted
+	}
+	process.startAttempted = true
+	if process.removed {
+		return errors.New("start Runtime Process: process was removed")
+	}
+	if _, err := process.api.ContainerStart(ctx, process.ID, mobyclient.ContainerStartOptions{}); err != nil && !errdefs.IsNotModified(err) {
+		return fmt.Errorf("start Runtime Process: %w", err)
+	}
+	process.started = true
+	return nil
+}
+
+func (process *Process) Wait(ctx context.Context) (int64, error) {
+	wait := process.api.ContainerWait(ctx, process.ID, mobyclient.ContainerWaitOptions{
+		Condition: container.WaitConditionNotRunning,
+	})
+	var status int64
+	select {
+	case response := <-wait.Result:
+		status = response.StatusCode
+		if response.Error != nil {
+			return status, fmt.Errorf("wait for Runtime Process: %s", response.Error.Message)
+		}
+	case err := <-wait.Error:
+		return 0, fmt.Errorf("wait for Runtime Process: %w", err)
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+
+	select {
+	case <-process.demuxDone:
+		process.demuxLock.Lock()
+		err := process.demuxErr
+		process.demuxLock.Unlock()
+		if err != nil && !process.transport.closed.Load() {
+			return status, fmt.Errorf("demultiplex Runtime Process output: %w", err)
+		}
+	case <-ctx.Done():
+		return status, ctx.Err()
+	}
+	if status != 0 {
+		return status, fmt.Errorf("Runtime Process exited with status %d", status)
+	}
+	return status, nil
+}
+
+func (process *Process) Stop(ctx context.Context, timeout time.Duration) error {
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
+	if process.removed || !process.started {
+		return nil
+	}
+	seconds := int(timeout.Round(time.Second) / time.Second)
+	if timeout > 0 && seconds == 0 {
+		seconds = 1
+	}
+	_, err := process.api.ContainerStop(ctx, process.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+	if err != nil && !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
+		return fmt.Errorf("stop Runtime Process: %w", err)
+	}
+	process.started = false
+	return nil
+}
+
+func (process *Process) Remove(ctx context.Context) error {
+	process.lifecycleLock.Lock()
+	defer process.lifecycleLock.Unlock()
+	if process.removed {
+		return nil
+	}
+	if process.transport != nil {
+		_ = process.transport.Close()
+	}
+	if _, err := process.api.ContainerRemove(ctx, process.ID, mobyclient.ContainerRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("remove Runtime Process: %w", err)
+	}
+	process.removed = true
+	process.started = false
+	return nil
+}
+
+func create(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*Process, error) {
+	options, err := buildCreateOptions(spec)
+	if err != nil {
+		return nil, err
+	}
+	created, err := api.ContainerCreate(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("create Runtime Process: %w", err)
+	}
+	process := &Process{
+		ID: created.ID, api: api, demuxDone: make(chan struct{}),
+	}
+
+	attached, err := api.ContainerAttach(ctx, created.ID, mobyclient.ContainerAttachOptions{
+		Stream: true,
+		Stdin:  true,
+		Stdout: true,
+		Stderr: true,
+	})
+	if err != nil {
+		close(process.demuxDone)
+		return process, fmt.Errorf("attach Runtime Process: %w", err)
+	}
+	stdoutReader, stdoutWriter := io.Pipe()
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	stderrSink := newAsyncWriter(stderr)
+	process.transport = &attachTransport{reader: stdoutReader, attach: &attached.HijackedResponse}
+	go func() {
+		_, copyErr := stdcopy.StdCopy(stdoutWriter, stderrSink, attached.Reader)
+		_ = stdoutWriter.CloseWithError(copyErr)
+		stderrSink.Close()
+		process.demuxLock.Lock()
+		process.demuxErr = copyErr
+		process.demuxLock.Unlock()
+		close(process.demuxDone)
+	}()
+	return process, nil
+}
+
+func prepareVolumeSubpaths(ctx context.Context, api dockerAPI, spec Spec) error {
+	options, err := buildSubpathCreateOptions(spec)
+	if err != nil || options.Config == nil {
+		return err
+	}
+	if err := runOneShotContainer(ctx, api, options, "assignment subpath initializer"); err != nil {
+		return fmt.Errorf("initialize assignment volume subpaths: %w", err)
+	}
+	return nil
+}
+
+func buildSubpathCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
+	uid, gid, err := validateSpec(spec)
+	if err != nil {
+		return mobyclient.ContainerCreateOptions{}, err
+	}
+	mounts := make([]mount.Mount, 0, len(spec.Volumes))
+	paths := make([]string, 0, len(spec.Volumes)+1)
+	paths = append(paths, "sh")
+	for _, volume := range spec.Volumes {
+		if volume.Subpath == "" {
+			continue
+		}
+		root := "/volumes/" + strconv.Itoa(len(mounts))
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: volume.Name, Target: root})
+		paths = append(paths, root+"/"+volume.Subpath)
+	}
+	if len(mounts) == 0 {
+		return mobyclient.ContainerCreateOptions{}, nil
+	}
+	pids := int64(subpathHelperPIDsLimit)
+	script := `set -eu
+uid="$1"
+gid="$2"
+shift 2
+for path do
+  mkdir -p "$path"
+  test "$(stat -c %u "$path")" = "$uid"
+  test "$(stat -c %g "$path")" = "$gid"
+done`
+	return mobyclient.ContainerCreateOptions{
+		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
+		Config: &container.Config{
+			Image:      spec.Image,
+			User:       spec.User,
+			Entrypoint: []string{"sh", "-c"},
+			Cmd:        append([]string{script, paths[0], uid, gid}, paths[1:]...),
+			Labels:     map[string]string{"io.omnigrex.assignment-subpath-initializer": "true"},
+		},
+		HostConfig: &container.HostConfig{
+			NetworkMode:    "none",
+			ReadonlyRootfs: true,
+			CapDrop:        []string{"ALL"},
+			SecurityOpt:    []string{"no-new-privileges"},
+			Mounts:         mounts,
+			Resources: container.Resources{
+				Memory:    subpathHelperMemoryBytes,
+				PidsLimit: &pids,
+			},
+		},
+	}, nil
+}
+
+func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
+	uid, gid, err := validateSpec(spec)
+	if err != nil {
+		return mobyclient.ContainerCreateOptions{}, err
+	}
+	if spec.Network == "" {
+		spec.Network = "none"
+	}
+	if spec.MemoryBytes <= 0 {
+		spec.MemoryBytes = defaultRuntimeMemoryBytes
+	}
+	if spec.PIDsLimit <= 0 {
+		spec.PIDsLimit = defaultRuntimePIDsLimit
+	}
+	initProcess := true
+	stopTimeout := 10
+	pidsLimit := spec.PIDsLimit
+	labels := maps.Clone(spec.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
+
+	mounts := make([]mount.Mount, 0, len(spec.Volumes))
+	for _, volume := range spec.Volumes {
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeVolume,
+			Source:   volume.Name,
+			Target:   volume.Target,
+			ReadOnly: volume.ReadOnly,
+			VolumeOptions: &mount.VolumeOptions{
+				Subpath: volume.Subpath,
+			},
+		})
+	}
+	tmpfs := make(map[string]string, len(spec.Tmpfs))
+	for _, temporary := range spec.Tmpfs {
+		options := []string{
+			"rw",
+			"nosuid",
+			"nodev",
+			"uid=" + uid,
+			"gid=" + gid,
+			"mode=0700",
+		}
+		if !temporary.Executable {
+			options = append(options, "noexec")
+		}
+		if temporary.SizeBytes > 0 {
+			options = append(options, "size="+strconv.FormatInt(temporary.SizeBytes, 10))
+		}
+		tmpfs[temporary.Target] = strings.Join(options, ",")
+	}
+
+	return mobyclient.ContainerCreateOptions{
+		Name:     spec.Name,
+		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
+		Config: &container.Config{
+			User:         spec.User,
+			AttachStdin:  true,
+			AttachStdout: true,
+			AttachStderr: true,
+			Tty:          false,
+			OpenStdin:    true,
+			StdinOnce:    true,
+			Env:          spec.Environment,
+			Cmd:          spec.Command,
+			Image:        spec.Image,
+			WorkingDir:   spec.WorkingDir,
+			Labels:       labels,
+			StopTimeout:  &stopTimeout,
+		},
+		HostConfig: &container.HostConfig{
+			NetworkMode:    container.NetworkMode(spec.Network),
+			CapDrop:        []string{"ALL"},
+			ExtraHosts:     spec.ExtraHosts,
+			ReadonlyRootfs: true,
+			SecurityOpt:    []string{"no-new-privileges"},
+			Tmpfs:          tmpfs,
+			Resources: container.Resources{
+				Memory:    spec.MemoryBytes,
+				PidsLimit: &pidsLimit,
+			},
+			Mounts: mounts,
+			Init:   &initProcess,
+		},
+	}, nil
+}
+
+func validateSpec(spec Spec) (string, string, error) {
+	if !validImageDigest(spec.Image) {
+		return "", "", fmt.Errorf("%w: image must be digest-qualified", ErrInvalidSpec)
+	}
+	if !validPlatform(spec.Platform) {
+		return "", "", fmt.Errorf("%w: platform must be exactly linux/amd64 or linux/arm64", ErrInvalidSpec)
+	}
+	if !filepath.IsAbs(spec.WorkingDir) || filepath.Clean(spec.WorkingDir) != spec.WorkingDir {
+		return "", "", fmt.Errorf("%w: working directory must be an absolute clean path", ErrInvalidSpec)
+	}
+	if _, present := spec.Labels[RuntimeProcessMarkerLabel]; present {
+		return "", "", fmt.Errorf("%w: Runtime Process marker label is reserved", ErrInvalidSpec)
+	}
+	uid, gid, found := strings.Cut(spec.User, ":")
+	if !found {
+		return "", "", fmt.Errorf("%w: user must contain a numeric UID and GID", ErrInvalidSpec)
+	}
+	uidNumber, err := strconv.ParseUint(uid, 10, 32)
+	if err != nil || uidNumber == 0 || strconv.FormatUint(uidNumber, 10) != uid {
+		return "", "", fmt.Errorf("%w: UID must be a canonical non-zero integer", ErrInvalidSpec)
+	}
+	gidNumber, err := strconv.ParseUint(gid, 10, 32)
+	if err != nil || gidNumber == 0 || strconv.FormatUint(gidNumber, 10) != gid {
+		return "", "", fmt.Errorf("%w: GID must be a canonical non-zero integer", ErrInvalidSpec)
+	}
+	targets := make([]string, 0, len(spec.Volumes)+len(spec.Tmpfs))
+	for _, volume := range spec.Volumes {
+		if volume.Name == "" || !filepath.IsAbs(volume.Target) || filepath.Clean(volume.Target) != volume.Target {
+			return "", "", fmt.Errorf("%w: invalid volume mount", ErrInvalidSpec)
+		}
+		if volume.Subpath != "" && (filepath.IsAbs(volume.Subpath) || filepath.Clean(volume.Subpath) != volume.Subpath || strings.HasPrefix(volume.Subpath, "..")) {
+			return "", "", fmt.Errorf("%w: invalid volume subpath %q", ErrInvalidSpec, volume.Subpath)
+		}
+		targets = append(targets, volume.Target)
+	}
+	for _, temporary := range spec.Tmpfs {
+		if !filepath.IsAbs(temporary.Target) || filepath.Clean(temporary.Target) != temporary.Target {
+			return "", "", fmt.Errorf("%w: invalid tmpfs mount", ErrInvalidSpec)
+		}
+		if temporary.SizeBytes <= 0 {
+			return "", "", fmt.Errorf("%w: tmpfs size must be positive", ErrInvalidSpec)
+		}
+		targets = append(targets, temporary.Target)
+	}
+	for index, target := range targets {
+		for otherIndex := index + 1; otherIndex < len(targets); otherIndex++ {
+			other := targets[otherIndex]
+			if target == other || strings.HasPrefix(target, other+"/") || strings.HasPrefix(other, target+"/") {
+				return "", "", fmt.Errorf("%w: overlapping writable targets %q and %q", ErrInvalidSpec, target, other)
+			}
+		}
+	}
+	if spec.Network == "host" || spec.Network == "default" || strings.HasPrefix(spec.Network, "container:") {
+		return "", "", fmt.Errorf("%w: unsafe network mode %q", ErrInvalidSpec, spec.Network)
+	}
+	for _, host := range spec.ExtraHosts {
+		if host != "host.docker.internal:host-gateway" {
+			return "", "", fmt.Errorf("%w: unsafe extra host %q", ErrInvalidSpec, host)
+		}
+	}
+	return uid, gid, nil
+}
+
+func validateResources(options EngineOptions, spec Spec) error {
+	policy := options.RuntimePolicy
+	if policy.Image != "" && spec.Image != policy.Image {
+		return fmt.Errorf("%w: image does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	if !validPlatform(policy.Platform) || spec.Platform.OS != policy.Platform.OS || spec.Platform.Architecture != policy.Platform.Architecture {
+		return fmt.Errorf("%w: platform does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	if spec.User != policy.User {
+		return fmt.Errorf("%w: user %q does not match the Runtime Policy", ErrInvalidSpec, spec.User)
+	}
+	if spec.WorkingDir != policy.WorkingDir {
+		return fmt.Errorf("%w: working directory %q does not match the Runtime Policy", ErrInvalidSpec, spec.WorkingDir)
+	}
+	if policy.Command != nil && !slices.Equal(spec.Command, policy.Command) {
+		return fmt.Errorf("%w: command does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	network := spec.Network
+	if network == "" {
+		network = "none"
+	}
+	if network != "none" && network != options.AgentNetwork {
+		return fmt.Errorf("%w: network %q is not the configured agent network", ErrInvalidSpec, network)
+	}
+	if policy.Network != "" && network != policy.Network {
+		return fmt.Errorf("%w: network does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	exactVolumes := make(map[string]VolumeMount, len(policy.Volumes))
+	for _, volume := range policy.Volumes {
+		if _, duplicate := exactVolumes[volume.Target]; duplicate {
+			return fmt.Errorf("%w: Runtime Policy has duplicate volume targets", ErrInvalidSpec)
+		}
+		exactVolumes[volume.Target] = volume
+	}
+	volumeTargets := make(map[string]VolumeMount, len(spec.Volumes))
+	for _, volume := range spec.Volumes {
+		if _, duplicate := volumeTargets[volume.Target]; duplicate {
+			return fmt.Errorf("%w: duplicate volume target", ErrInvalidSpec)
+		}
+		if policy.Volumes != nil {
+			expected, allowed := exactVolumes[volume.Target]
+			if !allowed || volume != expected {
+				return fmt.Errorf("%w: volume mount does not match the Runtime Policy", ErrInvalidSpec)
+			}
+		} else {
+			expectedSource, allowed := policy.VolumeBindings[volume.Target]
+			if !allowed || volume.Name != expectedSource {
+				return fmt.Errorf("%w: volume %q is not allowed at %q", ErrInvalidSpec, volume.Name, volume.Target)
+			}
+		}
+		if policy.RequireVolumeSubpaths && volume.Subpath == "" {
+			return fmt.Errorf("%w: assignment subpath is required for %q", ErrInvalidSpec, volume.Target)
+		}
+		volumeTargets[volume.Target] = volume
+	}
+	if policy.Volumes != nil && len(volumeTargets) != len(exactVolumes) {
+		return fmt.Errorf("%w: volume mounts do not match the Runtime Policy", ErrInvalidSpec)
+	}
+	for index, volume := range spec.Volumes {
+		for otherIndex := index + 1; otherIndex < len(spec.Volumes); otherIndex++ {
+			other := spec.Volumes[otherIndex]
+			if volume.Name == other.Name && (volume.Subpath == other.Subpath || strings.HasPrefix(volume.Subpath, other.Subpath+"/") || strings.HasPrefix(other.Subpath, volume.Subpath+"/")) {
+				return fmt.Errorf("%w: overlapping subpaths in volume %q", ErrInvalidSpec, volume.Name)
+			}
+		}
+	}
+	for _, target := range policy.RequiredVolumeTargets {
+		if _, present := volumeTargets[target]; !present {
+			return fmt.Errorf("%w: required volume target %q is missing", ErrInvalidSpec, target)
+		}
+	}
+	for _, target := range policy.RequiredWritableVolumeTargets {
+		volume, present := volumeTargets[target]
+		if !present || volume.ReadOnly {
+			return fmt.Errorf("%w: volume target %q must be present and writable", ErrInvalidSpec, target)
+		}
+	}
+	exactTmpfs := make(map[string]TmpfsMount, len(policy.Tmpfs))
+	for _, temporary := range policy.Tmpfs {
+		if _, duplicate := exactTmpfs[temporary.Target]; duplicate {
+			return fmt.Errorf("%w: Runtime Policy has duplicate tmpfs targets", ErrInvalidSpec)
+		}
+		exactTmpfs[temporary.Target] = temporary
+	}
+	for _, temporary := range spec.Tmpfs {
+		expected, allowed := exactTmpfs[temporary.Target]
+		if !allowed || temporary != expected {
+			return fmt.Errorf("%w: tmpfs mount does not match the Runtime Policy", ErrInvalidSpec)
+		}
+	}
+	if len(spec.Tmpfs) != len(exactTmpfs) {
+		return fmt.Errorf("%w: tmpfs mounts do not match the Runtime Policy", ErrInvalidSpec)
+	}
+	if len(spec.ExtraHosts) > 0 && !options.AllowHostGateway {
+		return fmt.Errorf("%w: host gateway is not allowed", ErrInvalidSpec)
+	}
+	environment := make(map[string]string, len(spec.Environment))
+	for _, entry := range spec.Environment {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || name == "" {
+			return fmt.Errorf("%w: invalid environment entry", ErrInvalidSpec)
+		}
+		if _, duplicate := environment[name]; duplicate {
+			return fmt.Errorf("%w: duplicate environment name", ErrInvalidSpec)
+		}
+		environment[name] = value
+	}
+	if policy.Environment != nil && !maps.Equal(environment, policy.Environment) {
+		return fmt.Errorf("%w: environment does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	for name, requiredValue := range policy.RequiredEnvironment {
+		if environment[name] != requiredValue {
+			return fmt.Errorf("%w: required environment %s is missing or invalid", ErrInvalidSpec, name)
+		}
+	}
+	if policy.Labels != nil && !maps.Equal(spec.Labels, policy.Labels) {
+		return fmt.Errorf("%w: labels do not match the Runtime Policy", ErrInvalidSpec)
+	}
+	memoryBytes := spec.MemoryBytes
+	if memoryBytes <= 0 {
+		memoryBytes = defaultRuntimeMemoryBytes
+	}
+	if policy.MaxMemoryBytes > 0 && memoryBytes > policy.MaxMemoryBytes {
+		return fmt.Errorf("%w: memory limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
+	}
+	if policy.MemoryBytes > 0 && spec.MemoryBytes != policy.MemoryBytes {
+		return fmt.Errorf("%w: memory limit does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	pidsLimit := spec.PIDsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = defaultRuntimePIDsLimit
+	}
+	if policy.MaxPIDsLimit > 0 && pidsLimit > policy.MaxPIDsLimit {
+		return fmt.Errorf("%w: PID limit exceeds the Runtime Policy maximum", ErrInvalidSpec)
+	}
+	if policy.PIDsLimit > 0 && spec.PIDsLimit != policy.PIDsLimit {
+		return fmt.Errorf("%w: PID limit does not match the Runtime Policy", ErrInvalidSpec)
+	}
+	return nil
+}
+
+func validPlatform(platform Platform) bool {
+	return platform.OS == "linux" &&
+		(platform.Architecture == "amd64" || platform.Architecture == "arm64") &&
+		platform.OSVersion == "" && platform.OSFeatures == nil && platform.Variant == ""
+}
+
+func validImageDigest(image string) bool {
+	if !strings.HasPrefix(image, "sha256:") && !strings.Contains(image, "@sha256:") {
+		return false
+	}
+	reference, err := distribution.ParseAnyReference(image)
+	if err != nil {
+		return false
+	}
+	digested, ok := reference.(distribution.Digested)
+	if !ok {
+		return false
+	}
+	imageDigest := digested.Digest()
+	return imageDigest.Algorithm() == digest.SHA256 && imageDigest.Validate() == nil
+}
+
+func compareAPIVersion(left, right string) int {
+	parse := func(version string) (int, int) {
+		majorText, minorText, _ := strings.Cut(strings.TrimPrefix(version, "v"), ".")
+		major, _ := strconv.Atoi(majorText)
+		minor, _ := strconv.Atoi(minorText)
+		return major, minor
+	}
+	leftMajor, leftMinor := parse(left)
+	rightMajor, rightMinor := parse(right)
+	if leftMajor != rightMajor {
+		return leftMajor - rightMajor
+	}
+	return leftMinor - rightMinor
+}
+
+func validateAPIVersions(advertised, effective string) error {
+	if !validAPIVersion(advertised) {
+		return errors.New("Docker Engine did not advertise a valid API version")
+	}
+	if !validAPIVersion(effective) {
+		return errors.New("Docker client negotiated an invalid API version")
+	}
+	if compareAPIVersion(advertised, minimumDockerAPIVersion) < 0 || compareAPIVersion(effective, minimumDockerAPIVersion) < 0 {
+		return fmt.Errorf("Docker API %s is unsupported; require %s or newer", effective, minimumDockerAPIVersion)
+	}
+	return nil
+}
+
+func validAPIVersion(version string) bool {
+	major, minor, found := strings.Cut(strings.TrimPrefix(version, "v"), ".")
+	if !found || major == "" || minor == "" {
+		return false
+	}
+	if _, err := strconv.ParseUint(major, 10, 16); err != nil {
+		return false
+	}
+	if _, err := strconv.ParseUint(minor, 10, 16); err != nil {
+		return false
+	}
+	return true
+}
+
+type attachTransport struct {
+	reader    *io.PipeReader
+	attach    *mobyclient.HijackedResponse
+	writeLock sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
+	closed    atomic.Bool
+}
+
+type asyncWriter struct {
+	target    io.Writer
+	writes    chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+	dropped   atomic.Uint64
+}
+
+func newAsyncWriter(target io.Writer) *asyncWriter {
+	writer := &asyncWriter{
+		target: target,
+		writes: make(chan []byte, 64),
+		done:   make(chan struct{}),
+	}
+	go writer.run()
+	return writer
+}
+
+func (writer *asyncWriter) Write(data []byte) (int, error) {
+	copyOfData := append([]byte(nil), data...)
+	select {
+	case writer.writes <- copyOfData:
+	case <-writer.done:
+	default:
+		writer.dropped.Add(1)
+	}
+	return len(data), nil
+}
+
+func (writer *asyncWriter) Close() {
+	writer.closeOnce.Do(func() {
+		close(writer.done)
+	})
+}
+
+func (writer *asyncWriter) run() {
+	for {
+		select {
+		case data := <-writer.writes:
+			if dropped := writer.dropped.Swap(0); dropped > 0 {
+				_, _ = fmt.Fprintf(writer.target, "[omnigrex: dropped %d stderr chunks]\n", dropped)
+			}
+			_, _ = writer.target.Write(data)
+		case <-writer.done:
+			return
+		}
+	}
+}
+
+func (transport *attachTransport) Read(data []byte) (int, error) {
+	return transport.reader.Read(data)
+}
+
+func (transport *attachTransport) Write(data []byte) (int, error) {
+	transport.writeLock.Lock()
+	defer transport.writeLock.Unlock()
+	return transport.attach.Conn.Write(data)
+}
+
+func (transport *attachTransport) SetWriteDeadline(deadline time.Time) error {
+	return transport.attach.Conn.SetWriteDeadline(deadline)
+}
+
+func (transport *attachTransport) Close() error {
+	transport.closeOnce.Do(func() {
+		transport.closed.Store(true)
+		_ = transport.reader.Close()
+		transport.closeErr = transport.attach.Conn.Close()
+	})
+	return transport.closeErr
+}

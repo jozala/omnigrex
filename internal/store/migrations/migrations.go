@@ -1,0 +1,243 @@
+package migrations
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"embed"
+	"errors"
+	"fmt"
+	"io/fs"
+	"path"
+	"regexp"
+	"sort"
+	"strconv"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var migrationFilename = regexp.MustCompile(`^([0-9]{6})_([a-z0-9][a-z0-9_]*)\.sql$`)
+
+const (
+	migrationLockID       = int64(0x4f4d4e4947524558)
+	migrationCleanupLimit = 5 * time.Second
+	schemaMigrationsDDL   = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version BIGINT PRIMARY KEY CHECK (version > 0),
+    name TEXT NOT NULL CHECK (name <> ''),
+    checksum BYTEA NOT NULL CHECK (octet_length(checksum) = 32),
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+)`
+)
+
+type migration struct {
+	version  int64
+	name     string
+	sql      string
+	checksum [sha256.Size]byte
+}
+
+// Files contains the ordered SQL migrations bundled with the service.
+//
+//go:embed *.sql
+var Files embed.FS
+
+// Run applies every pending embedded migration in version order.
+func Run(ctx context.Context, pool *pgxpool.Pool) (runErr error) {
+	if pool == nil {
+		return errors.New("run migrations: nil PostgreSQL pool")
+	}
+
+	migrations, err := discover(Files)
+	if err != nil {
+		return err
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		closeErr := closeMigrationConnection(conn)
+		return errors.Join(fmt.Errorf("lock migrations: %w", err), closeErr)
+	}
+	defer func() {
+		runErr = errors.Join(runErr, unlockMigrationConnection(conn))
+	}()
+
+	if _, err := conn.Exec(ctx, schemaMigrationsDDL); err != nil {
+		return fmt.Errorf("create migration history: %w", err)
+	}
+
+	for _, migration := range migrations {
+		if err := applyMigration(ctx, conn, migration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration migration) (applyErr error) {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+		defer cancel()
+		if err := tx.Rollback(cleanupCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			applyErr = errors.Join(applyErr, fmt.Errorf("roll back migration %06d_%s.sql: %w", migration.version, migration.name, err))
+		}
+	}()
+
+	if err := apply(ctx, tx, migration); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	return nil
+}
+
+func unlockMigrationConnection(conn *pgxpool.Conn) error {
+	// Session locks survive transactions, so cleanup must outlive a canceled Run context.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+	defer cancel()
+
+	var unlocked bool
+	if err := conn.QueryRow(cleanupCtx, `SELECT pg_advisory_unlock($1)`, migrationLockID).Scan(&unlocked); err != nil {
+		return errors.Join(fmt.Errorf("unlock migrations: %w", err), closeMigrationConnection(conn))
+	}
+	conn.Release()
+	if !unlocked {
+		return errors.New("unlock migrations: advisory lock was not held")
+	}
+	return nil
+}
+
+func closeMigrationConnection(conn *pgxpool.Conn) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupLimit)
+	defer cancel()
+	if err := conn.Hijack().Close(cleanupCtx); err != nil {
+		return fmt.Errorf("close migration connection: %w", err)
+	}
+	return nil
+}
+
+// Check verifies that PostgreSQL contains exactly the bundled migration history without changing it.
+func Check(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
+		return errors.New("check migrations: nil PostgreSQL pool")
+	}
+	expected, err := discover(Files)
+	if err != nil {
+		return err
+	}
+	rows, err := pool.Query(ctx, `SELECT version, name, checksum FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return fmt.Errorf("read migration history: %w", err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		var version int64
+		var name string
+		var checksum []byte
+		if err := rows.Scan(&version, &name, &checksum); err != nil {
+			return fmt.Errorf("scan migration history: %w", err)
+		}
+		if index >= len(expected) {
+			return fmt.Errorf("database contains unknown migration %06d_%s.sql", version, name)
+		}
+		migration := expected[index]
+		if version != migration.version || name != migration.name || !bytes.Equal(checksum, migration.checksum[:]) {
+			return fmt.Errorf("migration history differs at version %06d", migration.version)
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read migration history: %w", err)
+	}
+	if index != len(expected) {
+		migration := expected[index]
+		return fmt.Errorf("database is missing migration %06d_%s.sql", migration.version, migration.name)
+	}
+	return nil
+}
+
+func discover(files fs.FS) ([]migration, error) {
+	entries, err := fs.ReadDir(files, ".")
+	if err != nil {
+		return nil, fmt.Errorf("read migrations: %w", err)
+	}
+
+	migrations := make([]migration, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || path.Ext(entry.Name()) != ".sql" {
+			continue
+		}
+
+		matches := migrationFilename.FindStringSubmatch(entry.Name())
+		if matches == nil {
+			return nil, fmt.Errorf("invalid migration filename %q", entry.Name())
+		}
+		version, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse migration version %q: %w", entry.Name(), err)
+		}
+		if version == 0 {
+			return nil, fmt.Errorf("migration version must be positive in %q", entry.Name())
+		}
+		contents, err := fs.ReadFile(files, entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read migration %q: %w", entry.Name(), err)
+		}
+		migrations = append(migrations, migration{
+			version:  version,
+			name:     matches[2],
+			sql:      string(contents),
+			checksum: sha256.Sum256(contents),
+		})
+	}
+
+	sort.Slice(migrations, func(i, j int) bool {
+		return migrations[i].version < migrations[j].version
+	})
+	for i := 1; i < len(migrations); i++ {
+		if migrations[i-1].version == migrations[i].version {
+			return nil, fmt.Errorf("duplicate migration version %06d", migrations[i].version)
+		}
+	}
+	return migrations, nil
+}
+
+func apply(ctx context.Context, tx pgx.Tx, migration migration) error {
+	var recordedName string
+	var recordedChecksum []byte
+	err := tx.QueryRow(ctx, `
+SELECT name, checksum
+FROM schema_migrations
+WHERE version = $1`, migration.version).Scan(&recordedName, &recordedChecksum)
+	if err == nil {
+		if recordedName != migration.name || !bytes.Equal(recordedChecksum, migration.checksum[:]) {
+			return fmt.Errorf("migration %06d_%s.sql differs from recorded history", migration.version, migration.name)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read migration %06d history: %w", migration.version, err)
+	}
+
+	if _, err := tx.Exec(ctx, migration.sql); err != nil {
+		return fmt.Errorf("apply migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO schema_migrations (version, name, checksum)
+VALUES ($1, $2, $3)`, migration.version, migration.name, migration.checksum[:]); err != nil {
+		return fmt.Errorf("record migration %06d_%s.sql: %w", migration.version, migration.name, err)
+	}
+	return nil
+}

@@ -215,6 +215,7 @@ The Reviewer receives no file-editing tools and cannot publish repository change
 Local verification commands may create temporary files, but all Reviewer workspace changes are discarded after the turn.
 
 The Reviewer App submits native GitHub reviews under an identity distinct from the Developer App.
+Separate Agent Sessions and GitHub App identities isolate session state, authorization, and attribution, not repository contents: the Reviewer inspects the Change Proposal files in its own isolated workspace.
 
 A successful Reviewer outcome is one of:
 
@@ -337,15 +338,15 @@ Missing installation or permissions create a Human Handoff.
 
 ## Repository Configuration
 
-Managed repositories configure the two Agent Profiles at:
+Managed repositories define Agent Profiles as direct Markdown files under:
 
 ```text
-.omnigrex/team/developer.md
-.omnigrex/team/reviewer.md
+.omnigrex/team/
 ```
 
 Each file contains validated YAML front matter followed by Role instructions.
-The front matter selects a Runtime Profile and its model, variant, steps, and permissions configuration.
+The front matter declares the repository-local Profile name and Role and selects a Runtime Profile with its model, variant, steps, and permissions configuration.
+Filenames are arbitrary, and the current selector requires exactly one Profile for every Workflow Role.
 Provider credentials never appear in the repository.
 
 The orchestrator loads Agent Profiles from the latest default branch before every Agent Turn.

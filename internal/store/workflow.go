@@ -1,0 +1,1433 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/workflow"
+)
+
+var (
+	// ErrWorkflowLocatorMismatch means normalized identity disagrees with the durable webhook envelope.
+	ErrWorkflowLocatorMismatch = errors.New("workflow locator does not match webhook delivery")
+	// ErrWorkflowDecisionInvalid means reduction produced an internally inconsistent decision.
+	ErrWorkflowDecisionInvalid = errors.New("workflow reducer returned an invalid decision")
+	// ErrPendingEventReconciliationFenceLost means reconciliation ownership or immutable identity is stale.
+	ErrPendingEventReconciliationFenceLost = errors.New("pending event reconciliation fence lost")
+	// ErrPendingEventReconciliationPayloadInvalid means a fenced reconciliation job has an invalid durable payload.
+	ErrPendingEventReconciliationPayloadInvalid = errors.New("pending event reconciliation payload is invalid")
+	// ErrPendingNormalizedEventInvalid means persisted normalized event content is malformed or contradicts its durable envelope.
+	ErrPendingNormalizedEventInvalid = errors.New("invalid pending normalized event")
+	// ErrPendingEventCausalGap means no linked synchronization can advance the durable Change Proposal head.
+	ErrPendingEventCausalGap = errors.New("pending event synchronization has a causal gap")
+	// ErrClosureSettlementFenceLost means closure job ownership or immutable identity is stale.
+	ErrClosureSettlementFenceLost = errors.New("closure settlement fence lost")
+	// ErrClosureSettlementUnsettled means a closure stop or admitted mutation still needs acknowledgement.
+	ErrClosureSettlementUnsettled = errors.New("closure settlement is unsettled")
+	// ErrWorkflowSuccessorConflict means reconciliation found another live successor path.
+	ErrWorkflowSuccessorConflict = errors.New("workflow already has a live successor")
+	// ErrWorkflowNotFound means the requested Workflow does not exist.
+	ErrWorkflowNotFound = errors.New("workflow not found")
+)
+
+const (
+	WorkflowActionQueue           = "workflow"
+	ReconcilePendingEventsJobKind = "RECONCILE_PENDING_EVENTS"
+	StopAgentTurnJobKind          = "STOP_AGENT_TURN"
+	SettleClosureJobKind          = "SETTLE_CLOSURE"
+	PrepareAgentTurnJobKind       = "PREPARE_AGENT_TURN"
+	stopAgentTurnJobPriority      = 100
+	settleClosureJobPriority      = 80
+)
+
+// WorkflowLocator identifies a Workflow by its Work Item or known Change Proposal relation.
+type WorkflowLocator struct {
+	RepositoryID          int64
+	IssueID               int64
+	IssueNumber           int64
+	PullRequestID         int64
+	PullRequestNumber     int64
+	WorkflowID            string
+	WorkflowMarkerInvalid bool
+}
+
+// WorkflowRepository is the immutable repository identity captured when a Workflow is created.
+type WorkflowRepository struct {
+	Owner string
+	Name  string
+}
+
+// GetWorkflowRepository returns the immutable repository owner and name for a Workflow.
+func (store *Store) GetWorkflowRepository(ctx context.Context, workflowID string) (WorkflowRepository, error) {
+	if !validUUID(workflowID) {
+		return WorkflowRepository{}, ErrWorkflowNotFound
+	}
+	var repository WorkflowRepository
+	err := store.pool.QueryRow(ctx, `SELECT repository_owner, repository_name FROM workflows WHERE id = $1`, workflowID).Scan(&repository.Owner, &repository.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WorkflowRepository{}, ErrWorkflowNotFound
+	}
+	if err != nil {
+		return WorkflowRepository{}, fmt.Errorf("get Workflow repository: %w", err)
+	}
+	return repository, nil
+}
+
+// GetChangeProposalReview returns a previously recorded review identity in one repository.
+func (store *Store) GetChangeProposalReview(ctx context.Context, repositoryID, reviewID int64) (*workflow.ReviewIdentity, error) {
+	if repositoryID <= 0 || reviewID <= 0 {
+		return nil, errors.New("get Change Proposal review: invalid identity")
+	}
+	var review workflow.ReviewIdentity
+	err := store.pool.QueryRow(ctx, `
+SELECT review.review_id, review.review_node_id, proposal.pull_request_id,
+       review.actor_id, review.head_sha
+FROM change_proposal_reviews AS review
+JOIN change_proposals AS proposal ON proposal.id = review.change_proposal_id
+WHERE review.repository_id = $1 AND review.review_id = $2`, repositoryID, reviewID).Scan(
+		&review.ID, &review.NodeID, &review.ChangeProposalID, &review.ActorID, &review.HeadSHA,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get Change Proposal review: %w", err)
+	}
+	return &review, nil
+}
+
+// WorkflowEventContext contains the Store-owned state and metadata used to build one Event.
+type WorkflowEventContext struct {
+	Snapshot workflow.Snapshot
+	Metadata workflow.EventMetadata
+}
+
+// WorkflowEventFactory maps normalized external data to a domain Event without reducing it.
+type WorkflowEventFactory func(WorkflowEventContext) (workflow.Event, error)
+
+// WorkflowApplication is the durable outcome of applying one normalized event.
+type WorkflowApplication struct {
+	DeliveryID  string
+	WorkflowID  string
+	Status      NormalizedEventStatus
+	Disposition workflow.Disposition
+	Reason      workflow.Reason
+	State       workflow.State
+	Revision    uint64
+}
+
+// PendingWorkflowEventFactory rebuilds an Event factory from one persisted normalized event.
+type PendingWorkflowEventFactory func(NormalizedEventRecord) (WorkflowLocator, WorkflowEventFactory, error)
+
+type workflowEnvelope struct {
+	eventName, action               string
+	repositoryID                    int64
+	repositoryOwner, repositoryName string
+	issueID, issueNumber            int64
+	receivedAt                      time.Time
+}
+
+// CompleteWebhookTransition atomically applies a claimed webhook's normalized Workflow Event.
+func (store *Store) CompleteWebhookTransition(ctx context.Context, deliveryID, claimToken string, normalizedPayload json.RawMessage, locator WorkflowLocator, eventFactory WorkflowEventFactory) (WorkflowApplication, error) {
+	if !validUUID(deliveryID) || !validUUID(claimToken) {
+		return WorkflowApplication{}, ErrWebhookClaimLost
+	}
+	payload, err := canonicalJSON(normalizedPayload)
+	if err != nil {
+		return WorkflowApplication{}, fmt.Errorf("complete webhook transition: normalized payload: %w", err)
+	}
+	if eventFactory == nil {
+		return WorkflowApplication{}, errors.New("complete webhook transition: event factory is nil")
+	}
+
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return WorkflowApplication{}, fmt.Errorf("begin webhook transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := validateNormalizedDeliveryID(payload, deliveryID); err != nil {
+		return WorkflowApplication{}, fmt.Errorf("complete webhook transition: %w", err)
+	}
+
+	envelope, err := lockWebhookForTransition(ctx, tx, deliveryID, claimToken)
+	if err != nil {
+		return WorkflowApplication{}, err
+	}
+	if err := validateWorkflowLocator(locator, envelope); err != nil {
+		return WorkflowApplication{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO normalized_events (delivery_id, payload, status) VALUES ($1, $2, 'PENDING')`, deliveryID, payload); err != nil {
+		return WorkflowApplication{}, fmt.Errorf("insert normalized event: %w", err)
+	}
+	record := NormalizedEventRecord{DeliveryID: deliveryID, Payload: payload, Status: NormalizedEventPending}
+	application, err := store.applyWorkflowEventTx(ctx, tx, record, envelope, locator, eventFactory)
+	if err != nil {
+		return WorkflowApplication{}, err
+	}
+	result, err := tx.Exec(ctx, `
+UPDATE webhook_deliveries
+SET workflow_id = $3, status = 'PROCESSED', claim_owner = NULL, claim_token = NULL,
+    claimed_at = NULL, lease_expires_at = NULL, processed_at = clock_timestamp(), last_error = NULL
+WHERE delivery_id = $1 AND status = 'PROCESSING' AND claim_token = $2
+  AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, nullableString(application.WorkflowID))
+	if err != nil {
+		return WorkflowApplication{}, fmt.Errorf("complete transitioned webhook delivery: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return WorkflowApplication{}, ErrWebhookClaimLost
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowApplication{}, fmt.Errorf("commit webhook transition: %w", err)
+	}
+	return application, nil
+}
+
+// ApplyNextPendingNormalizedEvent drains one historical Phase 4 event without polling DEFERRED rows.
+// Its inbox delivery was already completed, so this API cannot restore claim fencing for historical events.
+func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory PendingWorkflowEventFactory) (WorkflowApplication, bool, error) {
+	if factory == nil {
+		return WorkflowApplication{}, false, errors.New("apply pending normalized event: factory is nil")
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("begin pending normalized event: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var record NormalizedEventRecord
+	var envelope workflowEnvelope
+	err = tx.QueryRow(ctx, `
+SELECT event.delivery_id::text, event.payload, event.status, event.created_at,
+       COALESCE(delivery.repository_id, 0), COALESCE(delivery.repository_owner, ''),
+       COALESCE(delivery.repository_name, ''), COALESCE(delivery.issue_id, 0),
+       COALESCE(delivery.issue_number, 0), delivery.received_at
+FROM normalized_events AS event
+JOIN webhook_deliveries AS delivery USING (delivery_id)
+WHERE event.status = 'PENDING' AND event.attempt_count < event.max_attempts
+  AND NOT EXISTS (
+      SELECT 1
+      FROM assignment_retention_generations AS generation
+      JOIN workflows AS candidate_workflow ON candidate_workflow.id = generation.workflow_id
+      WHERE generation.status = 'COLLECTING'
+        AND (candidate_workflow.id = delivery.workflow_id
+             OR (delivery.workflow_id IS NULL
+                 AND candidate_workflow.repository_id = delivery.repository_id
+                 AND candidate_workflow.issue_id = delivery.issue_id
+                 AND candidate_workflow.issue_number = delivery.issue_number))
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM normalized_events AS earlier_event
+      JOIN webhook_deliveries AS earlier_delivery USING (delivery_id)
+      WHERE earlier_event.status = 'PENDING'
+        AND earlier_event.attempt_count < earlier_event.max_attempts
+        AND ((delivery.workflow_id IS NOT NULL AND earlier_delivery.workflow_id = delivery.workflow_id)
+             OR (delivery.repository_id IS NOT NULL AND delivery.issue_id IS NOT NULL
+                 AND earlier_delivery.repository_id = delivery.repository_id
+                 AND earlier_delivery.issue_id = delivery.issue_id
+                 AND earlier_delivery.issue_number = delivery.issue_number))
+        AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+            < (delivery.received_at, delivery.delivery_id)
+  )
+ORDER BY delivery.received_at, event.delivery_id
+FOR UPDATE OF event SKIP LOCKED
+LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.CreatedAt,
+		&envelope.repositoryID, &envelope.repositoryOwner, &envelope.repositoryName,
+		&envelope.issueID, &envelope.issueNumber, &envelope.receivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return WorkflowApplication{}, false, fmt.Errorf("commit empty pending event drain: %w", err)
+		}
+		return WorkflowApplication{}, false, nil
+	}
+	if err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("select pending normalized event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SAVEPOINT defer_pending_normalized_event`); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("save pending normalized event deferral: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+UPDATE normalized_events
+SET attempt_count = attempt_count + 1, last_error = NULL
+WHERE delivery_id = $1 AND status = 'PENDING' AND attempt_count < max_attempts
+RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptCount, &record.MaxAttempts); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("count pending normalized event attempt: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SAVEPOINT apply_pending_normalized_event`); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("save pending normalized event application: %w", err)
+	}
+	if err := validateNormalizedDeliveryID(record.Payload, record.DeliveryID); err != nil {
+		cause := fmt.Errorf("apply pending normalized event: %w", err)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
+	}
+	locator, eventFactory, err := factory(record)
+	if err != nil {
+		cause := fmt.Errorf("build pending event factory: %w", err)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
+	}
+	if eventFactory == nil {
+		cause := fmt.Errorf("build pending event factory: factory is nil: %w", ErrPendingNormalizedEventInvalid)
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, cause)
+	}
+	if err := validateWorkflowLocator(locator, envelope); err != nil {
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
+	}
+	application, err := store.applyWorkflowEventTx(ctx, tx, record, envelope, locator, eventFactory)
+	if err != nil {
+		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
+	}
+	if application.Status == NormalizedEventPending {
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT defer_pending_normalized_event`); err != nil {
+			return WorkflowApplication{}, false, fmt.Errorf("rollback deferred pending normalized event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WorkflowApplication{}, false, fmt.Errorf("commit deferred pending normalized event: %w", err)
+		}
+		return application, false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowApplication{}, false, fmt.Errorf("commit pending normalized event: %w", err)
+	}
+	return application, true, nil
+}
+
+func finishPendingNormalizedEventFailure(ctx context.Context, tx pgx.Tx, record NormalizedEventRecord, cause error) error {
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT apply_pending_normalized_event`); err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	terminal := deterministicPendingNormalizedEventFailure(cause) || record.AttemptCount >= record.MaxAttempts
+	result, err := tx.Exec(ctx, `
+UPDATE normalized_events
+SET status = CASE WHEN $4 THEN 'FAILED' ELSE 'PENDING' END,
+    reason = CASE WHEN $4 THEN $2 ELSE NULL END,
+    processed_at = CASE WHEN $4 THEN clock_timestamp() ELSE NULL END,
+    last_error = $2
+WHERE delivery_id = $1 AND status = 'PENDING' AND attempt_count = $3`,
+		record.DeliveryID, cause.Error(), record.AttemptCount, terminal)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("record failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	if result.RowsAffected() != 1 {
+		return errors.Join(cause, errors.New("pending normalized event is no longer pending"))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return errors.Join(cause, fmt.Errorf("commit failed pending normalized event %s: %w", record.DeliveryID, err))
+	}
+	return cause
+}
+
+func deterministicPendingNormalizedEventFailure(err error) bool {
+	return errors.Is(err, ErrNormalizedEventDeliveryMismatch) ||
+		errors.Is(err, ErrPendingNormalizedEventInvalid) ||
+		errors.Is(err, ErrWorkflowLocatorMismatch) ||
+		errors.Is(err, ErrWorkflowDecisionInvalid)
+}
+
+func lockWebhookForTransition(ctx context.Context, tx pgx.Tx, deliveryID, claimToken string) (workflowEnvelope, error) {
+	var envelope workflowEnvelope
+	var status WebhookStatus
+	var currentToken *string
+	var leaseLive bool
+	err := tx.QueryRow(ctx, `
+SELECT status, claim_token::text, COALESCE(lease_expires_at > clock_timestamp(), FALSE),
+       COALESCE(repository_id, 0), COALESCE(repository_owner, ''), COALESCE(repository_name, ''),
+       COALESCE(issue_id, 0), COALESCE(issue_number, 0), received_at
+FROM webhook_deliveries WHERE delivery_id = $1 FOR UPDATE`, deliveryID).Scan(
+		&status, &currentToken, &leaseLive, &envelope.repositoryID, &envelope.repositoryOwner,
+		&envelope.repositoryName, &envelope.issueID, &envelope.issueNumber, &envelope.receivedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && (status != WebhookProcessing || currentToken == nil || *currentToken != claimToken || !leaseLive) {
+		return workflowEnvelope{}, ErrWebhookClaimLost
+	}
+	if err != nil {
+		return workflowEnvelope{}, fmt.Errorf("lock webhook transition: %w", err)
+	}
+	return envelope, nil
+}
+
+func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope) error {
+	if locator.RepositoryID <= 0 || locator.RepositoryID != envelope.repositoryID ||
+		(locator.IssueID == 0) != (locator.IssueNumber == 0) || locator.IssueID < 0 || locator.IssueNumber < 0 ||
+		(locator.PullRequestID == 0) != (locator.PullRequestNumber == 0) || locator.PullRequestID < 0 || locator.PullRequestNumber < 0 ||
+		(locator.WorkflowID != "" && !validUUID(locator.WorkflowID)) ||
+		(locator.WorkflowMarkerInvalid && locator.WorkflowID != "") {
+		return ErrWorkflowLocatorMismatch
+	}
+	if envelope.issueID > 0 && (locator.IssueID != envelope.issueID || locator.IssueNumber != envelope.issueNumber) {
+		return ErrWorkflowLocatorMismatch
+	}
+	if locator.IssueID == 0 && locator.PullRequestID == 0 {
+		return ErrWorkflowLocatorMismatch
+	}
+	return nil
+}
+
+func (store *Store) applyWorkflowEventTx(ctx context.Context, tx pgx.Tx, event NormalizedEventRecord, envelope workflowEnvelope, locator WorkflowLocator, eventFactory WorkflowEventFactory) (WorkflowApplication, error) {
+	workflowID, err := resolveWorkflowID(ctx, tx, locator)
+	if err != nil {
+		return WorkflowApplication{}, err
+	}
+	if workflowID == "" && locator.IssueID > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fmt.Sprintf("%d:%d", locator.RepositoryID, locator.IssueID)); err != nil {
+			return WorkflowApplication{}, fmt.Errorf("serialize first workflow trigger: %w", err)
+		}
+		workflowID, err = resolveWorkflowID(ctx, tx, locator)
+		if err != nil {
+			return WorkflowApplication{}, err
+		}
+	}
+
+	snapshot := workflow.Snapshot{State: workflow.StateAbsent}
+	if workflowID != "" {
+		snapshot, err = rehydrateWorkflow(ctx, tx, workflowID)
+		if err != nil {
+			return WorkflowApplication{}, err
+		}
+		blocked, err := workflowTransitionBlockedTx(ctx, tx, workflowID, event.DeliveryID)
+		if err != nil {
+			return WorkflowApplication{}, err
+		}
+		if blocked {
+			return WorkflowApplication{
+				DeliveryID: event.DeliveryID, WorkflowID: workflowID, Status: NormalizedEventPending,
+				State: snapshot.State, Revision: snapshot.Revision,
+			}, nil
+		}
+	}
+	workItem := snapshot.WorkItem
+	if snapshot.State == workflow.StateAbsent {
+		workItem = workflow.WorkItem{RepositoryID: locator.RepositoryID, IssueID: locator.IssueID, IssueNumber: locator.IssueNumber}
+		if locator.IssueID == 0 {
+			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
+		}
+	}
+	decision, err := store.reduceWorkflowEvent(snapshot, workflow.EventMetadata{
+		ID: event.DeliveryID, ObservedAt: envelope.receivedAt,
+		WorkItem: workItem, ExpectedRevision: snapshot.Revision,
+	}, eventFactory)
+	if err != nil {
+		return WorkflowApplication{}, err
+	}
+
+	if decision.Disposition == workflow.DispositionApplied {
+		if workflowID == "" {
+			if locator.IssueID == 0 || decision.Snapshot.WorkItem != (workflow.WorkItem{RepositoryID: locator.RepositoryID, IssueID: locator.IssueID, IssueNumber: locator.IssueNumber}) {
+				return WorkflowApplication{}, ErrWorkflowDecisionInvalid
+			}
+			workflowID, err = randomUUID()
+			if err != nil {
+				return WorkflowApplication{}, fmt.Errorf("generate workflow identity: %w", err)
+			}
+			if err := insertWorkflow(ctx, tx, workflowID, envelope, decision.Snapshot); err != nil {
+				return WorkflowApplication{}, err
+			}
+		}
+		if err := persistAppliedDecision(ctx, tx, event.DeliveryID, workflowID, snapshot, decision, ""); err != nil {
+			return WorkflowApplication{}, err
+		}
+	}
+
+	status := NormalizedEventCompleted
+	deferredTurnID := ""
+	if decision.Disposition == workflow.DispositionDeferred {
+		status = NormalizedEventDeferred
+		if snapshot.ActiveTurn != nil {
+			deferredTurnID = snapshot.ActiveTurn.ID
+		}
+	}
+	result, err := tx.Exec(ctx, `
+UPDATE normalized_events
+SET status = $2, workflow_id = $3, disposition = $4, reason = $5,
+    applied_revision = $6, deferred_for_turn_id = $7, processed_at = clock_timestamp()
+WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
+		nullableString(workflowID), decision.Disposition, decision.Reason,
+		int64(decision.Snapshot.Revision), nullableString(deferredTurnID))
+	if err != nil {
+		return WorkflowApplication{}, fmt.Errorf("complete normalized event: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return WorkflowApplication{}, errors.New("normalized event is no longer pending")
+	}
+	return WorkflowApplication{
+		DeliveryID: event.DeliveryID, WorkflowID: workflowID, Status: status,
+		Disposition: decision.Disposition, Reason: decision.Reason,
+		State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
+	}, nil
+}
+
+func (store *Store) reduceWorkflowEvent(snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
+	decision := store.reducer.DefinitionIncompatible(snapshot)
+	if store.reducer.DefinitionCompatible(snapshot) {
+		event, err := factory(WorkflowEventContext{Snapshot: snapshot.Clone(), Metadata: metadata})
+		if err != nil {
+			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		if err := validateWorkflowEventMetadata(event, metadata); err != nil {
+			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		decision = store.reducer.Reduce(snapshot, event)
+	}
+	if err := validateWorkflowDecision(snapshot, decision); err != nil {
+		return workflow.Decision{}, err
+	}
+	return decision, nil
+}
+
+func validateWorkflowEventMetadata(event workflow.Event, expected workflow.EventMetadata) error {
+	metadata, ok := workflow.EventMetadataOf(event)
+	if !ok || metadata.ID != expected.ID || !metadata.ObservedAt.Equal(expected.ObservedAt) ||
+		metadata.WorkItem != expected.WorkItem || metadata.ExpectedRevision != expected.ExpectedRevision {
+		return fmt.Errorf("metadata mismatch: %w", ErrPendingNormalizedEventInvalid)
+	}
+	return nil
+}
+
+func workflowTransitionBlockedTx(ctx context.Context, tx pgx.Tx, workflowID, deliveryID string) (bool, error) {
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM assignment_retention_generations
+    WHERE workflow_id = $1 AND status = 'COLLECTING'
+    UNION ALL
+    SELECT 1
+    FROM normalized_events AS earlier_event
+    JOIN webhook_deliveries AS earlier_delivery USING (delivery_id)
+    JOIN webhook_deliveries AS current_delivery ON current_delivery.delivery_id = $2
+    JOIN workflows AS current_workflow ON current_workflow.id = $1
+    WHERE earlier_event.status = 'PENDING'
+      AND earlier_event.attempt_count < earlier_event.max_attempts
+      AND (earlier_event.workflow_id = $1 OR earlier_delivery.workflow_id = $1
+           OR (earlier_delivery.repository_id = current_workflow.repository_id
+               AND earlier_delivery.issue_id = current_workflow.issue_id
+               AND earlier_delivery.issue_number = current_workflow.issue_number))
+      AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+          < (current_delivery.received_at, current_delivery.delivery_id)
+    UNION ALL
+    SELECT 1
+    FROM webhook_deliveries AS earlier_delivery
+    JOIN webhook_deliveries AS current_delivery ON current_delivery.delivery_id = $2
+    JOIN workflows AS current_workflow ON current_workflow.id = $1
+    WHERE earlier_delivery.event_name = 'issues' AND earlier_delivery.action = 'reopened'
+      AND earlier_delivery.status IN ('PENDING', 'PROCESSING')
+      AND earlier_delivery.repository_id = current_workflow.repository_id
+      AND earlier_delivery.issue_id = current_workflow.issue_id
+      AND earlier_delivery.issue_number = current_workflow.issue_number
+      AND (earlier_delivery.received_at, earlier_delivery.delivery_id)
+          < (current_delivery.received_at, current_delivery.delivery_id)
+)`, workflowID, deliveryID).Scan(&blocked); err != nil {
+		return false, fmt.Errorf("check Workflow transition barrier: %w", err)
+	}
+	return blocked, nil
+}
+
+func resolveWorkflowID(ctx context.Context, tx pgx.Tx, locator WorkflowLocator) (string, error) {
+	var byIssue, byProposal, byMarker string
+	if locator.IssueID > 0 {
+		err := tx.QueryRow(ctx, `
+SELECT id::text FROM workflows
+WHERE repository_id = $1 AND issue_id = $2 AND issue_number = $3`,
+			locator.RepositoryID, locator.IssueID, locator.IssueNumber).Scan(&byIssue)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("resolve workflow by issue: %w", err)
+		}
+	}
+	if locator.PullRequestID > 0 {
+		err := tx.QueryRow(ctx, `
+SELECT workflow_id::text FROM change_proposals
+WHERE repository_id = $1 AND pull_request_id = $2`, locator.RepositoryID, locator.PullRequestID).Scan(&byProposal)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("resolve workflow by change proposal: %w", err)
+		}
+	}
+	if locator.WorkflowMarkerInvalid && byProposal == "" {
+		return "", ErrWorkflowLocatorMismatch
+	}
+	if locator.WorkflowID != "" {
+		err := tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id = $1 AND repository_id = $2`, locator.WorkflowID, locator.RepositoryID).Scan(&byMarker)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("resolve workflow by marker: %w", err)
+		}
+		if byMarker == "" && (byIssue != "" || byProposal != "") {
+			return "", ErrWorkflowLocatorMismatch
+		}
+	}
+	resolved := ""
+	for _, candidate := range []string{byIssue, byProposal, byMarker} {
+		if candidate == "" {
+			continue
+		}
+		if resolved != "" && resolved != candidate {
+			return "", ErrWorkflowLocatorMismatch
+		}
+		resolved = candidate
+	}
+	if byIssue != "" && byProposal != "" && byIssue != byProposal {
+		return "", ErrWorkflowLocatorMismatch
+	}
+	return resolved, nil
+}
+
+func rehydrateWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) (workflow.Snapshot, error) {
+	var snapshot workflow.Snapshot
+	var resumeRole, continuationStage, assignmentStatus, runtimeState, closureID, closureToken, retentionToken string
+	var closureDeadline, retentionDeadline *time.Time
+	var closureReopen bool
+	err := tx.QueryRow(ctx, `
+SELECT status, state_revision, repository_id, issue_id, issue_number,
+       COALESCE(resume_role, ''), COALESCE(desired_assignment_status, ''),
+       COALESCE(desired_runtime_state, ''), COALESCE(closure_id, ''), closure_deadline,
+	       COALESCE(closure_retention_token, ''), closure_reopen_requested,
+	       retention_deadline, COALESCE(retention_token, ''), COALESCE(continuation_stage, '')
+FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
+		&snapshot.State, &snapshot.Revision, &snapshot.WorkItem.RepositoryID,
+		&snapshot.WorkItem.IssueID, &snapshot.WorkItem.IssueNumber, &resumeRole,
+		&assignmentStatus, &runtimeState, &closureID, &closureDeadline, &closureToken,
+		&closureReopen, &retentionDeadline, &retentionToken, &continuationStage,
+	)
+	if err != nil {
+		return workflow.Snapshot{}, fmt.Errorf("lock workflow: %w", err)
+	}
+	snapshot.ResumeRole = workflow.Role(resumeRole)
+	snapshot.ContinuationStage = workflow.StageID(continuationStage)
+	snapshot.Assignments.Status = workflow.AssignmentStatus(assignmentStatus)
+	snapshot.Assignments.RuntimeState = workflow.RuntimeState(runtimeState)
+	if retentionDeadline != nil {
+		snapshot.Assignments.RetainedUntil = *retentionDeadline
+		snapshot.Assignments.RetentionToken = retentionToken
+	}
+	if closureID != "" {
+		snapshot.Closure = &workflow.Closure{ID: closureID, RetainUntil: *closureDeadline, RetentionToken: closureToken, ReopenRequested: closureReopen}
+	}
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(attempt_number), 0) FROM workflow_attempts WHERE workflow_id = $1`, workflowID).Scan(&snapshot.LastAttemptNumber); err != nil {
+		return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt sequence: %w", err)
+	}
+	var attempt workflow.WorkflowAttempt
+	var reviewUsageJSON []byte
+	err = tx.QueryRow(ctx, `
+	SELECT id::text, attempt_number, started_at, infrastructure_failures,
+	       infrastructure_failure_limit, current_stage, review_usage
+FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
+		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.InfrastructureRetryBudget.Used,
+		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON)
+	if err == nil {
+		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
+			return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt Stage usage: %w", err)
+		}
+		if attempt.ReviewUsage == nil {
+			return workflow.Snapshot{}, errors.New("rehydrate attempt Stage usage: null object")
+		}
+		attempt.Lifecycle = workflow.AttemptActive
+		snapshot.CurrentAttempt = &attempt
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return workflow.Snapshot{}, fmt.Errorf("rehydrate active attempt: %w", err)
+	}
+	var proposal workflow.ChangeProposal
+	err = tx.QueryRow(ctx, `
+SELECT pull_request_id, pull_request_number, head_sha, active, COALESCE(ready_for_sha, '')
+FROM change_proposals WHERE workflow_id = $1 AND active`, workflowID).Scan(
+		&proposal.ID, &proposal.Number, &proposal.HeadSHA, &proposal.Open, &proposal.ReadyForSHA)
+	if err == nil {
+		snapshot.ChangeProposal = &proposal
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return workflow.Snapshot{}, fmt.Errorf("rehydrate active change proposal: %w", err)
+	}
+	var turn workflow.ActiveTurn
+	err = tx.QueryRow(ctx, `
+SELECT turn.id::text, turn.agent_session_id::text, turn.workflow_attempt_id::text,
+	       turn.stage_id, assignment.role, turn.execution_epoch, turn.control_revision,
+       COALESCE(proposal.pull_request_id, 0), COALESCE(turn.expected_head_sha, '')
+FROM agent_turns AS turn
+JOIN agent_sessions AS session ON session.id = turn.agent_session_id
+JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+LEFT JOIN change_proposals AS proposal ON proposal.id = turn.change_proposal_id
+WHERE assignment.workflow_id = $1 AND turn.active`, workflowID).Scan(
+		&turn.ID, &turn.SessionID, &turn.AttemptID, &turn.Stage, &turn.Role, &turn.Epoch,
+		&turn.ControlRevision, &turn.ChangeProposalID, &turn.ExpectedHeadSHA)
+	if err == nil {
+		snapshot.ActiveTurn = &turn
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return workflow.Snapshot{}, fmt.Errorf("rehydrate active turn: %w", err)
+	}
+	return snapshot, nil
+}
+
+func validateWorkflowDecision(current workflow.Snapshot, decision workflow.Decision) error {
+	switch decision.Disposition {
+	case workflow.DispositionApplied:
+		if decision.Snapshot.Revision != current.Revision+1 || decision.Snapshot.State == workflow.StateAbsent || decision.Reason == "" ||
+			current.State != workflow.StateAbsent && decision.Snapshot.WorkItem != current.WorkItem {
+			return ErrWorkflowDecisionInvalid
+		}
+	case workflow.DispositionDeferred, workflow.DispositionDuplicate, workflow.DispositionStale, workflow.DispositionUnrelated, workflow.DispositionIllegal:
+		if !reflect.DeepEqual(decision.Snapshot, current) || decision.Reason == "" {
+			return ErrWorkflowDecisionInvalid
+		}
+		if decision.Disposition != workflow.DispositionDeferred && len(decision.Actions) != 0 {
+			return ErrWorkflowDecisionInvalid
+		}
+	default:
+		return ErrWorkflowDecisionInvalid
+	}
+	return nil
+}
+
+func insertWorkflow(ctx context.Context, tx pgx.Tx, workflowID string, envelope workflowEnvelope, snapshot workflow.Snapshot) error {
+	_, err := tx.Exec(ctx, `
+INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision, resume_role, desired_assignment_status, desired_runtime_state
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, workflowID,
+		snapshot.WorkItem.RepositoryID, envelope.repositoryOwner, envelope.repositoryName,
+		snapshot.WorkItem.IssueID, snapshot.WorkItem.IssueNumber, snapshot.State,
+		int64(snapshot.Revision), nullableString(string(snapshot.ResumeRole)),
+		nullableString(string(snapshot.Assignments.Status)), nullableString(string(snapshot.Assignments.RuntimeState)))
+	if err != nil {
+		return fmt.Errorf("insert workflow: %w", err)
+	}
+	return nil
+}
+
+func persistAppliedDecision(ctx context.Context, tx pgx.Tx, deliveryID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	return persistAppliedDecisionWithProvenance(ctx, tx, deliveryID, "", workflowID, current, decision, actionNamespace)
+}
+
+func persistAppliedSettlementDecision(ctx context.Context, tx pgx.Tx, settlementID, workflowID string, current workflow.Snapshot, decision workflow.Decision) error {
+	return persistAppliedDecisionWithProvenance(ctx, tx, "", settlementID, workflowID, current, decision, "")
+}
+
+func persistAppliedDecisionWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	return persistAppliedDecisionWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, current, decision, actionNamespace)
+}
+
+func persistAppliedDecisionWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	if decision.Reason == workflow.ReasonClosureSettled {
+		if err := requireClosureSettlementBarrier(ctx, tx, workflowID, current); err != nil {
+			return err
+		}
+	}
+	for _, action := range decision.Actions {
+		if complete, ok := action.(workflow.CompleteAttemptAction); ok {
+			result, err := tx.Exec(ctx, `
+UPDATE workflow_attempts SET active = FALSE, status = $3, completed_at = clock_timestamp(), updated_at = clock_timestamp()
+WHERE id = $1 AND workflow_id = $2 AND active`, complete.AttemptID, workflowID, complete.Reason)
+			if err != nil || result.RowsAffected() != 1 {
+				if err == nil {
+					err = errors.New("active attempt was not completed")
+				}
+				return fmt.Errorf("complete workflow attempt: %w", err)
+			}
+		}
+	}
+	if err := persistWorkflowSnapshot(ctx, tx, workflowID, decision); err != nil {
+		return err
+	}
+	for _, action := range decision.Actions {
+		if create, ok := action.(workflow.CreateAttemptAction); ok {
+			attempt := create.Attempt
+			reviewUsage, err := json.Marshal(attempt.ReviewUsage)
+			if err != nil {
+				return fmt.Errorf("encode workflow attempt Stage usage: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+INSERT INTO workflow_attempts (
+	    id, workflow_id, attempt_number, trigger_delivery_id, status, active,
+	    infrastructure_failures, infrastructure_failure_limit, started_at, current_stage, review_usage
+)
+VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
+				workflowID, int64(attempt.Number), deliveryID, int(attempt.InfrastructureRetryBudget.Used),
+				int(attempt.InfrastructureRetryBudget.Limit), attempt.StartedAt, attempt.CurrentStage, reviewUsage); err != nil {
+				return fmt.Errorf("create workflow attempt: %w", err)
+			}
+		}
+	}
+	if decision.Snapshot.CurrentAttempt != nil {
+		attempt := decision.Snapshot.CurrentAttempt
+		reviewUsage, err := json.Marshal(attempt.ReviewUsage)
+		if err != nil {
+			return fmt.Errorf("encode workflow attempt Stage usage: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+		UPDATE workflow_attempts SET infrastructure_failures = $3, infrastructure_failure_limit = $4,
+		    current_stage = $5, review_usage = $6, updated_at = clock_timestamp()
+WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
+			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
+			attempt.CurrentStage, reviewUsage); err != nil {
+			return fmt.Errorf("persist workflow attempt budgets: %w", err)
+		}
+	}
+	if err := persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision, actionNamespace); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requireClosureSettlementBarrier(ctx context.Context, tx pgx.Tx, workflowID string, current workflow.Snapshot) error {
+	if current.Closure == nil {
+		return ErrClosureSettlementFenceLost
+	}
+	var barrierRevision int64
+	var settlementStatus JobStatus
+	var settled bool
+	err := tx.QueryRow(ctx, `
+SELECT barrier.workflow_revision, barrier.settled_at IS NOT NULL, job.status
+FROM workflow_closure_barriers AS barrier
+JOIN jobs AS job ON job.id = barrier.settlement_job_id
+WHERE barrier.workflow_id = $1 AND barrier.closure_id = $2
+FOR UPDATE OF barrier, job`, workflowID, current.Closure.ID).Scan(&barrierRevision, &settled, &settlementStatus)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && (!settled || settlementStatus != JobSucceeded || barrierRevision > int64(current.Revision)) {
+		return ErrClosureSettlementUnsettled
+	}
+	if err != nil {
+		return fmt.Errorf("verify closure settlement barrier: %w", err)
+	}
+	return nil
+}
+
+func persistWorkflowSnapshot(ctx context.Context, tx pgx.Tx, workflowID string, decision workflow.Decision) error {
+	snapshot := decision.Snapshot
+	var closureID, closureToken string
+	var closureDeadline any
+	closureReopen := false
+	if snapshot.Closure != nil {
+		closureID, closureToken = snapshot.Closure.ID, snapshot.Closure.RetentionToken
+		closureDeadline, closureReopen = snapshot.Closure.RetainUntil, snapshot.Closure.ReopenRequested
+	}
+	var retentionDeadline any
+	if !snapshot.Assignments.RetainedUntil.IsZero() {
+		retentionDeadline = snapshot.Assignments.RetainedUntil
+	}
+	handoffReason := any(nil)
+	for _, action := range decision.Actions {
+		if handoff, ok := action.(workflow.MarkHumanHandoffAction); ok {
+			handoffReason = string(handoff.Reason)
+		}
+	}
+	result, err := tx.Exec(ctx, `
+UPDATE workflows SET status = $2, state_revision = $3, resume_role = $4,
+	    desired_assignment_status = $5, desired_runtime_state = $6,
+	    closure_id = $7, closure_deadline = $8, closure_retention_token = $9,
+	    closure_reopen_requested = $10, retention_deadline = $11, retention_token = $12,
+	    human_handoff_reason = $13, continuation_stage = $14, updated_at = clock_timestamp(),
+    closed_at = CASE WHEN $2 = 'CLOSED' THEN COALESCE(closed_at, clock_timestamp()) ELSE NULL END
+WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
+		nullableString(string(snapshot.ResumeRole)), nullableString(string(snapshot.Assignments.Status)),
+		nullableString(string(snapshot.Assignments.RuntimeState)), nullableString(closureID), closureDeadline,
+		nullableString(closureToken), closureReopen, retentionDeadline,
+		nullableString(snapshot.Assignments.RetentionToken), handoffReason,
+		nullableString(string(snapshot.ContinuationStage)))
+	if err != nil {
+		return fmt.Errorf("persist workflow snapshot: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("persist workflow snapshot: workflow not found")
+	}
+	if err := persistChangeProposal(ctx, tx, workflowID, snapshot); err != nil {
+		return err
+	}
+	return nil
+}
+
+func persistChangeProposal(ctx context.Context, tx pgx.Tx, workflowID string, snapshot workflow.Snapshot) error {
+	if snapshot.ChangeProposal == nil {
+		return nil
+	}
+	proposal := snapshot.ChangeProposal
+	result, err := tx.Exec(ctx, `
+UPDATE change_proposals
+SET head_sha = $4, ready_for_sha = $5, updated_at = clock_timestamp()
+WHERE workflow_id = $1
+  AND repository_id = (SELECT repository_id FROM workflows WHERE id = $1)
+  AND pull_request_id = $2 AND pull_request_number = $3 AND active`,
+		workflowID, proposal.ID, proposal.Number, proposal.HeadSHA, nullableString(proposal.ReadyForSHA))
+	if err != nil {
+		return fmt.Errorf("persist change proposal: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("persist change proposal: matching active Change Proposal not found")
+	}
+	return nil
+}
+
+type preparedTurnIntent struct {
+	mode workflow.AssignmentGeneration
+	turn workflow.EnqueueTurnAction
+	set  bool
+}
+
+func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, decision workflow.Decision, actionNamespace string) error {
+	intent := preparedTurnIntent{mode: workflow.AssignmentGenerationCurrent}
+	labels := false
+	consumeRun := false
+	var closureTurn *workflow.TurnGuard
+	var closureStopJobID string
+	var labelAction workflow.ReconcileLabelsAction
+	for _, action := range decision.Actions {
+		switch action := action.(type) {
+		case workflow.EnsureAssignmentsAction:
+			intent.mode = action.Mode
+		case workflow.EnqueueTurnAction:
+			intent.turn, intent.set = action, true
+		case workflow.ConsumeRunLabelAction:
+			labels, consumeRun = true, true
+		case workflow.ReconcileLabelsAction:
+			labels, labelAction = true, action
+		case workflow.RecordReviewAction:
+			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, workflowID, action); err != nil {
+				return err
+			}
+		case workflow.MarkHumanHandoffAction:
+			if _, err := tx.Exec(ctx, `
+UPDATE agent_assignments
+SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
+    updated_at = clock_timestamp()
+WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID); err != nil {
+				return fmt.Errorf("mark current Agent Assignments waiting for Human Handoff: %w", err)
+			}
+			if decision.Snapshot.CurrentAttempt != nil {
+				if _, err := tx.Exec(ctx, `UPDATE workflow_attempts SET human_handoff_reason = $2 WHERE id = $1`, decision.Snapshot.CurrentAttempt.ID, action.Reason); err != nil {
+					return fmt.Errorf("mark attempt human handoff: %w", err)
+				}
+			}
+			handoffPayload := map[string]any{
+				"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision,
+			}
+			if decision.Snapshot.ChangeProposal != nil {
+				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
+			}
+			if _, err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload); err != nil {
+				return err
+			}
+		case workflow.CloseMutationAdmissionAction:
+			if settlementID == "" {
+				if err := closeMutationAdmissionTx(ctx, tx, action.Turn); err != nil {
+					return err
+				}
+				turn := action.Turn
+				closureTurn = &turn
+			}
+		case workflow.InterruptTurnForHumanHandoffAction:
+			if settlementID == "" {
+				if err := interruptTurnForHumanHandoffTx(ctx, tx, action.Turn); err != nil {
+					return err
+				}
+			}
+		case workflow.StopTurnAction:
+			if decision.Snapshot.Closure == nil {
+				return ErrWorkflowDecisionInvalid
+			}
+			var err error
+			closureStopJobID, err = enqueueStopTurnJob(ctx, tx, deliveryID, workflowID, decision.Snapshot.Closure.ID, action.Turn, decision.Snapshot.Revision)
+			if err != nil {
+				return err
+			}
+		case workflow.SettleClosureAction:
+			settlementJobID, err := enqueueClosureSettlementJob(ctx, tx, deliveryID, workflowID, currentAttemptID(decision.Snapshot), action.ClosureID, decision.Snapshot.Revision, closureTurn)
+			if err != nil {
+				return err
+			}
+			if err := createClosureBarrier(ctx, tx, workflowID, action.ClosureID, decision.Snapshot.Revision, closureTurn, closureStopJobID, settlementJobID); err != nil {
+				return err
+			}
+		case workflow.CompleteAssignmentsAction:
+			if err := completeCurrentAssignmentsTx(ctx, tx, workflowID, decision.Snapshot); err != nil {
+				return err
+			}
+		case workflow.ScheduleRetentionAction:
+			if err := scheduleAssignmentRetentionTx(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision.Snapshot.Revision, action); err != nil {
+				return err
+			}
+		case workflow.CancelRetentionAction:
+			if err := cancelAssignmentRetentionTx(ctx, tx, workflowID, action.RetentionToken); err != nil {
+				return err
+			}
+		case workflow.ReconcilePendingEventsAction:
+			if err := enqueueReconcilePendingEventsJob(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), decision.Snapshot.Revision, action); err != nil {
+				return err
+			}
+		case workflow.RecordPendingEventAction, workflow.CompleteAttemptAction, workflow.CreateAttemptAction:
+		default:
+			return fmt.Errorf("persist workflow action %T: %w", action, ErrWorkflowDecisionInvalid)
+		}
+	}
+	if intent.set {
+		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
+			"mode": intent.mode, "stage": intent.turn.Stage, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
+			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
+			"revision": decision.Snapshot.Revision,
+		}); err != nil {
+			return err
+		}
+	}
+	if labels {
+		if labelAction.State == "" {
+			labelAction.State = decision.Snapshot.State
+		}
+		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "reconcile-github-labels"), "RECONCILE_GITHUB_LABELS", map[string]any{
+			"state": labelAction.State, "ready_for_sha": labelAction.ReadyForSHA,
+			"consume_run": consumeRun, "revision": decision.Snapshot.Revision,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func namespacedWorkflowActionKey(namespace, action string) string {
+	if namespace == "" {
+		return action
+	}
+	return namespace + ":" + action
+}
+
+func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID string, revision uint64, action workflow.ReconcilePendingEventsAction) error {
+	rows, err := tx.Query(ctx, `
+SELECT event.delivery_id::text, event.deferred_for_turn_id::text,
+	   turn.execution_epoch, turn.control_revision, turn.agent_session_id::text,
+	       turn.workflow_attempt_id::text, session.agent_assignment_id::text,
+	       assignment.role, turn.stage_id
+FROM normalized_events AS event
+JOIN agent_turns AS turn ON turn.id = event.deferred_for_turn_id
+JOIN agent_sessions AS session ON session.id = turn.agent_session_id
+JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+WHERE event.workflow_id = $1 AND event.status = 'DEFERRED'
+  AND event.deferred_for_turn_id = $2
+ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.TurnID)
+	if err != nil {
+		return fmt.Errorf("read deferred normalized events for reconciliation: %w", err)
+	}
+	deferredIDs := make([]string, 0, action.Count)
+	var sourceTurnID, sourceSessionID, sourceAssignmentID string
+	var sourceEpoch, sourceControlRevision int64
+	for rows.Next() {
+		var eventID, turnID, sessionID, turnAttemptID, assignmentID string
+		var role workflow.Role
+		var stage workflow.StageID
+		var epoch, controlRevision int64
+		if err := rows.Scan(&eventID, &turnID, &epoch, &controlRevision, &sessionID, &turnAttemptID, &assignmentID, &role, &stage); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan deferred normalized event: %w", err)
+		}
+		if turnID != action.SourceTurn.TurnID || sessionID != action.SourceTurn.SessionID ||
+			turnAttemptID != action.SourceTurn.AttemptID || turnAttemptID != attemptID || stage != action.SourceTurn.Stage || role != action.SourceTurn.Role ||
+			epoch != int64(action.SourceTurn.Epoch) || controlRevision != int64(action.SourceTurn.ControlRevision) {
+			rows.Close()
+			return ErrAgentTurnFenceLost
+		}
+		if sourceTurnID == "" {
+			sourceTurnID, sourceEpoch, sourceControlRevision = turnID, epoch, controlRevision
+			sourceSessionID, sourceAssignmentID = sessionID, assignmentID
+		} else if sourceTurnID != turnID || sourceSessionID != sessionID || sourceAssignmentID != assignmentID || sourceEpoch != epoch || sourceControlRevision != controlRevision {
+			rows.Close()
+			return errors.New("reconcile pending events: deferred rows span multiple Agent Turn fences")
+		}
+		deferredIDs = append(deferredIDs, eventID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read deferred normalized events: %w", err)
+	}
+	rows.Close()
+	if sourceTurnID == "" || uint32(len(deferredIDs)) != action.Count {
+		return errors.New("reconcile pending events: deferred row count does not match action")
+	}
+	payload := map[string]any{
+		"workflow_id": workflowID, "workflow_attempt_id": attemptID,
+		"count": action.Count, "latest_observed_head_sha": action.LatestObservedHeadSHA,
+		"fallback_stage": action.FallbackStage, "fallback_role": action.FallbackRole, "fallback_purpose": action.FallbackPurpose,
+		"fallback_expected_head_sha": action.FallbackExpectedHead, "retry_of_turn_id": action.RetryOfTurnID,
+		"revision": revision, "source_turn_id": sourceTurnID, "source_stage": action.SourceTurn.Stage,
+		"source_execution_epoch": sourceEpoch, "source_control_revision": sourceControlRevision,
+		"deferred_normalized_event_ids": deferredIDs,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode pending-event reconciliation: %w", err)
+	}
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: ReconcilePendingEventsJobKind, payload: payloadJSON, maxAttempts: 3,
+		idempotencyKey: workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "", "reconcile-pending-events"),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: sourceAssignmentID,
+			agentSessionID: sourceSessionID, agentTurnID: sourceTurnID, executionEpoch: sourceEpoch,
+		},
+		provenance: jobInsertProvenance{
+			normalizedEventID: deliveryID, agentTurnSettlementID: settlementID, actionKey: "reconcile-pending-events",
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue pending-event reconciliation: %w", err)
+	}
+	for _, eventID := range deferredIDs {
+		result, err := tx.Exec(ctx, `
+INSERT INTO job_normalized_events (job_id, normalized_event_id)
+VALUES ($1, $2) ON CONFLICT (normalized_event_id) DO NOTHING`, jobID, eventID)
+		if err != nil {
+			return fmt.Errorf("link deferred normalized event to reconciliation job: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			var existingJobID string
+			if err := tx.QueryRow(ctx, `SELECT job_id::text FROM job_normalized_events WHERE normalized_event_id = $1`, eventID).Scan(&existingJobID); err != nil {
+				return fmt.Errorf("read deferred normalized event job link: %w", err)
+			}
+			if existingJobID != jobID {
+				return ErrJobIdempotencyConflict
+			}
+		}
+	}
+	return nil
+}
+
+func currentAttemptID(snapshot workflow.Snapshot) string {
+	if snapshot.CurrentAttempt == nil {
+		return ""
+	}
+	return snapshot.CurrentAttempt.ID
+}
+
+func enqueueWorkflowJobWithProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID, attemptID, actionKey, kind string, value any) (string, error) {
+	return enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, "", workflowID, attemptID, actionKey, kind, value)
+}
+
+func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID, attemptID, actionKey, kind string, value any) (string, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("encode %s action: %w", actionKey, err)
+	}
+	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey)
+	provenanceActionKey := actionKey
+	if deliveryID == "" && settlementID == "" && internalEventID == "" {
+		provenanceActionKey = ""
+	}
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: kind, payload: payload, maxAttempts: 3, idempotencyKey: idempotencyKey,
+		scope: jobInsertScope{workflowID: workflowID, workflowAttemptID: attemptID},
+		provenance: jobInsertProvenance{
+			normalizedEventID: deliveryID, agentTurnSettlementID: settlementID,
+			workflowInternalEventID: internalEventID, actionKey: provenanceActionKey,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("enqueue %s action: %w", actionKey, err)
+	}
+	return jobID, nil
+}
+
+func workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey string) string {
+	if internalEventID != "" {
+		return fmt.Sprintf("workflow:%s:internal-event:%s:action:%s", workflowID, internalEventID, actionKey)
+	}
+	if settlementID != "" {
+		return fmt.Sprintf("workflow:%s:settlement:%s:action:%s", workflowID, settlementID, actionKey)
+	}
+	return fmt.Sprintf("workflow:%s:delivery:%s:action:%s", workflowID, deliveryID, actionKey)
+}
+
+func readWorkflowJobActionProvenance(ctx context.Context, tx pgx.Tx, jobID string) (string, string, error) {
+	var deliveryID, settlementID string
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(normalized_event_id::text, ''),
+       COALESCE(agent_turn_settlement_id::text, '')
+FROM jobs WHERE id = $1`, jobID).Scan(&deliveryID, &settlementID); err != nil {
+		return "", "", err
+	}
+	if (deliveryID == "") == (settlementID == "") {
+		return "", "", ErrWorkflowDecisionInvalid
+	}
+	return deliveryID, settlementID, nil
+}
+
+func closeMutationAdmissionTx(ctx context.Context, tx pgx.Tx, guard workflow.TurnGuard) error {
+	result, err := tx.Exec(ctx, `
+UPDATE agent_turns AS turn
+SET mutation_admission_open = FALSE,
+    mutation_admission_closed_at = COALESCE(mutation_admission_closed_at, clock_timestamp()),
+    status = 'CANCELLING'
+FROM agent_sessions AS session, agent_assignments AS assignment
+WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id = $3
+  AND turn.execution_epoch = $4 AND turn.control_revision = $5 AND turn.active
+  AND session.id = turn.agent_session_id AND assignment.id = session.agent_assignment_id
+  AND assignment.role = $6`, guard.TurnID, guard.SessionID, guard.AttemptID,
+		int64(guard.Epoch), int64(guard.ControlRevision), guard.Role)
+	if err != nil {
+		return fmt.Errorf("close mutation admission: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("close mutation admission: %w", ErrAgentTurnFenceLost)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE tool_invocations
+SET state = 'FAILED', finished_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'Issue closed before mutation started'
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+  AND state = 'RESERVED' AND started_at IS NULL`, guard.TurnID, int64(guard.Epoch)); err != nil {
+		return fmt.Errorf("fail unstarted closure mutations: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE tool_invocations
+SET state = 'UNKNOWN', updated_at = clock_timestamp(),
+    last_error = 'Issue closed with mutation in flight'
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+  AND state = 'IN_FLIGHT'`, guard.TurnID, int64(guard.Epoch)); err != nil {
+		return fmt.Errorf("mark in-flight closure mutations unknown: %w", err)
+	}
+	return nil
+}
+
+func interruptTurnForHumanHandoffTx(ctx context.Context, tx pgx.Tx, guard workflow.TurnGuard) error {
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+`
+WHERE kind = 'RUN_AGENT_TURN' AND agent_turn_id = $1 AND execution_epoch = $2
+FOR UPDATE`, guard.TurnID, int64(guard.Epoch)))
+	if err != nil {
+		return fmt.Errorf("lock Human Handoff Agent Turn job: %w", err)
+	}
+	turn, err := lockAgentTurn(ctx, tx, guard.TurnID)
+	if err != nil {
+		return err
+	}
+	if !turn.active || turn.AgentSessionID != guard.SessionID || turn.WorkflowAttemptID != guard.AttemptID ||
+		turn.ExecutionEpoch != int64(guard.Epoch) || turn.ControlRevision != int64(guard.ControlRevision) ||
+		job.WorkflowAttemptID != guard.AttemptID || job.AgentSessionID != guard.SessionID {
+		return ErrAgentTurnFenceLost
+	}
+
+	if job.Status == JobAvailable {
+		result, err := tx.Exec(ctx, `
+UPDATE jobs
+SET status = 'CANCELLED', completed_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND status = 'AVAILABLE'`, job.ID)
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+		result, err = tx.Exec(ctx, `
+UPDATE agent_turns
+SET status = 'INTERRUPTED', active = FALSE, owner_id = NULL, owner_token = NULL,
+    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+    completed_at = clock_timestamp(), last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND execution_epoch = $2 AND active`, guard.TurnID, int64(guard.Epoch))
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM agent_turn_slots WHERE agent_turn_id = $1`, guard.TurnID); err != nil {
+			return fmt.Errorf("release Human Handoff Agent Turn slot: %w", err)
+		}
+		return nil
+	}
+	if job.Status != JobLeased || job.LeaseToken == "" || job.AttemptCount <= 0 {
+		return ErrAgentTurnFenceLost
+	}
+	if err := lockAgentTurnSlots(ctx, tx); err != nil {
+		return err
+	}
+	var slotExists bool
+	if err := tx.QueryRow(ctx, `SELECT TRUE FROM agent_turn_slots WHERE agent_turn_id = $1 FOR UPDATE`, guard.TurnID).Scan(&slotExists); err != nil {
+		return ErrAgentTurnFenceLost
+	}
+	var revokedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() - interval '1 microsecond'`).Scan(&revokedAt); err != nil {
+		return fmt.Errorf("calculate Human Handoff lease revocation: %w", err)
+	}
+	updates := []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE jobs SET lease_expires_at = $2 WHERE id = $1 AND status = 'LEASED'`, []any{job.ID, revokedAt}},
+		{`UPDATE job_attempts SET lease_expires_at = $4 WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`, []any{job.ID, job.AttemptCount, job.LeaseToken, revokedAt}},
+		{`UPDATE agent_turns SET lease_expires_at = $3 WHERE id = $1 AND execution_epoch = $2 AND active`, []any{guard.TurnID, int64(guard.Epoch), revokedAt}},
+		{`UPDATE agent_turn_slots SET lease_expires_at = $3 WHERE agent_turn_id = $1 AND execution_epoch = $2`, []any{guard.TurnID, int64(guard.Epoch), revokedAt}},
+	}
+	for _, update := range updates {
+		result, err := tx.Exec(ctx, update.query, update.args...)
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrAgentTurnFenceLost
+		}
+	}
+	recovery, err := recoverExpiredAgentTurnTx(ctx, tx, job)
+	if err != nil {
+		return fmt.Errorf("recover Human Handoff Agent Turn: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
+UPDATE agent_turns
+SET recovery_continuation = $3, last_error = 'Workflow Definition incompatible'
+WHERE id = $1 AND stop_runtime_job_id = $2
+  AND recovery_continuation = $4 AND recovery_settled_at IS NULL`,
+		recovery.TurnID, recovery.StopRuntimeJobID, recoveryContinuationDefinitionHandoff, recoveryContinuationPendingInfrastructure)
+	if err != nil {
+		return fmt.Errorf("mark Workflow Definition recovery handoff: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("mark Workflow Definition recovery handoff for Turn %s, stop Job %s, continuation %s: %w",
+			recovery.TurnID, recovery.StopRuntimeJobID, recovery.Continuation, ErrAgentTurnRecoveryFenceLost)
+	}
+	return nil
+}
+
+func enqueueStopTurnJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, closureID string, guard workflow.TurnGuard, revision uint64) (string, error) {
+	var assignmentID string
+	err := tx.QueryRow(ctx, `
+SELECT session.agent_assignment_id::text
+FROM agent_turns AS turn JOIN agent_sessions AS session ON session.id = turn.agent_session_id
+WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id = $3
+  AND turn.execution_epoch = $4 AND turn.control_revision = $5`, guard.TurnID, guard.SessionID,
+		guard.AttemptID, int64(guard.Epoch), int64(guard.ControlRevision)).Scan(&assignmentID)
+	if err != nil {
+		return "", fmt.Errorf("resolve stopped turn hierarchy: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"workflow_id": workflowID, "workflow_attempt_id": guard.AttemptID, "closure_id": closureID,
+		"turn_id": guard.TurnID, "session_id": guard.SessionID, "execution_epoch": guard.Epoch,
+		"control_revision": guard.ControlRevision, "workflow_revision": revision,
+	})
+	if err != nil {
+		return "", err
+	}
+	jobID, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: StopAgentTurnJobKind, payload: payload,
+		priority: stopAgentTurnJobPriority, maxAttempts: 3,
+		idempotencyKey: fmt.Sprintf("workflow:%s:delivery:%s:action:stop-agent-turn", workflowID, deliveryID),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: guard.AttemptID, agentAssignmentID: assignmentID,
+			agentSessionID: guard.SessionID, agentTurnID: guard.TurnID, executionEpoch: int64(guard.Epoch),
+		},
+		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "stop-agent-turn"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("enqueue stop Agent Turn: %w", err)
+	}
+	return jobID, nil
+}
+
+type closureJobPayload struct {
+	WorkflowID        string `json:"workflow_id"`
+	WorkflowAttemptID string `json:"workflow_attempt_id,omitempty"`
+	ClosureID         string `json:"closure_id"`
+	TurnID            string `json:"turn_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	ExecutionEpoch    int64  `json:"execution_epoch,omitempty"`
+	ControlRevision   int64  `json:"control_revision,omitempty"`
+	WorkflowRevision  int64  `json:"workflow_revision"`
+}
+
+func enqueueClosureSettlementJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, attemptID, closureID string, revision uint64, guard *workflow.TurnGuard) (string, error) {
+	payload := closureJobPayload{
+		WorkflowID: workflowID, WorkflowAttemptID: attemptID, ClosureID: closureID,
+		WorkflowRevision: int64(revision),
+	}
+	var assignmentID, sessionID, turnID string
+	var epoch int64
+	if guard != nil {
+		payload.TurnID, payload.SessionID = guard.TurnID, guard.SessionID
+		payload.ExecutionEpoch, payload.ControlRevision = int64(guard.Epoch), int64(guard.ControlRevision)
+		sessionID, turnID, epoch = guard.SessionID, guard.TurnID, int64(guard.Epoch)
+		if err := tx.QueryRow(ctx, `
+SELECT agent_assignment_id::text FROM agent_sessions WHERE id = $1`, guard.SessionID).Scan(&assignmentID); err != nil {
+			return "", fmt.Errorf("resolve closure settlement hierarchy: %w", err)
+		}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode closure settlement job: %w", err)
+	}
+	jobID, err := insertJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: SettleClosureJobKind, payload: payloadJSON,
+		priority: settleClosureJobPriority, maxAttempts: 3,
+		idempotencyKey: fmt.Sprintf("workflow:%s:closure:%s:settle", workflowID, closureID),
+		scope: jobInsertScope{
+			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: assignmentID,
+			agentSessionID: sessionID, agentTurnID: turnID, executionEpoch: epoch,
+		},
+		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "settle-closure"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("enqueue closure settlement: %w", err)
+	}
+	return jobID, nil
+}
+
+func createClosureBarrier(ctx context.Context, tx pgx.Tx, workflowID, closureID string, revision uint64, guard *workflow.TurnGuard, stopJobID, settlementJobID string) error {
+	var turnID, sessionID, attemptID string
+	var epoch, controlRevision int64
+	var admissionClosedAt any
+	if guard != nil {
+		if stopJobID == "" {
+			return errors.New("create closure barrier: source turn has no stop job")
+		}
+		turnID, sessionID, attemptID = guard.TurnID, guard.SessionID, guard.AttemptID
+		epoch, controlRevision = int64(guard.Epoch), int64(guard.ControlRevision)
+		var closedAt time.Time
+		if err := tx.QueryRow(ctx, `
+SELECT mutation_admission_closed_at
+FROM agent_turns
+WHERE id = $1 AND agent_session_id = $2 AND workflow_attempt_id = $3
+  AND execution_epoch = $4 AND control_revision = $5 AND status = 'CANCELLING'
+  AND NOT mutation_admission_open`, turnID, sessionID, attemptID, epoch, controlRevision).Scan(&closedAt); err != nil {
+			return fmt.Errorf("verify closure mutation admission: %w", err)
+		}
+		admissionClosedAt = closedAt
+	}
+	_, err := tx.Exec(ctx, `
+INSERT INTO workflow_closure_barriers (
+    workflow_id, closure_id, workflow_revision, source_turn_id, source_session_id,
+    source_attempt_id, source_execution_epoch, source_control_revision,
+    mutation_admission_closed_at, stop_job_id, settlement_job_id
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, clock_timestamp()), $10, $11)`,
+		workflowID, closureID, int64(revision), nullableString(turnID), nullableString(sessionID),
+		nullableString(attemptID), nullableEpoch(epoch), nullableEpoch(controlRevision),
+		admissionClosedAt, nullableString(stopJobID), settlementJobID)
+	if err != nil {
+		return fmt.Errorf("create closure barrier: %w", err)
+	}
+	return nil
+}
+
+func recordChangeProposalReview(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, action workflow.RecordReviewAction) error {
+	var proposalID string
+	if err := tx.QueryRow(ctx, `
+SELECT id::text FROM change_proposals
+WHERE workflow_id = $1 AND repository_id = (SELECT repository_id FROM workflows WHERE id = $1)
+  AND pull_request_id = $2`, workflowID, action.Review.ChangeProposalID).Scan(&proposalID); err != nil {
+		return fmt.Errorf("resolve reviewed change proposal: %w", err)
+	}
+	var repositoryID int64
+	if err := tx.QueryRow(ctx, `SELECT repository_id FROM workflows WHERE id = $1`, workflowID).Scan(&repositoryID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+INSERT INTO change_proposal_reviews (
+    repository_id, review_id, review_node_id, change_proposal_id,
+    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (repository_id, review_id) DO NOTHING`, repositoryID, action.Review.ID,
+		action.Review.NodeID, proposalID, action.Review.ActorID, action.Review.HeadSHA,
+		action.Accepted, nullableString(deliveryID), nullableString(settlementID))
+	if err != nil {
+		return fmt.Errorf("record change proposal review: %w", err)
+	}
+	if result.RowsAffected() == 1 {
+		return nil
+	}
+	if settlementID != "" {
+		return errors.New("change proposal review already has different provenance")
+	}
+	var nodeID, existingProposalID, headSHA string
+	var actorID int64
+	var accepted bool
+	if err := tx.QueryRow(ctx, `
+SELECT review_node_id, change_proposal_id::text, actor_id, head_sha, accepted
+FROM change_proposal_reviews WHERE repository_id = $1 AND review_id = $2`, repositoryID,
+		action.Review.ID).Scan(&nodeID, &existingProposalID, &actorID, &headSHA, &accepted); err != nil {
+		return err
+	}
+	if nodeID != action.Review.NodeID || existingProposalID != proposalID || actorID != action.Review.ActorID || headSHA != action.Review.HeadSHA || accepted != action.Accepted {
+		return errors.New("change proposal review identity conflict")
+	}
+	return nil
+}

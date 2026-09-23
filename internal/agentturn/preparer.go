@@ -1,0 +1,252 @@
+// Package agentturn coordinates durable Agent Turn preparation and execution.
+package agentturn
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/jozala/omnigrex/internal/agentprofile"
+	githubapi "github.com/jozala/omnigrex/internal/github"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/workflow"
+)
+
+var (
+	ErrDependencyNil                   = errors.New("Agent Turn Preparer dependency is nil")
+	ErrInvalidRequest                  = errors.New("invalid Agent Turn preparation request")
+	ErrInvalidRuntimeProfileReference  = errors.New("invalid Runtime Profile reference")
+	ErrRuntimeProfileReferenceMismatch = errors.New("resolved Runtime Profile reference does not match Agent Profile")
+	ErrAssignmentConfigurationConflict = errors.New("Agent Assignment configuration conflict")
+)
+
+// AssignmentConfigurationConflictError carries the credential-free preparation used to detect binding drift.
+type AssignmentConfigurationConflictError struct {
+	Preparation store.AgentTurnPreparationSpec
+	Cause       error
+}
+
+func (err *AssignmentConfigurationConflictError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrAssignmentConfigurationConflict, err.Cause)
+}
+
+func (err *AssignmentConfigurationConflictError) Unwrap() []error {
+	return []error{ErrAssignmentConfigurationConflict, err.Cause}
+}
+
+// ProfileLoader discovers all Agent Profiles from one repository snapshot.
+type ProfileLoader interface {
+	Load(context.Context, string, string, string) (agentprofile.Snapshot, error)
+}
+
+// RuntimeRegistry resolves one exact immutable Runtime Profile reference.
+type RuntimeRegistry interface {
+	Resolve(string, string) (runtimeprofile.Profile, error)
+}
+
+type runtimeBindingResolver interface {
+	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
+}
+
+// PreparationStore commits one Stage-scoped preparation under a job fence.
+type PreparationStore interface {
+	GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error)
+	PrepareAgentTurn(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error)
+}
+
+var (
+	_ ProfileLoader    = (*agentprofile.Loader)(nil)
+	_ RuntimeRegistry  = runtimeprofile.Registry{}
+	_ PreparationStore = (*store.Store)(nil)
+)
+
+// Request identifies the live preparation Job and repository profile source.
+type Request struct {
+	Lease                  store.JobLease
+	InstallationCredential string
+	RepositoryOwner        string
+	RepositoryName         string
+}
+
+// Result carries the durable Store commit and the Runtime Profile selected by its fenced Role.
+type Result struct {
+	Commit         store.AgentTurnPreparationCommit
+	RuntimeProfile runtimeprofile.Profile
+}
+
+// Preparer translates repository Agent Profiles into a durable preparation specification.
+type Preparer struct {
+	loader   ProfileLoader
+	selector agentprofile.Selector
+	registry RuntimeRegistry
+	store    PreparationStore
+}
+
+func NewPreparer(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
+	return &Preparer{loader: loader, selector: selector, registry: registry, store: preparationStore}
+}
+
+// Prepare resolves the current Stage's Role configuration and commits one fenced Agent Turn preparation.
+func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result Result, err error) {
+	defer func() {
+		if err != nil {
+			err = sanitizePreparationError(err, request.InstallationCredential)
+		}
+	}()
+	if preparer == nil || nilDependency(preparer.loader) || nilDependency(preparer.selector) || nilDependency(preparer.registry) || nilDependency(preparer.store) {
+		return Result{}, ErrDependencyNil
+	}
+	if strings.TrimSpace(request.InstallationCredential) == "" || strings.TrimSpace(request.RepositoryOwner) == "" ||
+		strings.TrimSpace(request.RepositoryName) == "" || request.Lease.Kind != store.PrepareAgentTurnJobKind ||
+		request.Lease.Status != store.JobLeased {
+		return Result{}, ErrInvalidRequest
+	}
+
+	bindings, err := preparer.store.GetAgentTurnPreparationRuntimeBindings(ctx, request.Lease)
+	if err != nil {
+		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
+	}
+	snapshot, err := preparer.loader.Load(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName)
+	if err != nil {
+		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)
+	}
+	var profile agentprofile.Profile
+	var ok bool
+	if bindings.Participant != nil {
+		profile, ok = snapshot.Profile(agentprofile.Name(bindings.Participant.AgentProfileName))
+		ok = ok && profile.Role() == bindings.Role
+	} else {
+		selection, selectionErr := snapshot.Select(preparer.selector)
+		if selectionErr != nil {
+			return Result{}, fmt.Errorf("select Agent Profiles: %w", selectionErr)
+		}
+		name, selected := selection.Profile(bindings.Role)
+		if selected {
+			profile, ok = snapshot.Profile(name)
+		}
+	}
+	if !ok {
+		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, agentprofile.ErrUnknownProfile)
+	}
+	preparation, selectedRuntime, err := preparer.prepareRole(profile, snapshot.CommitSHA(), bindings.Participant)
+	if err != nil {
+		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, err)
+	}
+	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
+	switch bindings.Role {
+	case workflow.RoleDeveloper:
+		spec.Developer = preparation
+	case workflow.RoleReviewer:
+		spec.Reviewer = preparation
+	}
+
+	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
+	if err != nil {
+		if errors.Is(err, store.ErrAssignmentConfigurationConflict) {
+			return Result{}, &AssignmentConfigurationConflictError{
+				Preparation: spec,
+				Cause:       err,
+			}
+		}
+		return Result{}, fmt.Errorf("commit Agent Turn preparation: %w", err)
+	}
+	return Result{Commit: commit, RuntimeProfile: selectedRuntime}, nil
+}
+
+func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding) (store.RolePreparation, runtimeprofile.Profile, error) {
+	name, version, ok := strings.Cut(profile.Runtime(), "/")
+	if !ok || name == "" || version == "" || strings.Contains(version, "/") {
+		return store.RolePreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
+	}
+	var resolved runtimeprofile.Profile
+	var err error
+	if pinned != nil && pinned.RuntimeProfileName == name && pinned.RuntimeProfileVersion == version {
+		resolver, ok := preparer.registry.(runtimeBindingResolver)
+		if !ok {
+			return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
+		}
+		resolved, err = resolver.ResolveBinding(runtimeprofile.Binding{
+			Name: pinned.RuntimeProfileName, Version: pinned.RuntimeProfileVersion,
+			ContentSHA256: pinned.RuntimeProfileContentSHA256, Image: pinned.RuntimeImageDigest,
+		})
+	} else {
+		resolved, err = preparer.registry.Resolve(name, version)
+	}
+	if err != nil {
+		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
+	}
+	contract := resolved.Contract()
+	if contract.Name != name || contract.Version != version {
+		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("%w: requested %s/%s, resolved %s/%s", ErrRuntimeProfileReferenceMismatch, name, version, contract.Name, contract.Version)
+	}
+	hash := profile.ContentSHA256()
+	return store.RolePreparation{
+		ProfilePath: profile.Path(),
+		Binding: store.AssignmentRuntimeBinding{
+			AgentProfileName:            string(profile.Name()),
+			RuntimeProfileName:          contract.Name,
+			RuntimeProfileVersion:       contract.Version,
+			RuntimeProfileContentSHA256: resolved.ContentSHA256(),
+			RuntimeImageDigest:          contract.Image,
+		},
+		RuntimeCompatibility: store.RuntimeCompatibilityRequirement{
+			Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
+			WorkspacePath: runtimeprofile.StableWorkspacePath,
+		},
+		Profile: store.AgentProfileSnapshot{
+			CommitSHA:     commitSHA,
+			ContentSHA256: hash[:],
+			Config:        profile.CanonicalJSON(),
+		},
+	}, resolved, nil
+}
+
+type credentialSafeError struct {
+	message  string
+	metadata githubapi.SafeErrorMetadata
+}
+
+func (err credentialSafeError) Error() string { return err.message }
+func (err credentialSafeError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
+	return err.metadata
+}
+
+func sanitizePreparationError(err error, credential string) error {
+	var conflict *AssignmentConfigurationConflictError
+	if errors.As(err, &conflict) {
+		return &AssignmentConfigurationConflictError{
+			Preparation: conflict.Preparation,
+			Cause:       ErrAssignmentConfigurationConflict,
+		}
+	}
+	return redactCredential(err, credential)
+}
+
+func redactCredential(err error, credential string) error {
+	if credential == "" {
+		return err
+	}
+	message := err.Error()
+	message = strings.ReplaceAll(message, credential, "[REDACTED]")
+	metadata := githubapi.ExtractSafeErrorMetadata(err)
+	if isPermanentWorkerError(err) {
+		metadata.Permanent = true
+	}
+	return credentialSafeError{message: message, metadata: metadata}
+}
+
+func nilDependency(dependency any) bool {
+	if dependency == nil {
+		return true
+	}
+	value := reflect.ValueOf(dependency)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}

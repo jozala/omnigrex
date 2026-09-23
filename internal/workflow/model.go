@@ -1,0 +1,536 @@
+package workflow
+
+import (
+	"time"
+
+	"github.com/jozala/omnigrex/internal/role"
+)
+
+type State string
+
+const (
+	StateAbsent     State = "ABSENT"
+	StateDormant    State = "DORMANT"
+	StateDeveloping State = "DEVELOPING"
+	StateReviewing  State = "REVIEWING"
+	StatePRReady    State = "PR_READY"
+	StateNeedsHuman State = "NEEDS_HUMAN"
+	StateClosing    State = "CLOSING"
+	StateClosed     State = "CLOSED"
+)
+
+type Role = role.ID
+
+const (
+	RoleDeveloper = role.Developer
+	RoleReviewer  = role.Reviewer
+)
+
+type Disposition string
+
+const (
+	DispositionApplied              Disposition = "APPLIED"
+	DispositionDeferred             Disposition = "DEFERRED"
+	DispositionDuplicate            Disposition = "DUPLICATE"
+	DispositionStale                Disposition = "STALE"
+	DispositionUnrelated            Disposition = "UNRELATED"
+	DispositionIllegal              Disposition = "ILLEGAL"
+	DispositionReconciliationFailed Disposition = "RECONCILIATION_FAILED"
+)
+
+type Reason string
+
+const (
+	ReasonTriggered                                Reason = "workflow_triggered"
+	ReasonChangeProposalReady                      Reason = "change_proposal_ready"
+	ReasonChangesRequested                         Reason = "changes_requested"
+	ReasonApproved                                 Reason = "approved"
+	ReasonReviewBudgetExhausted                    Reason = "review_budget_exhausted"
+	ReasonReviewHeadReplaced                       Reason = "review_head_replaced"
+	ReasonAgentBlocked                             Reason = "agent_blocked"
+	ReasonInfrastructureRetry                      Reason = "infrastructure_retry"
+	ReasonInfrastructureRetriesExhausted           Reason = "infrastructure_retries_exhausted"
+	ReasonClosureStarted                           Reason = "closure_started"
+	ReasonClosureSettled                           Reason = "closure_settled"
+	ReasonClosureCancellationRecorded              Reason = "closure_cancellation_recorded"
+	ReasonIssueReopened                            Reason = "issue_reopened"
+	ReasonActiveTurn                               Reason = "active_turn"
+	ReasonEventDuplicate                           Reason = "event_duplicate"
+	ReasonReviewDuplicate                          Reason = "review_duplicate"
+	ReasonReviewIdentityConflict                   Reason = "review_identity_conflict"
+	ReasonStateRevisionStale                       Reason = "state_revision_stale"
+	ReasonEventOutOfOrder                          Reason = "event_out_of_order"
+	ReasonSynchronizationStale                     Reason = "synchronization_stale"
+	ReasonSynchronizationDuplicate                 Reason = "synchronization_duplicate"
+	ReasonWorkItemUnrelated                        Reason = "work_item_unrelated"
+	ReasonReviewerActorUnrelated                   Reason = "reviewer_actor_unrelated"
+	ReasonTurnGuardStale                           Reason = "turn_guard_stale"
+	ReasonChangeProposalUnrelated                  Reason = "change_proposal_unrelated"
+	ReasonAssignmentsCollected                     Reason = "assignments_collected"
+	ReasonRetentionGenerationStale                 Reason = "retention_generation_stale"
+	ReasonRetentionCancelled                       Reason = "retention_cancelled"
+	ReasonRetentionNotDue                          Reason = "retention_not_due"
+	ReasonEventIllegalInState                      Reason = "event_illegal_in_state"
+	ReasonInvariantViolation                       Reason = "aggregate_invariant_violation"
+	ReasonInvalidEvent                             Reason = "invalid_event"
+	ReasonWorkflowAbsent                           Reason = "workflow_absent"
+	ReasonAttemptAlreadyActive                     Reason = "attempt_already_active"
+	ReasonCorroborationWithoutActiveTurn           Reason = "corroboration_without_active_turn"
+	ReasonAssignmentConfigurationConflict          Reason = "assignment_configuration_conflict"
+	ReasonAgentTurnPreparationFailed               Reason = "agent_turn_preparation_failed"
+	ReasonAgentTurnMutationReconciliationExhausted Reason = "agent_turn_mutation_reconciliation_exhausted"
+	ReasonWorkflowActionExhausted                  Reason = "workflow_action_exhausted"
+	ReasonWorkflowDefinitionIncompatible           Reason = "workflow_definition_incompatible"
+)
+
+// WorkItem is a unit of software-development work supervised by a human and represented by a durable collaboration artifact
+type WorkItem struct {
+	RepositoryID int64
+	IssueID      int64
+	IssueNumber  int64
+}
+
+type AttemptBudget struct {
+	Used  uint8
+	Limit uint8
+}
+
+type AttemptLifecycle string
+
+const AttemptActive AttemptLifecycle = "ACTIVE"
+
+// WorkflowAttempt is a bounded period of autonomous work started or resumed by a human, with its own retry and review budgets
+type WorkflowAttempt struct {
+	ID                        string
+	Number                    uint64
+	StartedAt                 time.Time
+	Lifecycle                 AttemptLifecycle
+	CurrentStage              StageID
+	ReviewUsage               map[StageID]uint8
+	InfrastructureRetryBudget AttemptBudget
+}
+
+type AttemptCompletionReason string
+
+const (
+	AttemptCompletionSuperseded  AttemptCompletionReason = "SUPERSEDED"
+	AttemptCompletionIssueClosed AttemptCompletionReason = "ISSUE_CLOSED"
+)
+
+type ActiveTurn struct {
+	ID               string
+	SessionID        string
+	AttemptID        string
+	Stage            StageID
+	Role             Role
+	Epoch            uint64
+	ControlRevision  uint64
+	ChangeProposalID int64
+	ExpectedHeadSHA  string
+}
+
+type TurnGuard struct {
+	TurnID           string
+	SessionID        string
+	AttemptID        string
+	Stage            StageID
+	Role             Role
+	Epoch            uint64
+	ControlRevision  uint64
+	ChangeProposalID int64
+	ExpectedHeadSHA  string
+}
+
+type ChangeProposal struct {
+	ID          int64
+	Number      int64
+	HeadSHA     string
+	Open        bool
+	ReadyForSHA string
+}
+
+type ReviewIdentity struct {
+	ID               int64
+	NodeID           string
+	ChangeProposalID int64
+	ActorID          int64
+	HeadSHA          string
+}
+
+type AssignmentStatus string
+
+const (
+	AssignmentActive          AssignmentStatus = "ACTIVE"
+	AssignmentWaitingForHuman AssignmentStatus = "WAITING_FOR_HUMAN"
+	AssignmentCompleted       AssignmentStatus = "COMPLETED"
+)
+
+type RuntimeState string
+
+const (
+	RuntimeStateActive    RuntimeState = "ACTIVE"
+	RuntimeStateRetained  RuntimeState = "RETAINED"
+	RuntimeStateCollected RuntimeState = "COLLECTED"
+)
+
+type Assignments struct {
+	Status         AssignmentStatus
+	RuntimeState   RuntimeState
+	RetainedUntil  time.Time
+	RetentionToken string
+}
+
+type Closure struct {
+	ID              string
+	RetainUntil     time.Time
+	RetentionToken  string
+	ReopenRequested bool
+}
+
+type Snapshot struct {
+	State             State
+	Revision          uint64
+	WorkItem          WorkItem
+	CurrentAttempt    *WorkflowAttempt
+	ChangeProposal    *ChangeProposal
+	ActiveTurn        *ActiveTurn
+	ContinuationStage StageID
+	ResumeRole        Role
+	Assignments       Assignments
+	Closure           *Closure
+	LastAttemptNumber uint64
+}
+
+type Decision struct {
+	Snapshot    Snapshot
+	Disposition Disposition
+	Reason      Reason
+	Actions     []Action
+}
+
+// Event is the closed set of observations accepted by the Workflow reducer.
+type Event interface {
+	isWorkflowEvent()
+}
+
+// EventMetadata identifies when and against which Work Item revision an Event was observed.
+type EventMetadata struct {
+	ID               string
+	ObservedAt       time.Time
+	WorkItem         WorkItem
+	ExpectedRevision uint64
+}
+
+// TriggerEvent records an accepted human command to start a new Workflow Attempt.
+type TriggerEvent struct {
+	EventMetadata
+	AttemptID     string
+	AttemptNumber uint64
+}
+
+func (TriggerEvent) isWorkflowEvent() {}
+
+type TurnOutcome string
+
+const (
+	TurnOutcomeChangeProposalReady  TurnOutcome = "CHANGE_PROPOSAL_READY"
+	TurnOutcomeChangesRequested     TurnOutcome = "CHANGES_REQUESTED"
+	TurnOutcomeApproved             TurnOutcome = "APPROVED"
+	TurnOutcomeBlocked              TurnOutcome = "BLOCKED"
+	TurnOutcomeInfrastructureFailed TurnOutcome = "INFRASTRUCTURE_FAILED"
+)
+
+type PendingEventsObservation struct {
+	Count                  uint32
+	RequiresReconciliation bool
+	LatestObservedHeadSHA  string
+}
+
+// TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
+type TurnSettledEvent struct {
+	EventMetadata
+	Turn                      TurnGuard
+	Outcome                   TurnOutcome
+	ChangeProposal            *ChangeProposal
+	Review                    *ReviewIdentity
+	ExistingReview            *ReviewIdentity
+	AuthorizedReviewerActorID int64
+	PendingEvents             PendingEventsObservation
+	Diagnostic                string
+}
+
+func (TurnSettledEvent) isWorkflowEvent() {}
+
+// SynchronizationEvent records that the linked Change Proposal head moved to a new commit.
+type SynchronizationEvent struct {
+	EventMetadata
+	ChangeProposalID int64
+	PreviousHeadSHA  string
+	HeadSHA          string
+}
+
+func (SynchronizationEvent) isWorkflowEvent() {}
+
+// ReviewObservedEvent records a GitHub review observed for the linked Change Proposal.
+type ReviewObservedEvent struct {
+	EventMetadata
+	Review ReviewIdentity
+}
+
+func (ReviewObservedEvent) isWorkflowEvent() {}
+
+// ChangeProposalObservedEvent records a GitHub Pull Request observed as the Workflow's Change Proposal.
+type ChangeProposalObservedEvent struct {
+	EventMetadata
+	ChangeProposal ChangeProposal
+}
+
+func (ChangeProposalObservedEvent) isWorkflowEvent() {}
+
+// IssueClosedEvent records that the Work Item's GitHub Issue was closed.
+type IssueClosedEvent struct {
+	EventMetadata
+	ClosureID      string
+	RetainUntil    time.Time
+	RetentionToken string
+}
+
+func (IssueClosedEvent) isWorkflowEvent() {}
+
+// ClosureSettledEvent records completion of the durable coordination required after Issue closure.
+type ClosureSettledEvent struct {
+	EventMetadata
+	ClosureID        string
+	Turn             *TurnGuard
+	AssignmentsExist bool
+}
+
+func (ClosureSettledEvent) isWorkflowEvent() {}
+
+// IssueReopenedEvent records that the Work Item's GitHub Issue was reopened.
+type IssueReopenedEvent struct {
+	EventMetadata
+}
+
+func (IssueReopenedEvent) isWorkflowEvent() {}
+
+// AssignmentsCollectedEvent records deletion of retained Assignment runtime state after its retention period.
+type AssignmentsCollectedEvent struct {
+	EventMetadata
+	RetentionToken string
+	RetainUntil    time.Time
+	CollectedAt    time.Time
+}
+
+func (AssignmentsCollectedEvent) isWorkflowEvent() {}
+
+// AssignmentConfigurationConflictEvent records that current Role configuration conflicts with an existing Assignment's immutable binding.
+type AssignmentConfigurationConflictEvent struct {
+	EventMetadata
+	Role Role
+}
+
+func (AssignmentConfigurationConflictEvent) isWorkflowEvent() {}
+
+// AgentTurnPreparationFailedEvent records terminal failure to prepare the next Agent Turn for a Role.
+type AgentTurnPreparationFailedEvent struct {
+	EventMetadata
+	Role             Role
+	Diagnostic       string
+	AssignmentsExist bool
+}
+
+func (AgentTurnPreparationFailedEvent) isWorkflowEvent() {}
+
+// AgentTurnMutationReconciliationExhaustedEvent records exhausted recovery of uncertain mutations from an Agent Turn.
+type AgentTurnMutationReconciliationExhaustedEvent struct {
+	EventMetadata
+	Role       Role
+	Diagnostic string
+}
+
+func (AgentTurnMutationReconciliationExhaustedEvent) isWorkflowEvent() {}
+
+// WorkflowActionExhaustedEvent records that durable Workflow coordination or an effect exhausted its retry budget.
+type WorkflowActionExhaustedEvent struct {
+	EventMetadata
+	ResumeRole Role
+	Diagnostic string
+}
+
+func (WorkflowActionExhaustedEvent) isWorkflowEvent() {}
+
+type EventKind string
+
+const (
+	EventKindTrigger                                  EventKind = "TRIGGER"
+	EventKindTurnSettled                              EventKind = "TURN_SETTLED"
+	EventKindSynchronization                          EventKind = "SYNCHRONIZATION"
+	EventKindReviewObserved                           EventKind = "REVIEW_OBSERVED"
+	EventKindChangeProposalObserved                   EventKind = "CHANGE_PROPOSAL_OBSERVED"
+	EventKindIssueClosed                              EventKind = "ISSUE_CLOSED"
+	EventKindClosureSettled                           EventKind = "CLOSURE_SETTLED"
+	EventKindIssueReopened                            EventKind = "ISSUE_REOPENED"
+	EventKindAssignmentsCollected                     EventKind = "ASSIGNMENTS_COLLECTED"
+	EventKindAssignmentConfigurationConflict          EventKind = "ASSIGNMENT_CONFIGURATION_CONFLICT"
+	EventKindAgentTurnPreparationFailed               EventKind = "AGENT_TURN_PREPARATION_FAILED"
+	EventKindAgentTurnMutationReconciliationExhausted EventKind = "AGENT_TURN_MUTATION_RECONCILIATION_EXHAUSTED"
+	EventKindWorkflowActionExhausted                  EventKind = "WORKFLOW_ACTION_EXHAUSTED"
+)
+
+type TurnPurpose string
+
+const (
+	TurnPurposeInitialDevelopment TurnPurpose = "INITIAL_DEVELOPMENT"
+	TurnPurposeReview             TurnPurpose = "REVIEW"
+	TurnPurposeRequestedChanges   TurnPurpose = "REQUESTED_CHANGES"
+	TurnPurposeRetry              TurnPurpose = "RETRY"
+	TurnPurposeSynchronization    TurnPurpose = "SYNCHRONIZATION"
+	TurnPurposeReactivation       TurnPurpose = "REACTIVATION"
+)
+
+// Action describes a durable side effect requested by a Workflow decision.
+type Action interface {
+	isWorkflowAction()
+}
+
+type AssignmentGeneration string
+
+const (
+	AssignmentGenerationCurrent  AssignmentGeneration = "CURRENT"
+	AssignmentGenerationRetained AssignmentGeneration = "RETAINED"
+	AssignmentGenerationNew      AssignmentGeneration = "NEW"
+)
+
+// EnsureAssignmentsAction requests the Agent Participants and Stage Assignments needed for a generation.
+type EnsureAssignmentsAction struct {
+	Mode AssignmentGeneration
+}
+
+func (EnsureAssignmentsAction) isWorkflowAction() {}
+
+// CompleteAttemptAction marks a Workflow Attempt complete for the specified reason.
+type CompleteAttemptAction struct {
+	AttemptID string
+	Reason    AttemptCompletionReason
+}
+
+func (CompleteAttemptAction) isWorkflowAction() {}
+
+// CreateAttemptAction persists a newly started Workflow Attempt.
+type CreateAttemptAction struct {
+	Attempt WorkflowAttempt
+}
+
+func (CreateAttemptAction) isWorkflowAction() {}
+
+// ConsumeRunLabelAction removes the label that requested a Workflow Attempt.
+type ConsumeRunLabelAction struct{}
+
+func (ConsumeRunLabelAction) isWorkflowAction() {}
+
+// EnqueueTurnAction schedules an Agent Turn for a Stage and Role.
+type EnqueueTurnAction struct {
+	Stage           StageID
+	Role            Role
+	Purpose         TurnPurpose
+	ExpectedHeadSHA string
+	RetryOfTurnID   string
+}
+
+func (EnqueueTurnAction) isWorkflowAction() {}
+
+// ReconcileLabelsAction synchronizes repository labels with the Workflow state.
+type ReconcileLabelsAction struct {
+	State       State
+	ReadyForSHA string
+}
+
+func (ReconcileLabelsAction) isWorkflowAction() {}
+
+// RecordReviewAction persists an observed review and whether the Workflow accepted it.
+type RecordReviewAction struct {
+	Review   ReviewIdentity
+	Accepted bool
+}
+
+func (RecordReviewAction) isWorkflowAction() {}
+
+// MarkHumanHandoffAction records that autonomous progress has returned to a human.
+type MarkHumanHandoffAction struct {
+	Reason     Reason
+	Diagnostic string
+}
+
+func (MarkHumanHandoffAction) isWorkflowAction() {}
+
+// CloseMutationAdmissionAction prevents a Turn from starting further repository mutations.
+type CloseMutationAdmissionAction struct {
+	Turn TurnGuard
+}
+
+func (CloseMutationAdmissionAction) isWorkflowAction() {}
+
+// StopTurnAction requests a cooperative stop of an active Agent Turn.
+type StopTurnAction struct {
+	Turn TurnGuard
+}
+
+func (StopTurnAction) isWorkflowAction() {}
+
+// InterruptTurnForHumanHandoffAction terminates a Turn under a durable Human Handoff recovery barrier.
+type InterruptTurnForHumanHandoffAction struct {
+	Turn TurnGuard
+}
+
+func (InterruptTurnForHumanHandoffAction) isWorkflowAction() {}
+
+// SettleClosureAction schedules closure settlement for the identified closure request.
+type SettleClosureAction struct {
+	ClosureID string
+}
+
+func (SettleClosureAction) isWorkflowAction() {}
+
+// CompleteAssignmentsAction marks the current Agent Participants complete.
+type CompleteAssignmentsAction struct{}
+
+func (CompleteAssignmentsAction) isWorkflowAction() {}
+
+// ScheduleRetentionAction retains completed Agent state until the specified deadline.
+type ScheduleRetentionAction struct {
+	RetentionToken string
+	RetainUntil    time.Time
+}
+
+func (ScheduleRetentionAction) isWorkflowAction() {}
+
+// CancelRetentionAction cancels the retention generation identified by its token.
+type CancelRetentionAction struct {
+	RetentionToken string
+}
+
+func (CancelRetentionAction) isWorkflowAction() {}
+
+// RecordPendingEventAction records an event that cannot be applied while a Turn is active.
+type RecordPendingEventAction struct {
+	EventID    string
+	Kind       EventKind
+	ObservedAt time.Time
+}
+
+func (RecordPendingEventAction) isWorkflowAction() {}
+
+// ReconcilePendingEventsAction reconciles deferred events before scheduling its fallback Turn.
+type ReconcilePendingEventsAction struct {
+	SourceTurn            TurnGuard
+	Count                 uint32
+	LatestObservedHeadSHA string
+	FallbackRole          Role
+	FallbackStage         StageID
+	FallbackPurpose       TurnPurpose
+	FallbackExpectedHead  string
+	RetryOfTurnID         string
+}
+
+func (ReconcilePendingEventsAction) isWorkflowAction() {}

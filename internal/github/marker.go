@@ -1,0 +1,189 @@
+package github
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+const MarkerVersion = "v1"
+
+var (
+	ErrInvalidMarkerToken  = errors.New("invalid Omnigrex marker token")
+	ErrUntrustedMarkerText = errors.New("text contains an untrusted Omnigrex marker")
+)
+
+type Marker struct {
+	WorkflowID        string
+	AgentAssignmentID string
+	OperationID       string
+}
+
+// MarkerInspection reports valid markers and whether any Omnigrex-like comment was malformed.
+type MarkerInspection struct {
+	Markers   []Marker
+	Untrusted bool
+}
+
+func RenderMarker(marker Marker) (string, error) {
+	if err := validateMarker(marker); err != nil {
+		return "", err
+	}
+	var rendered strings.Builder
+	rendered.WriteString("<!-- omnigrex:")
+	rendered.WriteString(MarkerVersion)
+	rendered.WriteString(" workflow=")
+	rendered.WriteString(marker.WorkflowID)
+	if marker.AgentAssignmentID != "" {
+		rendered.WriteString(" assignment=")
+		rendered.WriteString(marker.AgentAssignmentID)
+	}
+	if marker.OperationID != "" {
+		rendered.WriteString(" operation=")
+		rendered.WriteString(marker.OperationID)
+	}
+	rendered.WriteString(" -->")
+	return rendered.String(), nil
+}
+
+func ParseMarkers(text string) []Marker {
+	inspection := InspectMarkers(text)
+	if inspection.Untrusted {
+		return nil
+	}
+	return inspection.Markers
+}
+
+// InspectMarkers parses valid markers while retaining evidence of malformed Omnigrex-like comments.
+func InspectMarkers(text string) MarkerInspection {
+	const prefix = "<!-- omnigrex"
+	markers := make([]Marker, 0)
+	untrusted := false
+	for offset := 0; offset < len(text); {
+		start := strings.Index(text[offset:], prefix)
+		if start < 0 {
+			break
+		}
+		start += offset
+		end := strings.Index(text[start+4:], "-->")
+		next := strings.Index(text[start+len(prefix):], prefix)
+		if next >= 0 {
+			next += start + len(prefix)
+		}
+		if next >= 0 && (end < 0 || next < start+4+end) {
+			untrusted = true
+			offset = next
+			continue
+		}
+		if end < 0 {
+			untrusted = true
+			break
+		}
+		end += start + 4
+		if marker, ok := parseMarkerComment(text[start+4 : end]); ok {
+			markers = append(markers, marker)
+		} else {
+			untrusted = true
+		}
+		offset = end + 3
+	}
+	return MarkerInspection{Markers: markers, Untrusted: untrusted}
+}
+
+func EnsureMarker(text string, marker Marker) (string, error) {
+	rendered, err := RenderMarker(marker)
+	if err != nil {
+		return "", err
+	}
+	inspection := InspectMarkers(text)
+	if inspection.Untrusted {
+		return "", ErrUntrustedMarkerText
+	}
+	for _, existing := range inspection.Markers {
+		if existing == marker {
+			return text, nil
+		}
+	}
+	if text == "" {
+		return rendered, nil
+	}
+	separator := "\n\n"
+	if strings.HasSuffix(text, "\n\n") {
+		separator = ""
+	} else if strings.HasSuffix(text, "\n") {
+		separator = "\n"
+	}
+	return text + separator + rendered, nil
+}
+
+func parseMarkerComment(comment string) (Marker, bool) {
+	if len(comment) < 2 || comment[0] != ' ' || comment[len(comment)-1] != ' ' {
+		return Marker{}, false
+	}
+	fields := strings.Split(comment[1:len(comment)-1], " ")
+	if len(fields) < 2 || len(fields) > 4 || fields[0] != "omnigrex:"+MarkerVersion {
+		return Marker{}, false
+	}
+	workflowID, ok := markerField(fields[1], "workflow")
+	if !ok {
+		return Marker{}, false
+	}
+	marker := Marker{WorkflowID: workflowID}
+	index := 2
+	if index < len(fields) {
+		if assignmentID, assignment := markerField(fields[index], "assignment"); assignment {
+			marker.AgentAssignmentID = assignmentID
+			index++
+		}
+	}
+	if index < len(fields) {
+		if operationID, operation := markerField(fields[index], "operation"); operation {
+			marker.OperationID = operationID
+			index++
+		}
+	}
+	if index != len(fields) || validateMarker(marker) != nil {
+		return Marker{}, false
+	}
+	return marker, true
+}
+
+func markerField(field, name string) (string, bool) {
+	prefix := name + "="
+	if !strings.HasPrefix(field, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(field, prefix), true
+}
+
+func validateMarker(marker Marker) error {
+	if !validMarkerToken(marker.WorkflowID) {
+		return fmt.Errorf("%w: workflow id", ErrInvalidMarkerToken)
+	}
+	for name, value := range map[string]string{
+		"workflow id":         marker.WorkflowID,
+		"agent assignment id": marker.AgentAssignmentID,
+		"operation id":        marker.OperationID,
+	} {
+		if value != "" && !validMarkerToken(value) {
+			return fmt.Errorf("%w: %s", ErrInvalidMarkerToken, name)
+		}
+	}
+	return nil
+}
+
+func validMarkerToken(value string) bool {
+	if len(value) == 0 || len(value) > 128 || !asciiAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if !asciiAlphaNumeric(value[index]) && !strings.ContainsRune("-_.:", rune(value[index])) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}

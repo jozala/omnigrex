@@ -1,0 +1,556 @@
+//go:build integration
+
+package store_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jozala/omnigrex/internal/store"
+)
+
+func TestInsertWebhookDeliveryDeduplicatesDeliveryID(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := store.WebhookDelivery{
+		DeliveryID:      "123e4567-e89b-12d3-a456-426614174000",
+		EventName:       "issues",
+		Action:          "labeled",
+		RepositoryID:    3_000_000_001,
+		RepositoryOwner: "jozala",
+		RepositoryName:  "omnigrex",
+		IssueID:         5_367_580_208,
+		IssueNumber:     3_000_000_002,
+		Headers:         map[string]string{"X-GitHub-Event": "issues"},
+		Payload:         []byte(`{"original":true}`),
+	}
+
+	inserted, err := database.InsertWebhookDelivery(ctx, delivery)
+	if err != nil {
+		t.Fatalf("first InsertWebhookDelivery() error = %v", err)
+	}
+	if !inserted {
+		t.Error("first InsertWebhookDelivery() inserted = false, want true")
+	}
+	delivery.Payload = []byte(`{"replacement":true}`)
+	inserted, err = database.InsertWebhookDelivery(ctx, delivery)
+	if err != nil {
+		t.Fatalf("duplicate InsertWebhookDelivery() error = %v", err)
+	}
+	if inserted {
+		t.Error("duplicate InsertWebhookDelivery() inserted = true, want false")
+	}
+
+	got, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if got.Status != store.WebhookPending || got.AttemptCount != 0 {
+		t.Errorf("delivery state = (%q, %d attempts), want (PENDING, 0 attempts)", got.Status, got.AttemptCount)
+	}
+	if got.RepositoryID != delivery.RepositoryID || got.IssueID != delivery.IssueID || got.IssueNumber != delivery.IssueNumber {
+		t.Errorf("stored GitHub identity = (%d, %d, %d), want (%d, %d, %d)",
+			got.RepositoryID, got.IssueID, got.IssueNumber, delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber)
+	}
+	if string(got.Payload) != `{"original":true}` {
+		t.Errorf("stored payload = %s, want original payload", got.Payload)
+	}
+}
+
+func TestClaimWebhookDeliveryReclaimsExpiredLeaseAndFencesOldOwner(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", 75*time.Millisecond)
+	if err != nil {
+		t.Fatalf("first ClaimWebhookDelivery() error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("first ClaimWebhookDelivery() = nil, want claim")
+	}
+	if first.AttemptCount != 1 || first.ClaimOwner != "processor-a" || first.ClaimToken == "" {
+		t.Errorf("first claim = %#v, want attempt 1 owned by processor-a with token", first)
+	}
+	claimedAgain, err := database.ClaimWebhookDelivery(ctx, "processor-b", time.Second)
+	if err != nil {
+		t.Fatalf("ClaimWebhookDelivery() during live lease error = %v", err)
+	}
+	if claimedAgain != nil {
+		t.Errorf("ClaimWebhookDelivery() during live lease = %#v, want nil", claimedAgain)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	second, err := database.ClaimWebhookDelivery(ctx, "processor-b", 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("reclaim ClaimWebhookDelivery() error = %v", err)
+	}
+	if second == nil {
+		t.Fatal("reclaim ClaimWebhookDelivery() = nil, want expired delivery")
+	}
+	if second.AttemptCount != 2 || second.ClaimOwner != "processor-b" || second.ClaimToken == first.ClaimToken {
+		t.Errorf("reclaimed delivery = %#v, want attempt 2 with a new processor-b token", second)
+	}
+
+	err = database.RenewWebhookClaim(ctx, delivery.DeliveryID, first.ClaimToken, time.Second)
+	if !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("RenewWebhookClaim() with old token error = %v, want ErrWebhookClaimLost", err)
+	}
+	beforeRenewal := second.LeaseExpiresAt
+	if err := database.RenewWebhookClaim(ctx, delivery.DeliveryID, second.ClaimToken, time.Second); err != nil {
+		t.Fatalf("RenewWebhookClaim() with current token error = %v", err)
+	}
+	got, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if got.LeaseExpiresAt == nil || !got.LeaseExpiresAt.After(beforeRenewal) {
+		t.Errorf("renewed lease expiry = %v, want after %v", got.LeaseExpiresAt, beforeRenewal)
+	}
+}
+
+func TestClaimWebhookDeliveryAllowsConcurrentProcessorsToSkipLockedRows(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, deliveryID := range []string{
+		"123e4567-e89b-12d3-a456-426614174000",
+		"223e4567-e89b-12d3-a456-426614174000",
+	} {
+		if _, err := database.InsertWebhookDelivery(ctx, webhookDelivery(deliveryID)); err != nil {
+			t.Fatalf("insert delivery %s: %v", deliveryID, err)
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan *store.WebhookClaim, 2)
+	errors := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, owner := range []string{"processor-a", "processor-b"} {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			claim, err := database.ClaimWebhookDelivery(ctx, owner, 30*time.Second)
+			results <- claim
+			errors <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent ClaimWebhookDelivery() error = %v", err)
+		}
+	}
+	claimedIDs := make(map[string]bool)
+	for claim := range results {
+		if claim == nil {
+			t.Fatal("concurrent ClaimWebhookDelivery() = nil, want one claim per processor")
+		}
+		if claim.AttemptCount != 1 {
+			t.Errorf("claim attempt count = %d, want 1", claim.AttemptCount)
+		}
+		if claimedIDs[claim.DeliveryID] {
+			t.Errorf("delivery %s claimed by both processors", claim.DeliveryID)
+		}
+		claimedIDs[claim.DeliveryID] = true
+	}
+	if len(claimedIDs) != 2 {
+		t.Errorf("claimed delivery IDs = %#v, want two distinct rows", claimedIDs)
+	}
+}
+
+func TestCompleteWebhookDeliveryAtomicallyRecordsSupportedOrIgnoredOutcome(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	supported := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, supported); err != nil {
+		t.Fatalf("insert supported delivery: %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("claim supported delivery = (%#v, %v), want claim", claim, err)
+	}
+	payload := json.RawMessage(`{"delivery_id":"123e4567-e89b-12d3-a456-426614174000","event":"issues","action":"closed"}`)
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, "323e4567-e89b-12d3-a456-426614174000", store.WebhookCompletion{
+		Outcome:           store.WebhookOutcomeProcessed,
+		NormalizedPayload: payload,
+	}); !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("CompleteWebhookDelivery() with wrong token error = %v, want ErrWebhookClaimLost", err)
+	}
+	if _, err := database.GetNormalizedEvent(ctx, supported.DeliveryID); !errors.Is(err, store.ErrNormalizedEventNotFound) {
+		t.Errorf("GetNormalizedEvent() before fenced completion error = %v, want ErrNormalizedEventNotFound", err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome:           store.WebhookOutcomeProcessed,
+		NormalizedPayload: payload,
+	}); err != nil {
+		t.Fatalf("CompleteWebhookDelivery(PROCESSED) error = %v", err)
+	}
+
+	deliveryState, err := database.GetWebhookDelivery(ctx, supported.DeliveryID)
+	if err != nil {
+		t.Fatalf("get processed delivery: %v", err)
+	}
+	if deliveryState.Status != store.WebhookProcessed || deliveryState.ProcessedAt == nil || deliveryState.ClaimToken != nil {
+		t.Errorf("processed delivery state = %#v, want completed and unclaimed", deliveryState)
+	}
+	event, err := database.GetNormalizedEvent(ctx, supported.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetNormalizedEvent() error = %v", err)
+	}
+	if event.Status != store.NormalizedEventPending || !json.Valid(event.Payload) {
+		t.Errorf("normalized event = %#v, want valid PENDING event", event)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome:           store.WebhookOutcomeProcessed,
+		NormalizedPayload: payload,
+	}); !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("duplicate CompleteWebhookDelivery() error = %v, want ErrWebhookClaimLost", err)
+	}
+
+	ignored := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	ignored.EventName = "push"
+	ignored.Action = ""
+	if _, err := database.InsertWebhookDelivery(ctx, ignored); err != nil {
+		t.Fatalf("insert ignored delivery: %v", err)
+	}
+	claim, err = database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("claim ignored delivery = (%#v, %v), want claim", claim, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{
+		Outcome: store.WebhookOutcomeIgnored,
+	}); err != nil {
+		t.Fatalf("CompleteWebhookDelivery(IGNORED) error = %v", err)
+	}
+	deliveryState, err = database.GetWebhookDelivery(ctx, ignored.DeliveryID)
+	if err != nil {
+		t.Fatalf("get ignored delivery: %v", err)
+	}
+	if deliveryState.Status != store.WebhookIgnored || deliveryState.ProcessedAt == nil {
+		t.Errorf("ignored delivery state = %#v, want IGNORED completion", deliveryState)
+	}
+	if _, err := database.GetNormalizedEvent(ctx, ignored.DeliveryID); !errors.Is(err, store.ErrNormalizedEventNotFound) {
+		t.Errorf("GetNormalizedEvent() for ignored delivery error = %v, want ErrNormalizedEventNotFound", err)
+	}
+}
+
+func TestFailWebhookDeliveryIsFencedAndRecordsFailure(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+
+	err = database.FailWebhookDelivery(ctx, claim.DeliveryID, "323e4567-e89b-12d3-a456-426614174000", errors.New("wrong shape"))
+	if !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("FailWebhookDelivery() with wrong token error = %v, want ErrWebhookClaimLost", err)
+	}
+	if err := database.FailWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, errors.New("wrong shape")); err != nil {
+		t.Fatalf("FailWebhookDelivery() error = %v", err)
+	}
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.ProcessedAt == nil || record.ClaimToken != nil || record.LastError == nil || *record.LastError != "wrong shape" {
+		t.Errorf("failed delivery state = %#v, want FAILED, unclaimed, with wrong shape error", record)
+	}
+	if _, err := database.GetNormalizedEvent(ctx, delivery.DeliveryID); !errors.Is(err, store.ErrNormalizedEventNotFound) {
+		t.Errorf("GetNormalizedEvent() after failure error = %v, want ErrNormalizedEventNotFound", err)
+	}
+}
+
+func TestWebhookFailureAcknowledgementBoundsRetryablePoisonAndFencesAttempt(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+		if err != nil || claim == nil {
+			t.Fatalf("attempt %d ClaimWebhookDelivery() = (%#v, %v), want claim", attempt, claim, err)
+		}
+		if claim.AttemptCount != attempt {
+			t.Fatalf("claim attempt = %d, want %d", claim.AttemptCount, attempt)
+		}
+		if attempt == 1 {
+			err = database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount+1, errors.New("poison"), true)
+			if !errors.Is(err, store.ErrWebhookClaimLost) {
+				t.Fatalf("AcknowledgeWebhookDeliveryFailure() with wrong attempt error = %v, want ErrWebhookClaimLost", err)
+			}
+		}
+		if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, errors.New("poison"), true); err != nil {
+			t.Fatalf("attempt %d AcknowledgeWebhookDeliveryFailure() error = %v", attempt, err)
+		}
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.AttemptCount != 3 || record.ClaimToken != nil || record.LastError == nil || *record.LastError != "poison" {
+		t.Errorf("exhausted delivery = %#v, want FAILED after 3 attempts with poison error", record)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim != nil {
+		t.Errorf("ClaimWebhookDelivery() after exhaustion = (%#v, %v), want no claim", claim, err)
+	}
+}
+
+func TestWebhookFailureAcknowledgementKeepsTransientFailureRetryable(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", 30*time.Second)
+	if err != nil || first == nil {
+		t.Fatalf("first ClaimWebhookDelivery() = (%#v, %v), want claim", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("database unavailable"), true); err != nil {
+		t.Fatalf("AcknowledgeWebhookDeliveryFailure() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookPending || record.AttemptCount != 1 || record.ProcessedAt != nil || record.LastError == nil || *record.LastError != "database unavailable" {
+		t.Fatalf("retryable delivery = %#v, want PENDING attempt 1 with transient error", record)
+	}
+	second, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || second == nil || second.DeliveryID != delivery.DeliveryID || second.AttemptCount != 2 {
+		t.Errorf("retry ClaimWebhookDelivery() = (%#v, %v), want same delivery at attempt 2", second, err)
+	}
+}
+
+func TestWebhookFailureAcknowledgementTerminallyFailsDeterministicError(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, store.ErrWorkflowDecisionInvalid, false); err != nil {
+		t.Fatalf("AcknowledgeWebhookDeliveryFailure() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, delivery.DeliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.AttemptCount != 1 || record.ProcessedAt == nil || record.ClaimToken != nil || record.LastError == nil {
+		t.Errorf("deterministically failed delivery = %#v, want terminal FAILED attempt 1", record)
+	}
+}
+
+func TestClaimWebhookDeliveryDoesNotLetRetryingPoisonStarveFreshDelivery(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	poison := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	valid := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, poison); err != nil {
+		t.Fatalf("insert poison delivery: %v", err)
+	}
+	poisonClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || poisonClaim == nil {
+		t.Fatalf("claim poison delivery = (%#v, %v)", poisonClaim, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, poisonClaim.DeliveryID, poisonClaim.ClaimToken, poisonClaim.AttemptCount, errors.New("retry poison"), true); err != nil {
+		t.Fatalf("acknowledge poison retry: %v", err)
+	}
+	if _, err := database.InsertWebhookDelivery(ctx, valid); err != nil {
+		t.Fatalf("insert valid delivery: %v", err)
+	}
+
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil || claim.DeliveryID != valid.DeliveryID || claim.AttemptCount != 1 {
+		t.Fatalf("claim with poison retry waiting = (%#v, %v), want fresh valid delivery", claim, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete valid delivery after poison: %v", err)
+	}
+	retry, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || retry == nil || retry.DeliveryID != poison.DeliveryID || retry.AttemptCount != 2 {
+		t.Errorf("claim after valid delivery = (%#v, %v), want poison retry attempt 2", retry, err)
+	}
+}
+
+func TestClaimWebhookDeliveryKeepsLaterIssueWorkBehindUnresolvedReopen(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reopen := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	reopen.Action = "reopened"
+	if _, err := database.InsertWebhookDelivery(ctx, reopen); err != nil {
+		t.Fatalf("insert reopen delivery: %v", err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", 30*time.Second)
+	if err != nil || first == nil || first.DeliveryID != reopen.DeliveryID {
+		t.Fatalf("claim reopen delivery = (%#v, %v)", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailure(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("temporary failure"), true); err != nil {
+		t.Fatalf("return reopen for retry: %v", err)
+	}
+	later := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	later.Action = "labeled"
+	if _, err := database.InsertWebhookDelivery(ctx, later); err != nil {
+		t.Fatalf("insert later Issue delivery: %v", err)
+	}
+	unrelated := webhookDelivery("323e4567-e89b-12d3-a456-426614174000")
+	unrelated.IssueID, unrelated.IssueNumber = 457, 13
+	if _, err := database.InsertWebhookDelivery(ctx, unrelated); err != nil {
+		t.Fatalf("insert unrelated delivery: %v", err)
+	}
+
+	independent, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || independent == nil || independent.DeliveryID != unrelated.DeliveryID {
+		t.Fatalf("claim with unresolved reopen = (%#v, %v), want unrelated fresh delivery", independent, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, independent.DeliveryID, independent.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete unrelated delivery: %v", err)
+	}
+	retry, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || retry == nil || retry.DeliveryID != reopen.DeliveryID {
+		t.Fatalf("claim with unresolved reopen = (%#v, %v), want reopen retry", retry, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, retry.DeliveryID, retry.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatalf("complete reopen retry: %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
+	if err != nil || claim == nil || claim.DeliveryID != later.DeliveryID {
+		t.Fatalf("claim after reopen completion = (%#v, %v), want later Issue delivery", claim, err)
+	}
+}
+
+func TestClaimWebhookDeliveryFailsExpiredExhaustedPoisonBeforeClaimingValidWork(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	poison := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	valid := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, poison); err != nil {
+		t.Fatalf("insert poison delivery: %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+		if err != nil || claim == nil || claim.DeliveryID != poison.DeliveryID {
+			t.Fatalf("poison attempt %d claim = (%#v, %v)", attempt, claim, err)
+		}
+		if err := database.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, errors.New("transient poison"), true); err != nil {
+			t.Fatalf("poison attempt %d acknowledgement: %v", attempt, err)
+		}
+	}
+	finalClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 50*time.Millisecond)
+	if err != nil || finalClaim == nil || finalClaim.DeliveryID != poison.DeliveryID || finalClaim.AttemptCount != 3 {
+		t.Fatalf("final poison claim = (%#v, %v), want attempt 3", finalClaim, err)
+	}
+	if _, err := database.InsertWebhookDelivery(ctx, valid); err != nil {
+		t.Fatalf("insert valid delivery: %v", err)
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	validClaim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || validClaim == nil || validClaim.DeliveryID != valid.DeliveryID {
+		t.Fatalf("claim after exhausted poison = (%#v, %v), want valid delivery", validClaim, err)
+	}
+	record, err := database.GetWebhookDelivery(ctx, poison.DeliveryID)
+	if err != nil {
+		t.Fatalf("get exhausted poison: %v", err)
+	}
+	if record.Status != store.WebhookFailed || record.ProcessedAt == nil || record.ClaimToken != nil || record.LastError == nil {
+		t.Errorf("expired exhausted poison = %#v, want terminal FAILED state", record)
+	}
+}
+
+func TestExpiredWebhookClaimCannotCompleteOrFail(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 50*time.Millisecond)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	completion := store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}
+	if err := database.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, completion); !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("CompleteWebhookDelivery() after expiry error = %v, want ErrWebhookClaimLost", err)
+	}
+	if err := database.FailWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, errors.New("late failure")); !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("FailWebhookDelivery() after expiry error = %v, want ErrWebhookClaimLost", err)
+	}
+}
+
+func openWebhookStore(t *testing.T) *store.Store {
+	t.Helper()
+	postgres := startPostgres(t)
+	passwordFile := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
+		t.Fatalf("write database password: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(database.Close)
+	return database
+}
+
+func webhookDelivery(deliveryID string) store.WebhookDelivery {
+	return store.WebhookDelivery{
+		DeliveryID:      deliveryID,
+		EventName:       "issues",
+		Action:          "closed",
+		RepositoryID:    9123,
+		RepositoryOwner: "jozala",
+		RepositoryName:  "omnigrex",
+		IssueID:         456,
+		IssueNumber:     12,
+		Headers:         map[string]string{"X-GitHub-Event": "issues"},
+		Payload:         []byte(`{"action":"closed"}`),
+	}
+}

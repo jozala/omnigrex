@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Run unit tests
+        run: go test -race ./...
+
+      - name: Validate Docker Compose
+        env:
+          OMNIGREX_DOCKER_GID: "0"
+          OMNIGREX_SECRET_GID: "1"
+          OMNIGREX_GITHUB_DEVELOPER_APP_ID: "1"
+          OMNIGREX_GITHUB_REVIEWER_APP_ID: "2"
+          OMNIGREX_OPENCODE_ACP_V1_IMAGE: registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          OMNIGREX_OPENCODE_ACP_V1_PLATFORM: linux/amd64
+          OMNIGREX_DATABASE_PASSWORD_FILE: /dev/null
+          OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /dev/null
+          OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /dev/null
+          OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /dev/null
+          OMNIGREX_PROVIDER_CREDENTIALS_FILE: /dev/null
+        run: docker compose config --quiet
+
+      - name: Build image
+        run: docker build --tag omnigrex/orchestrator:dev .
+
+      - name: Verify non-root image user
+        run: test "$(docker image inspect --format '{{.Config.User}}' omnigrex/orchestrator:dev)" = "10001:10001"
+
+      - name: Build OpenCode Runtime Process image
+        run: docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 .
+
+      - name: Build previous OpenCode compatibility image
+        run: docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.19 --tag omnigrex/opencode:1.18.19 .
+
+      - name: Verify hardened OpenCode image
+        run: |
+          docker run --rm --read-only \
+            --tmpfs /home/opencode/.cache:rw,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /home/opencode/.config:rw,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /home/opencode/.local/share:rw,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /home/opencode/.local/state:rw,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /home/opencode/.opencode:rw,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /tmp/opencode:rw,uid=10001,gid=10001,mode=0700 \
+            --entrypoint sh omnigrex/opencode:1.18.29 \
+            -c 'test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && opencode --version && mise --version && git --version'
+
+      - name: Run Docker-backed integration tests
+        run: go test -race -tags=integration ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+
+      - name: Compile live GitHub App gate
+        run: go test -tags=live ./internal/github -run '^$'
+
+      - name: Run full-stack Docker Compose test
+        env:
+          OMNIGREX_COMPOSE_INTEGRATION: "1"
+        run: |
+          OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
+          go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v

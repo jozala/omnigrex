@@ -13,6 +13,10 @@ _Avoid_: Task, ticket
 The complete coordination process associated with one Work Item.
 _Avoid_: Pipeline, job
 
+**Workflow Definition**:
+The immutable code-defined Stage graph, Role bindings, accepted purposes, outcomes, and review limits used by every Workflow in one deployment.
+_Avoid_: Persisted workflow template, user-authored workflow
+
 **Workflow Attempt**:
 A bounded period of autonomous work started or resumed by a human, with its own retry and review budgets.
 _Avoid_: Run, execution
@@ -20,6 +24,10 @@ _Avoid_: Run, execution
 **Review Cycle**:
 One Reviewer evaluation of the current Change Proposal within a Workflow Attempt.
 _Avoid_: Review iteration, feedback loop
+
+**Stage**:
+A stable named position in a Workflow Definition that selects one Role and defines accepted purposes and outcome transitions.
+_Avoid_: Status, step number
 
 **Change Proposal**:
 The reviewable set of repository changes produced for a Work Item.
@@ -40,15 +48,23 @@ A named set of responsibilities, goals, permissions, and decision boundaries wit
 _Avoid_: Job title, prompt
 
 **Agent Profile**:
-A named, versioned set of instructions and configuration used by an agent performing a Role.
+A repository-owned named, versioned set of instructions and configuration that declares the Role performed by an agent.
 _Avoid_: Persona, agent definition
 
-**Agent Assignment**:
-The binding of a Work Item, Role, Agent Profile identity, and immutable Runtime Profile for a period of responsibility.
-_Avoid_: Agent job, delegation
+**Assignment Generation**:
+A durable epoch that groups the Agent Participants and Stage Assignments selected for one period of Workflow responsibility.
+_Avoid_: Attempt, session generation
+
+**Agent Participant**:
+The durable identity of one Agent Profile participating in a Work Item during one Assignment Generation, including its immutable Runtime Profile binding.
+_Avoid_: Role, Agent Session, worker
+
+**Stage Assignment**:
+The immutable binding from one Stage in an Assignment Generation to an Agent Participant whose Agent Profile belongs to the Stage's Role.
+_Avoid_: Mutable assignment status, Agent Participant
 
 **Agent Session**:
-The persistent conversational context owned by one Agent Assignment and reusable across multiple Agent Turns.
+The persistent conversational context owned by one Agent Participant and reusable across multiple Agent Turns and Stage Assignments that select that Participant.
 _Avoid_: Chat, run
 
 **Agent Turn**:
@@ -80,6 +96,10 @@ _Avoid_: Log line, transcript entry
 **Control Owner**:
 The single actor authorized to submit the next prompt to an Agent Session.
 _Avoid_: Session mode, operator
+
+**Role Policy**:
+The immutable deployment policy that maps a Role to capabilities, credential authorities, runtime hardening, workspace isolation, and human-control eligibility.
+_Avoid_: Agent Profile, Workflow transition
 
 **Human Handoff**:
 A Workflow state in which autonomous progress stops and responsibility is explicitly returned to a human.

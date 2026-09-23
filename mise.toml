@@ -1,0 +1,103 @@
+[tools]
+go = "1.27.0"
+"go:golang.org/x/tools/cmd/deadcode" = "v0.50.0"
+
+[tasks.format]
+description = "Format Go source files"
+run = "gofmt -w ."
+
+[tasks.format-check]
+description = "Check Go source formatting"
+run = '''
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then
+  printf '%s\n' "$unformatted"
+  exit 1
+fi
+'''
+
+[tasks.lint]
+description = "Run static analysis"
+run = "go vet ./..."
+
+[tasks.deadcode]
+description = "Reject production functions unreachable from the application"
+run = '''
+if ! output="$(deadcode ./...)"; then
+  exit 1
+fi
+
+unexpected="$(printf '%s\n' "$output" | grep -Ev '^(internal/agentturn/execution_worker\.go:[0-9]+:[0-9]+: unreachable func: (ExecutionWorkerConfig|ExecutionWorker)\.(String|GoString)|internal/agentturn/outcome_reconciler\.go:[0-9]+:[0-9]+: unreachable func: OutcomeReconcilerConfig\.(String|GoString))$' || true)"
+if [ -n "$unexpected" ]; then
+  printf '%s\n' "$unexpected"
+  exit 1
+fi
+'''
+
+[tasks.test]
+description = "Run unit tests"
+run = "go test -race ./..."
+
+[tasks.test-integration]
+description = "Run Docker-backed integration tests"
+depends = ["agent-images"]
+run = "go test -race -tags=integration ./internal/doctor ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment"
+
+[tasks.test-compose]
+description = "Run the destructive full-stack Docker Compose integration test"
+depends = ["image", "agent-image"]
+run = '''
+OMNIGREX_COMPOSE_INTEGRATION=1 \
+OMNIGREX_DOCKER_GID="${OMNIGREX_DOCKER_GID:-0}" \
+go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
+'''
+
+[tasks.test-live-github]
+description = "Run the opt-in live Reviewer GitHub App review gate"
+run = "go test -tags=live ./internal/github -run TestLiveReviewerAppSubmitsApproveAndRequestChanges -count=1 -v"
+
+[tasks.compose-check]
+description = "Validate the Docker Compose configuration"
+run = '''
+OMNIGREX_DOCKER_GID=0 \
+OMNIGREX_SECRET_GID=1 \
+OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
+OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
+OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
+docker compose config --quiet
+'''
+
+[tasks.image]
+description = "Build the orchestrator image"
+run = "docker build --tag omnigrex/orchestrator:dev ."
+
+[tasks.agent-image]
+description = "Build the pinned OpenCode Runtime Process image"
+run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 ."
+
+[tasks.agent-image-previous]
+description = "Build the previous OpenCode image used for controlled upgrade tests"
+run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.19 --tag omnigrex/opencode:1.18.19 ."
+
+[tasks.agent-images]
+description = "Build current and previous OpenCode compatibility images"
+depends = ["agent-image", "agent-image-previous"]
+
+[tasks.release-check-runtime-upgrade]
+description = "Qualify source-to-candidate state compatibility and optionally emit an exact-digest result"
+depends = ["agent-images"]
+run = '''
+go test -race -tags=integration ./internal/runtime/acp -run '^TestOpenCodeControlledStateUpgrade$' -count=1
+go test -race ./internal/agentturn -run '^TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration$' -count=1
+go test -race ./internal/runtime/profile -run '^TestCompatibilityResults'
+'''
+
+[tasks.check]
+description = "Run all local verification checks"
+depends = ["format-check", "lint", "deadcode", "test", "compose-check"]
