@@ -126,12 +126,48 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 // directory permissions, using no-follow descriptors so an agent-created link
 // cannot redirect chmod outside its assignment data.
 func makeMiseDirectoriesWritable(path string) error {
-	directory, _, err := openDirectoryNoFollow(path)
+	parent, _, err := openDirectoryNoFollow(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	var stat unix.Stat_t
+	name := filepath.Base(path)
+	if err := unix.Fstatat(int(parent.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	directory, err := openMiseDirectoryAtNoFollow(int(parent.Fd()), name, stat)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
 	return makeMiseDirectoryWritable(directory)
+}
+
+func openMiseDirectoryAtNoFollow(parentFD int, name string, stat unix.Stat_t) (*os.File, error) {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() {
+		return nil, fmt.Errorf("%w: mise directory is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+	}
+	child, err := openDirectoryAtNoFollow(parentFD, name)
+	if errors.Is(err, unix.EACCES) && stat.Mode&0o500 != 0o500 {
+		if err := restoreUnreadableMiseDirectory(parentFD, name, stat); err != nil {
+			return nil, err
+		}
+		child, err = openDirectoryAtNoFollow(parentFD, name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var opened unix.Stat_t
+	if err := unix.Fstat(int(child.Fd()), &opened); err != nil {
+		child.Close()
+		return nil, err
+	}
+	if opened.Dev != stat.Dev || opened.Ino != stat.Ino {
+		child.Close()
+		return nil, ErrUnsafeAssignmentPath
+	}
+	return child, nil
 }
 
 func makeMiseDirectoryWritable(directory *os.File) error {
@@ -160,7 +196,7 @@ func makeMiseDirectoryWritable(directory *os.File) error {
 		if childStat.Mode&unix.S_IFMT != unix.S_IFDIR {
 			continue
 		}
-		child, err := openDirectoryAtNoFollow(int(directory.Fd()), name)
+		child, err := openMiseDirectoryAtNoFollow(int(directory.Fd()), name, childStat)
 		if err != nil {
 			return err
 		}

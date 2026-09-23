@@ -218,6 +218,10 @@ fi
 	if err := os.Symlink(external, filepath.Join(paths.Mise, "cache")); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(external, 0o755) })
+	if err := os.Chmod(external, 0o000); err != nil {
+		t.Fatal(err)
+	}
 	moduleDirectory := filepath.Join(paths.Mise, "home", "go", "pkg", "mod", "golang.org", "x", "tools@v0.50.0")
 	if err := os.MkdirAll(moduleDirectory, 0o755); err != nil {
 		t.Fatal(err)
@@ -225,16 +229,37 @@ fi
 	if err := os.WriteFile(filepath.Join(moduleDirectory, "socket_test.go"), []byte("cached"), 0o444); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = os.Chmod(paths.Mise, 0o755)
+		for _, directory := range []string{filepath.Dir(filepath.Dir(moduleDirectory)), filepath.Dir(moduleDirectory), moduleDirectory} {
+			_ = os.Chmod(directory, 0o755)
+		}
+	})
 	for _, directory := range []string{moduleDirectory, filepath.Dir(moduleDirectory), filepath.Dir(filepath.Dir(moduleDirectory))} {
 		if err := os.Chmod(directory, 0o555); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, directory := range []string{moduleDirectory, filepath.Dir(moduleDirectory)} {
+		if err := os.Chmod(directory, 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(paths.Mise, 0o000); err != nil {
+		t.Fatal(err)
 	}
 
 	if _, err := lifecycle.ProvisionMise(context.Background(), workspace.MiseProvision{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
 	}); err != nil {
 		t.Fatalf("ProvisionMise() error = %v", err)
+	}
+	externalInfo, err := os.Stat(external)
+	if err != nil || externalInfo.Mode().Perm() != 0 {
+		t.Fatalf("external symlink target permissions = %v, %v, want 000", externalInfo, err)
+	}
+	if err := os.Chmod(external, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	content, err := os.ReadFile(externalMarker)
 	if err != nil || string(content) != "outside" {
