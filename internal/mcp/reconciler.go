@@ -263,11 +263,12 @@ func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, re
 		if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
 			continue
 		}
-		if comment.Body != expectedBody {
-			conflict = true
+		if comment.Body == expectedBody || matchesSignedComment(comment.Body, request.Body, marker) {
+			matches = append(matches, comment)
 			continue
 		}
-		matches = append(matches, comment)
+		conflict = true
+		continue
 	}
 	if len(matches) == 1 && !conflict {
 		result, err := encodeCommentResult(matches[0])
@@ -321,7 +322,11 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		if !hasExactOperationMarker(review.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
 			continue
 		}
-		if review.Body != expectedBody || review.CommitID != mutation.ExpectedSHA || review.State != expectedState || review.User.ID <= 0 ||
+		if review.Body != expectedBody && !matchesSignedComment(review.Body, request.Body, marker) {
+			conflict = true
+			continue
+		}
+		if review.CommitID != mutation.ExpectedSHA || review.State != expectedState || review.User.ID <= 0 ||
 			reconciliation.ReviewerActorID != 0 && review.User.ID != reconciliation.ReviewerActorID {
 			conflict = true
 			continue
@@ -607,6 +612,19 @@ func safeCredential(credential string) bool {
 		}
 	}
 	return true
+}
+
+// matchesSignedComment accepts a published body whose hidden marker is intact
+// and whose visible text is the agent body with a signature footer, or the
+// legacy unsigned body. The signature itself is persisted in the published
+// body, so display-name changes and pre-deployment bodies remain recognizable
+// without duplicates, and replay retains the source signature.
+func matchesSignedComment(published, agentBody, marker string) bool {
+	withoutMarker := strings.TrimSpace(strings.Replace(published, marker, "", 1))
+	if strings.TrimSpace(withoutMarker) == strings.TrimSpace(agentBody) {
+		return true
+	}
+	return githubapi.MatchesSignedBody(withoutMarker, agentBody)
 }
 
 func foundReconciliation(result json.RawMessage) MutationReconciliationResult {

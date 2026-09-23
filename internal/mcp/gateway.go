@@ -132,6 +132,8 @@ type ToolScope struct {
 	AgentTurnID       string            `json:"agent_turn_id"`
 	ExecutionEpoch    int64             `json:"execution_epoch"`
 	Role              workflow.Role     `json:"role"`
+	AgentProfileName  string            `json:"agent_profile_name"`
+	RoleDisplayName   string            `json:"role_display_name"`
 	Repository        RepositoryScope   `json:"repository"`
 	Issue             IssueScope        `json:"issue"`
 	PullRequest       *PullRequestScope `json:"pull_request,omitempty"`
@@ -769,6 +771,10 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	}
 	invocation.OperationID = operationID
 	invocation.Mutation = mutationMetadata(invocation.Name, registration.scope)
+	if message := signedBodyTooLong(invocation, registration.scope); message != "" {
+		writeToolError(response, id, message)
+		return
+	}
 	gate := registration.gate.channel
 	select {
 	case gate <- struct{}{}:
@@ -1091,16 +1097,81 @@ func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(value)
 }
 
+// signedBodyTooLong checks the complete body, including its signature footer
+// and hidden marker allowance, before posting. It never truncates agent text.
+func signedBodyTooLong(invocation Invocation, scope TokenScope) string {
+	var bodies []string
+	switch invocation.Name {
+	case ToolCommentOnIssue, ToolCommentOnPullRequest:
+		var arguments struct {
+			Body string `json:"body"`
+		}
+		if json.Unmarshal(invocation.Arguments, &arguments) != nil {
+			return ""
+		}
+		bodies = []string{arguments.Body}
+	case ToolSubmitReview:
+		var arguments struct {
+			Body     string `json:"body"`
+			Comments []struct {
+				Body string `json:"body"`
+			} `json:"comments"`
+		}
+		if json.Unmarshal(invocation.Arguments, &arguments) != nil {
+			return ""
+		}
+		bodies = []string{arguments.Body}
+		for _, comment := range arguments.Comments {
+			bodies = append(bodies, comment.Body)
+		}
+	default:
+		return ""
+	}
+	profile, display := participantSignatureIdentity(scope)
+	if profile == "" {
+		profile = scope.Lease.AgentAssignmentID
+	}
+	if display == "" {
+		display = string(scope.Role)
+	}
+	overhead := len("_By Omnigrex: `` []_") + len(profile) + len(display) + 4 + 256
+	for _, body := range bodies {
+		if len(body)+overhead > 65536 {
+			return "comment body with signature exceeds GitHub limit; shorten the body without changing its meaning"
+		}
+	}
+	return ""
+}
+
+// participantSignatureIdentity takes the profile name from the Agent Turn
+// identity and pairs it with the configured Role display name.
+func participantSignatureIdentity(scope TokenScope) (string, string) {
+	var snapshot struct {
+		Name string `json:"name"`
+	}
+	profileName := ""
+	if json.Unmarshal(scope.Lease.AgentProfileConfig, &snapshot) == nil {
+		profileName = snapshot.Name
+	}
+	displayName := string(scope.Role)
+	if metadata, ok := role.BuiltinCatalog().Lookup(role.ID(scope.Role)); ok {
+		displayName = metadata.DisplayName
+	}
+	return profileName, displayName
+}
+
 func backendScope(scope TokenScope) ToolScope {
 	var pullRequest *PullRequestScope
 	if scope.PullRequest != nil {
 		clone := *scope.PullRequest
 		pullRequest = &clone
 	}
+	profileName, displayName := participantSignatureIdentity(scope)
 	return ToolScope{
 		WorkflowID: scope.WorkflowID, AgentAssignmentID: scope.Lease.AgentAssignmentID,
 		AgentSessionID: scope.Lease.AgentSessionID, AgentTurnID: scope.Lease.ID,
 		ExecutionEpoch: scope.Lease.ExecutionEpoch, Role: scope.Role,
+		AgentProfileName: profileName, RoleDisplayName: displayName,
 		Repository: scope.Repository, Issue: scope.Issue, PullRequest: pullRequest,
 		Branch: scope.Branch, DefaultBranch: scope.DefaultBranch, HeadSHA: scope.HeadSHA,
 		TurnCreatedAt: scope.Lease.CreatedAt,

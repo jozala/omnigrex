@@ -535,8 +535,15 @@ func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation
 	if err != nil {
 		return nil, err
 	}
+	signed, err := signedAgentBody(invocation.Scope, arguments.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSignedBodyLength(signed, marker); err != nil {
+		return nil, err
+	}
 	comment, err := backend.github.CreateIssueComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.Issue.Number), githubapi.CommentRequest{Body: arguments.Body, Marker: marker})
+		int(invocation.Scope.Issue.Number), githubapi.CommentRequest{Body: signed, Marker: marker})
 	if err != nil {
 		return nil, classifyGitHubMutationError(err)
 	}
@@ -557,8 +564,15 @@ func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invo
 	if err != nil {
 		return nil, err
 	}
+	signed, err := signedAgentBody(invocation.Scope, arguments.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSignedBodyLength(signed, marker); err != nil {
+		return nil, err
+	}
 	comment, err := backend.github.CreatePullRequestComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.PullRequest.Number), githubapi.CommentRequest{Body: arguments.Body, Marker: marker})
+		int(invocation.Scope.PullRequest.Number), githubapi.CommentRequest{Body: signed, Marker: marker})
 	if err != nil {
 		return nil, classifyGitHubMutationError(err)
 	}
@@ -586,6 +600,11 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
+	for _, comment := range arguments.Comments {
+		if !markerFree(comment.Body) {
+			return nil, ErrInvalidInvocation
+		}
+	}
 	current, err := backend.github.GetPullRequest(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
 		int(invocation.Scope.PullRequest.Number))
 	if err != nil {
@@ -602,7 +621,14 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !reviewCommentsMatchFiles(arguments.Comments, files) {
 		return nil, ErrToolPrecondition
 	}
-	reviewBody, err := githubapi.EnsureMarker(arguments.Body, githubapi.Marker{
+	signedBody, err := signedAgentBody(invocation.Scope, arguments.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSignedBodyLength(signedBody, ""); err != nil {
+		return nil, err
+	}
+	reviewBody, err := githubapi.EnsureMarker(signedBody, githubapi.Marker{
 		WorkflowID: invocation.Scope.WorkflowID, AgentAssignmentID: invocation.Scope.AgentAssignmentID, OperationID: invocation.OperationID,
 	})
 	if err != nil {
@@ -610,8 +636,15 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	}
 	comments := make([]githubapi.ReviewCommentRequest, len(arguments.Comments))
 	for index, comment := range arguments.Comments {
+		signedComment, signErr := signedAgentBody(invocation.Scope, comment.Body)
+		if signErr != nil {
+			return nil, signErr
+		}
+		if err := checkSignedBodyLength(signedComment, ""); err != nil {
+			return nil, err
+		}
 		comments[index] = githubapi.ReviewCommentRequest{
-			Path: comment.Path, Body: comment.Body, Line: comment.Line, Side: comment.Side,
+			Path: comment.Path, Body: signedComment, Line: comment.Line, Side: comment.Side,
 			StartLine: comment.StartLine, StartSide: comment.StartSide,
 		}
 	}
@@ -850,6 +883,36 @@ func operationMarker(invocation Invocation) (string, error) {
 func markerFree(body string) bool {
 	inspection := githubapi.InspectMarkers(body)
 	return !inspection.Untrusted && len(inspection.Markers) == 0
+}
+
+func signedAgentBody(scope ToolScope, body string) (string, error) {
+	profile := scope.AgentProfileName
+	if profile == "" {
+		profile = scope.AgentAssignmentID
+	}
+	if profile == "" {
+		return "", ErrInvalidInvocation
+	}
+	display := scope.RoleDisplayName
+	if display == "" {
+		display = string(scope.Role)
+	}
+	return githubapi.AppendSignature(body, githubapi.RenderSignature(profile, display)), nil
+}
+
+func checkSignedBodyLength(signedBody, marker string) error {
+	complete := signedBody
+	if marker != "" {
+		if strings.TrimSpace(signedBody) == "" {
+			complete = marker
+		} else {
+			complete = strings.TrimSpace(signedBody) + "\n\n" + marker
+		}
+	}
+	if len(complete) > 65536 {
+		return fmt.Errorf("%w: comment body with signature exceeds GitHub limit", ErrInvalidInvocation)
+	}
+	return nil
 }
 
 func encodeCommentResult(comment githubapi.IssueComment) (json.RawMessage, error) {

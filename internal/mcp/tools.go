@@ -65,7 +65,7 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolSubmitReview, Description: "Submit a native review for the scoped Pull Request head.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(),
 		"event":        map[string]any{"type": "string", "enum": []string{"APPROVE", "REQUEST_CHANGES"}},
-		"body":         stringSchema(1, 65536),
+		"body":         stringSchema(0, 65536),
 		"comments": map[string]any{
 			"type": "array", "maxItems": 100,
 			"items": objectSchema(map[string]any{

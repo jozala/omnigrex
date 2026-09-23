@@ -506,20 +506,67 @@ func TestProductionBackendPerformsMarkedGitHubMutationsAndCommitBoundReview(t *t
 	}
 	wantIssueMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "issue-comment-1"})
 	wantPRMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "pr-comment-1"})
-	if api.issueCommentNumber != 12 || api.issueCommentRequest.Marker != wantIssueMarker || api.issueCommentCredential != "developer-secret" {
+	if api.issueCommentNumber != 12 || api.issueCommentRequest.Marker != wantIssueMarker || api.issueCommentCredential != "developer-secret" ||
+		api.issueCommentRequest.Body != "Issue update\n\n"+productionSignature(workflow.RoleDeveloper) {
 		t.Fatalf("Issue comment call = number %d, credential %q, request %#v", api.issueCommentNumber, api.issueCommentCredential, api.issueCommentRequest)
 	}
-	if api.pullRequestCommentNumber != 23 || api.pullRequestCommentRequest.Marker != wantPRMarker || api.pullRequestCommentCredential != "developer-secret" {
+	if api.pullRequestCommentNumber != 23 || api.pullRequestCommentRequest.Marker != wantPRMarker || api.pullRequestCommentCredential != "developer-secret" ||
+		api.pullRequestCommentRequest.Body != "PR update\n\n"+productionSignature(workflow.RoleDeveloper) {
 		t.Fatalf("Pull Request comment call = number %d, credential %q, request %#v", api.pullRequestCommentNumber, api.pullRequestCommentCredential, api.pullRequestCommentRequest)
 	}
 	wantReviewMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "review-1"})
-	if api.reviewCredential != "reviewer-secret" || api.reviewNumber != 23 || api.reviewRequest.CommitID != productionHeadSHA || api.reviewRequest.Body != "Fix this\n\n"+wantReviewMarker ||
+	if api.reviewCredential != "reviewer-secret" || api.reviewNumber != 23 || api.reviewRequest.CommitID != productionHeadSHA || api.reviewRequest.Body != "Fix this\n\n"+productionSignature(workflow.RoleReviewer)+"\n\n"+wantReviewMarker ||
 		api.reviewRequest.Event != githubapi.ReviewRequestChanges || len(api.reviewRequest.Comments) != 1 ||
-		api.reviewRequest.Comments[0] != (githubapi.ReviewCommentRequest{Path: "internal/mcp/backend.go", Body: "Validate this range", Line: 53, Side: githubapi.ReviewSideRight, StartLine: 50, StartSide: githubapi.ReviewSideRight}) {
+		api.reviewRequest.Comments[0] != (githubapi.ReviewCommentRequest{Path: "internal/mcp/backend.go", Body: "Validate this range\n\n" + productionSignature(workflow.RoleReviewer), Line: 53, Side: githubapi.ReviewSideRight, StartLine: 50, StartSide: githubapi.ReviewSideRight}) {
 		t.Fatalf("review call = number %d, credential %q, request %#v", api.reviewNumber, api.reviewCredential, api.reviewRequest)
 	}
 	if api.pullRequestFilesCredential != "reviewer-secret" || api.pullRequestFilesNumber != 23 {
 		t.Fatalf("Pull Request files call = number %d, credential %q", api.pullRequestFilesNumber, api.pullRequestFilesCredential)
+	}
+}
+
+func TestProductionBackendSignsBodylessApproval(t *testing.T) {
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{reviewer: "reviewer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	result, err := backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolSubmitReview, Arguments: json.RawMessage(`{"operation_id":"approve-1","event":"APPROVE"}`),
+		Scope: productionToolScope(workflow.RoleReviewer), Class: mcp.MutationTool, OperationID: "approve-1",
+	})
+	if err != nil || !json.Valid(result) {
+		t.Fatalf("Execute(submit_review) = %s, %v", result, err)
+	}
+	wantMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "approve-1"})
+	if api.reviewRequest.Body != productionSignature(workflow.RoleReviewer)+"\n\n"+wantMarker {
+		t.Fatalf("bodyless approval body = %q", api.reviewRequest.Body)
+	}
+}
+
+func TestProductionBackendRejectsOversizedSignedBody(t *testing.T) {
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatalf("NewProductionBackend() error = %v", err)
+	}
+	oversized := strings.Repeat("x", 65536)
+	arguments, err := json.Marshal(map[string]string{"operation_id": "too-long", "body": oversized})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolCommentOnIssue, Arguments: arguments, Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "too-long",
+	})
+	if !errors.Is(err, mcp.ErrInvalidInvocation) {
+		t.Fatalf("Execute(comment_on_issue) error = %v, want ErrInvalidInvocation", err)
+	}
+	if api.issueCommentRequest.Body != "" {
+		t.Fatalf("oversized comment reached GitHub: body length %d", len(api.issueCommentRequest.Body))
 	}
 }
 
@@ -854,14 +901,26 @@ func TestProductionBackendRejectsCrossRoleMutationsBeforeResolvingCredentials(t 
 const productionHeadSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func productionToolScope(role workflow.Role) mcp.ToolScope {
+	profile, display := "implementation-specialist", "Developer"
+	if role == workflow.RoleReviewer {
+		profile, display = "review-specialist", "Reviewer"
+	}
 	return mcp.ToolScope{
 		WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", AgentSessionID: "session-1",
 		AgentTurnID: "turn-1", ExecutionEpoch: 4, Role: role,
+		AgentProfileName: profile, RoleDisplayName: display,
 		Repository: mcp.RepositoryScope{ID: 9123, Owner: "acme", Name: "widgets"},
 		Issue:      mcp.IssueScope{ID: 456, Number: 12}, PullRequest: &mcp.PullRequestScope{ID: 654, Number: 23},
 		Branch: "omnigrex/issue-12", DefaultBranch: "main", HeadSHA: productionHeadSHA,
 		TurnCreatedAt: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
 	}
+}
+
+func productionSignature(role workflow.Role) string {
+	if role == workflow.RoleReviewer {
+		return "_By Omnigrex: `review-specialist` [Reviewer]_"
+	}
+	return "_By Omnigrex: `implementation-specialist` [Developer]_"
 }
 
 type backendGitHubCall struct {
@@ -971,7 +1030,11 @@ func (api *backendGitHub) SubmitReview(_ context.Context, credential, _, _ strin
 	if api.mutationErr != nil {
 		return githubapi.Review{}, api.mutationErr
 	}
-	return githubapi.Review{ID: 801, NodeID: "PRR_801", State: "CHANGES_REQUESTED", CommitID: request.CommitID, User: githubapi.User{ID: 91, Login: "reviewer-app"}, HTMLURL: "https://github.test/acme/widgets/pull/23#pullrequestreview-801"}, nil
+	state := "CHANGES_REQUESTED"
+	if request.Event == githubapi.ReviewApprove {
+		state = "APPROVED"
+	}
+	return githubapi.Review{ID: 801, NodeID: "PRR_801", State: state, CommitID: request.CommitID, User: githubapi.User{ID: 91, Login: "reviewer-app"}, HTMLURL: "https://github.test/acme/widgets/pull/23#pullrequestreview-801"}, nil
 }
 
 type backendCredentials struct {
