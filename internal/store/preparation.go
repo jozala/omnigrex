@@ -1421,7 +1421,7 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 	allowed := mode == workflow.AssignmentGenerationRetained && participant.Status == AgentAssignmentCompleted
 	if mode == workflow.AssignmentGenerationCurrent && participant.Status == AgentAssignmentWaitingForHuman {
 		var err error
-		allowed, err = preparationHandoffAllowsWaitingAssignments(ctx, tx, preparationJobID, participant.WorkflowID, false)
+		allowed, err = previousHandoffAllowsParticipantReactivation(ctx, tx, preparationJobID, participant.WorkflowID)
 		if err != nil {
 			return AgentParticipant{}, err
 		}
@@ -1448,29 +1448,25 @@ func runtimeBinding(binding ParticipantRuntimeBinding) runtimeprofile.Binding {
 	}
 }
 
-func preparationHandoffAllowsWaitingAssignments(ctx context.Context, tx pgx.Tx, preparationJobID, workflowID string, configurationConflictOnly bool) (bool, error) {
+// A waiting Participant can be reactivated only for the first active Attempt
+// after the durable Human Handoff that put it under human responsibility.
+func previousHandoffAllowsParticipantReactivation(ctx context.Context, tx pgx.Tx, preparationJobID, workflowID string) (bool, error) {
 	var allowed bool
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1
     FROM jobs AS preparation
-    JOIN workflow_attempts AS handoff_attempt
-      ON handoff_attempt.id = preparation.workflow_attempt_id
-     AND handoff_attempt.workflow_id = preparation.workflow_id
     JOIN workflow_attempts AS current_attempt
-      ON current_attempt.workflow_id = handoff_attempt.workflow_id
-     AND current_attempt.attempt_number = handoff_attempt.attempt_number + 1
-    WHERE current_attempt.id = (SELECT workflow_attempt_id FROM jobs WHERE id = $1)
-      AND current_attempt.workflow_id = $2 AND current_attempt.active
+      ON current_attempt.id = preparation.workflow_attempt_id
+     AND current_attempt.workflow_id = preparation.workflow_id
+    JOIN workflow_attempts AS handoff_attempt
+      ON handoff_attempt.workflow_id = current_attempt.workflow_id
+     AND handoff_attempt.attempt_number = current_attempt.attempt_number - 1
+    WHERE preparation.id = $1 AND preparation.workflow_id = $2
+      AND preparation.kind = 'PREPARE_AGENT_TURN' AND current_attempt.active
       AND NOT handoff_attempt.active
-      AND preparation.kind = 'PREPARE_AGENT_TURN'
-      AND (
-          NOT $3 AND handoff_attempt.human_handoff_reason = $4 AND preparation.status = 'FAILED'
-          OR handoff_attempt.human_handoff_reason = $5 AND preparation.status = 'SUCCEEDED'
-             AND preparation.result->>'reason' = $5
-      )
-)`, preparationJobID, workflowID, configurationConflictOnly, workflow.ReasonAgentTurnPreparationFailed,
-		workflow.ReasonAssignmentConfigurationConflict).Scan(&allowed); err != nil {
+      AND handoff_attempt.human_handoff_reason IS NOT NULL
+)`, preparationJobID, workflowID).Scan(&allowed); err != nil {
 		return false, fmt.Errorf("verify preparation handoff waiting Assignments: %w", err)
 	}
 	return allowed, nil

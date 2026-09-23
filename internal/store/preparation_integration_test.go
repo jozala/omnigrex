@@ -1928,6 +1928,50 @@ FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID, retrigge
 	}
 }
 
+func TestInfrastructureHandoffRetriggerReactivatesCurrentParticipant(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	application := triggerPreparationWorkflow(t, database, ctx,
+		"61000000-0000-4000-8000-000000000050", "62000000-0000-4000-8000-000000000050")
+	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "infrastructure-profile", "openai/test")
+	for attempt := 0; attempt < 2; attempt++ {
+		lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "infrastructure-acp")
+		if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+			t.Fatal(err)
+		}
+		settled, err := database.SettleAgentTurn(ctx, lease, failedSettlementObservation("tool provisioning failed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 {
+			if settled.Reason != workflow.ReasonInfrastructureRetry {
+				t.Fatalf("first settlement = %#v, want infrastructure retry", settled)
+			}
+			prepared = prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "infrastructure-profile", "openai/test")
+		} else if settled.Reason != workflow.ReasonInfrastructureRetriesExhausted || settled.State != workflow.StateNeedsHuman {
+			t.Fatalf("second settlement = %#v, want infrastructure Human Handoff", settled)
+		}
+	}
+
+	triggerPreparationWorkflow(t, database, ctx,
+		"61000000-0000-4000-8000-000000000051", "62000000-0000-4000-8000-000000000051")
+	reactivated := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "infrastructure-profile", "openai/test")
+	if reactivated.Participant.ID != prepared.Participant.ID || reactivated.Session.ID != prepared.Session.ID ||
+		reactivated.Participant.Status != store.AgentParticipantActive || reactivated.Turn.Purpose != workflow.TurnPurposeReactivation {
+		t.Fatalf("infrastructure handoff reactivation = %#v, want same Participant and Session", reactivated)
+	}
+	var waiting int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_assignments WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN'`, application.WorkflowID).Scan(&waiting); err != nil || waiting != 0 {
+		t.Fatalf("waiting Participants after reactivation = %d, %v", waiting, err)
+	}
+}
+
 func TestConfigurationConflictHandoffRetriggerReactivatesExistingAssignments(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
