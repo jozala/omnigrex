@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 var ErrInvalidMiseEnvironment = errors.New("mise returned an invalid activation environment")
@@ -49,6 +51,9 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	}
 	if err := ensureOwnedDirectory(paths.Mise, 0o755); err != nil {
 		return MiseActivation{}, fmt.Errorf("create assignment mise data: %w", err)
+	}
+	if err := makeMiseDirectoriesWritable(paths.Mise); err != nil {
+		return MiseActivation{}, fmt.Errorf("prepare assignment mise data for replacement: %w", err)
 	}
 	if err := os.RemoveAll(paths.Mise); err != nil {
 		return MiseActivation{}, fmt.Errorf("replace assignment mise data: %w", err)
@@ -117,6 +122,60 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	return activation, nil
 }
 
+// Go's module cache contains read-only directories. Restore only the owner's
+// directory permissions, using no-follow descriptors so an agent-created link
+// cannot redirect chmod outside its assignment data.
+func makeMiseDirectoriesWritable(path string) error {
+	directory, _, err := openDirectoryNoFollow(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return makeMiseDirectoryWritable(directory)
+}
+
+func makeMiseDirectoryWritable(directory *os.File) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("%w: mise directory is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+	}
+	mode := stat.Mode & 0o777
+	if mode&0o700 != 0o700 {
+		if err := unix.Fchmod(int(directory.Fd()), uint32(mode|0o700)); err != nil {
+			return err
+		}
+	}
+	names, err := directory.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		var childStat unix.Stat_t
+		if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if childStat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			continue
+		}
+		child, err := openDirectoryAtNoFollow(int(directory.Fd()), name)
+		if err != nil {
+			return err
+		}
+		err = makeMiseDirectoryWritable(child)
+		closeErr := child.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
 func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory string, environment map[string]string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, lifecycle.miseExecutable, arguments...)
 	command.Dir = directory
@@ -144,14 +203,16 @@ func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory strin
 
 func miseIsolation(dataDir, trustedSource string) map[string]string {
 	return map[string]string{
+		"GOFLAGS":                   "-p=1 -modcacherw",
 		"HOME":                      filepath.Join(dataDir, "home"),
 		"MISE_CACHE_DIR":            filepath.Join(dataDir, "cache"),
 		"MISE_CONFIG_DIR":           filepath.Join(dataDir, "config"),
 		"MISE_DATA_DIR":             dataDir,
-		"MISE_GLOBAL_CONFIG_FILE":   os.DevNull,
+		"MISE_GLOBAL_CONFIG_FILE":   "/etc/omnigrex/mise-global.toml",
+		"MISE_JOBS":                 "1",
 		"MISE_PROJECT_ROOT":         trustedSource,
 		"MISE_STATE_DIR":            filepath.Join(dataDir, "state"),
-		"MISE_SYSTEM_CONFIG_FILE":   os.DevNull,
+		"MISE_SYSTEM_CONFIG_FILE":   "/etc/omnigrex/mise-system.toml",
 		"MISE_TRUSTED_CONFIG_PATHS": trustedSource,
 		"XDG_CACHE_HOME":            filepath.Join(dataDir, "xdg-cache"),
 		"XDG_CONFIG_HOME":           filepath.Join(dataDir, "xdg-config"),
@@ -163,7 +224,7 @@ func miseIsolation(dataDir, trustedSource string) map[string]string {
 func runtimeMiseEnvironment(isolation map[string]string) map[string]string {
 	environment := make(map[string]string, len(isolation)-1)
 	for name, value := range isolation {
-		if name != "HOME" && name != "MISE_PROJECT_ROOT" && name != "MISE_TRUSTED_CONFIG_PATHS" && !strings.HasPrefix(name, "XDG_") {
+		if name != "HOME" && name != "GOFLAGS" && name != "MISE_JOBS" && name != "MISE_PROJECT_ROOT" && name != "MISE_TRUSTED_CONFIG_PATHS" && !strings.HasPrefix(name, "XDG_") {
 			environment[name] = value
 		}
 	}

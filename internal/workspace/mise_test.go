@@ -21,6 +21,10 @@ func TestLifecycleProvisionsMiseOnlyFromSelectedTrustedRevision(t *testing.T) {
 	writeExecutable(t, fakeMise, `#!/bin/sh
 set -eu
 test -z "${SENSITIVE_ORCHESTRATOR_SECRET:-}"
+test "$GOFLAGS" = '-p=1 -modcacherw'
+test "$MISE_JOBS" = 1
+test "$MISE_GLOBAL_CONFIG_FILE" = /etc/omnigrex/mise-global.toml
+test "$MISE_SYSTEM_CONFIG_FILE" = /etc/omnigrex/mise-system.toml
 printf '%s|%s|' "$PWD" "$*" >> `+quoted(logPath)+`
 tr -d '\n' < mise.toml >> `+quoted(logPath)+`
 printf '\n' >> `+quoted(logPath)+`
@@ -77,6 +81,11 @@ fi
 	for name, want := range wantRuntimeIsolation {
 		if got := activation.Environment[name]; got != want {
 			t.Errorf("activation environment %s = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"GOFLAGS", "MISE_JOBS"} {
+		if _, found := activation.Environment[name]; found {
+			t.Errorf("activation exposes provisioning-only setting %s", name)
 		}
 	}
 	for _, name := range []string{"HOME", "MISE_PROJECT_ROOT", "MISE_TRUSTED_CONFIG_PATHS", "XDG_CONFIG_HOME"} {
@@ -209,6 +218,18 @@ fi
 	if err := os.Symlink(external, filepath.Join(paths.Mise, "cache")); err != nil {
 		t.Fatal(err)
 	}
+	moduleDirectory := filepath.Join(paths.Mise, "home", "go", "pkg", "mod", "golang.org", "x", "tools@v0.50.0")
+	if err := os.MkdirAll(moduleDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDirectory, "socket_test.go"), []byte("cached"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{moduleDirectory, filepath.Dir(moduleDirectory), filepath.Dir(filepath.Dir(moduleDirectory))} {
+		if err := os.Chmod(directory, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if _, err := lifecycle.ProvisionMise(context.Background(), workspace.MiseProvision{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
@@ -229,5 +250,8 @@ fi
 	content, err = os.ReadFile(filepath.Join(paths.Mise, "cache", "marker"))
 	if err != nil || string(content) != "provisioned" {
 		t.Fatalf("assignment marker = %q, %v", content, err)
+	}
+	if _, err := os.Stat(moduleDirectory); !os.IsNotExist(err) {
+		t.Fatalf("read-only module cache survived replacement: %v", err)
 	}
 }

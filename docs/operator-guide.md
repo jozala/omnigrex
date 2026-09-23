@@ -29,6 +29,9 @@ Install the following software on the deployment host:
 - `mise` when building and qualifying Runtime Profile images on the host.
 - A reverse proxy or tunnel that terminates publicly trusted HTTPS.
 
+The orchestrator installs repository tools inside its own container before launching Agent Turns, including compiling Go tools declared in `mise.toml`.
+Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Agent Runtime Processes.
+
 Clone the repository and create the local configuration:
 
 ```sh
