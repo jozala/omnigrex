@@ -252,6 +252,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&result.SettledAt); err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("timestamp Agent Turn settlement: %w", err)
 	}
+	result.SettledAt = result.SettledAt.UTC()
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("encode Agent Turn settlement result: %w", err)
@@ -485,6 +486,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&result.SettledAt); err != nil {
 		return false, fmt.Errorf("timestamp recovered Agent Turn settlement: %w", err)
 	}
+	result.SettledAt = result.SettledAt.UTC()
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		return false, fmt.Errorf("encode recovered Agent Turn settlement result: %w", err)

@@ -488,7 +488,7 @@ func TestClosureSettlementWithoutActiveTurnCompletesAndRetainsConcreteHierarchy(
 	defer cancel()
 	prepareClosableFixture(t, pool, fixture)
 
-	observedAt := time.Now().UTC()
+	observedAt := time.Now().UTC().Truncate(time.Microsecond)
 	retainUntil := observedAt.Add(30 * 24 * time.Hour)
 	settlement := closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 31,
 		"51000000-0000-4000-8000-000000000311", "closure-no-turn", "retention-no-turn", observedAt, retainUntil)
@@ -1042,7 +1042,7 @@ func TestAssignmentCollectionFinalizationSurvivesWallClockRollbackAfterAuthoriza
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	observedAt := time.Now().UTC()
+	observedAt := time.Now().UTC().Truncate(time.Microsecond)
 	retainUntil := observedAt.Add(time.Hour)
 	closeAndSettleWithoutTurn(t, databases[0], pool, ctx, fixture, 36,
 		"51000000-0000-4000-8000-000000000361", "closure-clock-rollback", "retention-clock-rollback",
