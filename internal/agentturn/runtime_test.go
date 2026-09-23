@@ -720,9 +720,66 @@ func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError
 	if err := handle.Cleanup(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
+	}
+}
+
+func TestRuntimeHandleCleanupDoesNotDiscardReviewerWorkspaceAfterFenceLoss(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	handle, resources, err := launchRuntimeForRoleCleanupFailure(t, &operations, workflow.RoleReviewer, proposal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+	operations = operations[:0]
+	resources.store.operations = &operations
+	resources.workspace.operations = &operations
+	resources.gateway.operations = &operations
+	resources.engineFactory.engine.operations = &operations
+	resources.engineFactory.engine.process.operations = &operations
+	resources.client.operations = &operations
+
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("Cleanup() = %v, want lost fence", err)
+	}
+	if slices.Contains(operations, "workspace-discard") {
+		t.Fatalf("lost fence discarded successor workspace: %v", operations)
+	}
+}
+
+func TestLauncherRefusesToPromoteWorkspaceAfterTurnFenceLoss(t *testing.T) {
+	operations := []string{}
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.requirePromotionFence = true
+			resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+		})
+	if !errors.Is(err, store.ErrAgentTurnFenceLost) || handle != nil {
+		t.Fatalf("Launch() = (%v, %v), want lost fence before launch", handle, err)
+	}
+	if slices.Contains(operations, "mise") || slices.Contains(operations, "docker-new") {
+		t.Fatalf("stale workspace promotion progressed to Runtime Process: %v", operations)
+	}
+}
+
+func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
+	operations := []string{}
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.requireProvisionFence = true
+			resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+		})
+	if !errors.Is(err, store.ErrAgentTurnFenceLost) || handle != nil {
+		t.Fatalf("Launch() = (%v, %v), want lost fence before mise provisioning", handle, err)
+	}
+	if slices.Contains(operations, "refresh") || slices.Contains(operations, "docker-new") {
+		t.Fatalf("stale mise provisioning progressed to Runtime Process: %v", operations)
 	}
 }
 
@@ -830,7 +887,7 @@ func TestRuntimeHandleCleanupRetriesReviewerWorkspaceDiscard(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "workspace-discard", "docker-close", "workspace-discard"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close", "turn-fence", "workspace-discard"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -909,7 +966,7 @@ func TestRuntimeHandleCleanupDiscardsReviewerWorkspaceAfterProcessRemoval(t *tes
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
 	}
@@ -950,7 +1007,7 @@ func TestRuntimeHandleCleanupKeepsReviewerWorkspaceWhenProcessRemovalFails(t *te
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-remove", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1196,6 +1253,10 @@ func (database *runtimeStore) WithAgentTurnFence(ctx context.Context, _ store.Ag
 	return operation(ctx)
 }
 
+func (database *runtimeStore) WithAgentTurnCleanupFence(ctx context.Context, lease store.AgentTurnLease, operation func(context.Context) error) error {
+	return database.WithAgentTurnFence(ctx, lease, operation)
+}
+
 func (database *runtimeStore) acquireRecoveryLock(attempted, acquired chan<- struct{}) {
 	close(attempted)
 	database.turnFence.Lock()
@@ -1217,6 +1278,8 @@ func (registry *runtimeRegistry) ResolveBinding(profile.Binding) (profile.Profil
 type runtimeWorkspace struct {
 	operations            *[]string
 	checkout              workspace.Checkout
+	requirePromotionFence bool
+	requireProvisionFence bool
 	mise                  workspace.MiseProvision
 	activation            workspace.MiseActivation
 	workspaceErr          error
@@ -1225,15 +1288,31 @@ type runtimeWorkspace struct {
 	discardErr            error
 }
 
-func (lifecycle *runtimeWorkspace) PrepareWorkspace(_ context.Context, checkout workspace.Checkout) (workspace.Paths, error) {
+func (lifecycle *runtimeWorkspace) PrepareWorkspace(ctx context.Context, checkout workspace.Checkout) (workspace.Paths, error) {
 	*lifecycle.operations = append(*lifecycle.operations, "workspace")
 	lifecycle.checkout = checkout
+	if lifecycle.requirePromotionFence {
+		if checkout.Fence == nil {
+			return workspace.Paths{}, errors.New("workspace promotion is not fenced")
+		}
+		if err := checkout.Fence(ctx, func(context.Context) error { return nil }); err != nil {
+			return workspace.Paths{}, err
+		}
+	}
 	return workspace.Paths{Workspace: "/srv/workspace", Mise: lifecycle.activation.DataDir}, lifecycle.workspaceErr
 }
 
-func (lifecycle *runtimeWorkspace) ProvisionMise(_ context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
+func (lifecycle *runtimeWorkspace) ProvisionMise(ctx context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
 	*lifecycle.operations = append(*lifecycle.operations, "mise")
 	lifecycle.mise = provision
+	if lifecycle.requireProvisionFence {
+		if provision.Fence == nil {
+			return workspace.MiseActivation{}, errors.New("mise provisioning is not fenced")
+		}
+		if err := provision.Fence(ctx, func(context.Context) error { return nil }); err != nil {
+			return workspace.MiseActivation{}, err
+		}
+	}
 	return lifecycle.activation, lifecycle.miseErr
 }
 
@@ -1241,6 +1320,13 @@ func (lifecycle *runtimeWorkspace) DiscardWorkspace(assignmentID string) error {
 	*lifecycle.operations = append(*lifecycle.operations, "workspace-discard")
 	lifecycle.discardedAssignmentID = assignmentID
 	return lifecycle.discardErr
+}
+
+func (lifecycle *runtimeWorkspace) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, _ int64, fence workspace.WorkspaceFence) error {
+	if fence == nil {
+		return lifecycle.DiscardWorkspace(assignmentID)
+	}
+	return fence(ctx, func(context.Context) error { return lifecycle.DiscardWorkspace(assignmentID) })
 }
 
 type runtimeGateway struct {

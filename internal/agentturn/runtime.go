@@ -46,13 +46,14 @@ type LauncherStore interface {
 	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
+	WithAgentTurnCleanupFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 }
 
 // RuntimeWorkspace prepares assignment-isolated checkout and trusted tool state.
 type RuntimeWorkspace interface {
 	PrepareWorkspace(context.Context, workspace.Checkout) (workspace.Paths, error)
 	ProvisionMise(context.Context, workspace.MiseProvision) (workspace.MiseActivation, error)
-	DiscardWorkspace(string) error
+	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
 }
 
 // MCPRegistrar issues, drains, and revokes exact per-turn MCP authority.
@@ -178,6 +179,7 @@ type RuntimeHandle struct {
 	registration       mcp.Registration
 	registered         bool
 	workspace          RuntimeWorkspace
+	store              LauncherStore
 	assignmentID       string
 	engine             RuntimeEngine
 	process            RuntimeProcess
@@ -280,7 +282,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 
 	paths, err := launcher.workspace.PrepareWorkspace(ctx, workspace.Checkout{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
-		Credential: request.RepositoryCredential, Revision: revision,
+		Credential: request.RepositoryCredential, Revision: revision, ExecutionEpoch: request.Lease.ExecutionEpoch,
+		Fence: func(ctx context.Context, operation func(context.Context) error) error {
+			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated Agent workspace: %w", err)
@@ -291,6 +296,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	if rolePolicy.DiscardWorkspace {
 		resources.workspace = launcher.workspace
+		resources.store = launcher.store
 		resources.assignmentID = execution.Assignment.ID
 	}
 	defer func() {
@@ -313,7 +319,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	activation, err := launcher.workspace.ProvisionMise(ctx, workspace.MiseProvision{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
-		Credential: request.RepositoryCredential, Revision: miseRevision,
+		Credential: request.RepositoryCredential, Revision: miseRevision, ExecutionEpoch: request.Lease.ExecutionEpoch,
+		Fence: func(ctx context.Context, operation func(context.Context) error) error {
+			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision trusted repository tools: %w", err)
@@ -535,7 +544,10 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	}
 	processRemoved := handle.process == nil || handle.processRemoved
 	if processRemoved && handle.workspace != nil && !handle.workspaceDiscarded {
-		if err := handle.workspace.DiscardWorkspace(handle.assignmentID); err != nil {
+		fence := func(ctx context.Context, operation func(context.Context) error) error {
+			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
+		}
+		if err := handle.workspace.DiscardWorkspaceFenced(ctx, handle.assignmentID, handle.lease.ExecutionEpoch, fence); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("discard Reviewer workspace: %w", err))
 		} else {
 			handle.workspaceDiscarded = true

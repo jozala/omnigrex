@@ -153,6 +153,75 @@ func TestLifecycleDiscardsOwnedWorkspace(t *testing.T) {
 	}
 }
 
+func TestLifecycleDiscardRequiresFenceCallback(t *testing.T) {
+	root := t.TempDir()
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := lifecycle.Paths(assignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.DiscardWorkspaceFenced(context.Background(), assignmentID, 0,
+		func(context.Context, func(context.Context) error) error { return nil }); err == nil {
+		t.Fatal("DiscardWorkspaceFenced() accepted a fence that skipped detachment")
+	}
+	if _, err := os.Stat(paths.Workspace); err != nil {
+		t.Fatalf("skipped detachment removed workspace: %v", err)
+	}
+}
+
+func TestLifecycleDiscardRetriesDetachedWorkspaceAfterCleanupFailure(t *testing.T) {
+	root := t.TempDir()
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := lifecycle.Paths(assignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Workspace, "review.txt"), []byte("changes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		fence := func(ctx context.Context, detach func(context.Context) error) error {
+			if err := detach(ctx); err != nil {
+				return err
+			}
+			cancel()
+			return nil
+		}
+		if err := lifecycle.DiscardWorkspaceFenced(ctx, assignmentID, 7, fence); !errors.Is(err, context.Canceled) {
+			t.Fatalf("discard attempt %d = %v, want unfinished cleanup", attempt, err)
+		}
+		cancel()
+	}
+	if _, err := os.Stat(paths.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("active workspace remains after detachment: %v", err)
+	}
+	if err := lifecycle.DiscardWorkspaceFenced(context.Background(), assignmentID, 7,
+		func(ctx context.Context, detach func(context.Context) error) error { return detach(ctx) }); err != nil {
+		t.Fatalf("retry DiscardWorkspaceFenced() error = %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(paths.Workspace))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("discarded assignment workspace entries = %v, %v, want none", entries, err)
+	}
+}
+
 func TestLifecycleDiscardWorkspaceRejectsSymlinkedAssignment(t *testing.T) {
 	root := t.TempDir()
 	lifecycle, err := workspace.New(workspace.Options{

@@ -1000,6 +1000,21 @@ func (store *Store) WithAgentTurnFence(ctx context.Context, lease AgentTurnLease
 	})
 }
 
+// WithAgentTurnCleanupFence holds exact live authority while a settling Turn detaches its workspace.
+func (store *Store) WithAgentTurnCleanupFence(ctx context.Context, lease AgentTurnLease, operation func(context.Context) error) error {
+	if operation == nil {
+		return errors.New("hold Agent Turn cleanup fence: operation is nil")
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return store.withLockedAgentTurnLeaseOptions(ctx, lease, "hold Agent Turn cleanup fence", true, true, func(_ pgx.Tx, turn lockedTurn) error {
+		if turn.Status != AgentTurnRunning && turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
+			return ErrAgentTurnFenceLost
+		}
+		return operation(operationCtx)
+	})
+}
+
 // GetAgentTurnExecutionContext returns launch inputs only while the exact acquired epoch remains live.
 func (store *Store) GetAgentTurnExecutionContext(ctx context.Context, lease AgentTurnLease) (AgentTurnExecutionContext, error) {
 	var execution AgentTurnExecutionContext

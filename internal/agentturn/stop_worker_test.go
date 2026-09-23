@@ -13,6 +13,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testing.T) {
@@ -63,6 +64,23 @@ func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *te
 	}
 	if durable.acknowledgements != 1 || durable.discardSuccessesAtAcknowledgement != 1 {
 		t.Fatalf("acknowledgements = %d after %d successful discards", durable.acknowledgements, durable.discardSuccessesAtAcknowledgement)
+	}
+}
+
+func TestStopWorkerDoesNotDiscardReviewerWorkspaceAfterRecoveryFenceLoss(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
+		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+	}, cleanupFenceErr: store.ErrAgentTurnRecoveryFenceLost}
+	discarder := &recordingWorkspaceDiscarder{}
+	worker := newStopWorkerWithWorkspace(t, durable, &recordingRuntimeCleaner{}, discarder, 100*time.Millisecond, time.Millisecond, time.Millisecond)
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
+		t.Fatalf("ProcessNext() = (%t, %v), want lost recovery fence", processed, err)
+	}
+	if discarder.callCount() != 0 || durable.acknowledgements != 0 || durable.failureAcknowledgements != 0 {
+		t.Fatalf("stale stop Job discarded workspace or acknowledged: discards %d, successes %d, failures %d",
+			discarder.callCount(), durable.acknowledgements, durable.failureAcknowledgements)
 	}
 }
 
@@ -392,6 +410,7 @@ type stopWorkerStore struct {
 	cleanupContextResults              []error
 	cleanupContextCalls                int
 	cleanupContextLease                store.JobLease
+	cleanupFenceErr                    error
 	discardCallsAtAcknowledgement      int
 	discardSuccessesAtAcknowledgement  int
 	workspaces                         *recordingWorkspaceDiscarder
@@ -444,6 +463,13 @@ func (durable *stopWorkerStore) cleanupContextCallCount() int {
 	durable.mutex.Lock()
 	defer durable.mutex.Unlock()
 	return durable.cleanupContextCalls
+}
+
+func (durable *stopWorkerStore) WithRecoveredRuntimeCleanupFence(ctx context.Context, _ store.JobLease, operation func(context.Context) error) error {
+	if durable.cleanupFenceErr != nil {
+		return durable.cleanupFenceErr
+	}
+	return operation(ctx)
 }
 
 func (durable *stopWorkerStore) AcknowledgeRecoveredRuntimeStopped(_ context.Context, lease store.JobLease) (store.AgentTurnRecovery, error) {
@@ -551,6 +577,10 @@ func (discarder *recordingWorkspaceDiscarder) DiscardWorkspace(assignmentID stri
 		discarder.successes++
 	}
 	return result
+}
+
+func (discarder *recordingWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, _ int64, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return discarder.DiscardWorkspace(assignmentID) })
 }
 
 func (discarder *recordingWorkspaceDiscarder) callCount() int {

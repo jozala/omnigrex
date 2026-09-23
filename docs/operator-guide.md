@@ -31,7 +31,8 @@ Install the following software on the deployment host:
 
 The orchestrator installs repository tools inside its own container before launching Agent Turns, including compiling Go tools declared in `mise.toml`.
 Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Runtime Processes.
-Tool installation uses scratch space in the per-assignment mise volume rather than the orchestrator's 16 MiB `/tmp` tmpfs, so that volume also needs room for Go compilation.
+Tool installation uses a per-assignment directory in the shared mise volume for scratch space rather than the orchestrator's 16 MiB `/tmp` tmpfs, so the volume also needs room for Go compilation.
+The scratch directory is removed before the Runtime Process starts.
 
 Clone the repository and create the local configuration:
 

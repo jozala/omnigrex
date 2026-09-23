@@ -1467,7 +1467,7 @@ SELECT EXISTS (
       AND NOT handoff_attempt.active
       AND handoff_attempt.human_handoff_reason IS NOT NULL
 )`, preparationJobID, workflowID).Scan(&allowed); err != nil {
-		return false, fmt.Errorf("verify preparation handoff waiting Assignments: %w", err)
+		return false, fmt.Errorf("verify preceding Human Handoff for Participant reactivation: %w", err)
 	}
 	return allowed, nil
 }

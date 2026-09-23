@@ -303,9 +303,11 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 - Create an isolated assignment workspace subdirectory in the orchestrator-mounted named volume.
 - Mount only that subdirectory at `/workspace` in a Runtime Process.
 - Clone and refresh through the orchestrator using short-lived Developer App tokens.
+- Build each checkout in a turn-scoped staging directory and promote it under the live Agent Turn fence; clean detached previous workspaces without touching a successor's active path.
 - Keep credentials out of Git remotes and the agent environment.
 - Check out the default branch for initial development and the Pull Request head for subsequent turns.
 - Install and activate repository mise tools into an assignment-isolated data directory before starting the Agent Turn when mise configuration is present.
+- Serialize provisioning of one Assignment's mise data across Runtime Processes so a stale Turn cannot replace a successor's installed tools.
 - Use the Developer workspace mise revision for Developer Turns and the latest default-branch mise configuration and lock data for Reviewer Turns.
 - Keep feature-branch mise files visible for review without evaluating or executing them.
 - Prepare publication in a clean checkout that the agent cannot modify.

@@ -3,6 +3,7 @@ package workspace_test
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -138,6 +140,173 @@ func TestLifecycleReplacesReadOnlyAgentCacheWithoutFollowingSymlinks(t *testing.
 	}
 	if content, err := os.ReadFile(filepath.Join(external, "marker")); err != nil || string(content) != "outside" {
 		t.Errorf("external marker = %q, %v", content, err)
+	}
+}
+
+func TestStaleStagedCheckoutCannotReplaceSuccessorWorkspace(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	initial := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first, ExecutionEpoch: 1}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Workspace, "agent-edit.txt"), []byte("keep until promotion"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(paths.Workspace), "workspace-retired-0-abandoned"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	staleCtx, cancelStale := context.WithCancel(context.Background())
+	defer cancelStale()
+	stale := initial
+	stale.Revision = fixture.second
+	stale.ExecutionEpoch = 2
+	stale.Fence = func(ctx context.Context, promote func(context.Context) error) error {
+		if content, err := os.ReadFile(filepath.Join(paths.Workspace, "agent-edit.txt")); err != nil || string(content) != "keep until promotion" {
+			return fmt.Errorf("active workspace changed before promotion: %q, %v", content, err)
+		}
+		close(ready)
+		<-release
+		return promote(ctx)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := lifecycle.PrepareWorkspace(staleCtx, stale)
+		result <- err
+	}()
+	select {
+	case <-ready:
+	case err := <-result:
+		t.Fatalf("stale checkout did not reach promotion: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale checkout did not reach promotion")
+	}
+	cancelStale()
+	successor := initial
+	successor.ExecutionEpoch = 3
+	successor.Fence = func(ctx context.Context, promote func(context.Context) error) error { return promote(ctx) }
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), successor); err != nil {
+		t.Fatalf("successor PrepareWorkspace() error = %v", err)
+	}
+	close(release)
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("stale PrepareWorkspace() error = %v, want canceled fence", err)
+	}
+	if got := gitOutput(t, paths.Workspace, "rev-parse", "HEAD"); got != fixture.first {
+		t.Fatalf("successor workspace HEAD = %q, want %q", got, fixture.first)
+	}
+	entries, err := os.ReadDir(filepath.Dir(paths.Workspace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "workspace" {
+		t.Errorf("assignment workspace entries = %v, want only active workspace", entries)
+	}
+}
+
+func TestWorkspacePromotionRequiresFenceCallback(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout.Revision = fixture.second
+	checkout.Fence = func(context.Context, func(context.Context) error) error { return nil }
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), checkout); err == nil {
+		t.Fatal("PrepareWorkspace() accepted a fence that skipped promotion")
+	}
+	if got := gitOutput(t, paths.Workspace, "rev-parse", "HEAD"); got != fixture.first {
+		t.Fatalf("skipped promotion changed active workspace to %q", got)
+	}
+}
+
+func TestOlderTurnDoesNotCleanSuccessorRollbackDirectory(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first, ExecutionEpoch: 8}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback := filepath.Join(filepath.Dir(paths.Workspace), "workspace-retired-9-successor")
+	if err := os.Mkdir(rollback, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rollback, "prior-workspace"), []byte("restore on failure"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checkout.Revision = fixture.second
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), checkout); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(filepath.Join(rollback, "prior-workspace")); err != nil || string(content) != "restore on failure" {
+		t.Fatalf("older turn removed successor rollback directory: %q, %v", content, err)
+	}
+}
+
+func TestCheckoutRetriesFailedDetachedWorkspaceCleanup(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first, ExecutionEpoch: 7}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout.Revision = fixture.second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checkout.Fence = func(ctx context.Context, promote func(context.Context) error) error {
+		if err := promote(ctx); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+	if _, err := lifecycle.PrepareWorkspace(ctx, checkout); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareWorkspace() after unfinished old-tree cleanup = %v, want cancellation", err)
+	}
+	checkout.ExecutionEpoch = 8
+	checkout.Fence = nil
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), checkout); err != nil {
+		t.Fatalf("successor PrepareWorkspace() did not clean retired tree: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(paths.Workspace))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "workspace" {
+		t.Fatalf("assignment directory after cleanup retry = %v, %v", entries, err)
+	}
+}
+
+func TestCheckoutReportsOlderStagedWorkspaceCleanupBacklog(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first, ExecutionEpoch: 1}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		if err := os.Mkdir(filepath.Join(filepath.Dir(paths.Workspace), fmt.Sprintf("workspace-staged-1-abandoned-%d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkout.ExecutionEpoch = 2
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), checkout); err == nil {
+		t.Fatal("PrepareWorkspace() hid abandoned staged workspace cleanup backlog")
+	}
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), checkout); err != nil {
+		t.Fatalf("PrepareWorkspace() after bounded cleanup retry = %v", err)
 	}
 }
 
