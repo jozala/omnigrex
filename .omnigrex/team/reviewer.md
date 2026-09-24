@@ -3,6 +3,7 @@ name: reviewer
 role: REVIEWER
 runtime: opencode-acp/v1
 model: opencode-go/muse-spark-1.3-contributor
+variant: xhigh
 steps: 100
 permissions:
   read: allow
