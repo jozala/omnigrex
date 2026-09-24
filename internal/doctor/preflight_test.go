@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 func TestValidateDeveloperWebhookURL(t *testing.T) {
@@ -24,6 +25,28 @@ func TestValidateDeveloperWebhookURL(t *testing.T) {
 		if err := validateDeveloperWebhookURL(value); err == nil {
 			t.Errorf("validateDeveloperWebhookURL(%q) error = nil", value)
 		}
+	}
+}
+
+func TestACPContainerContractUsesConfiguredMemoryInSpecAndPolicy(t *testing.T) {
+	profile, err := runtimeprofile.NewOpenCodeV1(
+		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, memory := range []int64{512 << 20, 1024 << 20} {
+		policy, spec, err := acpContainerContract(profile, profile.Contract().Image, acpProbeOptions{Network: "omnigrex-agent", MemoryBytes: memory})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.MemoryBytes != memory || spec.MemoryBytes != memory || policy.PIDsLimit != 128 || spec.PIDsLimit != 128 {
+			t.Errorf("ACP policy/spec memory = %d/%d, PIDs = %d/%d", policy.MemoryBytes, spec.MemoryBytes, policy.PIDsLimit, spec.PIDsLimit)
+		}
+	}
+	if _, _, err := acpContainerContract(profile, profile.Contract().Image, acpProbeOptions{}); err == nil {
+		t.Error("ACP probe accepted missing memory")
 	}
 }
 

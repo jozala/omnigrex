@@ -70,7 +70,7 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 		Tmpfs: []TmpfsMount{
 			{Target: "/tmp/opencode", SizeBytes: 64 << 20},
 		},
-		MemoryBytes: 512 << 20,
+		MemoryBytes: 1024 << 20,
 		PIDsLimit:   128,
 	})
 	if err != nil {
@@ -104,8 +104,8 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 	if options.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue || options.Config.Labels["io.omnigrex.assignment"] != "assignment-1" {
 		t.Errorf("managed Runtime Process labels = %#v", options.Config.Labels)
 	}
-	if options.HostConfig.Memory != 512<<20 {
-		t.Errorf("memory = %d, want %d", options.HostConfig.Memory, 512<<20)
+	if options.HostConfig.Memory != 1073741824 {
+		t.Errorf("HostConfig.Memory = %d, want 1073741824", options.HostConfig.Memory)
 	}
 	if options.HostConfig.PidsLimit == nil || *options.HostConfig.PidsLimit != 128 {
 		t.Errorf("PidsLimit = %v, want 128", options.HostConfig.PidsLimit)

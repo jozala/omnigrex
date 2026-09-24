@@ -166,8 +166,9 @@ func (state *productionState) checkACPRuntime(ctx context.Context) error {
 		return errors.New("configured MCP endpoint does not have a host")
 	}
 	return checkACP(ctx, state.runtimeProfile, acpProbeOptions{
-		Network: state.settings.DockerAgentNetwork,
-		MCPHost: endpoint.Hostname(),
+		Network:     state.settings.DockerAgentNetwork,
+		MCPHost:     endpoint.Hostname(),
+		MemoryBytes: state.settings.AgentTurnMemoryBytes,
 	})
 }
 

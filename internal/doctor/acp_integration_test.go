@@ -29,7 +29,7 @@ func TestACPProbeInitializesOpenCodeWithoutPersistentState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := checkACPImage(ctx, profile, imageID, acpProbeOptions{
-		Network: "bridge", MCPHost: "host.docker.internal", ExtraHosts: []string{"host.docker.internal:host-gateway"},
+		Network: "bridge", MCPHost: "host.docker.internal", ExtraHosts: []string{"host.docker.internal:host-gateway"}, MemoryBytes: 1024 << 20,
 	}); err != nil {
 		t.Fatalf("ACP probe error = %v", err)
 	}

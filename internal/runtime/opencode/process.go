@@ -37,6 +37,7 @@ var reservedProcessLabels = map[string]struct{}{
 // ProcessOptions binds immutable Runtime Profile paths to one deployment and Assignment.
 type ProcessOptions struct {
 	Name               string
+	MemoryBytes        int64
 	Network            string
 	AssignmentID       string
 	AgentSessionID     string
@@ -57,7 +58,7 @@ type ProviderCredentials struct {
 // BuildProcess compiles a validated Runtime Profile and rendered Role configuration into an exact Docker contract.
 func BuildProcess(runtimeProfile profile.Profile, rendered *RenderedProfile, credentials ProviderCredentials, options ProcessOptions) (dockerruntime.RuntimePolicy, dockerruntime.Spec, error) {
 	contract := runtimeProfile.Contract()
-	if rendered == nil || credentials.Role != rendered.role || !validProcessIdentity(options) || contract.Name == "" || contract.Version == "" {
+	if rendered == nil || credentials.Role != rendered.role || !validProcessIdentity(options) || options.MemoryBytes <= 0 || contract.Name == "" || contract.Version == "" {
 		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, ErrInvalidProcess
 	}
 
@@ -112,7 +113,7 @@ func BuildProcess(runtimeProfile profile.Profile, rendered *RenderedProfile, cre
 		Volumes:     slices.Clone(volumes),
 		Tmpfs:       slices.Clone(tmpfs),
 		Network:     options.Network,
-		MemoryBytes: contract.MemoryBytes,
+		MemoryBytes: options.MemoryBytes,
 		PIDsLimit:   contract.PIDsLimit,
 	}
 	policy := dockerruntime.RuntimePolicy{
@@ -126,7 +127,7 @@ func BuildProcess(runtimeProfile profile.Profile, rendered *RenderedProfile, cre
 		Environment: maps.Clone(environment),
 		Labels:      maps.Clone(labels),
 		Network:     options.Network,
-		MemoryBytes: contract.MemoryBytes,
+		MemoryBytes: options.MemoryBytes,
 		PIDsLimit:   contract.PIDsLimit,
 	}
 	return policy, spec, nil

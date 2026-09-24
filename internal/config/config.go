@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -47,6 +48,7 @@ const (
 	defaultWorkflowEffectRetryDelay    = 5 * time.Second
 	defaultAssignmentRetention         = 30 * 24 * time.Hour
 	defaultAgentTurnConcurrencyLimit   = 2
+	defaultAgentTurnMemoryMiB          = 512
 	minimumWebhookLeaseDuration        = 5 * time.Second
 	maximumWorkerDuration              = 365 * 24 * time.Hour
 )
@@ -94,6 +96,7 @@ type Config struct {
 	WorkflowEffectRetryDelay               time.Duration
 	AssignmentRetentionDuration            time.Duration
 	AgentTurnConcurrencyLimit              int
+	AgentTurnMemoryBytes                   int64
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
 	ShutdownTimeout                        time.Duration
@@ -161,6 +164,7 @@ func Load(getenv func(string) string) (Config, error) {
 		WorkflowEffectRetryDelay:               defaultWorkflowEffectRetryDelay,
 		AssignmentRetentionDuration:            defaultAssignmentRetention,
 		AgentTurnConcurrencyLimit:              defaultAgentTurnConcurrencyLimit,
+		AgentTurnMemoryBytes:                   defaultAgentTurnMemoryMiB << 20,
 		HTTPAddr:                               valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
 		ReadinessTimeout:                       defaultReadinessTimeout,
 		ShutdownTimeout:                        defaultShutdownTimeout,
@@ -368,6 +372,14 @@ func Load(getenv func(string) string) (Config, error) {
 			problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT must be a positive integer"))
 		} else {
 			config.AgentTurnConcurrencyLimit = limit
+		}
+	}
+	if value := getenv("OMNIGREX_AGENT_TURN_MEMORY_MIB"); value != "" {
+		mib, err := positiveInt64(value)
+		if err != nil || mib > math.MaxInt64/(1<<20) {
+			problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_TURN_MEMORY_MIB must be a positive integer of MiB that fits in int64 bytes"))
+		} else {
+			config.AgentTurnMemoryBytes = mib << 20
 		}
 	}
 

@@ -68,11 +68,18 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	client := &runtimeACPClient{operations: &operations}
 	clientFactory := &runtimeACPFactory{operations: &operations, client: client}
 	sessions := &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}}
-	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
+	launcherConfig := agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: clientFactory, Sessions: sessions,
 		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
-	})
+		MemoryBytes: 1024 << 20,
+	}
+	withoutMemory := launcherConfig
+	withoutMemory.MemoryBytes = 0
+	if _, err := agentturn.NewLauncher(withoutMemory); !errors.Is(err, agentturn.ErrInvalidLauncher) {
+		t.Fatalf("NewLauncher() with no memory error = %v, want ErrInvalidLauncher", err)
+	}
+	launcher := runtimeLauncher(t, launcherConfig)
 	var renewal agentturn.MCPRenewal
 
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -138,6 +145,9 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 
 	spec := engineFactory.engine.spec
+	if spec.MemoryBytes != 1073741824 || engineFactory.options.RuntimePolicy.MemoryBytes != spec.MemoryBytes {
+		t.Errorf("Agent Turn policy/spec memory = %d/%d, want 1073741824", engineFactory.options.RuntimePolicy.MemoryBytes, spec.MemoryBytes)
+	}
 	for _, label := range []struct{ got, want string }{
 		{store.RuntimeLabelAssignmentID, "io.omnigrex.assignment"},
 		{store.RuntimeLabelSessionID, "io.omnigrex.agent-session"},
@@ -1189,6 +1199,9 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 
 func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.Launcher {
 	t.Helper()
+	if config.MemoryBytes == 0 {
+		config.MemoryBytes = 512 << 20
+	}
 	launcher, err := agentturn.NewLauncher(config)
 	if err != nil {
 		t.Fatalf("NewLauncher() error = %v", err)

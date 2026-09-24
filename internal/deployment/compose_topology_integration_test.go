@@ -124,6 +124,9 @@ func TestComposeTopology(t *testing.T) {
 	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"]; got != "2" {
 		t.Errorf("Agent Turn concurrency limit = %q, want 2", got)
 	}
+	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_MEMORY_MIB"]; got != "512" {
+		t.Errorf("Agent Turn memory MiB = %q, want 512", got)
+	}
 	if got := orchestrator.Environment["OMNIGREX_ASSIGNMENT_RETENTION_DURATION"]; got != "720h" {
 		t.Errorf("Assignment retention duration = %q, want 720h", got)
 	}
@@ -210,9 +213,21 @@ func TestComposeTopology(t *testing.T) {
 
 func loadComposeConfig(t *testing.T) composeConfig {
 	t.Helper()
+	return loadComposeConfigWithEnvironment(t, nil)
+}
+
+func TestComposeForwardsConfiguredAgentTurnMemory(t *testing.T) {
+	config := loadComposeConfigWithEnvironment(t, map[string]string{"OMNIGREX_AGENT_TURN_MEMORY_MIB": "1024"})
+	if got := config.Services["orchestrator"].Environment["OMNIGREX_AGENT_TURN_MEMORY_MIB"]; got != "1024" {
+		t.Errorf("Agent Turn memory setting = %q, want 1024", got)
+	}
+}
+
+func loadComposeConfigWithEnvironment(t *testing.T, overrides map[string]string) composeConfig {
+	t.Helper()
 	output, err := executeCompose(
 		repositoryRoot(t),
-		composeEnvironment("/dev/null", "123", "456", "8080", nil),
+		composeEnvironment("/dev/null", "123", "456", "8080", overrides),
 		30*time.Second,
 		"config", "--format", "json",
 	)
