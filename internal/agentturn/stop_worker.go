@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/role"
+	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -20,12 +21,14 @@ type StopWorkerStore interface {
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
 	GetAgentTurnRuntimeCleanupContext(context.Context, store.JobLease) (store.AgentTurnRuntimeCleanupContext, error)
 	WithRecoveredRuntimeCleanupFence(context.Context, store.JobLease, func(context.Context) error) error
+	RecordRecoveredRuntimeOOM(context.Context, store.JobLease, string, int) error
 	AcknowledgeRecoveredRuntimeStopped(context.Context, store.JobLease) (store.AgentTurnRecovery, error)
 	AcknowledgeRecoveredRuntimeStopFailure(context.Context, store.JobLease, error, time.Duration) (store.AgentTurnRuntimeStopFailureAcknowledgement, error)
 }
 
 // ExactRuntimeCleaner removes every Runtime Process carrying an exact runtime identity.
 type ExactRuntimeCleaner interface {
+	ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error)
 	EnsureAbsent(context.Context, map[string]string) error
 }
 
@@ -154,6 +157,23 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	cleanup, err := worker.store.GetAgentTurnRuntimeCleanupContext(ctx, lease)
 	if err != nil {
 		return fmt.Errorf("read stale Runtime Process cleanup context: %w", err)
+	}
+	if cleanup.RuntimeProfileName == "" || cleanup.RuntimeProfileVersion == "" {
+		return errors.New("stale Runtime Process has no immutable Runtime Profile identity")
+	}
+	observationLabels := make(map[string]string, len(labels)+1)
+	for name, value := range labels {
+		observationLabels[name] = value
+	}
+	observationLabels[dockerruntime.RuntimeProfileIdentityLabel] = cleanup.RuntimeProfileName + "/" + cleanup.RuntimeProfileVersion
+	observation, err := worker.cleaner.ObserveExactExit(ctx, observationLabels)
+	if err != nil {
+		return fmt.Errorf("inspect stale Runtime Process before removal: %w", err)
+	}
+	if observation.Exited && observation.OOMKilled {
+		if err := worker.store.RecordRecoveredRuntimeOOM(ctx, lease, observation.ContainerID, observation.ExitCode); err != nil {
+			return fmt.Errorf("persist recovered Runtime Process OOM before removal: %w", err)
+		}
 	}
 
 	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {

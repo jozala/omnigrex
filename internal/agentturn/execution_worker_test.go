@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -448,6 +449,43 @@ func TestExecutionWorkerRejectsUnknownACPStopReasonAfterTerminalIntent(t *testin
 	}
 	if fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed || fixture.store.settled.Completion.Status != store.AgentTurnFailed {
 		t.Fatalf("invalid response settlement = %#v", fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerReportsConfirmedOOMWithoutChangingSettlementBarriers(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.runtime.oomKilled = true
+	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
+		return acp.PromptResponse{}, io.EOF
+	}
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) {
+		t.Fatalf("ProcessNext() = (%t, %v), want confirmed OOM", processed, err)
+	}
+	if fixture.outcomes.request.PromptDiagnostic != store.RuntimeOOMDiagnostic {
+		t.Fatalf("prompt diagnostic = %q", fixture.outcomes.request.PromptDiagnostic)
+	}
+	if !containsInOrder(fixture.operations.values(), "prompt", "close-admission", "mcp-drain", "cleanup", "reconcile", "settle") {
+		t.Fatalf("OOM finalization operations = %v", fixture.operations.values())
+	}
+}
+
+func TestExecutionWorkerUsesOOMDiscoveredDuringCleanup(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.runtime.oomAfterCleanup = true
+	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
+		return acp.PromptResponse{}, io.EOF
+	}
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) ||
+		fixture.outcomes.request.PromptDiagnostic != store.RuntimeOOMDiagnostic {
+		t.Fatalf("cleanup-discovered OOM = (%t, %v), diagnostic %q", processed, err, fixture.outcomes.request.PromptDiagnostic)
 	}
 }
 
@@ -1676,19 +1714,27 @@ func (launcher *executionLauncher) LaunchExecution(_ context.Context, request ag
 }
 
 type executionRuntime struct {
-	mutex          sync.Mutex
-	operations     *executionOperations
-	lease          store.AgentTurnLease
-	client         session.PromptClient
-	drainResults   []error
-	drainWaits     int
-	cleanupResults []error
-	renewals       chan time.Time
-	closed         bool
-	closeStarted   chan struct{}
-	closeRelease   chan struct{}
-	closeOnce      sync.Once
+	mutex           sync.Mutex
+	operations      *executionOperations
+	lease           store.AgentTurnLease
+	client          session.PromptClient
+	drainResults    []error
+	drainWaits      int
+	cleanupResults  []error
+	renewals        chan time.Time
+	closed          bool
+	closeStarted    chan struct{}
+	closeRelease    chan struct{}
+	closeOnce       sync.Once
+	oomKilled       bool
+	oomAfterCleanup bool
 }
+
+func (runtime *executionRuntime) ObserveOOM(context.Context) (bool, error) {
+	return runtime.oomKilled, nil
+}
+
+func (runtime *executionRuntime) ConfirmedOOM() bool { return runtime.oomKilled }
 
 func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
 func (runtime *executionRuntime) PromptClient() session.PromptClient { return runtime.client }
@@ -1741,6 +1787,9 @@ func (runtime *executionRuntime) Cleanup(context.Context) error {
 	runtime.operations.add("cleanup")
 	runtime.mutex.Lock()
 	defer runtime.mutex.Unlock()
+	if runtime.oomAfterCleanup {
+		runtime.oomKilled = true
+	}
 	if len(runtime.cleanupResults) == 0 {
 		return nil
 	}

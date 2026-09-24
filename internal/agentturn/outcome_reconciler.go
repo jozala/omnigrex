@@ -40,6 +40,9 @@ const (
 
 // ClassifyPromptError maps ACP prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
+	if errors.Is(err, ErrRuntimeOOMKilled) {
+		return PromptErrorFailure
+	}
 	if errors.Is(err, acp.ErrUnknownStopReason) {
 		return PromptErrorInvalidResponse
 	}

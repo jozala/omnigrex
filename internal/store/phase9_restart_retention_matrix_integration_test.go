@@ -19,6 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -623,6 +624,7 @@ type phaseNineExecutionRuntime struct {
 }
 
 func (runtime *phaseNineExecutionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
+func (*phaseNineExecutionRuntime) ConfirmedOOM() bool                         { return false }
 func (runtime *phaseNineExecutionRuntime) PromptClient() session.PromptClient { return runtime.client }
 func (*phaseNineExecutionRuntime) RenewMCP(time.Time) bool                    { return true }
 func (*phaseNineExecutionRuntime) CloseMCP(context.Context) error             { return nil }
@@ -762,6 +764,10 @@ func (phaseNineFoundReconciler) Reconcile(context.Context, store.AgentTurnMutati
 
 type phaseNineExactCleaner struct {
 	calls int
+}
+
+func (*phaseNineExactCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+	return dockerruntime.ExitObservation{}, nil
 }
 
 func (cleaner *phaseNineExactCleaner) EnsureAbsent(context.Context, map[string]string) error {

@@ -92,6 +92,115 @@ func TestExpiredRecoveryWithoutMutationsSettlesFromStopAcknowledgement(t *testin
 	assertRecoverySettlement(t, pool, ctx, lease, recovery, completed, stopLease, workflow.ReasonInfrastructureRetry, 1, 0)
 }
 
+func TestRecoveredOOMSurvivesContainerRemovalAndRetainsSingleRetry(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 938, workflow.RoleDeveloper, "")
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	stopLease := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "oom-stop")
+	if err := database.RecordRecoveredRuntimeOOM(ctx, stopLease, "container-938", 137); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordRecoveredRuntimeOOM(ctx, stopLease, "container-938", 137); err != nil {
+		t.Fatalf("idempotent OOM observation: %v", err)
+	}
+	if err := database.RecordRecoveredRuntimeOOM(ctx, stopLease, "other-container", 137); !errors.Is(err, store.ErrRuntimeOOMEvidenceConflict) {
+		t.Fatalf("different container OOM evidence = %v", err)
+	}
+	completed, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, stopLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.SettlementID == "" || !completed.SuccessorAllowed {
+		t.Fatalf("OOM recovery did not retain normal retry: %#v", completed)
+	}
+	var diagnostic, containerID string
+	if err := pool.QueryRow(ctx, `
+SELECT settlement.terminal_last_error, turn.runtime_oom_container_id
+FROM agent_turn_settlements AS settlement
+JOIN agent_turns AS turn ON turn.id = settlement.agent_turn_id
+WHERE turn.id = $1`, lease.ID).Scan(&diagnostic, &containerID); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic != store.RuntimeOOMDiagnostic || containerID != "container-938" {
+		t.Fatalf("recovery evidence = %q, %q", diagnostic, containerID)
+	}
+}
+
+func TestMutationRecoveryHandoffRetainsUncertaintyAndMentionsConfirmedOOM(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	lease, mutation, _, stopLease, mutationLease := beginControlledRecovery(t, database, pool, ctx, 940,
+		"unknown-oom", "comment_on_issue", json.RawMessage(`{"body":"status"}`))
+	if err := database.RecordRecoveredRuntimeOOM(ctx, stopLease, "container-940", 137); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, stopLease); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		ack, err := database.AcknowledgeAgentTurnMutationReconciliationFailure(ctx, mutationLease,
+			errors.New("mutation outcome unavailable"), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 {
+			if !ack.RetryScheduled {
+				t.Fatalf("attempt %d did not schedule a mutation reconciliation retry", attempt)
+			}
+			mutationLease = claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "mutation-retry")
+		} else if !ack.Escalated {
+			t.Fatalf("final mutation reconciliation did not escalate: %#v", ack)
+		}
+	}
+	var reason, diagnostic, mutationError string
+	if err := pool.QueryRow(ctx, `
+SELECT payload->>'reason', payload->>'diagnostic' FROM jobs
+WHERE workflow_id = $1 AND kind = 'PUBLISH_HUMAN_HANDOFF'`, lease.JobLease.WorkflowID).Scan(&reason, &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT last_error FROM tool_invocations WHERE id = $1`, mutation.ID).Scan(&mutationError); err != nil {
+		t.Fatal(err)
+	}
+	if reason != string(workflow.ReasonAgentTurnMutationReconciliationExhausted) ||
+		!strings.Contains(diagnostic, "outcome unknowable") || !strings.Contains(diagnostic, store.RuntimeOOMDiagnostic) ||
+		strings.Contains(mutationError, store.RuntimeOOMDiagnostic) {
+		t.Fatalf("handoff = %s / %q, mutation error = %q", reason, diagnostic, mutationError)
+	}
+}
+
+func TestLiveOOMObservationRequiresCurrentTurnFence(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 939, workflow.RoleDeveloper, "")
+	if err := database.RecordAgentTurnRuntimeOOM(ctx, lease, "container-939", 137); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordAgentTurnRuntimeOOM(ctx, lease, "container-939", 137); err != nil {
+		t.Fatalf("idempotent live observation: %v", err)
+	}
+	stale := lease
+	stale.ExecutionEpoch++
+	if err := database.RecordAgentTurnRuntimeOOM(ctx, stale, "container-stale", 137); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("stale epoch accepted OOM evidence: %v", err)
+	}
+	var containerID string
+	if err := pool.QueryRow(ctx, `SELECT runtime_oom_container_id FROM agent_turns WHERE id = $1`, lease.ID).Scan(&containerID); err != nil || containerID != "container-939" {
+		t.Fatalf("durable live evidence = (%q, %v)", containerID, err)
+	}
+}
+
 func TestControlledRuntimeRecoveryWithoutMutationsSettlesOnlyFromStopAcknowledgement(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]

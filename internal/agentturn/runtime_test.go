@@ -1070,6 +1070,64 @@ func TestLauncherFailureReturnsRecoverableHandleWhenCleanupCannotProveRemoval(t 
 	}
 }
 
+func TestLauncherPreservesOOMBeforeRemovingProcessAfterSessionResumeFails(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
+				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+			}
+		})
+	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) {
+		t.Fatalf("Launch() = (%v, %v), want classified OOM with cleaned handle", handle, err)
+	}
+	if resources.store.oomContainerID != "container-oom" || resources.store.oomExitCode != 137 {
+		t.Fatalf("saved OOM = (%q, %d)", resources.store.oomContainerID, resources.store.oomExitCode)
+	}
+	index := slices.Index(operations, "oom-record")
+	if index < 0 || slices.Index(operations, "process-stop") <= index || slices.Index(operations, "process-remove") <= index {
+		t.Fatalf("OOM evidence must be durable before process cleanup: %v", operations)
+	}
+}
+
+func TestLauncherReportsOOMFirstConfirmedDuringCleanup(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.observeResults = []dockerruntime.ExitObservation{
+				{Running: true},
+				{Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "late-oom"},
+			}
+		})
+	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) || resources.store.oomContainerID != "late-oom" {
+		t.Fatalf("Launch() = (%v, %v), saved container %q", handle, err, resources.store.oomContainerID)
+	}
+	if !containsInOrder(operations, "oom-record", "process-stop", "process-remove") {
+		t.Fatalf("cleanup removed Runtime Process before recording OOM: %v", operations)
+	}
+}
+
+func TestLauncherDoesNotRemoveOOMContainerIfEvidenceCannotBePersisted(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
+				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+			}
+			resources.store.oomRecordErr = errors.New("database temporarily unavailable")
+		})
+	if err == nil || handle == nil || resources.engineFactory.engine.process.removed != 0 {
+		t.Fatalf("Launch() = (%v, %v), removed %d processes", handle, err, resources.engineFactory.engine.process.removed)
+	}
+	resources.store.oomRecordErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup() retry error = %v", err)
+	}
+	if resources.engineFactory.engine.process.removed != 1 {
+		t.Fatalf("removed processes after OOM persistence = %d", resources.engineFactory.engine.process.removed)
+	}
+}
+
 type runtimeLaunchResources struct {
 	store         *runtimeStore
 	workspace     *runtimeWorkspace
@@ -1204,6 +1262,17 @@ type runtimeStore struct {
 	turnFence          sync.Mutex
 	withFenceAttempted chan struct{}
 	withFenceErr       error
+	oomRecordErr       error
+	oomContainerID     string
+	oomExitCode        int
+}
+
+func (database *runtimeStore) RecordAgentTurnRuntimeOOM(_ context.Context, _ store.AgentTurnLease, id string, code int) error {
+	*database.operations = append(*database.operations, "oom-record")
+	if database.oomRecordErr == nil {
+		database.oomContainerID, database.oomExitCode = id, code
+	}
+	return database.oomRecordErr
 }
 
 func (database *runtimeStore) RefreshAgentTurnLease(_ context.Context, lease store.AgentTurnLease, extension time.Duration) (store.AgentTurnLease, error) {
@@ -1433,6 +1502,18 @@ type runtimeProcess struct {
 	releaseStart     <-chan struct{}
 	stopContextErr   error
 	removeContextErr error
+	exitObservation  dockerruntime.ExitObservation
+	observeResults   []dockerruntime.ExitObservation
+	observeErr       error
+}
+
+func (process *runtimeProcess) ObserveExit(context.Context) (dockerruntime.ExitObservation, error) {
+	if len(process.observeResults) != 0 {
+		result := process.observeResults[0]
+		process.observeResults = process.observeResults[1:]
+		return result, process.observeErr
+	}
+	return process.exitObservation, process.observeErr
 }
 
 func (process *runtimeProcess) Transport() io.ReadWriteCloser { return process.transport }

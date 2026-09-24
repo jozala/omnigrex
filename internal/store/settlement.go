@@ -290,20 +290,22 @@ func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, reducer workflow.
 	var stopJobID, reconcileJobID, continuation, originalOwnerID string
 	var recoveryStartedAt time.Time
 	var recoverySettled bool
+	var runtimeOOMKilled bool
 	var originalOwnerHash []byte
 	var stopStatus JobStatus
 	reconcileStatus := JobSucceeded
 	if err := tx.QueryRow(ctx, `
 SELECT turn.stop_runtime_job_id::text, COALESCE(turn.reconcile_mutations_job_id::text, ''),
        turn.recovery_continuation, turn.recovery_started_at,
-       turn.recovery_settled_at IS NOT NULL, COALESCE(turn.recovery_original_owner_id, ''),
+        turn.recovery_settled_at IS NOT NULL, turn.runtime_oom_container_id IS NOT NULL,
+        COALESCE(turn.recovery_original_owner_id, ''),
        COALESCE(turn.recovery_original_owner_token_sha256, ''::bytea),
        (SELECT status FROM jobs WHERE id = turn.stop_runtime_job_id),
        COALESCE((SELECT status FROM jobs WHERE id = turn.reconcile_mutations_job_id), 'SUCCEEDED')
 FROM agent_turns AS turn
 WHERE turn.id = $1 AND turn.execution_epoch = $2
   AND turn.recovery_started_at IS NOT NULL`, authority.AgentTurnID, authority.ExecutionEpoch).Scan(
-		&stopJobID, &reconcileJobID, &continuation, &recoveryStartedAt, &recoverySettled,
+		&stopJobID, &reconcileJobID, &continuation, &recoveryStartedAt, &recoverySettled, &runtimeOOMKilled,
 		&originalOwnerID, &originalOwnerHash, &stopStatus, &reconcileStatus,
 	); err != nil {
 		return false, fmt.Errorf("inspect Agent Turn recovery settlement: %w", err)
@@ -337,6 +339,10 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`,
 	}
 	if !runtimeStopped || stopStatus != JobSucceeded || reconcileStatus != JobSucceeded || unsettled {
 		return false, nil
+	}
+	diagnostic := recoverySettlementDiagnostic
+	if runtimeOOMKilled {
+		diagnostic = RuntimeOOMDiagnostic
 	}
 
 	if continuation == recoveryContinuationMutationHandoff || continuation == recoveryContinuationMigrationHandoff ||
@@ -414,8 +420,8 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	}
 	observation, observationJSON, observationHash, err := canonicalizeAgentTurnSettlementObservation(AgentTurnSettlementObservation{
 		ObservedAt: recoveryStartedAt, Outcome: workflow.TurnOutcomeInfrastructureFailed,
-		Diagnostic: recoverySettlementDiagnostic,
-		Completion: AgentTurnCompletion{Status: AgentTurnInterrupted, LastError: recoverySettlementDiagnostic},
+		Diagnostic: diagnostic,
+		Completion: AgentTurnCompletion{Status: AgentTurnInterrupted, LastError: diagnostic},
 	})
 	if err != nil {
 		return false, err
@@ -462,7 +468,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		originalOwnerHash, authority.ID, authority.Kind, authority.AttemptCount,
 		authority.LeaseOwner, authority.LeaseToken, observationJSON, observationHash[:],
 		workflow.TurnOutcomeInfrastructureFailed, AgentTurnInterrupted,
-		recoverySettlementDiagnostic, int64(pending.Count), nullableString(pending.LatestObservedHeadSHA),
+		diagnostic, int64(pending.Count), nullableString(pending.LatestObservedHeadSHA),
 		decision.Disposition, decision.Reason, decision.Snapshot.State,
 		int64(decision.Snapshot.Revision), nullableString(turn.ChangeProposalID))
 	if err != nil {
@@ -507,7 +513,7 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2
       SELECT 1 FROM tool_invocations
       WHERE agent_turn_id = turn.id AND execution_epoch = turn.execution_epoch
         AND kind = 'MUTATION' AND state IN ('RESERVED', 'IN_FLIGHT', 'UNKNOWN', 'RECONCILING')
-  )`, turn.ID, turn.ExecutionEpoch, recoverySettlementDiagnostic, result.SettledAt, settlementID)
+	)`, turn.ID, turn.ExecutionEpoch, diagnostic, result.SettledAt, settlementID)
 	if err != nil || turnResult.RowsAffected() != 1 {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}

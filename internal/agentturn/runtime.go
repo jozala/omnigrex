@@ -47,6 +47,7 @@ type LauncherStore interface {
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 	WithAgentTurnCleanupFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
+	RecordAgentTurnRuntimeOOM(context.Context, store.AgentTurnLease, string, int) error
 }
 
 // RuntimeWorkspace prepares assignment-isolated checkout and trusted tool state.
@@ -68,6 +69,7 @@ type MCPRegistrar interface {
 type RuntimeProcess interface {
 	Start(context.Context) error
 	Transport() io.ReadWriteCloser
+	ObserveExit(context.Context) (dockerruntime.ExitObservation, error)
 	Stop(context.Context, time.Duration) error
 	Remove(context.Context) error
 }
@@ -183,6 +185,9 @@ type RuntimeHandle struct {
 	assignmentID       string
 	engine             RuntimeEngine
 	process            RuntimeProcess
+	exitObservation    *dockerruntime.ExitObservation
+	oomRecorded        bool
+	observeExit        bool
 	stopTimeout        time.Duration
 	secrets            []string
 	mcpMutex           sync.Mutex
@@ -292,6 +297,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	resources := &RuntimeHandle{
 		gateway: launcher.gateway, stopTimeout: launcher.stopTimeout, lease: request.Lease,
+		store:   launcher.store,
 		secrets: append([]string(nil), secrets...),
 	}
 	if rolePolicy.DiscardWorkspace {
@@ -305,7 +311,18 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCleanupTimeout)
 		defer cancel()
+		if resources.process != nil {
+			_, observeErr := resources.ObserveOOM(cleanupCtx)
+			if observeErr != nil {
+				err = errors.Join(err, observeErr)
+			} else if resources.oomRecorded {
+				err = errors.Join(err, ErrRuntimeOOMKilled)
+			}
+		}
 		cleanupErr := resources.Cleanup(cleanupCtx)
+		if resources.ConfirmedOOM() && !errors.Is(err, ErrRuntimeOOMKilled) {
+			err = errors.Join(err, ErrRuntimeOOMKilled)
+		}
 		err = errors.Join(err, cleanupErr)
 		if cleanupErr != nil {
 			handle = resources
@@ -437,6 +454,43 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	return resources, nil
 }
 
+// ErrRuntimeOOMKilled is attached only to a Docker-confirmed and durably recorded OOM exit.
+var ErrRuntimeOOMKilled = errors.New("Runtime Process was OOM-killed")
+
+// ObserveOOM saves a stopped Runtime Process's OOM state while Docker still retains it.
+// A missing or running process cannot establish an OOM cause.
+func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
+	if handle == nil || handle.process == nil {
+		return false, nil
+	}
+	handle.observeExit = true
+	if handle.exitObservation == nil {
+		observation, err := handle.process.ObserveExit(ctx)
+		if err != nil {
+			return false, err
+		}
+		if observation.Exited && (observation.OOMKilled || observation.ExitCode != 137) {
+			handle.exitObservation = &observation
+		}
+	}
+	if handle.exitObservation == nil || !handle.exitObservation.OOMKilled {
+		return false, nil
+	}
+	if !handle.oomRecorded {
+		observation := handle.exitObservation
+		if err := handle.store.RecordAgentTurnRuntimeOOM(ctx, handle.lease, observation.ContainerID, observation.ExitCode); err != nil {
+			return false, fmt.Errorf("persist Runtime Process OOM before removal: %w", err)
+		}
+		handle.oomRecorded = true
+	}
+	return true, nil
+}
+
+// ConfirmedOOM reports whether Docker's OOM exit state was durably recorded before cleanup.
+func (handle *RuntimeHandle) ConfirmedOOM() bool {
+	return handle != nil && handle.oomRecorded
+}
+
 // LaunchExecution exposes Launch through the execution worker's narrow runtime boundary.
 func (launcher *Launcher) LaunchExecution(ctx context.Context, request LaunchRequest) (ExecutionRuntime, error) {
 	handle, err := launcher.Launch(ctx, request)
@@ -509,6 +563,14 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	}()
 	handle.cleanupMutex.Lock()
 	defer handle.cleanupMutex.Unlock()
+	if handle.observeExit && handle.process != nil && !handle.processRemoved {
+		observeCtx, cancel := handle.teardownContext(ctx)
+		_, observeErr := handle.ObserveOOM(observeCtx)
+		cancel()
+		if observeErr != nil {
+			return fmt.Errorf("observe Runtime Process before cleanup: %w", observeErr)
+		}
+	}
 
 	var cleanupErrors []error
 	if err := handle.CloseMCP(ctx); err != nil {

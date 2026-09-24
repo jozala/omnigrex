@@ -27,9 +27,11 @@ type AgentTurnMutationReconciliationContext struct {
 
 // AgentTurnRuntimeCleanupContext identifies the recovered Assignment whose Runtime Process is being stopped.
 type AgentTurnRuntimeCleanupContext struct {
-	AssignmentID     string
-	Role             workflow.Role
-	DiscardWorkspace bool
+	AssignmentID          string
+	Role                  workflow.Role
+	RuntimeProfileName    string
+	RuntimeProfileVersion string
+	DiscardWorkspace      bool
 }
 
 // AgentTurnRuntimeStopFailureAcknowledgement is the durable retry outcome of one stale-runtime stop attempt.
@@ -71,8 +73,10 @@ func (store *Store) GetAgentTurnRuntimeCleanupContext(ctx context.Context, lease
 	}
 	cleanup := AgentTurnRuntimeCleanupContext{AssignmentID: job.AgentAssignmentID}
 	if err := tx.QueryRow(ctx, `
-SELECT role FROM agent_assignments
-WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&cleanup.Role); err != nil {
+SELECT role, runtime_profile_name, runtime_profile_version FROM agent_assignments
+WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(
+		&cleanup.Role, &cleanup.RuntimeProfileName, &cleanup.RuntimeProfileVersion,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AgentTurnRuntimeCleanupContext{}, ErrAgentTurnRecoveryFenceLost
 		}
@@ -339,12 +343,13 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 	}
 	var role workflow.Role
 	var continuation string
+	var runtimeOOMKilled bool
 	if err := tx.QueryRow(ctx, `
-SELECT assignment.role, turn.recovery_continuation
+SELECT assignment.role, turn.recovery_continuation, turn.runtime_oom_container_id IS NOT NULL
 FROM agent_assignments AS assignment
 JOIN agent_turns AS turn ON turn.id = $3 AND turn.execution_epoch = $4
 WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID,
-		job.AgentTurnID, job.ExecutionEpoch).Scan(&role, &continuation); err != nil {
+		job.AgentTurnID, job.ExecutionEpoch).Scan(&role, &continuation, &runtimeOOMKilled); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}
 	observedAt := job.CreatedAt
@@ -359,12 +364,17 @@ WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID
 		decision := store.reducer.DefinitionIncompatible(snapshot)
 		nextContinuation = recoveryContinuationDefinitionHandoff
 		if definitionCompatible {
+			handoffDiagnostic := diagnostic
+			if runtimeOOMKilled {
+				handoffDiagnostic = fmt.Sprintf("outcome unknowable; escalated after %d reconciliation attempts. %s Reconciliation detail: %s",
+					job.AttemptCount, RuntimeOOMDiagnostic, cause.Error())
+			}
 			decision = store.reducer.Reduce(snapshot, workflow.AgentTurnMutationReconciliationExhaustedEvent{
 				EventMetadata: workflow.EventMetadata{
 					ID: job.ID, ObservedAt: observedAt, WorkItem: snapshot.WorkItem,
 					ExpectedRevision: snapshot.Revision,
 				},
-				Role: role, Diagnostic: diagnostic,
+				Role: role, Diagnostic: handoffDiagnostic,
 			})
 			nextContinuation = recoveryContinuationMutationHandoff
 		}

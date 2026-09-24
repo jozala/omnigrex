@@ -47,6 +47,7 @@ type DefaultBranchResolver interface {
 type ExecutionRuntime interface {
 	CurrentLease() store.AgentTurnLease
 	PromptClient() session.PromptClient
+	ConfirmedOOM() bool
 	CloseMCP(context.Context) error
 	Cleanup(context.Context) error
 }
@@ -345,6 +346,18 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			cancelPrompt()
 			if promptErr != nil {
 				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)
+				if observer, ok := runtime.(interface {
+					ObserveOOM(context.Context) (bool, error)
+				}); ok {
+					observeCtx, cancelObserve := context.WithTimeout(context.WithoutCancel(workCtx), worker.cleanupTimeout)
+					oom, observeErr := observer.ObserveOOM(observeCtx)
+					cancelObserve()
+					if observeErr != nil {
+						operationErr = errors.Join(operationErr, observeErr)
+					} else if oom {
+						operationErr = errors.Join(operationErr, ErrRuntimeOOMKilled)
+					}
+				}
 			} else {
 				promptResponse = &response
 			}
@@ -376,6 +389,9 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	}
 
 	cleanupErr := worker.cleanupWithRetry(leaseCtx, runtime)
+	if !nilDependency(runtime) && operationErr != nil && runtime.ConfirmedOOM() && !errors.Is(operationErr, ErrRuntimeOOMKilled) {
+		operationErr = errors.Join(operationErr, ErrRuntimeOOMKilled)
+	}
 	combinedErr := errors.Join(operationErr, wrapExecutionError("cleanup Agent Turn runtime", cleanupErr))
 	if lostLease(leaseCtx, cleanupErr) {
 		return false, combinedErr
@@ -405,7 +421,11 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		reconciliation.PromptError = classification
 		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
 		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential, reviewerOutcomeCredential)
-		reconciliation.PromptDiagnostic = sanitizeLaunchError(combinedErr, diagnosticSecrets).Error()
+		if errors.Is(operationErr, ErrRuntimeOOMKilled) {
+			reconciliation.PromptDiagnostic = store.RuntimeOOMDiagnostic
+		} else {
+			reconciliation.PromptDiagnostic = sanitizeLaunchError(combinedErr, diagnosticSecrets).Error()
+		}
 	}
 	var observation store.AgentTurnSettlementObservation
 	reconcileErr := worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
+	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -41,6 +42,36 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 	}
 	if durable.acknowledgements != 1 || durable.acknowledged.ID != lease.ID || durable.acknowledged.LeaseToken != lease.LeaseToken {
 		t.Fatalf("AcknowledgeRecoveredRuntimeStopped() calls = %d, lease %#v", durable.acknowledgements, durable.acknowledged)
+	}
+}
+
+func TestStopWorkerPersistsRecoveredOOMBeforeRemovingContainer(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	}}
+	durable.cleaner = cleaner
+	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
+	processed, err := worker.ProcessNext(context.Background())
+	if err != nil || !processed || durable.oomID != "stopped-oom" || durable.oomExitCode != 137 ||
+		durable.cleanupCallsAtOOM != 0 || cleaner.callCount() != 1 {
+		t.Fatalf("stop OOM recovery = (%t, %v), evidence %q/%d before %d cleanups", processed, err,
+			durable.oomID, durable.oomExitCode, durable.cleanupCallsAtOOM)
+	}
+}
+
+func TestStopWorkerKeepsContainerWhenOOMEvidenceCannotBeSaved(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease, oomErr: errors.New("store unavailable")}
+	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	}}
+	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || err == nil || cleaner.callCount() != 0 || durable.failureAcknowledgements != 1 {
+		t.Fatalf("failed OOM persistence = (%t, %v), cleanup %d, retry %d", processed, err,
+			cleaner.callCount(), durable.failureAcknowledgements)
 	}
 }
 
@@ -420,6 +451,18 @@ type stopWorkerStore struct {
 	failureErr                         error
 	failureAcknowledgementErr          error
 	heartbeatsAtFailureAcknowledgement int
+	oomID                              string
+	oomExitCode                        int
+	oomErr                             error
+	cleanupCallsAtOOM                  int
+}
+
+func (durable *stopWorkerStore) RecordRecoveredRuntimeOOM(_ context.Context, _ store.JobLease, id string, code int) error {
+	durable.oomID, durable.oomExitCode = id, code
+	if durable.cleaner != nil {
+		durable.cleanupCallsAtOOM = durable.cleaner.callCount()
+	}
+	return durable.oomErr
 }
 
 func (durable *stopWorkerStore) ClaimJobKind(_ context.Context, queue, kind, owner string, duration time.Duration) (*store.JobLease, error) {
@@ -456,7 +499,12 @@ func (durable *stopWorkerStore) GetAgentTurnRuntimeCleanupContext(_ context.Cont
 		result = durable.cleanupContextResults[0]
 		durable.cleanupContextResults = durable.cleanupContextResults[1:]
 	}
-	return durable.cleanupContext, result
+	cleanup := durable.cleanupContext
+	if cleanup.RuntimeProfileName == "" {
+		cleanup.RuntimeProfileName = "opencode-acp"
+		cleanup.RuntimeProfileVersion = "v1"
+	}
+	return cleanup, result
 }
 
 func (durable *stopWorkerStore) cleanupContextCallCount() int {
@@ -505,6 +553,11 @@ type recordingRuntimeCleaner struct {
 	blockUntilCanceled bool
 	canceled           bool
 	delay              time.Duration
+	exitObservation    dockerruntime.ExitObservation
+}
+
+func (cleaner *recordingRuntimeCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+	return cleaner.exitObservation, nil
 }
 
 func (cleaner *recordingRuntimeCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
