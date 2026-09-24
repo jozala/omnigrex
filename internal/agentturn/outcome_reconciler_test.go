@@ -449,7 +449,8 @@ func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *t
 	if agentturn.ClassifyPromptError(context.DeadlineExceeded) != agentturn.PromptErrorDeadline ||
 		agentturn.ClassifyPromptError(context.Canceled) != agentturn.PromptErrorCancellation ||
 		agentturn.ClassifyPromptError(fmt.Errorf("ACP prompt: %w", acp.ErrUnknownStopReason)) != agentturn.PromptErrorInvalidResponse ||
-		agentturn.ClassifyPromptError(errors.New("transport")) != agentturn.PromptErrorFailure {
+		agentturn.ClassifyPromptError(errors.New("transport")) != agentturn.PromptErrorFailure ||
+		agentturn.ClassifyPromptError(errors.Join(context.DeadlineExceeded, agentturn.ErrRuntimeOOMKilled)) != agentturn.PromptErrorFailure {
 		t.Fatal("ClassifyPromptError() returned an incorrect classification")
 	}
 

@@ -433,6 +433,43 @@ func TestProcessCleanupIsSafeBeforeStartAndAcrossDockerRemovalRaces(t *testing.T
 	}
 }
 
+func TestProcessObservesOnlyDockerConfirmedOOMBeforeRemoval(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		state      *container.State
+		inspectErr error
+		wantOOM    bool
+		wantExit   bool
+	}{
+		{name: "oom", state: &container.State{OOMKilled: true, ExitCode: 137}, wantOOM: true, wantExit: true},
+		{name: "exit 137 without oom", state: &container.State{ExitCode: 137}, wantExit: true},
+		{name: "container removed", inspectErr: errdefs.ErrNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			labels := map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}
+			api := newRuntimeAPIFake()
+			api.inspectErr = test.inspectErr
+			api.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{
+				ID: "runtime-container", Config: &container.Config{Labels: labels}, State: test.state,
+			}}
+			process := &Process{ID: "runtime-container", api: api, labels: labels}
+			got, err := process.ObserveExit(context.Background())
+			if err != nil || got.OOMKilled != test.wantOOM || got.Exited != test.wantExit {
+				t.Fatalf("ObserveExit() = (%+v, %v)", got, err)
+			}
+		})
+	}
+	api := newRuntimeAPIFake()
+	api.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{
+		ID: "replacement", Config: &container.Config{Labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}},
+		State: &container.State{OOMKilled: true, ExitCode: 137},
+	}}
+	process := &Process{ID: "runtime-container", api: api, labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}}
+	if _, err := process.ObserveExit(context.Background()); err == nil {
+		t.Fatal("replacement container was accepted as OOM evidence")
+	}
+}
+
 func TestAsyncWriterDoesNotBlockRuntimeOutput(t *testing.T) {
 	target := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
 	writer := newAsyncWriter(target)
@@ -487,6 +524,12 @@ type runtimeAPIFake struct {
 	startErr    error
 	stopErr     error
 	removeErr   error
+	inspect     mobyclient.ContainerInspectResult
+	inspectErr  error
+}
+
+func (api *runtimeAPIFake) ContainerInspect(_ context.Context, id string, _ mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error) {
+	return api.inspect, api.inspectErr
 }
 
 func newRuntimeAPIFake() *runtimeAPIFake { return &runtimeAPIFake{} }

@@ -73,6 +73,7 @@ type dockerAPI interface {
 	ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error)
 	ContainerAttach(context.Context, string, mobyclient.ContainerAttachOptions) (mobyclient.ContainerAttachResult, error)
 	ContainerStart(context.Context, string, mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error)
+	ContainerInspect(context.Context, string, mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error)
 	ContainerStop(context.Context, string, mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error)
 	ContainerWait(context.Context, string, mobyclient.ContainerWaitOptions) mobyclient.ContainerWaitResult
 	ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error)
@@ -193,6 +194,7 @@ func (engine *Engine) validateAPI(ctx context.Context) error {
 type Process struct {
 	ID             string
 	api            dockerAPI
+	labels         map[string]string
 	transport      *attachTransport
 	demuxDone      chan struct{}
 	demuxLock      sync.Mutex
@@ -201,6 +203,66 @@ type Process struct {
 	startAttempted bool
 	started        bool
 	removed        bool
+}
+
+// ExitObservation contains only Docker-owned exit facts, never container logs or configuration.
+type ExitObservation struct {
+	ContainerID string
+	ExitCode    int
+	Exited      bool
+	Running     bool
+	OOMKilled   bool
+}
+
+// ObserveExit inspects the exact container before Stop or Remove can overwrite its exit state.
+// Missing containers and running containers provide no evidence of an OOM.
+func (process *Process) ObserveExit(ctx context.Context) (ExitObservation, error) {
+	// The ACP attach stream can close just before Docker publishes the terminal state.
+	for attempt := 0; attempt < 6; attempt++ {
+		observation, err := observeExit(ctx, process.api, process.ID, process.labels)
+		uncertainExit := observation.Running || observation.Exited && observation.ExitCode == 137 && !observation.OOMKilled
+		if err != nil || !uncertainExit || attempt == 5 {
+			return observation, err
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ExitObservation{}, ctx.Err()
+		}
+	}
+	return ExitObservation{}, nil
+}
+
+type exitInspector interface {
+	ContainerInspect(context.Context, string, mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error)
+}
+
+func observeExit(ctx context.Context, api exitInspector, id string, labels map[string]string) (ExitObservation, error) {
+	inspected, err := api.ContainerInspect(ctx, id, mobyclient.ContainerInspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return ExitObservation{}, nil
+	}
+	if err != nil {
+		return ExitObservation{}, fmt.Errorf("inspect Runtime Process exit: %w", err)
+	}
+	actual := inspected.Container
+	if actual.ID != id || actual.Config == nil {
+		return ExitObservation{}, errors.New("inspected Runtime Process identity does not match")
+	}
+	for name, value := range labels {
+		if actual.Config.Labels[name] != value {
+			return ExitObservation{}, errors.New("inspected Runtime Process labels do not match")
+		}
+	}
+	if actual.State == nil {
+		return ExitObservation{}, nil
+	}
+	if actual.State.Running {
+		return ExitObservation{Running: true}, nil
+	}
+	return ExitObservation{ContainerID: id, ExitCode: actual.State.ExitCode, Exited: true, OOMKilled: actual.State.OOMKilled}, nil
 }
 
 func (process *Process) Transport() io.ReadWriteCloser {
@@ -304,7 +366,7 @@ func create(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*P
 		return nil, fmt.Errorf("create Runtime Process: %w", err)
 	}
 	process := &Process{
-		ID: created.ID, api: api, demuxDone: make(chan struct{}),
+		ID: created.ID, api: api, demuxDone: make(chan struct{}), labels: maps.Clone(options.Config.Labels),
 	}
 
 	attached, err := api.ContainerAttach(ctx, created.ID, mobyclient.ContainerAttachOptions{

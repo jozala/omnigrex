@@ -399,7 +399,8 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAgentTurnRuntimeCleanupContext() error = %v", err)
 	}
-	if cleanup.AssignmentID != fixture.assignmentID || cleanup.Role != workflow.RoleReviewer {
+	if cleanup.AssignmentID != fixture.assignmentID || cleanup.Role != workflow.RoleReviewer ||
+		cleanup.RuntimeProfileName == "" || cleanup.RuntimeProfileVersion == "" {
 		t.Errorf("runtime cleanup context = %#v, want recovered Reviewer Assignment", cleanup)
 	}
 	staleStop := *stopLease

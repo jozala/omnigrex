@@ -564,6 +564,12 @@ docker ps --filter label=io.omnigrex.runtime-process=true \
   --format '{{.ID}} {{.Names}} {{.Status}}'
 ```
 
+An Agent Turn diagnostic containing `runtime_oom_killed` means Docker confirmed that its Runtime Process was OOM-killed before Omnigrex removed the container.
+Omnigrex keeps the normal single infrastructure retry, then includes this diagnosis in the Human Handoff if the retry also fails this way.
+Inspect the affected Agent Turn and the retry separately, including their Runtime Profile binding, last tool calls, and available Docker or orchestrator logs, before deciding whether to start another Workflow Attempt.
+An EOF or exit code 137 without Docker's `OOMKilled` state does not establish an OOM cause; when the container was removed before inspection, the cause remains unknown.
+Do not change the immutable Runtime Profile binding of an existing Assignment to adjust its memory limit.
+
 Do not publish logs without checking them for repository content and operational identifiers.
 The application redacts known credential types, but operator-added proxy and platform logs may not.
 

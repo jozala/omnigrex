@@ -64,6 +64,33 @@ func (cleaner *ExactLabelCleaner) Close() error {
 	return cleaner.close()
 }
 
+// ObserveExactExit returns exit facts only for a uniquely identified Runtime Process.
+// Duplicate or missing containers cannot establish the cause of one Agent Turn's failure.
+func (cleaner *ExactLabelCleaner) ObserveExactExit(ctx context.Context, labels map[string]string) (ExitObservation, error) {
+	if err := validateExactRuntimeLabels(labels); err != nil {
+		return ExitObservation{}, err
+	}
+	filters := make(mobyclient.Filters)
+	for name, value := range labels {
+		filters = filters.Add("label", name+"="+value)
+	}
+	listed, err := cleaner.api.ContainerList(ctx, mobyclient.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return ExitObservation{}, fmt.Errorf("list exact Runtime Process for exit observation: %w", err)
+	}
+	if len(listed.Items) != 1 {
+		return ExitObservation{}, nil
+	}
+	candidate := listed.Items[0]
+	if !hasExactRuntimeLabels(candidate.Labels, labels) {
+		return ExitObservation{}, errors.New("Docker returned a container outside the exact Runtime Process identity")
+	}
+	if !runtimeProcessCandidateLabels(candidate.Labels) {
+		return ExitObservation{}, nil
+	}
+	return observeExit(ctx, cleaner.api, candidate.ID, labels)
+}
+
 // EnsureAbsent gracefully stops and force-removes every container with the exact labels.
 func (cleaner *ExactLabelCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
 	if err := validateExactRuntimeLabels(labels); err != nil {

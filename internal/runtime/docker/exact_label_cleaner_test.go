@@ -202,6 +202,29 @@ func TestExactLabelCleanerRevalidatesMalformedManagedContainerBeforeRemoval(t *t
 	}
 }
 
+func TestExactLabelCleanerObservesOnlyUniqueMatchingStoppedContainer(t *testing.T) {
+	labels := markedExactRuntimeLabels()
+	api := &exactLabelCleanupFake{
+		lists: []mobyclient.ContainerListResult{{Items: []container.Summary{{ID: "one", Labels: labels}}}},
+		inspects: []mobyclient.ContainerInspectResult{{Container: container.InspectResponse{
+			ID: "one", Config: &container.Config{Labels: labels}, State: &container.State{OOMKilled: true, ExitCode: 137},
+		}}},
+	}
+	cleaner := newExactLabelCleaner(api, func() error { return nil }, ExactLabelCleanerOptions{StopTimeout: time.Second})
+	observed, err := cleaner.ObserveExactExit(context.Background(), exactRuntimeLabels())
+	if err != nil || !observed.OOMKilled || observed.ContainerID != "one" {
+		t.Fatalf("ObserveExactExit() = (%+v, %v)", observed, err)
+	}
+	if len(api.stopped) != 0 || len(api.removed) != 0 {
+		t.Fatal("observing an exit must not remove its evidence")
+	}
+	api.lists = []mobyclient.ContainerListResult{{Items: []container.Summary{{ID: "one", Labels: labels}, {ID: "two", Labels: labels}}}}
+	observed, err = cleaner.ObserveExactExit(context.Background(), exactRuntimeLabels())
+	if err != nil || observed.OOMKilled || observed.ContainerID != "" {
+		t.Fatalf("duplicate identity was attributed an OOM: (%+v, %v)", observed, err)
+	}
+}
+
 func TestExactLabelCleanerRefusesMalformedContainerWhenOwnershipChangedAfterInventory(t *testing.T) {
 	legacy := managedRuntimeLabels()
 	delete(legacy, RuntimeProcessMarkerLabel)
