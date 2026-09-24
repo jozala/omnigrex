@@ -339,6 +339,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			response, promptErr := worker.sessions.Prompt(promptCtx, session.PromptRequest{
 				Lease: *lease, Session: execution.Session, Client: runtime.PromptClient(), Content: content,
 			})
+			if promptErr == nil && response.StopReason == acp.StopReasonCancelled && promptCtx.Err() == context.DeadlineExceeded {
+				promptErr = context.DeadlineExceeded
+			}
 			cancelPrompt()
 			if promptErr != nil {
 				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)

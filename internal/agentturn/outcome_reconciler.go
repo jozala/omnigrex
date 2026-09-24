@@ -32,13 +32,17 @@ const maxOutcomeDiagnosticRunes = 4096
 type PromptErrorClassification string
 
 const (
-	PromptErrorDeadline     PromptErrorClassification = "DEADLINE"
-	PromptErrorCancellation PromptErrorClassification = "CANCELLATION"
-	PromptErrorFailure      PromptErrorClassification = "FAILURE"
+	PromptErrorDeadline        PromptErrorClassification = "DEADLINE"
+	PromptErrorCancellation    PromptErrorClassification = "CANCELLATION"
+	PromptErrorFailure         PromptErrorClassification = "FAILURE"
+	PromptErrorInvalidResponse PromptErrorClassification = "INVALID_RESPONSE"
 )
 
-// ClassifyPromptError maps transport errors to the terminal Agent Turn status contract.
+// ClassifyPromptError maps ACP prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
+	if errors.Is(err, acp.ErrUnknownStopReason) {
+		return PromptErrorInvalidResponse
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return PromptErrorDeadline
 	}
@@ -168,31 +172,43 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 	if diagnostic := validateTerminalLedger(mutations, request.Lease); diagnostic != "" {
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic), nil
 	}
-	if diagnostic := promptFailureDiagnostic(request); diagnostic != "" {
-		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, diagnostic), nil
-	}
-
 	intents := successfulTerminalIntents(mutations)
-	if len(intents) == 0 {
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent"), nil
-	}
-	if len(intents) != 1 {
+	if len(intents) > 1 {
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains duplicate or conflicting terminal intents"), nil
 	}
+	promptDiagnostic := promptFailureDiagnostic(request)
+	// A lost response or deadline does not invalidate a completed terminal intent.
+	// Explicit cancellation and non-normal ACP stop reasons still prevent acceptance.
+	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline {
+		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
+	}
+	if len(intents) == 0 {
+		if promptDiagnostic != "" {
+			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
+		}
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent"), nil
+	}
 	intent := intents[0]
+	var result store.AgentTurnSettlementObservation
 	if intent.ToolName == mcp.ToolReportBlocked {
-		return blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID), nil
+		result = blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID)
+	} else {
+		switch intent.ToolName {
+		case mcp.ToolRequestReview:
+			result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent)
+		case mcp.ToolSubmitReview:
+			request.RepositoryCredential = request.ReviewerRepositoryCredential
+			result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent)
+		default:
+			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
+		}
 	}
-
-	switch intent.ToolName {
-	case mcp.ToolRequestReview:
-		return reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent), nil
-	case mcp.ToolSubmitReview:
-		request.RepositoryCredential = request.ReviewerRepositoryCredential
-		return reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent), nil
-	default:
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
+	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && request.PromptError != "" {
+		result.Completion.Status = promptTerminalStatus(request)
+	} else if result.Outcome != workflow.TurnOutcomeBlocked && request.PromptError != "" {
+		result.Diagnostic = promptDiagnostic
 	}
+	return result, nil
 }
 
 func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replacer, error) {
@@ -508,7 +524,8 @@ func validPromptInput(request OutcomeReconciliation) bool {
 	if !hasError {
 		return true
 	}
-	return request.PromptError == PromptErrorDeadline || request.PromptError == PromptErrorCancellation || request.PromptError == PromptErrorFailure
+	return request.PromptError == PromptErrorDeadline || request.PromptError == PromptErrorCancellation ||
+		request.PromptError == PromptErrorFailure || request.PromptError == PromptErrorInvalidResponse
 }
 
 func validateTerminalLedger(mutations []store.MutationReservation, lease store.AgentTurnLease) string {
@@ -569,6 +586,8 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 			diagnostic = "ACP prompt deadline exceeded"
 		case PromptErrorCancellation:
 			diagnostic = "ACP prompt was cancelled"
+		case PromptErrorInvalidResponse:
+			diagnostic = "ACP prompt returned an invalid stop reason"
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic

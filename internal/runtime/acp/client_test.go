@@ -397,6 +397,43 @@ func TestClientPromptForwardsUpdatesRejectsConcurrencyAndCancels(t *testing.T) {
 	}
 }
 
+func TestClientCanReturnCancelledStopReasonAfterPromptDeadline(t *testing.T) {
+	client, agent := newPipeClient(t, acp.ClientOptions{})
+	reader := bufio.NewReader(agent)
+	initializeClient(t, client, agent, reader, map[string]any{})
+	createSession(t, client, agent, reader, "session-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	prompted := make(chan struct {
+		response acp.PromptResponse
+		err      error
+	}, 1)
+	go func() {
+		response, err := client.Prompt(ctx, "session-1", []acp.ContentBlock{acp.TextContent("hello")})
+		prompted <- struct {
+			response acp.PromptResponse
+			err      error
+		}{response: response, err: err}
+	}()
+	promptRequest := readWireMessage(t, reader)
+	if promptRequest.Method != "session/prompt" {
+		t.Fatalf("method = %q, want session/prompt", promptRequest.Method)
+	}
+	cancelRequest := readWireMessage(t, reader)
+	if cancelRequest.Method != "session/cancel" {
+		t.Fatalf("method = %q, want session/cancel", cancelRequest.Method)
+	}
+	writeWireMessage(t, agent, map[string]any{
+		"jsonrpc": "2.0", "id": promptRequest.ID,
+		"result": map[string]string{"stopReason": "cancelled"},
+	})
+	result := <-prompted
+	if ctx.Err() != context.DeadlineExceeded || result.err != nil || result.response.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("deadline cancellation = (context %v, response %#v, error %v)", ctx.Err(), result.response, result.err)
+	}
+}
+
 func TestClientEmitsAgentEventFromMatchingSessionUpdateAndPreservesOnUpdate(t *testing.T) {
 	const secret = "reasoning-and-transcript-sentinel"
 	events := make(chan agentevent.AgentEvent, 1)
