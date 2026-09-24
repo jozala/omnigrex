@@ -157,3 +157,38 @@ jobs:
           docker pull "$OPENCODE_TAG"
           docker image inspect "$ORCHESTRATOR_TAG" > /dev/null
           docker image inspect "$OPENCODE_TAG" > /dev/null
+
+  deploy-smoke:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Start the image-only stack from published digests
+        run: |
+          set -eu
+          ORCHESTRATOR_TAG="ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
+          OPENCODE_TAG="ghcr.io/jozala/omnigrex/opencode:sha-${{ github.sha }}"
+          docker pull --platform linux/amd64 "$ORCHESTRATOR_TAG"
+          docker pull --platform linux/amd64 "$OPENCODE_TAG"
+          ORCHESTRATOR_DIGEST="$(docker image inspect "$ORCHESTRATOR_TAG" --format '{{index .RepoDigests 0}}')"
+          OPENCODE_DIGEST="$(docker image inspect "$OPENCODE_TAG" --format '{{index .RepoDigests 0}}')"
+          OMNIGREX_DEPLOY_SMOKE=1 \
+            OMNIGREX_DEPLOY_SMOKE_ORCHESTRATOR_IMAGE="$ORCHESTRATOR_DIGEST" \
+            OMNIGREX_DEPLOY_SMOKE_OPENCODE_IMAGE="$OPENCODE_DIGEST" \
+            OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
+            go test -race -tags=integration ./internal/deployment -run TestDeployImageOnlyStartupSmoke -count=1 -v

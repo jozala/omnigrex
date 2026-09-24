@@ -333,9 +333,13 @@ This GitHub-side delivery check is required because `doctor` cannot prove that t
 
 ## Deploy
 
-From the deployment directory containing only the pinned `compose.yaml`, `.env`, and operator-provided `secrets/`, pull the exact OpenCode digest into the Docker Engine before startup, validate Compose, and start the stack without `--build`:
+From the deployment directory containing only the pinned `compose.yaml`, `.env`, and operator-provided `secrets/`, pull the exact OpenCode digest into the Docker Engine before startup, validate Compose, and start the stack without `--build`.
+Docker Compose loads `.env` automatically, but the shell does not, so source it first for the explicit pre-pull:
 
 ```sh
+set -a
+. ./.env
+set +a
 docker pull --platform=linux/amd64 "$OMNIGREX_OPENCODE_ACP_V1_IMAGE"
 docker compose config --quiet
 docker compose up --wait
