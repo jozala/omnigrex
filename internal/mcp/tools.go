@@ -66,7 +66,7 @@ var toolCatalog = []ToolDefinition{
 		"operation_id": operationIDSchema(),
 		"event":        map[string]any{"type": "string", "enum": []string{"APPROVE", "REQUEST_CHANGES"}},
 		"body":         stringSchema(0, 65536),
-		"signature":    stringSchema(0, 512),
+		"signature":    stringSchema(0, 2048),
 		"comments": map[string]any{
 			"type": "array", "maxItems": 100,
 			"items": objectSchema(map[string]any{
@@ -79,10 +79,10 @@ var toolCatalog = []ToolDefinition{
 		},
 	}, "operation_id", "event"), Class: MutationTool},
 	{Name: ToolCommentOnIssue, Description: "Add an idempotent comment to the scoped Issue.", InputSchema: objectSchema(map[string]any{
-		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536), "signature": stringSchema(0, 512),
+		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536), "signature": stringSchema(0, 2048),
 	}, "operation_id", "body"), Class: MutationTool},
 	{Name: ToolCommentOnPullRequest, Description: "Add an idempotent comment to the scoped Pull Request.", InputSchema: objectSchema(map[string]any{
-		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536), "signature": stringSchema(0, 512),
+		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536), "signature": stringSchema(0, 2048),
 	}, "operation_id", "body"), Class: MutationTool},
 	{Name: ToolReportBlocked, Description: "Create a Human Handoff for a blocker.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "reason": stringSchema(1, 4096), "details": stringSchema(1, 65536),

@@ -42,6 +42,7 @@ var (
 	// ErrMutationDrainUnresolved indicates that at least one admitted mutation did not reach a durable terminal or recoverable state.
 	ErrMutationDrainUnresolved     = errors.New("admitted mutation durable state is unresolved")
 	errMissingAgentProfileIdentity = errors.New("agent profile identity is unavailable for signing")
+	errMissingRoleDisplayName      = errors.New("role display name is unavailable for signing")
 )
 
 // Store is the durable fencing and mutation ledger needed by the gateway.
@@ -1207,7 +1208,7 @@ func (gateway *Gateway) publicationIdentity(scope TokenScope) (string, string, e
 	}
 	metadata, ok := gateway.roleCatalog.Lookup(role.ID(scope.Role))
 	if !ok || metadata.DisplayName == "" {
-		return "", "", errMissingAgentProfileIdentity
+		return "", "", errMissingRoleDisplayName
 	}
 	return profileName, metadata.DisplayName, nil
 }
