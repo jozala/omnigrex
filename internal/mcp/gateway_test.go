@@ -278,6 +278,11 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	if specs[3].ExternalService != "github" || specs[3].ExternalResourceID != "9123:omnigrex/issue-12:main" {
 		t.Fatalf("open_pr reservation metadata = %#v", specs[3])
 	}
+	for index, spec := range specs {
+		if strings.Contains(string(spec.Request), `"signature"`) {
+			t.Errorf("reservation %d (%s) request contains a signature field: %s", index+1, spec.ToolName, spec.Request)
+		}
+	}
 	wantMarker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: testMutationID(3)})
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +293,33 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	if len(publisher.publications) != 2 || strings.Contains(publisher.publications[0].Message, "publish-1") ||
 		!strings.Contains(publisher.publications[0].Message, "Omnigrex-Operation-ID: "+testMutationID(1)) {
 		t.Fatalf("publication operation trailers = %#v", publisher.publications)
+	}
+}
+
+func TestOversizedCommentBodyReturnsExplicitLengthError(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{}
+	backend := &recordingBackend{}
+	gateway := newTestGateway(t, now, durable, backend)
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	initialize(t, gateway, registration)
+
+	oversized, err := json.Marshal(map[string]string{"operation_id": "too-long", "body": strings.Repeat("x", 70000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"comment_on_issue","arguments":%s}}`, oversized)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, body))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"isError":true`) ||
+		!strings.Contains(response.Body.String(), "exceeds GitHub limit") {
+		t.Fatalf("oversized tools/call response = %d %s", response.Code, response.Body.String())
+	}
+	if backend.count() != 0 || len(durable.mutationSpecs()) != 0 {
+		t.Fatalf("oversized body reached dependencies: backend = %d, reservations = %d", backend.count(), len(durable.mutationSpecs()))
 	}
 }
 

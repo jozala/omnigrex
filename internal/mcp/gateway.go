@@ -893,7 +893,7 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		// persisted footer — including an explicitly empty footer for legacy
 		// unsigned reservations — so publication can never diverge from what
 		// recovery reconciles against.
-		invocation.Arguments = ensureReservationSignature(reservation.Request)
+		invocation.Arguments = ensureReservationSignature(invocation.Name, reservation.Request)
 	default:
 		finishCall(true)
 		writeToolError(response, id, "mutation state is invalid")
@@ -1199,10 +1199,14 @@ const placeholderMarkerOperationID = "00000000-0000-4000-8000-000000000000"
 const postedBodyTooLongMessage = "comment body with signature exceeds GitHub limit; shorten the body without changing its meaning"
 
 // ensureReservationSignature normalizes reused reservation arguments for
-// execution. Fresh reservations already carry the persisted footer; legacy
-// reservations without one gain an explicitly empty footer so the backend
-// publishes them unsigned, exactly as recovery expects.
-func ensureReservationSignature(request json.RawMessage) json.RawMessage {
+// execution. Fresh signed reservations already carry the persisted footer;
+// legacy reservations without one gain an explicitly empty footer so the
+// backend publishes them unsigned, exactly as recovery expects. Tools
+// without a signature footer are returned untouched.
+func ensureReservationSignature(tool string, request json.RawMessage) json.RawMessage {
+	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview {
+		return request
+	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(request, &object) != nil {
 		return request

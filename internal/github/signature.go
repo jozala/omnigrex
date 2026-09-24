@@ -92,36 +92,3 @@ func CheckFinalBodyLength(final string) error {
 	}
 	return nil
 }
-
-// stripSignature removes one trailing signature footer, reporting whether one was present.
-func stripSignature(body string) (string, bool) {
-	trimmed := strings.TrimRight(body, "\n")
-	index := strings.LastIndex(trimmed, "\n\n"+SignatureFooterPrefix)
-	if index < 0 {
-		if strings.HasPrefix(trimmed, SignatureFooterPrefix) {
-			return "", true
-		}
-		return body, false
-	}
-	candidate := trimmed[index+2:]
-	if !strings.HasPrefix(candidate, SignatureFooterPrefix) || !strings.HasSuffix(candidate, "_") {
-		return body, false
-	}
-	return strings.TrimRight(trimmed[:index], "\n"), true
-}
-
-// matchesSignedBody reports whether a published body without its hidden marker
-// corresponds to the agent body with either a valid signature footer or,
-// for pre-deployment publications, no footer at all.
-func matchesSignedBody(publishedWithoutMarker, agentBody string) bool {
-	published := strings.TrimSpace(publishedWithoutMarker)
-	agent := strings.TrimSpace(agentBody)
-	if published == agent {
-		return true
-	}
-	stripped, ok := stripSignature(published)
-	if !ok {
-		return false
-	}
-	return strings.TrimSpace(stripped) == agent
-}

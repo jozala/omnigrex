@@ -419,13 +419,23 @@ func inlineCommentMatches(got githubapi.ReviewComment, want reservedReviewCommen
 	if got.Body != expectedBody || got.Path != want.Path || got.Side != string(want.Side) {
 		return false
 	}
-	if got.Line == nil || *got.Line != want.Line {
+	// GitHub nulls the current line once a thread is outdated while retaining
+	// the durable original location, so fall back to it when appropriate.
+	line := got.Line
+	if line == nil {
+		line = got.OriginalLine
+	}
+	if line == nil || *line != want.Line {
 		return false
 	}
-	if want.StartLine == 0 {
-		return want.StartSide == "" && got.StartLine == nil && got.StartSide == ""
+	start := got.StartLine
+	if start == nil {
+		start = got.OriginalStartLine
 	}
-	return want.StartSide != "" && got.StartLine != nil && *got.StartLine == want.StartLine && got.StartSide == string(want.StartSide)
+	if want.StartLine == 0 {
+		return want.StartSide == "" && start == nil && got.StartSide == ""
+	}
+	return want.StartSide != "" && start != nil && *start == want.StartLine && got.StartSide == string(want.StartSide)
 }
 
 func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {

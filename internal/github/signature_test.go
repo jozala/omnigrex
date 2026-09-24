@@ -37,19 +37,6 @@ func TestAppendSignature(t *testing.T) {
 	}
 }
 
-func TestMatchesSignedBodyAcceptsSignedAndLegacy(t *testing.T) {
-	signature := RenderSignature("dev", "Developer")
-	if !matchesSignedBody("agent text\n\n"+signature, "agent text") {
-		t.Fatalf("matchesSignedBody() rejected signed body")
-	}
-	if !matchesSignedBody("agent text", "agent text") {
-		t.Fatalf("matchesSignedBody() rejected legacy unsigned body")
-	}
-	if matchesSignedBody("other text\n\n"+signature, "agent text") {
-		t.Fatalf("matchesSignedBody() accepted mismatched body")
-	}
-}
-
 func TestJoinBodyPartsAssembly(t *testing.T) {
 	marker := "<!-- omnigrex:v1 workflow=workflow-1 -->"
 	if got := JoinPostedBody("hello", marker); got != "hello\n\n"+marker {

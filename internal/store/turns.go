@@ -2109,16 +2109,18 @@ func sameAgentMutationDefinition(existing MutationReservation, spec MutationSpec
 	if existing.OperationID != spec.OperationID || existing.ToolName != spec.ToolName {
 		return false
 	}
-	return bytes.Equal(stripReservationSignature(existing.ToolName, existing.Request), stripReservationSignature(spec.ToolName, spec.Request))
+	return bytes.Equal(WithoutReservationSignature(existing.ToolName, existing.Request), WithoutReservationSignature(spec.ToolName, spec.Request))
 }
 
-// stripReservationSignature removes the persisted rendered signature footer
-// from comment and review requests before comparing mutation identity. The
-// footer depends on the deployment-configured Role display name, which may
-// change between turns; ignoring it keeps replay identity stable while the
-// source reservation's original signature is retained on replay and used for
-// recovery. Agent-supplied bodies are still compared exactly.
-func stripReservationSignature(toolName string, request json.RawMessage) json.RawMessage {
+// WithoutReservationSignature removes the persisted rendered signature
+// footer from comment and review requests before comparing mutation
+// identity. The footer depends on the deployment-configured Role display
+// name, which may change between turns; ignoring it keeps replay identity
+// stable while the source reservation's original signature is retained on
+// replay and used for recovery. Agent-supplied bodies are still compared
+// exactly. This is the single interpretation of reservation identity shared
+// by admission, replay, and backend validation.
+func WithoutReservationSignature(toolName string, request json.RawMessage) json.RawMessage {
 	switch toolName {
 	case "comment_on_issue", "comment_on_pull_request", "submit_review":
 	default:

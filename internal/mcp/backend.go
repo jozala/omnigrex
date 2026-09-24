@@ -527,6 +527,21 @@ func (backend *ProductionBackend) openPullRequest(ctx context.Context, invocatio
 }
 
 func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
+	return backend.createIssueComment(ctx, invocation, credential, false)
+}
+
+func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
+	if invocation.Scope.PullRequest == nil {
+		return nil, ErrInvalidInvocation
+	}
+	return backend.createIssueComment(ctx, invocation, credential, true)
+}
+
+// createIssueComment publishes one signed comment to the scoped Issue or,
+// for pullRequest, to the scoped Pull Request conversation. Both surfaces
+// share footer selection, marker creation, signing, and length checks so
+// they cannot drift apart.
+func (backend *ProductionBackend) createIssueComment(ctx context.Context, invocation Invocation, credential string, pullRequest bool) (json.RawMessage, error) {
 	var arguments struct {
 		Body string `json:"body"`
 	}
@@ -548,38 +563,18 @@ func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation
 	if err := checkSignedBodyLength(signed, marker); err != nil {
 		return nil, err
 	}
-	comment, err := backend.github.CreateIssueComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.Issue.Number), githubapi.CommentRequest{Body: signed, Marker: marker})
-	if err != nil {
-		return nil, classifyGitHubMutationError(err)
+	number := int(invocation.Scope.Issue.Number)
+	if pullRequest {
+		number = int(invocation.Scope.PullRequest.Number)
 	}
-	return encodeCommentResult(comment)
-}
-
-func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
-	var arguments struct {
-		Body string `json:"body"`
+	var comment githubapi.IssueComment
+	if pullRequest {
+		comment, err = backend.github.CreatePullRequestComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
+			number, githubapi.CommentRequest{Body: signed, Marker: marker})
+	} else {
+		comment, err = backend.github.CreateIssueComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
+			number, githubapi.CommentRequest{Body: signed, Marker: marker})
 	}
-	if json.Unmarshal(invocation.Arguments, &arguments) != nil || invocation.Scope.PullRequest == nil {
-		return nil, ErrInvalidInvocation
-	}
-	if !markerFree(arguments.Body) {
-		return nil, ErrInvalidInvocation
-	}
-	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
-	if err != nil {
-		return nil, err
-	}
-	marker, err := operationMarker(invocation)
-	if err != nil {
-		return nil, err
-	}
-	signed := githubapi.AppendSignature(arguments.Body, footer)
-	if err := checkSignedBodyLength(signed, marker); err != nil {
-		return nil, err
-	}
-	comment, err := backend.github.CreatePullRequestComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.PullRequest.Number), githubapi.CommentRequest{Body: signed, Marker: marker})
 	if err != nil {
 		return nil, classifyGitHubMutationError(err)
 	}
@@ -893,24 +888,17 @@ func markerFree(body string) bool {
 // stripReservedSignatureArgument removes the server-owned signature footer
 // before public input validation. Agent input cannot carry the field (the
 // public schema rejects it at the gateway); only gateway-persisted
-// reservations reach the backend with it present.
+// reservations reach the backend with it present. Identity comparison shares
+// the store's canonical interpretation via store.WithoutReservationSignature.
 func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
 	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview {
 		return invocation.Arguments
 	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(invocation.Arguments, &object) != nil {
+	stripped := store.WithoutReservationSignature(invocation.Name, invocation.Arguments)
+	if len(stripped) == 0 {
 		return invocation.Arguments
 	}
-	if _, ok := object["signature"]; !ok {
-		return invocation.Arguments
-	}
-	delete(object, "signature")
-	encoded, err := json.Marshal(object)
-	if err != nil {
-		return invocation.Arguments
-	}
-	return encoded
+	return stripped
 }
 
 // reservedFooter returns the footer to publish. A reservation-persisted

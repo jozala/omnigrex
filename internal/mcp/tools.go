@@ -65,7 +65,7 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolSubmitReview, Description: "Submit a native review for the scoped Pull Request head.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(),
 		"event":        map[string]any{"type": "string", "enum": []string{"APPROVE", "REQUEST_CHANGES"}},
-		"body":         stringSchema(0, 65536),
+		"body":         publicationBodySchema(0),
 		"comments": map[string]any{
 			"type": "array", "maxItems": 100,
 			"items": objectSchema(map[string]any{
@@ -73,15 +73,15 @@ var toolCatalog = []ToolDefinition{
 				"side":       map[string]any{"type": "string", "enum": []string{"LEFT", "RIGHT"}},
 				"start_line": integerSchema(1, 1_000_000),
 				"start_side": map[string]any{"type": "string", "enum": []string{"LEFT", "RIGHT"}},
-				"body":       stringSchema(1, 65536),
+				"body":       publicationBodySchema(1),
 			}, "path", "line", "side", "body"),
 		},
 	}, "operation_id", "event"), Class: MutationTool},
 	{Name: ToolCommentOnIssue, Description: "Add an idempotent comment to the scoped Issue.", InputSchema: objectSchema(map[string]any{
-		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536),
+		"operation_id": operationIDSchema(), "body": publicationBodySchema(1),
 	}, "operation_id", "body"), Class: MutationTool},
 	{Name: ToolCommentOnPullRequest, Description: "Add an idempotent comment to the scoped Pull Request.", InputSchema: objectSchema(map[string]any{
-		"operation_id": operationIDSchema(), "body": stringSchema(1, 65536),
+		"operation_id": operationIDSchema(), "body": publicationBodySchema(1),
 	}, "operation_id", "body"), Class: MutationTool},
 	{Name: ToolReportBlocked, Description: "Create a Human Handoff for a blocker.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "reason": stringSchema(1, 4096), "details": stringSchema(1, 65536),
@@ -116,6 +116,14 @@ func objectSchema(properties map[string]any, required ...string) map[string]any 
 
 func stringSchema(minimum, maximum int) map[string]any {
 	return map[string]any{"type": "string", "minLength": minimum, "maxLength": maximum}
+}
+
+// publicationBodySchema bounds signed publication text. The maximum far
+// exceeds the posted GitHub limit so oversized input reaches the exact
+// complete-body check, which returns a clear length error instead of the
+// generic invalid-arguments error, without truncating agent text.
+func publicationBodySchema(minimum int) map[string]any {
+	return stringSchema(minimum, 1<<20)
 }
 
 func operationIDSchema() map[string]any {

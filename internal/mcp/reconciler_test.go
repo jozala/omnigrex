@@ -235,6 +235,14 @@ func TestProductionReconcilerVerifiesReservedInlineComments(t *testing.T) {
 	t.Run("missing inline unresolved", func(t *testing.T) {
 		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: nil}}, mcp.ReconciliationUnresolved)
 	})
+	t.Run("outdated thread matches original location", func(t *testing.T) {
+		outdated := signedComment(inlineBody(true))
+		outdated.Line = nil
+		outdated.StartLine = nil
+		originalLine := 12
+		outdated.OriginalLine = &originalLine
+		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Outdated: true, Comments: []githubapi.ReviewComment{outdated}}}, mcp.ReconciliationFound)
+	})
 	t.Run("changed inline unresolved", func(t *testing.T) {
 		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: []githubapi.ReviewComment{signedComment("added")}}}, mcp.ReconciliationUnresolved)
 	})
