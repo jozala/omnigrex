@@ -385,6 +385,72 @@ func TestExecutionWorkerMapsPromptDeadlineAndCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutionWorkerTreatsCancelledACPResponseAfterTurnDeadlineAsDeadline(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.config.TurnTimeout = time.Millisecond
+	fixture.prompter.prompt = func(ctx context.Context) (acp.PromptResponse, error) {
+		<-ctx.Done()
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+	}
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorDeadline || request.PromptResponse != nil {
+			t.Fatalf("deadline-induced ACP cancellation = %#v, want deadline error", request)
+		}
+		return executionObservation(workflow.TurnOutcomeChangeProposalReady, store.AgentTurnSucceeded)
+	}
+
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ProcessNext() = (%t, %v), want settled deadline", processed, err)
+	}
+	if fixture.store.settled.Outcome != workflow.TurnOutcomeChangeProposalReady || fixture.store.settled.Completion.Status != store.AgentTurnSucceeded {
+		t.Fatalf("deadline handoff settlement = %#v", fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerKeepsExplicitACPResponseCancellationInterrupted(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.prompter.prompt = func(promptCtx context.Context) (acp.PromptResponse, error) {
+		cancel()
+		<-promptCtx.Done()
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+	}
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptResponse == nil || request.PromptResponse.StopReason != acp.StopReasonCancelled || request.PromptError != "" {
+			t.Fatalf("explicit ACP cancellation = %#v, want cancelled stop reason", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+
+	processed, err := fixture.worker(t).ProcessNext(ctx)
+	if !processed || err != nil {
+		t.Fatalf("ProcessNext() = (%t, %v), want settled explicit cancellation", processed, err)
+	}
+	if fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed || fixture.store.settled.Completion.Status != store.AgentTurnInterrupted {
+		t.Fatalf("explicit cancellation settlement = %#v", fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerRejectsUnknownACPStopReasonAfterTerminalIntent(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.err = fmt.Errorf("submit ACP prompt: %w", acp.ErrUnknownStopReason)
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorInvalidResponse || request.PromptResponse != nil {
+			t.Fatalf("unknown ACP stop reason = %#v, want invalid response", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
+	}
+
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, acp.ErrUnknownStopReason) {
+		t.Fatalf("ProcessNext() = (%t, %v), want rejected ACP response", processed, err)
+	}
+	if fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed || fixture.store.settled.Completion.Status != store.AgentTurnFailed {
+		t.Fatalf("invalid response settlement = %#v", fixture.store.settled)
+	}
+}
+
 func TestExecutionWorkerSettlesParentCancellationWhileHeartbeatRemainsLive(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	ctx, cancel := context.WithCancel(context.Background())

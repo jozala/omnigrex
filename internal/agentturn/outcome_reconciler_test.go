@@ -108,32 +108,30 @@ func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterACPPromptEOF(t *t
 
 func TestOutcomeReconcilerAcceptsCorroboratedTerminalIntentsAfterPromptLoss(t *testing.T) {
 	tests := []struct {
-		name      string
-		role      workflow.Role
-		mutation  store.MutationReservation
-		want      workflow.TurnOutcome
-		wantBlock string
+		name                  string
+		role                  workflow.Role
+		mutation              store.MutationReservation
+		promptError           agentturn.PromptErrorClassification
+		want                  workflow.TurnOutcome
+		wantBlockedDiagnostic string
 	}{
-		{name: "Developer deadline", role: workflow.RoleDeveloper, mutation: outcomeRequestReviewMutation(1), want: workflow.TurnOutcomeChangeProposalReady},
-		{name: "Reviewer EOF", role: workflow.RoleReviewer, mutation: outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701), want: workflow.TurnOutcomeApproved},
-		{name: "blocker EOF", role: workflow.RoleDeveloper, mutation: outcomeBlockedMutation(1, "cannot proceed", "needs access"), want: workflow.TurnOutcomeBlocked, wantBlock: "cannot proceed: needs access"},
+		{name: "Developer deadline", role: workflow.RoleDeveloper, mutation: outcomeRequestReviewMutation(1), promptError: agentturn.PromptErrorDeadline, want: workflow.TurnOutcomeChangeProposalReady},
+		{name: "Reviewer EOF", role: workflow.RoleReviewer, mutation: outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701), promptError: agentturn.PromptErrorFailure, want: workflow.TurnOutcomeApproved},
+		{name: "blocker EOF", role: workflow.RoleDeveloper, mutation: outcomeBlockedMutation(1, "cannot proceed", "needs access"), promptError: agentturn.PromptErrorFailure, want: workflow.TurnOutcomeBlocked, wantBlockedDiagnostic: "cannot proceed: needs access"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			request := outcomeRequest(t, test.role, true)
 			request.PromptResponse = nil
-			request.PromptError = agentturn.PromptErrorFailure
-			if test.name == "Developer deadline" {
-				request.PromptError = agentturn.PromptErrorDeadline
-			}
+			request.PromptError = test.promptError
 			request.PromptDiagnostic = "submit ACP prompt: EOF"
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{test.mutation}}, github).Reconcile(context.Background(), request)
 			if err != nil || observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded || observation.Completion.LastError != "" {
 				t.Fatalf("terminal intent after prompt loss = (%#v, %v)", observation, err)
 			}
-			if test.wantBlock != "" {
-				if observation.Diagnostic != test.wantBlock || github.getCalls != 0 {
+			if test.wantBlockedDiagnostic != "" {
+				if observation.Diagnostic != test.wantBlockedDiagnostic || github.getCalls != 0 {
 					t.Fatalf("blocked handoff = %#v, GitHub gets %d", observation, github.getCalls)
 				}
 			} else if !strings.Contains(observation.Diagnostic, "submit ACP prompt: EOF") {
@@ -158,6 +156,7 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 		{name: "deadline and stale head", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorDeadline, head: outcomeNewHead, wantStatus: store.AgentTurnTimedOut, wantDetail: "does not match"},
 		{name: "conflicting intents", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1), outcomeBlockedMutation(2, "blocked", "")}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "duplicate or conflicting"},
 		{name: "cancelled prompt", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorCancellation, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
+		{name: "unknown stop reason", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorInvalidResponse, wantStatus: store.AgentTurnFailed, wantDetail: "invalid stop reason"},
 		{name: "cancelled stop", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonCancelled, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
 		{name: "token limit", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonMaxTokens, wantStatus: store.AgentTurnFailed, wantDetail: "token limit"},
 	}
@@ -176,6 +175,9 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 			}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: test.mutations}, github).Reconcile(context.Background(), request)
 			assertOutcomeInfrastructureFailure(t, observation, err, test.wantStatus, test.wantDetail)
+			if test.promptError == agentturn.PromptErrorInvalidResponse && github.getCalls != 0 {
+				t.Fatalf("invalid ACP stop reason triggered %d GitHub observations", github.getCalls)
+			}
 		})
 	}
 }
@@ -432,6 +434,7 @@ func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *t
 		{name: "ACP cancellation", response: &acp.PromptResponse{StopReason: acp.StopReasonCancelled}, status: store.AgentTurnInterrupted},
 		{name: "deadline error", failure: agentturn.PromptErrorDeadline, status: store.AgentTurnTimedOut},
 		{name: "cancellation error", failure: agentturn.PromptErrorCancellation, status: store.AgentTurnInterrupted},
+		{name: "invalid response error", failure: agentturn.PromptErrorInvalidResponse, status: store.AgentTurnFailed},
 		{name: "other error", failure: agentturn.PromptErrorFailure, status: store.AgentTurnFailed},
 	}
 	for _, test := range tests {
@@ -445,6 +448,7 @@ func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *t
 	}
 	if agentturn.ClassifyPromptError(context.DeadlineExceeded) != agentturn.PromptErrorDeadline ||
 		agentturn.ClassifyPromptError(context.Canceled) != agentturn.PromptErrorCancellation ||
+		agentturn.ClassifyPromptError(fmt.Errorf("ACP prompt: %w", acp.ErrUnknownStopReason)) != agentturn.PromptErrorInvalidResponse ||
 		agentturn.ClassifyPromptError(errors.New("transport")) != agentturn.PromptErrorFailure {
 		t.Fatal("ClassifyPromptError() returned an incorrect classification")
 	}

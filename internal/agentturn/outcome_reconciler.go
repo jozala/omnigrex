@@ -32,13 +32,17 @@ const maxOutcomeDiagnosticRunes = 4096
 type PromptErrorClassification string
 
 const (
-	PromptErrorDeadline     PromptErrorClassification = "DEADLINE"
-	PromptErrorCancellation PromptErrorClassification = "CANCELLATION"
-	PromptErrorFailure      PromptErrorClassification = "FAILURE"
+	PromptErrorDeadline        PromptErrorClassification = "DEADLINE"
+	PromptErrorCancellation    PromptErrorClassification = "CANCELLATION"
+	PromptErrorFailure         PromptErrorClassification = "FAILURE"
+	PromptErrorInvalidResponse PromptErrorClassification = "INVALID_RESPONSE"
 )
 
-// ClassifyPromptError maps transport errors to the terminal Agent Turn status contract.
+// ClassifyPromptError maps ACP prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
+	if errors.Is(err, acp.ErrUnknownStopReason) {
+		return PromptErrorInvalidResponse
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return PromptErrorDeadline
 	}
@@ -175,7 +179,7 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 	promptDiagnostic := promptFailureDiagnostic(request)
 	// A lost response or deadline does not invalidate a completed terminal intent.
 	// Explicit cancellation and non-normal ACP stop reasons still prevent acceptance.
-	if promptDiagnostic != "" && (request.PromptError == "" || request.PromptError == PromptErrorCancellation) {
+	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline {
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
 	if len(intents) == 0 {
@@ -520,7 +524,8 @@ func validPromptInput(request OutcomeReconciliation) bool {
 	if !hasError {
 		return true
 	}
-	return request.PromptError == PromptErrorDeadline || request.PromptError == PromptErrorCancellation || request.PromptError == PromptErrorFailure
+	return request.PromptError == PromptErrorDeadline || request.PromptError == PromptErrorCancellation ||
+		request.PromptError == PromptErrorFailure || request.PromptError == PromptErrorInvalidResponse
 }
 
 func validateTerminalLedger(mutations []store.MutationReservation, lease store.AgentTurnLease) string {
@@ -581,6 +586,8 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 			diagnostic = "ACP prompt deadline exceeded"
 		case PromptErrorCancellation:
 			diagnostic = "ACP prompt was cancelled"
+		case PromptErrorInvalidResponse:
+			diagnostic = "ACP prompt returned an invalid stop reason"
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
