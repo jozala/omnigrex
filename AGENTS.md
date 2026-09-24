@@ -1,6 +1,6 @@
 # AGENTS.md — Working on Omnigrex
 
-Start with the assigned GitHub Issue, then read the minimum repository context needed for the change.
+Read the minimum repository context needed for the change.
 
 ## Read first
 
@@ -20,7 +20,7 @@ Start with the assigned GitHub Issue, then read the minimum repository context n
 
 ## How to work
 
-- Read the assigned Issue and the code it touches before changing anything. Keep changes focused on that Issue.
+- When an Issue is assigned, read it and the relevant code before changing anything; otherwise follow the task's stated requirements. Keep changes focused accordingly.
 - Follow `CONTEXT.md` terms and the ADRs that apply; do not reintroduce rejected alternatives.
 - Do not modify `docs/first-iteration.md`; it is an accepted specification.
 - Capture implementation failures and regression behavior in tests when possible, rather than adding incident notes or implementation details to accepted specifications.
@@ -35,7 +35,7 @@ Start with the assigned GitHub Issue, then read the minimum repository context n
   mise run check
   ```
 
-- Run the narrowest applicable tests plus the broader gate for the area touched. `mise run test-integration` needs Docker; `mise run test-compose` deliberately recreates stable local networks and volumes, so run it only when those resources can be removed.
+- Run `mise run check` for every code change, plus the narrowest applicable tests. Run `mise run test-integration` when Docker-backed behavior is affected; it needs Docker. `mise run test-compose` deliberately recreates stable local networks and volumes, so run it only when those resources can be removed.
 
 ## Secrets and safety
 
