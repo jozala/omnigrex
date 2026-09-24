@@ -198,7 +198,7 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 	if err != nil {
 		return MutationReconciliationResult{}, dependencyError("list Pull Requests")
 	}
-	expectedBody := joinVisibleParts(request.Body, fmt.Sprintf("Closes #%d", reconciliation.Issue.Number), marker)
+	expectedBody := githubapi.JoinBodyParts(request.Body, fmt.Sprintf("Closes #%d", reconciliation.Issue.Number), marker)
 	matches := make([]githubapi.PullRequest, 0, 1)
 	conflict := false
 	for _, pullRequest := range pullRequests {
@@ -231,12 +231,18 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 
 func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string, pullRequestComment bool) (MutationReconciliationResult, error) {
 	var request struct {
-		Body string `json:"body"`
+		Body      string `json:"body"`
+		Signature string `json:"signature"`
 	}
 	if mutation.ExternalService != "github" || !decodePersistedRequest(mutation.Request, &request) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	expectedBody := joinVisibleParts(request.Body, marker)
+	// Reconstruct the exact published body from the reservation. Reservations
+	// without a persisted signature predate signatures and stay unsigned.
+	expectedBody := githubapi.JoinBodyParts(request.Body, marker)
+	if request.Signature != "" {
+		expectedBody = githubapi.JoinBodyParts(githubapi.AppendSignature(request.Body, request.Signature), marker)
+	}
 	number := int(reconciliation.Issue.Number)
 	expectedResourceID := reconciliation.Issue.ID
 	if pullRequestComment {
@@ -289,8 +295,10 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	var request struct {
-		Event githubapi.ReviewEvent `json:"event"`
-		Body  string                `json:"body"`
+		Event     githubapi.ReviewEvent   `json:"event"`
+		Body      string                  `json:"body"`
+		Signature string                  `json:"signature"`
+		Comments  []reservedReviewComment `json:"comments"`
 	}
 	if !decodePersistedRequest(mutation.Request, &request) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -301,10 +309,14 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 	} else if request.Event != githubapi.ReviewApprove {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	expectedBody, err := githubapi.EnsureMarker(request.Body, githubapi.Marker{
+	visibleBody := request.Body
+	if request.Signature != "" {
+		visibleBody = githubapi.AppendSignature(request.Body, request.Signature)
+	}
+	expectedBody, err := githubapi.EnsureMarker(visibleBody, githubapi.Marker{
 		WorkflowID: reconciliation.WorkflowID, AgentAssignmentID: reconciliation.Turn.AgentAssignmentID, OperationID: mutation.ID,
 	})
-	if err != nil || !strings.Contains(expectedBody, marker) {
+	if err != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolSubmitReview, reconciliation.Repository)
@@ -321,7 +333,11 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		if !hasExactOperationMarker(review.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
 			continue
 		}
-		if review.Body != expectedBody || review.CommitID != mutation.ExpectedSHA || review.State != expectedState || review.User.ID <= 0 ||
+		if review.Body != expectedBody {
+			conflict = true
+			continue
+		}
+		if review.CommitID != mutation.ExpectedSHA || review.State != expectedState || review.User.ID <= 0 ||
 			reconciliation.ReviewerActorID != 0 && review.User.ID != reconciliation.ReviewerActorID {
 			conflict = true
 			continue
@@ -329,6 +345,15 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		matches = append(matches, review)
 	}
 	if len(matches) == 1 && !conflict {
+		if len(request.Comments) != 0 {
+			verified, err := reconciler.verifyInlineComments(ctx, credential, reconciliation, request.Comments, request.Signature, matches[0].ID)
+			if err != nil {
+				return MutationReconciliationResult{}, dependencyError("list review threads")
+			}
+			if !verified {
+				return unresolvedReconciliation(), nil
+			}
+		}
 		result, err := encodeReviewResult(matches[0])
 		if err != nil {
 			return unresolvedReconciliation(), nil
@@ -339,6 +364,78 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		return unresolvedReconciliation(), nil
 	}
 	return unresolvedReconciliation(), nil
+}
+
+// reservedReviewComment is one inline finding recorded in a review reservation.
+type reservedReviewComment struct {
+	Path      string               `json:"path"`
+	Body      string               `json:"body"`
+	Line      int                  `json:"line"`
+	Side      githubapi.ReviewSide `json:"side"`
+	StartLine int                  `json:"start_line"`
+	StartSide githubapi.ReviewSide `json:"start_side"`
+}
+
+// verifyInlineComments confirms every reserved inline finding is present on
+// the matched review with its exact reserved body, including the persisted
+// signature footer (or the legacy unsigned body). A missing or changed inline
+// comment leaves the mutation unresolved instead of accepting the review.
+func (reconciler *ProductionReconciler) verifyInlineComments(ctx context.Context, credential string, reconciliation store.AgentTurnMutationReconciliationContext, reserved []reservedReviewComment, signature string, reviewID int64) (bool, error) {
+	threads, err := reconciler.github.ListReviewThreads(ctx, credential, reconciliation.Repository.Owner, reconciliation.Repository.Name, int(reconciliation.ChangeProposal.PullRequestNumber))
+	if err != nil {
+		return false, err
+	}
+	published := make([]githubapi.ReviewComment, 0)
+	for _, thread := range threads {
+		for _, comment := range thread.Comments {
+			if comment.PullRequestReviewID != nil && *comment.PullRequestReviewID == reviewID {
+				published = append(published, comment)
+			}
+		}
+	}
+	used := make([]bool, len(published))
+	for _, want := range reserved {
+		expectedBody := want.Body
+		if signature != "" {
+			expectedBody = githubapi.AppendSignature(want.Body, signature)
+		}
+		matched := false
+		for index, got := range published {
+			if used[index] || !inlineCommentMatches(got, want, expectedBody) {
+				continue
+			}
+			used[index] = true
+			matched = true
+			break
+		}
+		if !matched {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func inlineCommentMatches(got githubapi.ReviewComment, want reservedReviewComment, expectedBody string) bool {
+	if got.Body != expectedBody || got.Path != want.Path || got.Side != string(want.Side) {
+		return false
+	}
+	// GitHub nulls the current line once a thread is outdated while retaining
+	// the durable original location, so fall back to it when appropriate.
+	line := got.Line
+	if line == nil {
+		line = got.OriginalLine
+	}
+	if line == nil || *line != want.Line {
+		return false
+	}
+	start := got.StartLine
+	if start == nil {
+		start = got.OriginalStartLine
+	}
+	if want.StartLine == 0 {
+		return want.StartSide == "" && start == nil && got.StartSide == ""
+	}
+	return want.StartSide != "" && start != nil && *start == want.StartLine && got.StartSide == string(want.StartSide)
 }
 
 func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
@@ -585,16 +682,6 @@ func hasAssignmentMarker(body, workflowID, assignmentID string) bool {
 
 func validArtifactOperationID(value string) bool {
 	return uuidtext.Valid(value)
-}
-
-func joinVisibleParts(parts ...string) string {
-	visible := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			visible = append(visible, part)
-		}
-	}
-	return strings.Join(visible, "\n\n")
 }
 
 func safeCredential(credential string) bool {

@@ -114,6 +114,7 @@ type ProductionBackendConfig struct {
 	Workflow         WorkflowMutations
 	GitRemoteBaseURL string
 	Policies         role.PolicyCatalog
+	RoleCatalog      role.Catalog
 }
 
 type ProductionBackend struct {
@@ -124,6 +125,7 @@ type ProductionBackend struct {
 	remoteBase  gitremote.BaseURL
 	identity    workspace.CommitIdentity
 	policies    role.PolicyCatalog
+	roleCatalog role.Catalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -166,6 +168,9 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	if len(config.Policies.Roles()) == 0 {
 		config.Policies = role.BuiltinPolicyCatalog()
 	}
+	if len(config.RoleCatalog.IDs()) == 0 {
+		config.RoleCatalog = role.BuiltinCatalog()
+	}
 	if err := validatePolicyTools(config.Policies); err != nil {
 		return nil, ErrInvalidBackendConfiguration
 	}
@@ -175,7 +180,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	}
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
-		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies,
+		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
 		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
@@ -522,6 +527,21 @@ func (backend *ProductionBackend) openPullRequest(ctx context.Context, invocatio
 }
 
 func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
+	return backend.createIssueComment(ctx, invocation, credential, false)
+}
+
+func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
+	if invocation.Scope.PullRequest == nil {
+		return nil, ErrInvalidInvocation
+	}
+	return backend.createIssueComment(ctx, invocation, credential, true)
+}
+
+// createIssueComment publishes one signed comment to the scoped Issue or,
+// for pullRequest, to the scoped Pull Request conversation. Both surfaces
+// share footer selection, marker creation, signing, and length checks so
+// they cannot drift apart.
+func (backend *ProductionBackend) createIssueComment(ctx context.Context, invocation Invocation, credential string, pullRequest bool) (json.RawMessage, error) {
 	var arguments struct {
 		Body string `json:"body"`
 	}
@@ -531,34 +551,30 @@ func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
-	marker, err := operationMarker(invocation)
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
 	if err != nil {
 		return nil, err
-	}
-	comment, err := backend.github.CreateIssueComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.Issue.Number), githubapi.CommentRequest{Body: arguments.Body, Marker: marker})
-	if err != nil {
-		return nil, classifyGitHubMutationError(err)
-	}
-	return encodeCommentResult(comment)
-}
-
-func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
-	var arguments struct {
-		Body string `json:"body"`
-	}
-	if json.Unmarshal(invocation.Arguments, &arguments) != nil || invocation.Scope.PullRequest == nil {
-		return nil, ErrInvalidInvocation
-	}
-	if !markerFree(arguments.Body) {
-		return nil, ErrInvalidInvocation
 	}
 	marker, err := operationMarker(invocation)
 	if err != nil {
 		return nil, err
 	}
-	comment, err := backend.github.CreatePullRequestComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
-		int(invocation.Scope.PullRequest.Number), githubapi.CommentRequest{Body: arguments.Body, Marker: marker})
+	signed := githubapi.AppendSignature(arguments.Body, footer)
+	if err := checkSignedBodyLength(signed, marker); err != nil {
+		return nil, err
+	}
+	number := int(invocation.Scope.Issue.Number)
+	if pullRequest {
+		number = int(invocation.Scope.PullRequest.Number)
+	}
+	var comment githubapi.IssueComment
+	if pullRequest {
+		comment, err = backend.github.CreatePullRequestComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
+			number, githubapi.CommentRequest{Body: signed, Marker: marker})
+	} else {
+		comment, err = backend.github.CreateIssueComment(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
+			number, githubapi.CommentRequest{Body: signed, Marker: marker})
+	}
 	if err != nil {
 		return nil, classifyGitHubMutationError(err)
 	}
@@ -586,6 +602,15 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
+	for _, comment := range arguments.Comments {
+		if !markerFree(comment.Body) {
+			return nil, ErrInvalidInvocation
+		}
+	}
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
+	if err != nil {
+		return nil, err
+	}
 	current, err := backend.github.GetPullRequest(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
 		int(invocation.Scope.PullRequest.Number))
 	if err != nil {
@@ -602,16 +627,24 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !reviewCommentsMatchFiles(arguments.Comments, files) {
 		return nil, ErrToolPrecondition
 	}
-	reviewBody, err := githubapi.EnsureMarker(arguments.Body, githubapi.Marker{
+	signedBody := githubapi.AppendSignature(arguments.Body, footer)
+	reviewBody, err := githubapi.EnsureMarker(signedBody, githubapi.Marker{
 		WorkflowID: invocation.Scope.WorkflowID, AgentAssignmentID: invocation.Scope.AgentAssignmentID, OperationID: invocation.OperationID,
 	})
 	if err != nil {
 		return nil, ErrInvalidInvocation
 	}
+	if err := githubapi.CheckFinalBodyLength(reviewBody); err != nil {
+		return nil, ErrInvalidInvocation
+	}
 	comments := make([]githubapi.ReviewCommentRequest, len(arguments.Comments))
 	for index, comment := range arguments.Comments {
+		signedComment := githubapi.AppendSignature(comment.Body, footer)
+		if err := checkSignedBodyLength(signedComment, ""); err != nil {
+			return nil, err
+		}
 		comments[index] = githubapi.ReviewCommentRequest{
-			Path: comment.Path, Body: comment.Body, Line: comment.Line, Side: comment.Side,
+			Path: comment.Path, Body: signedComment, Line: comment.Line, Side: comment.Side,
 			StartLine: comment.StartLine, StartSide: comment.StartSide,
 		}
 	}
@@ -850,6 +883,61 @@ func operationMarker(invocation Invocation) (string, error) {
 func markerFree(body string) bool {
 	inspection := githubapi.InspectMarkers(body)
 	return !inspection.Untrusted && len(inspection.Markers) == 0
+}
+
+// stripReservedSignatureArgument removes the server-owned signature footer
+// before public input validation. Agent input cannot carry the field (the
+// public schema rejects it at the gateway); only gateway-persisted
+// reservations reach the backend with it present. Identity comparison shares
+// the store's canonical interpretation via store.WithoutReservationSignature.
+func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
+	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview {
+		return invocation.Arguments
+	}
+	stripped := store.WithoutReservationSignature(invocation.Name, invocation.Arguments)
+	if len(stripped) == 0 {
+		return invocation.Arguments
+	}
+	return stripped
+}
+
+// reservedFooter returns the footer to publish. A reservation-persisted
+// footer is authoritative: it is the exact value recovery reconciles
+// against, including an explicitly empty footer for legacy unsigned
+// reservations reused across turns. Without one (direct calls only), it is
+// derived from the validated scope identity, rejecting a missing name.
+func (backend *ProductionBackend) reservedFooter(scope ToolScope, args json.RawMessage) (string, error) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(args, &object) == nil {
+		if raw, ok := object["signature"]; ok {
+			var footer string
+			if json.Unmarshal(raw, &footer) != nil {
+				return "", ErrInvalidInvocation
+			}
+			return footer, nil
+		}
+	}
+	if scope.AgentProfileName == "" {
+		return "", ErrInvalidInvocation
+	}
+	return githubapi.RenderSignature(scope.AgentProfileName, backend.displayName(scope)), nil
+}
+
+func (backend *ProductionBackend) displayName(scope ToolScope) string {
+	if scope.RoleDisplayName != "" {
+		return scope.RoleDisplayName
+	}
+	if metadata, ok := backend.roleCatalog.Lookup(role.ID(scope.Role)); ok && metadata.DisplayName != "" {
+		return metadata.DisplayName
+	}
+	return string(scope.Role)
+}
+
+func checkSignedBodyLength(signedBody, marker string) error {
+	if err := githubapi.CheckPostedBodyLength(signedBody, marker); err != nil {
+		return ErrInvalidInvocation
+	}
+	return nil
 }
 
 func encodeCommentResult(comment githubapi.IssueComment) (json.RawMessage, error) {
@@ -1094,7 +1182,11 @@ func (backend *ProductionBackend) validateInvocation(invocation Invocation) (Too
 	if !found || !policyFound || tool.Class != invocation.Class || !slices.Contains(policy.MCPTools, invocation.Name) {
 		return ToolDefinition{}, ErrToolNotAuthorized
 	}
-	if validateArguments(invocation.Arguments, tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
+	// The signature footer is server-owned: the gateway persists it in the
+	// reservation after validating agent input, so it is kept out of the
+	// public tool schema and stripped before input validation. Publication
+	// below uses the reservation value verbatim.
+	if validateArguments(stripReservedSignatureArgument(invocation), tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
 		return ToolDefinition{}, ErrInvalidInvocation
 	}
 	if !scopeAllowsBackendTool(invocation.Scope, invocation.Name) {

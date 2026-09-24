@@ -2121,7 +2121,43 @@ func sameMutationDefinition(existing MutationReservation, spec MutationSpec) boo
 }
 
 func sameAgentMutationDefinition(existing MutationReservation, spec MutationSpec) bool {
-	return existing.OperationID == spec.OperationID && existing.ToolName == spec.ToolName && bytes.Equal(existing.Request, spec.Request)
+	if existing.OperationID != spec.OperationID || existing.ToolName != spec.ToolName {
+		return false
+	}
+	return bytes.Equal(WithoutReservationSignature(existing.ToolName, existing.Request), WithoutReservationSignature(spec.ToolName, spec.Request))
+}
+
+// WithoutReservationSignature removes the persisted rendered signature
+// footer from comment and review requests before comparing mutation
+// identity. The footer depends on the deployment-configured Role display
+// name, which may change between turns; ignoring it keeps replay identity
+// stable while the source reservation's original signature is retained on
+// replay and used for recovery. Agent-supplied bodies are still compared
+// exactly. This is the single interpretation of reservation identity shared
+// by admission, replay, and backend validation.
+func WithoutReservationSignature(toolName string, request json.RawMessage) json.RawMessage {
+	switch toolName {
+	case "comment_on_issue", "comment_on_pull_request", "submit_review":
+	default:
+		return request
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(request, &object) != nil {
+		return request
+	}
+	if _, ok := object["signature"]; !ok {
+		return request
+	}
+	delete(object, "signature")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return request
+	}
+	normalized, err := canonicalJSON(json.RawMessage(encoded))
+	if err != nil {
+		return request
+	}
+	return normalized
 }
 
 func validateMutationSpec(spec MutationSpec) (json.RawMessage, error) {

@@ -94,6 +94,23 @@ Configure the Reviewer App with these exact repository permissions:
 Select no webhook events and disable the webhook.
 The Reviewer App must not reuse the Developer App identity or private key.
 
+### Agent Participant Signatures
+
+GitHub attributes every comment to the GitHub App that published it, so
+comments from different Agent Profiles sharing one App look identical.
+Every new Agent Participant comment, Pull Request comment, native review
+body (including otherwise bodyless approvals), and inline review comment
+ends with a visible footer identifying its Agent Profile:
+
+```text
+_By Omnigrex: `profile-name` [Role Display Name]_
+```
+
+The profile name comes from the Agent Participant's validated Agent Turn
+identity and the display name from the configured Role catalog. The hidden
+idempotency marker follows the footer. Historical comments and Human
+Handoff diagnostics are never re-signed.
+
 ### Keys And Installation
 
 Generate and download one private key from each App's settings page.

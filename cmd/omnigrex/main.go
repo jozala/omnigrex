@@ -220,6 +220,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Workflow:         mcp.LedgerWorkflowMutations{},
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		Policies:         rolePolicies,
+		RoleCatalog:      roleCatalog,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP tool backend: %w", err)
@@ -229,6 +230,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
 		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
 		Policies:                 rolePolicies,
+		RoleCatalog:              roleCatalog,
 	})
 	if err != nil {
 		return fmt.Errorf("configure MCP Tool Gateway: %w", err)
