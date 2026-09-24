@@ -80,9 +80,8 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
 			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
 		},
-		Workspace:   "/workspace",
-		MemoryBytes: 512 << 20,
-		PIDsLimit:   128,
+		Workspace: "/workspace",
+		PIDsLimit: 128,
 	}
 	if contract := got.Contract(); !reflect.DeepEqual(contract, want) {
 		t.Fatalf("Contract() = %#v, want %#v", contract, want)
@@ -165,8 +164,6 @@ func TestNewRejectsContractsOutsideOpenCodeV1(t *testing.T) {
 		{name: "executable home tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[0].Executable = true }},
 		{name: "non-executable temp tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[4].Executable = false }},
 		{name: "wrong workspace", mutate: func(contract *profile.Contract) { contract.Workspace = "/work" }},
-		{name: "zero memory", mutate: func(contract *profile.Contract) { contract.MemoryBytes = 0 }},
-		{name: "wrong memory", mutate: func(contract *profile.Contract) { contract.MemoryBytes++ }},
 		{name: "zero PID limit", mutate: func(contract *profile.Contract) { contract.PIDsLimit = 0 }},
 		{name: "wrong PID limit", mutate: func(contract *profile.Contract) { contract.PIDsLimit++ }},
 	}

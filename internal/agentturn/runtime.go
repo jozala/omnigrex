@@ -126,6 +126,7 @@ type LauncherConfig struct {
 	WorkspaceVolume    string
 	RuntimeStateVolume string
 	MiseVolume         string
+	MemoryBytes        int64
 	ACPOptions         acp.ClientOptions
 	StopTimeout        time.Duration
 	Policies           role.PolicyCatalog
@@ -164,6 +165,7 @@ type Launcher struct {
 	workspaceVolume    string
 	runtimeStateVolume string
 	miseVolume         string
+	memoryBytes        int64
 	acpOptions         acp.ClientOptions
 	stopTimeout        time.Duration
 	policies           role.PolicyCatalog
@@ -212,6 +214,9 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 			return nil, fmt.Errorf("%w: %s", ErrInvalidLauncher, field.name)
 		}
 	}
+	if config.MemoryBytes <= 0 {
+		return nil, fmt.Errorf("%w: Agent Turn memory must be positive", ErrInvalidLauncher)
+	}
 	if config.StopTimeout < 0 {
 		return nil, fmt.Errorf("%w: stop timeout", ErrInvalidLauncher)
 	}
@@ -226,7 +231,8 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
 		network: config.Network, workspaceVolume: config.WorkspaceVolume,
 		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
-		acpOptions: config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
+		memoryBytes: config.MemoryBytes,
+		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 	}, nil
 }
 
@@ -367,8 +373,9 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	policy, spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
 		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
 	}, opencode.ProcessOptions{
-		Name:    "omnigrex-turn-" + execution.Turn.ID + "-epoch-" + strconv.FormatInt(execution.Turn.ExecutionEpoch, 10),
-		Network: launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
+		Name:        "omnigrex-turn-" + execution.Turn.ID + "-epoch-" + strconv.FormatInt(execution.Turn.ExecutionEpoch, 10),
+		MemoryBytes: launcher.memoryBytes,
+		Network:     launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
 		AgentTurnID: execution.Turn.ID, ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch),
 		VolumeBindings:     map[string]string{"workspace": launcher.workspaceVolume, "state": launcher.runtimeStateVolume, "mise": launcher.miseVolume},
 		AssignmentSubpaths: map[string]string{"workspace": assignmentRoot + "/workspace", "state": statePath, "mise": assignmentRoot + "/mise"},

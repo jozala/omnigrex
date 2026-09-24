@@ -17,7 +17,7 @@ func TestBuildProcessMergesDuplicateEnvironmentAndRejectsConflicts(t *testing.T)
 		t.Fatalf("NewOpenCodeV1() error = %v", err)
 	}
 	options := ProcessOptions{
-		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1,
+		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
 		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "workspace": "workspace"},
 		AssignmentSubpaths: map[string]string{
 			"mise": "assignment-1/mise", "state": "assignment-1/state", "workspace": "assignment-1/workspace",
@@ -63,7 +63,7 @@ func TestBuildProcessRequiresOpenCodeConfigurationEnvironment(t *testing.T) {
 		t.Fatalf("NewOpenCodeV1() error = %v", err)
 	}
 	options := ProcessOptions{
-		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1,
+		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
 		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "workspace": "workspace"},
 		AssignmentSubpaths: map[string]string{
 			"mise": "assignment-1/mise", "state": "assignment-1/state", "workspace": "assignment-1/workspace",

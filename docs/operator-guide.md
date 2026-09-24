@@ -232,6 +232,18 @@ OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64
 Use `linux/arm64` only with an arm64 image.
 The exact digest must already be available to the deployment host's Docker Engine because Omnigrex does not pull Runtime Profile images automatically.
 
+### Agent Turn Memory
+
+Set `OMNIGREX_AGENT_TURN_MEMORY_MIB` in `.env` to a positive integer number of MiB per Agent Turn container.
+The default is `512`; set `OMNIGREX_AGENT_TURN_MEMORY_MIB=1024` for 1 GiB (1073741824 bytes).
+After changing `.env`, recreate the orchestrator with `docker compose up -d --build --force-recreate orchestrator` and run `doctor` for each repository.
+Newly created Agent Turn containers and the doctor ACP probe use the new limit; running containers are not resized.
+Changing this setting does not change the Runtime Profile binding or require a database reset.
+At the default concurrency of two, 1 GiB per turn allows up to 2 GiB across Agent Turn containers in addition to other host processes.
+The first deployment of the memory-independent `opencode-acp/v1` contract changes its existing content hash once.
+Coordinate the agreed one-time database reset with active turns before that upgrade; it discards Omnigrex Workflow and session associations, including those for existing Issues and Pull Requests, while GitHub Issues, Pull Requests, and labels remain.
+Later memory-setting changes do not require another reset.
+
 ## HTTPS Ingress
 
 The Compose stack publishes its HTTP server on `${OMNIGREX_HTTP_PORT:-8080}` and does not publish the private MCP listener.

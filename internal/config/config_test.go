@@ -2,7 +2,9 @@ package config_test
 
 import (
 	"errors"
+	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +47,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if got.AgentImageReference != "omnigrex/opencode:1.18.29" {
 		t.Errorf("AgentImageReference = %q, want %q", got.AgentImageReference, "omnigrex/opencode:1.18.29")
+	}
+	if got.AgentTurnMemoryBytes != 512<<20 {
+		t.Errorf("AgentTurnMemoryBytes = %d, want %d", got.AgentTurnMemoryBytes, 512<<20)
 	}
 	if got.OpenCodeACPV1Image != deploymentImage {
 		t.Errorf("OpenCodeACPV1Image = %q, want %q", got.OpenCodeACPV1Image, deploymentImage)
@@ -138,6 +143,7 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_WORKFLOW_EFFECT_RETRY_DELAY":                "4s",
 		"OMNIGREX_ASSIGNMENT_RETENTION_DURATION":              "48h",
 		"OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT":               "7",
+		"OMNIGREX_AGENT_TURN_MEMORY_MIB":                      "1024",
 		"OMNIGREX_HTTP_ADDR":                                  "127.0.0.1:9000",
 		"OMNIGREX_READINESS_TIMEOUT":                          "3s",
 		"OMNIGREX_SHUTDOWN_TIMEOUT":                           "20s",
@@ -205,6 +211,9 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	}
 	if got.AssignmentRetentionDuration != 48*time.Hour || got.AgentTurnConcurrencyLimit != 7 {
 		t.Errorf("workflow limits = (%s, %d), want (48h, 7)", got.AssignmentRetentionDuration, got.AgentTurnConcurrencyLimit)
+	}
+	if got.AgentTurnMemoryBytes != 1073741824 {
+		t.Errorf("AgentTurnMemoryBytes = %d, want 1073741824", got.AgentTurnMemoryBytes)
 	}
 	if got.HTTPAddr != values["OMNIGREX_HTTP_ADDR"] {
 		t.Errorf("HTTPAddr = %q, want %q", got.HTTPAddr, values["OMNIGREX_HTTP_ADDR"])
@@ -291,6 +300,14 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "assignment retention above maximum", key: "OMNIGREX_ASSIGNMENT_RETENTION_DURATION", value: "8760h1us"},
 		{name: "Agent Turn concurrency syntax", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "many"},
 		{name: "Agent Turn concurrency value", key: "OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT", value: "0"},
+		{name: "Agent Turn memory zero", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "0"},
+		{name: "Agent Turn memory negative", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "-1"},
+		{name: "Agent Turn memory leading zero", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "01024"},
+		{name: "Agent Turn memory sign", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "+1024"},
+		{name: "Agent Turn memory whitespace", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: " 1024"},
+		{name: "Agent Turn memory fraction", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "1.5"},
+		{name: "Agent Turn memory overflow in bytes", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: strconv.FormatInt(math.MaxInt64/(1<<20)+1, 10)},
+		{name: "Agent Turn memory overflow in MiB", key: "OMNIGREX_AGENT_TURN_MEMORY_MIB", value: "9223372036854775808"},
 		{name: "readiness timeout syntax", key: "OMNIGREX_READINESS_TIMEOUT", value: "eventually"},
 		{name: "readiness timeout value", key: "OMNIGREX_READINESS_TIMEOUT", value: "0s"},
 		{name: "shutdown timeout syntax", key: "OMNIGREX_SHUTDOWN_TIMEOUT", value: "eventually"},
@@ -307,6 +324,34 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("Load() error disclosed credentials: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadAcceptsLargestAgentTurnMemoryWithoutOverflow(t *testing.T) {
+	settings, err := config.Load(environment(map[string]string{
+		"OMNIGREX_AGENT_TURN_MEMORY_MIB": strconv.FormatInt(math.MaxInt64/(1<<20), 10),
+	}))
+	if err != nil || settings.AgentTurnMemoryBytes != (math.MaxInt64/(1<<20))<<20 {
+		t.Fatalf("Load() = (%d, %v), want maximum whole MiB in int64 bytes", settings.AgentTurnMemoryBytes, err)
+	}
+}
+
+func TestAgentTurnMemoryDoesNotChangeRuntimeProfileBinding(t *testing.T) {
+	var binding profile.Binding
+	for _, value := range []string{"512", "1024"} {
+		settings, err := config.Load(environment(map[string]string{"OMNIGREX_AGENT_TURN_MEMORY_MIB": value}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeProfile, err := profile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if binding == (profile.Binding{}) {
+			binding = runtimeProfile.Binding()
+		} else if runtimeProfile.Binding() != binding {
+			t.Fatalf("binding changed with memory: %v != %v", runtimeProfile.Binding(), binding)
+		}
 	}
 }
 

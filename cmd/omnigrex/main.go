@@ -339,7 +339,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
 		Sessions: sessions, Network: settings.DockerAgentNetwork,
 		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume: settings.MiseVolume, ACPOptions: acp.ClientOptions{
+		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
 		Policies: rolePolicies,

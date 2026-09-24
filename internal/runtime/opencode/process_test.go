@@ -205,6 +205,8 @@ func TestBuildProcessRejectsInvalidMappingsAndLabelsWithoutExposingValues(t *tes
 		{name: "empty session", mutate: func(options *opencode.ProcessOptions) { options.AgentSessionID = "" }},
 		{name: "empty turn", mutate: func(options *opencode.ProcessOptions) { options.AgentTurnID = "" }},
 		{name: "zero epoch", mutate: func(options *opencode.ProcessOptions) { options.ExecutionEpoch = 0 }},
+		{name: "missing memory", mutate: func(options *opencode.ProcessOptions) { options.MemoryBytes = 0 }},
+		{name: "negative memory", mutate: func(options *opencode.ProcessOptions) { options.MemoryBytes = -1 }},
 		{name: "unsafe network", mutate: func(options *opencode.ProcessOptions) { options.Network = "host" }},
 		{name: "reserved label", mutate: func(options *opencode.ProcessOptions) { options.Labels["io.omnigrex.assignment"] = secret }},
 		{name: "owner label", mutate: func(options *opencode.ProcessOptions) { options.Labels["example.owner"] = secret }},
@@ -265,6 +267,25 @@ func TestBuildProcessNamespacesEachAssignmentAndOwnsInputsAndOutputs(t *testing.
 	if firstPolicy.Command[0] != "acp" || firstPolicy.Volumes[0].Name != "mise-volume" ||
 		firstPolicy.Tmpfs[0].SizeBytes != 64<<20 || firstPolicy.Labels["io.omnigrex.workflow"] != "workflow-1" {
 		t.Fatalf("compiled policy changed through mutable input or spec: %#v", firstPolicy)
+	}
+}
+
+func TestBuildProcessUsesDeploymentMemoryWithoutChangingBinding(t *testing.T) {
+	runtimeProfile := processRuntimeProfile(t)
+	binding := runtimeProfile.Binding()
+	for _, memory := range []int64{512 << 20, 1024 << 20} {
+		options := validProcessOptions()
+		options.MemoryBytes = memory
+		policy, spec, err := opencode.BuildProcess(runtimeProfile, processRenderedProfile(t, opencode.RoleDeveloper), processCredentials(opencode.RoleDeveloper, `{}`), options)
+		if err != nil {
+			t.Fatalf("BuildProcess() with %d bytes: %v", memory, err)
+		}
+		if policy.MemoryBytes != memory || spec.MemoryBytes != memory {
+			t.Errorf("policy/spec memory = %d/%d, want %d", policy.MemoryBytes, spec.MemoryBytes, memory)
+		}
+		if runtimeProfile.Binding() != binding {
+			t.Fatal("deployment memory changed Runtime Profile binding")
+		}
 	}
 }
 
@@ -373,6 +394,7 @@ func validProcessOptions() opencode.ProcessOptions {
 		AgentSessionID: "session-1",
 		AgentTurnID:    "turn-1",
 		ExecutionEpoch: 7,
+		MemoryBytes:    512 << 20,
 		VolumeBindings: map[string]string{
 			"mise": "mise-volume", "state": "state-volume", "workspace": "workspace-volume",
 		},

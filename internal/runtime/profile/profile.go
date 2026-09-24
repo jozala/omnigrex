@@ -65,7 +65,6 @@ type Contract struct {
 	Capabilities []string              `json:"capabilities"`
 	Tmpfs        []Tmpfs               `json:"tmpfs"`
 	Workspace    string                `json:"workspace"`
-	MemoryBytes  int64                 `json:"memory_bytes"`
 	PIDsLimit    int64                 `json:"pids_limit"`
 }
 
@@ -144,9 +143,8 @@ func NewOpenCodeV1(image string, platform Platform) (Profile, error) {
 			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
 			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
 		},
-		Workspace:   "/workspace",
-		MemoryBytes: 512 << 20,
-		PIDsLimit:   128,
+		Workspace: "/workspace",
+		PIDsLimit: 128,
 	}
 	return New(contract)
 }
@@ -451,9 +449,6 @@ func validate(contract Contract) error {
 
 	if contract.Workspace != "/workspace" {
 		return invalid("workspace must be exactly /workspace")
-	}
-	if contract.MemoryBytes != 512<<20 {
-		return invalid("memory limit must be exactly 512 MiB")
 	}
 	if contract.PIDsLimit != 128 {
 		return invalid("PID limit must be exactly 128")

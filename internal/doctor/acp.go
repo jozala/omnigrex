@@ -14,9 +14,10 @@ import (
 )
 
 type acpProbeOptions struct {
-	Network    string
-	MCPHost    string
-	ExtraHosts []string
+	Network     string
+	MCPHost     string
+	ExtraHosts  []string
+	MemoryBytes int64
 }
 
 func checkACP(ctx context.Context, profile runtimeprofile.Profile, options acpProbeOptions) (err error) {
@@ -25,9 +26,9 @@ func checkACP(ctx context.Context, profile runtimeprofile.Profile, options acpPr
 }
 
 func checkACPImage(ctx context.Context, profile runtimeprofile.Profile, image string, options acpProbeOptions) (err error) {
-	contract := profile.Contract()
-	if contract.Name == "" {
-		return errors.New("Runtime Profile contract check did not pass")
+	policy, spec, err := acpContainerContract(profile, image, options)
+	if err != nil {
+		return err
 	}
 	diagnostic, err := startDiagnosticMCP(options.MCPHost)
 	if err != nil {
@@ -38,28 +39,6 @@ func checkACPImage(ctx context.Context, profile runtimeprofile.Profile, image st
 		defer cancel()
 		err = errors.Join(err, diagnostic.Close(cleanupCtx))
 	}()
-	environment := make([]string, len(contract.Environment))
-	environmentPolicy := make(map[string]string, len(contract.Environment))
-	for index, variable := range contract.Environment {
-		environment[index] = variable.Name + "=" + variable.Value
-		environmentPolicy[variable.Name] = variable.Value
-	}
-	temporary := make([]dockerruntime.TmpfsMount, 0, len(contract.Tmpfs)+len(contract.Mounts))
-	for _, mount := range contract.Tmpfs {
-		temporary = append(temporary, dockerruntime.TmpfsMount{
-			Target: mount.Path, SizeBytes: mount.SizeBytes, Executable: mount.Executable,
-		})
-	}
-	for _, mount := range contract.Mounts {
-		temporary = append(temporary, dockerruntime.TmpfsMount{Target: mount.Path, SizeBytes: 64 << 20})
-	}
-	platform := dockerruntime.Platform{OS: contract.Platform.OS, Architecture: contract.Platform.Arch}
-	user := strconv.FormatUint(uint64(contract.User.UID), 10) + ":" + strconv.FormatUint(uint64(contract.User.GID), 10)
-	policy := dockerruntime.RuntimePolicy{
-		Image: image, Platform: platform, User: user, WorkingDir: contract.Workspace,
-		Command: contract.Command, Tmpfs: temporary, Environment: environmentPolicy, Network: options.Network,
-		MemoryBytes: contract.MemoryBytes, PIDsLimit: contract.PIDsLimit,
-	}
 	engine, err := dockerruntime.NewEngine(dockerruntime.EngineOptions{
 		AgentNetwork: options.Network, AllowHostGateway: len(options.ExtraHosts) > 0, RuntimePolicy: policy,
 	})
@@ -67,13 +46,7 @@ func checkACPImage(ctx context.Context, profile runtimeprofile.Profile, image st
 		return err
 	}
 	defer func() { err = errors.Join(err, engine.Close()) }()
-	process, err := engine.Start(ctx, dockerruntime.Spec{
-		Name:  "omnigrex-doctor-acp-" + strconv.FormatInt(time.Now().UnixNano(), 10),
-		Image: image, Platform: platform, User: user, WorkingDir: contract.Workspace,
-		Command: contract.Command, Environment: environment, Tmpfs: temporary, Network: options.Network,
-		ExtraHosts:  options.ExtraHosts,
-		MemoryBytes: contract.MemoryBytes, PIDsLimit: contract.PIDsLimit,
-	}, io.Discard)
+	process, err := engine.Start(ctx, spec, io.Discard)
 	if err != nil {
 		return err
 	}
@@ -111,4 +84,44 @@ func checkACPImage(ctx context.Context, profile runtimeprofile.Profile, image st
 	case <-ctx.Done():
 		return fmt.Errorf("wait for OpenCode MCP initialization: %w", context.Cause(ctx))
 	}
+}
+
+func acpContainerContract(profile runtimeprofile.Profile, image string, options acpProbeOptions) (dockerruntime.RuntimePolicy, dockerruntime.Spec, error) {
+	contract := profile.Contract()
+	if contract.Name == "" {
+		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, errors.New("Runtime Profile contract check did not pass")
+	}
+	if options.MemoryBytes <= 0 {
+		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, errors.New("ACP probe memory must be positive")
+	}
+	environment := make([]string, len(contract.Environment))
+	environmentPolicy := make(map[string]string, len(contract.Environment))
+	for index, variable := range contract.Environment {
+		environment[index] = variable.Name + "=" + variable.Value
+		environmentPolicy[variable.Name] = variable.Value
+	}
+	temporary := make([]dockerruntime.TmpfsMount, 0, len(contract.Tmpfs)+len(contract.Mounts))
+	for _, mount := range contract.Tmpfs {
+		temporary = append(temporary, dockerruntime.TmpfsMount{
+			Target: mount.Path, SizeBytes: mount.SizeBytes, Executable: mount.Executable,
+		})
+	}
+	for _, mount := range contract.Mounts {
+		temporary = append(temporary, dockerruntime.TmpfsMount{Target: mount.Path, SizeBytes: 64 << 20})
+	}
+	platform := dockerruntime.Platform{OS: contract.Platform.OS, Architecture: contract.Platform.Arch}
+	user := strconv.FormatUint(uint64(contract.User.UID), 10) + ":" + strconv.FormatUint(uint64(contract.User.GID), 10)
+	policy := dockerruntime.RuntimePolicy{
+		Image: image, Platform: platform, User: user, WorkingDir: contract.Workspace,
+		Command: contract.Command, Tmpfs: temporary, Environment: environmentPolicy, Network: options.Network,
+		MemoryBytes: options.MemoryBytes, PIDsLimit: contract.PIDsLimit,
+	}
+	spec := dockerruntime.Spec{
+		Name:  "omnigrex-doctor-acp-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Image: image, Platform: platform, User: user, WorkingDir: contract.Workspace,
+		Command: contract.Command, Environment: environment, Tmpfs: temporary, Network: options.Network,
+		ExtraHosts:  options.ExtraHosts,
+		MemoryBytes: options.MemoryBytes, PIDsLimit: contract.PIDsLimit,
+	}
+	return policy, spec, nil
 }
