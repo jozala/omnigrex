@@ -324,6 +324,9 @@ Do not edit PostgreSQL records to force a transition.
 ## Retry And Review Budgets
 
 A failed or timed-out Agent Turn receives one infrastructure retry as a new Agent Turn in the same Agent Session.
+If a unique terminal mutation intent succeeded before an ACP response was lost or the prompt deadline elapsed, Omnigrex can settle the turn successfully after corroborating the current Pull Request, review, or workspace state.
+For a successful Developer or Reviewer outcome, the prompt failure remains in the settlement diagnostic; a turn without a successful terminal intent still follows the infrastructure retry policy.
+Explicit cancellation and non-normal ACP stop reasons do not take this successful settlement path.
 Infrastructure retries do not consume the review budget.
 After the second failure, Omnigrex publishes diagnostics and creates a Human Handoff.
 

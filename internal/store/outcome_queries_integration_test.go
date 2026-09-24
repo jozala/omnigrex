@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestListAgentTurnMutationInvocationsRequiresClosedSettledLedgerAndPreservesOrder(t *testing.T) {
@@ -290,17 +292,91 @@ SELECT (SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1),
 }
 
 type replayOutcomeGitHub struct {
-	calls int
+	calls       int
+	pullRequest *githubapi.PullRequest
 }
 
 func (github *replayOutcomeGitHub) GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error) {
 	github.calls++
+	if github.pullRequest != nil {
+		return *github.pullRequest, nil
+	}
 	return githubapi.PullRequest{}, errors.New("unexpected GitHub call")
 }
 
 func (github *replayOutcomeGitHub) ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error) {
 	github.calls++
 	return nil, errors.New("unexpected GitHub call")
+}
+
+func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fixture, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 97, workflow.RoleDeveloper, "")
+	const head = "2123456789abcdef0123456789abcdef01234567"
+	request := json.RawMessage(`{"operation_id":"request-review-1","summary":"Ready for review"}`)
+	result, err := json.Marshal(map[string]any{
+		"outcome": "REVIEW_REQUESTED", "pull_request_id": proposal.PullRequestID,
+		"pull_request_number": proposal.PullRequestNumber, "head_sha": head,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "request-review-1", ToolName: mcp.ToolRequestReview, Request: request,
+		ExternalService: "omnigrex", ExternalResourceID: fmt.Sprintf("%d:feature", proposal.RepositoryID), ExpectedSHA: head,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := &replayOutcomeGitHub{pullRequest: &githubapi.PullRequest{
+		ID: proposal.PullRequestID, NodeID: proposal.PullRequestNodeID, Number: int(proposal.PullRequestNumber), State: "open",
+		Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: head, Label: "owner:feature"},
+		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:main"},
+	}}
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
+		Lease: lease, Execution: execution, PromptError: agentturn.PromptErrorFailure,
+		PromptDiagnostic: "submit ACP prompt: EOF", RepositoryCredential: "developer-token",
+		Paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()},
+	})
+	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
+		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != head || github.calls != 1 {
+		t.Fatalf("EOF handoff observation = (%#v, %v), GitHub gets %d", observation, err, github.calls)
+	}
+	settled, err := database.SettleAgentTurn(ctx, lease, observation)
+	if err != nil || settled.State != workflow.StateReviewing || settled.Reason != workflow.ReasonChangeProposalReady || settled.SuccessorJobID == "" ||
+		settled.TerminalStatus != store.AgentTurnSucceeded || settled.ChangeProposalID == "" {
+		t.Fatalf("EOF handoff settlement = (%#v, %v)", settled, err)
+	}
+	var nextStage, nextRole string
+	if err := pool.QueryRow(ctx, `SELECT current_stage FROM workflow_attempts WHERE id = $1`, fixture.attemptID).Scan(&nextStage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT payload->>'role' FROM jobs WHERE id = $1`, settled.SuccessorJobID).Scan(&nextRole); err != nil {
+		t.Fatal(err)
+	}
+	if nextStage != string(workflow.StageReview) || nextRole != string(workflow.RoleReviewer) {
+		t.Fatalf("EOF handoff successor = stage %s, Role %s", nextStage, nextRole)
+	}
 }
 
 func TestGetChangeProposalReviewReturnsDurableIdentity(t *testing.T) {

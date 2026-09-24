@@ -77,6 +77,27 @@ func TestExecutionWorkerDelegatesInfrastructureSettlementObservation(t *testing.
 	}
 }
 
+func TestExecutionWorkerSettlesCorroboratedHandoffAfterPromptEOF(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	promptErr := errors.New("submit ACP prompt: EOF")
+	fixture.prompter.err = promptErr
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorFailure || request.PromptResponse != nil {
+			t.Fatalf("prompt outcome passed to reconciler = %#v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeChangeProposalReady, store.AgentTurnSucceeded)
+	}
+
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, promptErr) {
+		t.Fatalf("ProcessNext() = (%t, %v), want settled prompt EOF", processed, err)
+	}
+	if fixture.store.settled.Outcome != workflow.TurnOutcomeChangeProposalReady || fixture.store.settled.Completion.Status != store.AgentTurnSucceeded ||
+		!containsInOrder(fixture.operations.values(), "prompt", "close-admission", "mcp-drain", "list-unsettled", "cleanup", "reconcile", "settle") {
+		t.Fatalf("settled observation = %#v, operations = %v", fixture.store.settled, fixture.operations.values())
+	}
+}
+
 func TestExecutionWorkerHeartbeatLossCancelsPromptAndOnlyCleansRuntime(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.store.heartbeatErrAt = 2
