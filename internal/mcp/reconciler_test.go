@@ -169,6 +169,77 @@ func TestProductionReconcilerFindsExactPullRequestAndReviewArtifacts(t *testing.
 	})
 }
 
+func TestProductionReconcilerVerifiesReservedInlineComments(t *testing.T) {
+	marker := reconciliationMarker(t, reconciliationMutationID)
+	signature := "_By Omnigrex: `review-specialist` [Reviewer]_"
+	line := 12
+	reviewID := int64(801)
+	reviewBody := "Fix this\n\n" + signature + "\n\n" + marker
+
+	signedComment := func(body string) githubapi.ReviewComment {
+		return githubapi.ReviewComment{
+			ID: 9001, NodeID: "PRRC_9001", PullRequestReviewID: &reviewID,
+			Body: body, Path: "review.go", Side: "RIGHT", Line: &line,
+		}
+	}
+	reconciliation := reconciliationContext()
+	reconciliation.Role = workflow.RoleReviewer
+	reconciliation.ReviewerActorID = 91
+	reservation := func(signed bool) string {
+		request := `{"operation_id":"caller-review","event":"REQUEST_CHANGES","body":"Fix this","comments":[{"path":"review.go","line":12,"side":"RIGHT","body":"added"}]}`
+		if !signed {
+			return request
+		}
+		return `{"operation_id":"caller-review","event":"REQUEST_CHANGES","body":"Fix this","signature":"` + signature + `","comments":[{"path":"review.go","line":12,"side":"RIGHT","body":"added"}]}`
+	}
+	inlineBody := func(signed bool) string {
+		if !signed {
+			return "added"
+		}
+		return "added\n\n" + signature
+	}
+	run := func(t *testing.T, signed bool, threads []githubapi.ReviewThread, want mcp.MutationReconciliationDisposition) {
+		t.Helper()
+		body := reviewBody
+		if !signed {
+			body = "Fix this\n\n" + marker
+		}
+		api := &reconciliationGitHub{
+			reviews: []githubapi.Review{{
+				ID: 801, NodeID: "PRR_801", State: "CHANGES_REQUESTED", Body: body,
+				CommitID: productionHeadSHA, User: githubapi.User{ID: 91, Login: "reviewer-app"},
+				HTMLURL: "https://github.test/acme/widgets/pull/23#pullrequestreview-801",
+			}},
+			threads: threads,
+		}
+		reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
+		mutation := reconciliationMutation(mcp.ToolSubmitReview, reservation(signed))
+		mutation.ExternalResourceID = "9123:654"
+		mutation.State = store.MutationSucceeded
+
+		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if result.Disposition != want {
+			t.Fatalf("Reconcile() = %#v, want %s", result, want)
+		}
+	}
+
+	t.Run("signed inline present", func(t *testing.T) {
+		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: []githubapi.ReviewComment{signedComment(inlineBody(true))}}}, mcp.ReconciliationFound)
+	})
+	t.Run("legacy inline present", func(t *testing.T) {
+		run(t, false, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: []githubapi.ReviewComment{signedComment(inlineBody(false))}}}, mcp.ReconciliationFound)
+	})
+	t.Run("missing inline unresolved", func(t *testing.T) {
+		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: nil}}, mcp.ReconciliationUnresolved)
+	})
+	t.Run("changed inline unresolved", func(t *testing.T) {
+		run(t, true, []githubapi.ReviewThread{{ID: "PRRT_1", Path: "review.go", Comments: []githubapi.ReviewComment{signedComment("added")}}}, mcp.ReconciliationUnresolved)
+	})
+}
+
 func TestProductionReconcilerRecoversMutationsForRoleRemovedFromPolicyCatalog(t *testing.T) {
 	const retiredRole workflow.Role = "RETIRED_REVIEWER"
 	marker := reconciliationMarker(t, reconciliationMutationID)
@@ -585,6 +656,7 @@ type reconciliationGitHub struct {
 	pullRequests     []githubapi.PullRequest
 	issueComments    []githubapi.IssueComment
 	reviews          []githubapi.Review
+	threads          []githubapi.ReviewThread
 	err              error
 	credential       string
 	issueNumber      int
@@ -627,6 +699,10 @@ func (api *reconciliationGitHub) ListPullRequestReviews(_ context.Context, crede
 }
 
 func (api *reconciliationGitHub) ListReviewThreads(ctx context.Context, credential, owner, repository string, number int) ([]githubapi.ReviewThread, error) {
+	if api.threads != nil {
+		api.credential = credential
+		return api.threads, api.err
+	}
 	return api.backend().ListReviewThreads(ctx, credential, owner, repository, number)
 }
 

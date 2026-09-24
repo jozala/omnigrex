@@ -888,6 +888,12 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		return
 	case store.MutationReserved:
 		invocation.OperationID = reservation.ID
+		// Execute exactly what the reservation recorded. A reused RESERVED
+		// mutation (same turn retry or successor turn) carries its original
+		// persisted footer — including an explicitly empty footer for legacy
+		// unsigned reservations — so publication can never diverge from what
+		// recovery reconciles against.
+		invocation.Arguments = ensureReservationSignature(reservation.Request)
 	default:
 		finishCall(true)
 		writeToolError(response, id, "mutation state is invalid")
@@ -1191,6 +1197,26 @@ func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessa
 const placeholderMarkerOperationID = "00000000-0000-4000-8000-000000000000"
 
 const postedBodyTooLongMessage = "comment body with signature exceeds GitHub limit; shorten the body without changing its meaning"
+
+// ensureReservationSignature normalizes reused reservation arguments for
+// execution. Fresh reservations already carry the persisted footer; legacy
+// reservations without one gain an explicitly empty footer so the backend
+// publishes them unsigned, exactly as recovery expects.
+func ensureReservationSignature(request json.RawMessage) json.RawMessage {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(request, &object) != nil {
+		return request
+	}
+	if _, ok := object["signature"]; ok {
+		return request
+	}
+	object["signature"] = json.RawMessage(`""`)
+	normalized, err := canonicalJSON(mustMarshalJSON(object))
+	if err != nil {
+		return request
+	}
+	return normalized
+}
 
 // publicationIdentity takes the profile name from the Agent Participant's
 // validated Agent Turn identity and pairs it with the deployment-configured

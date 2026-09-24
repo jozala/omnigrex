@@ -546,7 +546,7 @@ func TestProductionBackendSignsBodylessApproval(t *testing.T) {
 	}
 }
 
-func TestProductionBackendAcceptsMatchingPersistedSignature(t *testing.T) {
+func TestProductionBackendPublishesReservationSignatureVerbatim(t *testing.T) {
 	api := &backendGitHub{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
 		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
@@ -554,6 +554,11 @@ func TestProductionBackendAcceptsMatchingPersistedSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProductionBackend() error = %v", err)
 	}
+	// The signature field is server-owned: agents cannot submit it (the
+	// public schema rejects it at the gateway) and the gateway overwrites it
+	// with the validated identity before reserving. The backend therefore
+	// publishes the reservation value verbatim so reused reservations can
+	// never diverge from what recovery reconciles.
 	arguments, err := json.Marshal(map[string]string{
 		"operation_id": "issue-comment-1", "body": "Issue update",
 		"signature": "_By Omnigrex: `implementation-specialist` [Developer]_",
@@ -568,31 +573,6 @@ func TestProductionBackendAcceptsMatchingPersistedSignature(t *testing.T) {
 	}
 	if api.issueCommentRequest.Body != "Issue update\n\n"+productionSignature(workflow.RoleDeveloper) {
 		t.Fatalf("Issue comment body = %q", api.issueCommentRequest.Body)
-	}
-}
-
-func TestProductionBackendRejectsForgedPersistedSignature(t *testing.T) {
-	api := &backendGitHub{}
-	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
-	})
-	if err != nil {
-		t.Fatalf("NewProductionBackend() error = %v", err)
-	}
-	arguments, err := json.Marshal(map[string]string{
-		"operation_id": "issue-comment-1", "body": "Issue update",
-		"signature": "_By Omnigrex: `someone-else` [Developer]_",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backend.Execute(context.Background(), mcp.Invocation{
-		Name: mcp.ToolCommentOnIssue, Arguments: arguments, Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "issue-comment-1",
-	}); !errors.Is(err, mcp.ErrInvalidInvocation) {
-		t.Fatalf("Execute(comment_on_issue) error = %v, want ErrInvalidInvocation", err)
-	}
-	if api.issueCommentRequest.Body != "" {
-		t.Fatalf("forged comment reached GitHub: %#v", api.issueCommentRequest)
 	}
 }
 

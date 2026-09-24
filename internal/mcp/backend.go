@@ -536,17 +536,15 @@ func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
-	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
+	if err != nil {
 		return nil, err
 	}
 	marker, err := operationMarker(invocation)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
-	if err != nil {
-		return nil, err
-	}
+	signed := githubapi.AppendSignature(arguments.Body, footer)
 	if err := checkSignedBodyLength(signed, marker); err != nil {
 		return nil, err
 	}
@@ -568,17 +566,15 @@ func (backend *ProductionBackend) commentOnPullRequest(ctx context.Context, invo
 	if !markerFree(arguments.Body) {
 		return nil, ErrInvalidInvocation
 	}
-	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
+	if err != nil {
 		return nil, err
 	}
 	marker, err := operationMarker(invocation)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
-	if err != nil {
-		return nil, err
-	}
+	signed := githubapi.AppendSignature(arguments.Body, footer)
 	if err := checkSignedBodyLength(signed, marker); err != nil {
 		return nil, err
 	}
@@ -616,7 +612,8 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 			return nil, ErrInvalidInvocation
 		}
 	}
-	if err := backend.checkReservedSignature(invocation.Scope, invocation.Arguments); err != nil {
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
+	if err != nil {
 		return nil, err
 	}
 	current, err := backend.github.GetPullRequest(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name,
@@ -635,10 +632,7 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	if !reviewCommentsMatchFiles(arguments.Comments, files) {
 		return nil, ErrToolPrecondition
 	}
-	signedBody, err := backend.signedAgentBody(invocation.Scope, arguments.Body)
-	if err != nil {
-		return nil, err
-	}
+	signedBody := githubapi.AppendSignature(arguments.Body, footer)
 	reviewBody, err := githubapi.EnsureMarker(signedBody, githubapi.Marker{
 		WorkflowID: invocation.Scope.WorkflowID, AgentAssignmentID: invocation.Scope.AgentAssignmentID, OperationID: invocation.OperationID,
 	})
@@ -650,10 +644,7 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	}
 	comments := make([]githubapi.ReviewCommentRequest, len(arguments.Comments))
 	for index, comment := range arguments.Comments {
-		signedComment, signErr := backend.signedAgentBody(invocation.Scope, comment.Body)
-		if signErr != nil {
-			return nil, signErr
-		}
+		signedComment := githubapi.AppendSignature(comment.Body, footer)
 		if err := checkSignedBodyLength(signedComment, ""); err != nil {
 			return nil, err
 		}
@@ -899,21 +890,45 @@ func markerFree(body string) bool {
 	return !inspection.Untrusted && len(inspection.Markers) == 0
 }
 
-// signedAgentBody appends the visible Agent Participant signature. The
-// profile name must come from the validated participant identity carried in
-// the tool scope; a missing name is rejected rather than substituted. The
-// display name prefers the scope value supplied by the gateway from the
-// deployment-configured Role catalog.
-func (backend *ProductionBackend) signedAgentBody(scope ToolScope, body string) (string, error) {
-	if scope.AgentProfileName == "" {
-		return "", ErrInvalidInvocation
+// stripReservedSignatureArgument removes the server-owned signature footer
+// before public input validation. Agent input cannot carry the field (the
+// public schema rejects it at the gateway); only gateway-persisted
+// reservations reach the backend with it present.
+func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
+	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview {
+		return invocation.Arguments
 	}
-	return githubapi.AppendSignature(body, githubapi.RenderSignature(scope.AgentProfileName, backend.displayName(scope))), nil
+	var object map[string]json.RawMessage
+	if json.Unmarshal(invocation.Arguments, &object) != nil {
+		return invocation.Arguments
+	}
+	if _, ok := object["signature"]; !ok {
+		return invocation.Arguments
+	}
+	delete(object, "signature")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return invocation.Arguments
+	}
+	return encoded
 }
 
-// expectedSignature renders the footer the scope identity requires. A
-// reservation-supplied signature must match it exactly.
-func (backend *ProductionBackend) expectedSignature(scope ToolScope) (string, error) {
+// reservedFooter returns the footer to publish. A reservation-persisted
+// footer is authoritative: it is the exact value recovery reconciles
+// against, including an explicitly empty footer for legacy unsigned
+// reservations reused across turns. Without one (direct calls only), it is
+// derived from the validated scope identity, rejecting a missing name.
+func (backend *ProductionBackend) reservedFooter(scope ToolScope, args json.RawMessage) (string, error) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(args, &object) == nil {
+		if raw, ok := object["signature"]; ok {
+			var footer string
+			if json.Unmarshal(raw, &footer) != nil {
+				return "", ErrInvalidInvocation
+			}
+			return footer, nil
+		}
+	}
 	if scope.AgentProfileName == "" {
 		return "", ErrInvalidInvocation
 	}
@@ -928,25 +943,6 @@ func (backend *ProductionBackend) displayName(scope ToolScope) string {
 		return metadata.DisplayName
 	}
 	return string(scope.Role)
-}
-
-// checkReservedSignature rejects a reservation-supplied signature that does
-// not match the validated participant identity.
-func (backend *ProductionBackend) checkReservedSignature(scope ToolScope, args json.RawMessage) error {
-	var persisted struct {
-		Signature string `json:"signature"`
-	}
-	if json.Unmarshal(args, &persisted) != nil {
-		return ErrInvalidInvocation
-	}
-	if persisted.Signature == "" {
-		return nil
-	}
-	expected, err := backend.expectedSignature(scope)
-	if err != nil || persisted.Signature != expected {
-		return ErrInvalidInvocation
-	}
-	return nil
 }
 
 func checkSignedBodyLength(signedBody, marker string) error {
@@ -1198,7 +1194,11 @@ func (backend *ProductionBackend) validateInvocation(invocation Invocation) (Too
 	if !found || !policyFound || tool.Class != invocation.Class || !slices.Contains(policy.MCPTools, invocation.Name) {
 		return ToolDefinition{}, ErrToolNotAuthorized
 	}
-	if validateArguments(invocation.Arguments, tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
+	// The signature footer is server-owned: the gateway persists it in the
+	// reservation after validating agent input, so it is kept out of the
+	// public tool schema and stripped before input validation. Publication
+	// below uses the reservation value verbatim.
+	if validateArguments(stripReservedSignatureArgument(invocation), tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
 		return ToolDefinition{}, ErrInvalidInvocation
 	}
 	if !scopeAllowsBackendTool(invocation.Scope, invocation.Name) {

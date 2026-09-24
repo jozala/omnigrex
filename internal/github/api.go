@@ -1132,7 +1132,7 @@ func (client *APIClient) OpenPullRequest(ctx context.Context, installationToken,
 	if !validMarker(input.Marker) {
 		return PullRequest{}, &ConfigurationError{Cause: ErrInvalidMarker}
 	}
-	body := appendBodyParts(input.Body, fmt.Sprintf("Closes #%d", input.IssueNumber), input.Marker)
+	body := JoinBodyParts(input.Body, fmt.Sprintf("Closes #%d", input.IssueNumber), input.Marker)
 	payload := struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
@@ -1186,7 +1186,7 @@ func (client *APIClient) createComment(ctx context.Context, installationToken, o
 	if !validMarker(input.Marker) {
 		return IssueComment{}, &ConfigurationError{Cause: ErrInvalidMarker}
 	}
-	body := appendBodyParts(input.Body, input.Marker)
+	body := JoinBodyParts(input.Body, input.Marker)
 	payload := struct {
 		Body string `json:"body"`
 	}{Body: body}
@@ -1629,16 +1629,6 @@ func validReviewCommentRequest(comment ReviewCommentRequest) bool {
 		return comment.StartSide == ""
 	}
 	return comment.StartLine > 0 && comment.StartLine < comment.Line && comment.StartSide == comment.Side
-}
-
-func appendBodyParts(parts ...string) string {
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			result = append(result, part)
-		}
-	}
-	return strings.Join(result, "\n\n")
 }
 
 func allHexadecimal(value string) bool {

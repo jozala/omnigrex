@@ -39,6 +39,8 @@ func EscapeSignatureDisplayName(display string) string {
 
 // AppendSignature appends the visible footer to an agent body.
 // It is idempotent: a body already ending with the exact signature is unchanged.
+// Surplus trailing newlines are normalized before the footer; all other
+// whitespace and content are preserved exactly.
 func AppendSignature(body, signature string) string {
 	if signature == "" {
 		return body
@@ -53,16 +55,24 @@ func AppendSignature(body, signature string) string {
 	return trimmed + "\n\n" + signature
 }
 
+// JoinBodyParts assembles a posted body from visible text and trailing
+// markers, trimming surrounding whitespace and dropping empty parts. This is
+// the single assembly used for length checks, publication, and recovery so
+// the three cannot disagree about the posted body.
+func JoinBodyParts(parts ...string) string {
+	visible := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			visible = append(visible, part)
+		}
+	}
+	return strings.Join(visible, "\n\n")
+}
+
 // JoinPostedBody assembles the exact posted body from the signed visible text
 // and the hidden operation marker, mirroring API body assembly.
 func JoinPostedBody(signedBody, marker string) string {
-	parts := make([]string, 0, 2)
-	for _, part := range []string{signedBody, marker} {
-		if part = strings.TrimSpace(part); part != "" {
-			parts = append(parts, part)
-		}
-	}
-	return strings.Join(parts, "\n\n")
+	return JoinBodyParts(signedBody, marker)
 }
 
 // CheckPostedBodyLength rejects an oversized complete body before posting
@@ -83,8 +93,8 @@ func CheckFinalBodyLength(final string) error {
 	return nil
 }
 
-// StripSignature removes one trailing signature footer, reporting whether one was present.
-func StripSignature(body string) (string, bool) {
+// stripSignature removes one trailing signature footer, reporting whether one was present.
+func stripSignature(body string) (string, bool) {
 	trimmed := strings.TrimRight(body, "\n")
 	index := strings.LastIndex(trimmed, "\n\n"+SignatureFooterPrefix)
 	if index < 0 {
@@ -100,16 +110,16 @@ func StripSignature(body string) (string, bool) {
 	return strings.TrimRight(trimmed[:index], "\n"), true
 }
 
-// MatchesSignedBody reports whether a published body without its hidden marker
+// matchesSignedBody reports whether a published body without its hidden marker
 // corresponds to the agent body with either a valid signature footer or,
 // for pre-deployment publications, no footer at all.
-func MatchesSignedBody(publishedWithoutMarker, agentBody string) bool {
+func matchesSignedBody(publishedWithoutMarker, agentBody string) bool {
 	published := strings.TrimSpace(publishedWithoutMarker)
 	agent := strings.TrimSpace(agentBody)
 	if published == agent {
 		return true
 	}
-	stripped, ok := StripSignature(published)
+	stripped, ok := stripSignature(published)
 	if !ok {
 		return false
 	}
