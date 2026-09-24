@@ -42,6 +42,7 @@ jobs:
           OMNIGREX_SECRET_GID: "1"
           OMNIGREX_GITHUB_DEVELOPER_APP_ID: "1"
           OMNIGREX_GITHUB_REVIEWER_APP_ID: "2"
+          OMNIGREX_ORCHESTRATOR_IMAGE: registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111
           OMNIGREX_OPENCODE_ACP_V1_IMAGE: registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000
           OMNIGREX_OPENCODE_ACP_V1_PLATFORM: linux/amd64
           OMNIGREX_DATABASE_PASSWORD_FILE: /dev/null
@@ -49,7 +50,9 @@ jobs:
           OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /dev/null
           OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /dev/null
           OMNIGREX_PROVIDER_CREDENTIALS_FILE: /dev/null
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose --file deploy/compose.yaml config --quiet
 
       - name: Build image
         run: docker build --tag omnigrex/orchestrator:dev .
@@ -87,3 +90,105 @@ jobs:
         run: |
           OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
           go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
+
+  publish:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push orchestrator image
+        run: |
+          set -eu
+          TAG="ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
+          docker build --platform linux/amd64 \
+            --label org.opencontainers.image.source=https://github.com/jozala/omnigrex \
+            --tag "$TAG" .
+          docker push "$TAG"
+
+      - name: Build and push OpenCode Runtime Process image
+        run: |
+          set -eu
+          TAG="ghcr.io/jozala/omnigrex/opencode:sha-${{ github.sha }}"
+          docker build --platform linux/amd64 \
+            --file agent/opencode/Dockerfile \
+            --tag "$TAG" .
+          docker push "$TAG"
+
+      - name: Record digests and verify published images
+        run: |
+          set -eu
+          ORCHESTRATOR_TAG="ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
+          OPENCODE_TAG="ghcr.io/jozala/omnigrex/opencode:sha-${{ github.sha }}"
+          ORCHESTRATOR_DIGEST="$(docker image inspect "$ORCHESTRATOR_TAG" --format '{{index .RepoDigests 0}}')"
+          OPENCODE_DIGEST="$(docker image inspect "$OPENCODE_TAG" --format '{{index .RepoDigests 0}}')"
+          case "$ORCHESTRATOR_DIGEST" in
+            ghcr.io/jozala/omnigrex/orchestrator@sha256:*) ;;
+            *) echo "unexpected orchestrator RepoDigest: $ORCHESTRATOR_DIGEST" >&2; exit 1 ;;
+          esac
+          case "$OPENCODE_DIGEST" in
+            ghcr.io/jozala/omnigrex/opencode@sha256:*) ;;
+            *) echo "unexpected opencode RepoDigest: $OPENCODE_DIGEST" >&2; exit 1 ;;
+          esac
+          {
+            echo "## Published Omnigrex images"
+            echo ""
+            echo "Commit: ${{ github.sha }}"
+            echo ""
+            echo "| Image | Tag | Digest |"
+            echo "| --- | --- | --- |"
+            echo "| orchestrator | \`$ORCHESTRATOR_TAG\` | \`$ORCHESTRATOR_DIGEST\` |"
+            echo "| opencode | \`$OPENCODE_TAG\` | \`$OPENCODE_DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'Commit: %s\nOrchestrator tag: %s\nOrchestrator digest: %s\nOpenCode tag: %s\nOpenCode digest: %s\n' \
+            "${{ github.sha }}" "$ORCHESTRATOR_TAG" "$ORCHESTRATOR_DIGEST" "$OPENCODE_TAG" "$OPENCODE_DIGEST"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$ORCHESTRATOR_TAG")" = "https://github.com/jozala/omnigrex"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ORCHESTRATOR_TAG")" = "linux/amd64"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$OPENCODE_TAG")" = "linux/amd64"
+          docker pull "$ORCHESTRATOR_TAG"
+          docker pull "$OPENCODE_TAG"
+          docker image inspect "$ORCHESTRATOR_TAG" > /dev/null
+          docker image inspect "$OPENCODE_TAG" > /dev/null
+
+  deploy-smoke:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Start the image-only stack from published digests
+        run: |
+          set -eu
+          ORCHESTRATOR_TAG="ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
+          OPENCODE_TAG="ghcr.io/jozala/omnigrex/opencode:sha-${{ github.sha }}"
+          docker pull --platform linux/amd64 "$ORCHESTRATOR_TAG"
+          docker pull --platform linux/amd64 "$OPENCODE_TAG"
+          ORCHESTRATOR_DIGEST="$(docker image inspect "$ORCHESTRATOR_TAG" --format '{{index .RepoDigests 0}}')"
+          OPENCODE_DIGEST="$(docker image inspect "$OPENCODE_TAG" --format '{{index .RepoDigests 0}}')"
+          OMNIGREX_DEPLOY_SMOKE=1 \
+            OMNIGREX_DEPLOY_SMOKE_ORCHESTRATOR_IMAGE="$ORCHESTRATOR_DIGEST" \
+            OMNIGREX_DEPLOY_SMOKE_OPENCODE_IMAGE="$OPENCODE_DIGEST" \
+            OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
+            go test -race -tags=integration ./internal/deployment -run TestDeployImageOnlyStartupSmoke -count=1 -v

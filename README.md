@@ -20,6 +20,11 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 
 The implementation is written in Go and deployable with Docker Compose.
 
+## Deployment
+
+Deploy without cloning the repository by using the published GHCR images and pinned deployment files.
+Follow the authoritative procedure in the [operator guide](./docs/operator-guide.md), including digest lookup, initial deployment, upgrades, retained Runtime Profile images, and restore prerequisites.
+
 ## Development
 
 Install the pinned toolchain and run all local checks with [mise](https://mise.jdx.dev/):
