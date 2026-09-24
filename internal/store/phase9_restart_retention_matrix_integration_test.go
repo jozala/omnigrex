@@ -773,6 +773,10 @@ type phaseNineWorkspaceDiscarder struct{}
 
 func (phaseNineWorkspaceDiscarder) DiscardWorkspace(string) error { return nil }
 
+func (phaseNineWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, _ string, _ int64, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return nil })
+}
+
 type phaseNineClosureStopResponseLossStore struct {
 	*store.Store
 }

@@ -387,7 +387,7 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	if _, err := database.RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch); err != nil {
 		t.Fatalf("RecoverExpiredAgentTurn() error = %v", err)
 	}
-	stopLease, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "stop-worker", time.Second)
+	stopLease, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "stop-worker", 5*time.Second)
 	if err != nil || stopLease == nil {
 		t.Fatalf("ClaimJobKind() stop = (%#v, %v), want lease", stopLease, err)
 	}
@@ -404,6 +404,20 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	}
 	staleStop := *stopLease
 	staleStop.LeaseToken = "30000000-0000-4000-8000-000000000097"
+	called := false
+	if err := database.WithRecoveredRuntimeCleanupFence(ctx, *stopLease, func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("WithRecoveredRuntimeCleanupFence() = (%t, %v), want live stop Job", called, err)
+	}
+	called = false
+	if err := database.WithRecoveredRuntimeCleanupFence(ctx, staleStop, func(context.Context) error {
+		called = true
+		return nil
+	}); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) || called {
+		t.Fatalf("stale WithRecoveredRuntimeCleanupFence() = (%t, %v), want lost fence", called, err)
+	}
 	if _, err := database.GetAgentTurnRuntimeCleanupContext(ctx, staleStop); !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
 		t.Errorf("GetAgentTurnRuntimeCleanupContext() with stale lease error = %v, want ErrAgentTurnRecoveryFenceLost", err)
 	}

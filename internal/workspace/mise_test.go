@@ -3,11 +3,13 @@ package workspace_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -21,11 +23,26 @@ func TestLifecycleProvisionsMiseOnlyFromSelectedTrustedRevision(t *testing.T) {
 	writeExecutable(t, fakeMise, `#!/bin/sh
 set -eu
 test -z "${SENSITIVE_ORCHESTRATOR_SECRET:-}"
+test "$GOFLAGS" = '-p=1 -modcacherw'
+test "$MISE_JOBS" = 1
+test "$MISE_GLOBAL_CONFIG_FILE" = /etc/omnigrex/mise-global.toml
+test "$MISE_SYSTEM_CONFIG_FILE" = /etc/omnigrex/mise-system.toml
+test "$TMPDIR" = "$MISE_DATA_DIR/tmp"
+test "$GOTMPDIR" = "$TMPDIR"
+test "$MISE_TMP_DIR" = "$TMPDIR"
+test -d "$TMPDIR"
+test -w "$TMPDIR"
 printf '%s|%s|' "$PWD" "$*" >> `+quoted(logPath)+`
 tr -d '\n' < mise.toml >> `+quoted(logPath)+`
 printf '\n' >> `+quoted(logPath)+`
+if [ "$1" = "install" ]; then
+  mkdir -p "$TMPDIR/scratch"
+  printf 'temporary build output' > "$TMPDIR/scratch/artifact"
+  chmod 000 "$TMPDIR/scratch"
+fi
 if [ "$1" = "env" ]; then
-  printf '{"PATH":"%s/installs/trusted/1/bin","TOOL_MODE":"trusted"}\n' "$MISE_DATA_DIR"
+  printf '{"PATH":"%s/installs/trusted/1/bin","TOOL_MODE":"trusted","TMPDIR":"%s","GOTMPDIR":"%s","MISE_TMP_DIR":"%s","GOFLAGS":"%s","MISE_JOBS":"%s","HOME":"%s","MISE_PROJECT_ROOT":"%s","XDG_CACHE_HOME":"%s"}\n' \
+    "$MISE_DATA_DIR" "$TMPDIR" "$GOTMPDIR" "$MISE_TMP_DIR" "$GOFLAGS" "$MISE_JOBS" "$HOME" "$MISE_PROJECT_ROOT" "$XDG_CACHE_HOME"
 fi
 `)
 	lifecycle, err := workspace.New(workspace.Options{
@@ -41,6 +58,7 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(paths.Mise, "tmp", "scratch"), 0o755) })
 	visible, err := os.ReadFile(filepath.Join(paths.Workspace, "mise.toml"))
 	if err != nil || !strings.Contains(string(visible), "poison") {
 		t.Fatalf("feature mise.toml = %q, %v", visible, err)
@@ -68,6 +86,9 @@ fi
 		activation.Environment["PATH"] != filepath.Join(paths.Mise, "installs", "trusted", "1", "bin") {
 		t.Errorf("activation environment = %#v", activation.Environment)
 	}
+	if _, err := os.Lstat(filepath.Join(paths.Mise, "tmp")); !os.IsNotExist(err) {
+		t.Errorf("provisioning scratch remains in Runtime Process mount: %v", err)
+	}
 	wantRuntimeIsolation := map[string]string{
 		"MISE_IGNORED_CONFIG_PATHS":             "/workspace",
 		"MISE_LEGACY_VERSION_FILE":              "false",
@@ -77,6 +98,11 @@ fi
 	for name, want := range wantRuntimeIsolation {
 		if got := activation.Environment[name]; got != want {
 			t.Errorf("activation environment %s = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"GOFLAGS", "GOTMPDIR", "MISE_JOBS", "MISE_TMP_DIR", "TMPDIR"} {
+		if _, found := activation.Environment[name]; found {
+			t.Errorf("activation exposes provisioning-only setting %s", name)
 		}
 	}
 	for _, name := range []string{"HOME", "MISE_PROJECT_ROOT", "MISE_TRUSTED_CONFIG_PATHS", "XDG_CONFIG_HOME"} {
@@ -101,6 +127,116 @@ fi
 	t.Run("pinned runtime mise ignores feature configuration", func(t *testing.T) {
 		assertPinnedRuntimeMiseIsolation(t, paths, activation)
 	})
+}
+
+func TestLifecycleSerializesMiseProvisioningAcrossTurnTakeover(t *testing.T) {
+	fixture := newGitFixture(t)
+	root := t.TempDir()
+	started := filepath.Join(root, "install-started")
+	release := filepath.Join(root, "release-install")
+	log := filepath.Join(root, "installs.log")
+	fakeMise := filepath.Join(root, "mise")
+	writeExecutable(t, fakeMise, `#!/bin/sh
+set -eu
+if [ "$1" = "install" ]; then
+  printf 'install\n' >> `+quoted(log)+`
+  if [ ! -e `+quoted(started)+` ]; then
+    touch `+quoted(started)+`
+    while [ ! -e `+quoted(release)+` ]; do sleep 0.02; done
+  fi
+else
+  printf '{}\n'
+fi
+`)
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"),
+		MiseRoot: filepath.Join(root, "mise-data"), MiseExecutable: fakeMise,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provision := workspace.MiseProvision{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first}
+	first := make(chan error, 1)
+	go func() {
+		_, err := lifecycle.ProvisionMise(context.Background(), provision)
+		first <- err
+	}()
+	deadline := time.After(10 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		select {
+		case err := <-first:
+			t.Fatalf("first provisioning ended before install: %v", err)
+		case <-deadline:
+			t.Fatal("first provisioning did not enter install")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	defer func() { _ = os.WriteFile(release, nil, 0o644) }()
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelSecond()
+	if _, err := lifecycle.ProvisionMise(secondCtx, provision); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("concurrent provisioning = %v, want wait for first or cancellation", err)
+	}
+	if content, err := os.ReadFile(log); err != nil || strings.Count(string(content), "install\n") != 1 {
+		t.Fatalf("install calls while first holds lock = %q, %v", content, err)
+	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-first; err != nil {
+		t.Fatalf("first provisioning error = %v", err)
+	}
+	if _, err := lifecycle.ProvisionMise(context.Background(), provision); err != nil {
+		t.Fatalf("successor provisioning error = %v", err)
+	}
+}
+
+func TestLifecycleRejectsOlderMiseProvisionAfterSuccessorClaimsEpoch(t *testing.T) {
+	fixture := newGitFixture(t)
+	root := t.TempDir()
+	fakeMise := filepath.Join(root, "mise")
+	writeExecutable(t, fakeMise, `#!/bin/sh
+set -eu
+if [ "$1" = "env" ]; then printf '{}\n'; fi
+`)
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"),
+		MiseRoot: filepath.Join(root, "mise-data"), MiseExecutable: fakeMise,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provision := workspace.MiseProvision{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
+		ExecutionEpoch: 6,
+		Fence:          func(ctx context.Context, claim func(context.Context) error) error { return claim(ctx) },
+	}
+	activation, err := lifecycle.ProvisionMise(context.Background(), provision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(activation.DataDir, "successor-tools")
+	if err := os.WriteFile(sentinel, []byte("new epoch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provision.ExecutionEpoch = 5
+	if _, err := lifecycle.ProvisionMise(context.Background(), provision); !errors.Is(err, workspace.ErrStaleMiseProvision) {
+		t.Fatalf("older ProvisionMise() = %v, want stale epoch", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "new epoch" {
+		t.Fatalf("older turn replaced successor tools: %q, %v", content, err)
+	}
+	provision.ExecutionEpoch = 7
+	provision.Fence = func(context.Context, func(context.Context) error) error { return errors.New("lost turn fence") }
+	if _, err := lifecycle.ProvisionMise(context.Background(), provision); err == nil || !strings.Contains(err.Error(), "lost turn fence") {
+		t.Fatalf("ProvisionMise() after fence loss = %v", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "new epoch" {
+		t.Fatalf("lost fence replaced successor tools: %q, %v", content, err)
+	}
 }
 
 func assertPinnedRuntimeMiseIsolation(t *testing.T, paths workspace.Paths, activation workspace.MiseActivation) {
@@ -209,11 +345,48 @@ fi
 	if err := os.Symlink(external, filepath.Join(paths.Mise, "cache")); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(external, 0o755) })
+	if err := os.Chmod(external, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	moduleDirectory := filepath.Join(paths.Mise, "home", "go", "pkg", "mod", "golang.org", "x", "tools@v0.50.0")
+	if err := os.MkdirAll(moduleDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDirectory, "socket_test.go"), []byte("cached"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(paths.Mise, 0o755)
+		for _, directory := range []string{filepath.Dir(filepath.Dir(moduleDirectory)), filepath.Dir(moduleDirectory), moduleDirectory} {
+			_ = os.Chmod(directory, 0o755)
+		}
+	})
+	for _, directory := range []string{moduleDirectory, filepath.Dir(moduleDirectory), filepath.Dir(filepath.Dir(moduleDirectory))} {
+		if err := os.Chmod(directory, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, directory := range []string{moduleDirectory, filepath.Dir(moduleDirectory)} {
+		if err := os.Chmod(directory, 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(paths.Mise, 0o000); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := lifecycle.ProvisionMise(context.Background(), workspace.MiseProvision{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
 	}); err != nil {
 		t.Fatalf("ProvisionMise() error = %v", err)
+	}
+	externalInfo, err := os.Stat(external)
+	if err != nil || externalInfo.Mode().Perm() != 0 {
+		t.Fatalf("external symlink target permissions = %v, %v, want 000", externalInfo, err)
+	}
+	if err := os.Chmod(external, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	content, err := os.ReadFile(externalMarker)
 	if err != nil || string(content) != "outside" {
@@ -229,5 +402,8 @@ fi
 	content, err = os.ReadFile(filepath.Join(paths.Mise, "cache", "marker"))
 	if err != nil || string(content) != "provisioned" {
 		t.Fatalf("assignment marker = %q, %v", content, err)
+	}
+	if _, err := os.Stat(moduleDirectory); !os.IsNotExist(err) {
+		t.Fatalf("read-only module cache survived replacement: %v", err)
 	}
 }

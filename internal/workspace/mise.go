@@ -11,15 +11,20 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var ErrInvalidMiseEnvironment = errors.New("mise returned an invalid activation environment")
 
 type MiseProvision struct {
-	AssignmentID  string
-	RepositoryURL string
-	Credential    string
-	Revision      string
+	AssignmentID   string
+	RepositoryURL  string
+	Credential     string
+	Revision       string
+	ExecutionEpoch int64
+	Fence          WorkspaceFence
 }
 
 type MiseActivation struct {
@@ -47,10 +52,21 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	if err := ensureAssignmentDirectory(lifecycle.miseRoot, assignmentRoot); err != nil {
 		return MiseActivation{}, fmt.Errorf("create assignment mise parent: %w", err)
 	}
+	release, err := acquireMiseProvisionLock(ctx, assignmentRoot)
+	if err != nil {
+		return MiseActivation{}, fmt.Errorf("serialize assignment mise provisioning: %w", err)
+	}
+	defer release()
+	if err := claimMiseProvisionEpoch(ctx, assignmentRoot, provision.ExecutionEpoch, provision.Fence); err != nil {
+		return MiseActivation{}, fmt.Errorf("claim assignment mise provisioning epoch: %w", err)
+	}
 	if err := ensureOwnedDirectory(paths.Mise, 0o755); err != nil {
 		return MiseActivation{}, fmt.Errorf("create assignment mise data: %w", err)
 	}
-	if err := os.RemoveAll(paths.Mise); err != nil {
+	if err := makeOwnedTreeDirectoriesWritable(ctx, paths.Mise); err != nil {
+		return MiseActivation{}, fmt.Errorf("prepare assignment mise data for replacement: %w", err)
+	}
+	if err := removeOwnedDirectoryTree(ctx, paths.Mise); err != nil {
 		return MiseActivation{}, fmt.Errorf("replace assignment mise data: %w", err)
 	}
 	if err := ensureOwnedDirectory(paths.Mise, 0o755); err != nil {
@@ -91,6 +107,9 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	if !configured {
 		return activation, nil
 	}
+	if err := ensureOwnedDirectory(filepath.Join(paths.Mise, "tmp"), 0o700); err != nil {
+		return MiseActivation{}, fmt.Errorf("create assignment mise temporary data: %w", err)
+	}
 	if _, err := lifecycle.mise(ctx, "install trusted repository tools", source, isolation, "install", "--yes"); err != nil {
 		return MiseActivation{}, err
 	}
@@ -106,7 +125,9 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 		if name == "" || strings.ContainsRune(name, '=') || strings.ContainsRune(name, '\x00') || strings.ContainsRune(value, '\x00') {
 			return MiseActivation{}, ErrInvalidMiseEnvironment
 		}
-		activation.Environment[name] = value
+		if !provisioningOnlyMiseVariable(name) {
+			activation.Environment[name] = value
+		}
 	}
 	for name, value := range runtimeMiseEnvironment(isolation) {
 		activation.Environment[name] = value
@@ -114,7 +135,55 @@ func (lifecycle *Lifecycle) ProvisionMise(ctx context.Context, provision MisePro
 	if _, err := inspectOwnedDirectory(paths.Mise); err != nil {
 		return MiseActivation{}, err
 	}
+	temporary := filepath.Join(paths.Mise, "tmp")
+	if exists, err := inspectOwnedDirectory(temporary); err != nil {
+		return MiseActivation{}, fmt.Errorf("inspect assignment mise temporary data: %w", err)
+	} else if exists {
+		if err := makeOwnedTreeDirectoriesWritable(ctx, temporary); err != nil {
+			return MiseActivation{}, fmt.Errorf("prepare assignment mise temporary data for removal: %w", err)
+		}
+		if err := removeOwnedDirectoryTree(ctx, temporary); err != nil {
+			return MiseActivation{}, fmt.Errorf("remove assignment mise temporary data: %w", err)
+		}
+	}
 	return activation, nil
+}
+
+func acquireMiseProvisionLock(ctx context.Context, assignmentRoot string) (func(), error) {
+	path := filepath.Join(assignmentRoot, ".mise-provision.lock")
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || int(stat.Uid) != os.Geteuid() {
+		unix.Close(fd)
+		return nil, ErrUnsafeAssignmentPath
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			unix.Close(fd)
+			return nil, err
+		}
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+			return func() { _ = unix.Flock(fd, unix.LOCK_UN); _ = unix.Close(fd) }, nil
+		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			unix.Close(fd)
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			unix.Close(fd)
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory string, environment map[string]string, arguments ...string) (string, error) {
@@ -143,16 +212,22 @@ func (lifecycle *Lifecycle) mise(ctx context.Context, operation, directory strin
 }
 
 func miseIsolation(dataDir, trustedSource string) map[string]string {
+	temporary := filepath.Join(dataDir, "tmp")
 	return map[string]string{
+		"GOFLAGS":                   "-p=1 -modcacherw",
+		"GOTMPDIR":                  temporary,
 		"HOME":                      filepath.Join(dataDir, "home"),
 		"MISE_CACHE_DIR":            filepath.Join(dataDir, "cache"),
 		"MISE_CONFIG_DIR":           filepath.Join(dataDir, "config"),
 		"MISE_DATA_DIR":             dataDir,
-		"MISE_GLOBAL_CONFIG_FILE":   os.DevNull,
+		"MISE_GLOBAL_CONFIG_FILE":   "/etc/omnigrex/mise-global.toml",
+		"MISE_JOBS":                 "1",
 		"MISE_PROJECT_ROOT":         trustedSource,
 		"MISE_STATE_DIR":            filepath.Join(dataDir, "state"),
-		"MISE_SYSTEM_CONFIG_FILE":   os.DevNull,
+		"MISE_SYSTEM_CONFIG_FILE":   "/etc/omnigrex/mise-system.toml",
+		"MISE_TMP_DIR":              temporary,
 		"MISE_TRUSTED_CONFIG_PATHS": trustedSource,
+		"TMPDIR":                    temporary,
 		"XDG_CACHE_HOME":            filepath.Join(dataDir, "xdg-cache"),
 		"XDG_CONFIG_HOME":           filepath.Join(dataDir, "xdg-config"),
 		"XDG_DATA_HOME":             filepath.Join(dataDir, "xdg-data"),
@@ -163,7 +238,7 @@ func miseIsolation(dataDir, trustedSource string) map[string]string {
 func runtimeMiseEnvironment(isolation map[string]string) map[string]string {
 	environment := make(map[string]string, len(isolation)-1)
 	for name, value := range isolation {
-		if name != "HOME" && name != "MISE_PROJECT_ROOT" && name != "MISE_TRUSTED_CONFIG_PATHS" && !strings.HasPrefix(name, "XDG_") {
+		if !provisioningOnlyMiseVariable(name) {
 			environment[name] = value
 		}
 	}
@@ -172,6 +247,15 @@ func runtimeMiseEnvironment(isolation map[string]string) map[string]string {
 	environment["MISE_OVERRIDE_CONFIG_FILENAMES"] = "none"
 	environment["MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES"] = "none"
 	return environment
+}
+
+func provisioningOnlyMiseVariable(name string) bool {
+	switch name {
+	case "HOME", "GOFLAGS", "GOTMPDIR", "MISE_JOBS", "MISE_PROJECT_ROOT", "MISE_TMP_DIR", "MISE_TRUSTED_CONFIG_PATHS", "TMPDIR":
+		return true
+	default:
+		return strings.HasPrefix(name, "XDG_")
+	}
 }
 
 func hasMiseConfiguration(root string) (bool, error) {

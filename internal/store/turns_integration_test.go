@@ -1840,6 +1840,33 @@ func TestAgentTurnPreparationAndAcquisitionRejectInactiveHierarchy(t *testing.T)
 	}
 }
 
+func TestAgentTurnCleanupFenceAllowsSettlingTurnButRejectsLostOwner(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, lease, _ := prepareSettlementTurn(t, database, pool, ctx, 812, workflow.RoleDeveloper, "")
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := database.WithAgentTurnCleanupFence(ctx, lease, func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("WithAgentTurnCleanupFence() = (%t, %v), want live settling Turn", called, err)
+	}
+	stale := lease
+	stale.OwnerToken = "78120000-0000-4000-8000-000000000099"
+	called = false
+	if err := database.WithAgentTurnCleanupFence(ctx, stale, func(context.Context) error {
+		called = true
+		return nil
+	}); !errors.Is(err, store.ErrAgentTurnFenceLost) || called {
+		t.Fatalf("stale WithAgentTurnCleanupFence() = (%t, %v), want lost fence", called, err)
+	}
+}
+
 func TestAgentTurnHeartbeatAndCompetingAcquireSerializeGlobalSlot(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	firstFixture := seedAgentSession(t, pool, 1)

@@ -87,6 +87,25 @@ WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan
 	return cleanup, nil
 }
 
+// WithRecoveredRuntimeCleanupFence holds a live stop-job fence for the short workspace detachment.
+func (store *Store) WithRecoveredRuntimeCleanupFence(ctx context.Context, lease JobLease, operation func(context.Context) error) error {
+	if operation == nil {
+		return errors.New("hold recovered Runtime Process cleanup fence: operation is nil")
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin recovered Runtime Process cleanup fence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := lockAgentTurnRecoveryJob(ctx, tx, lease, StopStaleRuntimeJobKind); err != nil {
+		return err
+	}
+	if err := operation(ctx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // AcknowledgeRecoveredRuntimeStopFailure promptly releases a failed stop attempt while preserving cleanup authority.
 func (store *Store) AcknowledgeRecoveredRuntimeStopFailure(ctx context.Context, lease JobLease, cause error, retryDelay time.Duration) (AgentTurnRuntimeStopFailureAcknowledgement, error) {
 	if cause == nil || strings.TrimSpace(cause.Error()) == "" {

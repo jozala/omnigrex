@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -21,10 +22,12 @@ var (
 )
 
 type Checkout struct {
-	AssignmentID  string
-	RepositoryURL string
-	Credential    string
-	Revision      string
+	AssignmentID   string
+	RepositoryURL  string
+	Credential     string
+	Revision       string
+	ExecutionEpoch int64
+	Fence          WorkspaceFence
 }
 
 func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Checkout) (paths Paths, err error) {
@@ -45,48 +48,78 @@ func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Check
 	if err := ensureAssignmentDirectory(lifecycle.workspaceRoot, filepath.Dir(paths.Workspace)); err != nil {
 		return Paths{}, fmt.Errorf("create assignment workspace parent: %w", err)
 	}
-	if _, err := inspectOwnedDirectory(paths.Workspace); err != nil {
-		return Paths{}, err
+	if err := cleanupOldEpochDirectories(ctx, filepath.Dir(paths.Workspace), "workspace-staged-", checkout.ExecutionEpoch); err != nil {
+		return Paths{}, fmt.Errorf("remove abandoned staged workspaces: %w", err)
 	}
-	if err := os.RemoveAll(paths.Workspace); err != nil {
-		return Paths{}, fmt.Errorf("replace assignment workspace: %w", err)
+	staged, err := os.MkdirTemp(filepath.Dir(paths.Workspace), "workspace-staged-"+strconv.FormatInt(checkout.ExecutionEpoch, 10)+"-")
+	if err != nil {
+		return Paths{}, fmt.Errorf("create staged assignment workspace: %w", err)
 	}
 	defer func() {
-		if err != nil {
-			_ = os.RemoveAll(paths.Workspace)
+		if staged != "" {
+			if cleanupErr := cleanupDetachedWorkspace(ctx, staged); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove incomplete staged workspace: %w", cleanupErr))
+			}
 		}
 	}()
 
 	if err = lifecycle.git(ctx, "clone repository", "", checkout.Credential,
-		"clone", "--no-checkout", "--origin=origin", "--config", "core.hooksPath=/dev/null", "--", checkout.RepositoryURL, paths.Workspace); err != nil {
+		"clone", "--no-checkout", "--origin=origin", "--config", "core.hooksPath=/dev/null", "--", checkout.RepositoryURL, staged); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "set credential-free remote", paths.Workspace, "",
+	if err = lifecycle.git(ctx, "set credential-free remote", staged, "",
 		"remote", "set-url", "origin", checkout.RepositoryURL); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "disable repository hooks", paths.Workspace, "",
+	if err = lifecycle.git(ctx, "disable repository hooks", staged, "",
 		"config", "--local", "core.hooksPath", "/dev/null"); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "fetch exact revision", paths.Workspace, checkout.Credential,
+	if err = lifecycle.git(ctx, "fetch exact revision", staged, checkout.Credential,
 		"fetch", "--force", "--no-tags", "origin", revision); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "check out exact revision", paths.Workspace, "",
+	if err = lifecycle.git(ctx, "check out exact revision", staged, "",
 		"checkout", "--detach", "--force", revision); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "reset exact revision", paths.Workspace, "",
+	if err = lifecycle.git(ctx, "reset exact revision", staged, "",
 		"reset", "--hard", revision); err != nil {
 		return Paths{}, err
 	}
-	if err = lifecycle.git(ctx, "clean workspace", paths.Workspace, "",
+	if err = lifecycle.git(ctx, "clean workspace", staged, "",
 		"clean", "-ffdx"); err != nil {
 		return Paths{}, err
 	}
-	if _, err = inspectOwnedDirectory(paths.Workspace); err != nil {
+	if _, err = inspectOwnedDirectory(staged); err != nil {
 		return Paths{}, err
+	}
+	var detached string
+	promote := func(fenceCtx context.Context) error {
+		detached, err = swapAssignmentWorkspace(fenceCtx, paths.Workspace, staged, checkout.ExecutionEpoch)
+		if err == nil {
+			staged = ""
+		}
+		return err
+	}
+	if checkout.Fence != nil {
+		err = checkout.Fence(ctx, promote)
+	} else {
+		err = promote(ctx)
+	}
+	if err != nil {
+		return Paths{}, fmt.Errorf("promote staged assignment workspace: %w", err)
+	}
+	if staged != "" {
+		return Paths{}, errors.New("promote staged assignment workspace: fence did not run promotion")
+	}
+	if detached != "" {
+		if err := removeOwnedWorkspaceTree(ctx, detached); err != nil {
+			return Paths{}, fmt.Errorf("remove detached previous workspace: %w", err)
+		}
+	}
+	if err := cleanupOldEpochDirectories(ctx, filepath.Dir(paths.Workspace), "workspace-retired-", checkout.ExecutionEpoch); err != nil {
+		return Paths{}, fmt.Errorf("remove older detached workspaces: %w", err)
 	}
 	return paths, nil
 }

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -109,11 +110,16 @@ func (lifecycle *Lifecycle) Paths(assignmentID string) (Paths, error) {
 
 // DiscardWorkspace removes an assignment workspace after validating every owned directory in its path.
 func (lifecycle *Lifecycle) DiscardWorkspace(assignmentID string) error {
+	return lifecycle.DiscardWorkspaceFenced(context.Background(), assignmentID, 0, nil)
+}
+
+// DiscardWorkspaceFenced detaches the live workspace under a short fence before cleaning the detached tree.
+func (lifecycle *Lifecycle) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, epoch int64, fence WorkspaceFence) error {
 	paths, err := lifecycle.Paths(assignmentID)
 	if err != nil {
 		return err
 	}
-	for _, path := range []string{lifecycle.workspaceRoot, filepath.Dir(paths.Workspace), paths.Workspace} {
+	for _, path := range []string{lifecycle.workspaceRoot, filepath.Dir(paths.Workspace)} {
 		exists, err := inspectOwnedDirectory(path)
 		if err != nil {
 			return err
@@ -122,10 +128,34 @@ func (lifecycle *Lifecycle) DiscardWorkspace(assignmentID string) error {
 			return nil
 		}
 	}
-	if err := os.RemoveAll(paths.Workspace); err != nil {
-		return fmt.Errorf("discard assignment workspace: %w", err)
+	var detached string
+	detachedUnderFence := false
+	detach := func(fenceCtx context.Context) error {
+		detachedUnderFence = true
+		var err error
+		detached, err = detachAssignmentWorkspace(fenceCtx, paths.Workspace, epoch)
+		return err
 	}
-	return nil
+	if fence != nil {
+		err = fence(ctx, detach)
+	} else {
+		err = detach(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("detach assignment workspace for discard: %w", err)
+	}
+	if !detachedUnderFence {
+		return errors.New("detach assignment workspace for discard: fence did not run detachment")
+	}
+	if detached != "" {
+		if err := removeOwnedWorkspaceTree(ctx, detached); err != nil {
+			return fmt.Errorf("discard detached assignment workspace: %w", err)
+		}
+	}
+	if err := cleanupRetiredWorkspacesForEpoch(ctx, filepath.Dir(paths.Workspace), epoch); err != nil {
+		return fmt.Errorf("discard previously detached assignment workspace: %w", err)
+	}
+	return cleanupOldEpochDirectories(ctx, filepath.Dir(paths.Workspace), "workspace-retired-", epoch)
 }
 
 func (lifecycle *Lifecycle) acquirePublicationLock(assignmentID string) func() {

@@ -11,6 +11,7 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 // StopWorkerStore is the durable recovery-job boundary used by StopWorker.
@@ -18,6 +19,7 @@ type StopWorkerStore interface {
 	ClaimJobKind(context.Context, string, string, string, time.Duration) (*store.JobLease, error)
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
 	GetAgentTurnRuntimeCleanupContext(context.Context, store.JobLease) (store.AgentTurnRuntimeCleanupContext, error)
+	WithRecoveredRuntimeCleanupFence(context.Context, store.JobLease, func(context.Context) error) error
 	AcknowledgeRecoveredRuntimeStopped(context.Context, store.JobLease) (store.AgentTurnRecovery, error)
 	AcknowledgeRecoveredRuntimeStopFailure(context.Context, store.JobLease, error, time.Duration) (store.AgentTurnRuntimeStopFailureAcknowledgement, error)
 }
@@ -29,7 +31,7 @@ type ExactRuntimeCleaner interface {
 
 // WorkspaceDiscarder removes recovered Reviewer workspace changes.
 type WorkspaceDiscarder interface {
-	DiscardWorkspace(string) error
+	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
 }
 
 // StopWorkerConfig controls stale-runtime recovery claims, heartbeats, retries, and idle polling.
@@ -159,7 +161,10 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	}
 
 	if cleanup.DiscardWorkspace {
-		if err := worker.workspaces.DiscardWorkspace(cleanup.AssignmentID); err != nil {
+		fence := func(ctx context.Context, operation func(context.Context) error) error {
+			return worker.store.WithRecoveredRuntimeCleanupFence(ctx, lease, operation)
+		}
+		if err := worker.workspaces.DiscardWorkspaceFenced(ctx, cleanup.AssignmentID, lease.ExecutionEpoch, fence); err != nil {
 			return fmt.Errorf("discard recovered Agent workspace: %w", err)
 		}
 	}
