@@ -57,6 +57,9 @@ RUN --mount=type=bind,source=agent/opencode/apk-packages.sha256,target=/tmp/apk-
 COPY --from=build --chown=10001:10001 /out/omnigrex /usr/local/bin/omnigrex
 COPY --from=tools /usr/local/bin/mise /usr/local/bin/mise
 
+LABEL org.opencontainers.image.source="https://github.com/jozala/omnigrex" \
+      org.opencontainers.image.title="Omnigrex Orchestrator"
+
 USER 10001:10001
 EXPOSE 8080 8081
 ENTRYPOINT ["/usr/local/bin/omnigrex"]

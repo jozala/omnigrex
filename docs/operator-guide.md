@@ -7,7 +7,9 @@ Read the trust model before installing credentials or granting Docker access.
 
 The supported deployment is one Docker Compose stack running the Omnigrex orchestrator, PostgreSQL, and disposable OpenCode Runtime Processes on one Docker Engine.
 Docker Engine API 1.45 or newer and Docker Compose v2 are required.
-The operator must provide a registry for immutable Runtime Profile images, public DNS, and HTTPS ingress for GitHub webhooks.
+The operator must provide public DNS and HTTPS ingress for GitHub webhooks.
+Production hosts deploy without cloning the repository by using published `linux/amd64` images from `ghcr.io/jozala/omnigrex/` and the pinned `deploy/compose.yaml` and `deploy/.env.example` files for one commit.
+A source checkout is only needed for development and for qualifying Runtime Profile upgrades elsewhere.
 
 Only trusted repositories are supported.
 The orchestrator has effective host-root authority through the Docker socket and can read all deployment secrets.
@@ -23,27 +25,67 @@ Use GitHub branch protection when checks must be mandatory.
 
 Install the following software on the deployment host:
 
-- Git.
 - Docker Engine with API 1.45 or newer.
 - Docker Compose v2.
-- `mise` when building and qualifying Runtime Profile images on the host.
+- `curl` for downloading the pinned deployment files.
 - A reverse proxy or tunnel that terminates publicly trusted HTTPS.
+
+Git and `mise` are not required on a no-clone deployment host.
+Use a separate source checkout with Git and `mise` only when qualifying a Runtime Profile upgrade.
 
 The orchestrator installs repository tools inside its own container before launching Agent Turns, including compiling Go tools declared in `mise.toml`.
 Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Runtime Processes.
 Tool installation uses a per-assignment directory in the shared mise volume for scratch space rather than the orchestrator's 16 MiB `/tmp` tmpfs, so the volume also needs room for Go compilation.
 The scratch directory is removed before the Runtime Process starts.
 
-Clone the repository and create the local configuration:
+Create the local configuration in the deployment directory:
 
 ```sh
-git clone https://github.com/jozala/omnigrex.git
-cd omnigrex
-cp .env.example .env
 install -m 0700 -d secrets
 ```
 
 Do not commit `.env`, `secrets/`, provider credentials, private keys, compatibility artifacts containing deployment metadata, or backups.
+See [Published Images And Deployment Files](#published-images-and-deployment-files) and [Deploy](#deploy) for how the deployment directory is created without cloning the repository.
+
+## Published Images And Deployment Files
+
+Every push to `main` that passes the `check` job publishes two `linux/amd64` images for discovery:
+
+- `ghcr.io/jozala/omnigrex/orchestrator:sha-<full-commit-SHA>` from `Dockerfile`.
+- `ghcr.io/jozala/omnigrex/opencode:sha-<full-commit-SHA>` from `agent/opencode/Dockerfile`.
+
+No `latest` tag is published, and Pull Request runs publish neither image.
+After the first publication, a repository/package administrator must make both GHCR packages public and confirm that a host can pull them without `docker login`.
+Do not add registry credentials to the deployment bundle.
+
+Select a commit whose `main` CI run successfully published both images.
+Open that run and read its `Published Omnigrex images` workflow summary, which records the commit SHA, both `sha-<commit>` tags, and both resolved `sha256` digests.
+
+Download the deployment files pinned to that exact commit into one empty host directory:
+
+```sh
+COMMIT=<full-commit-SHA>
+mkdir -p omnigrex-deploy && cd omnigrex-deploy
+curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/compose.yaml"
+curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/.env.example"
+cp .env.example .env
+install -m 0700 -d secrets
+```
+
+There is no GitHub Release for every merge; the commit-pinned raw URLs are the distribution mechanism.
+
+Pull the two matching `sha-<commit>` images and resolve their registry digests:
+
+```sh
+docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/orchestrator:sha-${COMMIT}"
+docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/opencode:sha-${COMMIT}"
+docker image inspect "ghcr.io/jozala/omnigrex/orchestrator:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
+docker image inspect "ghcr.io/jozala/omnigrex/opencode:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
+```
+
+The inspected `...@sha256:...` values must match the digests in the workflow summary.
+Record them in `.env` as `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_OPENCODE_ACP_V1_IMAGE`, keep `OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64`, and fill in the host-specific settings and file-backed secrets described below.
+The deployment bundle uses one OpenCode digest for the `opencode-image` validation service, `OMNIGREX_AGENT_IMAGE_REFERENCE`, and `OMNIGREX_OPENCODE_ACP_V1_IMAGE` so they cannot diverge.
 
 ## GitHub Apps
 
@@ -225,35 +267,25 @@ Never place provider credentials, GitHub credentials, deployment secrets, or pri
 
 ## Runtime Profile Image
 
-Build the pinned OpenCode image:
-
-```sh
-mise run agent-image
-```
-
-Tag and push it to a registry that retains immutable digests:
-
-```sh
-docker tag omnigrex/opencode:1.18.29 registry.example/omnigrex/opencode:1.18.29
-docker push registry.example/omnigrex/opencode:1.18.29
-docker image inspect registry.example/omnigrex/opencode:1.18.29 --format '{{index .RepoDigests 0}}'
-```
-
-Set the resulting registry digest and matching platform in `.env`:
+A no-clone deployment uses the published OpenCode digest for the selected commit.
+Set the digest from the CI workflow summary and matching platform in `.env`:
 
 ```text
-OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:...
+OMNIGREX_OPENCODE_ACP_V1_IMAGE=ghcr.io/jozala/omnigrex/opencode@sha256:...
 OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64
 ```
 
-Use `linux/arm64` only with an arm64 image.
+Only `linux/amd64` is published initially.
 The exact digest must already be available to the deployment host's Docker Engine because Omnigrex does not pull Runtime Profile images automatically.
+Pull it explicitly before startup (see [Deploy](#deploy)).
+Keep every digest referenced by active or retained Agent Sessions available until the corresponding state is garbage-collected.
+The same requirement applies when restoring a backup on another host: restore `.env`, secrets, compatibility artifacts, the deployed commit, and every referenced image digest before changing current data.
 
 ### Agent Turn Memory
 
 Set `OMNIGREX_AGENT_TURN_MEMORY_MIB` in `.env` to a positive integer number of MiB per Agent Turn container.
 The default is `512`; set `OMNIGREX_AGENT_TURN_MEMORY_MIB=1024` for 1 GiB (1073741824 bytes).
-After changing `.env`, recreate the orchestrator with `docker compose up -d --build --force-recreate orchestrator` and run `doctor` for each repository.
+After changing `.env`, recreate the orchestrator with `docker compose up -d --force-recreate orchestrator` and run `doctor` for each repository.
 Newly created Agent Turn containers and the doctor ACP probe use the new limit; running containers are not resized.
 Changing this setting does not change the Runtime Profile binding or require a database reset.
 At the default concurrency of two, 1 GiB per turn allows up to 2 GiB across Agent Turn containers in addition to other host processes.
@@ -301,16 +333,12 @@ This GitHub-side delivery check is required because `doctor` cannot prove that t
 
 ## Deploy
 
-Validate configuration before creating containers:
+From the deployment directory containing only the pinned `compose.yaml`, `.env`, and operator-provided `secrets/`, pull the exact OpenCode digest into the Docker Engine before startup, validate Compose, and start the stack without `--build`:
 
 ```sh
+docker pull --platform=linux/amd64 "$OMNIGREX_OPENCODE_ACP_V1_IMAGE"
 docker compose config --quiet
-```
-
-Build and start the stack:
-
-```sh
-docker compose up --build --wait
+docker compose up --wait
 ```
 
 Verify local health and dependency readiness:
@@ -499,10 +527,11 @@ Select the recovery-set directory once, verify it, stop the complete stack witho
 )
 ```
 
-Start the full stack and run preflight for every repository:
+Start the full stack and run preflight for every repository.
+Restore the matching `.env`, secrets, compatibility artifacts, and exact Runtime Profile images on the new host first; retained Agent Sessions cannot continue when their pinned digests are missing:
 
 ```sh
-docker compose up --build --wait
+docker compose up --wait
 docker compose exec orchestrator \
   /usr/local/bin/omnigrex doctor --repository OWNER/REPOSITORY
 ```
@@ -517,14 +546,14 @@ That command permanently removes all declared named volumes.
 
 Create a coordinated backup before every application, PostgreSQL, or Runtime Profile upgrade.
 
-### Orchestrator And Database
+### Orchestrator-Only Upgrade
 
-Record the current Git commit and image references, update to the intended release, validate Compose, and deploy:
+An orchestrator-only upgrade keeps the same OpenCode digest and compatibility artifact.
+Record the current commit and image references, download the target commit's `deploy/compose.yaml` and `deploy/.env.example` into the deployment directory, keep `OMNIGREX_OPENCODE_ACP_V1_IMAGE` and the compatibility file unchanged, update `OMNIGREX_ORCHESTRATOR_IMAGE` to the target digest, validate Compose, and deploy:
 
 ```sh
-git rev-parse HEAD
 docker compose config --quiet
-docker compose up --build --wait
+docker compose up --wait
 ```
 
 The orchestrator applies forward-only embedded PostgreSQL migrations under an advisory lock during startup.
@@ -535,16 +564,18 @@ Rollback after a migration requires restoring the coordinated pre-upgrade Postgr
 For a PostgreSQL major-version upgrade, use a logical dump and restore into a new volume using the target PostgreSQL version.
 Do not reuse a physical PostgreSQL data volume across major versions.
 
-### Runtime Profile
+### Runtime Profile Image Change
 
 Existing Agent Sessions remain pinned to the exact image that created them.
 A source-to-candidate qualification does not migrate those sessions and does not prove candidate-to-source rollback compatibility.
 
-Pull both exact source and candidate image digests, choose an absolute output path whose file does not yet exist, and run:
+Qualify the exact old-image to new-image upgrade in CI or another source checkout, not on the clone-free deployment host.
+Packaging a host-side qualification tool is out of scope.
+Pull both exact source and candidate image digests there, choose an absolute output path whose file does not yet exist, and run:
 
 ```sh
-SOURCE='registry.example/omnigrex/opencode@sha256:SOURCE_DIGEST'
-TARGET='registry.example/omnigrex/opencode@sha256:TARGET_DIGEST'
+SOURCE='ghcr.io/jozala/omnigrex/opencode@sha256:SOURCE_DIGEST'
+TARGET='ghcr.io/jozala/omnigrex/opencode@sha256:TARGET_DIGEST'
 ARTIFACT="$PWD/runtime-profile-compatibility-results.json"
 docker pull --platform=linux/amd64 "$SOURCE"
 docker pull --platform=linux/amd64 "$TARGET"
@@ -557,11 +588,11 @@ OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE="$ARTIFACT" \
 mise run release-check-runtime-upgrade
 ```
 
-Use the actual source and target versions and use `arm64` consistently for an arm64 deployment.
+Use the actual source and target versions.
 The qualification creates the artifact with mode `0600`, and it refuses to overwrite an existing file.
 
-Set `OMNIGREX_OPENCODE_ACP_V1_IMAGE` to the candidate digest and set `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` to the artifact's absolute host path.
-Deploy and run `doctor` for every repository.
+Transfer the resulting JSON file to the deployment host (for example with `scp`), place it at an absolute host path outside the downloaded deployment directory, and set `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` to that path.
+Set `OMNIGREX_OPENCODE_ACP_V1_IMAGE` to the candidate digest, pull that digest into the Docker Engine before startup, validate Compose, deploy, and run `doctor` for every repository.
 Keep source and candidate digests available for every active and retained session.
 
 An in-place Runtime Profile rollback is unsupported after Agent Participants using the candidate Runtime Profile exist unless the reverse direction has also been qualified.
@@ -609,7 +640,7 @@ docker compose restart orchestrator
 ```
 
 Startup reconciliation fences stale Runtime Processes and resumes durable work according to retry policy.
-Use `docker compose up -d --build --force-recreate orchestrator` instead when the binary, image, environment, or mounted configuration changed.
+Use `docker compose up -d --force-recreate orchestrator` instead when the image, environment, or mounted configuration changed.
 
 If the Developer webhook receives no deliveries, inspect the Developer App's Recent deliveries page, public DNS and TLS, proxy logs, firewall, and exact path.
 If deliveries receive 401, verify that the local and GitHub webhook secrets match.
