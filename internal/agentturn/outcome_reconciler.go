@@ -368,6 +368,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		Event       githubapi.ReviewEvent `json:"event"`
 		Body        string                `json:"body"`
 		Comments    json.RawMessage       `json:"comments"`
+		Signature   string                `json:"signature"`
 	}
 	var result struct {
 		ReviewID int64  `json:"review_id"`

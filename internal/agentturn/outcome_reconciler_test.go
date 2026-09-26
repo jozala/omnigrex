@@ -305,6 +305,119 @@ func TestOutcomeReconcilerRejectsWrongReviewerActorAndSubmittedHead(t *testing.T
 	}
 }
 
+func TestOutcomeReconcilerAcceptsGatewaySignedReviewerReviews(t *testing.T) {
+	const signedFooter = "_By Omnigrex: `review-specialist` [Reviewer]_"
+	tests := []struct {
+		name     string
+		event    string
+		state    string
+		comments string
+		sig      string
+		want     workflow.TurnOutcome
+	}{
+		{name: "signed approve", event: "APPROVE", state: "APPROVED", comments: `[]`, sig: signedFooter, want: workflow.TurnOutcomeApproved},
+		{name: "signed request changes", event: "REQUEST_CHANGES", state: "CHANGES_REQUESTED", comments: `[]`, sig: signedFooter, want: workflow.TurnOutcomeChangesRequested},
+		{name: "signed request changes with inline comments", event: "REQUEST_CHANGES", state: "CHANGES_REQUESTED", comments: `[{"path":"review.go","line":12,"side":"RIGHT","body":"added"}]`, sig: signedFooter, want: workflow.TurnOutcomeChangesRequested},
+		{name: "empty signature remains readable", event: "APPROVE", state: "APPROVED", comments: `[]`, sig: "", want: workflow.TurnOutcomeApproved},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			request.ReviewerRepositoryCredential = "reviewer-repository-secret"
+			mutation := outcomeSignedSubmitReviewMutation(1, test.event, test.state, outcomeHead, 701, test.sig, test.comments)
+			review := outcomeReview(outcomeHead, 701)
+			review.State = test.state
+			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
+			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
+			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded ||
+				observation.Review == nil || observation.Review.HeadSHA != outcomeHead ||
+				observation.AuthorizedReviewerActorID != 701 || observation.ChangeProposal == nil {
+				t.Fatalf("signed %s observation = %#v, want outcome %s", test.event, observation, test.want)
+			}
+			if !strings.Contains(string(mutation.Request), `"signature"`) {
+				t.Fatalf("signed fixture request is missing signature field: %s", mutation.Request)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerRejectsMalformedSignedReviewerRequests(t *testing.T) {
+	const signedFooter = "_By Omnigrex: `review-specialist` [Reviewer]_"
+	operationID := "submit-1"
+	signedRequest := func(signature, comments string) string {
+		return fmt.Sprintf(`{"operation_id":%q,"event":"APPROVE","body":"review","comments":%s,"signature":%s}`, operationID, comments, signature)
+	}
+	validResult := fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":"APPROVED","commit_id":%q,"actor_id":701,"html_url":"https://github.test/review/801"}`, outcomeHead)
+	quotedFooter := fmt.Sprintf(`%q`, signedFooter)
+	tests := []struct {
+		name    string
+		request string
+		review  githubapi.Review
+		mutate  func(*store.MutationReservation)
+		want    string
+	}{
+		{
+			name:    "unexpected request field",
+			request: fmt.Sprintf(`{"operation_id":%q,"event":"APPROVE","body":"review","comments":[],"signature":%q,"extra":"oops"}`, operationID, signedFooter),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "malformed signature type",
+			request: signedRequest(`42`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "malformed signature object",
+			request: signedRequest(`{"footer":"x"}`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "conflicting review identity",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  func() githubapi.Review { review := outcomeReview(outcomeHead, 701); review.ID = 802; return review }(),
+			want:    "absent or conflicts",
+		},
+		{
+			name:    "wrong submitted head",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  outcomeReview(outcomeNewHead, 701),
+			mutate: func(mutation *store.MutationReservation) {
+				*mutation = outcomeSignedSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeNewHead, 701, signedFooter, `[]`)
+			},
+			want: "malformed or incoherent",
+		},
+		{
+			name:    "wrong reviewer actor",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  outcomeReview(outcomeHead, 702),
+			want:    "absent or conflicts",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			mutation := outcomeSucceededMutation(1, mcp.ToolSubmitReview, operationID, test.request, validResult, "github", "41:901", outcomeHead)
+			if test.mutate != nil {
+				test.mutate(&mutation)
+			}
+			if test.name == "wrong submitted head" {
+				mutation.Result = json.RawMessage(fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":"APPROVED","commit_id":%q,"actor_id":701,"html_url":"https://github.test/review/801"}`, outcomeNewHead))
+			}
+			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
+			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{test.review}}
+			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, test.want)
+		})
+	}
+}
+
 func TestOutcomeReconcilerRejectsDuplicateAndConflictingTerminalIntents(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -688,6 +801,20 @@ func outcomeSubmitReviewMutation(number int64, event, state, commit string, acto
 	operationID := fmt.Sprintf("submit-%d", number)
 	return outcomeSucceededMutation(number, mcp.ToolSubmitReview, operationID,
 		fmt.Sprintf(`{"operation_id":%q,"event":%q,"body":"review","comments":[]}`, operationID, event),
+		fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":%q,"commit_id":%q,"actor_id":%d,"html_url":"https://github.test/review/801"}`, state, commit, actorID),
+		"github", "41:901", commit)
+}
+
+func outcomeSignedSubmitReviewMutation(number int64, event, state, commit string, actorID int64, signature, comments string) store.MutationReservation {
+	operationID := fmt.Sprintf("submit-%d", number)
+	request, err := json.Marshal(map[string]any{
+		"operation_id": operationID, "event": event, "body": "review",
+		"comments": json.RawMessage(comments), "signature": signature,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return outcomeSucceededMutation(number, mcp.ToolSubmitReview, operationID, string(request),
 		fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":%q,"commit_id":%q,"actor_id":%d,"html_url":"https://github.test/review/801"}`, state, commit, actorID),
 		"github", "41:901", commit)
 }
