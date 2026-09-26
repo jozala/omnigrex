@@ -437,12 +437,21 @@ type processorInbox struct {
 	pending        []store.NormalizedEventRecord
 	drained        []recordedTransition
 	transitions    []recordedTransition
+	provisioned    []recordedProvisioning
 	atomicSnapshot workflow.Snapshot
 	drainSnapshot  workflow.Snapshot
 	transitionErr  error
+	provisionErr   error
 	drainErr       error
 	operations     []string
 	claimedAt      time.Time
+}
+
+type recordedProvisioning struct {
+	deliveryID     string
+	claimToken     string
+	installationID int64
+	repositories   []store.LabelProvisioningRepository
 }
 
 type recordedTransition struct {
@@ -550,6 +559,12 @@ func (inbox *processorInbox) CompleteWebhookDelivery(_ context.Context, delivery
 	return inbox.completeErr
 }
 
+func (inbox *processorInbox) CompleteLabelProvisioningTransition(_ context.Context, deliveryID, claimToken string, installationID int64, repositories []store.LabelProvisioningRepository) error {
+	inbox.operations = append(inbox.operations, "provision")
+	inbox.provisioned = append(inbox.provisioned, recordedProvisioning{deliveryID: deliveryID, claimToken: claimToken, installationID: installationID, repositories: repositories})
+	return inbox.provisionErr
+}
+
 func (inbox *processorInbox) AcknowledgeWebhookDeliveryFailure(_ context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool) error {
 	inbox.failures = append(inbox.failures, recordedFailure{deliveryID: deliveryID, claimToken: claimToken, attemptCount: attemptCount, cause: cause, retryable: retryable})
 	return inbox.failErr
@@ -586,6 +601,10 @@ func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string,
 	return store.WorkflowApplication{}, nil
 }
 
+func (*retryingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository) error {
+	return nil
+}
+
 func (*retryingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {
 	return nil
 }
@@ -607,6 +626,10 @@ func (*pollingInbox) ApplyNextPendingNormalizedEvent(context.Context, store.Pend
 
 func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error) {
 	return store.WorkflowApplication{}, nil
+}
+
+func (*pollingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository) error {
+	return nil
 }
 
 func (*pollingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {

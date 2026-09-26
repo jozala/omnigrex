@@ -50,7 +50,7 @@ The provider credential file must contain the nonempty deployment-wide OpenCode 
 
 Place the downloaded Developer/Orchestrator and Reviewer GitHub App RSA private keys at `secrets/github-developer-private-key.pem` and `secrets/github-reviewer-private-key.pem` with mode `0640`.
 Set both numeric App IDs in `.env`.
-The Developer App requires exactly metadata and Checks read access, contents/Issues/Pull Requests/Workflows write access, and subscriptions to Issue, Pull Request, and Pull Request Review events.
+The Developer App requires exactly metadata and Checks read access, contents/Issues/Pull Requests/Workflows write access, and subscriptions to Issue, Pull Request, Pull Request Review, and Repository events.
 The Reviewer App requires exactly metadata and contents read access plus Pull Request write access, no event subscriptions, and a disabled webhook.
 
 Use `OMNIGREX_DOCKER_GID=0` from `.env.example` with Docker Desktop.
