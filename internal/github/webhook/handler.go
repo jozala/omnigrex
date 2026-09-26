@@ -16,7 +16,10 @@ import (
 	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
-const maxPayloadBytes = 1 << 20
+// maxPayloadBytes bounds authenticated webhook bodies.
+// Installation events can list many repositories in one delivery, so the bound
+// accommodates larger installation payloads while remaining bounded.
+const maxPayloadBytes = 2 << 20
 
 // DeliveryInbox is the durable insert boundary used by Handler.
 type DeliveryInbox interface {
@@ -91,6 +94,12 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			http.Error(response, "invalid webhook Issue identity", http.StatusBadRequest)
 			return
 		}
+	} else if provisioningEvent(eventName) {
+		// Accept authenticated provisioning deliveries durably and let Normalize
+		// classify malformed payloads as terminal observable failures.
+		// Only the action (and repository identity when present) is extracted
+		// leniently here; strict validation happens during processing.
+		_ = json.Unmarshal(body, &envelope)
 	}
 
 	headers := make(map[string]string)

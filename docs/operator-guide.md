@@ -111,6 +111,11 @@ Subscribe to exactly these repository events:
 - Issues.
 - Pull request.
 - Pull request review.
+- Repository.
+
+The Repository subscription delivers `repository.created` so newly created
+repositories are provisioned. The Developer App also receives the default
+`installation.created` and `installation_repositories.added` deliveries.
 
 Enable the webhook and configure:
 
@@ -308,7 +313,7 @@ The reverse proxy must:
 - Forward `POST /webhooks/github` to `http://127.0.0.1:8080/webhooks/github` without changing the path.
 - Preserve the exact raw request body.
 - Preserve `X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event`.
-- Allow request bodies up to 1 MiB.
+- Allow request bodies up to 2 MiB.
 - Complete request headers within five seconds and the request within fifteen seconds.
 - Keep port 8081 and the `omnigrex-agent` network private.
 
@@ -370,6 +375,32 @@ GitHub installation checks create short-lived tokens but do not modify repositor
 
 Finally, verify a real GitHub webhook delivery from the Developer App.
 Do not add `omnigrex:run` until preflight and webhook delivery verification both pass.
+
+## Automatic Label Provisioning
+
+When the Developer App gains access to a repository, Omnigrex provisions the
+five managed labels before the first Workflow, using only Developer App
+credentials:
+
+- A new Developer App installation provisions every accessible repository.
+  Accessible repositories are enumerated through a paginated
+  installation-token request, not the webhook repository list.
+- Explicitly added repositories are provisioned from the
+  `installation_repositories.added` delivery.
+- Repositories created under all-repository access are provisioned from the
+  `repository.created` delivery.
+
+Provisioning creates missing label names only, preserves the color and
+description of existing labels, leaves unrelated labels untouched, and never
+applies a state label to an Issue or Pull Request or starts a Workflow.
+Duplicate or overlapping deliveries are harmless, one repository's failure
+does not block other repositories, and terminal failures are recorded as
+observable provisioning and delivery failures for operator follow-up.
+
+Repositories installed before this provisioning was deployed are not
+backfilled on startup. Their missing labels are created by the existing
+Workflow label reconciliation the next time a Workflow runs. Labels deleted
+from an idle repository are likewise restored only when a Workflow runs.
 
 ## Start A Workflow
 

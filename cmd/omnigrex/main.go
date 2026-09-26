@@ -416,6 +416,17 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure GitHub Human Handoff Worker: %w", err)
 	}
+	provisioningWorker, err := githubapi.NewLabelProvisioningWorker(database, githubServices.developerSigner, developerRepositoryCredentials, githubServices.api, githubapi.LabelProvisioningWorkerConfig{
+		ClaimOwner: githubServices.claimOwner + ":provision-managed-labels", LeaseDuration: settings.WorkflowEffectLeaseDuration,
+		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
+		RetryDelay: settings.WorkflowEffectRetryDelay,
+		OnError: func(err error) {
+			logger.Error("provision managed GitHub labels", "error", err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configure managed label provisioning Worker: %w", err)
+	}
 	failureWorker, err := workflowaction.NewFailureWorker(database, workflowaction.FailureWorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":escalate-workflow-action-failure",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, IdlePollInterval: settings.WorkflowEffectPollInterval,
@@ -501,6 +512,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		expiredTurnMonitor.Run,
 		labelWorker.Run,
 		humanHandoffWorker.Run,
+		provisioningWorker.Run,
 		failureWorker.Run,
 		closureStopWorker.Run,
 		closureSettlementWorker.Run,
@@ -736,11 +748,16 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("identify webhook processor: %w", err)
 	}
+	installationEnumerator, err := githubapi.NewInstallationEnumerator(developerSigner, api)
+	if err != nil {
+		return nil, fmt.Errorf("configure label provisioning enumerator: %w", err)
+	}
 	processor, err := webhook.NewProcessor(database, webhook.ProcessorConfig{
 		ClaimOwner:                  claimOwner,
 		LeaseDuration:               settings.WebhookLeaseDuration,
 		IdlePollInterval:            settings.WebhookPollInterval,
 		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
+		Enumerator:                  installationEnumerator,
 		OnError: func(err error) {
 			logger.Error("process GitHub webhook delivery", "error", err)
 		},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -20,8 +21,16 @@ type ProcessorStore interface {
 	ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
 	CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error
 	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error)
+	CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository) error
 	ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error)
 	AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error
+}
+
+// InstallationEnumerator lists every repository accessible to one installation.
+// It is used only for installation.created, whose webhook repository list may be
+// incomplete, and keeps provisioning complete without trusting that list.
+type InstallationEnumerator interface {
+	EnumerateInstallationRepositories(context.Context, int64) ([]githubapi.InstallationRepository, error)
 }
 
 // ProcessorConfig controls claim ownership, lease duration, and idle polling.
@@ -30,6 +39,7 @@ type ProcessorConfig struct {
 	LeaseDuration               time.Duration
 	IdlePollInterval            time.Duration
 	AssignmentRetentionDuration time.Duration
+	Enumerator                  InstallationEnumerator
 	OnError                     func(error)
 }
 
@@ -40,6 +50,7 @@ type Processor struct {
 	leaseDuration               time.Duration
 	idlePollInterval            time.Duration
 	assignmentRetentionDuration time.Duration
+	enumerator                  InstallationEnumerator
 	onError                     func(error)
 }
 
@@ -66,6 +77,7 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 		leaseDuration:               config.LeaseDuration,
 		idlePollInterval:            config.IdlePollInterval,
 		assignmentRetentionDuration: config.AssignmentRetentionDuration,
+		enumerator:                  config.Enumerator,
 		onError:                     config.OnError,
 	}, nil
 }
@@ -119,7 +131,7 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
 	case NormalizationIgnored:
-		if normalization.Event != nil {
+		if normalization.Event != nil || normalization.Provisioning != nil {
 			cause := errors.New("normalize webhook delivery: ignored outcome has an event")
 			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
@@ -127,11 +139,56 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			cause := fmt.Errorf("complete ignored webhook delivery %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, true)
 		}
+	case NormalizationProvisioning:
+		if normalization.Event != nil || normalization.Provisioning == nil {
+			cause := errors.New("normalize webhook delivery: provisioning outcome has no provisioning event")
+			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
+		}
+		if err := processor.completeProvisioning(ctx, claim, *normalization.Provisioning); err != nil {
+			cause := fmt.Errorf("complete label provisioning %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicProvisioningFailure(err))
+		}
 	default:
 		cause := fmt.Errorf("normalize webhook delivery: invalid outcome %q", normalization.Outcome)
 		return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 	}
 	return true, nil
+}
+
+func (processor *Processor) completeProvisioning(ctx context.Context, claim *store.WebhookClaim, event ProvisioningEvent) error {
+	repositories := make([]store.LabelProvisioningRepository, 0, len(event.Repositories))
+	if event.EventName == "installation" && event.Action == "created" {
+		if processor.enumerator == nil {
+			return fmt.Errorf("%w: installation enumerator is not configured", errInvalidPendingNormalizedEvent)
+		}
+		enumerated, err := processor.enumerator.EnumerateInstallationRepositories(ctx, event.InstallationID)
+		if err != nil {
+			return err
+		}
+		for _, repository := range enumerated {
+			if repository.ID <= 0 || strings.TrimSpace(repository.Owner) == "" || strings.TrimSpace(repository.Name) == "" {
+				return fmt.Errorf("%w: enumerated repository identity is invalid", errInvalidPendingNormalizedEvent)
+			}
+			repositories = append(repositories, store.LabelProvisioningRepository{
+				ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
+			})
+		}
+	} else {
+		for _, repository := range event.Repositories {
+			repositories = append(repositories, store.LabelProvisioningRepository{
+				ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
+			})
+		}
+	}
+	return processor.store.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories)
+}
+
+func deterministicProvisioningFailure(err error) bool {
+	return errors.Is(err, errInvalidPendingNormalizedEvent) ||
+		errors.Is(err, store.ErrLabelProvisioningInvalid) ||
+		errors.Is(err, store.ErrNormalizedEventDeliveryMismatch) ||
+		errors.Is(err, store.ErrWorkflowLocatorMismatch) ||
+		errors.Is(err, store.ErrWorkflowDecisionInvalid)
 }
 
 func (processor *Processor) acknowledgeFailure(ctx context.Context, claim *store.WebhookClaim, cause error, retryable bool) error {

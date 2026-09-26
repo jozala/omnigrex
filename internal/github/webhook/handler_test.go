@@ -198,9 +198,9 @@ func TestHandlerOnlyAcceptsPost(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsBodyLargerThanOneMiB(t *testing.T) {
+func TestHandlerRejectsBodyLargerThanTwoMiB(t *testing.T) {
 	const secret = "webhook-secret"
-	body := bytes.Repeat([]byte("x"), 1<<20+1)
+	body := bytes.Repeat([]byte("x"), 2<<20+1)
 	inbox := &recordingInbox{}
 	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
