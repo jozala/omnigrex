@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -58,6 +59,7 @@ func ClassifyPromptError(err error) PromptErrorClassification {
 // OutcomeReconcilerStore is the durable evidence surface needed after MCP mutation admission closes.
 type OutcomeReconcilerStore interface {
 	ListAgentTurnMutationInvocations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
+	ListParticipantPublicationMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
 	GetChangeProposalReview(context.Context, int64, int64) (*workflow.ReviewIdentity, error)
 }
 
@@ -186,6 +188,20 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
 	if len(intents) == 0 {
+		if publication := request.Execution.Publication; publication != nil {
+			for _, mutation := range mutations {
+				if mutation.State == store.MutationFailed && mutation.ToolName == mcp.ToolPublishChanges &&
+					(mutation.LastError == mcp.FailurePublicationRemoteHeadMismatch ||
+						strings.HasPrefix(mutation.LastError, mcp.FailurePublicationRemoteHeadMismatch+" ")) {
+					return publicationConflictObservation(observedAt, promptOutcome), nil
+				}
+				if mutation.State == store.MutationFailed && mutation.ToolName == mcp.ToolRequestReview &&
+					mutation.LastError == mcp.FailurePullRequestHeadMismatch &&
+					(publication.PullRequestID > 0 || openedPRForRecoveredBranch(mutations, *publication, request.Execution.Repository.ID)) {
+					return publicationConflictObservation(observedAt, promptOutcome), nil
+				}
+			}
+		}
 		if promptDiagnostic != "" {
 			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 		}
@@ -212,6 +228,21 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		result.Diagnostic = promptDiagnostic
 	}
 	return result, nil
+}
+
+func openedPRForRecoveredBranch(mutations []store.MutationReservation, publication store.AgentTurnPublication, repositoryID int64) bool {
+	var opened int
+	for _, mutation := range mutations {
+		if mutation.State != store.MutationSucceeded || mutation.ToolName != mcp.ToolOpenPR {
+			continue
+		}
+		evidence, ok := parseOpenPullRequestEvidence(mutation, repositoryID)
+		if !ok || evidence.HeadRef != publication.HeadRef || evidence.BaseRef != publication.BaseRef {
+			return false
+		}
+		opened++
+	}
+	return opened == 1
 }
 
 func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replacer, error) {
@@ -316,8 +347,39 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 			return failure("request_review evidence conflicts with the durable Change Proposal")
 		}
 		baseRef = proposal.BaseRef
-	} else if opened != nil && (opened.PullRequestID != result.PullRequestID || opened.PullRequestNumber != result.PullRequestNumber || opened.HeadSHA != result.HeadSHA || opened.HeadRef != branch) {
+	} else if opened != nil && (opened.PullRequestID != result.PullRequestID || opened.PullRequestNumber != result.PullRequestNumber || opened.HeadRef != branch) {
 		return failure("request_review evidence conflicts with open_pr evidence")
+	}
+	if publication := request.Execution.Publication; publication != nil && publication.PullRequestID > 0 {
+		if opened != nil || publication.PullRequestID != result.PullRequestID || publication.PullRequestNumber != result.PullRequestNumber ||
+			publication.HeadRef != branch || publication.BaseRef == "" || publication.SourceOpenPRMutationID == "" {
+			return failure("request_review evidence conflicts with recovered publication")
+		}
+		baseRef = publication.BaseRef
+	}
+	provenOpen := opened
+	if publication := request.Execution.Publication; publication != nil && publication.PullRequestID > 0 {
+		prior, err := reconciler.store.ListParticipantPublicationMutations(ctx, request.Lease)
+		if err != nil {
+			return failure("recovered Pull Request publication evidence is unavailable")
+		}
+		for _, mutation := range prior {
+			if mutation.ID != publication.SourceOpenPRMutationID {
+				continue
+			}
+			if provenOpen != nil {
+				return failure("recovered Pull Request publication evidence is ambiguous")
+			}
+			evidence, ok := parseOpenPullRequestEvidence(mutation, request.Execution.Repository.ID)
+			if !ok || evidence.PullRequestID != publication.PullRequestID || evidence.PullRequestNumber != publication.PullRequestNumber ||
+				evidence.NodeID != publication.PullRequestNodeID || evidence.HeadRef != publication.HeadRef || evidence.BaseRef != publication.BaseRef {
+				return failure("recovered Pull Request publication evidence is malformed or incoherent")
+			}
+			provenOpen = &evidence
+		}
+		if provenOpen == nil {
+			return failure("recovered Pull Request publication evidence is unavailable")
+		}
 	}
 
 	pullRequest, err := reconciler.github.GetPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
@@ -328,7 +390,20 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	if baseRef == "" {
 		baseRef = pullRequest.Base.Ref
 	}
+	if provenOpen != nil {
+		marker, err := githubapi.RenderMarker(githubapi.Marker{
+			WorkflowID: request.Execution.WorkflowID, AgentAssignmentID: request.Execution.Assignment.ID,
+			OperationID: provenOpen.MutationID,
+		})
+		if err != nil || pullRequest.NodeID != provenOpen.NodeID || pullRequest.Title != provenOpen.Title ||
+			pullRequest.Body != githubapi.JoinBodyParts(provenOpen.Body, fmt.Sprintf("Closes #%d", request.Execution.Issue.Number), marker) {
+			return publicationConflictObservation(observedAt, promptOutcome)
+		}
+	}
 	if !matchesDeveloperPullRequest(pullRequest, request.Execution.Repository, result, branch, baseRef) {
+		if provenOpen != nil {
+			return publicationConflictObservation(observedAt, promptOutcome)
+		}
 		return failure("fresh Developer Pull Request does not match terminal evidence")
 	}
 	if opened != nil && (opened.NodeID != pullRequest.NodeID || opened.PullRequestID != pullRequest.ID || opened.PullRequestNumber != int64(pullRequest.Number)) {
@@ -351,6 +426,17 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	}
 	return store.AgentTurnSettlementObservation{
 		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeChangeProposalReady, ChangeProposal: proposal,
+		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
+	}
+}
+
+// A recovered PR is authorized only while its original identity and exact
+// publication remain corroborated. A definite fresh conflict is a blocker,
+// not an infrastructure failure that should silently retry.
+func publicationConflictObservation(observedAt time.Time, promptOutcome json.RawMessage) store.AgentTurnSettlementObservation {
+	return store.AgentTurnSettlementObservation{
+		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked,
+		Diagnostic: "publication_conflict: recovered Pull Request changed during Developer turn",
 		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
 	}
 }
@@ -446,6 +532,9 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 }
 
 type openPullRequestEvidence struct {
+	MutationID        string
+	Title             string
+	Body              string
 	PullRequestID     int64
 	PullRequestNumber int64
 	NodeID            string
@@ -475,6 +564,7 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 		return openPullRequestEvidence{}, false
 	}
 	return openPullRequestEvidence{
+		MutationID: mutation.ID, Title: arguments.Title, Body: arguments.Body,
 		PullRequestID: result.PullRequestID, PullRequestNumber: result.Number, NodeID: result.NodeID,
 		HeadSHA: result.HeadSHA, HeadRef: head, BaseRef: base,
 	}, true

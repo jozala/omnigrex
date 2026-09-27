@@ -120,6 +120,97 @@ func TestProductionBackendPublishesOrderedDeterministicCommits(t *testing.T) {
 	}
 }
 
+func TestRecoveredBranchPublicationUsesVerifiedOldHead(t *testing.T) {
+	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: advancedHeadSHA, Changed: true}}}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: publisher, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+	scope.BranchExists = true
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"next","message":"Continue"}`),
+		Scope: scope, Class: mcp.MutationTool, OperationID: "next",
+	})
+	if err != nil || len(publisher.publications) != 1 || publisher.publications[0].ExpectedOldHead != scope.HeadSHA ||
+		publisher.publications[0].BaseRevision != scope.HeadSHA {
+		t.Fatalf("recovered branch publication = %#v, error %v", publisher.publications, err)
+	}
+}
+
+func TestRecoveredPublicationReplayDoesNotRewindVerifiedHead(t *testing.T) {
+	const first = "1123456789abcdef0123456789abcdef01234567"
+	const verified = "2123456789abcdef0123456789abcdef01234567"
+	const next = "3123456789abcdef0123456789abcdef01234567"
+	for _, test := range []struct {
+		name         string
+		replaySecond bool
+	}{
+		{name: "replay first publish only"},
+		{name: "replay both earlier publishes", replaySecond: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: next, Changed: true}}}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+				GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+				Publisher: publisher, Workflow: &backendWorkflow{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := productionToolScope(workflow.RoleDeveloper)
+			scope.PullRequest = nil
+			scope.HeadSHA = verified
+			scope.BranchExists = true
+			scope.RecoveredPublication = true
+			firstPublish := replayMutation("51000000-0000-4000-8000-000000000001", mcp.ToolPublishChanges,
+				`{"operation_id":"publish-first","message":"First"}`, "git", "9123:"+scope.Branch, productionHeadSHA,
+				`{"head":"`+first+`","branch":"`+scope.Branch+`","changed":true}`)
+			if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, firstPublish), firstPublish); err != nil {
+				t.Fatal(err)
+			}
+			if test.replaySecond {
+				secondPublish := replayMutation("51000000-0000-4000-8000-000000000002", mcp.ToolPublishChanges,
+					`{"operation_id":"publish-second","message":"Second"}`, "git", "9123:"+scope.Branch, first,
+					`{"head":"`+verified+`","branch":"`+scope.Branch+`","changed":true}`)
+				if err := backend.RestoreMutationReplay(context.Background(), replayInvocation(scope, secondPublish), secondPublish); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := backend.Execute(context.Background(), mcp.Invocation{
+				Name: mcp.ToolPublishChanges, Arguments: json.RawMessage(`{"operation_id":"new-publish","message":"Continue"}`),
+				Scope: scope, Class: mcp.MutationTool, OperationID: "new-publish",
+			}); err != nil || len(publisher.publications) != 1 || publisher.publications[0].ExpectedOldHead != verified ||
+				publisher.publications[0].BaseRevision != verified {
+				t.Fatalf("publication after replay = %#v, error %v", publisher.publications, err)
+			}
+		})
+	}
+}
+
+func TestRequestReviewRejectsPRHeadChangedAfterTurnBegan(t *testing.T) {
+	api := &backendGitHub{currentHead: advancedHeadSHA}
+	workflowMutations := &backendWorkflow{requestReviewResult: json.RawMessage(`{"outcome":"REVIEW_REQUESTED"}`)}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: &backendPublisher{}, Workflow: workflowMutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.Execute(context.Background(), mcp.Invocation{
+		Name: mcp.ToolRequestReview, Arguments: json.RawMessage(`{"operation_id":"review-1","summary":"Ready"}`),
+		Scope: productionToolScope(workflow.RoleDeveloper), Class: mcp.MutationTool, OperationID: "review-1",
+	})
+	if err == nil || err.Error() != "pull_request_head_mismatch" || workflowMutations.requestReview.OperationID != "" {
+		t.Fatalf("stale PR review request = %v, mutation %#v", err, workflowMutations.requestReview)
+	}
+}
+
 func TestProductionPublicationAndReconciliationUseExactConfiguredRemoteURL(t *testing.T) {
 	const remoteBase = "https://github.enterprise.test/source/"
 	const wantRepositoryURL = "https://github.enterprise.test/source/acme/widgets.git"
@@ -257,7 +348,7 @@ func TestProductionBackendRestoresOrderedPublicationReplayAndContinues(t *testin
 	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: head2, Changed: true}}}
 	workflowBackend := &backendWorkflow{requestReviewResult: json.RawMessage(`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"` + head2 + `"}`)}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		GitHub: &backendGitHub{currentHead: head2}, Credentials: &backendCredentials{developer: "developer-secret"},
 		Publisher: publisher, Workflow: workflowBackend,
 	})
 	if err != nil {
@@ -310,7 +401,7 @@ func TestProductionBackendRestoresRequestReviewOnlyAndNoChangePublicationInferen
 	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: head2, Changed: true}}}
 	workflowBackend := &backendWorkflow{requestReviewResult: json.RawMessage(`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"` + head1 + `"}`)}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: publisher, Workflow: workflowBackend,
+		GitHub: &backendGitHub{currentHead: head1}, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: publisher, Workflow: workflowBackend,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -737,7 +828,7 @@ func TestProductionBackendPerformsInternalWorkflowMutationsWithDurableJSON(t *te
 	}
 	credentials := &backendCredentials{developer: "developer-secret", reviewer: "reviewer-secret"}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: &backendGitHub{}, Credentials: credentials, Publisher: publisher, Workflow: workflowBackend,
+		GitHub: &backendGitHub{currentHead: publishedHead}, Credentials: credentials, Publisher: publisher, Workflow: workflowBackend,
 	})
 	if err != nil {
 		t.Fatalf("NewProductionBackend() error = %v", err)
@@ -771,7 +862,7 @@ func TestProductionBackendPerformsInternalWorkflowMutationsWithDurableJSON(t *te
 	if workflowBackend.reportBlocked.OperationID != "blocked-1" || workflowBackend.reportBlocked.Reason != "Unavailable" || workflowBackend.reportBlocked.Details != "External dependency" || workflowBackend.reportBlocked.Scope.Role != workflow.RoleReviewer {
 		t.Fatalf("ReportBlocked mutation = %#v", workflowBackend.reportBlocked)
 	}
-	if credentials.developerCalls != 1 || credentials.reviewerCalls != 0 {
+	if credentials.developerCalls != 2 || credentials.reviewerCalls != 0 {
 		t.Fatalf("workflow mutation credential calls = developer %d, reviewer %d", credentials.developerCalls, credentials.reviewerCalls)
 	}
 }
@@ -996,7 +1087,9 @@ type backendGitHub struct {
 	pullRequestFilesCredential   string
 	pullRequestFilesNumber       int
 	mutationErr                  error
+	readErr                      error
 	openHead                     string
+	currentHead                  string
 }
 
 func (api *backendGitHub) record(name, credential, owner, repository string, number int, head string) {
@@ -1015,7 +1108,14 @@ func (api *backendGitHub) ListIssueComments(_ context.Context, credential, owner
 
 func (api *backendGitHub) GetPullRequest(_ context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
 	api.record(mcp.ToolGetPullRequest, credential, owner, repository, number, "")
-	return githubapi.PullRequest{ID: 654, Number: number, Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-12", SHA: productionHeadSHA}, Base: githubapi.PullRequestBranch{Ref: "main"}}, nil
+	if api.readErr != nil {
+		return githubapi.PullRequest{}, api.readErr
+	}
+	head := productionHeadSHA
+	if api.currentHead != "" {
+		head = api.currentHead
+	}
+	return githubapi.PullRequest{ID: 654, Number: number, State: "open", Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-12", SHA: head}, Base: githubapi.PullRequestBranch{Ref: "main"}}, nil
 }
 
 func (api *backendGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {

@@ -618,6 +618,10 @@ Use this recovery sequence:
 
 Re-adding the command label resets retry and review budgets but does not erase history.
 Retained Agent Sessions are reused when their exact Runtime Profile image and state remain available.
+If an earlier Developer Turn published a branch or opened a Pull Request but did not successfully request review, a later Turn for the same Agent Participant verifies that publication against its durable MCP mutations and fresh GitHub state before using it as in-progress work.
+The later Turn starts at the verified published head and must explicitly request review; publication alone never schedules Reviewer.
+An unproven branch, changed head, edited operation marker, or different Participant causes a publication-conflict Human Handoff rather than automatic adoption.
+If Git or GitHub cannot be reached during verification, execution follows bounded infrastructure retries instead of claiming a conflict.
 
 For an apparently stuck deployment, inspect safe operational metadata:
 
@@ -627,6 +631,9 @@ docker compose logs --since 15m orchestrator
 docker ps --filter label=io.omnigrex.runtime-process=true \
   --format '{{.ID}} {{.Names}} {{.Status}}'
 ```
+
+The orchestrator logs `MCP mutation failed` with a safe `failure_code`, operation and mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
+The corresponding `tool_invocations.last_error` contains the safe failure code and available allowlisted details for definite failures; unknown external outcomes remain subject to mutation reconciliation.
 
 An Agent Turn diagnostic containing `runtime_oom_killed` means Docker confirmed that its Runtime Process was OOM-killed before Omnigrex removed the container.
 Omnigrex keeps the normal single infrastructure retry, then includes this diagnosis in the Human Handoff if the retry also fails this way.

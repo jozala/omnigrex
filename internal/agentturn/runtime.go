@@ -368,7 +368,9 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number}, PullRequest: pullRequest,
-		Branch: branch, DefaultBranch: request.DefaultBranchName, HeadSHA: headSHA, ExpiresAt: request.Lease.LeaseExpiresAt,
+		Branch: branch, BranchExists: execution.Publication != nil || execution.ChangeProposal != nil,
+		RecoveredPublication: execution.Publication != nil,
+		DefaultBranch:        request.DefaultBranchName, HeadSHA: headSHA, ExpiresAt: request.Lease.LeaseExpiresAt,
 	})
 	resources.registration = registration
 	secrets = append(secrets, registrationSecrets(registration)...)
@@ -735,6 +737,17 @@ func checkoutSelection(execution store.AgentTurnExecutionContext, request Launch
 	if execution.ChangeProposal == nil {
 		if policy.Role != execution.Assignment.Role || policy.RequiresChangeProposal {
 			return "", "", "", nil, fmt.Errorf("%w: Role requires a Change Proposal", ErrRuntimeBinding)
+		}
+		if publication := execution.Publication; publication != nil {
+			if publication.HeadRef != request.InitialFeatureBranch || publication.BaseRef != request.DefaultBranchName || publication.HeadSHA == "" ||
+				(publication.PullRequestID == 0) != (publication.PullRequestNumber == 0) {
+				return "", "", "", nil, fmt.Errorf("%w: in-progress publication", ErrRuntimeBinding)
+			}
+			var pullRequest *mcp.PullRequestScope
+			if publication.PullRequestID > 0 {
+				pullRequest = &mcp.PullRequestScope{ID: publication.PullRequestID, Number: publication.PullRequestNumber}
+			}
+			return publication.HeadSHA, publication.HeadRef, publication.HeadSHA, pullRequest, nil
 		}
 		if strings.TrimSpace(request.InitialFeatureBranch) == "" {
 			return "", "", "", nil, fmt.Errorf("%w: initial Developer branch", ErrRuntimeBinding)

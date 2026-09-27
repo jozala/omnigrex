@@ -58,6 +58,14 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	}
 	storeAPI := &outcomeStore{mutations: ledger}
 	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: ledger[0].ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.pullRequest.Title = "Change"
+	github.pullRequest.Body = githubapi.JoinBodyParts("Ready", "Closes #61", marker)
 	reconciler := newOutcomeReconciler(t, storeAPI, github)
 
 	observation, err := reconciler.Reconcile(context.Background(), request)
@@ -74,6 +82,152 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	}
 	if github.getCredential != outcomeCredential || github.getOwner != "acme" || github.getRepository != "widgets" || github.getNumber != 23 {
 		t.Errorf("GetPullRequest scope = credential %q, %s/%s#%d", github.getCredential, github.getOwner, github.getRepository, github.getNumber)
+	}
+	github.pullRequest.Body = "Ready without operation marker"
+	changed, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil || changed.Outcome != workflow.TurnOutcomeBlocked || changed.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(changed.Diagnostic, "publication_conflict") {
+		t.Fatalf("edited same-turn PR was accepted: %#v, error %v", changed, err)
+	}
+}
+
+func TestOutcomeReconcilerAcceptsReviewAfterPublishingAgainOnNewlyOpenedPR(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
+		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
+		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		"github", "41:feature/work:main", outcomeHead)
+	published := outcomeSucceededMutation(2, mcp.ToolPublishChanges, "publish-2",
+		`{"operation_id":"publish-2","message":"Additional edit"}`,
+		`{"head":"`+outcomeNewHead+`","branch":"feature/work","changed":true}`,
+		"git", "41:feature/work", outcomeHead)
+	requested := outcomeSucceededMutation(3, mcp.ToolRequestReview, "review-3",
+		`{"operation_id":"review-3","summary":"Ready"}`,
+		`{"outcome":"REVIEW_REQUESTED","pull_request_id":901,"pull_request_number":23,"head_sha":"`+outcomeNewHead+`"}`,
+		"omnigrex", "41:feature/work", outcomeNewHead)
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: opened.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := outcomePullRequest(outcomeNewHead)
+	pr.Title = "Change"
+	pr.Body = githubapi.JoinBodyParts("Ready", "Closes #61", marker)
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{opened, published, requested}},
+		&outcomeGitHub{pullRequest: pr}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
+		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != outcomeNewHead {
+		t.Fatalf("review after another publication = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerRequiresRecoveredPRMarkerAtReviewHandoff(t *testing.T) {
+	const sourceOpenPR = "10000000-0000-4000-8000-000000000003"
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: sourceOpenPR,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, body string
+		title      string
+		head       string
+		want       workflow.TurnOutcome
+	}{
+		{name: "unchanged marker", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Change", want: workflow.TurnOutcomeChangeProposalReady},
+		{name: "removed marker", body: "Ready", title: "Change", want: workflow.TurnOutcomeBlocked},
+		{name: "edited body retaining marker", body: githubapi.JoinBodyParts("Human edit", "Closes #61", marker), title: "Change", want: workflow.TurnOutcomeBlocked},
+		{name: "edited title retaining marker", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Human edit", want: workflow.TurnOutcomeBlocked},
+		{name: "new head after review request", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Change", head: outcomeNewHead, want: workflow.TurnOutcomeBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, false)
+			request.Execution.Publication = &store.AgentTurnPublication{
+				HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+				PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_node",
+				SourcePublishMutationID: "10000000-0000-4000-8000-000000000002", SourceOpenPRMutationID: sourceOpenPR,
+			}
+			pr := outcomePullRequest(outcomeHead)
+			pr.Body = test.body
+			pr.Title = test.title
+			if test.head != "" {
+				pr.Head.SHA = test.head
+			}
+			source := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-prior",
+				`{"operation_id":"open-prior","title":"Change","body":"Ready"}`,
+				`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+				"github", "41:feature/work:main", outcomeHead)
+			source.ID = sourceOpenPR
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, prior: []store.MutationReservation{source}},
+				&outcomeGitHub{pullRequest: pr}).Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded ||
+				(test.want == workflow.TurnOutcomeBlocked && !strings.Contains(observation.Diagnostic, "publication_conflict")) {
+				t.Fatalf("recovered PR handoff = %#v, want %s", observation, test.want)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerBlocksRecoveredPRWhenEarlyHeadCheckFails(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_node",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000003",
+	}
+	failed := outcomeFailedMutation(1, mcp.ToolRequestReview)
+	failed.LastError = "pull_request_head_mismatch"
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("early head conflict = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerBlocksHeadConflictAfterRecoveredBranchOpenedPR(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
+		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
+		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		"github", "41:feature/work:main", outcomeHead)
+	failed := outcomeFailedMutation(2, mcp.ToolRequestReview)
+	failed.LastError = mcp.FailurePullRequestHeadMismatch
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{opened, failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("recovered branch head conflict after open_pr = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerBlocksRecoveredBranchOnDefinitePublishConflict(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	failed := outcomeFailedMutation(1, mcp.ToolPublishChanges)
+	failed.LastError = "publication_remote_head_mismatch expected_sha=" + outcomeHead + " observed_sha=" + outcomeNewHead
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("recovered branch publish conflict = %#v, error %v", observation, err)
 	}
 }
 
@@ -542,10 +696,15 @@ func TestOutcomeReconcilerDispatchesTerminalIntentByEvidenceKind(t *testing.T) {
 
 type outcomeStore struct {
 	mutations          []store.MutationReservation
+	prior              []store.MutationReservation
 	err                error
 	existing           *workflow.ReviewIdentity
 	reviewRepositoryID int64
 	reviewID           int64
+}
+
+func (storeAPI *outcomeStore) ListParticipantPublicationMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error) {
+	return storeAPI.prior, storeAPI.err
 }
 
 func (storeAPI *outcomeStore) ListAgentTurnMutationInvocations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error) {

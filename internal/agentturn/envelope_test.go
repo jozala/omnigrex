@@ -78,6 +78,24 @@ func TestBuildEventEnvelopeUsesInjectedWorkflowDefinition(t *testing.T) {
 	}
 }
 
+func TestBuildEventEnvelopeExplainsRecoveredInProgressPR(t *testing.T) {
+	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeRetry, nil)
+	execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "omnigrex/issue-17", HeadSHA: "2222222222222222222222222222222222222222", BaseRef: "main",
+		PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_901",
+	}
+	content, err := agentturn.BuildEventEnvelope(execution, execution.Publication.HeadSHA, builtinDefinition(t), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != 1 || !strings.Contains(content[0].Text, `"pull_request_number":23`) ||
+		!strings.Contains(content[0].Text, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
+		!strings.Contains(content[0].Text, "Inspect the recovered publication") ||
+		!strings.Contains(content[0].Text, `"expected_head_sha":""`) {
+		t.Fatalf("recovered Developer envelope = %#v", content)
+	}
+}
+
 func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23,

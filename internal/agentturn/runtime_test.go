@@ -212,6 +212,48 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 }
 
+func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProposal(t *testing.T) {
+	operations := []string{}
+	profile := runtimeLauncherProfile(t)
+	execution, lease := runtimeExecutionContext(t, profile, workflow.RoleDeveloper, nil)
+	execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA, BaseRef: "trunk",
+		PullRequestID: 123, PullRequestNumber: 18, PullRequestNodeID: "PR_123",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000001",
+		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000002",
+	}
+	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
+		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestPRHeadSHA,
+		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
+	}}
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
+		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	}}}
+	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
+		Store:     &runtimeStore{operations: &operations, execution: execution},
+		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: profile},
+		Workspace: workspaces, Gateway: gateway, Docker: &runtimeEngineFactory{operations: &operations},
+		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
+		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+	})
+	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
+		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
+		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
+	if workspaces.checkout.Revision != runtimeTestPRHeadSHA || gateway.scope.HeadSHA != runtimeTestPRHeadSHA ||
+		gateway.scope.PullRequest == nil || gateway.scope.PullRequest.Number != 18 || !gateway.scope.BranchExists || !gateway.scope.RecoveredPublication ||
+		gateway.scope.Branch != "omnigrex/issue-17" || workspaces.mise.Revision != runtimeTestPRHeadSHA {
+		t.Fatalf("recovered checkout %#v, scope %#v, mise %#v", workspaces.checkout, gateway.scope, workspaces.mise)
+	}
+}
+
 func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
