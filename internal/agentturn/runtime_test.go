@@ -22,6 +22,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -172,6 +173,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	wantVolumes := []dockerruntime.VolumeMount{
 		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/mise", Target: "/home/opencode/.local/share/mise"},
 		{Name: "runtime-state", Subpath: "assignment-" + runtimeTestAssignment + "/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/tool-data", Target: "/home/opencode/.local/share/omnigrex-tool-data"},
 		{Name: "workspaces", Subpath: "assignment-" + runtimeTestAssignment + "/workspace", Target: "/workspace"},
 	}
 	if !reflect.DeepEqual(spec.Volumes, wantVolumes) {
@@ -209,6 +211,46 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 	if handle.Client != client || handle.Session.ACPSessionID != "acp-session" || client.prompts != 0 {
 		t.Errorf("Runtime handle = %#v", handle)
+	}
+}
+
+func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
+	operations := []string{}
+	runtimeProfile := runtimeLauncherProfile(t)
+	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
+	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn","go-cache":"assignment"},"environment":{"TMPDIR":"build","GOTMPDIR":"build","GOCACHE":"go-cache"}}`)
+	database := &runtimeStore{operations: &operations, execution: execution}
+	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
+		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestDefaultSHA,
+		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
+	}}
+	engineFactory := &runtimeEngineFactory{operations: &operations}
+	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
+		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
+		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
+		Docker: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
+		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+		PathEnvironmentAllowlist: []string{"TMPDIR", "GOTMPDIR", "GOCACHE"},
+	})
+	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
+		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
+		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantScratch := "/home/opencode/.local/share/omnigrex-tool-data/turn/" + runtimeTestTurn + "/build"
+	assertRuntimeEnvironment(t, engineFactory.engine.spec.Environment, map[string]string{
+		"TMPDIR": wantScratch, "GOTMPDIR": wantScratch,
+		"GOCACHE": "/home/opencode/.local/share/omnigrex-tool-data/assignment/go-cache",
+	})
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if workspaces.cleanedTurnID != runtimeTestTurn {
+		t.Fatalf("Agent Turn scratch cleanup targeted %q, want %q", workspaces.cleanedTurnID, runtimeTestTurn)
 	}
 }
 
@@ -1406,6 +1448,7 @@ type runtimeWorkspace struct {
 	requireProvisionFence bool
 	mise                  workspace.MiseProvision
 	activation            workspace.MiseActivation
+	cleanedTurnID         string
 	workspaceErr          error
 	miseErr               error
 	discardedAssignmentID string
@@ -1438,6 +1481,31 @@ func (lifecycle *runtimeWorkspace) ProvisionMise(ctx context.Context, provision 
 		}
 	}
 	return lifecycle.activation, lifecycle.miseErr
+}
+
+func (lifecycle *runtimeWorkspace) PrepareTurnPaths(ctx context.Context, _, turnID string, configuration turnconfig.Configuration, fence workspace.WorkspaceFence) (map[string]string, error) {
+	if len(configuration.Directories) != 0 && fence != nil {
+		if err := fence(ctx, func(context.Context) error { return nil }); err != nil {
+			return nil, err
+		}
+	}
+	values := make(map[string]string)
+	for name, directory := range configuration.Environment {
+		prefix := "/home/opencode/.local/share/omnigrex-tool-data/" + string(configuration.Directories[directory]) + "/"
+		if configuration.Directories[directory] == turnconfig.Turn {
+			prefix += turnID + "/"
+		}
+		values[name] = prefix + directory
+	}
+	return values, nil
+}
+
+func (lifecycle *runtimeWorkspace) CleanupTurnPaths(ctx context.Context, _, turnID string, fence workspace.WorkspaceFence) error {
+	if fence != nil {
+		return fence(ctx, func(context.Context) error { lifecycle.cleanedTurnID = turnID; return nil })
+	}
+	lifecycle.cleanedTurnID = turnID
+	return nil
 }
 
 func (lifecycle *runtimeWorkspace) DiscardWorkspace(assignmentID string) error {

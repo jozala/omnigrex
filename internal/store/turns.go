@@ -84,6 +84,7 @@ type AgentTurnSpec struct {
 	AgentProfileCommitSHA     string
 	AgentProfileContentSHA256 []byte
 	AgentProfileConfig        json.RawMessage
+	TurnConfiguration         json.RawMessage
 }
 
 // AgentTurn identifies one prompt-response interaction and its execution fence.
@@ -1844,14 +1845,14 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	COALESCE(owner_id, ''), COALESCE(owner_token::text, ''), lease_expires_at IS NOT NULL,
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
 	stage_id, COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
-	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, created_at
+	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration, created_at
 FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
 		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,
 		&turn.ExecutionEpoch, &turn.ControlRevision, &turn.Status, &turn.MutationAdmissionOpen,
 		&turn.active, &turn.ownerID, &turn.ownerToken, &turn.leasePresent, &turn.leaseLive,
 		&turn.RetryOfTurnID, &turn.Stage, &turn.Purpose, &turn.ChangeProposalID, &turn.ExpectedHeadSHA,
 		&turn.AgentProfileCommitSHA, &turn.AgentProfileContentSHA256,
-		&profileConfig, &turn.CreatedAt,
+		&profileConfig, &turn.TurnConfiguration, &turn.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return lockedTurn{}, ErrAgentTurnFenceLost

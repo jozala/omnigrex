@@ -636,6 +636,10 @@ func (discarder *recordingWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context
 	return fence(ctx, func(context.Context) error { return discarder.DiscardWorkspace(assignmentID) })
 }
 
+func (*recordingWorkspaceDiscarder) CleanupTurnPaths(ctx context.Context, _, _ string, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return nil })
+}
+
 func (discarder *recordingWorkspaceDiscarder) callCount() int {
 	discarder.mutex.Lock()
 	defer discarder.mutex.Unlock()

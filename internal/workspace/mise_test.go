@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -127,6 +128,24 @@ fi
 	t.Run("pinned runtime mise ignores feature configuration", func(t *testing.T) {
 		assertPinnedRuntimeMiseIsolation(t, paths, activation)
 	})
+	toolPaths, err := lifecycle.PrepareTurnPaths(context.Background(), assignmentID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", turnconfig.Configuration{
+		Directories: map[string]turnconfig.Lifecycle{"cache": turnconfig.Assignment}, Environment: map[string]string{"GOCACHE": "cache"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(filepath.Dir(paths.Mise), "tool-data", "assignment", "cache", "retained")
+	if err := os.WriteFile(cache, []byte("reuse"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.ProvisionMise(context.Background(), workspace.MiseProvision{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); err != nil || toolPaths["GOCACHE"] != workspace.TurnPathMount+"/assignment/cache" {
+		t.Fatalf("mise reprovision lost Assignment cache: path %q, error %v", toolPaths["GOCACHE"], err)
+	}
 }
 
 func TestLifecycleSerializesMiseProvisioningAcrossTurnTakeover(t *testing.T) {

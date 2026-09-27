@@ -104,6 +104,7 @@ type ParticipantPreparation struct {
 	RuntimeCompatibility RuntimeCompatibilityRequirement
 	Profile              AgentProfileSnapshot
 	ProfilePath          string
+	TurnConfiguration    json.RawMessage
 }
 
 // RolePreparation is retained for non-store callers using the former name.
@@ -372,6 +373,14 @@ SELECT EXISTS (
 	if turnNumber <= 0 || executionEpoch <= 0 {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnPreparationFenceLost
 	}
+	turnConfiguration := participantPreparation.TurnConfiguration
+	if len(turnConfiguration) == 0 {
+		turnConfiguration = json.RawMessage(`{}`)
+	}
+	turnConfiguration, err = canonicalJSON(turnConfiguration)
+	if err != nil || turnConfiguration[0] != '{' {
+		return AgentTurnPreparationCommit{}, errors.New("prepare Agent Turn: invalid turn configuration snapshot")
+	}
 	turn := AgentTurn{
 		AgentTurnSpec: AgentTurnSpec{
 			AgentSessionID: session.ID, WorkflowAttemptID: preparation.WorkflowAttemptID,
@@ -379,6 +388,7 @@ SELECT EXISTS (
 			ChangeProposalID: preparation.ChangeProposalID, ExpectedHeadSHA: preparation.ExpectedHeadSHA,
 			ControlRevision: session.ControlRevision, AgentProfileCommitSHA: profile.CommitSHA,
 			AgentProfileContentSHA256: append([]byte(nil), profile.ContentSHA256...), AgentProfileConfig: profileConfig,
+			TurnConfiguration: turnConfiguration,
 		},
 		ID: turnID, AgentParticipantID: participant.ID, AgentAssignmentID: participant.ID, TurnNumber: turnNumber,
 		operationLineageID: operationLineageID,
@@ -388,14 +398,14 @@ SELECT EXISTS (
 INSERT INTO agent_turns (
 	    id, workflow_id, preparation_job_id, agent_session_id, workflow_attempt_id,
 	    turn_number, execution_epoch, retry_of_turn_id, operation_lineage_id, status, active, control_revision,
-	    agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config,
+	    agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration,
 	    stage_id, purpose, change_proposal_id, expected_head_sha
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'QUEUED', TRUE, $10, $11, $12, $13, $14, $15, $16, $17)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'QUEUED', TRUE, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		preparation.WorkflowAttemptID, turn.TurnNumber, turn.ExecutionEpoch,
 		nullableString(turn.RetryOfTurnID), turn.operationLineageID, turn.ControlRevision, turn.AgentProfileCommitSHA,
-		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.Stage, turn.Purpose,
+		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.TurnConfiguration, turn.Stage, turn.Purpose,
 		nullableString(turn.ChangeProposalID), nullableString(turn.ExpectedHeadSHA)).Scan(&turn.CreatedAt); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("insert prepared Agent Turn: %w", err)
 	}
