@@ -454,6 +454,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		Event       githubapi.ReviewEvent `json:"event"`
 		Body        string                `json:"body"`
 		Comments    json.RawMessage       `json:"comments"`
+		Signature   json.RawMessage       `json:"signature"`
 	}
 	var result struct {
 		ReviewID int64  `json:"review_id"`
@@ -466,6 +467,13 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	expectedState := ""
 	if !decodeExactObject(intent.Request, &arguments) {
 		return failure("submit_review request evidence is malformed")
+	}
+	// An absent signature is valid for legacy reservations, but an explicit null is not a string.
+	if len(arguments.Signature) > 0 {
+		var signature *string
+		if json.Unmarshal(arguments.Signature, &signature) != nil || signature == nil {
+			return failure("submit_review request evidence is malformed")
+		}
 	}
 	switch arguments.Event {
 	case githubapi.ReviewApprove:
