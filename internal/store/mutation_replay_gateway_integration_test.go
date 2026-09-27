@@ -449,8 +449,32 @@ func TestGatewaySignedReviewerReviewReconcilesToWorkflowOutcome(t *testing.T) {
 	}
 	if observation.Outcome != workflow.TurnOutcomeChangesRequested || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.Review == nil || observation.Review.HeadSHA != head ||
-		observation.AuthorizedReviewerActorID != 701 || observation.ChangeProposal == nil {
+		observation.AuthorizedReviewerActorID != 9702 || observation.ChangeProposal == nil {
 		t.Fatalf("gateway-signed REQUEST_CHANGES outcome = %#v, want successful CHANGES_REQUESTED settlement", observation)
+	}
+	settled, err := database.SettleAgentTurn(ctx, lease, observation)
+	if err != nil {
+		t.Fatalf("SettleAgentTurn() signed review error = %v", err)
+	}
+	if settled.State != workflow.StateDeveloping || settled.Reason != workflow.ReasonChangesRequested ||
+		settled.TerminalStatus != store.AgentTurnSucceeded || settled.SuccessorJobID == "" {
+		t.Fatalf("signed review settlement = %#v, want Developer successor", settled)
+	}
+	var reviewUsage, infrastructureFailures int
+	var successorRole, successorPurpose string
+	if err := pool.QueryRow(ctx, `
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), attempt.infrastructure_failures,
+       successor.payload->>'role', successor.payload->>'purpose'
+FROM workflow_attempts AS attempt
+JOIN jobs AS successor ON successor.id = $2
+WHERE attempt.id = $1`, execution.Turn.WorkflowAttemptID, settled.SuccessorJobID).Scan(
+		&reviewUsage, &infrastructureFailures, &successorRole, &successorPurpose); err != nil {
+		t.Fatal(err)
+	}
+	if reviewUsage != 1 || infrastructureFailures != 0 ||
+		successorRole != string(workflow.RoleDeveloper) || successorPurpose != string(workflow.TurnPurposeRequestedChanges) {
+		t.Fatalf("signed review successor = review usage %d, infrastructure failures %d, %s/%s",
+			reviewUsage, infrastructureFailures, successorRole, successorPurpose)
 	}
 }
 
@@ -495,7 +519,7 @@ func (github *signedReviewerGitHub) SubmitReview(_ context.Context, _, _, _ stri
 	}
 	review := githubapi.Review{
 		ID: 801, NodeID: "PRR_node", State: state, CommitID: request.CommitID,
-		Body: request.Body, User: githubapi.User{ID: 701},
+		Body: request.Body, User: githubapi.User{ID: 9702},
 		HTMLURL: "https://github.test/review/801",
 	}
 	github.submitted = &review

@@ -379,6 +379,12 @@ func TestOutcomeReconcilerRejectsMalformedSignedReviewerRequests(t *testing.T) {
 			want:    "submit_review request evidence is malformed",
 		},
 		{
+			name:    "null signature",
+			request: signedRequest(`null`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
 			name:    "conflicting review identity",
 			request: signedRequest(quotedFooter, `[]`),
 			review:  func() githubapi.Review { review := outcomeReview(outcomeHead, 701); review.ID = 802; return review }(),
