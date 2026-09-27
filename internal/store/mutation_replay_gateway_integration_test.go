@@ -111,7 +111,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatal(err)
 	}
 	if observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
-		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 1 {
+		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 2 {
 		t.Fatalf("fresh replay outcome = %#v, GitHub gets %d", observation, github.getCallCount())
 	}
 }
@@ -315,6 +315,8 @@ type replayGatewayGitHub struct {
 	head      string
 	branch    string
 	base      string
+	title     string
+	body      string
 	openCalls int
 	getCalls  int
 }
@@ -322,6 +324,7 @@ type replayGatewayGitHub struct {
 func (github *replayGatewayGitHub) pullRequest() githubapi.PullRequest {
 	return githubapi.PullRequest{
 		ID: 654, NodeID: "PR_654", Number: 23, State: "open", HTMLURL: "https://github.com/owner/repo/pull/23",
+		Title: github.title, Body: github.body,
 		Head: githubapi.PullRequestBranch{Ref: github.branch, SHA: github.head, Label: "owner:" + github.branch},
 		Base: githubapi.PullRequestBranch{Ref: github.base, SHA: "7123456789abcdef0123456789abcdef01234567", Label: "owner:" + github.base},
 	}
@@ -354,10 +357,12 @@ func (*replayGatewayGitHub) ListReviewThreads(context.Context, string, string, s
 func (*replayGatewayGitHub) GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error) {
 	return nil, errors.New("unexpected call")
 }
-func (github *replayGatewayGitHub) OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
+func (github *replayGatewayGitHub) OpenPullRequest(_ context.Context, _, _, _ string, request githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
 	github.mutex.Lock()
 	defer github.mutex.Unlock()
 	github.openCalls++
+	github.title = request.Title
+	github.body = githubapi.JoinBodyParts(request.Body, fmt.Sprintf("Closes #%d", request.IssueNumber), request.Marker)
 	return github.pullRequest(), nil
 }
 func (*replayGatewayGitHub) CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {

@@ -226,7 +226,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure MCP tool backend: %w", err)
 	}
 	toolGateway, err := mcp.New(mcp.Config{
-		EndpointURL: settings.MCPEndpointURL, Store: database, Backend: toolBackend,
+		EndpointURL: settings.MCPEndpointURL, Logger: logger, Store: database, Backend: toolBackend,
 		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
 		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
 		Policies:                 rolePolicies,
@@ -365,10 +365,11 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
 		Launcher: runtimeLauncher, Sessions: sessions,
-		Outcomes:   loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
-		Workspace:  workspaces,
-		Policies:   rolePolicies,
-		Definition: definition,
+		Outcomes:            loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
+		Workspace:           workspaces,
+		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
+		Policies:            rolePolicies,
+		Definition:          definition,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,

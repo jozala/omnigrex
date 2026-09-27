@@ -336,8 +336,9 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 
 	progress, exists := backend.publishedHeads[turnKey]
 	if !exists {
-		progress = publicationHead{head: invocation.Scope.HeadSHA, branchExists: invocation.Scope.PullRequest != nil}
+		progress = publicationHead{head: invocation.Scope.HeadSHA, branchExists: invocation.Scope.PullRequest != nil || invocation.Scope.BranchExists}
 	}
+	currentHead := progress.head
 	if invocation.Scope.PullRequest != nil {
 		if progress.pullRequest != nil && *progress.pullRequest != *invocation.Scope.PullRequest {
 			return ErrToolPrecondition
@@ -348,7 +349,7 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 		}
 		progress.branchExists = true
 	}
-	if exists && progress.head != source.ExpectedSHA {
+	if exists && progress.head != source.ExpectedSHA && !invocation.Scope.RecoveredPublication {
 		return ErrToolPrecondition
 	}
 
@@ -399,6 +400,12 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 			progress.pullRequest = pullRequest
 		}
 	}
+	if invocation.Scope.RecoveredPublication {
+		// The source result is historical evidence within the verified
+		// publication. Replaying it cannot move the new Turn's authority back
+		// from its bound head (or from a later publish in this Turn).
+		progress.head = currentHead
+	}
 
 	backend.publishedHeads[turnKey] = progress
 	if backend.restoredMutations[turnKey] == nil {
@@ -436,11 +443,26 @@ func (backend *ProductionBackend) requestReview(ctx context.Context, invocation 
 		effectiveScope.PullRequest = backend.currentPullRequest(invocation.Scope)
 	}
 	if effectiveScope.PullRequest == nil {
-		return nil, ErrToolPrecondition
+		return nil, mutationFailure{code: "pull_request_context_missing", message: "Pull Request context is missing for this turn"}
+	}
+	credential, err := backend.credential(ctx, ToolRequestReview, invocation.Scope.Role, invocation.Scope.Repository)
+	if err != nil {
+		return nil, mutationFailure{code: "github_observation_unavailable", message: "could not verify the Pull Request head"}
+	}
+	pullRequest, err := backend.github.GetPullRequest(ctx, credential, effectiveScope.Repository.Owner, effectiveScope.Repository.Name,
+		int(effectiveScope.PullRequest.Number))
+	if err != nil {
+		return nil, githubObservationFailure(err)
+	}
+	head := backend.currentPublishedHead(invocation.Scope)
+	if pullRequest.ID != effectiveScope.PullRequest.ID || int64(pullRequest.Number) != effectiveScope.PullRequest.Number ||
+		pullRequest.State != "open" || pullRequest.Head.Ref != effectiveScope.Branch || pullRequest.Head.SHA != head ||
+		pullRequest.Base.Ref != effectiveScope.DefaultBranch {
+		return nil, mutationFailure{code: FailurePullRequestHeadMismatch, message: "Pull Request head or identity changed during this turn"}
 	}
 	result, err := backend.workflow.RequestReview(ctx, RequestReviewMutation{
 		Scope: effectiveScope, OperationID: invocation.OperationID,
-		HeadSHA: backend.currentPublishedHead(invocation.Scope), Summary: arguments.Summary,
+		HeadSHA: head, Summary: arguments.Summary,
 	})
 	return canonicalWorkflowResult(result, err)
 }
@@ -488,7 +510,7 @@ func cloneToolScope(scope ToolScope) ToolScope {
 
 func (backend *ProductionBackend) openPullRequest(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
 	if backend.currentPullRequest(invocation.Scope) != nil {
-		return nil, ErrToolPrecondition
+		return nil, mutationFailure{code: "pull_request_already_bound", message: "Pull Request is already bound to this turn"}
 	}
 	var arguments struct {
 		Title string `json:"title"`
@@ -960,7 +982,7 @@ func classifyGitHubMutationError(err error) error {
 	if errors.As(err, &transient) || errors.As(err, &transport) {
 		return OutcomeUnknown(ErrToolDependency)
 	}
-	return ErrToolDependency
+	return githubMutationFailure(err)
 }
 
 func (backend *ProductionBackend) currentPublishedHead(scope ToolScope) string {
@@ -1019,7 +1041,7 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 	progress, exists := backend.publishedHeads[turnKey]
 	backend.publicationMutex.Unlock()
 	if !exists {
-		progress = publicationHead{head: invocation.Scope.HeadSHA, branchExists: invocation.Scope.PullRequest != nil}
+		progress = publicationHead{head: invocation.Scope.HeadSHA, branchExists: invocation.Scope.PullRequest != nil || invocation.Scope.BranchExists}
 	}
 	expectedOldHead := ""
 	if progress.branchExists {
@@ -1040,7 +1062,13 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		if errors.Is(err, workspace.ErrPushRejected) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, OutcomeUnknown(ErrToolDependency)
 		}
-		return nil, ErrToolDependency
+		if errors.Is(err, workspace.ErrUnexpectedHead) {
+			return nil, publicationHeadFailure(err)
+		}
+		if errors.Is(err, workspace.ErrTreeMismatch) {
+			return nil, mutationFailure{code: "publication_tree_mismatch", message: "workspace and publication trees differ"}
+		}
+		return nil, mutationFailure{code: "publication_dependency_failed", message: "publication could not be prepared"}
 	}
 	if !validRevision(result.Head) || result.Changed && result.Head == progress.head || !result.Changed && result.Head != progress.head {
 		return nil, OutcomeUnknown(ErrToolPrecondition)

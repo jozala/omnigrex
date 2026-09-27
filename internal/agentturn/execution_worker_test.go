@@ -78,6 +78,24 @@ func TestExecutionWorkerDelegatesInfrastructureSettlementObservation(t *testing.
 	}
 }
 
+func TestExecutionWorkerHandsOffUnprovenPublicationBeforeLaunchingAgent(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	dependencies := fixture.dependencies()
+	dependencies.PublicationRecovery = executionPublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
+		return agentturn.ErrPublicationConflict
+	})
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || err != nil || fixture.store.settled.Outcome != workflow.TurnOutcomeBlocked ||
+		fixture.store.settled.Completion.Status != store.AgentTurnSucceeded || !strings.Contains(fixture.store.settled.Diagnostic, "publication_conflict") ||
+		fixture.launcher.request.RepositoryURL != "" {
+		t.Fatalf("publication conflict = processed %t, error %v, settlement %#v, launcher %#v", processed, err, fixture.store.settled, fixture.launcher)
+	}
+}
+
 func TestExecutionWorkerSettlesCorroboratedHandoffAfterPromptEOF(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	promptErr := errors.New("submit ACP prompt: EOF")
@@ -1197,6 +1215,9 @@ func (fixture *executionWorkerFixture) dependencies() agentturn.ExecutionWorkerD
 		ReviewerCredentials: fixture.reviewerCredentials, DefaultBranch: fixture.defaultBranch,
 		Launcher: fixture.launcher, Sessions: fixture.prompter, Outcomes: fixture.outcomes, Workspace: fixture.workspace,
 		Definition: fixture.definition, Policies: fixture.policies,
+		PublicationRecovery: executionPublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
+			return nil
+		}),
 	}
 }
 
@@ -1689,6 +1710,12 @@ type executionLauncher struct {
 	registrationRelease   chan struct{}
 	registrationPublished chan struct{}
 	returnRelease         chan struct{}
+}
+
+type executionPublicationRecoveryFunc func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error
+
+func (recover executionPublicationRecoveryFunc) Recover(ctx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, url, credential, base string) error {
+	return recover(ctx, lease, execution, url, credential, base)
 }
 
 func (launcher *executionLauncher) LaunchExecution(_ context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {

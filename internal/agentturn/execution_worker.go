@@ -91,6 +91,7 @@ type ExecutionWorkerDependencies struct {
 	Sessions             ExecutionPrompter
 	Outcomes             ExecutionOutcomeReconciler
 	Workspace            ExecutionWorkspace
+	PublicationRecovery  ExecutionPublicationRecovery
 	Policies             role.PolicyCatalog
 	Definition           workflow.Definition
 }
@@ -124,6 +125,7 @@ type ExecutionWorker struct {
 	sessions             ExecutionPrompter
 	outcomes             ExecutionOutcomeReconciler
 	workspace            ExecutionWorkspace
+	publicationRecovery  ExecutionPublicationRecovery
 	policies             role.PolicyCatalog
 	definition           workflow.Definition
 	claimOwner           string
@@ -146,7 +148,8 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 	if nilDependency(dependencies.Store) || nilDependency(dependencies.DeveloperCredentials) ||
 		nilDependency(dependencies.ReviewerCredentials) || nilDependency(dependencies.DefaultBranch) ||
 		nilDependency(dependencies.Launcher) || nilDependency(dependencies.Sessions) ||
-		nilDependency(dependencies.Outcomes) || nilDependency(dependencies.Workspace) {
+		nilDependency(dependencies.Outcomes) || nilDependency(dependencies.Workspace) ||
+		nilDependency(dependencies.PublicationRecovery) {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidExecutionWorker)
 	}
 	if strings.TrimSpace(config.ClaimOwner) == "" || strings.TrimSpace(config.ClaimOwner) != config.ClaimOwner {
@@ -182,7 +185,8 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
 		launcher: dependencies.Launcher, sessions: dependencies.Sessions, outcomes: dependencies.Outcomes,
-		workspace: dependencies.Workspace, policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
+		workspace: dependencies.Workspace, publicationRecovery: dependencies.PublicationRecovery,
+		policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		turnTimeout: config.TurnTimeout, cleanupTimeout: config.CleanupTimeout,
 		concurrencyLimit: config.ConcurrencyLimit, providerCredential: providerCredential,
@@ -290,6 +294,15 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 
 	var runtime ExecutionRuntime
 	if operationErr == nil {
+		recoveryErr := worker.publicationRecovery.Recover(workCtx, *lease, execution, repositoryURL, repositoryCredential, defaultBranch.Name)
+		if errors.Is(recoveryErr, ErrPublicationConflict) {
+			return worker.finalizePublicationConflict(leaseCtx, *lease)
+		}
+		if recoveryErr != nil {
+			operationErr = fmt.Errorf("verify in-progress Developer publication: %w", recoveryErr)
+		}
+	}
+	if operationErr == nil {
 		launchProviderCredential := append(json.RawMessage(nil), providerCredential...)
 		runtime, err = worker.launcher.LaunchExecution(workCtx, LaunchRequest{
 			Lease: *lease, LeaseDuration: worker.leaseDuration, RepositoryURL: repositoryURL,
@@ -331,6 +344,8 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		currentHead := defaultBranch.CommitSHA
 		if execution.ChangeProposal != nil {
 			currentHead = execution.ChangeProposal.HeadSHA
+		} else if execution.Publication != nil {
+			currentHead = execution.Publication.HeadSHA
 		}
 		content, envelopeErr := BuildEventEnvelope(execution, currentHead, worker.definition, worker.policies)
 		if envelopeErr != nil {
@@ -365,6 +380,28 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	}
 
 	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, operationErr)
+}
+
+func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
+	if err := worker.retryFinalization(ctx, func(ctx context.Context) error {
+		return worker.store.CloseMutationAdmission(ctx, lease)
+	}); err != nil {
+		return false, fmt.Errorf("close conflicting publication turn: %w", err)
+	}
+	observation := store.AgentTurnSettlementObservation{
+		ObservedAt: time.Now().UTC(), Outcome: workflow.TurnOutcomeBlocked,
+		Diagnostic: "publication_conflict: an existing branch or Pull Request does not match this Participant's recorded publication",
+		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded},
+	}
+	err := worker.retryBoundedFinalization(ctx, func(ctx context.Context) error {
+		_, err := worker.store.SettleAgentTurn(ctx, lease, observation)
+		return err
+	})
+	if err != nil {
+		recoveryErr := worker.beginAgentTurnRecovery(ctx, lease)
+		return recoveryErr == nil, errors.Join(fmt.Errorf("settle publication conflict: %w", err), recoveryErr)
+	}
+	return true, nil
 }
 
 func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, operationErr error) (bool, error) {

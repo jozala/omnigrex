@@ -23,22 +23,29 @@ type triggeringEvent struct {
 	TurnPurpose workflow.TurnPurpose `json:"turn_purpose"`
 }
 
+type recoveredPublicationEvent struct {
+	HeadSHA     string `json:"head_sha"`
+	HeadRef     string `json:"head_ref"`
+	Instruction string `json:"instruction"`
+}
+
 type eventEnvelope struct {
-	SchemaVersion        int                    `json:"schema_version"`
-	WorkflowID           string                 `json:"workflow_id"`
-	IssueNumber          int64                  `json:"issue_number"`
-	RepositoryID         int64                  `json:"repository_id"`
-	AgentParticipantID   string                 `json:"agent_participant_id"`
-	AssignmentGeneration int                    `json:"assignment_generation"`
-	AgentSessionID       string                 `json:"agent_session_id"`
-	AgentTurnID          string                 `json:"agent_turn_id"`
-	TriggeringEvent      triggeringEvent        `json:"triggering_event"`
-	PullRequestNumber    *int64                 `json:"pull_request_number,omitempty"`
-	CurrentHeadSHA       string                 `json:"current_head_sha"`
-	ExpectedHeadSHA      string                 `json:"expected_head_sha"`
-	ExpectedOutcomes     []workflow.TurnOutcome `json:"expected_outcomes"`
-	AllowedOutcomes      []workflow.TurnOutcome `json:"allowed_outcomes"`
-	MCPCapabilities      []string               `json:"mcp_capabilities"`
+	SchemaVersion        int                        `json:"schema_version"`
+	WorkflowID           string                     `json:"workflow_id"`
+	IssueNumber          int64                      `json:"issue_number"`
+	RepositoryID         int64                      `json:"repository_id"`
+	AgentParticipantID   string                     `json:"agent_participant_id"`
+	AssignmentGeneration int                        `json:"assignment_generation"`
+	AgentSessionID       string                     `json:"agent_session_id"`
+	AgentTurnID          string                     `json:"agent_turn_id"`
+	TriggeringEvent      triggeringEvent            `json:"triggering_event"`
+	PullRequestNumber    *int64                     `json:"pull_request_number,omitempty"`
+	RecoveredPublication *recoveredPublicationEvent `json:"recovered_publication,omitempty"`
+	CurrentHeadSHA       string                     `json:"current_head_sha"`
+	ExpectedHeadSHA      string                     `json:"expected_head_sha"`
+	ExpectedOutcomes     []workflow.TurnOutcome     `json:"expected_outcomes"`
+	AllowedOutcomes      []workflow.TurnOutcome     `json:"allowed_outcomes"`
+	MCPCapabilities      []string                   `json:"mcp_capabilities"`
 }
 
 // BuildEventEnvelope projects a Turn using the deployment's Workflow Definition and Role policies.
@@ -66,6 +73,15 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	if execution.ChangeProposal != nil {
 		number := execution.ChangeProposal.PullRequestNumber
 		envelope.PullRequestNumber = &number
+	} else if publication := execution.Publication; publication != nil {
+		if publication.PullRequestID > 0 {
+			number := publication.PullRequestNumber
+			envelope.PullRequestNumber = &number
+		}
+		envelope.RecoveredPublication = &recoveredPublicationEvent{
+			HeadSHA: publication.HeadSHA, HeadRef: publication.HeadRef,
+			Instruction: "Inspect the recovered publication and current Pull Request before changing files or requesting review. Its existence alone does not mean it is ready for Reviewer.",
+		}
 	}
 
 	encoded, err := json.Marshal(envelope)
@@ -92,7 +108,15 @@ func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, cur
 			turn.Purpose == workflow.TurnPurposeRequestedChanges {
 			return ErrInvalidEventEnvelope
 		}
+		if publication := execution.Publication; publication != nil &&
+			(!validEnvelopeString(publication.HeadSHA) || publication.HeadSHA != currentHeadSHA ||
+				!validEnvelopeString(publication.HeadRef) || (publication.PullRequestID > 0) != (publication.PullRequestNumber > 0)) {
+			return ErrInvalidEventEnvelope
+		}
 		return nil
+	}
+	if execution.Publication != nil {
+		return ErrInvalidEventEnvelope
 	}
 	proposal := execution.ChangeProposal
 	if turn.Purpose == workflow.TurnPurposeInitialDevelopment || !validEnvelopeString(proposal.ID) || proposal.PullRequestNumber <= 0 ||

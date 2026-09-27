@@ -139,12 +139,25 @@ type AgentTurnChangeProposal struct {
 	HeadSHA           string
 }
 
+// AgentTurnPublication is verified in-progress Developer work, not a review-ready Change Proposal.
+type AgentTurnPublication struct {
+	HeadRef                 string
+	HeadSHA                 string
+	BaseRef                 string
+	PullRequestID           int64
+	PullRequestNumber       int64
+	PullRequestNodeID       string
+	SourcePublishMutationID string
+	SourceOpenPRMutationID  string
+}
+
 // AgentTurnExecutionContext contains only durable launch inputs read under the live turn fence.
 type AgentTurnExecutionContext struct {
 	WorkflowID     string
 	Repository     AgentTurnRepository
 	Issue          AgentTurnIssue
 	ChangeProposal *AgentTurnChangeProposal
+	Publication    *AgentTurnPublication
 	Participant    AgentParticipant
 	Assignment     AgentAssignment
 	Session        AgentSession
@@ -1041,6 +1054,22 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		execution.Turn = turn.AgentTurn
 
 		if lease.ChangeProposalID == "" {
+			publication := &AgentTurnPublication{}
+			err := tx.QueryRow(ctx, `
+SELECT head_ref, head_sha, base_ref, COALESCE(pull_request_id, 0), COALESCE(pull_request_number, 0),
+       COALESCE(pull_request_node_id, ''), source_publish_mutation_id::text,
+       COALESCE(source_open_pr_mutation_id::text, '')
+FROM agent_turn_publications WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch).Scan(
+				&publication.HeadRef, &publication.HeadSHA, &publication.BaseRef,
+				&publication.PullRequestID, &publication.PullRequestNumber, &publication.PullRequestNodeID,
+				&publication.SourcePublishMutationID, &publication.SourceOpenPRMutationID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			execution.Publication = publication
 			return nil
 		}
 		proposal := &AgentTurnChangeProposal{}
