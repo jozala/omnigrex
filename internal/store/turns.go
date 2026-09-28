@@ -244,6 +244,8 @@ type MutationReservation struct {
 	ExternalService    string
 	ExternalResourceID string
 	ExpectedSHA        string
+	ProposedSHA        string
+	HistoryPublication bool
 	Result             json.RawMessage
 	LastError          string
 	AdmittedAt         time.Time
@@ -1229,16 +1231,17 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			InvocationNumber: number, OperationID: spec.OperationID, ToolName: spec.ToolName,
 			Request: spec.Request, State: MutationReserved, ExternalService: spec.ExternalService,
 			ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA,
+			HistoryPublication: spec.ToolName == "publish_changes",
 		}
 		return tx.QueryRow(ctx, `
 INSERT INTO tool_invocations (
 	    id, agent_turn_id, execution_epoch, operation_lineage_id, invocation_number, tool_name, kind, state,
-	    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha
+	    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha, history_publication
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'MUTATION', 'RESERVED', $7, $7, $8, $9, $10, $11)
+VALUES ($1, $2, $3, $4, $5, $6, 'MUTATION', 'RESERVED', $7, $7, $8, $9, $10, $11, $12)
 RETURNING admitted_at`, invocationID, lease.ID, lease.ExecutionEpoch, turn.operationLineageID, number, spec.ToolName,
 			spec.OperationID, spec.Request, nullableString(spec.ExternalService),
-			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA)).Scan(&reservation.AdmittedAt)
+			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA), reservation.HistoryPublication).Scan(&reservation.AdmittedAt)
 	})
 	return reservation, err
 }
@@ -1355,6 +1358,43 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 		return err
 	})
 	return mutation, err
+}
+
+// RecordProposedPublicationTip binds one validated Git commit to a live
+// publication mutation before the external push can start.
+func (store *Store) RecordProposedPublicationTip(ctx context.Context, lease AgentTurnLease, mutationID, tip string) error {
+	if !validUUID(mutationID) || !validPublicationObjectID(tip) {
+		return ErrMutationStateConflict
+	}
+	return store.withLockedAgentTurnLease(ctx, lease, "record proposed publication tip", func(tx pgx.Tx, turn lockedTurn) error {
+		if turn.Status != AgentTurnRunning {
+			return ErrAgentTurnFenceLost
+		}
+		result, err := tx.Exec(ctx, `
+UPDATE tool_invocations SET proposed_sha = $4, updated_at = clock_timestamp()
+WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3
+  AND kind = 'MUTATION' AND tool_name = 'publish_changes'
+  AND state = 'IN_FLIGHT' AND history_publication AND proposed_sha IS NULL`, mutationID, lease.ID, lease.ExecutionEpoch, tip)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return ErrMutationStateConflict
+		}
+		return nil
+	})
+}
+
+func validPublicationObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CompleteMutation records a known successful outcome from IN_FLIGHT or RECONCILING.
@@ -2096,20 +2136,20 @@ WHERE id = $1 AND (status = 'ACTIVE' OR ($3 AND status = 'WAITING_FOR_HUMAN'))
 const mutationSelect = `
 SELECT id::text, agent_turn_id::text, execution_epoch, invocation_number,
 COALESCE(operation_id, ''), tool_name, request, state,
-COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''),
+COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''), COALESCE(proposed_sha, ''), history_publication,
 result, COALESCE(last_error, ''), admitted_at, started_at, finished_at
 FROM tool_invocations`
 
 const mutationLedgerSelect = `
 SELECT id::text, agent_turn_id::text, execution_epoch, invocation_number,
        COALESCE(operation_id, ''), tool_name, request, state,
-       COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''),
+       COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''), COALESCE(proposed_sha, ''), history_publication,
        result, COALESCE(last_error, ''), admitted_at, started_at, finished_at
 FROM (
     SELECT invocation.id, invocation.agent_turn_id, invocation.execution_epoch,
            invocation.invocation_number, invocation.operation_id, invocation.tool_name,
            invocation.request, invocation.state, invocation.external_service,
-           invocation.external_resource_id, invocation.expected_sha, invocation.result,
+            invocation.external_resource_id, invocation.expected_sha, invocation.proposed_sha, invocation.history_publication, invocation.result,
            invocation.last_error, invocation.admitted_at, invocation.started_at,
            invocation.finished_at
     FROM tool_invocations AS invocation
@@ -2121,7 +2161,7 @@ FROM (
     SELECT source.id, replay.agent_turn_id, replay.execution_epoch,
            replay.invocation_number, source.operation_id, source.tool_name,
            source.request, source.state, source.external_service,
-           source.external_resource_id, source.expected_sha, source.result,
+            source.external_resource_id, source.expected_sha, source.proposed_sha, source.history_publication, source.result,
            source.last_error, source.admitted_at, source.started_at,
            source.finished_at
     FROM tool_invocation_replays AS replay
@@ -2233,7 +2273,7 @@ func scanMutation(row rowScanner) (MutationReservation, error) {
 	err := row.Scan(
 		&mutation.ID, &mutation.AgentTurnID, &mutation.ExecutionEpoch, &mutation.InvocationNumber,
 		&mutation.OperationID, &mutation.ToolName, &request, &mutation.State,
-		&mutation.ExternalService, &mutation.ExternalResourceID, &mutation.ExpectedSHA,
+		&mutation.ExternalService, &mutation.ExternalResourceID, &mutation.ExpectedSHA, &mutation.ProposedSHA, &mutation.HistoryPublication,
 		&result, &mutation.LastError, &mutation.AdmittedAt, &mutation.StartedAt, &mutation.FinishedAt,
 	)
 	if err != nil {

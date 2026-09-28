@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/jozala/omnigrex/internal/workspace"
+	"golang.org/x/sys/unix"
 )
 
-func TestLifecyclePublishesNormalizedWorkspaceFromCleanCheckout(t *testing.T) {
+func TestLifecyclePublishesCommittedWorkspaceFromCleanCheckout(t *testing.T) {
 	fixture := newGitFixture(t)
 	lifecycle := newLifecycle(t)
 	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
@@ -27,40 +29,37 @@ func TestLifecyclePublishesNormalizedWorkspaceFromCleanCheckout(t *testing.T) {
 	if err := os.Symlink("bin/tool", filepath.Join(paths.Workspace, "tool")); err != nil {
 		t.Fatal(err)
 	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Omnigrex Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@omnigrex.test")
+	gitRun(t, paths.Workspace, "add", "-A")
+	gitRun(t, paths.Workspace, "commit", "-m", "Apply deterministic change")
+	wantHead := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
 
-	when := time.Date(2026, time.September, 3, 12, 34, 56, 0, time.FixedZone("ignored", 2*60*60))
 	request := workspace.Publication{
 		AssignmentID:  assignmentID,
 		RepositoryURL: fixture.remote,
 		BaseRevision:  fixture.second,
 		Branch:        "omnigrex/feature",
 		Message:       "Apply deterministic change",
-		Identity:      workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.test"},
-		Time:          when,
+		RecordProposedTip: func(_ context.Context, head string) error {
+			if head != wantHead {
+				t.Errorf("recorded proposed tip = %q, want %q", head, wantHead)
+			}
+			return nil
+		},
 	}
 	result, err := lifecycle.Publish(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
-	if !result.Changed || result.Head == "" || result.Head == fixture.second {
+	if !result.Changed || result.Head != wantHead {
 		t.Fatalf("Publish() result = %#v", result)
 	}
 	if got := gitOutput(t, fixture.remote, "rev-parse", "refs/heads/omnigrex/feature"); got != result.Head {
 		t.Errorf("remote branch = %q, want %q", got, result.Head)
 	}
-	if got := gitOutput(t, paths.Publication, "show", "-s", "--format=%an|%ae|%cn|%ce|%aI|%cI", "HEAD"); got != "Omnigrex Developer|developer@omnigrex.test|Omnigrex Developer|developer@omnigrex.test|2026-09-03T10:34:56Z|2026-09-03T10:34:56Z" {
+	if got := gitOutput(t, fixture.remote, "show", "-s", "--format=%an|%ae|%cn|%ce", result.Head); got != "Omnigrex Developer|developer@omnigrex.test|Omnigrex Developer|developer@omnigrex.test" {
 		t.Errorf("commit metadata = %q", got)
-	}
-	workspaceTree, err := workspace.SnapshotTree(paths.Workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	publicationTree, err := workspace.SnapshotTree(paths.Publication)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !workspaceTree.Equal(publicationTree) {
-		t.Error("published tree differs from workspace tree")
 	}
 
 	gitRun(t, fixture.remote, "update-ref", "-d", "refs/heads/omnigrex/feature")
@@ -70,6 +69,411 @@ func TestLifecyclePublishesNormalizedWorkspaceFromCleanCheckout(t *testing.T) {
 	}
 	if repeated.Head != result.Head {
 		t.Errorf("repeated commit = %q, want deterministic %q", repeated.Head, result.Head)
+	}
+}
+
+func TestLifecyclePublishesCommittedMergeHistoryWithoutFlattening(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/main", fixture.second)
+	mainCheckout := filepath.Join(t.TempDir(), "main")
+	gitRun(t, filepath.Dir(mainCheckout), "clone", fixture.remote, mainCheckout)
+	gitRun(t, mainCheckout, "checkout", "main")
+	gitRun(t, mainCheckout, "config", "user.name", "Main Contributor")
+	gitRun(t, mainCheckout, "config", "user.email", "main@example.test")
+	writeFile(t, filepath.Join(mainCheckout, "main.txt"), "main change\n", 0o644)
+	gitRun(t, mainCheckout, "add", "main.txt")
+	gitRun(t, mainCheckout, "commit", "-m", "Advance main")
+	mainHead := gitOutput(t, mainCheckout, "rev-parse", "HEAD")
+	gitRun(t, mainCheckout, "push", "origin", "HEAD:refs/heads/main")
+
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, "developer.txt"), "first change\n", 0o644)
+	gitRun(t, paths.Workspace, "add", "developer.txt")
+	gitRun(t, paths.Workspace, "commit", "-m", "First developer commit")
+	first := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(paths.Workspace, "developer.txt"), "second change\n", 0o644)
+	gitRun(t, paths.Workspace, "commit", "-am", "Second developer commit")
+	second := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	gitRun(t, paths.Workspace, "fetch", "origin", "main")
+	gitRun(t, paths.Workspace, "merge", "--no-ff", "--no-edit", "FETCH_HEAD")
+	merged := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	// A normal advance of main after the merge must not invalidate its verified historical parent.
+	commitFixtureChange(t, fixture.remote, mainHead, "main", "main moved again\n", "Advance main again")
+
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "omnigrex/feature", DefaultBranch: "main", Message: "Publish the committed merge",
+		RecordProposedTip: func(_ context.Context, head string) error {
+			if head != merged {
+				t.Errorf("recorded tip = %s, want %s", head, merged)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Head != merged || !result.Changed {
+		t.Errorf("Publish() = %#v, want the exact merge commit %s", result, merged)
+	}
+	if got := gitOutput(t, fixture.remote, "rev-parse", "refs/heads/omnigrex/feature"); got != merged {
+		t.Errorf("remote head = %s, want local merge %s", got, merged)
+	}
+	if got := gitOutput(t, paths.Workspace, "rev-list", "--parents", "-n", "1", merged); got != merged+" "+second+" "+mainHead {
+		t.Errorf("merge parents = %s", got)
+	}
+	if got := gitOutput(t, fixture.remote, "merge-base", "--is-ancestor", first, "refs/heads/omnigrex/feature"); got != "" {
+		t.Errorf("first developer commit not reachable from published head")
+	}
+}
+
+func TestLifecyclePublishesRepeatedVerifiedDefaultBranchMerges(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/main", fixture.second)
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	mainOne := commitFixtureChange(t, fixture.remote, fixture.second, "main", "main one\n", "First main advance")
+	gitRun(t, paths.Workspace, "fetch", "origin", "main")
+	gitRun(t, paths.Workspace, "merge", "--no-ff", "--no-edit", "FETCH_HEAD")
+	mergeOne := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	mainTwo := commitFixtureChange(t, fixture.remote, mainOne, "main", "main two\n", "Second main advance")
+	gitRun(t, paths.Workspace, "fetch", "origin", "main")
+	gitRun(t, paths.Workspace, "merge", "--no-ff", "--no-edit", "FETCH_HEAD")
+	mergeTwo := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "feature", DefaultBranch: "main", RecordProposedTip: func(_ context.Context, head string) error {
+			if head != mergeTwo {
+				t.Errorf("recorded tip = %s, want %s", head, mergeTwo)
+			}
+			return nil
+		},
+	})
+	if err != nil || !result.Changed || result.Head != mergeTwo {
+		t.Fatalf("Publish() = %#v, %v", result, err)
+	}
+	if got := gitOutput(t, fixture.remote, "rev-list", "--parents", "-n", "1", mergeOne); got != mergeOne+" "+fixture.second+" "+mainOne {
+		t.Errorf("first merge parents = %s", got)
+	}
+	if got := gitOutput(t, fixture.remote, "rev-list", "--parents", "-n", "1", mergeTwo); got != mergeTwo+" "+mergeOne+" "+mainTwo {
+		t.Errorf("second merge parents = %s", got)
+	}
+}
+
+func TestLifecycleExtendsPreviouslyPublishedLegacyHead(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/main", fixture.second)
+	legacy := commitFixtureChange(t, fixture.remote, fixture.second, "feature", "legacy\n",
+		"Legacy publication\n\nOmnigrex-Operation-ID: old-operation")
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: legacy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, "developer.txt"), "committed change\n", 0o644)
+	gitRun(t, paths.Workspace, "add", "developer.txt")
+	gitRun(t, paths.Workspace, "commit", "-m", "Extend legacy publication")
+	proposed := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: legacy,
+		ExpectedOldHead: legacy, Branch: "feature", DefaultBranch: "main",
+		RecordProposedTip: func(context.Context, string) error { return nil },
+	})
+	if err != nil || !result.Changed || result.Head != proposed {
+		t.Fatalf("Publish() = %#v, %v", result, err)
+	}
+	if got := gitOutput(t, fixture.remote, "rev-list", "--parents", "-n", "1", proposed); got != proposed+" "+legacy {
+		t.Errorf("new commit parent = %s, want legacy head %s", got, legacy)
+	}
+}
+
+func TestLifecyclePublicationRejectsRebasedAndNonDefaultMergeHistory(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, gitFixture, string)
+	}{
+		{name: "rewritten first parent", prepare: func(t *testing.T, fixture gitFixture, path string) {
+			gitRun(t, path, "checkout", "--detach", fixture.first)
+			writeFile(t, filepath.Join(path, "tracked.txt"), "rewritten\n", 0o644)
+			gitRun(t, path, "commit", "-am", "Rewrite instead of extend")
+		}},
+		{name: "non-default merge", prepare: func(t *testing.T, fixture gitFixture, path string) {
+			commitFixtureChange(t, fixture.remote, fixture.second, "other", "other branch\n", "Change other branch")
+			gitRun(t, path, "fetch", "origin", "other")
+			gitRun(t, path, "merge", "--no-ff", "--no-edit", "FETCH_HEAD")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			gitRun(t, fixture.remote, "update-ref", "refs/heads/main", fixture.second)
+			lifecycle := newLifecycle(t)
+			paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+			gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+			test.prepare(t, fixture, paths.Workspace)
+			_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+				DefaultBranch: "main", Branch: "feature", RecordProposedTip: func(context.Context, string) error {
+					t.Fatal("unverified history must not be recorded")
+					return nil
+				},
+			})
+			if !errors.Is(err, workspace.ErrInvalidPublicationHistory) {
+				t.Fatalf("Publish() = %v, want invalid history", err)
+			}
+			if got := gitOutput(t, fixture.remote, "for-each-ref", "--format=%(objectname)", "refs/heads/feature"); got != "" {
+				t.Errorf("invalid candidate was pushed: %s", got)
+			}
+		})
+	}
+}
+
+func TestLifecyclePublicationRejectsAlteredLocalHistoryMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		alter func(*testing.T, string, gitFixture)
+	}{
+		{name: "replace ref", alter: func(t *testing.T, path string, fixture gitFixture) {
+			gitRun(t, path, "replace", "HEAD", fixture.first)
+		}},
+		{name: "graft", alter: func(t *testing.T, path string, fixture gitFixture) {
+			writeFile(t, filepath.Join(path, ".git", "info", "grafts"), fixture.second+" "+fixture.first+"\n", 0o644)
+		}},
+		{name: "shallow", alter: func(t *testing.T, path string, fixture gitFixture) {
+			writeFile(t, filepath.Join(path, ".git", "shallow"), fixture.second+"\n", 0o644)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			lifecycle := newLifecycle(t)
+			paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.alter(t, paths.Workspace, fixture)
+			_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second, Branch: "feature",
+				RecordProposedTip: func(context.Context, string) error {
+					t.Fatal("altered history must never be recorded")
+					return nil
+				},
+			})
+			if !errors.Is(err, workspace.ErrInvalidPublicationHistory) {
+				t.Fatalf("Publish() = %v, want invalid history", err)
+			}
+		})
+	}
+}
+
+func TestLifecyclePublicationRequiresFullyCommittedWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*testing.T, string)
+	}{
+		{name: "unstaged", change: func(t *testing.T, path string) {
+			writeFile(t, filepath.Join(path, "tracked.txt"), "uncommitted\n", 0o644)
+		}},
+		{name: "staged", change: func(t *testing.T, path string) {
+			writeFile(t, filepath.Join(path, "tracked.txt"), "staged\n", 0o644)
+			gitRun(t, path, "add", "tracked.txt")
+		}},
+		{name: "untracked", change: func(t *testing.T, path string) {
+			writeFile(t, filepath.Join(path, "untracked.txt"), "new\n", 0o644)
+		}},
+		{name: "unresolved", change: func(t *testing.T, path string) {
+			gitRun(t, path, "config", "user.name", "Developer")
+			gitRun(t, path, "config", "user.email", "developer@example.test")
+			gitRun(t, path, "checkout", "-b", "conflicting")
+			writeFile(t, filepath.Join(path, "tracked.txt"), "different branch\n", 0o644)
+			gitRun(t, path, "commit", "-am", "Divergent change")
+			gitRun(t, path, "checkout", "--detach", "HEAD~1")
+			writeFile(t, filepath.Join(path, "tracked.txt"), "local change\n", 0o644)
+			gitRun(t, path, "commit", "-am", "Local change")
+			command := exec.Command("git", "merge", "--no-ff", "conflicting")
+			command.Dir = path
+			if err := command.Run(); err == nil {
+				t.Fatal("fixture should produce unresolved merge entries")
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			lifecycle := newLifecycle(t)
+			paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(t, paths.Workspace)
+			_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+				Branch: "feature", RecordProposedTip: func(context.Context, string) error {
+					t.Fatal("uncommitted tree must never record a proposed tip")
+					return nil
+				},
+			})
+			if !errors.Is(err, workspace.ErrUncommittedWorkspace) {
+				t.Fatalf("Publish() = %v, want uncommitted workspace", err)
+			}
+		})
+	}
+}
+
+func TestLifecyclePublicationWithNoNewCommitsDoesNotCreateBranch(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	if _, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second, Branch: "feature",
+	})
+	if err != nil || result.Changed || result.Head != fixture.second {
+		t.Fatalf("no-op publication = %#v, %v", result, err)
+	}
+	if got := gitOutput(t, fixture.remote, "for-each-ref", "--format=%(objectname)", "refs/heads/feature"); got != "" {
+		t.Errorf("no-op created a branch: %s", got)
+	}
+	paths, err := lifecycle.Paths(assignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "update-index", "--assume-unchanged", "tracked.txt")
+	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "hidden edit\n", 0o644)
+	_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second, Branch: "feature",
+	})
+	if !errors.Is(err, workspace.ErrTreeMismatch) {
+		t.Fatalf("no-op with hidden tracked edit = %v, want tree mismatch", err)
+	}
+}
+
+func TestLifecycleNeverPushesWhenDurableTipRecordingFails(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "committed\n", 0o644)
+	gitRun(t, paths.Workspace, "commit", "-am", "Commit before publishing")
+	wantErr := errors.New("database unavailable")
+	_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "feature", RecordProposedTip: func(context.Context, string) error { return wantErr },
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Publish() error = %v, want durable recording failure", err)
+	}
+	if got := gitOutput(t, fixture.remote, "for-each-ref", "--format=%(objectname)", "refs/heads/feature"); got != "" {
+		t.Errorf("branch moved despite unrecorded tip: %s", got)
+	}
+}
+
+func TestLifecycleIgnoresAgentConfiguredUploadPackCommand(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "committed\n", 0o644)
+	gitRun(t, paths.Workspace, "commit", "-am", "Committed change")
+	marker := filepath.Join(t.TempDir(), "upload-pack-ran")
+	gitRun(t, paths.Workspace, "config", "uploadpack.packObjectsHook", "touch "+marker+"; exit 7")
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "feature", RecordProposedTip: func(context.Context, string) error { return nil },
+	})
+	if err != nil || !result.Changed {
+		t.Fatalf("Publish() = %#v, %v", result, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("agent-configured upload-pack command executed: %v", err)
+	}
+}
+
+func TestLifecyclePublicationAllowsIgnoredFilesButDoesNotPublishThem(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, ".gitignore"), "build/\n", 0o644)
+	writeFile(t, filepath.Join(paths.Workspace, " leading.txt"), "preserve exact path\n", 0o644)
+	writeFile(t, filepath.Join(paths.Workspace, "a.txt"), "sibling\n", 0o644)
+	writeFile(t, filepath.Join(paths.Workspace, "a", "z"), "nested\n", 0o644)
+	gitRun(t, paths.Workspace, "add", ".gitignore", " leading.txt", "a.txt", "a/z")
+	gitRun(t, paths.Workspace, "commit", "-m", "Ignore local builds")
+	if err := os.Mkdir(filepath.Join(paths.Workspace, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(paths.Workspace, "build", "secret.log"), "never publish\n", 0o644)
+	if err := unix.Mkfifo(filepath.Join(paths.Workspace, "build", "ignored-pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "feature", RecordProposedTip: func(context.Context, string) error { return nil },
+	})
+	if err != nil || result.Head != want {
+		t.Fatalf("Publish() = %#v, %v", result, err)
+	}
+	if got := gitOutput(t, fixture.remote, "ls-tree", "-r", "--name-only", want); strings.Contains(got, "secret.log") {
+		t.Errorf("ignored local file was published: %s", got)
+	}
+	matching, err := workspace.CommittedTreesEqual(context.Background(), paths)
+	if err != nil || !matching {
+		t.Fatalf("ignored local file should not invalidate published tree = %t, %v", matching, err)
+	}
+	gitRun(t, paths.Workspace, "update-index", "--assume-unchanged", "tracked.txt")
+	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "hidden tracked change\n", 0o644)
+	matching, err = workspace.CommittedTreesEqual(context.Background(), paths)
+	if err != nil || matching {
+		t.Fatalf("hidden tracked edit must invalidate published tree = %t, %v", matching, err)
 	}
 }
 
@@ -85,7 +489,6 @@ func TestLifecycleRejectsUnexpectedOldHeadBeforePublishing(t *testing.T) {
 	_, err := lifecycle.Publish(context.Background(), workspace.Publication{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.first,
 		ExpectedOldHead: fixture.first, Branch: "feature", Message: "must not publish",
-		Identity: workspace.CommitIdentity{Name: "Developer", Email: "developer@example.test"}, Time: time.Unix(1_700_000_000, 0),
 	})
 	if !errors.Is(err, workspace.ErrUnexpectedHead) {
 		t.Errorf("Publish() error = %v, want ErrUnexpectedHead", err)

@@ -273,6 +273,13 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 			t.Errorf("reservation %d ExpectedSHA = %q, want %q", index+1, specs[index].ExpectedSHA, want)
 		}
 	}
+	durable.mutex.Lock()
+	firstProposed := durable.mutations["publish_changes\x00publish-1"].ProposedSHA
+	secondProposed := durable.mutations["publish_changes\x00shared"].ProposedSHA
+	durable.mutex.Unlock()
+	if firstProposed != firstHead || secondProposed != secondHead {
+		t.Fatalf("durable proposed publication tips = (%q, %q), want (%q, %q)", firstProposed, secondProposed, firstHead, secondHead)
+	}
 	if specs[4].ExternalService != "omnigrex" || specs[4].ExternalResourceID != "9123:omnigrex/issue-12" {
 		t.Fatalf("request_review reservation metadata = %#v", specs[4])
 	}
@@ -291,9 +298,8 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	if api.openRequest.Marker != wantMarker || strings.Contains(api.openRequest.Marker, "shared") {
 		t.Fatalf("open Pull Request marker = %q, want reservation identity only", api.openRequest.Marker)
 	}
-	if len(publisher.publications) != 2 || strings.Contains(publisher.publications[0].Message, "publish-1") ||
-		!strings.Contains(publisher.publications[0].Message, "Omnigrex-Operation-ID: "+testMutationID(1)) {
-		t.Fatalf("publication operation trailers = %#v", publisher.publications)
+	if len(publisher.publications) != 2 || publisher.publications[0].Message != "First" || publisher.publications[1].Message != "Second" {
+		t.Fatalf("publication audit summaries = %#v", publisher.publications)
 	}
 }
 
@@ -1895,6 +1901,7 @@ func (fake *fakeStore) ReserveMutation(_ context.Context, lease store.AgentTurnL
 	reservation := store.MutationReservation{
 		ID: testMutationID(len(fake.mutations) + 1), AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
 		OperationID: spec.OperationID, ToolName: spec.ToolName, Request: spec.Request, State: store.MutationReserved,
+		HistoryPublication: spec.ToolName == mcp.ToolPublishChanges,
 	}
 	fake.mutations[key] = reservation
 	return reservation, fake.reserveErr
@@ -1925,6 +1932,19 @@ func (fake *fakeStore) StartMutation(_ context.Context, _ store.AgentTurnLease, 
 		}
 	}
 	return store.MutationReservation{}, errors.New("mutation not found")
+}
+
+func (fake *fakeStore) RecordProposedPublicationTip(_ context.Context, _ store.AgentTurnLease, mutationID, tip string) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	for operationID, mutation := range fake.mutations {
+		if mutation.ID == mutationID && mutation.State == store.MutationInFlight && mutation.ProposedSHA == "" {
+			mutation.ProposedSHA = tip
+			fake.mutations[operationID] = mutation
+			return nil
+		}
+	}
+	return errors.New("proposed publication tip cannot be recorded")
 }
 
 func (fake *fakeStore) CompleteMutation(_ context.Context, _ store.AgentTurnLease, mutationID string, result json.RawMessage) error {

@@ -55,6 +55,9 @@ done
 if [ "$1" = "clone" ]; then
 	mkdir -p "$destination/.git"
 fi
+if [ "$1" = "rev-parse" ]; then
+	printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+fi
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,13 +68,12 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(paths.Workspace, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lifecycle.Publish(context.Background(), Publication{
 		AssignmentID: publishAssignment, RepositoryURL: repository, BaseRevision: baseRevision,
-		Branch: "feature", Message: "publish", Identity: CommitIdentity{Name: "Agent", Email: "agent@example.test"},
-		Time: time.Unix(1_700_000_000, 0),
+		Branch: "feature", Message: "publish",
 	}); err != nil {
 		t.Fatalf("Publish() success-path error = %v", err)
 	}
@@ -97,8 +99,7 @@ fi
 		if index%2 == 0 {
 			_, operationErr = lifecycle.Publish(context.Background(), Publication{
 				AssignmentID: assignmentID, RepositoryURL: repository, BaseRevision: baseRevision,
-				Branch: "feature", Message: "publish", Identity: CommitIdentity{Name: "Agent", Email: "agent@example.test"},
-				Time: time.Unix(1_700_000_000, 0),
+				Branch: "feature", Message: "publish",
 			})
 		} else {
 			_, operationErr = lifecycle.ReconcilePublication(context.Background(), PublicationReconciliation{

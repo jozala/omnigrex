@@ -143,14 +143,17 @@ func (reconciler *ProductionReconciler) reconcilePublication(ctx context.Context
 		AssignmentID:  reconciliation.Turn.AgentAssignmentID,
 		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: mutation.ExpectedSHA, ExpectedOldHead: expectedOldHead,
-		Branch: branch, OperationID: mutation.ID,
+		ProposedRevision:   mutation.ProposedSHA,
+		HistoryPublication: mutation.HistoryPublication,
+		Branch:             branch, OperationID: mutation.ID,
 	})
 	if err != nil {
 		return MutationReconciliationResult{}, dependencyError("reconcile publication")
 	}
 	switch observed.Outcome {
 	case workspace.PublicationReconciliationFound:
-		if !validRevision(observed.Head) || observed.Head == mutation.ExpectedSHA {
+		if !validRevision(observed.Head) || observed.Head == mutation.ExpectedSHA ||
+			mutation.HistoryPublication && (mutation.ProposedSHA == "" || observed.Head != mutation.ProposedSHA) {
 			return unresolvedReconciliation(), nil
 		}
 		result, err := json.Marshal(struct {

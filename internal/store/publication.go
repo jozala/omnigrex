@@ -18,7 +18,7 @@ func (store *Store) ListParticipantPublicationMutations(ctx context.Context, lea
 		rows, err := tx.Query(ctx, `
 SELECT mutation.id::text, mutation.agent_turn_id::text, mutation.execution_epoch, mutation.invocation_number,
        COALESCE(mutation.operation_id, ''), mutation.tool_name, mutation.request, mutation.state,
-       COALESCE(mutation.external_service, ''), COALESCE(mutation.external_resource_id, ''), COALESCE(mutation.expected_sha, ''),
+       COALESCE(mutation.external_service, ''), COALESCE(mutation.external_resource_id, ''), COALESCE(mutation.expected_sha, ''), COALESCE(mutation.proposed_sha, ''), mutation.history_publication,
        mutation.result, COALESCE(mutation.last_error, ''), mutation.admitted_at, mutation.started_at, mutation.finished_at
 FROM tool_invocations AS mutation
 JOIN agent_turns AS source_turn ON source_turn.id = mutation.agent_turn_id

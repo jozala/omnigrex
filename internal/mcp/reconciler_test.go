@@ -521,6 +521,30 @@ func TestProductionReconcilerReconcilesPublicationAndInternalMutations(t *testin
 		}
 	})
 
+	t.Run("interrupted multi-commit publication", func(t *testing.T) {
+		const proposed = "2123456789abcdef0123456789abcdef01234567"
+		publications := &reconciliationPublications{result: workspace.PublicationReconciliationResult{
+			Outcome: workspace.PublicationReconciliationFound, Head: proposed,
+		}}
+		reconciler := newProductionReconciler(t, &reconciliationGitHub{}, publications)
+		mutation := reconciliationMutation(mcp.ToolPublishChanges, `{"operation_id":"caller-publish"}`)
+		mutation.ExternalService = "git"
+		mutation.ExternalResourceID = "9123:omnigrex/issue-12"
+		mutation.State = store.MutationUnknown
+		mutation.ProposedSHA = proposed
+		mutation.HistoryPublication = true
+		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationFound || result.Outcome.State != store.MutationSucceeded ||
+			publications.input.ProposedRevision != proposed || publications.input.BaseRevision != productionHeadSHA {
+			t.Fatalf("reconcile interrupted publication = (%#v, %#v, %v)", result, publications.input, err)
+		}
+		mutation.ProposedSHA = ""
+		result, err = reconciler.Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
+			t.Fatalf("unrecorded new publication = (%#v, %v)", result, err)
+		}
+	})
+
 	t.Run("report blocked", func(t *testing.T) {
 		reconciler := newProductionReconciler(t, &reconciliationGitHub{}, &reconciliationPublications{})
 		mutation := reconciliationMutation(mcp.ToolReportBlocked, `{"operation_id":"caller-blocked","reason":"Unavailable","details":"External dependency"}`)

@@ -943,17 +943,7 @@ func (database *corroborationTracingStore) SettleTerminalRevalidation(ctx contex
 
 func cleanCorroborationPaths(t *testing.T) workspace.Paths {
 	t.Helper()
-	root := t.TempDir()
-	paths := workspace.Paths{Workspace: filepath.Join(root, "workspace"), Publication: filepath.Join(root, "publication")}
-	for _, path := range []string{paths.Workspace, paths.Publication} {
-		if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("same\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return paths
+	return committedPublicationPaths(t)
 }
 
 type corroborationReviewGitHub struct {
@@ -1010,16 +1000,7 @@ func TestTerminalCorroborationWorkerSettlesOriginalDeveloperWithoutAnotherPrompt
 	if _, recovered, err := databases[1].ClaimAndRecoverExpiredAgentTurn(ctx); err != nil || recovered {
 		t.Fatalf("fresh Store must not treat pending corroboration as an expired prompt: recovered %t, error %v", recovered, err)
 	}
-	root := t.TempDir()
-	paths := workspace.Paths{Workspace: filepath.Join(root, "workspace"), Publication: filepath.Join(root, "publication")}
-	for _, path := range []string{paths.Workspace, paths.Publication} {
-		if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("same\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	paths := committedPublicationPaths(t)
 	github := &corroborationReviewGitHub{pullRequest: githubapi.PullRequest{
 		ID: proposal.PullRequestID, NodeID: proposal.PullRequestNodeID, Number: int(proposal.PullRequestNumber),
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},

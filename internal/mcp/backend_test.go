@@ -80,7 +80,7 @@ func TestProductionBackendUsesDeveloperCredentialsForAllComments(t *testing.T) {
 	}
 }
 
-func TestProductionBackendPublishesOrderedDeterministicCommits(t *testing.T) {
+func TestProductionBackendPublishesOrderedCommittedHeads(t *testing.T) {
 	firstHead := "1123456789abcdef0123456789abcdef01234567"
 	secondHead := "2123456789abcdef0123456789abcdef01234567"
 	publisher := &backendPublisher{results: []workspace.PublicationResult{{Head: firstHead, Changed: true}, {Head: secondHead, Changed: true}}}
@@ -107,12 +107,11 @@ func TestProductionBackendPublishesOrderedDeterministicCommits(t *testing.T) {
 	first := publisher.publications[0]
 	second := publisher.publications[1]
 	if first.RepositoryURL != "https://github.com/acme/widgets.git" || first.BaseRevision != productionHeadSHA || first.ExpectedOldHead != productionHeadSHA ||
-		first.Branch != scope.Branch || first.Credential != "developer-secret" || first.Time != scope.TurnCreatedAt ||
-		first.Message != "Publish changes\n\nOmnigrex-Operation-ID: publish-1" ||
-		first.Identity != (workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"}) {
+		first.Branch != scope.Branch || first.DefaultBranch != scope.DefaultBranch || first.Credential != "developer-secret" ||
+		first.Message != "Publish changes" {
 		t.Fatalf("first publication = %#v", first)
 	}
-	if second.BaseRevision != firstHead || second.ExpectedOldHead != firstHead || second.Time != first.Time || second.RepositoryURL != first.RepositoryURL {
+	if second.BaseRevision != firstHead || second.ExpectedOldHead != firstHead || second.RepositoryURL != first.RepositoryURL {
 		t.Fatalf("second publication = %#v", second)
 	}
 	if credentials.developerCalls != 2 || credentials.reviewerCalls != 0 {
@@ -1360,7 +1359,7 @@ type backendPublisher struct {
 	err          error
 }
 
-func (publisher *backendPublisher) Publish(_ context.Context, publication workspace.Publication) (workspace.PublicationResult, error) {
+func (publisher *backendPublisher) Publish(ctx context.Context, publication workspace.Publication) (workspace.PublicationResult, error) {
 	publisher.publications = append(publisher.publications, publication)
 	if publisher.err != nil {
 		return workspace.PublicationResult{}, publisher.err
@@ -1370,6 +1369,11 @@ func (publisher *backendPublisher) Publish(_ context.Context, publication worksp
 	}
 	result := publisher.results[0]
 	publisher.results = publisher.results[1:]
+	if result.Changed && publication.RecordProposedTip != nil {
+		if err := publication.RecordProposedTip(ctx, result.Head); err != nil {
+			return workspace.PublicationResult{}, err
+		}
+	}
 	return result, nil
 }
 

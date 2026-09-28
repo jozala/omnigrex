@@ -52,6 +52,7 @@ type Store interface {
 	ReserveMutation(context.Context, store.AgentTurnLease, store.MutationSpec) (store.MutationReservation, error)
 	AcknowledgeMutationReplay(context.Context, store.AgentTurnLease, string, store.MutationSpec) error
 	StartMutation(context.Context, store.AgentTurnLease, string) (store.MutationReservation, error)
+	RecordProposedPublicationTip(context.Context, store.AgentTurnLease, string, string) error
 	CompleteMutation(context.Context, store.AgentTurnLease, string, json.RawMessage) error
 	FailMutation(context.Context, store.AgentTurnLease, string, error) error
 	MarkMutationUnknown(context.Context, store.AgentTurnLease, string, error) error
@@ -154,13 +155,14 @@ type ToolScope struct {
 }
 
 type Invocation struct {
-	Name        string
-	Arguments   json.RawMessage
-	Scope       ToolScope
-	Class       ToolClass
-	OperationID string
-	Mutation    MutationMetadata
-	lease       store.AgentTurnLease
+	Name              string
+	Arguments         json.RawMessage
+	Scope             ToolScope
+	Class             ToolClass
+	OperationID       string
+	Mutation          MutationMetadata
+	lease             store.AgentTurnLease
+	recordProposedTip func(context.Context, string) error
 }
 
 func (Invocation) String() string   { return "MCP tool invocation" }
@@ -903,9 +905,8 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		invocation.OperationID = reservation.ID
 		// Execute exactly what the reservation recorded. A reused RESERVED
 		// mutation (same turn retry or successor turn) carries its original
-		// persisted footer — including an explicitly empty footer for legacy
-		// unsigned reservations — so publication can never diverge from what
-		// recovery reconciles against.
+		// persisted footer, including an explicitly empty footer for legacy
+		// unsigned reservations. Publication uses its separately recorded tip.
 		invocation.Arguments = ensureReservationSignature(invocation.Name, reservation.Request)
 	default:
 		finishCall(true)
@@ -1011,6 +1012,11 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		}
 	}()
 
+	if invocation.Name == ToolPublishChanges {
+		invocation.recordProposedTip = func(ctx context.Context, head string) error {
+			return gateway.store.RecordProposedPublicationTip(ctx, lease, reservation.ID, head)
+		}
+	}
 	result, err := gateway.backend.Execute(backendContext, invocation)
 	watcherMutex.Lock()
 	stoppingWatcher = true

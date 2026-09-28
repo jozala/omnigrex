@@ -98,7 +98,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatalf("authoritative replay heads = %#v", ledger)
 	}
 
-	paths := workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}
+	paths := committedPublicationPaths(t)
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +268,7 @@ type replayGatewayPublisher struct {
 	calls   []workspace.Publication
 }
 
-func (publisher *replayGatewayPublisher) Publish(_ context.Context, publication workspace.Publication) (workspace.PublicationResult, error) {
+func (publisher *replayGatewayPublisher) Publish(ctx context.Context, publication workspace.Publication) (workspace.PublicationResult, error) {
 	publisher.mutex.Lock()
 	defer publisher.mutex.Unlock()
 	publisher.calls = append(publisher.calls, publication)
@@ -277,6 +277,11 @@ func (publisher *replayGatewayPublisher) Publish(_ context.Context, publication 
 	}
 	result := publisher.results[0]
 	publisher.results = publisher.results[1:]
+	if result.Changed && publication.RecordProposedTip != nil {
+		if err := publication.RecordProposedTip(ctx, result.Head); err != nil {
+			return workspace.PublicationResult{}, err
+		}
+	}
 	return result, nil
 }
 

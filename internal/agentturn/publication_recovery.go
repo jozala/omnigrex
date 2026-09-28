@@ -92,6 +92,9 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 			if result.Head == mutation.ExpectedSHA {
 				return ErrPublicationConflict
 			}
+			if mutation.HistoryPublication && mutation.ProposedSHA != result.Head {
+				return ErrPublicationConflict
+			}
 			publication.HeadSHA, publication.SourcePublishMutationID = result.Head, mutation.ID
 			latest = mutation
 		case mcp.ToolOpenPR:
@@ -126,7 +129,8 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 	}
 	observed, err := recovery.remote.ReconcilePublication(ctx, workspace.PublicationReconciliation{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: repositoryURL, Credential: credential,
-		BaseRevision: latest.ExpectedSHA, Branch: branch, OperationID: latest.ID,
+		BaseRevision: latest.ExpectedSHA, ProposedRevision: latest.ProposedSHA, HistoryPublication: latest.HistoryPublication,
+		Branch: branch, OperationID: latest.ID,
 	})
 	if err != nil {
 		return errors.New("verify publication commit unavailable")
