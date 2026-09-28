@@ -1,10 +1,12 @@
 package agentturn_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,6 +425,44 @@ func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *t
 	}
 }
 
+func TestOutcomeReconcilerAcceptsAgentConfirmedPriorReviewerIntent(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	prior := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	result, err := json.Marshal(map[string]any{
+		"source_invocation_id": prior.ID, "source_tool": prior.ToolName,
+		"source_operation_id": prior.OperationID, "source_request": prior.Request,
+		"source_result": prior.Result, "external_service": prior.ExternalService,
+		"external_resource_id": prior.ExternalResourceID, "expected_sha": prior.ExpectedSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := outcomeSucceededMutation(1, mcp.ToolConfirmPriorTerminalIntent, "confirm-1",
+		`{"operation_id":"confirm-1","source_invocation_id":"`+prior.ID+`"}`, string(result),
+		"omnigrex", outcomeWorkflowID, outcomeHead)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeApproved || observation.Review == nil || observation.Review.ID != 801 || github.listCalls != 1 {
+		t.Fatalf("confirmed Reviewer intent = (%#v, %v), GitHub review reads %d", observation, err, github.listCalls)
+	}
+	github.getErr = &githubapi.APIError{StatusCode: 503}
+	var unavailable *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { unavailable = &failure }
+	failed, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, failed, err, store.AgentTurnFailed, "observation failed")
+	if unavailable == nil || unavailable.SourceInvocationID != confirmed.ID || !unavailable.Retryable {
+		t.Fatalf("failed confirmed intent must checkpoint its current mutation: %#v", unavailable)
+	}
+	github.getErr = nil
+	github.reviews = []githubapi.Review{}
+	unavailable = nil
+	failed, err = newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, failed, err, store.AgentTurnFailed, "identity is absent")
+	if unavailable == nil || unavailable.SourceInvocationID != confirmed.ID || unavailable.Code != "review_not_visible_yet" {
+		t.Fatalf("temporarily unlisted confirmed review = %#v", unavailable)
+	}
+}
+
 func TestOutcomeReconcilerExposesRacedReviewerHeadWithoutConsumingTheReviewEvidence(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
 	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "REQUEST_CHANGES", "CHANGES_REQUESTED", outcomeHead, 701)}}
@@ -799,6 +839,160 @@ func TestOutcomeReconcilerNeverLeaksRepositoryCredential(t *testing.T) {
 	}
 }
 
+func TestOutcomeReconcilerLogsSafeGitHubObservationFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		role       workflow.Role
+		getErr     error
+		listErr    error
+		provider   string
+		want       []string
+		mustNotLog string
+	}{
+		{
+			name: "developer GitHub HTTP response", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 503, RequestID: "GH-123", Message: "sensitive " + outcomeCredential},
+			want:   []string{`"operation":"get_pull_request"`, `"failure_code":"github_http_error"`, `"github_http_status":503`}, mustNotLog: "GH-123",
+		},
+		{
+			name: "reviewer permission error", role: workflow.RoleReviewer,
+			getErr: &githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403, RequestID: "GH-PERM", Message: outcomeCredential}},
+			want:   []string{`"operation":"get_pull_request"`, `"role":"REVIEWER"`, `"failure_code":"permission_denied"`, `"github_http_status":403`}, mustNotLog: "GH-PERM",
+		},
+		{
+			name: "reviewer review list rate limit", role: workflow.RoleReviewer,
+			listErr: &githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 429, RequestID: "GH-LIMIT", Message: outcomeCredential}},
+			want:    []string{`"operation":"list_pull_request_reviews"`, `"failure_code":"rate_limited"`, `"github_http_status":429`}, mustNotLog: "GH-LIMIT",
+		},
+		{
+			name: "invalid response", role: workflow.RoleDeveloper,
+			getErr: fmt.Errorf("response %s: %w", outcomeCredential, githubapi.ErrInvalidAPIResponse),
+			want:   []string{`"failure_code":"invalid_api_response"`},
+		},
+		{
+			name: "malicious request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: "GH-1 " + outcomeCredential, Message: outcomeCredential},
+			want:   []string{`"github_http_status":502`}, mustNotLog: "GH-1",
+		},
+		{
+			name: "credential-shaped request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: outcomeCredential, Message: outcomeCredential},
+			want:   []string{`"github_http_status":502`}, mustNotLog: "github_request_id",
+		},
+		{
+			name: "provider credential in request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: "provider-secret"}, provider: "provider-secret",
+			want: []string{`"github_http_status":502`}, mustNotLog: "github_request_id",
+		},
+		{
+			name: "transport failure", role: workflow.RoleDeveloper,
+			getErr: &githubapi.TransientError{Cause: errors.New("transport " + outcomeCredential)},
+			want:   []string{`"failure_code":"transient_transport"`},
+		},
+		{
+			name: "deadline", role: workflow.RoleDeveloper,
+			getErr: fmt.Errorf("transport %s: %w", outcomeCredential, context.DeadlineExceeded),
+			want:   []string{`"failure_code":"deadline_exceeded"`},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, test.role, true)
+			request.ReviewerRepositoryCredential = "reviewer-repository-secret"
+			mutation := outcomeRequestReviewMutation(1)
+			if test.role == workflow.RoleReviewer {
+				mutation = outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+			}
+			github := &outcomeGitHub{
+				pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)},
+				getErr: test.getErr, listErr: test.listErr,
+			}
+			var logs bytes.Buffer
+			var providers []json.RawMessage
+			if test.provider != "" {
+				providers = []json.RawMessage{json.RawMessage(`{"token":"` + test.provider + `"}`)}
+			}
+			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
+				Clock: outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := reconciler.Reconcile(context.Background(), request)
+			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "observation failed")
+			output := logs.String()
+			for _, want := range append([]string{
+				`"msg":"Agent Turn GitHub outcome observation failed"`,
+				`"workflow_id":"` + outcomeWorkflowID + `"`,
+				`"agent_turn_id":"` + outcomeTurnID + `"`,
+				`"execution_epoch":7`, `"pull_request_number":23`,
+			}, test.want...) {
+				if !strings.Contains(output, want) {
+					t.Errorf("log missing %s: %s", want, output)
+				}
+			}
+			for _, forbidden := range []string{outcomeCredential, request.ReviewerRepositoryCredential, test.provider, test.mustNotLog, "github_request_id"} {
+				if forbidden != "" && strings.Contains(output, forbidden) {
+					t.Errorf("log contains disallowed content %q", forbidden)
+				}
+			}
+			if strings.Count(output, "Agent Turn GitHub outcome observation failed") != 1 {
+				t.Errorf("unexpected number of observation failure logs: %s", output)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerRetriesTransientFreshGitHubReadsWithinTurn(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		role          workflow.Role
+		getErrors     []error
+		listErrors    []error
+		wantGetCalls  int
+		wantListCalls int
+		wantOutcome   workflow.TurnOutcome
+	}{
+		{name: "Developer temporary outage", role: workflow.RoleDeveloper,
+			getErrors: []error{&githubapi.APIError{StatusCode: 503}}, wantGetCalls: 2,
+			wantOutcome: workflow.TurnOutcomeChangeProposalReady},
+		{name: "Developer newly published PR", role: workflow.RoleDeveloper,
+			getErrors: []error{&githubapi.APIError{StatusCode: 404}}, wantGetCalls: 2,
+			wantOutcome: workflow.TurnOutcomeChangeProposalReady},
+		{name: "Reviewer rate limit", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 429}}},
+			wantGetCalls: 1, wantListCalls: 2, wantOutcome: workflow.TurnOutcomeApproved},
+		{name: "Reviewer rate limit with retry advice", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 403}, RetryAfter: time.Minute}},
+			wantGetCalls: 1, wantListCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "Reviewer rate limit with reset time", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 403}, ResetAt: time.Now().Add(time.Minute)}},
+			wantGetCalls: 1, wantListCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "permanent permission denial", role: workflow.RoleDeveloper,
+			getErrors:    []error{&githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403}}},
+			wantGetCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "outage persists", role: workflow.RoleDeveloper,
+			getErrors:    []error{&githubapi.APIError{StatusCode: 503}, &githubapi.APIError{StatusCode: 503}, &githubapi.APIError{StatusCode: 503}},
+			wantGetCalls: 3, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, test.role, true)
+			mutation := outcomeRequestReviewMutation(1)
+			if test.role == workflow.RoleReviewer {
+				mutation = outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+			}
+			github := &outcomeGitHub{
+				pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)},
+				getErrors: test.getErrors, listErrors: test.listErrors,
+			}
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}}, github).Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != test.wantOutcome || github.getCalls != test.wantGetCalls || github.listCalls != test.wantListCalls {
+				t.Fatalf("Reconcile() = (%#v, %v), GetPullRequest calls = %d, ListPullRequestReviews calls = %d", observation, err, github.getCalls, github.listCalls)
+			}
+		})
+	}
+}
+
 func TestOutcomeReconcilerDispatchesTerminalIntentByEvidenceKind(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
 	observation, err := newOutcomeReconciler(t,
@@ -817,12 +1011,17 @@ type outcomeStore struct {
 	mutations          []store.MutationReservation
 	prior              []store.MutationReservation
 	err                error
+	priorErr           error
+	reviewErr          error
 	existing           *workflow.ReviewIdentity
 	reviewRepositoryID int64
 	reviewID           int64
 }
 
 func (storeAPI *outcomeStore) ListParticipantPublicationMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error) {
+	if storeAPI.priorErr != nil {
+		return nil, storeAPI.priorErr
+	}
 	return storeAPI.prior, storeAPI.err
 }
 
@@ -833,13 +1032,59 @@ func (storeAPI *outcomeStore) ListAgentTurnMutationInvocations(context.Context, 
 func (storeAPI *outcomeStore) GetChangeProposalReview(_ context.Context, repositoryID, reviewID int64) (*workflow.ReviewIdentity, error) {
 	storeAPI.reviewRepositoryID = repositoryID
 	storeAPI.reviewID = reviewID
+	if storeAPI.reviewErr != nil {
+		return nil, storeAPI.reviewErr
+	}
 	return storeAPI.existing, storeAPI.err
+}
+
+func TestOutcomeReconcilerReportsTransientDurableEvidenceReads(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	var observed *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { observed = &failure }
+	mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
+	reconciler := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}, reviewErr: errors.New("database unavailable")}, github)
+	result, err := reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, result, err, store.AgentTurnFailed, "lookup failed")
+	if observed == nil || observed.Code != "database_observation_unavailable" || !observed.Retryable || observed.SourceInvocationID != mutation.ID {
+		t.Fatalf("durable review lookup failure = %#v", observed)
+	}
+}
+
+func TestOutcomeReconcilerRetriesReviewNotYetVisibleButRejectsConflictingIdentity(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{}}
+	reconciler := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}}, github)
+	var unavailable *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { unavailable = &failure }
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "identity is absent")
+	if unavailable == nil || unavailable.Code != "review_not_visible_yet" || !unavailable.Retryable || unavailable.SourceInvocationID != mutation.ID {
+		t.Fatalf("not-yet-visible review = %#v", unavailable)
+	}
+	unavailable = nil
+	github.reviews = []githubapi.Review{outcomeReview(outcomeHead, 701)}
+	observation, err = reconciler.Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeApproved || unavailable != nil {
+		t.Fatalf("visible review = (%#v, %v), failure %#v", observation, err, unavailable)
+	}
+	unavailable = nil
+	github.reviews[0].NodeID = "different-review-node"
+	observation, err = reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "conflicts")
+	if unavailable != nil {
+		t.Fatalf("definitely conflicting review was treated as a retryable absence: %#v", unavailable)
+	}
 }
 
 type outcomeGitHub struct {
 	pullRequest                            githubapi.PullRequest
 	reviews                                []githubapi.Review
 	err                                    error
+	getErr, listErr                        error
+	getErrors, listErrors                  []error
 	getCredential, getOwner, getRepository string
 	listCredential                         string
 	getNumber, getCalls, listCalls         int
@@ -848,12 +1093,32 @@ type outcomeGitHub struct {
 func (github *outcomeGitHub) GetPullRequest(_ context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
 	github.getCredential, github.getOwner, github.getRepository, github.getNumber = credential, owner, repository, number
 	github.getCalls++
+	if len(github.getErrors) > 0 {
+		err := github.getErrors[0]
+		github.getErrors = github.getErrors[1:]
+		if err != nil {
+			return githubapi.PullRequest{}, err
+		}
+	}
+	if github.getErr != nil {
+		return githubapi.PullRequest{}, github.getErr
+	}
 	return github.pullRequest, github.err
 }
 
 func (github *outcomeGitHub) ListPullRequestReviews(_ context.Context, credential, _, _ string, _ int) ([]githubapi.Review, error) {
 	github.listCredential = credential
 	github.listCalls++
+	if len(github.listErrors) > 0 {
+		err := github.listErrors[0]
+		github.listErrors = github.listErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if github.listErr != nil {
+		return nil, github.listErr
+	}
 	return github.reviews, github.err
 }
 

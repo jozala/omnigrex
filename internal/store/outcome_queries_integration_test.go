@@ -85,7 +85,7 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, root), root.ControlRevision, "replay-root", time.Second, 1)
+	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, root), root.ControlRevision, "replay-root", 20*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 		if err != nil {
 			t.Fatalf("PrepareAgentTurn() retry error = %v", err)
 		}
-		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, owner, time.Second, 1)
+		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, owner, 20*time.Second, 1)
 		if err != nil {
 			t.Fatalf("ClaimAndAcquireAgentTurn() retry error = %v", err)
 		}

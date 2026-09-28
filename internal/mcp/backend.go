@@ -78,6 +78,11 @@ type WorkflowMutations interface {
 	ReportBlocked(context.Context, ReportBlockedMutation) (json.RawMessage, error)
 }
 
+type PriorTerminalIntentReader interface {
+	GetConfirmablePriorTerminalIntent(context.Context, store.AgentTurnLease, string) (store.MutationReservation, error)
+	HasPriorSuccessfulReviewForTurn(context.Context, store.AgentTurnLease) (bool, error)
+}
+
 // LedgerWorkflowMutations returns workflow intents that become durable with the gateway's mutation completion.
 // Phase 8 consumes these terminal mutation results when it settles the Agent Turn.
 type LedgerWorkflowMutations struct{}
@@ -112,20 +117,22 @@ type ProductionBackendConfig struct {
 	Credentials      RepositoryCredentials
 	Publisher        WorkspacePublisher
 	Workflow         WorkflowMutations
+	PriorIntents     PriorTerminalIntentReader
 	GitRemoteBaseURL string
 	Policies         role.PolicyCatalog
 	RoleCatalog      role.Catalog
 }
 
 type ProductionBackend struct {
-	github      GitHubAPI
-	credentials RepositoryCredentials
-	publisher   WorkspacePublisher
-	workflow    WorkflowMutations
-	remoteBase  gitremote.BaseURL
-	identity    workspace.CommitIdentity
-	policies    role.PolicyCatalog
-	roleCatalog role.Catalog
+	github       GitHubAPI
+	credentials  RepositoryCredentials
+	publisher    WorkspacePublisher
+	workflow     WorkflowMutations
+	priorIntents PriorTerminalIntentReader
+	remoteBase   gitremote.BaseURL
+	identity     workspace.CommitIdentity
+	policies     role.PolicyCatalog
+	roleCatalog  role.Catalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -180,7 +187,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	}
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
-		workflow: config.Workflow, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
+		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
 		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
@@ -198,6 +205,8 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return backend.requestReview(ctx, invocation)
 	case ToolReportBlocked:
 		return backend.reportBlocked(ctx, invocation)
+	case ToolConfirmPriorTerminalIntent:
+		return backend.confirmPriorTerminalIntent(ctx, invocation)
 	}
 	credential, err := backend.credential(ctx, tool.Name, invocation.Scope.Role, invocation.Scope.Repository)
 	if err != nil {
@@ -303,6 +312,11 @@ func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Inv
 		}
 		backend.publicationMutex.Unlock()
 		metadata.ExpectedSHA = head
+	}
+	if tool.Name == ToolConfirmPriorTerminalIntent {
+		metadata.ExternalService = "omnigrex"
+		metadata.ExternalResourceID = invocation.Scope.WorkflowID
+		metadata.ExpectedSHA = invocation.Scope.HeadSHA
 	}
 	return metadata, nil
 }
@@ -608,6 +622,15 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	authority, granted := policy.CredentialAuthorityForTool(ToolSubmitReview)
 	if !ok || !granted || authority != role.ReviewerAuthority || invocation.Scope.PullRequest == nil {
 		return nil, ErrToolNotAuthorized
+	}
+	if backend.priorIntents != nil {
+		alreadySubmitted, err := backend.priorIntents.HasPriorSuccessfulReviewForTurn(ctx, invocation.lease)
+		if err != nil {
+			return nil, ErrToolDependency
+		}
+		if alreadySubmitted {
+			return nil, ErrToolPrecondition
+		}
 	}
 	var arguments struct {
 		Event    githubapi.ReviewEvent    `json:"event"`
@@ -1164,6 +1187,10 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 	case ToolRequestReview:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
+		metadata.ExpectedSHA = scope.HeadSHA
+	case ToolConfirmPriorTerminalIntent:
+		metadata.ExternalService = "omnigrex"
+		metadata.ExternalResourceID = scope.WorkflowID
 		metadata.ExpectedSHA = scope.HeadSHA
 	case ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"

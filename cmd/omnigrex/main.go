@@ -218,6 +218,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Credentials:      repositoryCredentials,
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},
+		PriorIntents:     database,
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		Policies:         rolePolicies,
 		RoleCatalog:      roleCatalog,
@@ -354,7 +355,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api,
+		Store: database, GitHub: githubServices.api, Logger: logger,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
@@ -383,6 +384,20 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	zeroBytes(providerCredentialJSON)
 	if executionWorkerErr != nil {
 		return fmt.Errorf("configure Agent Turn execution Worker: %w", executionWorkerErr)
+	}
+	terminalCorroborationWorker, err := agentturn.NewTerminalCorroborationWorker(
+		database, outcomeReconciler, developerRepositoryCredentials, reviewerRepositoryCredentials, workspaces,
+		agentturn.TerminalCorroborationWorkerConfig{
+			ClaimOwner:    githubServices.claimOwner + ":verify-terminal-intent",
+			Window:        settings.TerminalCorroborationDuration,
+			PollInterval:  settings.WorkflowEffectPollInterval,
+			LeaseDuration: max(settings.WorkflowEffectLeaseDuration, 3*time.Second),
+			OnError: func(error) {
+				logger.Error("verify terminal intent", "failure_code", "verification_attempt_unavailable")
+			},
+		})
+	if err != nil {
+		return fmt.Errorf("configure terminal corroboration Worker: %w", err)
 	}
 	reconciliationWorker, err := webhook.NewReconciliationWorker(database, githubServices.webhookProcessor, webhook.ReconciliationWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":reconcile-pending-events", LeaseDuration: settings.WorkflowEffectLeaseDuration,
@@ -497,6 +512,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		reconciliationWorker.Run,
 		preparationWorker.Run,
 		executionWorker.Run,
+		terminalCorroborationWorker.Run,
 		runtimeStopWorker.Run,
 		mutationRecoveryWorker.Run,
 		expiredTurnMonitor.Run,

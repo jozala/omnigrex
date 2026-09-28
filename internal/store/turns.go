@@ -53,22 +53,25 @@ const (
 	recoveryContinuationMutationHandoff       = "MUTATION_RECONCILIATION_HANDOFF_APPLIED"
 	recoveryContinuationMigrationHandoff      = "MIGRATION_HANDOFF_APPLIED"
 	recoveryContinuationDefinitionHandoff     = "WORKFLOW_DEFINITION_HANDOFF_APPLIED"
+	recoveryContinuationTerminalPending       = "TERMINAL_CORROBORATION_PENDING"
+	recoveryContinuationTerminalApplied       = "TERMINAL_CORROBORATION_APPLIED"
 )
 
 // AgentTurnStatus is the durable lifecycle state of an Agent Turn.
 type AgentTurnStatus string
 
 const (
-	AgentTurnQueued      AgentTurnStatus = "QUEUED"
-	AgentTurnStarting    AgentTurnStatus = "STARTING"
-	AgentTurnRunning     AgentTurnStatus = "RUNNING"
-	AgentTurnCancelling  AgentTurnStatus = "CANCELLING"
-	AgentTurnSettling    AgentTurnStatus = "SETTLING"
-	AgentTurnReconciling AgentTurnStatus = "RECONCILING"
-	AgentTurnSucceeded   AgentTurnStatus = "SUCCEEDED"
-	AgentTurnFailed      AgentTurnStatus = "FAILED"
-	AgentTurnInterrupted AgentTurnStatus = "INTERRUPTED"
-	AgentTurnTimedOut    AgentTurnStatus = "TIMED_OUT"
+	AgentTurnQueued        AgentTurnStatus = "QUEUED"
+	AgentTurnStarting      AgentTurnStatus = "STARTING"
+	AgentTurnRunning       AgentTurnStatus = "RUNNING"
+	AgentTurnCancelling    AgentTurnStatus = "CANCELLING"
+	AgentTurnSettling      AgentTurnStatus = "SETTLING"
+	AgentTurnReconciling   AgentTurnStatus = "RECONCILING"
+	AgentTurnCorroborating AgentTurnStatus = "CORROBORATING"
+	AgentTurnSucceeded     AgentTurnStatus = "SUCCEEDED"
+	AgentTurnFailed        AgentTurnStatus = "FAILED"
+	AgentTurnInterrupted   AgentTurnStatus = "INTERRUPTED"
+	AgentTurnTimedOut      AgentTurnStatus = "TIMED_OUT"
 )
 
 // AgentTurnSpec captures the immutable inputs of an Agent Turn.
@@ -154,15 +157,24 @@ type AgentTurnPublication struct {
 
 // AgentTurnExecutionContext contains only durable launch inputs read under the live turn fence.
 type AgentTurnExecutionContext struct {
-	WorkflowID     string
-	Repository     AgentTurnRepository
-	Issue          AgentTurnIssue
-	ChangeProposal *AgentTurnChangeProposal
-	Publication    *AgentTurnPublication
-	Participant    AgentParticipant
-	Assignment     AgentAssignment
-	Session        AgentSession
-	Turn           AgentTurn
+	WorkflowID               string
+	Repository               AgentTurnRepository
+	Issue                    AgentTurnIssue
+	ChangeProposal           *AgentTurnChangeProposal
+	Publication              *AgentTurnPublication
+	Participant              AgentParticipant
+	Assignment               AgentAssignment
+	Session                  AgentSession
+	Turn                     AgentTurn
+	PriorTerminalIntent      *AgentTurnPriorTerminalIntent
+	PriorReviewRequiresHuman *AgentTurnPriorTerminalIntent
+}
+
+type AgentTurnPriorTerminalIntent struct {
+	SourceInvocationID string
+	SourceTurnID       string
+	ToolName           string
+	ExpectedHeadSHA    string
 }
 
 // AgentTurnCompletion describes the guarded terminal state of an Agent Turn.
@@ -976,20 +988,7 @@ func (store *Store) OpenMutationAdmission(ctx context.Context, lease AgentTurnLe
 // CloseMutationAdmission serializes with reservation and starts the settlement barrier.
 func (store *Store) CloseMutationAdmission(ctx context.Context, lease AgentTurnLease) error {
 	return store.withLockedAgentTurnLease(ctx, lease, "close mutation admission", func(tx pgx.Tx, turn lockedTurn) error {
-		if turn.Status != AgentTurnRunning && turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
-			return ErrAgentTurnFenceLost
-		}
-		var reconciliation bool
-		if err := tx.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM tool_invocations WHERE agent_turn_id = $1 AND execution_epoch = $2
-AND kind = 'MUTATION' AND state IN ('UNKNOWN', 'RECONCILING'))`, lease.ID, lease.ExecutionEpoch).Scan(&reconciliation); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `
-UPDATE agent_turns SET mutation_admission_open = FALSE,
-mutation_admission_closed_at = COALESCE(mutation_admission_closed_at, clock_timestamp()),
-status = CASE WHEN $2 THEN 'RECONCILING' ELSE 'SETTLING' END WHERE id = $1`, lease.ID, reconciliation)
-		return err
+		return closeLiveMutationAdmissionTx(ctx, tx, turn, false, "", "")
 	})
 }
 
@@ -1053,6 +1052,76 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		execution.Assignment = participant
 		execution.Session = session
 		execution.Turn = turn.AgentTurn
+		if turn.RetryOfTurnID != "" {
+			prior := &AgentTurnPriorTerminalIntent{}
+			err := tx.QueryRow(ctx, `
+WITH RECURSIVE ancestors (id) AS (
+    SELECT retry_of_turn_id FROM agent_turns WHERE id = $1
+    UNION ALL
+    SELECT source.retry_of_turn_id FROM agent_turns AS source
+    JOIN ancestors ON source.id = ancestors.id WHERE ancestors.id IS NOT NULL
+)
+SELECT mutation.id::text, source.id::text, mutation.tool_name, COALESCE(mutation.expected_sha, '')
+FROM ancestors
+JOIN agent_turns AS source ON source.id = ancestors.id
+JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
+WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
+  AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
+  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
+       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+  AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
+  AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
+       AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
+  AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
+  AND mutation.tool_name IN ('request_review', 'submit_review')
+	  AND (SELECT count(DISTINCT CASE WHEN terminal.tool_name = 'confirm_prior_terminal_intent'
+	                  THEN COALESCE(terminal.result->>'source_invocation_id', terminal.id::text)
+	                  ELSE terminal.id::text END) FROM ancestors AS prior_turn
+       JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
+       WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
+         AND terminal.tool_name IN ('request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
+  AND EXISTS (SELECT 1 FROM agent_turn_settlements AS settlement
+              WHERE settlement.agent_turn_id = source.id
+                AND settlement.workflow_outcome = 'INFRASTRUCTURE_FAILED')
+  AND NOT EXISTS (SELECT 1 FROM agent_turn_corroborations AS checkpoint
+                  WHERE checkpoint.agent_turn_id = source.id)
+ORDER BY source.turn_number DESC, mutation.invocation_number DESC LIMIT 1`,
+				turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID, turn.operationLineageID).Scan(
+				&prior.SourceInvocationID, &prior.SourceTurnID, &prior.ToolName, &prior.ExpectedHeadSHA)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				execution.PriorTerminalIntent = prior
+			}
+			if execution.PriorTerminalIntent == nil && participant.Role == workflow.RoleReviewer {
+				unconfirmable := &AgentTurnPriorTerminalIntent{}
+				err := tx.QueryRow(ctx, `
+WITH RECURSIVE ancestors (id) AS (
+    SELECT retry_of_turn_id FROM agent_turns WHERE id = $1
+    UNION ALL
+    SELECT source.retry_of_turn_id FROM agent_turns AS source
+    JOIN ancestors ON source.id = ancestors.id WHERE ancestors.id IS NOT NULL
+)
+SELECT mutation.id::text, source.id::text, mutation.tool_name, mutation.expected_sha
+FROM ancestors JOIN agent_turns AS source ON source.id = ancestors.id
+JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
+WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
+  AND source.operation_lineage_id = $4 AND mutation.kind = 'MUTATION'
+  AND mutation.state = 'SUCCEEDED' AND mutation.tool_name = 'submit_review'
+  AND mutation.expected_sha = $5
+ORDER BY source.turn_number DESC, mutation.invocation_number DESC LIMIT 1`,
+					turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID, turn.operationLineageID,
+					turn.ExpectedHeadSHA).Scan(&unconfirmable.SourceInvocationID, &unconfirmable.SourceTurnID,
+					&unconfirmable.ToolName, &unconfirmable.ExpectedHeadSHA)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+				if err == nil {
+					execution.PriorReviewRequiresHuman = unconfirmable
+				}
+			}
+		}
 
 		if lease.ChangeProposalID == "" {
 			publication := &AgentTurnPublication{}
@@ -1138,6 +1207,9 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 				if err := validateMutationReplayAncestor(ctx, tx, turn.ID, existing.AgentTurnID); err != nil {
 					return err
 				}
+				if err := rejectIneligibleTerminalReplay(ctx, tx, existing); err != nil {
+					return err
+				}
 			}
 			reservation = existing
 			return nil
@@ -1194,6 +1266,9 @@ func (store *Store) AcknowledgeMutationReplay(ctx context.Context, lease AgentTu
 			return ErrMutationOperationConflict
 		}
 		if err := validateMutationReplayAncestor(ctx, tx, turn.ID, source.AgentTurnID); err != nil {
+			return err
+		}
+		if err := rejectIneligibleTerminalReplay(ctx, tx, source); err != nil {
 			return err
 		}
 		return recordTerminalMutationReplay(ctx, tx, turn, source)
@@ -1828,12 +1903,15 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2 AND turn.recovery_started_at IS
 	if err := queryer.QueryRow(ctx, unsettledMutationsForTurnSQL, turnID, epoch).Scan(&recovery.MutationsUnsettled); err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil
+	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil &&
+		recovery.Continuation != recoveryContinuationTerminalPending &&
+		recovery.Continuation != recoveryContinuationTerminalApplied
 	return recovery, nil
 }
 
 func isAgentTurnRecoveryJob(kind string) bool {
-	return kind == StopStaleRuntimeJobKind || kind == ReconcileAgentTurnMutationsJobKind
+	return kind == StopStaleRuntimeJobKind || kind == ReconcileAgentTurnMutationsJobKind ||
+		kind == VerifyTerminalIntentJobKind || kind == RevalidateTerminalIntentJobKind
 }
 
 func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, error) {
@@ -2110,6 +2188,31 @@ SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, turnID, sourceTurnID).Sc
 		return err
 	}
 	if !ancestor {
+		return ErrMutationOperationConflict
+	}
+	return nil
+}
+
+func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source MutationReservation) error {
+	if source.State != MutationSucceeded {
+		return nil
+	}
+	switch source.ToolName {
+	case "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
+	default:
+		return nil
+	}
+	var eligible bool
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE((outcome IS NULL OR outcome->>'stop_reason' = 'end_turn')
+   AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'end_turn'
+        OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (last_error IS NULL OR (last_error NOT LIKE 'ACP prompt was cancelled%'
+       AND last_error NOT LIKE 'ACP prompt returned an invalid stop reason%')), FALSE)
+FROM agent_turns WHERE id = $1`, source.AgentTurnID).Scan(&eligible); err != nil {
+		return err
+	}
+	if !eligible {
 		return ErrMutationOperationConflict
 	}
 	return nil

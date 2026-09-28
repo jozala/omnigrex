@@ -160,7 +160,11 @@ type Invocation struct {
 	Class       ToolClass
 	OperationID string
 	Mutation    MutationMetadata
+	lease       store.AgentTurnLease
 }
+
+func (Invocation) String() string   { return "MCP tool invocation" }
+func (Invocation) GoString() string { return "mcp.Invocation{<authority redacted>}" }
 
 type MutationMetadata struct {
 	ExternalService    string
@@ -710,6 +714,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	invocation := Invocation{
 		Name: params.Name, Arguments: append(json.RawMessage(nil), canonicalArguments...),
 		Scope: gateway.backendScope(registration.scope), Class: tool.Class,
+		lease: registration.scope.Lease,
 	}
 	if tool.Class == MutationTool {
 		gateway.callMutation(response, request, registration, rpc.ID, invocation)

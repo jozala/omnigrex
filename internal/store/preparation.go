@@ -842,6 +842,16 @@ SELECT EXISTS (
 	if active {
 		return AgentSession{}, ErrAgentTurnActive
 	}
+	var priorIntentPending bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM jobs WHERE workflow_id = $1
+    AND kind = 'REVALIDATE_TERMINAL_INTENT' AND status IN ('AVAILABLE', 'LEASED'))`,
+		workflowID).Scan(&priorIntentPending); err != nil {
+		return AgentSession{}, err
+	}
+	if priorIntentPending {
+		return AgentSession{}, ErrAgentTurnRecoveryUnsettled
+	}
 	var recoveryUnsettled, mutationsUnsettled bool
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
