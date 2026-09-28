@@ -108,9 +108,9 @@ func (client *APIClient) ListInstallationRepositories(ctx context.Context, insta
 		if len(repositories) == totalCount {
 			break
 		}
-		if len(payload.Repositories) < 100 {
-			break
-		}
+		// Termination is driven by total_count alone: a short page does not
+		// mean the listing is complete, so keep fetching until every
+		// accessible repository has been observed.
 		if page >= 100 {
 			return nil, fmt.Errorf("%w: installation repositories pagination did not converge", ErrInvalidAPIResponse)
 		}
