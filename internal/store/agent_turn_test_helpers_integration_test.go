@@ -114,7 +114,8 @@ RETURNING id::text`, store.WorkflowActionQueue, store.PrepareAgentTurnJobKind, p
 			CommitSHA: spec.AgentProfileCommitSHA, ContentSHA256: spec.AgentProfileContentSHA256,
 			Config: spec.AgentProfileConfig,
 		},
-		ProfilePath: ".omnigrex/team/" + profileName + ".md",
+		ProfilePath:       ".omnigrex/team/" + profileName + ".md",
+		TurnConfiguration: spec.TurnConfiguration,
 	}
 	preparationSpec := store.AgentTurnPreparationSpec{
 		Stages: map[workflow.StageID]store.ParticipantPreparation{spec.Stage: preparation},

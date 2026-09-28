@@ -256,6 +256,40 @@ Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `patch`.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
+### Agent Turn Tool Paths
+
+An optional `.omnigrex/turn-configuration.yaml` on the default branch requests disk-backed directories for tool environment variables.
+Omnigrex reads it from the same pinned default-branch commit as the Agent Profiles for each Agent Turn and applies it to both Roles.
+The file is strictly validated; unknown fields, unsupported sizes, unapproved variables, and invalid directories cause a configuration Human Handoff before the Runtime Process starts.
+For example:
+
+```yaml
+version: 1
+environment-paths:
+  directories:
+    build-tmp:
+      lifecycle: turn
+    go-build-cache:
+      lifecycle: assignment
+  environment:
+    - name: TMPDIR
+      directory: build-tmp
+    - name: GOTMPDIR
+      directory: build-tmp
+    - name: GOCACHE
+      directory: go-build-cache
+```
+
+Set `OMNIGREX_AGENT_PATH_ENV_ALLOWLIST` to a comma-separated list of approved variable names in the deployment configuration, such as `TMPDIR,GOTMPDIR,GOCACHE,GOPATH`.
+The operator allowlist is shared across Roles; the repository may request only approved names and cannot supply path values.
+Omnigrex always rejects runtime-control and credential-related names such as `OPENCODE_*`, `OMNIGREX_*`, `HOME`, and `PATH` even if listed by the operator.
+Without the optional file, `TMPDIR` continues to use the 64 MiB `/tmp/opencode` tmpfs.
+Requested paths are created on the disk-backed mise volume under an isolated Assignment subpath, outside the repository workspace and Change Proposal tree.
+Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-lifecycle caches remain across turns and are removed during Assignment collection.
+These directories have no per-Assignment disk quota, like the existing workspace volume, so monitor available Docker-volume storage.
+Moving build output to disk does not increase the Agent Turn container's memory limit or constrain compiler parallelism.
+This implementation changes the `opencode-acp/v1` Runtime Profile content hash; existing Agent Sessions bound to the earlier contract cannot continue unless the deployment resets their stored associations before upgrading.
+
 Agent Profiles are loaded from the latest default-branch commit before each Agent Turn.
 Directory listing and every Profile file are read from the same exact commit.
 Every direct Markdown file is treated as configuration; malformed files and unknown or unreferenced Roles fail discovery.

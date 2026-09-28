@@ -11,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 const (
@@ -97,6 +98,7 @@ type Config struct {
 	AssignmentRetentionDuration            time.Duration
 	AgentTurnConcurrencyLimit              int
 	AgentTurnMemoryBytes                   int64
+	AgentPathEnvironmentAllowlist          []string
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
 	ShutdownTimeout                        time.Duration
@@ -381,6 +383,10 @@ func Load(getenv func(string) string) (Config, error) {
 		} else {
 			config.AgentTurnMemoryBytes = mib << 20
 		}
+	}
+	config.AgentPathEnvironmentAllowlist, err = turnconfig.Allowlist(getenv("OMNIGREX_AGENT_PATH_ENV_ALLOWLIST"))
+	if err != nil {
+		problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_PATH_ENV_ALLOWLIST: %w", err))
 	}
 
 	if len(problems) != 0 {

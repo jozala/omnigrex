@@ -184,7 +184,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
-	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies)
+	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
 	preparer := agentturn.NewPreparer(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
@@ -344,7 +344,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
-		Policies: rolePolicies,
+		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -445,7 +445,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
 	}
-	retentionWorker, err := retention.NewWorker(database, runtimeStateCleaner, retention.WorkerConfig{
+	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(runtimeStateCleaner, workspaces), retention.WorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
 		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,

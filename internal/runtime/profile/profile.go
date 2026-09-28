@@ -124,7 +124,6 @@ func NewOpenCodeV1(image string, platform Platform) (Profile, error) {
 			{Name: "OPENCODE_DISABLE_AUTOUPDATE", Value: "1"},
 			{Name: "OPENCODE_DISABLE_MODELS_FETCH", Value: "true"},
 			{Name: "OPENCODE_DISABLE_SHARE", Value: "1"},
-			{Name: "TMPDIR", Value: "/tmp/opencode"},
 			{Name: "XDG_CACHE_HOME", Value: "/home/opencode/.cache"},
 			{Name: "XDG_CONFIG_HOME", Value: "/home/opencode/.config"},
 			{Name: "XDG_DATA_HOME", Value: "/home/opencode/.local/share"},
@@ -133,6 +132,7 @@ func NewOpenCodeV1(image string, platform Platform) (Profile, error) {
 		Mounts: []Mount{
 			{Name: "mise", Path: "/home/opencode/.local/share/mise"},
 			{Name: "state", Path: "/home/opencode/.local/share/opencode"},
+			{Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"},
 			{Name: "workspace", Path: "/workspace"},
 		},
 		Capabilities: []string{"session/list", "session/load", "session/resume"},
@@ -341,7 +341,6 @@ func validate(contract Contract) error {
 		"OPENCODE_DISABLE_AUTOUPDATE":   "1",
 		"OPENCODE_DISABLE_MODELS_FETCH": "true",
 		"OPENCODE_DISABLE_SHARE":        "1",
-		"TMPDIR":                        "/tmp/opencode",
 		"XDG_CACHE_HOME":                "/home/opencode/.cache",
 		"XDG_CONFIG_HOME":               "/home/opencode/.config",
 		"XDG_DATA_HOME":                 "/home/opencode/.local/share",
@@ -368,6 +367,7 @@ func validate(contract Contract) error {
 	wantMounts := map[string]string{
 		"mise":      "/home/opencode/.local/share/mise",
 		"state":     "/home/opencode/.local/share/opencode",
+		"tool-data": "/home/opencode/.local/share/omnigrex-tool-data",
 		"workspace": "/workspace",
 	}
 	seenMounts := make(map[string]struct{}, len(contract.Mounts))

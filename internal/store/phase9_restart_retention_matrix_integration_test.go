@@ -792,6 +792,10 @@ func (phaseNineWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, _
 	return fence(ctx, func(context.Context) error { return nil })
 }
 
+func (phaseNineWorkspaceDiscarder) CleanupTurnPaths(ctx context.Context, _, _ string, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return nil })
+}
+
 type phaseNineClosureStopResponseLossStore struct {
 	*store.Store
 }
