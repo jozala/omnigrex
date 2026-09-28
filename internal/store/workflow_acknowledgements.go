@@ -1294,7 +1294,7 @@ func settleClosedAgentTurnTx(ctx context.Context, tx pgx.Tx, barrier lockedClosu
 	if err != nil {
 		return fmt.Errorf("lock closed Agent Turn execution job: %w", err)
 	}
-	corroborating := executionJob.Status == JobSucceeded
+	corroborating := executionJob.Status == JobSucceeded || executionJob.Status == JobFailed
 	if corroborating {
 		var verifierID string
 		if err := tx.QueryRow(ctx, `

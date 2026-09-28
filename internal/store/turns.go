@@ -53,6 +53,8 @@ const (
 	recoveryContinuationMutationHandoff       = "MUTATION_RECONCILIATION_HANDOFF_APPLIED"
 	recoveryContinuationMigrationHandoff      = "MIGRATION_HANDOFF_APPLIED"
 	recoveryContinuationDefinitionHandoff     = "WORKFLOW_DEFINITION_HANDOFF_APPLIED"
+	recoveryContinuationTerminalPending       = "TERMINAL_CORROBORATION_PENDING"
+	recoveryContinuationTerminalApplied       = "TERMINAL_CORROBORATION_APPLIED"
 )
 
 // AgentTurnStatus is the durable lifecycle state of an Agent Turn.
@@ -986,20 +988,7 @@ func (store *Store) OpenMutationAdmission(ctx context.Context, lease AgentTurnLe
 // CloseMutationAdmission serializes with reservation and starts the settlement barrier.
 func (store *Store) CloseMutationAdmission(ctx context.Context, lease AgentTurnLease) error {
 	return store.withLockedAgentTurnLease(ctx, lease, "close mutation admission", func(tx pgx.Tx, turn lockedTurn) error {
-		if turn.Status != AgentTurnRunning && turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
-			return ErrAgentTurnFenceLost
-		}
-		var reconciliation bool
-		if err := tx.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM tool_invocations WHERE agent_turn_id = $1 AND execution_epoch = $2
-AND kind = 'MUTATION' AND state IN ('UNKNOWN', 'RECONCILING'))`, lease.ID, lease.ExecutionEpoch).Scan(&reconciliation); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `
-UPDATE agent_turns SET mutation_admission_open = FALSE,
-mutation_admission_closed_at = COALESCE(mutation_admission_closed_at, clock_timestamp()),
-status = CASE WHEN $2 THEN 'RECONCILING' ELSE 'SETTLING' END WHERE id = $1`, lease.ID, reconciliation)
-		return err
+		return closeLiveMutationAdmissionTx(ctx, tx, turn, false, "", "")
 	})
 }
 
@@ -1078,6 +1067,8 @@ JOIN agent_turns AS source ON source.id = ancestors.id
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
   AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
+  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
+       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
   AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
   AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
        AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
@@ -1912,7 +1903,9 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2 AND turn.recovery_started_at IS
 	if err := queryer.QueryRow(ctx, unsettledMutationsForTurnSQL, turnID, epoch).Scan(&recovery.MutationsUnsettled); err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil
+	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil &&
+		recovery.Continuation != recoveryContinuationTerminalPending &&
+		recovery.Continuation != recoveryContinuationTerminalApplied
 	return recovery, nil
 }
 
@@ -2211,9 +2204,11 @@ func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source Mutat
 	}
 	var eligible bool
 	if err := tx.QueryRow(ctx, `
-SELECT (outcome IS NULL OR outcome->>'stop_reason' = 'end_turn')
+SELECT COALESCE((outcome IS NULL OR outcome->>'stop_reason' = 'end_turn')
+   AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'end_turn'
+        OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
    AND (last_error IS NULL OR (last_error NOT LIKE 'ACP prompt was cancelled%'
-       AND last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
+       AND last_error NOT LIKE 'ACP prompt returned an invalid stop reason%')), FALSE)
 FROM agent_turns WHERE id = $1`, source.AgentTurnID).Scan(&eligible); err != nil {
 		return err
 	}

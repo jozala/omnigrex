@@ -451,6 +451,61 @@ func TestExecutionWorkerKeepsExplicitACPResponseCancellationInterrupted(t *testi
 	}
 }
 
+func TestExecutionWorkerFailedAtomicPromptFenceDoesNotSettleKnownRefusal(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
+		return acp.PromptResponse{StopReason: acp.StopReasonRefusal}, nil
+	}
+	fixture.store.promptEvidenceErr = errors.New("temporary PostgreSQL failure")
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		t.Fatalf("unfenced known refusal reached reconciliation: %#v", request)
+		return store.AgentTurnSettlementObservation{}
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if err == nil || fixture.store.settled.Outcome != "" {
+		t.Fatalf("known refusal after failed checkpoint = processed %t, error %v, observation %#v",
+			processed, err, fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerOOMObservationDeadlineDoesNotReclassifyACPCancellation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.err = context.Canceled
+	fixture.runtime.oomObserveErr = context.DeadlineExceeded
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
+			t.Fatalf("cancelled ACP prompt was reclassified by Docker observation: %#v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, context.Canceled) ||
+		fixture.store.recordedPromptError != string(agentturn.PromptErrorCancellation) ||
+		fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed {
+		t.Fatalf("cancelled prompt = processed %t, error %v, stored class %q, settlement %#v",
+			processed, err, fixture.store.recordedPromptError, fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerConfirmedOOMDoesNotAcceptExplicitACPCancellation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.err = context.Canceled
+	fixture.runtime.oomKilled = true
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
+			t.Fatalf("confirmed OOM overrode explicit ACP cancellation: %#v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) ||
+		fixture.store.recordedPromptError != string(agentturn.PromptErrorCancellation) ||
+		fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed {
+		t.Fatalf("cancelled prompt with OOM = processed %t, error %v, stored class %q, settlement %#v",
+			processed, err, fixture.store.recordedPromptError, fixture.store.settled)
+	}
+}
+
 func TestExecutionWorkerRejectsUnknownACPStopReasonAfterTerminalIntent(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.prompter.err = fmt.Errorf("submit ACP prompt: %w", acp.ErrUnknownStopReason)
@@ -1290,6 +1345,10 @@ func (*executionRunStore) OpenMutationAdmission(context.Context, store.AgentTurn
 	return nil
 }
 
+func (*executionRunStore) CloseMutationAdmissionWithPromptEvidence(context.Context, store.AgentTurnLease, string, string) error {
+	return nil
+}
+
 func (*executionRunStore) CloseMutationAdmission(context.Context, store.AgentTurnLease) error {
 	return nil
 }
@@ -1491,6 +1550,8 @@ type executionStore struct {
 	heartbeatObserved          chan struct{}
 	heartbeats                 int
 	openErr                    error
+	promptEvidenceErr          error
+	recordedPromptError        string
 	closeErr                   error
 	unsettled                  []store.MutationReservation
 	unsettledResults           [][]store.MutationReservation
@@ -1559,6 +1620,15 @@ func (database *executionStore) OpenMutationAdmission(context.Context, store.Age
 
 func (database *executionStore) CloseMutationAdmission(context.Context, store.AgentTurnLease) error {
 	database.operations.add("close-admission")
+	return database.closeErr
+}
+
+func (database *executionStore) CloseMutationAdmissionWithPromptEvidence(_ context.Context, _ store.AgentTurnLease, stopReason, errorClass string) error {
+	database.operations.add("close-admission")
+	database.recordedPromptError = errorClass
+	if database.promptEvidenceErr != nil {
+		return database.promptEvidenceErr
+	}
 	return database.closeErr
 }
 
@@ -1754,10 +1824,14 @@ type executionRuntime struct {
 	closeRelease    chan struct{}
 	closeOnce       sync.Once
 	oomKilled       bool
+	oomObserveErr   error
 	oomAfterCleanup bool
 }
 
 func (runtime *executionRuntime) ObserveOOM(context.Context) (bool, error) {
+	if runtime.oomObserveErr != nil {
+		return false, runtime.oomObserveErr
+	}
 	return runtime.oomKilled, nil
 }
 

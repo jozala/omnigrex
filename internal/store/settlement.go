@@ -404,6 +404,19 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	if snapshot.ActiveTurn != nil || snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != turn.WorkflowAttemptID {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
+	if reducer.DefinitionCompatible(snapshot) && continuation == recoveryContinuationPendingInfrastructure &&
+		(snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing) {
+		executionJob, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, identity.ExecutionJobID))
+		if err != nil || executionJob.Kind != RunAgentTurnJobKind || executionJob.AgentTurnID != turn.ID ||
+			executionJob.ExecutionEpoch != turn.ExecutionEpoch || executionJob.WorkflowID != authority.WorkflowID ||
+			(executionJob.Status != JobSucceeded && executionJob.Status != JobFailed) {
+			return false, ErrAgentTurnRecoveryFenceLost
+		}
+		begun, err := beginRecoveredTerminalCorroborationTx(ctx, tx, executionJob, turn, role, originalOwnerID, originalOwnerHash)
+		if err != nil || begun {
+			return begun, err
+		}
+	}
 	guard := workflow.TurnGuard{
 		TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 		Stage: turn.Stage, Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),

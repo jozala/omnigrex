@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 const VerifyTerminalIntentJobKind = "VERIFY_TERMINAL_INTENT"
@@ -366,89 +365,29 @@ FROM agent_turn_corroborations WHERE agent_turn_id = $1 FOR UPDATE`, lease.ID).S
 	if turn.Status != AgentTurnSettling {
 		return TerminalCorroboration{}, ErrAgentTurnFenceLost
 	}
-	var successfulIntents int
-	var sourceTool string
-	rows, err := tx.Query(ctx, mutationLedgerSelect, turn.ID, turn.ExecutionEpoch)
-	if err != nil {
+	var recordedStop, recordedError string
+	var recorded bool
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
+       prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, turn.ID).Scan(
+		&recordedStop, &recordedError, &recorded); err != nil {
 		return TerminalCorroboration{}, err
 	}
-	for rows.Next() {
-		mutation, err := scanMutation(rows)
-		if err != nil {
-			rows.Close()
-			return TerminalCorroboration{}, err
-		}
-		if mutation.State != MutationSucceeded {
-			continue
-		}
-		switch mutation.ToolName {
-		case "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
-			successfulIntents++
-			if mutation.ID == sourceInvocationID {
-				sourceTool = mutation.ToolName
-			}
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return TerminalCorroboration{}, err
-	}
-	if successfulIntents != 1 ||
-		role == workflow.RoleDeveloper && sourceTool != "request_review" && sourceTool != "confirm_prior_terminal_intent" ||
-		role == workflow.RoleReviewer && sourceTool != "submit_review" && sourceTool != "confirm_prior_terminal_intent" ||
-		role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
+	if !recorded || recordedError != promptError ||
+		(promptError == "" && recordedStop != "end_turn") ||
+		(promptError != "" && recordedStop != "") {
 		return TerminalCorroboration{}, ErrTerminalCorroborationConflict
 	}
-	if sourceTool == "confirm_prior_terminal_intent" {
-		var source struct {
-			SourceTool         string `json:"source_tool"`
-			SourceInvocationID string `json:"source_invocation_id"`
-		}
-		var sourceResult []byte
-		if err := tx.QueryRow(ctx, `SELECT result FROM tool_invocations WHERE id = $1`, sourceInvocationID).Scan(&sourceResult); err != nil ||
-			json.Unmarshal(sourceResult, &source) != nil {
-			return TerminalCorroboration{}, ErrTerminalCorroborationConflict
-		}
-		if source.SourceInvocationID == "" || role == workflow.RoleDeveloper && source.SourceTool != "request_review" ||
-			role == workflow.RoleReviewer && source.SourceTool != "submit_review" {
-			return TerminalCorroboration{}, ErrTerminalCorroborationConflict
-		}
-	}
-	verificationJobID, err := randomUUID()
-	if err != nil {
+	if _, valid, err := findTerminalCorroborationSourceTx(ctx, tx, turn.ID, turn.ExecutionEpoch, role, sourceInvocationID); err != nil {
 		return TerminalCorroboration{}, err
-	}
-	checkpoint := TerminalCorroboration{
-		TurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, WorkflowID: job.WorkflowID,
-		WorkflowAttemptID: turn.WorkflowAttemptID, SourceInvocationID: sourceInvocationID,
-		VerificationJobID: verificationJobID, ExecutionJobID: job.ID, PromptOutcome: promptOutcome,
-		PromptError: promptError, LastFailureCode: failureCode,
-	}
-	if err := tx.QueryRow(ctx, `
-INSERT INTO jobs (id, queue, kind, payload, status, priority, max_attempts,
-                  idempotency_key, workflow_id, workflow_attempt_id,
-                  agent_assignment_id, agent_session_id, agent_turn_id, execution_epoch)
-VALUES ($1, 'agent-turn-recovery', $2, '{}'::jsonb, 'AVAILABLE', 80, 1000000,
-        $3, $4, $5, $6, $7, $8, $9)
-RETURNING id::text`, verificationJobID, VerifyTerminalIntentJobKind,
-		"terminal-corroboration:"+turn.ID+":"+fmt.Sprint(turn.ExecutionEpoch),
-		job.WorkflowID, turn.WorkflowAttemptID, job.AgentAssignmentID,
-		turn.AgentSessionID, turn.ID, turn.ExecutionEpoch).Scan(&checkpoint.VerificationJobID); err != nil {
-		return TerminalCorroboration{}, fmt.Errorf("enqueue terminal corroboration: %w", err)
+	} else if !valid {
+		return TerminalCorroboration{}, ErrTerminalCorroborationConflict
 	}
 	ownerHash := sha256.Sum256([]byte(lease.OwnerToken))
-	if err := tx.QueryRow(ctx, `
-INSERT INTO agent_turn_corroborations (agent_turn_id, execution_epoch, workflow_id,
-    workflow_attempt_id, source_invocation_id, execution_job_id,
-    execution_owner_id, execution_owner_token_sha256, prompt_outcome, prompt_error,
-    state, last_failure_code, verification_job_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', $11, $12)
-RETURNING pending_since`, turn.ID, turn.ExecutionEpoch, job.WorkflowID,
-		turn.WorkflowAttemptID, sourceInvocationID, job.ID, lease.OwnerID,
-		ownerHash[:], nullableJSON(promptOutcome), nullableString(promptError),
-		failureCode, verificationJobID).Scan(&checkpoint.PendingSince); err != nil {
-		return TerminalCorroboration{}, fmt.Errorf("persist terminal corroboration checkpoint: %w", err)
+	checkpoint, err := createTerminalCorroborationCheckpointTx(ctx, tx, job, turn, sourceInvocationID,
+		promptOutcome, promptError, failureCode, lease.OwnerID, ownerHash[:])
+	if err != nil {
+		return TerminalCorroboration{}, err
 	}
 	const result = `{"pending_terminal_corroboration":true}`
 	completedAttempt, err := tx.Exec(ctx, `
@@ -521,7 +460,7 @@ func validCorroborationFailureCode(code string) bool {
 		"invalid_configuration", "github_dependency_unknown", "github_prerequisite_unavailable",
 		"database_observation_unavailable", "workspace_observation_unavailable",
 		"terminal_evidence_conflict", "head_changed_during_corroboration",
-		"review_not_visible_yet":
+		"review_not_visible_yet", "runtime_interrupted_after_prompt":
 		return true
 	default:
 		return false
@@ -552,6 +491,8 @@ FROM agent_turns AS source
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source.workflow_id = $2
+  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
+       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
   AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
   AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
        AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))`, sourceID, lease.JobLease.WorkflowID).Scan(

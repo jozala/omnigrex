@@ -18,6 +18,8 @@ import (
 // SettleTerminalCorroboration applies an original Turn's proven outcome under
 // the exact leased verifier authority. The completed execution job is never
 // reopened, and the Runtime Process has already stopped.
+// This transaction intentionally parallels SettleAgentTurn's outcome/actions,
+// but its stopped-process and completed-execution-job fences must stay distinct.
 func (store *Store) SettleTerminalCorroboration(ctx context.Context, lease JobLease, observation AgentTurnSettlementObservation) (AgentTurnSettlement, error) {
 	return store.settleTerminalCorroboration(ctx, lease, observation, "")
 }
@@ -177,7 +179,12 @@ SELECT execution.attempt_count, attempt.lease_owner, attempt.lease_token::text
 FROM jobs AS execution JOIN job_attempts AS attempt
   ON attempt.job_id = execution.id AND attempt.attempt_number = execution.attempt_count
 WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
-  AND execution.status = 'SUCCEEDED' AND attempt.status = 'SUCCEEDED'
+  AND ((execution.status = 'SUCCEEDED' AND attempt.status = 'SUCCEEDED')
+       OR (execution.status = 'FAILED' AND attempt.status IN ('EXPIRED', 'FAILED', 'SUCCEEDED')
+           AND EXISTS (SELECT 1 FROM agent_turns AS recovered
+                       WHERE recovered.id = $2
+                         AND recovered.recovery_continuation = 'TERMINAL_CORROBORATION_PENDING'
+                         AND recovered.runtime_stopped_at IS NOT NULL)))
   AND execution.agent_turn_id = $2 AND execution.execution_epoch = $3`,
 		executionJobID, turn.ID, turn.ExecutionEpoch).Scan(&executionAttempt, &executionOwner, &executionToken); err != nil {
 		return AgentTurnSettlement{}, corroborationReadError(err)
@@ -328,7 +335,9 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 	}
 	turnUpdate, err := tx.Exec(ctx, `
 UPDATE agent_turns SET status = $3, active = FALSE, completed_at = clock_timestamp(),
-    outcome = $4, last_error = $5
+    outcome = $4, last_error = $5,
+    recovery_continuation = CASE WHEN recovery_continuation = 'TERMINAL_CORROBORATION_PENDING'
+        THEN 'TERMINAL_CORROBORATION_APPLIED' ELSE recovery_continuation END
 WHERE id = $1 AND execution_epoch = $2 AND status = 'CORROBORATING'
   AND active AND NOT mutation_admission_open`, turn.ID, turn.ExecutionEpoch,
 		canonical.TerminalStatus, nullableJSON(canonical.TerminalOutcome), nullableString(canonical.TerminalLastError))
@@ -421,6 +430,8 @@ JOIN agent_turns AS current_turn ON current_turn.id = $2
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source_turn.workflow_id = current_turn.workflow_id
   AND source_turn.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
+  AND (source_turn.prompt_recorded_at IS NULL OR source_turn.prompt_stop_reason = 'end_turn'
+       OR source_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
   AND (source_turn.outcome IS NULL OR source_turn.outcome->>'stop_reason' = 'end_turn')
   AND (source_turn.last_error IS NULL OR (source_turn.last_error NOT LIKE 'ACP prompt was cancelled%'
        AND source_turn.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))`,

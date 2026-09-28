@@ -31,6 +31,7 @@ type ExecutionWorkerStore interface {
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	OpenMutationAdmission(context.Context, store.AgentTurnLease) error
 	CloseMutationAdmission(context.Context, store.AgentTurnLease) error
+	CloseMutationAdmissionWithPromptEvidence(context.Context, store.AgentTurnLease, string, string) error
 	ListUnsettledMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
 	FailMutation(context.Context, store.AgentTurnLease, string, error) error
 	MarkMutationUnknown(context.Context, store.AgentTurnLease, string, error) error
@@ -340,6 +341,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	}
 
 	var promptResponse *acp.PromptResponse
+	var promptClassification PromptErrorClassification
 	if operationErr == nil {
 		currentHead := defaultBranch.CommitSHA
 		if execution.ChangeProposal != nil {
@@ -360,6 +362,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 			cancelPrompt()
 			if promptErr != nil {
+				// Classify the ACP ending before an independent Docker observation
+				// can add a deadline or transport error to the diagnostic chain.
+				promptClassification = ClassifyPromptError(promptErr)
 				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)
 				if observer, ok := runtime.(interface {
 					ObserveOOM(context.Context) (bool, error)
@@ -371,6 +376,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 						operationErr = errors.Join(operationErr, observeErr)
 					} else if oom {
 						operationErr = errors.Join(operationErr, ErrRuntimeOOMKilled)
+						if promptClassification == PromptErrorFailure || promptClassification == PromptErrorDeadline {
+							promptClassification = PromptErrorFailure
+						}
 					}
 				}
 			} else {
@@ -378,8 +386,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 		}
 	}
-
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
@@ -404,14 +411,25 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(runtime))
 	}
 
-	closeErr := worker.retryFinalization(leaseCtx, func(ctx context.Context) error {
-		return worker.store.CloseMutationAdmission(ctx, lease)
-	})
+	var closeErr error
+	if promptResponse != nil || promptClassification != "" {
+		stopReason := ""
+		if promptResponse != nil {
+			stopReason = string(promptResponse.StopReason)
+		}
+		closeErr = worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
+			return worker.store.CloseMutationAdmissionWithPromptEvidence(ctx, lease, stopReason, string(promptClassification))
+		})
+	} else {
+		closeErr = worker.retryFinalization(leaseCtx, func(ctx context.Context) error {
+			return worker.store.CloseMutationAdmission(ctx, lease)
+		})
+	}
 	if closeErr != nil {
 		return false, errors.Join(operationErr, closeErr, worker.cleanupWithoutFence(runtime))
 	}
@@ -452,12 +470,15 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
 		corroborationFailure = &failure
 	}
-	if combinedErr == nil && promptResponse != nil {
+	if promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
 	} else {
-		classification := PromptErrorFailure
-		if operationErr != nil {
-			classification = ClassifyPromptError(operationErr)
+		classification := promptClassification
+		if classification == "" {
+			classification = PromptErrorFailure
+			if operationErr != nil {
+				classification = ClassifyPromptError(operationErr)
+			}
 		}
 		reconciliation.PromptError = classification
 		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
