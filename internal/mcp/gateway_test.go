@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -51,7 +52,7 @@ func TestDeveloperListsOnlyItsFixedConcreteToolSetAfterInitialization(t *testing
 	}
 	want := []string{
 		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
-		"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked",
+		"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked", "confirm_prior_terminal_intent",
 	}
 	got := make([]string, len(payload.Result.Tools))
 	for index, tool := range payload.Result.Tools {
@@ -224,7 +225,7 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	firstHead := "1123456789abcdef0123456789abcdef01234567"
 	secondHead := "2123456789abcdef0123456789abcdef01234567"
 	durable := &fakeStore{}
-	api := &backendGitHub{openHead: secondHead}
+	api := &backendGitHub{openHead: secondHead, currentHead: secondHead}
 	publisher := &backendPublisher{results: []workspace.PublicationResult{
 		{Head: firstHead, Changed: true},
 		{Head: secondHead, Changed: true},
@@ -1342,6 +1343,212 @@ func TestKnownBackendMutationFailureIsDurablyFailed(t *testing.T) {
 	}
 }
 
+func TestKnownBackendPreconditionHasDurableFailureCode(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{}
+	gateway := newTestGateway(t, now, durable, &recordingBackend{err: mcp.ErrToolPrecondition})
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"precondition","body":"Update"}}}`))
+	if durable.failureReason() != "tool_precondition_failed" || !strings.Contains(response.Body.String(), "tool precondition failed") {
+		t.Fatalf("backend precondition = %q, response %s", durable.failureReason(), response.Body)
+	}
+}
+
+func TestPublicationHeadConflictHasDurableAndSafeDiagnosis(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher: &backendPublisher{err: fmt.Errorf("%w: credential-bearing git output", &workspace.UnexpectedHeadError{
+			Expected: productionHeadSHA, Actual: advancedHeadSHA, Branch: "refs/heads/omnigrex/issue-12",
+		})},
+		Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	gateway, err := mcp.New(mcp.Config{
+		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Now: func() time.Time { return now },
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x21}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"publish-conflict","message":"Publish"}}}`))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "publication remote head mismatch") ||
+		!strings.Contains(response.Body.String(), productionHeadSHA) || !strings.Contains(response.Body.String(), advancedHeadSHA) ||
+		!strings.Contains(durable.failureReason(), "publication_remote_head_mismatch") ||
+		!strings.Contains(durable.failureReason(), "expected_sha="+productionHeadSHA) ||
+		!strings.Contains(durable.failureReason(), "observed_sha="+advancedHeadSHA) ||
+		!strings.Contains(logs.String(), `"failure_code":"publication_remote_head_mismatch"`) ||
+		!strings.Contains(logs.String(), `"operation_id":"publish-conflict"`) {
+		t.Fatalf("publication failure = %s, durable %q, log %s", response.Body, durable.failureReason(), logs.String())
+	}
+	if strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "credential-bearing") ||
+		strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "developer-secret") {
+		t.Fatal("publication failure exposed backend output or credential")
+	}
+	replayed := httptest.NewRecorder()
+	gateway.ServeHTTP(replayed, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"publish_changes","arguments":{"operation_id":"publish-conflict","message":"Publish"}}}`))
+	_, started, _, failed, _ := durable.mutationCounts()
+	if !strings.Contains(replayed.Body.String(), "publication remote head mismatch") ||
+		!strings.Contains(replayed.Body.String(), "expected_sha="+productionHeadSHA) ||
+		!strings.Contains(replayed.Body.String(), "observed_sha="+advancedHeadSHA) || started != 1 || failed != 1 {
+		t.Fatalf("cached publication failure = %s, starts %d, failures %d", replayed.Body, started, failed)
+	}
+}
+
+func TestGitHubRejectionExposesOnlySafeStatusAndRequestID(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub:      &backendGitHub{mutationErr: &githubapi.APIError{StatusCode: 422, RequestID: "GH-123", Message: "credential-bearing GitHub detail"}},
+		Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher:   &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	gateway, err := mcp.New(mcp.Config{
+		EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Now: func() time.Time { return now },
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x22}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"open_pr","arguments":{"operation_id":"open-1","title":"Fix","body":"Ready"}}}`))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "GitHub rejected the mutation") ||
+		!strings.Contains(response.Body.String(), "http_status=422") || !strings.Contains(response.Body.String(), "GH-123") ||
+		!strings.Contains(durable.failureReason(), "github_request_rejected") ||
+		!strings.Contains(durable.failureReason(), "http_status=422") ||
+		!strings.Contains(durable.failureReason(), "request_id=GH-123") ||
+		!strings.Contains(logs.String(), `"github_http_status":422`) || !strings.Contains(logs.String(), `"github_request_id":"GH-123"`) {
+		t.Fatalf("GitHub rejection = %s, durable %q, log %s", response.Body, durable.failureReason(), logs.String())
+	}
+	if strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "credential-bearing") ||
+		strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "developer-secret") {
+		t.Fatal("GitHub rejection exposed raw response or credential")
+	}
+	replayed := httptest.NewRecorder()
+	gateway.ServeHTTP(replayed, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"open_pr","arguments":{"operation_id":"open-1","title":"Fix","body":"Ready"}}}`))
+	_, started, _, failed, _ := durable.mutationCounts()
+	if !strings.Contains(replayed.Body.String(), "GitHub rejected the mutation") ||
+		!strings.Contains(replayed.Body.String(), "http_status=422") || !strings.Contains(replayed.Body.String(), "GH-123") ||
+		started != 1 || failed != 1 {
+		t.Fatalf("cached GitHub rejection = %s, starts %d, failures %d", replayed.Body, started, failed)
+	}
+}
+
+func TestCachedFailureNeverReturnsUnrecognizedDurableErrorText(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	durable := &fakeStore{mutations: map[string]store.MutationReservation{
+		"comment_on_issue\x00historical": {
+			ID: testMutationID(1), AgentTurnID: "turn-1", ExecutionEpoch: 4,
+			OperationID: "historical", ToolName: mcp.ToolCommentOnIssue, State: store.MutationFailed,
+			LastError: "github_request_rejected http_status=422 request_id=GH-123 credential-sentinel",
+		},
+	}}
+	backend := &recordingBackend{result: json.RawMessage(`{"comment_id":1}`)}
+	gateway := newTestGateway(t, now, durable, backend)
+	registration, err := gateway.Register(validScope(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"historical","body":"Update"}}}`))
+	if !strings.Contains(response.Body.String(), "mutation previously failed") || strings.Contains(response.Body.String(), "credential-sentinel") || backend.count() != 0 {
+		t.Fatalf("unrecognized cached failure response = %s, backend calls %d", response.Body, backend.count())
+	}
+}
+
+func TestReviewHeadObservationFailureRetainsSafeGitHubDiagnostics(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "not found", err: &githubapi.APIError{StatusCode: 404, RequestID: "GH-READ-1", Message: "credential-bearing GitHub detail"}, want: 404},
+		{name: "permission wrapper", err: &githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403, RequestID: "GH-READ-1", Message: "credential-bearing GitHub detail"}}, want: 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			durable := &fakeStore{}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+				GitHub: &backendGitHub{readErr: test.err}, Credentials: &backendCredentials{developer: "developer-secret"},
+				Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			gateway, err := mcp.New(mcp.Config{
+				EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend,
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Now: func() time.Time { return now },
+				Random: bytes.NewReader(bytes.Repeat([]byte{0x23}, 32)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := validScope(now)
+			scope.HeadSHA = productionHeadSHA
+			scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
+			registration, err := gateway.Register(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initialize(t, gateway, registration)
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion,
+				`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"request_review","arguments":{"operation_id":"review-1","summary":"Ready"}}}`))
+			wantStatus := fmt.Sprintf("http_status=%d", test.want)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "could not verify the Pull Request head") ||
+				!strings.Contains(response.Body.String(), wantStatus) || !strings.Contains(response.Body.String(), "GH-READ-1") ||
+				!strings.Contains(durable.failureReason(), "github_observation_unavailable") ||
+				!strings.Contains(durable.failureReason(), wantStatus) || !strings.Contains(durable.failureReason(), "request_id=GH-READ-1") ||
+				!strings.Contains(logs.String(), `"github_http_status":`+fmt.Sprint(test.want)) ||
+				!strings.Contains(logs.String(), `"github_request_id":"GH-READ-1"`) {
+				t.Fatalf("review head read failure = %s, durable %q, log %s", response.Body, durable.failureReason(), logs.String())
+			}
+			if strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "credential-bearing") ||
+				strings.Contains(response.Body.String()+durable.failureReason()+logs.String(), "developer-secret") {
+				t.Fatal("GitHub read failure exposed raw response or credential")
+			}
+		})
+	}
+}
+
 func TestStartFailureIsUnresolvedWhenFailureTransitionCannotBeRecorded(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{
@@ -1622,6 +1829,7 @@ type fakeStore struct {
 	reserveErr         error
 	completeErr        error
 	failErr            error
+	failure            string
 	unknownErr         error
 	unknownObserved    chan mutationContextObservation
 	reserveStarted     chan struct{}
@@ -1741,14 +1949,31 @@ func (fake *fakeStore) CompleteMutation(_ context.Context, _ store.AgentTurnLeas
 	return errors.New("mutation not found")
 }
 
-func (fake *fakeStore) FailMutation(_ context.Context, _ store.AgentTurnLease, mutationID string, _ error) error {
+func (fake *fakeStore) FailMutation(_ context.Context, _ store.AgentTurnLease, mutationID string, cause error) error {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
 	fake.failed++
+	fake.failure = cause.Error()
 	if fake.failErr != nil {
 		return fake.failErr
 	}
-	return fake.setMutationState(mutationID, store.MutationFailed)
+	if err := fake.setMutationState(mutationID, store.MutationFailed); err != nil {
+		return err
+	}
+	for operationID, mutation := range fake.mutations {
+		if mutation.ID == mutationID {
+			mutation.LastError = fake.failure
+			fake.mutations[operationID] = mutation
+			break
+		}
+	}
+	return nil
+}
+
+func (fake *fakeStore) failureReason() string {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	return fake.failure
 }
 
 func (fake *fakeStore) MarkMutationUnknown(ctx context.Context, _ store.AgentTurnLease, mutationID string, _ error) error {

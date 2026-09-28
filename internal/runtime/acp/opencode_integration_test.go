@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +27,7 @@ import (
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 const (
@@ -55,6 +58,9 @@ const (
 	workspaceInitial          = "WORKSPACE_GENERATION_INITIAL"
 	workspaceOutput           = "WORKSPACE_GENERATION_REPLACED"
 	workspaceMarker           = "REPLACED_WORKSPACE_CONFIRMED"
+	cacheDiffPrompt           = "VERIFY_DISK_BACKED_CACHE_DIFF"
+	cacheDiffMarker           = "CACHE_WRITE_DONE"
+	cacheDiffCommand          = "printf 'cache' > \"$GOCACHE/cache-sentinel\" && printf 'module' > \"$GOPATH/module-sentinel\" && printf 'real change' > /workspace/actual-change.txt && printf CACHE_WRITE_DONE"
 	reviewerPrompt            = "VERIFY_REVIEWER_ISOLATION"
 	reviewerMarker            = "REVIEWER_CONFIGURATION_BLOCKED"
 	reviewerExposed           = "REVIEWER_CONFIGURATION_EXPOSED"
@@ -175,6 +181,114 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	waitForAgentText(t, thirdUpdates, continuedMarker)
 	third.stop(t)
 	assertRuntimeStateExcludes(t, runtimeStateVolume, "not-a-real-secret")
+}
+
+func TestOpenCodeDiffSummaryExcludesDiskBackedToolCaches(t *testing.T) {
+	image := localOpenCodeImage(t)
+	providerConfig := startFakeProvider(t)
+	workspaceVolume := uniqueDockerName("cache-diff-workspace")
+	stateVolume := uniqueDockerName("cache-diff-state")
+	miseVolume := uniqueDockerName("cache-diff-mise")
+	for _, volume := range []string{workspaceVolume, stateVolume, miseVolume} {
+		createDockerVolume(t, volume)
+	}
+	setup := func(arguments ...string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		output, err := exec.CommandContext(ctx, "docker", arguments...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("prepare OpenCode cache diff test: %v\n%s", err, output)
+		}
+	}
+	setup("run", "--rm", "--user", "10001:10001", "--network", "none",
+		"--mount", "type=volume,src="+workspaceVolume+",dst=/workspace,volume-subpath=assignment",
+		"--entrypoint", "sh", image, "-ec",
+		"git init -q && printf 'baseline' > baseline.txt && git add baseline.txt && git -c user.name=Test -c user.email=test@example.invalid commit -qm baseline")
+	setup("run", "--rm", "--user", "10001:10001", "--network", "none",
+		"--mount", "type=volume,src="+miseVolume+",dst=/data,volume-subpath=assignment",
+		"--entrypoint", "sh", image, "-ec",
+		"mkdir -p /data/mise /data/tool-data/turn/build /data/tool-data/assignment/.gocache /data/tool-data/assignment/.gopath")
+	const target = workspace.TurnPathMount
+	updates := make(chan acp.SessionUpdate, 64)
+	process := startOpenCodeWithTransport(t, image, workspaceVolume, stateVolume, miseVolume, providerConfig, updates, nil,
+		openCodeTestOptions{
+			toolDataVolume: miseVolume,
+			toolDataTarget: target,
+			miseSubpath:    "assignment/mise",
+			environment: []string{
+				"TMPDIR=" + path.Join(target, "turn/build"),
+				"GOTMPDIR=" + path.Join(target, "turn/build"),
+				"GOCACHE=" + path.Join(target, "assignment/.gocache"),
+				"GOPATH=" + path.Join(target, "assignment/.gopath"),
+			},
+			authorizedCommand: cacheDiffCommand,
+		})
+	initializeOpenCode(t, process.client)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	session, err := process.client.CreateSession(ctx, acp.CreateSessionRequest{CWD: acp.WorkspacePath})
+	cancel()
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v\nOpenCode stderr:\n%s", err, process.stderr.String())
+	}
+	prompt(t, process, session.ID, cacheDiffPrompt)
+	waitForAgentText(t, updates, cacheDiffMarker)
+	process.stop(t)
+	assertVolumePathContent(t, miseVolume, "tool-data/assignment/.gocache/cache-sentinel", "cache")
+	assertVolumePathContent(t, miseVolume, "tool-data/assignment/.gopath/module-sentinel", "module")
+	assertVolumePathAbsent(t, workspaceVolume, ".gocache/cache-sentinel")
+	assertVolumePathAbsent(t, workspaceVolume, ".gopath/module-sentinel")
+	assertVolumePathContent(t, workspaceVolume, "actual-change.txt", "real change")
+
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "docker", "run", "--rm", "--user", "10001:10001", "--read-only", "--network", "none",
+		"--mount", "type=volume,src="+workspaceVolume+",dst=/workspace,volume-subpath=assignment",
+		"--mount", "type=volume,src="+stateVolume+",dst=/home/opencode/.local/share/opencode,volume-subpath=assignment",
+		"--tmpfs", "/home/opencode/.cache:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.config:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.local/state:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.opencode:rw,uid=10001,gid=10001",
+		"--tmpfs", "/tmp/opencode:rw,uid=10001,gid=10001",
+		"--env", "OPENCODE_AUTH_CONTENT={}", "--entrypoint", "opencode", image, "export", session.ID)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("export OpenCode session summary: %v\n%s", err, stderr.String())
+	}
+	var exported struct {
+		Messages []struct {
+			Info struct {
+				Role    string `json:"role"`
+				Summary struct {
+					Diffs []struct {
+						File string `json:"file"`
+					} `json:"diffs"`
+				} `json:"summary"`
+			} `json:"info"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &exported); err != nil {
+		t.Fatalf("decode OpenCode session export: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	var files []string
+	for _, message := range exported.Messages {
+		if message.Info.Role != "user" {
+			continue
+		}
+		for _, diff := range message.Info.Summary.Diffs {
+			files = append(files, diff.File)
+		}
+	}
+	if !slices.Contains(files, "actual-change.txt") {
+		t.Fatalf("OpenCode diff summary has no workspace change: %q", files)
+	}
+	for _, file := range files {
+		if strings.Contains(file, ".gocache") || strings.Contains(file, ".gopath") || strings.Contains(file, "cache-sentinel") || strings.Contains(file, "module-sentinel") {
+			t.Fatalf("OpenCode diff summary included off-workspace cache file: %q", file)
+		}
+	}
 }
 
 func TestOpenCodeControlledStateUpgrade(t *testing.T) {
@@ -804,31 +918,57 @@ func startOpenCodeWithTransport(
 	providerConfig string,
 	updates chan<- acp.SessionUpdate,
 	wrapTransport func(io.ReadWriteCloser) io.ReadWriteCloser,
+	extra ...openCodeTestOptions,
 ) *openCodeProcess {
 	t.Helper()
+	var additional openCodeTestOptions
+	if len(extra) != 0 {
+		additional = extra[0]
+	}
+	miseSubpath := "assignment"
+	if additional.miseSubpath != "" {
+		miseSubpath = additional.miseSubpath
+	}
+	volumeBindings := map[string]string{
+		acp.WorkspacePath:                      workspaceVolume,
+		"/home/opencode/.local/share/opencode": runtimeStateVolume,
+		"/home/opencode/.local/share/mise":     miseVolume,
+	}
+	requiredTargets := []string{acp.WorkspacePath, "/home/opencode/.local/share/opencode", "/home/opencode/.local/share/mise"}
+	volumes := []dockerruntime.VolumeMount{
+		{Name: workspaceVolume, Subpath: "assignment", Target: acp.WorkspacePath},
+		{Name: runtimeStateVolume, Subpath: "assignment", Target: "/home/opencode/.local/share/opencode"},
+		{Name: miseVolume, Subpath: miseSubpath, Target: "/home/opencode/.local/share/mise"},
+	}
+	if additional.toolDataVolume != "" {
+		volumeBindings[additional.toolDataTarget] = additional.toolDataVolume
+		requiredTargets = append(requiredTargets, additional.toolDataTarget)
+		volumes = append(volumes, dockerruntime.VolumeMount{
+			Name: additional.toolDataVolume, Subpath: "assignment/tool-data", Target: additional.toolDataTarget,
+		})
+	}
+	environment := []string{
+		"OPENCODE_AUTH_CONTENT={}",
+		"OPENCODE_CONFIG_CONTENT=" + providerConfig,
+		"OPENCODE_DISABLE_CLAUDE_CODE=true",
+		"OPENCODE_DISABLE_DEFAULT_PLUGINS=true",
+		"OPENCODE_DISABLE_EXTERNAL_SKILLS=true",
+		"OPENCODE_DISABLE_MODELS_FETCH=true",
+		"OPENCODE_DISABLE_PROJECT_CONFIG=true",
+		"OPENCODE_PURE=true",
+	}
+	environment = append(environment, additional.environment...)
 
 	engine, err := dockerruntime.NewEngine(dockerruntime.EngineOptions{
 		AgentNetwork:     "bridge",
 		AllowHostGateway: true,
 		RuntimePolicy: dockerruntime.RuntimePolicy{
-			Platform:   dockerruntime.Platform{OS: "linux", Architecture: openCodeArchitecture()},
-			User:       "10001:10001",
-			WorkingDir: acp.WorkspacePath,
-			VolumeBindings: map[string]string{
-				acp.WorkspacePath:                      workspaceVolume,
-				"/home/opencode/.local/share/opencode": runtimeStateVolume,
-				"/home/opencode/.local/share/mise":     miseVolume,
-			},
-			RequiredVolumeTargets: []string{
-				acp.WorkspacePath,
-				"/home/opencode/.local/share/opencode",
-				"/home/opencode/.local/share/mise",
-			},
-			RequiredWritableVolumeTargets: []string{
-				acp.WorkspacePath,
-				"/home/opencode/.local/share/opencode",
-				"/home/opencode/.local/share/mise",
-			},
+			Platform:                      dockerruntime.Platform{OS: "linux", Architecture: openCodeArchitecture()},
+			User:                          "10001:10001",
+			WorkingDir:                    acp.WorkspacePath,
+			VolumeBindings:                volumeBindings,
+			RequiredVolumeTargets:         requiredTargets,
+			RequiredWritableVolumeTargets: requiredTargets,
 			Tmpfs: []dockerruntime.TmpfsMount{
 				{Target: "/home/opencode/.cache", SizeBytes: 64 << 20},
 				{Target: "/home/opencode/.config", SizeBytes: 16 << 20},
@@ -852,31 +992,18 @@ func startOpenCodeWithTransport(
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	process.process, err = engine.Start(ctx, dockerruntime.Spec{
-		Name:       uniqueDockerName("process"),
-		Image:      image,
-		Platform:   dockerruntime.Platform{OS: "linux", Architecture: openCodeArchitecture()},
-		User:       "10001:10001",
-		WorkingDir: acp.WorkspacePath,
-		Command:    []string{"acp"},
-		Environment: []string{
-			"OPENCODE_AUTH_CONTENT={}",
-			"OPENCODE_CONFIG_CONTENT=" + providerConfig,
-			"OPENCODE_DISABLE_CLAUDE_CODE=true",
-			"OPENCODE_DISABLE_DEFAULT_PLUGINS=true",
-			"OPENCODE_DISABLE_EXTERNAL_SKILLS=true",
-			"OPENCODE_DISABLE_MODELS_FETCH=true",
-			"OPENCODE_DISABLE_PROJECT_CONFIG=true",
-			"OPENCODE_PURE=true",
-		},
+		Name:        uniqueDockerName("process"),
+		Image:       image,
+		Platform:    dockerruntime.Platform{OS: "linux", Architecture: openCodeArchitecture()},
+		User:        "10001:10001",
+		WorkingDir:  acp.WorkspacePath,
+		Command:     []string{"acp"},
+		Environment: environment,
 		Labels: map[string]string{
 			"io.omnigrex.assignment":      "integration-test",
 			"io.omnigrex.runtime-profile": "opencode-acp/v1",
 		},
-		Volumes: []dockerruntime.VolumeMount{
-			{Name: workspaceVolume, Subpath: "assignment", Target: acp.WorkspacePath},
-			{Name: runtimeStateVolume, Subpath: "assignment", Target: "/home/opencode/.local/share/opencode"},
-			{Name: miseVolume, Subpath: "assignment", Target: "/home/opencode/.local/share/mise"},
-		},
+		Volumes: volumes,
 		Tmpfs: []dockerruntime.TmpfsMount{
 			{Target: "/home/opencode/.cache", SizeBytes: 64 << 20},
 			{Target: "/home/opencode/.config", SizeBytes: 16 << 20},
@@ -916,13 +1043,21 @@ func startOpenCodeWithTransport(
 		},
 		DecidePermission: func(ctx context.Context, request acp.PermissionRequest) acp.PermissionDecision {
 			process.permissionRequests <- request
-			return compatibilityPermissionDecision(request, permissions)
+			return compatibilityPermissionDecision(request, permissions, additional.authorizedCommand)
 		},
 	})
 	t.Cleanup(func() {
 		process.stop(t)
 	})
 	return process
+}
+
+type openCodeTestOptions struct {
+	toolDataVolume    string
+	toolDataTarget    string
+	miseSubpath       string
+	environment       []string
+	authorizedCommand string
 }
 
 func prompt(t *testing.T, process *openCodeProcess, sessionID, text string) {
@@ -1247,6 +1382,19 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		reply = recoveryMarker
 	case strings.Contains(activePrompt, workspacePrompt) && strings.Contains(latestToolMessage(chat), workspaceOutput):
 		reply = workspaceMarker
+	case strings.Contains(activePrompt, cacheDiffPrompt) && strings.Contains(latestToolMessage(chat), cacheDiffMarker):
+		reply = cacheDiffMarker
+	case strings.Contains(activePrompt, cacheDiffPrompt):
+		if !hasFakeTool(chat, "bash") {
+			reply = "CACHE_DIFF_TOOL_MISSING"
+			break
+		}
+		writeFakeToolCall(response, "bash", map[string]any{
+			"command": cacheDiffCommand,
+			"timeout": 15_000,
+			"workdir": acp.WorkspacePath,
+		})
+		return
 	case strings.Contains(activePrompt, workspacePrompt):
 		if !hasFakeTool(chat, "bash") {
 			reply = "WORKSPACE_TOOL_MISSING"
@@ -1778,7 +1926,7 @@ func mapsEqual(left, right map[string]any) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
-func compatibilityPermissionDecision(request acp.PermissionRequest, permissions *opencode.RenderedProfile) acp.PermissionDecision {
+func compatibilityPermissionDecision(request acp.PermissionRequest, permissions *opencode.RenderedProfile, additionalCommand ...string) acp.PermissionDecision {
 	var toolCall struct {
 		ID       string         `json:"toolCallId"`
 		Title    string         `json:"title"`
@@ -1792,7 +1940,11 @@ func compatibilityPermissionDecision(request acp.PermissionRequest, permissions 
 	if toolCall.Kind == "other" {
 		return permissions.DecidePermission(request)
 	}
-	authorized := (toolCall.Title == localToolCommand || toolCall.Title == workspaceCommand) &&
+	allowedCommand := toolCall.Title == localToolCommand || toolCall.Title == workspaceCommand
+	for _, command := range additionalCommand {
+		allowedCommand = allowedCommand || command != "" && toolCall.Title == command
+	}
+	authorized := allowedCommand &&
 		toolCall.Kind == "execute" &&
 		toolCall.RawInput["command"] == toolCall.Title
 	if !authorized {

@@ -31,6 +31,7 @@ type ExecutionWorkerStore interface {
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	OpenMutationAdmission(context.Context, store.AgentTurnLease) error
 	CloseMutationAdmission(context.Context, store.AgentTurnLease) error
+	CloseMutationAdmissionWithPromptEvidence(context.Context, store.AgentTurnLease, string, string) error
 	ListUnsettledMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
 	FailMutation(context.Context, store.AgentTurnLease, string, error) error
 	MarkMutationUnknown(context.Context, store.AgentTurnLease, string, error) error
@@ -91,6 +92,7 @@ type ExecutionWorkerDependencies struct {
 	Sessions             ExecutionPrompter
 	Outcomes             ExecutionOutcomeReconciler
 	Workspace            ExecutionWorkspace
+	PublicationRecovery  ExecutionPublicationRecovery
 	Policies             role.PolicyCatalog
 	Definition           workflow.Definition
 }
@@ -124,6 +126,7 @@ type ExecutionWorker struct {
 	sessions             ExecutionPrompter
 	outcomes             ExecutionOutcomeReconciler
 	workspace            ExecutionWorkspace
+	publicationRecovery  ExecutionPublicationRecovery
 	policies             role.PolicyCatalog
 	definition           workflow.Definition
 	claimOwner           string
@@ -146,7 +149,8 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 	if nilDependency(dependencies.Store) || nilDependency(dependencies.DeveloperCredentials) ||
 		nilDependency(dependencies.ReviewerCredentials) || nilDependency(dependencies.DefaultBranch) ||
 		nilDependency(dependencies.Launcher) || nilDependency(dependencies.Sessions) ||
-		nilDependency(dependencies.Outcomes) || nilDependency(dependencies.Workspace) {
+		nilDependency(dependencies.Outcomes) || nilDependency(dependencies.Workspace) ||
+		nilDependency(dependencies.PublicationRecovery) {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidExecutionWorker)
 	}
 	if strings.TrimSpace(config.ClaimOwner) == "" || strings.TrimSpace(config.ClaimOwner) != config.ClaimOwner {
@@ -182,7 +186,8 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
 		launcher: dependencies.Launcher, sessions: dependencies.Sessions, outcomes: dependencies.Outcomes,
-		workspace: dependencies.Workspace, policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
+		workspace: dependencies.Workspace, publicationRecovery: dependencies.PublicationRecovery,
+		policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
 		turnTimeout: config.TurnTimeout, cleanupTimeout: config.CleanupTimeout,
 		concurrencyLimit: config.ConcurrencyLimit, providerCredential: providerCredential,
@@ -290,6 +295,15 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 
 	var runtime ExecutionRuntime
 	if operationErr == nil {
+		recoveryErr := worker.publicationRecovery.Recover(workCtx, *lease, execution, repositoryURL, repositoryCredential, defaultBranch.Name)
+		if errors.Is(recoveryErr, ErrPublicationConflict) {
+			return worker.finalizePublicationConflict(leaseCtx, *lease)
+		}
+		if recoveryErr != nil {
+			operationErr = fmt.Errorf("verify in-progress Developer publication: %w", recoveryErr)
+		}
+	}
+	if operationErr == nil {
 		launchProviderCredential := append(json.RawMessage(nil), providerCredential...)
 		runtime, err = worker.launcher.LaunchExecution(workCtx, LaunchRequest{
 			Lease: *lease, LeaseDuration: worker.leaseDuration, RepositoryURL: repositoryURL,
@@ -327,10 +341,13 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	}
 
 	var promptResponse *acp.PromptResponse
+	var promptClassification PromptErrorClassification
 	if operationErr == nil {
 		currentHead := defaultBranch.CommitSHA
 		if execution.ChangeProposal != nil {
 			currentHead = execution.ChangeProposal.HeadSHA
+		} else if execution.Publication != nil {
+			currentHead = execution.Publication.HeadSHA
 		}
 		content, envelopeErr := BuildEventEnvelope(execution, currentHead, worker.definition, worker.policies)
 		if envelopeErr != nil {
@@ -345,6 +362,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 			cancelPrompt()
 			if promptErr != nil {
+				// Classify the ACP ending before an independent Docker observation
+				// can add a deadline or transport error to the diagnostic chain.
+				promptClassification = ClassifyPromptError(promptErr)
 				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)
 				if observer, ok := runtime.(interface {
 					ObserveOOM(context.Context) (bool, error)
@@ -356,6 +376,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 						operationErr = errors.Join(operationErr, observeErr)
 					} else if oom {
 						operationErr = errors.Join(operationErr, ErrRuntimeOOMKilled)
+						if promptClassification == PromptErrorFailure || promptClassification == PromptErrorDeadline {
+							promptClassification = PromptErrorFailure
+						}
 					}
 				}
 			} else {
@@ -363,18 +386,50 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 		}
 	}
-
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
+	if err := worker.retryFinalization(ctx, func(ctx context.Context) error {
+		return worker.store.CloseMutationAdmission(ctx, lease)
+	}); err != nil {
+		return false, fmt.Errorf("close conflicting publication turn: %w", err)
+	}
+	observation := store.AgentTurnSettlementObservation{
+		ObservedAt: time.Now().UTC(), Outcome: workflow.TurnOutcomeBlocked,
+		Diagnostic: "publication_conflict: an existing branch or Pull Request does not match this Participant's recorded publication",
+		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded},
+	}
+	err := worker.retryBoundedFinalization(ctx, func(ctx context.Context) error {
+		_, err := worker.store.SettleAgentTurn(ctx, lease, observation)
+		return err
+	})
+	if err != nil {
+		recoveryErr := worker.beginAgentTurnRecovery(ctx, lease)
+		return recoveryErr == nil, errors.Join(fmt.Errorf("settle publication conflict: %w", err), recoveryErr)
+	}
+	return true, nil
+}
+
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(runtime))
 	}
 
-	closeErr := worker.retryFinalization(leaseCtx, func(ctx context.Context) error {
-		return worker.store.CloseMutationAdmission(ctx, lease)
-	})
+	var closeErr error
+	if promptResponse != nil || promptClassification != "" {
+		stopReason := ""
+		if promptResponse != nil {
+			stopReason = string(promptResponse.StopReason)
+		}
+		closeErr = worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
+			return worker.store.CloseMutationAdmissionWithPromptEvidence(ctx, lease, stopReason, string(promptClassification))
+		})
+	} else {
+		closeErr = worker.retryFinalization(leaseCtx, func(ctx context.Context) error {
+			return worker.store.CloseMutationAdmission(ctx, lease)
+		})
+	}
 	if closeErr != nil {
 		return false, errors.Join(operationErr, closeErr, worker.cleanupWithoutFence(runtime))
 	}
@@ -411,12 +466,19 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
 		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
 	}
-	if combinedErr == nil && promptResponse != nil {
+	var corroborationFailure *TerminalCorroborationFailure
+	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
+		corroborationFailure = &failure
+	}
+	if promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
 	} else {
-		classification := PromptErrorFailure
-		if operationErr != nil {
-			classification = ClassifyPromptError(operationErr)
+		classification := promptClassification
+		if classification == "" {
+			classification = PromptErrorFailure
+			if operationErr != nil {
+				classification = ClassifyPromptError(operationErr)
+			}
 		}
 		reconciliation.PromptError = classification
 		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
@@ -447,6 +509,29 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			fmt.Errorf("reconcile Agent Turn outcome: %w", reconcileErr),
 			wrapExecutionError("begin Agent Turn recovery", recoveryErr),
 		)
+	}
+	if corroborationFailure != nil && observation.Outcome == workflow.TurnOutcomeInfrastructureFailed &&
+		(corroborationFailure.Retryable || corroborationFailure.Prerequisite) {
+		starter, ok := worker.store.(interface {
+			BeginTerminalCorroboration(context.Context, store.AgentTurnLease, string, json.RawMessage, string, string) (store.TerminalCorroboration, error)
+		})
+		if ok {
+			promptOutcome := encodedPromptOutcome(reconciliation.PromptResponse)
+			var pending store.TerminalCorroboration
+			checkpointErr := worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
+				var err error
+				pending, err = starter.BeginTerminalCorroboration(ctx, lease, corroborationFailure.SourceInvocationID,
+					promptOutcome, string(reconciliation.PromptError), corroborationFailure.Code)
+				return err
+			})
+			if checkpointErr == nil && pending.VerificationJobID != "" {
+				return true, combinedErr
+			}
+			if checkpointErr != nil {
+				recoveryErr := worker.beginAgentTurnRecovery(leaseCtx, lease)
+				return recoveryErr == nil, errors.Join(combinedErr, checkpointErr, recoveryErr)
+			}
+		}
 	}
 	settleErr := worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
 		_, err := worker.store.SettleAgentTurn(ctx, lease, observation)

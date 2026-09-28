@@ -406,7 +406,7 @@ func (store *Store) applyWorkflowEventTx(ctx context.Context, tx pgx.Tx, event N
 			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
 		}
 	}
-	decision, err := store.reduceWorkflowEvent(snapshot, workflow.EventMetadata{
+	decision, err := store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
 		ID: event.DeliveryID, ObservedAt: envelope.receivedAt,
 		WorkItem: workItem, ExpectedRevision: snapshot.Revision,
 	}, eventFactory)
@@ -460,7 +460,7 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
 	}, nil
 }
 
-func (store *Store) reduceWorkflowEvent(snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
+func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
 	decision := store.reducer.DefinitionIncompatible(snapshot)
 	if store.reducer.DefinitionCompatible(snapshot) {
 		event, err := factory(WorkflowEventContext{Snapshot: snapshot.Clone(), Metadata: metadata})
@@ -469,6 +469,33 @@ func (store *Store) reduceWorkflowEvent(snapshot workflow.Snapshot, metadata wor
 		}
 		if err := validateWorkflowEventMetadata(event, metadata); err != nil {
 			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.State == workflow.StateNeedsHuman && snapshot.CurrentAttempt != nil {
+			var controlOwner SessionControlOwner
+			err := tx.QueryRow(ctx, `
+SELECT checkpoint.agent_turn_id::text, turn.stage_id, assignment.role, session.control_owner
+FROM agent_turn_corroborations AS checkpoint
+JOIN agent_turns AS turn ON turn.id = checkpoint.agent_turn_id
+JOIN agent_sessions AS session ON session.id = turn.agent_session_id
+JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN workflows AS workflow ON workflow.id = checkpoint.workflow_id
+WHERE (checkpoint.workflow_attempt_id = $1 OR EXISTS (
+    SELECT 1 FROM jobs AS prior_job
+    WHERE prior_job.workflow_attempt_id = $1
+      AND prior_job.agent_turn_id = checkpoint.agent_turn_id
+      AND prior_job.kind = 'REVALIDATE_TERMINAL_INTENT' AND prior_job.status = 'SUCCEEDED'
+))
+  AND checkpoint.state = 'HANDED_OFF' AND turn.status = 'FAILED'
+  AND workflow.human_handoff_reason IN ('terminal_corroboration_exhausted', 'terminal_corroboration_prerequisite', 'terminal_revalidation_human_control')
+ORDER BY checkpoint.pending_since DESC LIMIT 1`, snapshot.CurrentAttempt.ID).Scan(
+				&trigger.PriorTerminalTurnID, &trigger.PriorTerminalStage, &trigger.PriorTerminalRole, &controlOwner)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return workflow.Decision{}, fmt.Errorf("inspect prior terminal intent: %w", err)
+			}
+			if err == nil {
+				trigger.PriorTerminalControlBlocked = controlOwner != SessionControlAutomation
+				event = trigger
+			}
 		}
 		decision = store.reducer.Reduce(snapshot, event)
 	}
@@ -727,6 +754,22 @@ WHERE id = $1 AND workflow_id = $2 AND active`, complete.AttemptID, workflowID, 
 	if err := persistWorkflowSnapshot(ctx, tx, workflowID, decision); err != nil {
 		return err
 	}
+	if current.CurrentAttempt != nil && current.ActiveTurn == nil {
+		cancelVerification := decision.Reason == workflow.ReasonClosureStarted ||
+			decision.Snapshot.State == workflow.StateNeedsHuman && internalEventID == ""
+		if decision.Reason == workflow.ReasonReviewHeadReplaced {
+			for _, action := range decision.Actions {
+				if _, ok := action.(workflow.EnqueueTurnAction); ok {
+					cancelVerification = true
+				}
+			}
+		}
+		if cancelVerification {
+			if err := cancelOutstandingTerminalRevalidationTx(ctx, tx, current.CurrentAttempt.ID); err != nil {
+				return err
+			}
+		}
+	}
 	for _, action := range decision.Actions {
 		if create, ok := action.(workflow.CreateAttemptAction); ok {
 			attempt := create.Attempt
@@ -763,6 +806,56 @@ WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 	}
 	if err := persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision, actionNamespace); err != nil {
 		return err
+	}
+	return nil
+}
+
+func cancelOutstandingTerminalRevalidationTx(ctx context.Context, tx pgx.Tx, attemptID string) error {
+	rows, err := tx.Query(ctx, `
+SELECT id::text, status, attempt_count, COALESCE(lease_token::text, '')
+FROM jobs WHERE workflow_attempt_id = $1 AND kind = 'REVALIDATE_TERMINAL_INTENT'
+  AND status IN ('AVAILABLE', 'LEASED') FOR UPDATE`, attemptID)
+	if err != nil {
+		return err
+	}
+	type pending struct {
+		id, status, token string
+		attempt           int
+	}
+	var jobs []pending
+	for rows.Next() {
+		var job pending
+		if err := rows.Scan(&job.id, &job.status, &job.attempt, &job.token); err != nil {
+			rows.Close()
+			return err
+		}
+		jobs = append(jobs, job)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.status == string(JobLeased) {
+			result, err := tx.Exec(ctx, `
+UPDATE job_attempts SET status = 'FAILED', finished_at = clock_timestamp(),
+    retryable = FALSE, last_error = 'Workflow superseded terminal revalidation'
+WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`,
+				job.id, job.attempt, job.token)
+			if err != nil || result.RowsAffected() != 1 {
+				return ErrJobLeaseLost
+			}
+		}
+		result, err := tx.Exec(ctx, `
+UPDATE jobs SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
+    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+    updated_at = clock_timestamp(), completed_at = clock_timestamp(),
+    last_error = 'Workflow superseded terminal revalidation'
+WHERE id = $1 AND status IN ('AVAILABLE', 'LEASED')`, job.id)
+		if err != nil || result.RowsAffected() != 1 {
+			return ErrJobLeaseLost
+		}
 	}
 	return nil
 }
@@ -873,12 +966,45 @@ func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx
 			intent.mode = action.Mode
 		case workflow.EnqueueTurnAction:
 			intent.turn, intent.set = action, true
+		case workflow.EnqueueTerminalRevalidationAction:
+			if deliveryID == "" || !validUUID(action.SourceTurnID) {
+				return ErrWorkflowDecisionInvalid
+			}
+			jobID, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, "", "", workflowID,
+				currentAttemptID(decision.Snapshot), "revalidate-terminal-intent", RevalidateTerminalIntentJobKind,
+				map[string]any{"source_turn_id": action.SourceTurnID, "revision": decision.Snapshot.Revision})
+			if err != nil {
+				return err
+			}
+			updated, err := tx.Exec(ctx, `
+UPDATE jobs AS job SET queue = 'agent-turn-recovery', max_attempts = 1000000,
+    agent_assignment_id = assignment.id,
+    agent_session_id = session.id, agent_turn_id = source.id,
+    execution_epoch = source.execution_epoch
+FROM agent_turns AS source
+JOIN agent_sessions AS session ON session.id = source.agent_session_id
+JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_turn_corroborations AS checkpoint ON checkpoint.agent_turn_id = source.id
+WHERE job.id = $1 AND source.id = $2 AND source.workflow_id = $3
+  AND checkpoint.state = 'HANDED_OFF' AND source.status = 'FAILED'
+  AND session.control_owner = 'AUTOMATION'
+  AND assignment.state_deleted_at IS NULL AND assignment.status = 'WAITING_FOR_HUMAN'`,
+				jobID, action.SourceTurnID, workflowID)
+			if err != nil || updated.RowsAffected() != 1 {
+				return ErrWorkflowDecisionInvalid
+			}
+			if _, err := tx.Exec(ctx, `
+UPDATE agent_assignments SET status = 'ACTIVE', updated_at = clock_timestamp()
+WHERE id = (SELECT agent_assignment_id FROM jobs WHERE id = $1)
+  AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL`, jobID); err != nil {
+				return err
+			}
 		case workflow.ConsumeRunLabelAction:
 			labels, consumeRun = true, true
 		case workflow.ReconcileLabelsAction:
 			labels, labelAction = true, action
 		case workflow.RecordReviewAction:
-			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, workflowID, action); err != nil {
+			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, action); err != nil {
 				return err
 			}
 		case workflow.MarkHumanHandoffAction:
@@ -900,7 +1026,7 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 			if decision.Snapshot.ChangeProposal != nil {
 				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
 			}
-			if _, err := enqueueWorkflowJobWithProvenance(ctx, tx, deliveryID, settlementID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload); err != nil {
+			if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), "PUBLISH_HUMAN_HANDOFF", handoffPayload); err != nil {
 				return err
 			}
 		case workflow.CloseMutationAdmissionAction:
@@ -1387,7 +1513,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, clock_timestamp()), $10, $1
 	return nil
 }
 
-func recordChangeProposalReview(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, workflowID string, action workflow.RecordReviewAction) error {
+func recordChangeProposalReview(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, action workflow.RecordReviewAction) error {
 	var proposalID string
 	if err := tx.QueryRow(ctx, `
 SELECT id::text FROM change_proposals
@@ -1402,19 +1528,19 @@ WHERE workflow_id = $1 AND repository_id = (SELECT repository_id FROM workflows 
 	result, err := tx.Exec(ctx, `
 INSERT INTO change_proposal_reviews (
     repository_id, review_id, review_node_id, change_proposal_id,
-    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id
+    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id, workflow_internal_event_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (repository_id, review_id) DO NOTHING`, repositoryID, action.Review.ID,
 		action.Review.NodeID, proposalID, action.Review.ActorID, action.Review.HeadSHA,
-		action.Accepted, nullableString(deliveryID), nullableString(settlementID))
+		action.Accepted, nullableString(deliveryID), nullableString(settlementID), nullableString(internalEventID))
 	if err != nil {
 		return fmt.Errorf("record change proposal review: %w", err)
 	}
 	if result.RowsAffected() == 1 {
 		return nil
 	}
-	if settlementID != "" {
+	if settlementID != "" || internalEventID != "" {
 		return errors.New("change proposal review already has different provenance")
 	}
 	var nodeID, existingProposalID, headSHA string

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +60,7 @@ func ClassifyPromptError(err error) PromptErrorClassification {
 // OutcomeReconcilerStore is the durable evidence surface needed after MCP mutation admission closes.
 type OutcomeReconcilerStore interface {
 	ListAgentTurnMutationInvocations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
+	ListParticipantPublicationMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error)
 	GetChangeProposalReview(context.Context, int64, int64) (*workflow.ReviewIdentity, error)
 }
 
@@ -80,6 +83,7 @@ type OutcomeReconcilerConfig struct {
 	Store                  OutcomeReconcilerStore
 	GitHub                 OutcomeReconcilerGitHub
 	Clock                  interface{ Now() time.Time }
+	Logger                 *slog.Logger
 	ProviderCredentialJSON []json.RawMessage
 }
 
@@ -99,6 +103,18 @@ type OutcomeReconciliation struct {
 	RepositoryCredential         string
 	ReviewerRepositoryCredential string
 	Paths                        workspace.Paths
+	PriorPublicationMutations    []store.MutationReservation
+	OnCorroborationFailure       func(TerminalCorroborationFailure)
+}
+
+// TerminalCorroborationFailure describes an unavailable observation without
+// carrying the dependency's potentially credential-bearing error.
+type TerminalCorroborationFailure struct {
+	SourceInvocationID string
+	Code               string
+	Retryable          bool
+	Prerequisite       bool
+	RetryAfter         time.Duration
 }
 
 func (OutcomeReconciliation) String() string { return "Agent Turn outcome reconciliation" }
@@ -111,6 +127,7 @@ type OutcomeReconciler struct {
 	store              OutcomeReconcilerStore
 	github             OutcomeReconcilerGitHub
 	clock              outcomeReconcilerClock
+	logger             *slog.Logger
 	diagnosticRedactor *strings.Replacer
 }
 
@@ -139,7 +156,7 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	if err != nil {
 		return nil, ErrInvalidOutcomeReconciler
 	}
-	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock, diagnosticRedactor: redactor}, nil
+	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock, logger: config.Logger, diagnosticRedactor: redactor}, nil
 }
 
 // Reconcile reads the closed terminal ledger and corroborates its sole successful terminal intent.
@@ -147,10 +164,6 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
 	}
-	defer func() {
-		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
-		observation = reconciler.sanitizeObservation(observation, request.ReviewerRepositoryCredential)
-	}()
 	mutations, err := reconciler.store.ListAgentTurnMutationInvocations(ctx, request.Lease)
 	if err != nil {
 		switch {
@@ -164,6 +177,20 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 			return store.AgentTurnSettlementObservation{}, ErrOutcomeReconciliationUnavailable
 		}
 	}
+	return reconciler.ReconcileRecorded(ctx, request, mutations)
+}
+
+// ReconcileRecorded uses a verifier-owned snapshot of an already closed,
+// settled mutation ledger. It does not obtain or confer a live Agent Turn
+// lease; the Store must fence its source before providing these records.
+func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, request OutcomeReconciliation, mutations []store.MutationReservation) (observation store.AgentTurnSettlementObservation, err error) {
+	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
+		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
+	}
+	defer func() {
+		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
+		observation = reconciler.sanitizeObservation(observation, request.ReviewerRepositoryCredential)
+	}()
 	observedAt := reconciler.clock.Now().UTC()
 	if observedAt.IsZero() {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciler
@@ -186,6 +213,20 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
 	if len(intents) == 0 {
+		if publication := request.Execution.Publication; publication != nil {
+			for _, mutation := range mutations {
+				if mutation.State == store.MutationFailed && mutation.ToolName == mcp.ToolPublishChanges &&
+					(mutation.LastError == mcp.FailurePublicationRemoteHeadMismatch ||
+						strings.HasPrefix(mutation.LastError, mcp.FailurePublicationRemoteHeadMismatch+" ")) {
+					return publicationConflictObservation(observedAt, promptOutcome), nil
+				}
+				if mutation.State == store.MutationFailed && mutation.ToolName == mcp.ToolRequestReview &&
+					mutation.LastError == mcp.FailurePullRequestHeadMismatch &&
+					(publication.PullRequestID > 0 || openedPRForRecoveredBranch(mutations, *publication, request.Execution.Repository.ID)) {
+					return publicationConflictObservation(observedAt, promptOutcome), nil
+				}
+			}
+		}
 		if promptDiagnostic != "" {
 			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 		}
@@ -202,6 +243,55 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		case mcp.ToolSubmitReview:
 			request.RepositoryCredential = request.ReviewerRepositoryCredential
 			result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent)
+		case mcp.ToolConfirmPriorTerminalIntent:
+			var source struct {
+				SourceInvocationID string          `json:"source_invocation_id"`
+				SourceTool         string          `json:"source_tool"`
+				SourceOperationID  string          `json:"source_operation_id"`
+				SourceRequest      json.RawMessage `json:"source_request"`
+				SourceResult       json.RawMessage `json:"source_result"`
+				ExternalService    string          `json:"external_service"`
+				ExternalResourceID string          `json:"external_resource_id"`
+				ExpectedSHA        string          `json:"expected_sha"`
+			}
+			var confirmRequest struct {
+				OperationID        string `json:"operation_id"`
+				SourceInvocationID string `json:"source_invocation_id"`
+			}
+			if !decodeExactObject(intent.Request, &confirmRequest) || !decodeExactObject(intent.Result, &source) ||
+				confirmRequest.OperationID != intent.OperationID || confirmRequest.SourceInvocationID != source.SourceInvocationID ||
+				source.SourceInvocationID == "" || source.SourceOperationID == "" || !jsonObject(source.SourceRequest) ||
+				!jsonObject(source.SourceResult) || intent.ExternalService != "omnigrex" ||
+				intent.ExternalResourceID != request.Execution.WorkflowID || intent.ExpectedSHA != source.ExpectedSHA {
+				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal evidence is malformed or incoherent"), nil
+			}
+			prior := intent
+			prior.ID, prior.OperationID, prior.ToolName = source.SourceInvocationID, source.SourceOperationID, source.SourceTool
+			prior.Request, prior.Result = source.SourceRequest, source.SourceResult
+			prior.ExternalService, prior.ExternalResourceID, prior.ExpectedSHA = source.ExternalService, source.ExternalResourceID, source.ExpectedSHA
+			// The prior mutation supplies evidence, but the terminal intent whose
+			// outcome is pending belongs to this Turn's confirmation invocation.
+			if original := request.OnCorroborationFailure; original != nil {
+				request.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
+					failure.SourceInvocationID = intent.ID
+					original(failure)
+				}
+			}
+			switch prior.ToolName {
+			case mcp.ToolRequestReview:
+				if request.Execution.Assignment.Role != workflow.RoleDeveloper {
+					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
+				}
+				result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, prior)
+			case mcp.ToolSubmitReview:
+				if request.Execution.Assignment.Role != workflow.RoleReviewer {
+					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
+				}
+				request.RepositoryCredential = request.ReviewerRepositoryCredential
+				result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, prior)
+			default:
+				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal source kind is invalid"), nil
+			}
 		default:
 			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
 		}
@@ -212,6 +302,21 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 		result.Diagnostic = promptDiagnostic
 	}
 	return result, nil
+}
+
+func openedPRForRecoveredBranch(mutations []store.MutationReservation, publication store.AgentTurnPublication, repositoryID int64) bool {
+	var opened int
+	for _, mutation := range mutations {
+		if mutation.State != store.MutationSucceeded || mutation.ToolName != mcp.ToolOpenPR {
+			continue
+		}
+		evidence, ok := parseOpenPullRequestEvidence(mutation, repositoryID)
+		if !ok || evidence.HeadRef != publication.HeadRef || evidence.BaseRef != publication.BaseRef {
+			return false
+		}
+		opened++
+	}
+	return opened == 1
 }
 
 func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replacer, error) {
@@ -316,19 +421,71 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 			return failure("request_review evidence conflicts with the durable Change Proposal")
 		}
 		baseRef = proposal.BaseRef
-	} else if opened != nil && (opened.PullRequestID != result.PullRequestID || opened.PullRequestNumber != result.PullRequestNumber || opened.HeadSHA != result.HeadSHA || opened.HeadRef != branch) {
+	} else if opened != nil && (opened.PullRequestID != result.PullRequestID || opened.PullRequestNumber != result.PullRequestNumber || opened.HeadRef != branch) {
 		return failure("request_review evidence conflicts with open_pr evidence")
 	}
+	if publication := request.Execution.Publication; publication != nil && publication.PullRequestID > 0 {
+		if opened != nil || publication.PullRequestID != result.PullRequestID || publication.PullRequestNumber != result.PullRequestNumber ||
+			publication.HeadRef != branch || publication.BaseRef == "" || publication.SourceOpenPRMutationID == "" {
+			return failure("request_review evidence conflicts with recovered publication")
+		}
+		baseRef = publication.BaseRef
+	}
+	provenOpen := opened
+	if publication := request.Execution.Publication; publication != nil && publication.PullRequestID > 0 {
+		prior := request.PriorPublicationMutations
+		if prior == nil {
+			var err error
+			prior, err = reconciler.store.ListParticipantPublicationMutations(ctx, request.Lease)
+			if err != nil {
+				reportTerminalCorroborationFailure(request, intent.ID,
+					corroborationFailure{code: "database_observation_unavailable", retryable: true})
+				return failure("recovered Pull Request publication evidence is unavailable")
+			}
+		}
+		for _, mutation := range prior {
+			if mutation.ID != publication.SourceOpenPRMutationID {
+				continue
+			}
+			if provenOpen != nil {
+				return failure("recovered Pull Request publication evidence is ambiguous")
+			}
+			evidence, ok := parseOpenPullRequestEvidence(mutation, request.Execution.Repository.ID)
+			if !ok || evidence.PullRequestID != publication.PullRequestID || evidence.PullRequestNumber != publication.PullRequestNumber ||
+				evidence.NodeID != publication.PullRequestNodeID || evidence.HeadRef != publication.HeadRef || evidence.BaseRef != publication.BaseRef {
+				return failure("recovered Pull Request publication evidence is malformed or incoherent")
+			}
+			provenOpen = &evidence
+		}
+		if provenOpen == nil {
+			return failure("recovered Pull Request publication evidence is unavailable")
+		}
+	}
 
-	pullRequest, err := reconciler.github.GetPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
+	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(result.PullRequestNumber))
 	if err != nil {
+		reconciler.logGitHubObservationFailure(request, "get_pull_request", result.PullRequestNumber, err)
+		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Developer Pull Request observation failed")
 	}
 	if baseRef == "" {
 		baseRef = pullRequest.Base.Ref
 	}
+	if provenOpen != nil {
+		marker, err := githubapi.RenderMarker(githubapi.Marker{
+			WorkflowID: request.Execution.WorkflowID, AgentAssignmentID: request.Execution.Assignment.ID,
+			OperationID: provenOpen.MutationID,
+		})
+		if err != nil || pullRequest.NodeID != provenOpen.NodeID || pullRequest.Title != provenOpen.Title ||
+			pullRequest.Body != githubapi.JoinBodyParts(provenOpen.Body, fmt.Sprintf("Closes #%d", request.Execution.Issue.Number), marker) {
+			return publicationConflictObservation(observedAt, promptOutcome)
+		}
+	}
 	if !matchesDeveloperPullRequest(pullRequest, request.Execution.Repository, result, branch, baseRef) {
+		if provenOpen != nil {
+			return publicationConflictObservation(observedAt, promptOutcome)
+		}
 		return failure("fresh Developer Pull Request does not match terminal evidence")
 	}
 	if opened != nil && (opened.NodeID != pullRequest.NodeID || opened.PullRequestID != pullRequest.ID || opened.PullRequestNumber != int64(pullRequest.Number)) {
@@ -340,10 +497,12 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	}
 	workspaceTree, err := workspace.SnapshotTree(request.Paths.Workspace)
 	if err != nil {
+		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
 		return failure("Developer workspace tree observation failed")
 	}
 	publicationTree, err := workspace.SnapshotTree(request.Paths.Publication)
 	if err != nil {
+		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
 		return failure("Developer publication tree observation failed")
 	}
 	if !workspaceTree.Equal(publicationTree) {
@@ -351,6 +510,17 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	}
 	return store.AgentTurnSettlementObservation{
 		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeChangeProposalReady, ChangeProposal: proposal,
+		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
+	}
+}
+
+// A recovered PR is authorized only while its original identity and exact
+// publication remain corroborated. A definite fresh conflict is a blocker,
+// not an infrastructure failure that should silently retry.
+func publicationConflictObservation(observedAt time.Time, promptOutcome json.RawMessage) store.AgentTurnSettlementObservation {
+	return store.AgentTurnSettlementObservation{
+		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked,
+		Diagnostic: "publication_conflict: recovered Pull Request changed during Developer turn",
 		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
 	}
 }
@@ -368,6 +538,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		Event       githubapi.ReviewEvent `json:"event"`
 		Body        string                `json:"body"`
 		Comments    json.RawMessage       `json:"comments"`
+		Signature   json.RawMessage       `json:"signature"`
 	}
 	var result struct {
 		ReviewID int64  `json:"review_id"`
@@ -380,6 +551,13 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	expectedState := ""
 	if !decodeExactObject(intent.Request, &arguments) {
 		return failure("submit_review request evidence is malformed")
+	}
+	// An absent signature is valid for legacy reservations, but an explicit null is not a string.
+	if len(arguments.Signature) > 0 {
+		var signature *string
+		if json.Unmarshal(arguments.Signature, &signature) != nil || signature == nil {
+			return failure("submit_review request evidence is malformed")
+		}
 	}
 	switch arguments.Event {
 	case githubapi.ReviewApprove:
@@ -396,27 +574,39 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		return failure("submit_review terminal evidence is malformed or incoherent")
 	}
 
-	pullRequest, err := reconciler.github.GetPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
+	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
 	if err != nil {
+		reconciler.logGitHubObservationFailure(request, "get_pull_request", proposalScope.PullRequestNumber, err)
+		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Reviewer Pull Request observation failed")
 	}
 	if !matchesReviewerPullRequest(pullRequest, request.Execution.Repository, *proposalScope) {
 		return failure("fresh Reviewer Pull Request does not match the durable Change Proposal")
 	}
-	reviews, err := reconciler.github.ListPullRequestReviews(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
+	reviews, err := reconciler.listPullRequestReviews(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
 	if err != nil {
+		reconciler.logGitHubObservationFailure(request, "list_pull_request_reviews", proposalScope.PullRequestNumber, err)
+		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Pull Request review observation failed")
 	}
 	matched := 0
+	seenReviewID := false
 	for _, review := range reviews {
+		if review.ID == result.ReviewID {
+			seenReviewID = true
+		}
 		if review.ID == result.ReviewID && review.NodeID == result.NodeID && review.State == result.State &&
 			review.CommitID == result.CommitID && review.User.ID == result.ActorID {
 			matched++
 		}
 	}
 	if matched != 1 {
+		if !seenReviewID {
+			reportTerminalCorroborationFailure(request, intent.ID,
+				corroborationFailure{code: "review_not_visible_yet", retryable: true})
+		}
 		return failure("submitted review identity is absent or conflicts with fresh GitHub state")
 	}
 	reviewIdentity := &workflow.ReviewIdentity{
@@ -428,6 +618,8 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	}
 	existing, err := reconciler.store.GetChangeProposalReview(ctx, request.Execution.Repository.ID, result.ReviewID)
 	if err != nil {
+		reportTerminalCorroborationFailure(request, intent.ID,
+			corroborationFailure{code: "database_observation_unavailable", retryable: true})
 		return failure("durable submitted review lookup failed")
 	}
 	proposal := settlementChangeProposal(request.Execution, pullRequest)
@@ -445,7 +637,110 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	}
 }
 
+func reportTerminalCorroborationFailure(request OutcomeReconciliation, sourceID string, failure corroborationFailure) {
+	if request.OnCorroborationFailure != nil {
+		request.OnCorroborationFailure(TerminalCorroborationFailure{
+			SourceInvocationID: sourceID, Code: failure.code,
+			Retryable: failure.retryable, Prerequisite: failure.prerequisite,
+		})
+	}
+}
+
+func reportGitHubCorroborationFailure(request OutcomeReconciliation, sourceID string, err error) {
+	if request.OnCorroborationFailure == nil {
+		return
+	}
+	failure := classifyGitHubCorroborationFailure(err)
+	report := TerminalCorroborationFailure{
+		SourceInvocationID: sourceID, Code: failure.code,
+		Retryable: failure.retryable, Prerequisite: failure.prerequisite,
+	}
+	var rateLimit *githubapi.RateLimitError
+	if errors.As(err, &rateLimit) {
+		report.RetryAfter = rateLimit.RetryAfter
+		if untilReset := time.Until(rateLimit.ResetAt); untilReset > report.RetryAfter {
+			report.RetryAfter = untilReset
+		}
+	}
+	request.OnCorroborationFailure(report)
+}
+
+// Short-lived read failures are retried while the original Turn still owns its
+// settlement fence. This does not replace durable corroboration across restarts.
+func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
+	var pullRequest githubapi.PullRequest
+	err := retryTransientObservation(ctx, func() error {
+		var err error
+		pullRequest, err = reconciler.github.GetPullRequest(ctx, credential, owner, repository, number)
+		return err
+	})
+	return pullRequest, err
+}
+
+func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context, credential, owner, repository string, number int) ([]githubapi.Review, error) {
+	var reviews []githubapi.Review
+	err := retryTransientObservation(ctx, func() error {
+		var err error
+		reviews, err = reconciler.github.ListPullRequestReviews(ctx, credential, owner, repository, number)
+		return err
+	})
+	return reviews, err
+}
+
+func retryTransientObservation(ctx context.Context, observe func() error) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		err := observe()
+		if err == nil || attempt == 2 || !shortRetryableGitHubObservation(err) || ctx.Err() != nil {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+// A short retry cannot honor a GitHub rate-limit delay. A future durable
+// corroboration worker must use delayed jobs for these observations.
+func shortRetryableGitHubObservation(err error) bool {
+	if !classifyGitHubCorroborationFailure(err).retryable {
+		return false
+	}
+	var rateLimit *githubapi.RateLimitError
+	return !errors.As(err, &rateLimit) ||
+		(rateLimit.RetryAfter <= 0 && !rateLimit.ResetAt.After(time.Now()))
+}
+
+// Log only reconciler-authored classifications and allowlisted GitHub response
+// metadata. Dependency errors can contain credentials or response bodies.
+func (reconciler *OutcomeReconciler) logGitHubObservationFailure(request OutcomeReconciliation, operation string, pullRequestNumber int64, err error) {
+	if reconciler.logger == nil {
+		return
+	}
+	failure := classifyGitHubCorroborationFailure(err)
+	attributes := []any{
+		"workflow_id", request.Execution.WorkflowID,
+		"agent_turn_id", request.Lease.ID,
+		"execution_epoch", request.Lease.ExecutionEpoch,
+		"role", request.Execution.Assignment.Role,
+		"operation", operation,
+		"pull_request_number", pullRequestNumber,
+		"failure_code", failure.code,
+	}
+	if failure.status != 0 {
+		attributes = append(attributes, "github_http_status", failure.status)
+	}
+	reconciler.logger.Warn("Agent Turn GitHub outcome observation failed", attributes...)
+}
+
 type openPullRequestEvidence struct {
+	MutationID        string
+	Title             string
+	Body              string
 	PullRequestID     int64
 	PullRequestNumber int64
 	NodeID            string
@@ -475,6 +770,7 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 		return openPullRequestEvidence{}, false
 	}
 	return openPullRequestEvidence{
+		MutationID: mutation.ID, Title: arguments.Title, Body: arguments.Body,
 		PullRequestID: result.PullRequestID, PullRequestNumber: result.Number, NodeID: result.NodeID,
 		HeadSHA: result.HeadSHA, HeadRef: head, BaseRef: base,
 	}, true
@@ -574,7 +870,7 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 			continue
 		}
 		switch mutation.ToolName {
-		case mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview:
+		case mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview, mcp.ToolConfirmPriorTerminalIntent:
 			intents = append(intents, mutation)
 		}
 	}

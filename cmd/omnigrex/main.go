@@ -184,7 +184,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
-	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies)
+	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
 	preparer := agentturn.NewPreparer(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
@@ -218,6 +218,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Credentials:      repositoryCredentials,
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},
+		PriorIntents:     database,
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		Policies:         rolePolicies,
 		RoleCatalog:      roleCatalog,
@@ -226,7 +227,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure MCP tool backend: %w", err)
 	}
 	toolGateway, err := mcp.New(mcp.Config{
-		EndpointURL: settings.MCPEndpointURL, Store: database, Backend: toolBackend,
+		EndpointURL: settings.MCPEndpointURL, Logger: logger, Store: database, Backend: toolBackend,
 		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
 		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
 		Policies:                 rolePolicies,
@@ -344,7 +345,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
-		Policies: rolePolicies,
+		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -354,7 +355,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api,
+		Store: database, GitHub: githubServices.api, Logger: logger,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
@@ -365,10 +366,11 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
 		Launcher: runtimeLauncher, Sessions: sessions,
-		Outcomes:   loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
-		Workspace:  workspaces,
-		Policies:   rolePolicies,
-		Definition: definition,
+		Outcomes:            loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
+		Workspace:           workspaces,
+		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
+		Policies:            rolePolicies,
+		Definition:          definition,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
@@ -382,6 +384,20 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	zeroBytes(providerCredentialJSON)
 	if executionWorkerErr != nil {
 		return fmt.Errorf("configure Agent Turn execution Worker: %w", executionWorkerErr)
+	}
+	terminalCorroborationWorker, err := agentturn.NewTerminalCorroborationWorker(
+		database, outcomeReconciler, developerRepositoryCredentials, reviewerRepositoryCredentials, workspaces,
+		agentturn.TerminalCorroborationWorkerConfig{
+			ClaimOwner:    githubServices.claimOwner + ":verify-terminal-intent",
+			Window:        settings.TerminalCorroborationDuration,
+			PollInterval:  settings.WorkflowEffectPollInterval,
+			LeaseDuration: max(settings.WorkflowEffectLeaseDuration, 3*time.Second),
+			OnError: func(error) {
+				logger.Error("verify terminal intent", "failure_code", "verification_attempt_unavailable")
+			},
+		})
+	if err != nil {
+		return fmt.Errorf("configure terminal corroboration Worker: %w", err)
 	}
 	reconciliationWorker, err := webhook.NewReconciliationWorker(database, githubServices.webhookProcessor, webhook.ReconciliationWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":reconcile-pending-events", LeaseDuration: settings.WorkflowEffectLeaseDuration,
@@ -455,7 +471,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
 	}
-	retentionWorker, err := retention.NewWorker(database, runtimeStateCleaner, retention.WorkerConfig{
+	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(runtimeStateCleaner, workspaces), retention.WorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
 		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,
@@ -507,6 +523,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		reconciliationWorker.Run,
 		preparationWorker.Run,
 		executionWorker.Run,
+		terminalCorroborationWorker.Run,
 		runtimeStopWorker.Run,
 		mutationRecoveryWorker.Run,
 		expiredTurnMonitor.Run,

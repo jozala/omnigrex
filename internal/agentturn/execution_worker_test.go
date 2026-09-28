@@ -78,6 +78,24 @@ func TestExecutionWorkerDelegatesInfrastructureSettlementObservation(t *testing.
 	}
 }
 
+func TestExecutionWorkerHandsOffUnprovenPublicationBeforeLaunchingAgent(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	dependencies := fixture.dependencies()
+	dependencies.PublicationRecovery = executionPublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
+		return agentturn.ErrPublicationConflict
+	})
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || err != nil || fixture.store.settled.Outcome != workflow.TurnOutcomeBlocked ||
+		fixture.store.settled.Completion.Status != store.AgentTurnSucceeded || !strings.Contains(fixture.store.settled.Diagnostic, "publication_conflict") ||
+		fixture.launcher.request.RepositoryURL != "" {
+		t.Fatalf("publication conflict = processed %t, error %v, settlement %#v, launcher %#v", processed, err, fixture.store.settled, fixture.launcher)
+	}
+}
+
 func TestExecutionWorkerSettlesCorroboratedHandoffAfterPromptEOF(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	promptErr := errors.New("submit ACP prompt: EOF")
@@ -430,6 +448,61 @@ func TestExecutionWorkerKeepsExplicitACPResponseCancellationInterrupted(t *testi
 	}
 	if fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed || fixture.store.settled.Completion.Status != store.AgentTurnInterrupted {
 		t.Fatalf("explicit cancellation settlement = %#v", fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerFailedAtomicPromptFenceDoesNotSettleKnownRefusal(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
+		return acp.PromptResponse{StopReason: acp.StopReasonRefusal}, nil
+	}
+	fixture.store.promptEvidenceErr = errors.New("temporary PostgreSQL failure")
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		t.Fatalf("unfenced known refusal reached reconciliation: %#v", request)
+		return store.AgentTurnSettlementObservation{}
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if err == nil || fixture.store.settled.Outcome != "" {
+		t.Fatalf("known refusal after failed checkpoint = processed %t, error %v, observation %#v",
+			processed, err, fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerOOMObservationDeadlineDoesNotReclassifyACPCancellation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.err = context.Canceled
+	fixture.runtime.oomObserveErr = context.DeadlineExceeded
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
+			t.Fatalf("cancelled ACP prompt was reclassified by Docker observation: %#v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, context.Canceled) ||
+		fixture.store.recordedPromptError != string(agentturn.PromptErrorCancellation) ||
+		fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed {
+		t.Fatalf("cancelled prompt = processed %t, error %v, stored class %q, settlement %#v",
+			processed, err, fixture.store.recordedPromptError, fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerConfirmedOOMDoesNotAcceptExplicitACPCancellation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.prompter.err = context.Canceled
+	fixture.runtime.oomKilled = true
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
+			t.Fatalf("confirmed OOM overrode explicit ACP cancellation: %#v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) ||
+		fixture.store.recordedPromptError != string(agentturn.PromptErrorCancellation) ||
+		fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed {
+		t.Fatalf("cancelled prompt with OOM = processed %t, error %v, stored class %q, settlement %#v",
+			processed, err, fixture.store.recordedPromptError, fixture.store.settled)
 	}
 }
 
@@ -1197,6 +1270,9 @@ func (fixture *executionWorkerFixture) dependencies() agentturn.ExecutionWorkerD
 		ReviewerCredentials: fixture.reviewerCredentials, DefaultBranch: fixture.defaultBranch,
 		Launcher: fixture.launcher, Sessions: fixture.prompter, Outcomes: fixture.outcomes, Workspace: fixture.workspace,
 		Definition: fixture.definition, Policies: fixture.policies,
+		PublicationRecovery: executionPublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
+			return nil
+		}),
 	}
 }
 
@@ -1266,6 +1342,10 @@ func (database *executionRunStore) GetAgentTurnExecutionContext(context.Context,
 }
 
 func (*executionRunStore) OpenMutationAdmission(context.Context, store.AgentTurnLease) error {
+	return nil
+}
+
+func (*executionRunStore) CloseMutationAdmissionWithPromptEvidence(context.Context, store.AgentTurnLease, string, string) error {
 	return nil
 }
 
@@ -1470,6 +1550,8 @@ type executionStore struct {
 	heartbeatObserved          chan struct{}
 	heartbeats                 int
 	openErr                    error
+	promptEvidenceErr          error
+	recordedPromptError        string
 	closeErr                   error
 	unsettled                  []store.MutationReservation
 	unsettledResults           [][]store.MutationReservation
@@ -1538,6 +1620,15 @@ func (database *executionStore) OpenMutationAdmission(context.Context, store.Age
 
 func (database *executionStore) CloseMutationAdmission(context.Context, store.AgentTurnLease) error {
 	database.operations.add("close-admission")
+	return database.closeErr
+}
+
+func (database *executionStore) CloseMutationAdmissionWithPromptEvidence(_ context.Context, _ store.AgentTurnLease, stopReason, errorClass string) error {
+	database.operations.add("close-admission")
+	database.recordedPromptError = errorClass
+	if database.promptEvidenceErr != nil {
+		return database.promptEvidenceErr
+	}
 	return database.closeErr
 }
 
@@ -1691,6 +1782,12 @@ type executionLauncher struct {
 	returnRelease         chan struct{}
 }
 
+type executionPublicationRecoveryFunc func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error
+
+func (recover executionPublicationRecoveryFunc) Recover(ctx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, url, credential, base string) error {
+	return recover(ctx, lease, execution, url, credential, base)
+}
+
 func (launcher *executionLauncher) LaunchExecution(_ context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
 	launcher.operations.add("launch")
 	launcher.request = request
@@ -1727,10 +1824,14 @@ type executionRuntime struct {
 	closeRelease    chan struct{}
 	closeOnce       sync.Once
 	oomKilled       bool
+	oomObserveErr   error
 	oomAfterCleanup bool
 }
 
 func (runtime *executionRuntime) ObserveOOM(context.Context) (bool, error) {
+	if runtime.oomObserveErr != nil {
+		return false, runtime.oomObserveErr
+	}
 	return runtime.oomKilled, nil
 }
 

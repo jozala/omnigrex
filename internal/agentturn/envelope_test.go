@@ -25,7 +25,7 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	if len(content) != 1 || content[0].Type != "text" || content[0].Data != "" || content[0].MIMEType != "" || content[0].URI != "" {
 		t.Fatalf("BuildEventEnvelope() content = %#v, want one text block", content)
 	}
-	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","publish_changes","open_pr","request_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
+	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","publish_changes","open_pr","request_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked"]}`
 	if content[0] != acp.TextContent(want) {
 		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content[0].Text, want)
 	}
@@ -78,6 +78,24 @@ func TestBuildEventEnvelopeUsesInjectedWorkflowDefinition(t *testing.T) {
 	}
 }
 
+func TestBuildEventEnvelopeExplainsRecoveredInProgressPR(t *testing.T) {
+	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeRetry, nil)
+	execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "omnigrex/issue-17", HeadSHA: "2222222222222222222222222222222222222222", BaseRef: "main",
+		PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_901",
+	}
+	content, err := agentturn.BuildEventEnvelope(execution, execution.Publication.HeadSHA, builtinDefinition(t), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != 1 || !strings.Contains(content[0].Text, `"pull_request_number":23`) ||
+		!strings.Contains(content[0].Text, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
+		!strings.Contains(content[0].Text, "Inspect the recovered publication") ||
+		!strings.Contains(content[0].Text, `"expected_head_sha":""`) {
+		t.Fatalf("recovered Developer envelope = %#v", content)
+	}
+}
+
 func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23,
@@ -89,7 +107,7 @@ func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","submit_review","comment_on_issue","comment_on_pull_request","report_blocked"]}`
+	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","submit_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked"]}`
 	if len(content) != 1 || content[0] != acp.TextContent(want) {
 		t.Fatalf("BuildEventEnvelope() = %#v\nwant text = %s", content, want)
 	}

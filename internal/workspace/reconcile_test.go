@@ -40,6 +40,30 @@ func TestLifecycleReconcilesPublishedCommitByExactOperationTrailer(t *testing.T)
 	}
 }
 
+func TestLifecycleRestoresPublishedHeadAsComparisonTreeForNextTurn(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/omnigrex/feature", fixture.second)
+	lifecycle := newLifecycle(t)
+	head, err := lifecycle.ObserveRemoteBranch(context.Background(), fixture.remote, "", "omnigrex/feature")
+	if err != nil || head != fixture.second {
+		t.Fatalf("observed branch = %q, %v; want %s", head, err, fixture.second)
+	}
+	if err := lifecycle.PrepareRecoveredPublication(context.Background(), assignmentID, fixture.remote, "", head); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := lifecycle.Paths(assignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOutput(t, paths.Publication, "rev-parse", "HEAD"); got != fixture.second {
+		t.Fatalf("restored comparison tree HEAD = %q, want %s", got, fixture.second)
+	}
+	missing, err := lifecycle.ObserveRemoteBranch(context.Background(), fixture.remote, "", "omnigrex/missing")
+	if err != nil || missing != "" {
+		t.Fatalf("missing branch = %q, %v", missing, err)
+	}
+}
+
 func TestLifecycleReconciliationDistinguishesAbsentAndConflictingAdvancement(t *testing.T) {
 	fixture := newGitFixture(t)
 	gitRun(t, fixture.remote, "update-ref", "refs/heads/existing", fixture.second)

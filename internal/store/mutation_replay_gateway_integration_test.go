@@ -111,7 +111,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatal(err)
 	}
 	if observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
-		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 1 {
+		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 2 {
 		t.Fatalf("fresh replay outcome = %#v, GitHub gets %d", observation, github.getCallCount())
 	}
 }
@@ -315,6 +315,8 @@ type replayGatewayGitHub struct {
 	head      string
 	branch    string
 	base      string
+	title     string
+	body      string
 	openCalls int
 	getCalls  int
 }
@@ -322,6 +324,7 @@ type replayGatewayGitHub struct {
 func (github *replayGatewayGitHub) pullRequest() githubapi.PullRequest {
 	return githubapi.PullRequest{
 		ID: 654, NodeID: "PR_654", Number: 23, State: "open", HTMLURL: "https://github.com/owner/repo/pull/23",
+		Title: github.title, Body: github.body,
 		Head: githubapi.PullRequestBranch{Ref: github.branch, SHA: github.head, Label: "owner:" + github.branch},
 		Base: githubapi.PullRequestBranch{Ref: github.base, SHA: "7123456789abcdef0123456789abcdef01234567", Label: "owner:" + github.base},
 	}
@@ -354,10 +357,12 @@ func (*replayGatewayGitHub) ListReviewThreads(context.Context, string, string, s
 func (*replayGatewayGitHub) GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error) {
 	return nil, errors.New("unexpected call")
 }
-func (github *replayGatewayGitHub) OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
+func (github *replayGatewayGitHub) OpenPullRequest(_ context.Context, _, _, _ string, request githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
 	github.mutex.Lock()
 	defer github.mutex.Unlock()
 	github.openCalls++
+	github.title = request.Title
+	github.body = githubapi.JoinBodyParts(request.Body, fmt.Sprintf("Closes #%d", request.IssueNumber), request.Marker)
 	return github.pullRequest(), nil
 }
 func (*replayGatewayGitHub) CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {
@@ -378,4 +383,192 @@ func (github *replayGatewayGitHub) getCallCount() int {
 	github.mutex.Lock()
 	defer github.mutex.Unlock()
 	return github.getCalls
+}
+
+func TestGatewaySignedReviewerReviewReconcilesToWorkflowOutcome(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const head = "1111111111111111111111111111111111111111"
+	_, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 97, workflow.RoleReviewer, head)
+	execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	github := &signedReviewerGitHub{proposal: proposal, head: head}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub: github, Credentials: replayGatewayCredentials{},
+		Publisher: &replayGatewayPublisher{}, Workflow: &replayGatewayWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := mcp.TokenScope{
+		Lease: lease, WorkflowID: execution.WorkflowID, Role: workflow.RoleReviewer,
+		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
+		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number},
+		PullRequest: &mcp.PullRequestScope{
+			ID: proposal.PullRequestID, Number: proposal.PullRequestNumber,
+		},
+		Branch: proposal.HeadRef, DefaultBranch: proposal.BaseRef, HeadSHA: head,
+		ExpiresAt: lease.LeaseExpiresAt.Add(-time.Second),
+	}
+	gateway, registration := openReplayGateway(t, database, backend, scope)
+	response := callReplayGatewayTool(t, gateway, registration, mcp.ToolSubmitReview, map[string]any{
+		"operation_id": "signed-review-1", "event": "REQUEST_CHANGES", "body": "Needs changes", "comments": []any{},
+	}, false)
+	if !strings.Contains(response, "CHANGES_REQUESTED") {
+		t.Fatalf("submit_review response = %s, want CHANGES_REQUESTED result", response)
+	}
+	if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := database.ListAgentTurnMutationInvocations(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 1 {
+		t.Fatalf("reviewer ledger = %#v, want one terminal intent", ledger)
+	}
+	if !strings.Contains(string(ledger[0].Request), `"signature"`) {
+		t.Fatalf("persisted submit_review request is missing server-owned signature: %s", ledger[0].Request)
+	}
+	if !strings.Contains(string(ledger[0].Request), "_By Omnigrex:") {
+		t.Fatalf("persisted signature footer is missing participant identity: %s", ledger[0].Request)
+	}
+	paths := workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
+		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token", Paths: paths,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Outcome != workflow.TurnOutcomeChangesRequested || observation.Completion.Status != store.AgentTurnSucceeded ||
+		observation.Review == nil || observation.Review.HeadSHA != head ||
+		observation.AuthorizedReviewerActorID != 9702 || observation.ChangeProposal == nil {
+		t.Fatalf("gateway-signed REQUEST_CHANGES outcome = %#v, want successful CHANGES_REQUESTED settlement", observation)
+	}
+	settled, err := database.SettleAgentTurn(ctx, lease, observation)
+	if err != nil {
+		t.Fatalf("SettleAgentTurn() signed review error = %v", err)
+	}
+	if settled.State != workflow.StateDeveloping || settled.Reason != workflow.ReasonChangesRequested ||
+		settled.TerminalStatus != store.AgentTurnSucceeded || settled.SuccessorJobID == "" {
+		t.Fatalf("signed review settlement = %#v, want Developer successor", settled)
+	}
+	var reviewUsage, infrastructureFailures int
+	var successorRole, successorPurpose string
+	if err := pool.QueryRow(ctx, `
+SELECT COALESCE((attempt.review_usage->>'review')::int, 0), attempt.infrastructure_failures,
+       successor.payload->>'role', successor.payload->>'purpose'
+FROM workflow_attempts AS attempt
+JOIN jobs AS successor ON successor.id = $2
+WHERE attempt.id = $1`, execution.Turn.WorkflowAttemptID, settled.SuccessorJobID).Scan(
+		&reviewUsage, &infrastructureFailures, &successorRole, &successorPurpose); err != nil {
+		t.Fatal(err)
+	}
+	if reviewUsage != 1 || infrastructureFailures != 0 ||
+		successorRole != string(workflow.RoleDeveloper) || successorPurpose != string(workflow.TurnPurposeRequestedChanges) {
+		t.Fatalf("signed review successor = review usage %d, infrastructure failures %d, %s/%s",
+			reviewUsage, infrastructureFailures, successorRole, successorPurpose)
+	}
+}
+
+type signedReviewerGitHub struct {
+	mutex       sync.Mutex
+	proposal    *store.AgentTurnSettlementChangeProposal
+	head        string
+	submitted   *githubapi.Review
+	getCalls    int
+	listCalls   int
+	submitCalls int
+}
+
+func (github *signedReviewerGitHub) pullRequest() githubapi.PullRequest {
+	return githubapi.PullRequest{
+		ID: github.proposal.PullRequestID, NodeID: github.proposal.PullRequestNodeID,
+		Number: int(github.proposal.PullRequestNumber), State: "open",
+		HTMLURL: "https://github.com/owner/repo/pull/" + fmt.Sprint(github.proposal.PullRequestNumber),
+		Head:    githubapi.PullRequestBranch{Ref: github.proposal.HeadRef, SHA: github.head, Label: "owner:" + github.proposal.HeadRef},
+		Base:    githubapi.PullRequestBranch{Ref: github.proposal.BaseRef, SHA: github.proposal.BaseSHA, Label: "owner:" + github.proposal.BaseRef},
+	}
+}
+
+func (github *signedReviewerGitHub) GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	github.getCalls++
+	return github.pullRequest(), nil
+}
+
+func (github *signedReviewerGitHub) ListPullRequestFiles(context.Context, string, string, string, int) ([]githubapi.PullRequestFile, error) {
+	return nil, nil
+}
+
+func (github *signedReviewerGitHub) SubmitReview(_ context.Context, _, _, _ string, _ int, request githubapi.ReviewRequest) (githubapi.Review, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	github.submitCalls++
+	state := "APPROVED"
+	if request.Event == githubapi.ReviewRequestChanges {
+		state = "CHANGES_REQUESTED"
+	}
+	review := githubapi.Review{
+		ID: 801, NodeID: "PRR_node", State: state, CommitID: request.CommitID,
+		Body: request.Body, User: githubapi.User{ID: 9702},
+		HTMLURL: "https://github.test/review/801",
+	}
+	github.submitted = &review
+	return review, nil
+}
+
+func (github *signedReviewerGitHub) ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	github.listCalls++
+	if github.submitted == nil {
+		return nil, nil
+	}
+	return []githubapi.Review{*github.submitted}, nil
+}
+
+func (*signedReviewerGitHub) GetIssue(context.Context, string, string, string, int) (githubapi.Issue, error) {
+	return githubapi.Issue{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) ListIssueComments(context.Context, string, string, string, int) ([]githubapi.IssueComment, error) {
+	return nil, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
+	return nil, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) ListReviewThreads(context.Context, string, string, string, int) ([]githubapi.ReviewThread, error) {
+	return nil, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error) {
+	return nil, errors.New("unexpected call")
+}
+
+func (github *signedReviewerGitHub) OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
+	return github.pullRequest(), errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {
+	return githubapi.IssueComment{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) CreatePullRequestComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {
+	return githubapi.IssueComment{}, errors.New("unexpected call")
 }

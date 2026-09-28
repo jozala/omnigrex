@@ -23,20 +23,21 @@ const (
 )
 
 const (
-	ServerName                 = "omnigrex"
-	ToolGetIssue               = "get_issue"
-	ToolListIssueComments      = "list_issue_comments"
-	ToolGetPullRequest         = "get_pull_request"
-	ToolListPullRequestReviews = "list_pull_request_reviews"
-	ToolListReviewThreads      = "list_review_threads"
-	ToolGetCheckRuns           = "get_check_runs"
-	ToolPublishChanges         = "publish_changes"
-	ToolOpenPR                 = "open_pr"
-	ToolRequestReview          = "request_review"
-	ToolSubmitReview           = "submit_review"
-	ToolCommentOnIssue         = "comment_on_issue"
-	ToolCommentOnPullRequest   = "comment_on_pull_request"
-	ToolReportBlocked          = "report_blocked"
+	ServerName                     = "omnigrex"
+	ToolGetIssue                   = "get_issue"
+	ToolListIssueComments          = "list_issue_comments"
+	ToolGetPullRequest             = "get_pull_request"
+	ToolListPullRequestReviews     = "list_pull_request_reviews"
+	ToolListReviewThreads          = "list_review_threads"
+	ToolGetCheckRuns               = "get_check_runs"
+	ToolPublishChanges             = "publish_changes"
+	ToolOpenPR                     = "open_pr"
+	ToolRequestReview              = "request_review"
+	ToolSubmitReview               = "submit_review"
+	ToolCommentOnIssue             = "comment_on_issue"
+	ToolCommentOnPullRequest       = "comment_on_pull_request"
+	ToolReportBlocked              = "report_blocked"
+	ToolConfirmPriorTerminalIntent = "confirm_prior_terminal_intent"
 )
 
 type ToolDefinition struct {
@@ -86,6 +87,9 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolReportBlocked, Description: "Create a Human Handoff for a blocker.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "reason": stringSchema(1, 4096), "details": stringSchema(1, 65536),
 	}, "operation_id", "reason"), Class: MutationTool},
+	{Name: ToolConfirmPriorTerminalIntent, Description: "Explicitly confirm a successful terminal intent from an interrupted prior Turn without repeating its GitHub effect.", InputSchema: objectSchema(map[string]any{
+		"operation_id": operationIDSchema(), "source_invocation_id": stringSchema(36, 36),
+	}, "operation_id", "source_invocation_id"), Class: MutationTool},
 }
 
 // CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.

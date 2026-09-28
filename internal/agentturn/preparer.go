@@ -3,6 +3,7 @@ package agentturn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -135,6 +136,12 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, err)
 	}
+	configuration := snapshot.TurnConfiguration()
+	encoded, err := json.Marshal(configuration)
+	if err != nil {
+		return Result{}, fmt.Errorf("encode turn configuration: %w", err)
+	}
+	preparation.TurnConfiguration = encoded
 	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
 	switch bindings.Role {
 	case workflow.RoleDeveloper:

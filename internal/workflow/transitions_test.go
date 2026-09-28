@@ -123,6 +123,64 @@ func TestReviewDeduplicatesByDurableIDAndRejectsConflictingContent(t *testing.T)
 	})
 }
 
+func TestPreviouslyAcceptedReviewRevalidationDoesNotConsumeAnotherCycle(t *testing.T) {
+	for _, test := range []struct {
+		outcome    workflow.TurnOutcome
+		wantState  workflow.State
+		wantReason workflow.Reason
+	}{
+		{workflow.TurnOutcomeChangesRequested, workflow.StateDeveloping, workflow.ReasonChangesRequested},
+		{workflow.TurnOutcomeApproved, workflow.StatePRReady, workflow.ReasonApproved},
+	} {
+		t.Run(string(test.outcome), func(t *testing.T) {
+			snapshot := reviewingSnapshot(0, "head-1")
+			source := guard(snapshot)
+			source.AttemptID = "previous-attempt"
+			snapshot.ActiveTurn = nil
+			identity := review(700, 64, "head-1")
+			event := workflow.TerminalIntentRevalidatedEvent{
+				EventMetadata: metadata(snapshot, "revalidated-review"),
+				AttemptID:     snapshot.CurrentAttempt.ID, SourceTurn: source,
+				Outcome: test.outcome, ChangeProposal: proposal(64, "head-1"),
+				Review: identity, ExistingReview: identity, AuthorizedReviewerActorID: identity.ActorID,
+			}
+			decision := reduce(snapshot, event)
+			assertDecision(t, decision, workflow.DispositionApplied, test.wantReason, test.wantState, snapshot.Revision+1)
+			if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 {
+				t.Fatalf("already accepted review consumed a new Review Cycle: %#v", decision.Snapshot.CurrentAttempt.ReviewUsage)
+			}
+			for _, action := range decision.Actions {
+				if _, duplicate := action.(workflow.RecordReviewAction); duplicate {
+					t.Fatalf("already accepted review was recorded a second time: %#v", decision.Actions)
+				}
+			}
+		})
+	}
+}
+
+func TestRevalidatedReviewerReviewOnReplacedHeadSchedulesSynchronization(t *testing.T) {
+	snapshot := reviewingSnapshot(0, "head-a")
+	source := guard(snapshot)
+	source.AttemptID = "previous-attempt"
+	snapshot.ActiveTurn = nil
+	identity := review(701, 64, "head-a")
+	event := workflow.TerminalIntentRevalidatedEvent{
+		EventMetadata: metadata(snapshot, "revalidated-stale-review"),
+		AttemptID:     snapshot.CurrentAttempt.ID, SourceTurn: source,
+		Outcome: workflow.TurnOutcomeApproved, ChangeProposal: proposal(64, "head-b"),
+		Review: identity, AuthorizedReviewerActorID: identity.ActorID,
+	}
+	decision := reduce(snapshot, event)
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 0 || decision.Snapshot.ChangeProposal.HeadSHA != "head-b" {
+		t.Fatalf("stale revalidation counted or rewound the head: %#v", decision.Snapshot)
+	}
+	intent := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
+	if intent.Role != workflow.RoleReviewer || intent.Purpose != workflow.TurnPurposeSynchronization || intent.ExpectedHeadSHA != "head-b" {
+		t.Fatalf("stale revalidation successor = %#v", intent)
+	}
+}
+
 func TestReviewWebhookIsPendingCorroborationNotTurnSettlement(t *testing.T) {
 	snapshot := reviewingSnapshot(0, "head-1")
 	event := workflow.ReviewObservedEvent{

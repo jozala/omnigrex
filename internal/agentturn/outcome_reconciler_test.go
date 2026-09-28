@@ -1,10 +1,12 @@
 package agentturn_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +60,14 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	}
 	storeAPI := &outcomeStore{mutations: ledger}
 	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: ledger[0].ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.pullRequest.Title = "Change"
+	github.pullRequest.Body = githubapi.JoinBodyParts("Ready", "Closes #61", marker)
 	reconciler := newOutcomeReconciler(t, storeAPI, github)
 
 	observation, err := reconciler.Reconcile(context.Background(), request)
@@ -74,6 +84,152 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	}
 	if github.getCredential != outcomeCredential || github.getOwner != "acme" || github.getRepository != "widgets" || github.getNumber != 23 {
 		t.Errorf("GetPullRequest scope = credential %q, %s/%s#%d", github.getCredential, github.getOwner, github.getRepository, github.getNumber)
+	}
+	github.pullRequest.Body = "Ready without operation marker"
+	changed, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil || changed.Outcome != workflow.TurnOutcomeBlocked || changed.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(changed.Diagnostic, "publication_conflict") {
+		t.Fatalf("edited same-turn PR was accepted: %#v, error %v", changed, err)
+	}
+}
+
+func TestOutcomeReconcilerAcceptsReviewAfterPublishingAgainOnNewlyOpenedPR(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
+		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
+		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		"github", "41:feature/work:main", outcomeHead)
+	published := outcomeSucceededMutation(2, mcp.ToolPublishChanges, "publish-2",
+		`{"operation_id":"publish-2","message":"Additional edit"}`,
+		`{"head":"`+outcomeNewHead+`","branch":"feature/work","changed":true}`,
+		"git", "41:feature/work", outcomeHead)
+	requested := outcomeSucceededMutation(3, mcp.ToolRequestReview, "review-3",
+		`{"operation_id":"review-3","summary":"Ready"}`,
+		`{"outcome":"REVIEW_REQUESTED","pull_request_id":901,"pull_request_number":23,"head_sha":"`+outcomeNewHead+`"}`,
+		"omnigrex", "41:feature/work", outcomeNewHead)
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: opened.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := outcomePullRequest(outcomeNewHead)
+	pr.Title = "Change"
+	pr.Body = githubapi.JoinBodyParts("Ready", "Closes #61", marker)
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{opened, published, requested}},
+		&outcomeGitHub{pullRequest: pr}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
+		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != outcomeNewHead {
+		t.Fatalf("review after another publication = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerRequiresRecoveredPRMarkerAtReviewHandoff(t *testing.T) {
+	const sourceOpenPR = "10000000-0000-4000-8000-000000000003"
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: sourceOpenPR,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, body string
+		title      string
+		head       string
+		want       workflow.TurnOutcome
+	}{
+		{name: "unchanged marker", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Change", want: workflow.TurnOutcomeChangeProposalReady},
+		{name: "removed marker", body: "Ready", title: "Change", want: workflow.TurnOutcomeBlocked},
+		{name: "edited body retaining marker", body: githubapi.JoinBodyParts("Human edit", "Closes #61", marker), title: "Change", want: workflow.TurnOutcomeBlocked},
+		{name: "edited title retaining marker", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Human edit", want: workflow.TurnOutcomeBlocked},
+		{name: "new head after review request", body: githubapi.JoinBodyParts("Ready", "Closes #61", marker), title: "Change", head: outcomeNewHead, want: workflow.TurnOutcomeBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, false)
+			request.Execution.Publication = &store.AgentTurnPublication{
+				HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+				PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_node",
+				SourcePublishMutationID: "10000000-0000-4000-8000-000000000002", SourceOpenPRMutationID: sourceOpenPR,
+			}
+			pr := outcomePullRequest(outcomeHead)
+			pr.Body = test.body
+			pr.Title = test.title
+			if test.head != "" {
+				pr.Head.SHA = test.head
+			}
+			source := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-prior",
+				`{"operation_id":"open-prior","title":"Change","body":"Ready"}`,
+				`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+				"github", "41:feature/work:main", outcomeHead)
+			source.ID = sourceOpenPR
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, prior: []store.MutationReservation{source}},
+				&outcomeGitHub{pullRequest: pr}).Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded ||
+				(test.want == workflow.TurnOutcomeBlocked && !strings.Contains(observation.Diagnostic, "publication_conflict")) {
+				t.Fatalf("recovered PR handoff = %#v, want %s", observation, test.want)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerBlocksRecoveredPRWhenEarlyHeadCheckFails(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		PullRequestID: 901, PullRequestNumber: 23, PullRequestNodeID: "PR_node",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000003",
+	}
+	failed := outcomeFailedMutation(1, mcp.ToolRequestReview)
+	failed.LastError = "pull_request_head_mismatch"
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("early head conflict = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerBlocksHeadConflictAfterRecoveredBranchOpenedPR(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
+		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
+		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		"github", "41:feature/work:main", outcomeHead)
+	failed := outcomeFailedMutation(2, mcp.ToolRequestReview)
+	failed.LastError = mcp.FailurePullRequestHeadMismatch
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{opened, failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("recovered branch head conflict after open_pr = %#v, error %v", observation, err)
+	}
+}
+
+func TestOutcomeReconcilerBlocksRecoveredBranchOnDefinitePublishConflict(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, false)
+	request.Execution.Publication = &store.AgentTurnPublication{
+		HeadRef: "feature/work", HeadSHA: outcomeHead, BaseRef: "main",
+		SourcePublishMutationID: "10000000-0000-4000-8000-000000000002",
+	}
+	failed := outcomeFailedMutation(1, mcp.ToolPublishChanges)
+	failed.LastError = "publication_remote_head_mismatch expected_sha=" + outcomeHead + " observed_sha=" + outcomeNewHead
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{failed}},
+		&outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.Completion.Status != store.AgentTurnSucceeded ||
+		!strings.Contains(observation.Diagnostic, "publication_conflict") {
+		t.Fatalf("recovered branch publish conflict = %#v, error %v", observation, err)
 	}
 }
 
@@ -269,6 +425,44 @@ func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *t
 	}
 }
 
+func TestOutcomeReconcilerAcceptsAgentConfirmedPriorReviewerIntent(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	prior := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	result, err := json.Marshal(map[string]any{
+		"source_invocation_id": prior.ID, "source_tool": prior.ToolName,
+		"source_operation_id": prior.OperationID, "source_request": prior.Request,
+		"source_result": prior.Result, "external_service": prior.ExternalService,
+		"external_resource_id": prior.ExternalResourceID, "expected_sha": prior.ExpectedSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := outcomeSucceededMutation(1, mcp.ToolConfirmPriorTerminalIntent, "confirm-1",
+		`{"operation_id":"confirm-1","source_invocation_id":"`+prior.ID+`"}`, string(result),
+		"omnigrex", outcomeWorkflowID, outcomeHead)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
+	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeApproved || observation.Review == nil || observation.Review.ID != 801 || github.listCalls != 1 {
+		t.Fatalf("confirmed Reviewer intent = (%#v, %v), GitHub review reads %d", observation, err, github.listCalls)
+	}
+	github.getErr = &githubapi.APIError{StatusCode: 503}
+	var unavailable *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { unavailable = &failure }
+	failed, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, failed, err, store.AgentTurnFailed, "observation failed")
+	if unavailable == nil || unavailable.SourceInvocationID != confirmed.ID || !unavailable.Retryable {
+		t.Fatalf("failed confirmed intent must checkpoint its current mutation: %#v", unavailable)
+	}
+	github.getErr = nil
+	github.reviews = []githubapi.Review{}
+	unavailable = nil
+	failed, err = newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{confirmed}}, github).Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, failed, err, store.AgentTurnFailed, "identity is absent")
+	if unavailable == nil || unavailable.SourceInvocationID != confirmed.ID || unavailable.Code != "review_not_visible_yet" {
+		t.Fatalf("temporarily unlisted confirmed review = %#v", unavailable)
+	}
+}
+
 func TestOutcomeReconcilerExposesRacedReviewerHeadWithoutConsumingTheReviewEvidence(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
 	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "REQUEST_CHANGES", "CHANGES_REQUESTED", outcomeHead, 701)}}
@@ -301,6 +495,125 @@ func TestOutcomeReconcilerRejectsWrongReviewerActorAndSubmittedHead(t *testing.T
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{test.review}}
 			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
 			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "review")
+		})
+	}
+}
+
+func TestOutcomeReconcilerAcceptsGatewaySignedReviewerReviews(t *testing.T) {
+	const signedFooter = "_By Omnigrex: `review-specialist` [Reviewer]_"
+	tests := []struct {
+		name     string
+		event    string
+		state    string
+		comments string
+		sig      string
+		want     workflow.TurnOutcome
+	}{
+		{name: "signed approve", event: "APPROVE", state: "APPROVED", comments: `[]`, sig: signedFooter, want: workflow.TurnOutcomeApproved},
+		{name: "signed request changes", event: "REQUEST_CHANGES", state: "CHANGES_REQUESTED", comments: `[]`, sig: signedFooter, want: workflow.TurnOutcomeChangesRequested},
+		{name: "signed request changes with inline comments", event: "REQUEST_CHANGES", state: "CHANGES_REQUESTED", comments: `[{"path":"review.go","line":12,"side":"RIGHT","body":"added"}]`, sig: signedFooter, want: workflow.TurnOutcomeChangesRequested},
+		{name: "empty signature remains readable", event: "APPROVE", state: "APPROVED", comments: `[]`, sig: "", want: workflow.TurnOutcomeApproved},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			request.ReviewerRepositoryCredential = "reviewer-repository-secret"
+			mutation := outcomeSignedSubmitReviewMutation(1, test.event, test.state, outcomeHead, 701, test.sig, test.comments)
+			review := outcomeReview(outcomeHead, 701)
+			review.State = test.state
+			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
+			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
+			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded ||
+				observation.Review == nil || observation.Review.HeadSHA != outcomeHead ||
+				observation.AuthorizedReviewerActorID != 701 || observation.ChangeProposal == nil {
+				t.Fatalf("signed %s observation = %#v, want outcome %s", test.event, observation, test.want)
+			}
+			if !strings.Contains(string(mutation.Request), `"signature"`) {
+				t.Fatalf("signed fixture request is missing signature field: %s", mutation.Request)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerRejectsMalformedSignedReviewerRequests(t *testing.T) {
+	const signedFooter = "_By Omnigrex: `review-specialist` [Reviewer]_"
+	operationID := "submit-1"
+	signedRequest := func(signature, comments string) string {
+		return fmt.Sprintf(`{"operation_id":%q,"event":"APPROVE","body":"review","comments":%s,"signature":%s}`, operationID, comments, signature)
+	}
+	validResult := fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":"APPROVED","commit_id":%q,"actor_id":701,"html_url":"https://github.test/review/801"}`, outcomeHead)
+	quotedFooter := fmt.Sprintf(`%q`, signedFooter)
+	tests := []struct {
+		name    string
+		request string
+		review  githubapi.Review
+		mutate  func(*store.MutationReservation)
+		want    string
+	}{
+		{
+			name:    "unexpected request field",
+			request: fmt.Sprintf(`{"operation_id":%q,"event":"APPROVE","body":"review","comments":[],"signature":%q,"extra":"oops"}`, operationID, signedFooter),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "malformed signature type",
+			request: signedRequest(`42`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "malformed signature object",
+			request: signedRequest(`{"footer":"x"}`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "null signature",
+			request: signedRequest(`null`, `[]`),
+			review:  outcomeReview(outcomeHead, 701),
+			want:    "submit_review request evidence is malformed",
+		},
+		{
+			name:    "conflicting review identity",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  func() githubapi.Review { review := outcomeReview(outcomeHead, 701); review.ID = 802; return review }(),
+			want:    "absent or conflicts",
+		},
+		{
+			name:    "wrong submitted head",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  outcomeReview(outcomeNewHead, 701),
+			mutate: func(mutation *store.MutationReservation) {
+				*mutation = outcomeSignedSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeNewHead, 701, signedFooter, `[]`)
+			},
+			want: "malformed or incoherent",
+		},
+		{
+			name:    "wrong reviewer actor",
+			request: signedRequest(quotedFooter, `[]`),
+			review:  outcomeReview(outcomeHead, 702),
+			want:    "absent or conflicts",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			mutation := outcomeSucceededMutation(1, mcp.ToolSubmitReview, operationID, test.request, validResult, "github", "41:901", outcomeHead)
+			if test.mutate != nil {
+				test.mutate(&mutation)
+			}
+			if test.name == "wrong submitted head" {
+				mutation.Result = json.RawMessage(fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":"APPROVED","commit_id":%q,"actor_id":701,"html_url":"https://github.test/review/801"}`, outcomeNewHead))
+			}
+			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
+			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{test.review}}
+			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, test.want)
 		})
 	}
 }
@@ -526,6 +839,160 @@ func TestOutcomeReconcilerNeverLeaksRepositoryCredential(t *testing.T) {
 	}
 }
 
+func TestOutcomeReconcilerLogsSafeGitHubObservationFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		role       workflow.Role
+		getErr     error
+		listErr    error
+		provider   string
+		want       []string
+		mustNotLog string
+	}{
+		{
+			name: "developer GitHub HTTP response", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 503, RequestID: "GH-123", Message: "sensitive " + outcomeCredential},
+			want:   []string{`"operation":"get_pull_request"`, `"failure_code":"github_http_error"`, `"github_http_status":503`}, mustNotLog: "GH-123",
+		},
+		{
+			name: "reviewer permission error", role: workflow.RoleReviewer,
+			getErr: &githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403, RequestID: "GH-PERM", Message: outcomeCredential}},
+			want:   []string{`"operation":"get_pull_request"`, `"role":"REVIEWER"`, `"failure_code":"permission_denied"`, `"github_http_status":403`}, mustNotLog: "GH-PERM",
+		},
+		{
+			name: "reviewer review list rate limit", role: workflow.RoleReviewer,
+			listErr: &githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 429, RequestID: "GH-LIMIT", Message: outcomeCredential}},
+			want:    []string{`"operation":"list_pull_request_reviews"`, `"failure_code":"rate_limited"`, `"github_http_status":429`}, mustNotLog: "GH-LIMIT",
+		},
+		{
+			name: "invalid response", role: workflow.RoleDeveloper,
+			getErr: fmt.Errorf("response %s: %w", outcomeCredential, githubapi.ErrInvalidAPIResponse),
+			want:   []string{`"failure_code":"invalid_api_response"`},
+		},
+		{
+			name: "malicious request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: "GH-1 " + outcomeCredential, Message: outcomeCredential},
+			want:   []string{`"github_http_status":502`}, mustNotLog: "GH-1",
+		},
+		{
+			name: "credential-shaped request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: outcomeCredential, Message: outcomeCredential},
+			want:   []string{`"github_http_status":502`}, mustNotLog: "github_request_id",
+		},
+		{
+			name: "provider credential in request ID", role: workflow.RoleDeveloper,
+			getErr: &githubapi.APIError{StatusCode: 502, RequestID: "provider-secret"}, provider: "provider-secret",
+			want: []string{`"github_http_status":502`}, mustNotLog: "github_request_id",
+		},
+		{
+			name: "transport failure", role: workflow.RoleDeveloper,
+			getErr: &githubapi.TransientError{Cause: errors.New("transport " + outcomeCredential)},
+			want:   []string{`"failure_code":"transient_transport"`},
+		},
+		{
+			name: "deadline", role: workflow.RoleDeveloper,
+			getErr: fmt.Errorf("transport %s: %w", outcomeCredential, context.DeadlineExceeded),
+			want:   []string{`"failure_code":"deadline_exceeded"`},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, test.role, true)
+			request.ReviewerRepositoryCredential = "reviewer-repository-secret"
+			mutation := outcomeRequestReviewMutation(1)
+			if test.role == workflow.RoleReviewer {
+				mutation = outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+			}
+			github := &outcomeGitHub{
+				pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)},
+				getErr: test.getErr, listErr: test.listErr,
+			}
+			var logs bytes.Buffer
+			var providers []json.RawMessage
+			if test.provider != "" {
+				providers = []json.RawMessage{json.RawMessage(`{"token":"` + test.provider + `"}`)}
+			}
+			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
+				Clock: outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := reconciler.Reconcile(context.Background(), request)
+			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "observation failed")
+			output := logs.String()
+			for _, want := range append([]string{
+				`"msg":"Agent Turn GitHub outcome observation failed"`,
+				`"workflow_id":"` + outcomeWorkflowID + `"`,
+				`"agent_turn_id":"` + outcomeTurnID + `"`,
+				`"execution_epoch":7`, `"pull_request_number":23`,
+			}, test.want...) {
+				if !strings.Contains(output, want) {
+					t.Errorf("log missing %s: %s", want, output)
+				}
+			}
+			for _, forbidden := range []string{outcomeCredential, request.ReviewerRepositoryCredential, test.provider, test.mustNotLog, "github_request_id"} {
+				if forbidden != "" && strings.Contains(output, forbidden) {
+					t.Errorf("log contains disallowed content %q", forbidden)
+				}
+			}
+			if strings.Count(output, "Agent Turn GitHub outcome observation failed") != 1 {
+				t.Errorf("unexpected number of observation failure logs: %s", output)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerRetriesTransientFreshGitHubReadsWithinTurn(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		role          workflow.Role
+		getErrors     []error
+		listErrors    []error
+		wantGetCalls  int
+		wantListCalls int
+		wantOutcome   workflow.TurnOutcome
+	}{
+		{name: "Developer temporary outage", role: workflow.RoleDeveloper,
+			getErrors: []error{&githubapi.APIError{StatusCode: 503}}, wantGetCalls: 2,
+			wantOutcome: workflow.TurnOutcomeChangeProposalReady},
+		{name: "Developer newly published PR", role: workflow.RoleDeveloper,
+			getErrors: []error{&githubapi.APIError{StatusCode: 404}}, wantGetCalls: 2,
+			wantOutcome: workflow.TurnOutcomeChangeProposalReady},
+		{name: "Reviewer rate limit", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 429}}},
+			wantGetCalls: 1, wantListCalls: 2, wantOutcome: workflow.TurnOutcomeApproved},
+		{name: "Reviewer rate limit with retry advice", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 403}, RetryAfter: time.Minute}},
+			wantGetCalls: 1, wantListCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "Reviewer rate limit with reset time", role: workflow.RoleReviewer,
+			listErrors:   []error{&githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 403}, ResetAt: time.Now().Add(time.Minute)}},
+			wantGetCalls: 1, wantListCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "permanent permission denial", role: workflow.RoleDeveloper,
+			getErrors:    []error{&githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403}}},
+			wantGetCalls: 1, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+		{name: "outage persists", role: workflow.RoleDeveloper,
+			getErrors:    []error{&githubapi.APIError{StatusCode: 503}, &githubapi.APIError{StatusCode: 503}, &githubapi.APIError{StatusCode: 503}},
+			wantGetCalls: 3, wantOutcome: workflow.TurnOutcomeInfrastructureFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, test.role, true)
+			mutation := outcomeRequestReviewMutation(1)
+			if test.role == workflow.RoleReviewer {
+				mutation = outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+			}
+			github := &outcomeGitHub{
+				pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)},
+				getErrors: test.getErrors, listErrors: test.listErrors,
+			}
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}}, github).Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != test.wantOutcome || github.getCalls != test.wantGetCalls || github.listCalls != test.wantListCalls {
+				t.Fatalf("Reconcile() = (%#v, %v), GetPullRequest calls = %d, ListPullRequestReviews calls = %d", observation, err, github.getCalls, github.listCalls)
+			}
+		})
+	}
+}
+
 func TestOutcomeReconcilerDispatchesTerminalIntentByEvidenceKind(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleReviewer, true)
 	observation, err := newOutcomeReconciler(t,
@@ -542,10 +1009,20 @@ func TestOutcomeReconcilerDispatchesTerminalIntentByEvidenceKind(t *testing.T) {
 
 type outcomeStore struct {
 	mutations          []store.MutationReservation
+	prior              []store.MutationReservation
 	err                error
+	priorErr           error
+	reviewErr          error
 	existing           *workflow.ReviewIdentity
 	reviewRepositoryID int64
 	reviewID           int64
+}
+
+func (storeAPI *outcomeStore) ListParticipantPublicationMutations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error) {
+	if storeAPI.priorErr != nil {
+		return nil, storeAPI.priorErr
+	}
+	return storeAPI.prior, storeAPI.err
 }
 
 func (storeAPI *outcomeStore) ListAgentTurnMutationInvocations(context.Context, store.AgentTurnLease) ([]store.MutationReservation, error) {
@@ -555,13 +1032,59 @@ func (storeAPI *outcomeStore) ListAgentTurnMutationInvocations(context.Context, 
 func (storeAPI *outcomeStore) GetChangeProposalReview(_ context.Context, repositoryID, reviewID int64) (*workflow.ReviewIdentity, error) {
 	storeAPI.reviewRepositoryID = repositoryID
 	storeAPI.reviewID = reviewID
+	if storeAPI.reviewErr != nil {
+		return nil, storeAPI.reviewErr
+	}
 	return storeAPI.existing, storeAPI.err
+}
+
+func TestOutcomeReconcilerReportsTransientDurableEvidenceReads(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	var observed *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { observed = &failure }
+	mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
+	reconciler := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}, reviewErr: errors.New("database unavailable")}, github)
+	result, err := reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, result, err, store.AgentTurnFailed, "lookup failed")
+	if observed == nil || observed.Code != "database_observation_unavailable" || !observed.Retryable || observed.SourceInvocationID != mutation.ID {
+		t.Fatalf("durable review lookup failure = %#v", observed)
+	}
+}
+
+func TestOutcomeReconcilerRetriesReviewNotYetVisibleButRejectsConflictingIdentity(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleReviewer, true)
+	mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{}}
+	reconciler := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{mutation}}, github)
+	var unavailable *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) { unavailable = &failure }
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "identity is absent")
+	if unavailable == nil || unavailable.Code != "review_not_visible_yet" || !unavailable.Retryable || unavailable.SourceInvocationID != mutation.ID {
+		t.Fatalf("not-yet-visible review = %#v", unavailable)
+	}
+	unavailable = nil
+	github.reviews = []githubapi.Review{outcomeReview(outcomeHead, 701)}
+	observation, err = reconciler.Reconcile(context.Background(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeApproved || unavailable != nil {
+		t.Fatalf("visible review = (%#v, %v), failure %#v", observation, err, unavailable)
+	}
+	unavailable = nil
+	github.reviews[0].NodeID = "different-review-node"
+	observation, err = reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "conflicts")
+	if unavailable != nil {
+		t.Fatalf("definitely conflicting review was treated as a retryable absence: %#v", unavailable)
+	}
 }
 
 type outcomeGitHub struct {
 	pullRequest                            githubapi.PullRequest
 	reviews                                []githubapi.Review
 	err                                    error
+	getErr, listErr                        error
+	getErrors, listErrors                  []error
 	getCredential, getOwner, getRepository string
 	listCredential                         string
 	getNumber, getCalls, listCalls         int
@@ -570,12 +1093,32 @@ type outcomeGitHub struct {
 func (github *outcomeGitHub) GetPullRequest(_ context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
 	github.getCredential, github.getOwner, github.getRepository, github.getNumber = credential, owner, repository, number
 	github.getCalls++
+	if len(github.getErrors) > 0 {
+		err := github.getErrors[0]
+		github.getErrors = github.getErrors[1:]
+		if err != nil {
+			return githubapi.PullRequest{}, err
+		}
+	}
+	if github.getErr != nil {
+		return githubapi.PullRequest{}, github.getErr
+	}
 	return github.pullRequest, github.err
 }
 
 func (github *outcomeGitHub) ListPullRequestReviews(_ context.Context, credential, _, _ string, _ int) ([]githubapi.Review, error) {
 	github.listCredential = credential
 	github.listCalls++
+	if len(github.listErrors) > 0 {
+		err := github.listErrors[0]
+		github.listErrors = github.listErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if github.listErr != nil {
+		return nil, github.listErr
+	}
 	return github.reviews, github.err
 }
 
@@ -688,6 +1231,20 @@ func outcomeSubmitReviewMutation(number int64, event, state, commit string, acto
 	operationID := fmt.Sprintf("submit-%d", number)
 	return outcomeSucceededMutation(number, mcp.ToolSubmitReview, operationID,
 		fmt.Sprintf(`{"operation_id":%q,"event":%q,"body":"review","comments":[]}`, operationID, event),
+		fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":%q,"commit_id":%q,"actor_id":%d,"html_url":"https://github.test/review/801"}`, state, commit, actorID),
+		"github", "41:901", commit)
+}
+
+func outcomeSignedSubmitReviewMutation(number int64, event, state, commit string, actorID int64, signature, comments string) store.MutationReservation {
+	operationID := fmt.Sprintf("submit-%d", number)
+	request, err := json.Marshal(map[string]any{
+		"operation_id": operationID, "event": event, "body": "review",
+		"comments": json.RawMessage(comments), "signature": signature,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return outcomeSucceededMutation(number, mcp.ToolSubmitReview, operationID, string(request),
 		fmt.Sprintf(`{"review_id":801,"node_id":"PRR_node","state":%q,"commit_id":%q,"actor_id":%d,"html_url":"https://github.test/review/801"}`, state, commit, actorID),
 		"github", "41:901", commit)
 }

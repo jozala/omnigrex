@@ -3,6 +3,7 @@ package opencode_test
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ func TestBuildProcessCompilesExactReviewerDockerContract(t *testing.T) {
 	runtimeProfile := processRuntimeProfile(t)
 	rendered := processRenderedProfile(t, opencode.RoleReviewer)
 	options := validProcessOptions()
+	options.Environment = make(map[string]string)
 
 	policy, spec, err := opencode.BuildProcess(runtimeProfile, rendered, processCredentials(opencode.RoleReviewer, `{}`), options)
 	if err != nil {
@@ -60,6 +62,7 @@ func TestBuildProcessCompilesExactReviewerDockerContract(t *testing.T) {
 	wantVolumes := []dockerruntime.VolumeMount{
 		{Name: "mise-volume", Subpath: "assignment-1/mise", Target: "/home/opencode/.local/share/mise"},
 		{Name: "state-volume", Subpath: "assignment-1/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+		{Name: "mise-volume", Subpath: "assignment-1/tool-data", Target: "/home/opencode/.local/share/omnigrex-tool-data"},
 		{Name: "workspace-volume", Subpath: "assignment-1/workspace", Target: "/workspace"},
 	}
 	wantTmpfs := []dockerruntime.TmpfsMount{
@@ -103,6 +106,16 @@ func TestBuildProcessCompilesExactReviewerDockerContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(policy, wantPolicy) {
 		t.Fatalf("BuildProcess() policy = %#v, want %#v", policy, wantPolicy)
+	}
+}
+
+func TestBuildProcessAcceptsPreparedDiskBackedTMPDIR(t *testing.T) {
+	options := validProcessOptions()
+	options.Environment = make(map[string]string)
+	options.Environment["TMPDIR"] = "/home/opencode/.local/share/omnigrex-tool-data/turn/turn-1/build"
+	_, spec, err := opencode.BuildProcess(processRuntimeProfile(t), processRenderedProfile(t, opencode.RoleDeveloper), processCredentials(opencode.RoleDeveloper, `{}`), options)
+	if err != nil || !slices.Contains(spec.Environment, "TMPDIR="+options.Environment["TMPDIR"]) {
+		t.Fatalf("disk-backed TMPDIR = (%#v, %v)", spec.Environment, err)
 	}
 }
 
@@ -241,7 +254,7 @@ func TestBuildProcessNamespacesEachAssignmentAndOwnsInputsAndOutputs(t *testing.
 	secondOptions := validProcessOptions()
 	secondOptions.AssignmentID = "2"
 	secondOptions.AssignmentSubpaths = map[string]string{
-		"mise": "assignment-2/mise", "state": "assignment-2/runtime-state", "workspace": "assignment-2/workspace",
+		"mise": "assignment-2/mise", "state": "assignment-2/runtime-state", "tool-data": "assignment-2/tool-data", "workspace": "assignment-2/workspace",
 	}
 	_, secondSpec, err := opencode.BuildProcess(runtimeProfile, rendered, processCredentials(opencode.RoleDeveloper, `{}`), secondOptions)
 	if err != nil {
@@ -396,10 +409,10 @@ func validProcessOptions() opencode.ProcessOptions {
 		ExecutionEpoch: 7,
 		MemoryBytes:    512 << 20,
 		VolumeBindings: map[string]string{
-			"mise": "mise-volume", "state": "state-volume", "workspace": "workspace-volume",
+			"mise": "mise-volume", "state": "state-volume", "tool-data": "mise-volume", "workspace": "workspace-volume",
 		},
 		AssignmentSubpaths: map[string]string{
-			"mise": "assignment-1/mise", "state": "assignment-1/runtime-state", "workspace": "assignment-1/workspace",
+			"mise": "assignment-1/mise", "state": "assignment-1/runtime-state", "tool-data": "assignment-1/tool-data", "workspace": "assignment-1/workspace",
 		},
 		Labels: map[string]string{"io.omnigrex.workflow": "workflow-1"},
 	}
