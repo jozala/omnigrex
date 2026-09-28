@@ -29,23 +29,38 @@ type recoveredPublicationEvent struct {
 	Instruction string `json:"instruction"`
 }
 
+type priorTerminalIntentEvent struct {
+	SourceInvocationID string `json:"source_invocation_id"`
+	ToolName           string `json:"tool_name"`
+	ExpectedHeadSHA    string `json:"expected_head_sha"`
+	Instruction        string `json:"instruction"`
+}
+
+type priorUnconfirmableReviewEvent struct {
+	SourceInvocationID string `json:"source_invocation_id"`
+	ExpectedHeadSHA    string `json:"expected_head_sha"`
+	Instruction        string `json:"instruction"`
+}
+
 type eventEnvelope struct {
-	SchemaVersion        int                        `json:"schema_version"`
-	WorkflowID           string                     `json:"workflow_id"`
-	IssueNumber          int64                      `json:"issue_number"`
-	RepositoryID         int64                      `json:"repository_id"`
-	AgentParticipantID   string                     `json:"agent_participant_id"`
-	AssignmentGeneration int                        `json:"assignment_generation"`
-	AgentSessionID       string                     `json:"agent_session_id"`
-	AgentTurnID          string                     `json:"agent_turn_id"`
-	TriggeringEvent      triggeringEvent            `json:"triggering_event"`
-	PullRequestNumber    *int64                     `json:"pull_request_number,omitempty"`
-	RecoveredPublication *recoveredPublicationEvent `json:"recovered_publication,omitempty"`
-	CurrentHeadSHA       string                     `json:"current_head_sha"`
-	ExpectedHeadSHA      string                     `json:"expected_head_sha"`
-	ExpectedOutcomes     []workflow.TurnOutcome     `json:"expected_outcomes"`
-	AllowedOutcomes      []workflow.TurnOutcome     `json:"allowed_outcomes"`
-	MCPCapabilities      []string                   `json:"mcp_capabilities"`
+	SchemaVersion            int                            `json:"schema_version"`
+	WorkflowID               string                         `json:"workflow_id"`
+	IssueNumber              int64                          `json:"issue_number"`
+	RepositoryID             int64                          `json:"repository_id"`
+	AgentParticipantID       string                         `json:"agent_participant_id"`
+	AssignmentGeneration     int                            `json:"assignment_generation"`
+	AgentSessionID           string                         `json:"agent_session_id"`
+	AgentTurnID              string                         `json:"agent_turn_id"`
+	TriggeringEvent          triggeringEvent                `json:"triggering_event"`
+	PullRequestNumber        *int64                         `json:"pull_request_number,omitempty"`
+	RecoveredPublication     *recoveredPublicationEvent     `json:"recovered_publication,omitempty"`
+	PriorTerminalIntent      *priorTerminalIntentEvent      `json:"prior_terminal_intent,omitempty"`
+	PriorUnconfirmableReview *priorUnconfirmableReviewEvent `json:"prior_unconfirmable_review,omitempty"`
+	CurrentHeadSHA           string                         `json:"current_head_sha"`
+	ExpectedHeadSHA          string                         `json:"expected_head_sha"`
+	ExpectedOutcomes         []workflow.TurnOutcome         `json:"expected_outcomes"`
+	AllowedOutcomes          []workflow.TurnOutcome         `json:"allowed_outcomes"`
+	MCPCapabilities          []string                       `json:"mcp_capabilities"`
 }
 
 // BuildEventEnvelope projects a Turn using the deployment's Workflow Definition and Role policies.
@@ -83,6 +98,19 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 			Instruction: "Inspect the recovered publication and current Pull Request before changing files or requesting review. Its existence alone does not mean it is ready for Reviewer.",
 		}
 	}
+	if prior := execution.PriorTerminalIntent; prior != nil {
+		envelope.PriorTerminalIntent = &priorTerminalIntentEvent{
+			SourceInvocationID: prior.SourceInvocationID, ToolName: prior.ToolName,
+			ExpectedHeadSHA: prior.ExpectedHeadSHA,
+			Instruction:     "A previous terminal MCP mutation succeeded, but that Agent Turn did not complete a proven Workflow handoff. Inspect the current Pull Request and review first. If the prior outcome is still correct, explicitly call confirm_prior_terminal_intent with the source_invocation_id; this verifies the old effect without submitting another review. Do not merely say no action is needed. If the evidence changed, report the blocker or perform authorized new work.",
+		}
+	}
+	if prior := execution.PriorReviewRequiresHuman; prior != nil {
+		envelope.PriorUnconfirmableReview = &priorUnconfirmableReviewEvent{
+			SourceInvocationID: prior.SourceInvocationID, ExpectedHeadSHA: prior.ExpectedHeadSHA,
+			Instruction: "A native GitHub review already succeeded at this head, but its earlier ACP ending does not authorize confirmation. Do not submit another review or claim the old one as a successful handoff. Call report_blocked to request human reconciliation.",
+		}
+	}
 
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -101,6 +129,16 @@ func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, cur
 		!validEnvelopeString(session.ID) || session.AgentAssignmentID != assignment.ID ||
 		!validEnvelopeString(turn.ID) || turn.AgentAssignmentID != assignment.ID || turn.AgentSessionID != session.ID ||
 		!validEnvelopeString(currentHeadSHA) || policy.Role != assignment.Role || !stageExists || stage.Role != assignment.Role || !definition.AcceptsPurpose(turn.Stage, turn.Purpose) {
+		return ErrInvalidEventEnvelope
+	}
+	if prior := execution.PriorTerminalIntent; prior != nil &&
+		(turn.RetryOfTurnID == "" || prior.SourceInvocationID == "" || prior.SourceTurnID == "" ||
+			prior.ExpectedHeadSHA == "" || prior.ToolName != "request_review" && prior.ToolName != "submit_review") {
+		return ErrInvalidEventEnvelope
+	}
+	if prior := execution.PriorReviewRequiresHuman; prior != nil &&
+		(turn.RetryOfTurnID == "" || assignment.Role != workflow.RoleReviewer ||
+			execution.PriorTerminalIntent != nil || prior.SourceInvocationID == "" || prior.ExpectedHeadSHA == "") {
 		return ErrInvalidEventEnvelope
 	}
 	if execution.ChangeProposal == nil {

@@ -448,6 +448,10 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
 		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
 	}
+	var corroborationFailure *TerminalCorroborationFailure
+	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
+		corroborationFailure = &failure
+	}
 	if combinedErr == nil && promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
 	} else {
@@ -484,6 +488,29 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			fmt.Errorf("reconcile Agent Turn outcome: %w", reconcileErr),
 			wrapExecutionError("begin Agent Turn recovery", recoveryErr),
 		)
+	}
+	if corroborationFailure != nil && observation.Outcome == workflow.TurnOutcomeInfrastructureFailed &&
+		(corroborationFailure.Retryable || corroborationFailure.Prerequisite) {
+		starter, ok := worker.store.(interface {
+			BeginTerminalCorroboration(context.Context, store.AgentTurnLease, string, json.RawMessage, string, string) (store.TerminalCorroboration, error)
+		})
+		if ok {
+			promptOutcome := encodedPromptOutcome(reconciliation.PromptResponse)
+			var pending store.TerminalCorroboration
+			checkpointErr := worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
+				var err error
+				pending, err = starter.BeginTerminalCorroboration(ctx, lease, corroborationFailure.SourceInvocationID,
+					promptOutcome, string(reconciliation.PromptError), corroborationFailure.Code)
+				return err
+			})
+			if checkpointErr == nil && pending.VerificationJobID != "" {
+				return true, combinedErr
+			}
+			if checkpointErr != nil {
+				recoveryErr := worker.beginAgentTurnRecovery(leaseCtx, lease)
+				return recoveryErr == nil, errors.Join(combinedErr, checkpointErr, recoveryErr)
+			}
+		}
 	}
 	settleErr := worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
 		_, err := worker.store.SettleAgentTurn(ctx, lease, observation)

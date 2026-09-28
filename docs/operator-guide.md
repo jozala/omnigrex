@@ -423,12 +423,16 @@ Do not edit PostgreSQL records to force a transition.
 
 ## Retry And Review Budgets
 
-A failed or timed-out Agent Turn receives one infrastructure retry as a new Agent Turn in the same Agent Session.
+An Agent Turn with no eligible successful terminal intent receives one infrastructure retry as a new Agent Turn in the same Agent Session.
 If a unique terminal mutation intent succeeded before an ACP response was lost or the prompt deadline elapsed, Omnigrex can settle the turn successfully after corroborating the current Pull Request, review, or workspace state.
 For a successful Developer or Reviewer outcome, the prompt failure remains in the settlement diagnostic; a turn without a successful terminal intent still follows the infrastructure retry policy.
 Explicit cancellation and non-normal ACP stop reasons do not take this successful settlement path.
 Infrastructure retries do not consume the review budget.
 After the second failure, Omnigrex publishes diagnostics and creates a Human Handoff.
+
+When `request_review` or `submit_review` succeeded and the ACP ending is eligible but a fresh corroboration read is unavailable, Omnigrex stops the Runtime Process and keeps the original Turn fenced while a separate worker retries the read. It does not prompt the agent or repeat the GitHub mutation. The default window is 30 minutes, configured by `OMNIGREX_TERMINAL_CORROBORATION_DURATION`. Its start is durable across orchestrator restarts; changing the configured duration changes the remaining window at the next check. The Issue retains its current developing/reviewing label while verification is pending. A clear access prerequisite or exhausted window creates a Human Handoff explaining that the mutation succeeded but the outcome was not accepted. Closing the Issue cancels pending verification.
+
+After that specific Human Handoff, a new human `omnigrex:run` first revalidates the old intent without another agent prompt **when** the Stage and Role still match, the Assignment Generation has not been replaced, and the Agent Session is automation-controlled. The old failed settlement is not rewritten; a fresh read must still prove the current PR/review identity and Developer workspace tree. If the Session is human-controlled, the trigger remains in Human Handoff rather than starting an unpreparable Turn. If the Stage or Assignment Generation changed, normal reactivation applies instead of adopting the old intent. If the old ACP ending was **not** durably known because execution crashed earlier, ordinary infrastructure recovery gives the successor Agent Turn an explicit prior-intent notice. That agent can call `confirm_prior_terminal_intent` for the recorded source mutation; Omnigrex verifies it without submitting a duplicate review. A review submitted before a **known explicit cancellation** cannot be confirmed or resubmitted in the retry; the successor is instructed to report the blocker for Human Handoff. Mere Agent Session memory or a final text response is not a terminal intent.
 
 Each Workflow Attempt permits at most three accepted Review Cycles.
 A review counts only after the Reviewer App publishes it for the expected Pull Request head and that head remains current.
