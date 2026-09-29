@@ -948,7 +948,7 @@ func reviewCommentFromGraphQL(source *graphQLReviewComment, thread *graphQLRevie
 }
 
 func validGraphQLReviewCommentLocation(comment *graphQLReviewComment, thread *graphQLReviewThread) bool {
-	return (comment.Position == nil || *comment.Position > 0 && !*thread.IsOutdated && thread.SubjectType == "LINE") && comment.SubjectType == thread.SubjectType && equalOptionalInt(comment.Line, thread.Line) && equalOptionalInt(comment.StartLine, normalizedGraphQLReviewThreadStartLine(thread)) &&
+	return (comment.Position == nil || *comment.Position > 0 && thread.SubjectType == "LINE") && comment.SubjectType == thread.SubjectType && equalOptionalInt(comment.Line, thread.Line) && equalOptionalInt(comment.StartLine, normalizedGraphQLReviewThreadStartLine(thread)) &&
 		equalOptionalInt(comment.OriginalLine, thread.OriginalLine) && equalOptionalInt(comment.OriginalStartLine, thread.OriginalStartLine)
 }
 

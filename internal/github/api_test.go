@@ -771,6 +771,8 @@ func TestAPIClientListsReviewThreadsAcrossAllPages(t *testing.T) {
 				t.Errorf("thread continuation payload = %#v", payload)
 			}
 			outdated := reviewCommentGraphQLFixture("PRRC_403", 403, "reviewer", "Old location", true, false)
+			// GitHub can retain a positive position even when the thread is outdated.
+			outdated["position"] = 37
 			writeGraphQLData(t, writer, reviewThreadsGraphQLFixture(2, graphQLPageFixture(false, true, "thread-last", "thread-last"), []any{
 				reviewThreadGraphQLFixture("PRRT_403", true, true, 1, graphQLPageFixture(false, false, "outdated-comment", "outdated-comment"), []any{outdated}),
 			}))
@@ -794,7 +796,7 @@ func TestAPIClientListsReviewThreadsAcrossAllPages(t *testing.T) {
 	if reviewID := threads[0].Comments[0].PullRequestReviewID; reviewID == nil || *reviewID != 302 {
 		t.Errorf("PullRequestReviewID = %v, want 302", reviewID)
 	}
-	if threads[1].ID != "PRRT_403" || !threads[1].Resolved || !threads[1].Outdated || threads[1].Comments[0].Line != nil || threads[1].Comments[0].OriginalLine == nil || *threads[1].Comments[0].OriginalLine != 42 || threads[1].Comments[0].User.Login != "reviewer" {
+	if threads[1].ID != "PRRT_403" || !threads[1].Resolved || !threads[1].Outdated || threads[1].Comments[0].Line != nil || threads[1].Comments[0].OriginalLine == nil || *threads[1].Comments[0].OriginalLine != 42 || threads[1].Comments[0].Position == nil || *threads[1].Comments[0].Position != 37 || threads[1].Comments[0].User.Login != "reviewer" {
 		t.Errorf("outdated resolved thread = %#v", threads[1])
 	}
 }
@@ -999,6 +1001,18 @@ func TestAPIClientRejectsInvalidGraphQLReviewThreadResponses(t *testing.T) {
 		{name: "mismatched comment path", mutate: func(data map[string]any) { firstReviewCommentFixture(data)["path"] = "other.go" }},
 		{name: "mismatched comment URL", mutate: func(data map[string]any) {
 			firstReviewCommentFixture(data)["url"] = "https://github.test/acme/other/pull/23#discussion_r401"
+		}},
+		{name: "zero comment position", mutate: func(data map[string]any) { firstReviewCommentFixture(data)["position"] = 0 }},
+		{name: "negative comment position", mutate: func(data map[string]any) { firstReviewCommentFixture(data)["position"] = -1 }},
+		{name: "file comment with position", mutate: func(data map[string]any) {
+			thread := firstReviewThreadFixture(data)
+			comment := firstReviewCommentFixture(data)
+			for _, item := range []map[string]any{thread, comment} {
+				item["subjectType"] = "FILE"
+				item["line"] = nil
+				item["originalLine"] = nil
+			}
+			comment["position"] = 1
 		}},
 		{name: "updated before created", mutate: func(data map[string]any) { firstReviewCommentFixture(data)["updatedAt"] = "2026-09-03T09:00:00Z" }},
 		{name: "missing current location", mutate: func(data map[string]any) { firstReviewCommentFixture(data)["line"] = nil }},
