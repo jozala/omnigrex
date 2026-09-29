@@ -65,16 +65,16 @@ func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication
 	if err := lifecycle.validateWorkspaceHistoryMetadata(ctx, paths.Workspace); err != nil {
 		return PublicationResult{}, err
 	}
-	status, err := lifecycle.gitOutput(ctx, "inspect committed workspace", paths.Workspace, "",
-		nil, "status", "--porcelain=v1", "--untracked-files=all")
+	status, err := lifecycle.workspaceGitOutput(ctx, "inspect committed workspace", paths.Workspace,
+		"status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return PublicationResult{}, err
 	}
 	if status != "" {
 		return PublicationResult{}, ErrUncommittedWorkspace
 	}
-	head, err := lifecycle.gitOutput(ctx, "read committed workspace head", paths.Workspace, "",
-		nil, "rev-parse", "--verify", "HEAD^{commit}")
+	head, err := lifecycle.workspaceGitOutput(ctx, "read committed workspace head", paths.Workspace,
+		"rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return PublicationResult{}, err
 	}

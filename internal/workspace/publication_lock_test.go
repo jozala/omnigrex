@@ -55,9 +55,11 @@ done
 if [ "$1" = "clone" ]; then
 	mkdir -p "$destination/.git"
 fi
-if [ "$1" = "rev-parse" ]; then
-	printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
-fi
+for argument in "$@"; do
+	if [ "$argument" = "rev-parse" ]; then
+		printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+	fi
+done
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}

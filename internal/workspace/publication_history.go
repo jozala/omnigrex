@@ -42,6 +42,7 @@ func (lifecycle *Lifecycle) validatePublicationHistory(ctx context.Context, dire
 	}
 	var mainHead string
 	reachedBase := false
+	validatedTrees := make(map[string]bool)
 	for _, line := range strings.Split(parents, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 1 || len(fields) > 3 {
@@ -96,6 +97,9 @@ func (lifecycle *Lifecycle) validatePublicationHistory(ctx context.Context, dire
 				}
 			}
 		}
+		if err := lifecycle.validatePublicationTree(ctx, directory, fields[0], validatedTrees); err != nil {
+			return err
+		}
 	}
 	if !reachedBase {
 		return ErrInvalidPublicationHistory
@@ -125,8 +129,15 @@ func CommittedTreesEqual(ctx context.Context, paths Paths) (bool, error) {
 	return lifecycle.committedTreesEqual(ctx, paths.Workspace, paths.Publication)
 }
 
+// Workspace Git queries must not follow an agent-controlled core.worktree
+// setting into a different directory when inspecting the assigned workspace.
+func (lifecycle *Lifecycle) workspaceGitOutput(ctx context.Context, operation, directory string, arguments ...string) (string, error) {
+	return lifecycle.gitOutput(ctx, operation, directory, "", nil,
+		append([]string{"--work-tree=" + directory}, arguments...)...)
+}
+
 func (lifecycle *Lifecycle) committedTreesEqual(ctx context.Context, workspaceDirectory, publicationDirectory string) (bool, error) {
-	status, err := lifecycle.gitOutput(ctx, "inspect published workspace status", workspaceDirectory, "", nil,
+	status, err := lifecycle.workspaceGitOutput(ctx, "inspect published workspace status", workspaceDirectory,
 		"status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return false, err
@@ -134,7 +145,7 @@ func (lifecycle *Lifecycle) committedTreesEqual(ctx context.Context, workspaceDi
 	if status != "" {
 		return false, nil
 	}
-	workspaceHead, err := lifecycle.gitOutput(ctx, "inspect published workspace head", workspaceDirectory, "", nil,
+	workspaceHead, err := lifecycle.workspaceGitOutput(ctx, "inspect published workspace head", workspaceDirectory,
 		"rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return false, err
@@ -147,7 +158,7 @@ func (lifecycle *Lifecycle) committedTreesEqual(ctx context.Context, workspaceDi
 	if workspaceHead != publicationHead {
 		return false, nil
 	}
-	tracked, err := lifecycle.gitOutput(ctx, "list tracked workspace entries", workspaceDirectory, "", nil,
+	tracked, err := lifecycle.workspaceGitOutput(ctx, "list tracked workspace entries", workspaceDirectory,
 		"ls-files", "-z", "--cached", "--full-name")
 	if err != nil {
 		return false, err

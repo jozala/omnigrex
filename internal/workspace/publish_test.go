@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -288,6 +289,147 @@ func TestLifecyclePublicationRejectsAlteredLocalHistoryMetadata(t *testing.T) {
 				t.Fatalf("Publish() = %v, want invalid history", err)
 			}
 		})
+	}
+}
+
+func TestLifecyclePublicationRejectsMalformedIntermediateTree(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		tree func(*testing.T, string, []byte) string
+	}{
+		{name: "duplicate files", tree: func(t *testing.T, path string, blob []byte) string {
+			entry := append([]byte("100644 tracked.txt\x00"), blob...)
+			return writeRawTree(t, path, append(append([]byte{}, entry...), entry...))
+		}},
+		{name: "unsorted files", tree: func(t *testing.T, path string, blob []byte) string {
+			first := append([]byte("100644 tracked.txt\x00"), blob...)
+			second := append([]byte("100644 earlier.txt\x00"), blob...)
+			return writeRawTree(t, path, append(first, second...))
+		}},
+		{name: "noncanonical mode", tree: func(t *testing.T, path string, blob []byte) string {
+			return writeRawTree(t, path, append([]byte("0100644 tracked.txt\x00"), blob...))
+		}},
+		{name: "duplicate nested files", tree: func(t *testing.T, path string, blob []byte) string {
+			entry := append([]byte("100644 nested.txt\x00"), blob...)
+			child, err := hex.DecodeString(writeRawTree(t, path, append(append([]byte{}, entry...), entry...)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return writeRawTree(t, path, append([]byte("40000 subdirectory\x00"), child...))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			lifecycle := newLifecycle(t)
+			paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			blob, err := hex.DecodeString(gitOutput(t, paths.Workspace, "rev-parse", fixture.second+":tracked.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			badTree := test.tree(t, paths.Workspace, blob)
+			gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+			gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+			intermediate := gitOutput(t, paths.Workspace, "commit-tree", badTree, "-p", fixture.second, "-m", "Malformed intermediate tree")
+			baseTree := gitOutput(t, paths.Workspace, "rev-parse", fixture.second+"^{tree}")
+			final := gitOutput(t, paths.Workspace, "commit-tree", baseTree, "-p", intermediate, "-m", "Restore valid final tree")
+			gitRun(t, paths.Workspace, "checkout", "--detach", final)
+			_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+				Branch: "feature", RecordProposedTip: func(context.Context, string) error {
+					t.Error("malformed intermediate tree reached tip recording")
+					return nil
+				},
+			})
+			if !errors.Is(err, workspace.ErrInvalidPublicationHistory) {
+				t.Fatalf("Publish() = %v, want invalid publication history", err)
+			}
+			if got := gitOutput(t, fixture.remote, "for-each-ref", "--format=%(objectname)", "refs/heads/feature"); got != "" {
+				t.Errorf("malformed history was pushed: %s", got)
+			}
+		})
+	}
+}
+
+func writeRawTree(t *testing.T, repository string, raw []byte) string {
+	t.Helper()
+	command := exec.Command("git", "hash-object", "--literally", "-t", "tree", "-w", "--stdin")
+	command.Dir, command.Stdin = repository, strings.NewReader(string(raw))
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("write malformed tree: %v: %s", err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func TestLifecyclePublicationChecksAssignedWorktreeDespiteCoreWorktreeOverride(t *testing.T) {
+	for _, newCommit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no new commits", true: "new commit"}[newCommit], func(t *testing.T) {
+			fixture := newGitFixture(t)
+			lifecycle := newLifecycle(t)
+			paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if newCommit {
+				gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+				gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+				writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "committed change\n", 0o644)
+				gitRun(t, paths.Workspace, "commit", "-am", "Valid commit")
+			}
+			alternate := t.TempDir()
+			gitRun(t, paths.Workspace, "--work-tree="+alternate, "checkout", "--force", "HEAD", "--", ".")
+			gitRun(t, paths.Workspace, "config", "core.worktree", alternate)
+			writeFile(t, filepath.Join(paths.Workspace, "not-ignored.txt"), "uncommitted\n", 0o644)
+			if got := gitOutput(t, paths.Workspace, "status", "--porcelain=v1", "--untracked-files=all"); got != "" {
+				t.Fatalf("fixture status = %q, want misleading clean status", got)
+			}
+			_, err = lifecycle.Publish(context.Background(), workspace.Publication{
+				AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+				Branch: "feature", RecordProposedTip: func(context.Context, string) error {
+					t.Error("dirty assigned worktree reached tip recording")
+					return nil
+				},
+			})
+			if !errors.Is(err, workspace.ErrUncommittedWorkspace) {
+				t.Fatalf("Publish() = %v, want uncommitted workspace", err)
+			}
+		})
+	}
+}
+
+func TestCommittedTreesEqualChecksAssignedWorktreeDespiteCoreWorktreeOverride(t *testing.T) {
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "config", "user.name", "Developer")
+	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
+	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "published\n", 0o644)
+	gitRun(t, paths.Workspace, "commit", "-am", "Committed change")
+	if _, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		Branch: "feature", RecordProposedTip: func(context.Context, string) error { return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	alternate := t.TempDir()
+	gitRun(t, paths.Workspace, "--work-tree="+alternate, "checkout", "--force", "HEAD", "--", ".")
+	gitRun(t, paths.Workspace, "config", "core.worktree", alternate)
+	writeFile(t, filepath.Join(paths.Workspace, "not-ignored.txt"), "unpublished\n", 0o644)
+	matching, err := workspace.CommittedTreesEqual(context.Background(), paths)
+	if err != nil || matching {
+		t.Fatalf("corroborate dirty assigned workspace = %t, %v", matching, err)
 	}
 }
 
