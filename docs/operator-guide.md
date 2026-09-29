@@ -528,11 +528,14 @@ Create a unique private recovery-set directory, then write each artifact atomica
     pg_restore --list < "$BACKUP_DIR/omnigrex.dump.tmp" > /dev/null
   mv "$BACKUP_DIR/omnigrex.dump.tmp" "$BACKUP_DIR/omnigrex.dump"
 
+  : "${BACKUP_DIR:?BACKUP_DIR must be set}"
+  test -d "$BACKUP_DIR"
   HELPER='alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b'
   docker run --rm --network none --read-only \
     --mount type=volume,src=omnigrex-runtime-state,dst=/source,readonly \
-    --mount "type=bind,src=$BACKUP_DIR,dst=/backup" \
-    "$HELPER" sh -ec 'umask 077; cd /source; tar -czf /backup/runtime-state.tar.gz.tmp .'
+    "$HELPER" sh -ec 'cd /source; tar -czf - .' \
+    > "$BACKUP_DIR/runtime-state.tar.gz.tmp"
+  tar -tzf "$BACKUP_DIR/runtime-state.tar.gz.tmp" > /dev/null
   mv "$BACKUP_DIR/runtime-state.tar.gz.tmp" "$BACKUP_DIR/runtime-state.tar.gz"
 
   (
@@ -708,6 +711,7 @@ docker ps --filter label=io.omnigrex.runtime-process=true \
 
 The orchestrator logs `MCP mutation failed` with a safe `failure_code`, operation and mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 The corresponding `tool_invocations.last_error` contains the safe failure code and available allowlisted details for definite failures; unknown external outcomes remain subject to mutation reconciliation.
+For read-tool failures, look for `MCP read failed` with the `agent_turn_id` and `tool_name`. The log gives a safe `failure_code` (for example, `credential_unavailable`, `read_precondition_failed` for a scoped identity/head mismatch, `github_request_rejected`, `github_graphql_errors_or_no_data`, or `github_invalid_response`), a `failure_stage` for review-thread queries and validation, and allowlisted `github_http_status` and `github_request_id` when available, including an ID on a GraphQL error or malformed-data response when GitHub provides one. Read logs omit request IDs that do not match the expected GitHub hexadecimal format; a missing ID does not mean GitHub supplied none. If the read and its ledger recording both fail, both failures are logged. `tool_invocations.last_error` and the agent-facing message remain generic; logs never include GitHub response bodies or review text. A GraphQL error classification does not include GitHub's error message, so further investigation may still require a controlled reproduction.
 
 An Agent Turn diagnostic containing `runtime_oom_killed` means Docker confirmed that its Runtime Process was OOM-killed before Omnigrex removed the container.
 Omnigrex keeps the normal single infrastructure retry, then includes this diagnosis in the Human Handoff if the retry also fails this way.

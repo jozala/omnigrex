@@ -208,6 +208,9 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	}
 	credential, err := backend.credential(ctx, tool.Name, invocation.Scope.Role, invocation.Scope.Repository)
 	if err != nil {
+		if tool.Class == ReadTool {
+			return nil, githubReadError{failure: readFailure{code: "credential_unavailable"}}
+		}
 		return nil, ErrToolDependency
 	}
 	owner := invocation.Scope.Repository.Owner
@@ -223,7 +226,7 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	case ToolGetIssue:
 		issue, callErr := backend.github.GetIssue(ctx, credential, owner, repository, issueNumber)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		if issue.ID != invocation.Scope.Issue.ID || int64(issue.Number) != invocation.Scope.Issue.Number {
 			return nil, ErrToolPrecondition
@@ -232,13 +235,13 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	case ToolListIssueComments:
 		comments, callErr := backend.github.ListIssueComments(ctx, credential, owner, repository, issueNumber)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		result = comments
 	case ToolGetPullRequest:
 		pullRequest, callErr := backend.github.GetPullRequest(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		if !matchesScopedPullRequest(pullRequest, invocation.Scope) {
 			return nil, ErrToolPrecondition
@@ -247,19 +250,19 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	case ToolListPullRequestReviews:
 		reviews, callErr := backend.github.ListPullRequestReviews(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		result = reviews
 	case ToolListReviewThreads:
 		threads, callErr := backend.github.ListReviewThreads(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		result = threads
 	case ToolGetCheckRuns:
 		checks, callErr := backend.github.GetCheckRuns(ctx, credential, owner, repository, invocation.Scope.HeadSHA)
 		if callErr != nil {
-			return nil, ErrToolDependency
+			return nil, newGitHubReadError(callErr)
 		}
 		for _, check := range checks {
 			if check.HeadSHA != invocation.Scope.HeadSHA {

@@ -562,15 +562,18 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 	var threadCursor *string
 	totalThreads := -1
 	var repositoryID, pullRequestID string
+	var lastRequestID string
 	for {
 		var data reviewThreadsQueryData
-		if err := client.doGraphQL(ctx, installationToken, reviewThreadsQuery, map[string]any{
+		requestID, err := client.doGraphQL(ctx, installationToken, reviewThreadsQuery, map[string]any{
 			"owner": owner, "name": repository, "number": pullRequestNumber, "threadsCursor": threadCursor,
-		}, &data); err != nil {
-			return nil, err
+		}, &data)
+		if err != nil {
+			return nil, &ReviewThreadReadError{Stage: ReviewThreadsQuery, RequestID: requestID, Cause: err}
 		}
+		lastRequestID = requestID
 		if err := validateReviewThreadsIdentity(data.Repository, owner, repository, pullRequestNumber, repositoryID, pullRequestID); err != nil {
-			return nil, err
+			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: err}
 		}
 		if repositoryID == "" {
 			repositoryID = data.Repository.ID
@@ -581,15 +584,19 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 		if totalThreads < 0 {
 			totalThreads = *connection.TotalCount
 		} else if *connection.TotalCount != totalThreads {
-			return nil, fmt.Errorf("%w: review thread total count changed during pagination", ErrInvalidAPIResponse)
+			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review thread total count changed during pagination", ErrInvalidAPIResponse)}
 		}
 		if err := validateGraphQLPageInfo(connection.PageInfo, len(connection.Nodes), threadCursor); err != nil {
-			return nil, fmt.Errorf("%w: review thread pageInfo is invalid", err)
+			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review thread pageInfo is invalid", err)}
 		}
 		for _, node := range connection.Nodes {
-			thread, err := client.reviewThreadFromGraphQL(ctx, installationToken, owner, repository, pullRequestNumber, repositoryID, pullRequestID, node, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
+			thread, err := client.reviewThreadFromGraphQL(ctx, installationToken, owner, repository, pullRequestNumber, repositoryID, pullRequestID, requestID, node, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
 			if err != nil {
-				return nil, err
+				var staged *ReviewThreadReadError
+				if errors.As(err, &staged) {
+					return nil, err
+				}
+				return nil, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
 			}
 			threads = append(threads, thread)
 		}
@@ -598,13 +605,13 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 		}
 		next := *connection.PageInfo.EndCursor
 		if _, exists := seenThreadCursors[next]; exists {
-			return nil, fmt.Errorf("%w: repeated review thread cursor", ErrInvalidAPIResponse)
+			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: repeated review thread cursor", ErrInvalidAPIResponse)}
 		}
 		seenThreadCursors[next] = struct{}{}
 		threadCursor = &next
 	}
 	if totalThreads != len(threads) {
-		return nil, fmt.Errorf("%w: review thread count does not match paginated results", ErrInvalidAPIResponse)
+		return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: lastRequestID, Cause: fmt.Errorf("%w: review thread count does not match paginated results", ErrInvalidAPIResponse)}
 	}
 	return threads, nil
 }
@@ -823,12 +830,12 @@ func validateReviewThreadsIdentity(actual *struct {
 	return nil
 }
 
-func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installationToken, owner, repository string, pullRequestNumber int, repositoryID, pullRequestID string, node *graphQLReviewThread, seenNodeIDs map[string]struct{}, seenCommentDatabaseIDs map[int64]struct{}, commentDatabaseIDByNodeID map[string]int64) (ReviewThread, error) {
+func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installationToken, owner, repository string, pullRequestNumber int, repositoryID, pullRequestID, requestID string, node *graphQLReviewThread, seenNodeIDs map[string]struct{}, seenCommentDatabaseIDs map[int64]struct{}, commentDatabaseIDByNodeID map[string]int64) (ReviewThread, error) {
 	if err := validateGraphQLReviewThread(node); err != nil {
-		return ReviewThread{}, err
+		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: err}
 	}
 	if _, exists := seenNodeIDs[node.ID]; exists {
-		return ReviewThread{}, fmt.Errorf("%w: duplicate GraphQL review thread id", ErrInvalidAPIResponse)
+		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: duplicate GraphQL review thread id", ErrInvalidAPIResponse)}
 	}
 	seenNodeIDs[node.ID] = struct{}{}
 
@@ -840,12 +847,12 @@ func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installati
 	seenCursors := make(map[string]struct{})
 	for {
 		if err := validateGraphQLPageInfo(connection.PageInfo, len(connection.Nodes), cursor); err != nil {
-			return ReviewThread{}, fmt.Errorf("%w: review comment pageInfo is invalid", err)
+			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review comment pageInfo is invalid", err)}
 		}
 		for _, graphQLComment := range connection.Nodes {
 			comment, err := reviewCommentFromGraphQL(graphQLComment, node, pullRequestURL, pullRequestHTMLPath, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
 			if err != nil {
-				return ReviewThread{}, err
+				return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
 			}
 			thread.Comments = append(thread.Comments, comment)
 		}
@@ -854,26 +861,28 @@ func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installati
 		}
 		next := *connection.PageInfo.EndCursor
 		if _, exists := seenCursors[next]; exists {
-			return ReviewThread{}, fmt.Errorf("%w: repeated review comment cursor", ErrInvalidAPIResponse)
+			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: repeated review comment cursor", ErrInvalidAPIResponse)}
 		}
 		seenCursors[next] = struct{}{}
 		cursor = &next
 
 		var data reviewThreadCommentsQueryData
-		if err := client.doGraphQL(ctx, installationToken, reviewThreadCommentsQuery, map[string]any{"threadID": node.ID, "commentsCursor": next}, &data); err != nil {
-			return ReviewThread{}, err
+		continuationID, err := client.doGraphQL(ctx, installationToken, reviewThreadCommentsQuery, map[string]any{"threadID": node.ID, "commentsCursor": next}, &data)
+		if err != nil {
+			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsQuery, RequestID: continuationID, Cause: err}
 		}
+		requestID = continuationID
 		if err := validateGraphQLReviewThread(data.Node); err != nil || !sameGraphQLReviewThread(node, data.Node) || *data.Node.Comments.TotalCount != *node.Comments.TotalCount ||
 			!matchesGraphQLPullRequestIdentity(data.Node.PullRequest, owner, repository, pullRequestNumber, repositoryID, pullRequestID) {
-			return ReviewThread{}, fmt.Errorf("%w: paginated review thread response is incomplete or mismatched", ErrInvalidAPIResponse)
+			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: paginated review thread response is incomplete or mismatched", ErrInvalidAPIResponse)}
 		}
 		connection = data.Node.Comments
 	}
 	if len(thread.Comments) != *node.Comments.TotalCount || len(thread.Comments) == 0 {
-		return ReviewThread{}, fmt.Errorf("%w: review comment count does not match paginated results", ErrInvalidAPIResponse)
+		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review comment count does not match paginated results", ErrInvalidAPIResponse)}
 	}
 	if err := validateReviewThreadReplies(thread.Comments); err != nil {
-		return ReviewThread{}, err
+		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
 	}
 	return thread, nil
 }
@@ -1043,26 +1052,28 @@ func validGraphQLCursor(value string) bool {
 	return validGraphQLNodeID(value)
 }
 
-func (client *APIClient) doGraphQL(ctx context.Context, installationToken, query string, variables map[string]any, destination any) error {
+func (client *APIClient) doGraphQL(ctx context.Context, installationToken, query string, variables map[string]any, destination any) (string, error) {
 	var response struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := client.doJSON(ctx, http.MethodPost, "/graphql", installationToken, struct {
+	header, err := client.doJSONWithHeaders(ctx, http.MethodPost, "/graphql", installationToken, struct {
 		Query     string         `json:"query"`
 		Variables map[string]any `json:"variables"`
-	}{Query: query, Variables: variables}, &response); err != nil {
-		return err
+	}{Query: query, Variables: variables}, &response)
+	requestID := header.Get("X-GitHub-Request-Id")
+	if err != nil {
+		return requestID, err
 	}
 	if len(response.Errors) != 0 || len(response.Data) == 0 || string(response.Data) == "null" {
-		return fmt.Errorf("%w: GraphQL query returned errors or no data", ErrInvalidAPIResponse)
+		return requestID, &GraphQLQueryError{RequestID: requestID}
 	}
 	if err := json.Unmarshal(response.Data, destination); err != nil {
-		return fmt.Errorf("%w: decode GraphQL data: %v", ErrInvalidAPIResponse, err)
+		return requestID, fmt.Errorf("%w: decode GraphQL data: %v", ErrInvalidAPIResponse, err)
 	}
-	return nil
+	return requestID, nil
 }
 
 func (client *APIClient) GetCheckRuns(ctx context.Context, installationToken, owner, repository, commitSHA string) ([]CheckRun, error) {
@@ -1405,7 +1416,7 @@ func (client *APIClient) doJSONWithHeaders(ctx context.Context, method, path, cr
 		return header, nil
 	}
 	if err := json.NewDecoder(response.Body).Decode(destination); err != nil {
-		return nil, fmt.Errorf("%w: decode response: %v", ErrInvalidAPIResponse, err)
+		return header, fmt.Errorf("%w: decode response: %v", ErrInvalidAPIResponse, err)
 	}
 	return header, nil
 }
@@ -1419,7 +1430,7 @@ func redactAPIClientError(err error, credential string) error {
 		if source == nil {
 			return nil
 		}
-		return &APIError{StatusCode: source.StatusCode, Method: source.Method, Path: source.Path, Message: redact(source.Message), RequestID: source.RequestID}
+		return &APIError{StatusCode: source.StatusCode, Method: source.Method, Path: source.Path, Message: redact(source.Message), RequestID: redact(source.RequestID)}
 	}
 	var rateLimit *RateLimitError
 	if errors.As(err, &rateLimit) {
@@ -1431,6 +1442,10 @@ func redactAPIClientError(err error, credential string) error {
 	}
 	var transient *TransientError
 	if errors.As(err, &transient) {
+		var api *APIError
+		if errors.As(transient.Cause, &api) {
+			return &TransientError{Cause: copyAPIError(api)}
+		}
 		return &TransientError{Cause: errors.New(redact(transient.Cause.Error()))}
 	}
 	var apiError *APIError

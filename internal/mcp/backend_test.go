@@ -1281,6 +1281,9 @@ func TestConfirmPriorDeveloperIntentUsesVerifiedSourcePRWithoutNewTurnPRScope(t 
 
 func (api *backendGitHub) ListReviewThreads(_ context.Context, credential, owner, repository string, number int) ([]githubapi.ReviewThread, error) {
 	api.record(mcp.ToolListReviewThreads, credential, owner, repository, number, "")
+	if api.readErr != nil {
+		return nil, api.readErr
+	}
 	return []githubapi.ReviewThread{}, nil
 }
 
