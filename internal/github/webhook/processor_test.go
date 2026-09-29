@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -426,6 +427,7 @@ func TestProcessorRunReportsAndRetriesOperationFailures(t *testing.T) {
 }
 
 type processorInbox struct {
+	mu             sync.Mutex
 	claims         []*store.WebhookClaim
 	claimOwner     string
 	claimLease     time.Duration
@@ -447,6 +449,15 @@ type processorInbox struct {
 	drainErr       error
 	operations     []string
 	claimedAt      time.Time
+}
+
+// appendOperation records a fake store operation. The provisioning renewal
+// goroutine runs concurrently with ProcessNext, so shared slices are guarded;
+// reads after ProcessNext returns are ordered by the renewal shutdown.
+func (inbox *processorInbox) appendOperation(operation string) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	inbox.operations = append(inbox.operations, operation)
 }
 
 type recordedProvisioning struct {
@@ -567,13 +578,17 @@ func (inbox *processorInbox) CompleteWebhookDelivery(_ context.Context, delivery
 	return inbox.completeErr
 }
 
-func (inbox *processorInbox) CompleteLabelProvisioningTransition(_ context.Context, deliveryID, claimToken string, installationID int64, repositories []store.LabelProvisioningRepository, invalid []string) error {
+func (inbox *processorInbox) CompleteLabelProvisioningTransition(_ context.Context, deliveryID, claimToken string, installationID int64, repositories []store.LabelProvisioningRepository, invalid []string, _ time.Duration) error {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
 	inbox.operations = append(inbox.operations, "provision")
 	inbox.provisioned = append(inbox.provisioned, recordedProvisioning{deliveryID: deliveryID, claimToken: claimToken, installationID: installationID, repositories: repositories, invalid: invalid})
 	return inbox.provisionErr
 }
 
 func (inbox *processorInbox) RenewWebhookClaim(_ context.Context, deliveryID, claimToken string, _ time.Duration) error {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
 	inbox.operations = append(inbox.operations, "renew")
 	inbox.renewals = append(inbox.renewals, recordedRenewal{deliveryID: deliveryID, claimToken: claimToken})
 	return inbox.renewErr
@@ -615,7 +630,7 @@ func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string,
 	return store.WorkflowApplication{}, nil
 }
 
-func (*retryingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string) error {
+func (*retryingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string, time.Duration) error {
 	return nil
 }
 
@@ -646,7 +661,7 @@ func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, 
 	return store.WorkflowApplication{}, nil
 }
 
-func (*pollingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string) error {
+func (*pollingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string, time.Duration) error {
 	return nil
 }
 

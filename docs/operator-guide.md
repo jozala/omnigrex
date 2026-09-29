@@ -445,8 +445,10 @@ becomes `PROCESSED`, so a later terminal failure of one repository appears
 only on that repository's `jobs` row: look for
 `kind = 'PROVISION_MANAGED_LABELS'` rows in state `FAILED`, whose
 `last_error` carries the cause and whose `payload` identifies the
-repository; the originating delivery is referenced by
-`normalized_event_id`.
+repository. Provisioning jobs intentionally leave `normalized_event_id`
+empty, so trace a failed job back to its delivery through its
+`idempotency_key`, which has the form
+`label-provisioning:<delivery-id>:<repository-id>`.
 
 Repositories installed before this provisioning was deployed are not
 backfilled on startup. Their missing labels are created by the existing

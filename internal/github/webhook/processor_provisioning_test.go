@@ -336,7 +336,7 @@ func (durable *slowCompletionStore) RenewWebhookClaim(_ context.Context, _, _ st
 	return nil
 }
 
-func (durable *slowCompletionStore) CompleteLabelProvisioningTransition(ctx context.Context, _, _ string, _ int64, _ []store.LabelProvisioningRepository, _ []string) error {
+func (durable *slowCompletionStore) CompleteLabelProvisioningTransition(ctx context.Context, _, _ string, _ int64, _ []store.LabelProvisioningRepository, _ []string, _ time.Duration) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

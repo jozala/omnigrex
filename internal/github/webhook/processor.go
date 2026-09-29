@@ -21,7 +21,7 @@ type ProcessorStore interface {
 	ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
 	CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error
 	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error)
-	CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string) error
+	CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string, time.Duration) error
 	RenewWebhookClaim(context.Context, string, string, time.Duration) error
 	ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error)
 	AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error
@@ -196,7 +196,7 @@ func (processor *Processor) completeProvisioning(ctx context.Context, claim *sto
 		}
 	}
 	if err == nil {
-		err = processor.store.CompleteLabelProvisioningTransition(workCtx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories, invalid)
+		err = processor.store.CompleteLabelProvisioningTransition(workCtx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories, invalid, processor.leaseDuration)
 	}
 	cancelWork()
 	<-renewDone

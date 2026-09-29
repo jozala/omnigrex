@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -72,15 +73,27 @@ func LabelProvisioningIdempotencyKey(deliveryID string, repositoryID int64) stri
 	return fmt.Sprintf("label-provisioning:%s:%d", deliveryID, repositoryID)
 }
 
-// CompleteLabelProvisioningTransition atomically records per-repository
-// provisioning jobs in the generic jobs table and settles its webhook
-// delivery without creating a Workflow or normalized event.
+// labelProvisioningBatchSize bounds one job-insert transaction so a large
+// installation never holds the webhook delivery row lock across an
+// unbounded batch. The claim is renewed between batches, while no row lock
+// is held, so renewal can actually extend the lease.
+const labelProvisioningBatchSize = 100
+
+// CompleteLabelProvisioningTransition records per-repository provisioning
+// jobs in the generic jobs table and settles its webhook delivery without
+// creating a Workflow or normalized event.
+//
+// Jobs are queued in bounded batches with claim renewal between batches:
+// each batch re-locks and re-validates the delivery fence, so a slow
+// installation cannot expire the lease mid-insertion and roll back queued
+// work. A lost fence aborts with ErrWebhookClaimLost for retry; idempotent
+// inserts make retries converge.
 //
 // Valid repositories always receive durable jobs, even when invalid entries
 // are present: with no invalid entries the delivery is marked PROCESSED, and
 // with invalid entries the jobs are still queued while the delivery is marked
 // FAILED carrying the invalid entries as an observable diagnostic.
-func (store *Store) CompleteLabelProvisioningTransition(ctx context.Context, deliveryID, claimToken string, installationID int64, repositories []LabelProvisioningRepository, invalid []string) error {
+func (store *Store) CompleteLabelProvisioningTransition(ctx context.Context, deliveryID, claimToken string, installationID int64, repositories []LabelProvisioningRepository, invalid []string, renewalLease time.Duration) error {
 	if !validUUID(deliveryID) || !validUUID(claimToken) {
 		return ErrWebhookClaimLost
 	}
@@ -93,7 +106,48 @@ func (store *Store) CompleteLabelProvisioningTransition(ctx context.Context, del
 			return fmt.Errorf("complete label provisioning: %w: repository identity is invalid", ErrLabelProvisioningInvalid)
 		}
 	}
+	if err := validatePositiveDuration("complete label provisioning renewal lease", renewalLease); err != nil {
+		return err
+	}
 
+	// Source identity is carried solely by the idempotency key. Provenance
+	// must stay empty: there is no normalized_events row for provisioning
+	// deliveries (so a normalized_event_id foreign key could never resolve),
+	// and sharing one action key across a delivery's repositories would
+	// collide on the (normalized_event_id, action_key) uniqueness scope.
+	seen := make(map[int64]struct{}, len(repositories))
+	deduped := make([]LabelProvisioningRepository, 0, len(repositories))
+	for _, repository := range repositories {
+		if _, exists := seen[repository.ID]; exists {
+			continue
+		}
+		seen[repository.ID] = struct{}{}
+		deduped = append(deduped, repository)
+	}
+
+	batches := len(deduped) / labelProvisioningBatchSize
+	if len(deduped)%labelProvisioningBatchSize != 0 || len(deduped) == 0 {
+		batches++
+	}
+	for batch := 0; batch < batches; batch++ {
+		chunk := deduped[batch*labelProvisioningBatchSize:]
+		if len(chunk) > labelProvisioningBatchSize {
+			chunk = chunk[:labelProvisioningBatchSize]
+		}
+		last := batch == batches-1
+		if err := store.insertLabelProvisioningBatch(ctx, deliveryID, claimToken, installationID, chunk, last, invalid); err != nil {
+			return err
+		}
+		if !last {
+			if err := store.RenewWebhookClaim(ctx, deliveryID, claimToken, renewalLease); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (store *Store) insertLabelProvisioningBatch(ctx context.Context, deliveryID, claimToken string, installationID int64, repositories []LabelProvisioningRepository, last bool, invalid []string) error {
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin label provisioning transition: %w", err)
@@ -118,17 +172,7 @@ FOR UPDATE`, deliveryID).Scan(&status, &currentToken, &leaseLive)
 		return ErrWebhookClaimLost
 	}
 
-	// Source identity is carried solely by the idempotency key. Provenance
-	// must stay empty: there is no normalized_events row for provisioning
-	// deliveries (so a normalized_event_id foreign key could never resolve),
-	// and sharing one action key across a delivery's repositories would
-	// collide on the (normalized_event_id, action_key) uniqueness scope.
-	seen := make(map[int64]struct{}, len(repositories))
 	for _, repository := range repositories {
-		if _, exists := seen[repository.ID]; exists {
-			continue
-		}
-		seen[repository.ID] = struct{}{}
 		payload, err := MarshalLabelProvisioningPayload(repository, installationID)
 		if err != nil {
 			return fmt.Errorf("encode label provisioning job: %w", err)
@@ -142,12 +186,13 @@ FOR UPDATE`, deliveryID).Scan(&status, &currentToken, &leaseLive)
 		}
 	}
 
-	outcome, lastError := WebhookProcessed, ""
-	if len(invalid) != 0 {
-		outcome = WebhookFailed
-		lastError = "label provisioning recorded with invalid entries: " + strings.Join(truncateInvalidEntries(invalid), "; ")
-	}
-	result, err := tx.Exec(ctx, `
+	if last {
+		outcome, lastError := WebhookProcessed, ""
+		if len(invalid) != 0 {
+			outcome = WebhookFailed
+			lastError = "label provisioning recorded with invalid entries: " + strings.Join(truncateInvalidEntries(invalid), "; ")
+		}
+		result, err := tx.Exec(ctx, `
 UPDATE webhook_deliveries
 SET status = $3,
     claim_owner = NULL,
@@ -160,11 +205,12 @@ WHERE delivery_id = $1
   AND status = 'PROCESSING'
   AND claim_token = $2
   AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, outcome, lastError)
-	if err != nil {
-		return fmt.Errorf("complete label provisioning delivery: %w", err)
-	}
-	if result.RowsAffected() != 1 {
-		return ErrWebhookClaimLost
+		if err != nil {
+			return fmt.Errorf("complete label provisioning delivery: %w", err)
+		}
+		if result.RowsAffected() != 1 {
+			return ErrWebhookClaimLost
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit label provisioning transition: %w", err)

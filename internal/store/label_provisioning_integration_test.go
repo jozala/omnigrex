@@ -29,7 +29,7 @@ func TestCompleteLabelProvisioningTransitionDedupesAndMarksDelivery(t *testing.T
 		{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		{ID: 9124, Owner: "jozala", Name: "widgets"},
 	}
-	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, repositories, nil); err != nil {
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, repositories, nil, 30*time.Second); err != nil {
 		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestLabelProvisioningFailureIsolationAcrossRepositories(t *testing.T) {
 	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, []store.LabelProvisioningRepository{
 		{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		{ID: 9124, Owner: "jozala", Name: "widgets"},
-	}, nil); err != nil {
+	}, nil, 30*time.Second); err != nil {
 		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
 	}
 	first, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
@@ -129,7 +129,7 @@ func TestCompleteLabelProvisioningTransitionRecordsInvalidEntriesAsDeliveryFailu
 	}
 	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99,
 		[]store.LabelProvisioningRepository{{ID: 9123, Owner: "jozala", Name: "omnigrex"}},
-		[]string{"repositories_added[1] has an incomplete repository entry"}); err != nil {
+		[]string{"repositories_added[1] has an incomplete repository entry"}, 30*time.Second); err != nil {
 		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
 	}
 
@@ -161,5 +161,60 @@ func insertProvisioningDelivery(t *testing.T, database *store.Store, ctx context
 		Payload: []byte(`{"action":"created","installation":{"id":99}}`),
 	}); err != nil {
 		t.Fatalf("InsertWebhookDelivery() error = %v", err)
+	}
+}
+
+func TestCompleteLabelProvisioningTransitionBatchesLargeInstallation(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	deliveryID := "423e4567-e89b-12d3-a456-426614174000"
+	insertProvisioningDelivery(t, database, ctx, deliveryID)
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	const repositories = 150
+	inputs := make([]store.LabelProvisioningRepository, 0, repositories)
+	for id := int64(1); id <= repositories; id++ {
+		inputs = append(inputs, store.LabelProvisioningRepository{
+			ID: 9000 + id, Owner: "jozala", Name: "repo",
+		})
+	}
+	// More than one batch worth of repositories exercises the inter-batch
+	// claim renewal path: renewal runs while no delivery row lock is held,
+	// so it can actually extend the lease instead of blocking behind the
+	// job-insert transaction.
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, inputs, nil, 30*time.Second); err != nil {
+		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, deliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookProcessed {
+		t.Fatalf("delivery status = %q, want PROCESSED", record.Status)
+	}
+	seen := make(map[int64]struct{}, repositories)
+	for range repositories {
+		lease, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
+		if err != nil || lease == nil {
+			t.Fatalf("ClaimJobKind() = (%#v, %v), want all %d jobs", lease, err, repositories)
+		}
+		payload, err := store.ParseLabelProvisioningPayload(lease.Payload)
+		if err != nil {
+			t.Fatalf("parse payload: %v", err)
+		}
+		if payload.InstallationID != 99 {
+			t.Errorf("installation ID = %d, want 99", payload.InstallationID)
+		}
+		seen[payload.RepositoryID] = struct{}{}
+		if err := database.CompleteJob(ctx, *lease, json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("CompleteJob() error = %v", err)
+		}
+	}
+	if len(seen) != repositories {
+		t.Errorf("distinct repositories = %d, want %d", len(seen), repositories)
 	}
 }
