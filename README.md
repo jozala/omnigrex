@@ -11,7 +11,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 ## Documentation
 
 - [Project concept](./project-concept.md)
-- [First-iteration specification](./docs/first-iteration.md)
+- [First-iteration specification](./docs/plans/first-iteration.md)
 - [Implementation plan](./docs/implementation-plan.md)
 - [Operator guide](./docs/operator-guide.md)
 - [Dogfooding record](./docs/dogfooding.md)

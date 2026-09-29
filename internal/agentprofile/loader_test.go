@@ -9,6 +9,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
+	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 type sourceCall struct {
@@ -91,12 +92,12 @@ func TestLoaderDiscoversAllProfilesAtOneCommit(t *testing.T) {
 	if _, found := snapshot.Profile("implementation"); found {
 		t.Error("Profile path stem was incorrectly used as the Profile name")
 	}
-	if len(source.resolveCalls) != 1 || len(source.listCalls) != 1 {
+	if len(source.resolveCalls) != 1 || len(source.listCalls) != 2 {
 		t.Fatalf("source calls = resolve %#v, list %#v", source.resolveCalls, source.listCalls)
 	}
 	wantListCall := sourceCall{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team", commitSHA: commitSHA}
-	if source.listCalls[0] != wantListCall {
-		t.Errorf("list call = %#v, want %#v", source.listCalls[0], wantListCall)
+	if source.listCalls[1] != wantListCall || source.listCalls[0].path != ".omnigrex" {
+		t.Errorf("list calls = %#v, want pinned root and team", source.listCalls)
 	}
 	wantFetchCalls := []sourceCall{
 		{credential: "installation-secret", owner: "acme", repository: "widgets", path: ".omnigrex/team/implementation.md", commitSHA: commitSHA},
@@ -158,6 +159,19 @@ func TestLoaderRejectsInvalidDiscoveredProfileSets(t *testing.T) {
 	}
 }
 
+func TestLoaderPinsTurnConfigurationToProfileCommit(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	source := &fakeSource{commitSHA: commit, paths: []string{turnconfig.Path, ".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md"}, contents: map[string][]byte{
+		turnconfig.Path:               []byte("version: 1\nenvironment-paths:\n  directories:\n    build: {lifecycle: turn}\n  environment:\n    - {name: GOTMPDIR, directory: build}\n"),
+		".omnigrex/team/developer.md": validProfileContent("developer", role.Developer, "openai/gpt-5.2", "Develop.\n"),
+		".omnigrex/team/reviewer.md":  validProfileContent("reviewer", role.Reviewer, "openai/gpt-5.2", "Review.\n"),
+	}}
+	snapshot, err := agentprofile.NewLoader(source, role.BuiltinPolicyCatalog(), "GOTMPDIR").Load(context.Background(), "token", "acme", "widgets")
+	if err != nil || snapshot.TurnConfiguration().Environment["GOTMPDIR"] != "build" || len(source.fetchCalls) != 3 || source.fetchCalls[0].commitSHA != commit {
+		t.Fatalf("pinned turn configuration = (%#v, %v); fetches %#v", snapshot.TurnConfiguration(), err, source.fetchCalls)
+	}
+}
+
 func TestLoaderStopsOnSourceFailures(t *testing.T) {
 	failure := errors.New("source unavailable")
 	validCommit := strings.Repeat("a", 40)
@@ -178,7 +192,7 @@ func TestLoaderStopsOnSourceFailures(t *testing.T) {
 			paths:     []string{".omnigrex/team/developer.md"},
 			contents:  map[string][]byte{},
 			fetchErr:  map[string]error{".omnigrex/team/developer.md": failure},
-		}, wantListCalls: 1, wantFetchCall: 1},
+		}, wantListCalls: 2, wantFetchCall: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

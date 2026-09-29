@@ -166,7 +166,41 @@ func safeToolFailureClass(raw json.RawMessage) string {
 		return "mutation_failed"
 	case "mutation state is invalid":
 		return "mutation_state_invalid"
+	case "publication remote head mismatch":
+		return "publication_remote_head_mismatch"
+	case "Pull Request context is missing for this turn":
+		return "pull_request_context_missing"
+	case "Pull Request head or identity changed during this turn":
+		return "pull_request_head_mismatch"
+	case "could not verify the Pull Request head":
+		return "github_observation_unavailable"
+	case "Pull Request is already bound to this turn":
+		return "pull_request_already_bound"
+	case "GitHub rejected the mutation":
+		return "github_request_rejected"
+	case "GitHub mutation failed":
+		return "github_dependency_failed"
+	case "mutation returned an invalid result":
+		return "backend_result_invalid"
+	case "invalid tool invocation":
+		return "invalid_tool_invocation"
+	case "tool is not authorized":
+		return "tool_not_authorized"
+	case "tool precondition failed":
+		return "tool_precondition_failed"
+	case "tool dependency failed":
+		return "tool_dependency_failed"
+	case "workspace and publication trees differ":
+		return "publication_tree_mismatch"
+	case "publication could not be prepared":
+		return "publication_dependency_failed"
 	default:
+		if strings.HasPrefix(output.Error, "publication remote head mismatch (expected_sha=") {
+			return "publication_remote_head_mismatch"
+		}
+		if strings.HasPrefix(output.Error, "GitHub rejected the mutation (http_status=") {
+			return "github_request_rejected"
+		}
 		return ""
 	}
 }

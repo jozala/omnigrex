@@ -7,32 +7,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode"
 )
 
 var (
-	ErrInvalidPublication = errors.New("invalid publication request")
-	ErrPushRejected       = errors.New("publication push rejected")
-	ErrTreeMismatch       = errors.New("workspace and publication trees differ")
-	ErrUnexpectedHead     = errors.New("unexpected remote branch head")
+	ErrInvalidPublication        = errors.New("invalid publication request")
+	ErrPushRejected              = errors.New("publication push rejected")
+	ErrTreeMismatch              = errors.New("workspace and publication trees differ")
+	ErrUnexpectedHead            = errors.New("unexpected remote branch head")
+	ErrUncommittedWorkspace      = errors.New("commit all workspace changes before publishing")
+	ErrInvalidPublicationHistory = errors.New("publication history is not anchored to the scoped branch and default branch")
 )
 
-type CommitIdentity struct {
-	Name  string
-	Email string
+// UnexpectedHeadError contains only validated Git object IDs and the branch
+// ref; Git command output and credentials are never retained in this error.
+type UnexpectedHeadError struct {
+	Expected string
+	Actual   string
+	Branch   string
 }
 
+func (err *UnexpectedHeadError) Error() string { return ErrUnexpectedHead.Error() + ": " + err.Branch }
+func (err *UnexpectedHeadError) Unwrap() error { return ErrUnexpectedHead }
+
 type Publication struct {
-	AssignmentID    string
-	RepositoryURL   string
-	Credential      string
-	BaseRevision    string
-	ExpectedOldHead string
-	Branch          string
-	Message         string
-	Identity        CommitIdentity
-	Time            time.Time
+	AssignmentID      string
+	RepositoryURL     string
+	Credential        string
+	BaseRevision      string
+	ExpectedOldHead   string
+	Branch            string
+	DefaultBranch     string
+	RecordProposedTip func(context.Context, string) error
 }
 
 type PublicationResult struct {
@@ -55,51 +61,54 @@ func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication
 	if err := lifecycle.preparePublication(ctx, paths.Publication, publication, baseRevision); err != nil {
 		return PublicationResult{}, err
 	}
-	baseTree, err := SnapshotTree(paths.Publication)
+	if err := lifecycle.validateWorkspaceHistoryMetadata(ctx, paths.Workspace); err != nil {
+		return PublicationResult{}, err
+	}
+	status, err := lifecycle.workspaceGitOutput(ctx, "inspect committed workspace", paths.Workspace,
+		"status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return PublicationResult{}, err
 	}
-	workspaceTree, err := SnapshotTree(paths.Workspace)
-	if err != nil {
-		return PublicationResult{}, err
+	if status != "" {
+		return PublicationResult{}, ErrUncommittedWorkspace
 	}
-	if err := SyncTree(paths.Workspace, paths.Publication); err != nil {
-		return PublicationResult{}, err
-	}
-	publicationTree, err := SnapshotTree(paths.Publication)
-	if err != nil {
-		return PublicationResult{}, err
-	}
-	if !workspaceTree.Equal(publicationTree) {
-		return PublicationResult{}, ErrTreeMismatch
-	}
-	if err := lifecycle.expectRemoteHead(ctx, paths.Publication, publication.Credential, publication.Branch, expectedOldHead); err != nil {
-		return PublicationResult{}, err
-	}
-	if baseTree.Equal(workspaceTree) {
-		return PublicationResult{Head: baseRevision}, nil
-	}
-	if err := lifecycle.git(ctx, "stage publication tree", paths.Publication, "",
-		"add", "--all", "--force", "--", "."); err != nil {
-		return PublicationResult{}, err
-	}
-	instant := publication.Time.UTC().Format(time.RFC3339)
-	identity := map[string]string{
-		"GIT_AUTHOR_NAME": publication.Identity.Name, "GIT_AUTHOR_EMAIL": publication.Identity.Email, "GIT_AUTHOR_DATE": instant,
-		"GIT_COMMITTER_NAME": publication.Identity.Name, "GIT_COMMITTER_EMAIL": publication.Identity.Email, "GIT_COMMITTER_DATE": instant,
-	}
-	if _, err := lifecycle.gitOutput(ctx, "commit publication tree", paths.Publication, "", identity,
-		"commit", "--no-verify", "--no-gpg-sign", "-m", publication.Message); err != nil {
-		return PublicationResult{}, err
-	}
-	head, err := lifecycle.gitOutput(ctx, "resolve publication commit", paths.Publication, "", nil,
-		"rev-parse", "--verify", "HEAD")
+	head, err := lifecycle.workspaceGitOutput(ctx, "read committed workspace head", paths.Workspace,
+		"rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return PublicationResult{}, err
 	}
 	head, err = normalizeObjectID(head)
 	if err != nil {
-		return PublicationResult{}, fmt.Errorf("resolve publication commit: %w", err)
+		return PublicationResult{}, err
+	}
+	if err := lifecycle.expectRemoteHead(ctx, paths.Publication, publication.Credential, publication.Branch, expectedOldHead); err != nil {
+		return PublicationResult{}, err
+	}
+	if head == baseRevision {
+		equal, err := lifecycle.committedTreesEqual(ctx, paths.Workspace, paths.Publication)
+		if err != nil {
+			return PublicationResult{}, err
+		}
+		if !equal {
+			return PublicationResult{}, ErrTreeMismatch
+		}
+		return PublicationResult{Head: baseRevision}, nil
+	}
+	if publication.RecordProposedTip == nil {
+		return PublicationResult{}, ErrInvalidPublication
+	}
+	if err := lifecycle.git(ctx, "import proposed commits", paths.Publication, "",
+		"-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-recurse-submodules", "--", paths.Workspace, head); err != nil {
+		return PublicationResult{}, err
+	}
+	if err := lifecycle.validatePublicationHistory(ctx, paths.Publication, publication, baseRevision, head); err != nil {
+		return PublicationResult{}, err
+	}
+	if err := lifecycle.verifyCommittedTree(ctx, paths.Workspace, paths.Publication, head); err != nil {
+		return PublicationResult{}, err
+	}
+	if err := publication.RecordProposedTip(ctx, head); err != nil {
+		return PublicationResult{}, fmt.Errorf("record proposed publication tip: %w", err)
 	}
 	if err := lifecycle.expectRemoteHead(ctx, paths.Publication, publication.Credential, publication.Branch, expectedOldHead); err != nil {
 		return PublicationResult{}, err
@@ -107,7 +116,7 @@ func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication
 	branchRef := "refs/heads/" + publication.Branch
 	lease := "--force-with-lease=" + branchRef + ":" + expectedOldHead
 	if err := lifecycle.git(ctx, "push publication commit", paths.Publication, publication.Credential,
-		"push", "--porcelain", lease, "origin", "HEAD:"+branchRef); err != nil {
+		"push", "--porcelain", lease, "origin", head+":"+branchRef); err != nil {
 		return PublicationResult{}, fmt.Errorf("%w: %v", ErrPushRejected, err)
 	}
 	return PublicationResult{Head: head, Changed: true}, nil
@@ -171,7 +180,7 @@ func (lifecycle *Lifecycle) expectRemoteHead(ctx context.Context, directory, cre
 		}
 	}
 	if actual != expected {
-		return fmt.Errorf("%w: %s", ErrUnexpectedHead, branchRef)
+		return &UnexpectedHeadError{Expected: expected, Actual: actual, Branch: branchRef}
 	}
 	return nil
 }
@@ -197,23 +206,10 @@ func validatePublication(publication Publication) (string, string, error) {
 			return "", "", fmt.Errorf("%w: expected old head must equal publication base", ErrInvalidPublication)
 		}
 	}
-	if !validBranch(publication.Branch) || strings.TrimSpace(publication.Message) == "" || publication.Time.IsZero() ||
-		!validIdentity(publication.Identity.Name) || !validIdentity(publication.Identity.Email) {
+	if !validBranch(publication.Branch) || publication.DefaultBranch != "" && !validBranch(publication.DefaultBranch) {
 		return "", "", ErrInvalidPublication
 	}
 	return base, expected, nil
-}
-
-func validIdentity(value string) bool {
-	if value == "" || strings.TrimSpace(value) != value {
-		return false
-	}
-	for _, character := range value {
-		if unicode.IsControl(character) {
-			return false
-		}
-	}
-	return true
 }
 
 func validBranch(value string) bool {

@@ -347,7 +347,9 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
 		Payload:     json.RawMessage(`{"reason":"agent_blocked","revision":7,"pull_request_number":23}`),
 		MaxAttempts: 3, IdempotencyKey: "handoff-cleanup-expiry", WorkflowID: workflowID,
 	})
-	first, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-1", 30*time.Millisecond)
+	// Allow race-instrumented PostgreSQL calls to finish before deliberately
+	// expiring this leased cleanup job below.
+	first, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-1", 2*time.Second)
 	if err != nil || first == nil {
 		t.Fatalf("first claim = (%#v, %v)", first, err)
 	}
@@ -365,7 +367,7 @@ func TestSupersededHumanHandoffCleanupSurvivesLeaseExpiry(t *testing.T) {
 	if err != nil || !acknowledgement.CleanupRequired {
 		t.Fatalf("superseded acknowledgement = (%#v, %v)", acknowledgement, err)
 	}
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	second, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff-2", 5*time.Second)
 	if err != nil || second == nil || second.ID != jobID || second.Attempt != 2 {
 		t.Fatalf("reclaimed cleanup claim = (%#v, %v)", second, err)

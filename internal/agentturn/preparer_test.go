@@ -205,6 +205,26 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 	}
 }
 
+func TestPreparePersistsDefaultBranchTurnConfiguration(t *testing.T) {
+	source := validProfileSource()
+	source.contents[".omnigrex/turn-configuration.yaml"] = []byte("version: 1\nenvironment-paths:\n  directories:\n    build: {lifecycle: turn}\n  environment:\n    - {name: GOTMPDIR, directory: build}\n")
+	registry, err := runtimeprofile.NewRegistry(runtimeProfile(t, testImage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := &preparationStore{selected: workflow.RoleDeveloper}
+	_, err = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog(), "GOTMPDIR"), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Environment map[string]string `json:"environment"`
+	}
+	if len(database.calls) != 1 || json.Unmarshal(database.calls[0].Developer.TurnConfiguration, &config) != nil || config.Environment["GOTMPDIR"] != "build" {
+		t.Fatalf("prepared turn configuration = %#v", database.calls)
+	}
+}
+
 func TestPrepareReturnsRoleSelectedByStore(t *testing.T) {
 	for _, selected := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
 		t.Run(string(selected), func(t *testing.T) {

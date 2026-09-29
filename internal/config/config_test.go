@@ -84,6 +84,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.AgentTurnExecutionLeaseDuration != 30*time.Second || got.AgentTurnExecutionHeartbeatInterval != 10*time.Second || got.AgentTurnExecutionPollInterval != 250*time.Millisecond || got.AgentTurnExecutionTurnTimeout != 2*time.Hour || got.AgentTurnExecutionCleanupTimeout != 10*time.Second {
 		t.Errorf("Agent Turn execution timing = (%s, %s, %s, %s, %s), want (30s, 10s, 250ms, 2h, 10s)", got.AgentTurnExecutionLeaseDuration, got.AgentTurnExecutionHeartbeatInterval, got.AgentTurnExecutionPollInterval, got.AgentTurnExecutionTurnTimeout, got.AgentTurnExecutionCleanupTimeout)
 	}
+	if got.TerminalCorroborationDuration != 30*time.Minute {
+		t.Errorf("terminal corroboration window = %s, want 30m", got.TerminalCorroborationDuration)
+	}
 	if got.WorkflowEffectLeaseDuration != 30*time.Second || got.WorkflowEffectHeartbeatInterval != 10*time.Second || got.WorkflowEffectPollInterval != 250*time.Millisecond || got.WorkflowEffectRetryDelay != 5*time.Second {
 		t.Errorf("Workflow effect timing = (%s, %s, %s, %s), want (30s, 10s, 250ms, 5s)", got.WorkflowEffectLeaseDuration, got.WorkflowEffectHeartbeatInterval, got.WorkflowEffectPollInterval, got.WorkflowEffectRetryDelay)
 	}
@@ -137,6 +140,7 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL":         "400ms",
 		"OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT":          "3h",
 		"OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT":       "12s",
+		"OMNIGREX_TERMINAL_CORROBORATION_DURATION":            "45m",
 		"OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION":             "1m",
 		"OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL":         "20s",
 		"OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL":              "600ms",
@@ -205,6 +209,9 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	}
 	if got.AgentTurnExecutionLeaseDuration != 45*time.Second || got.AgentTurnExecutionHeartbeatInterval != 15*time.Second || got.AgentTurnExecutionPollInterval != 400*time.Millisecond || got.AgentTurnExecutionTurnTimeout != 3*time.Hour || got.AgentTurnExecutionCleanupTimeout != 12*time.Second {
 		t.Errorf("Agent Turn execution timing = (%s, %s, %s, %s, %s)", got.AgentTurnExecutionLeaseDuration, got.AgentTurnExecutionHeartbeatInterval, got.AgentTurnExecutionPollInterval, got.AgentTurnExecutionTurnTimeout, got.AgentTurnExecutionCleanupTimeout)
+	}
+	if got.TerminalCorroborationDuration != 45*time.Minute {
+		t.Errorf("terminal corroboration window = %s, want 45m", got.TerminalCorroborationDuration)
 	}
 	if got.WorkflowEffectLeaseDuration != time.Minute || got.WorkflowEffectHeartbeatInterval != 20*time.Second || got.WorkflowEffectPollInterval != 600*time.Millisecond || got.WorkflowEffectRetryDelay != 4*time.Second {
 		t.Errorf("Workflow effect timing = (%s, %s, %s, %s)", got.WorkflowEffectLeaseDuration, got.WorkflowEffectHeartbeatInterval, got.WorkflowEffectPollInterval, got.WorkflowEffectRetryDelay)
@@ -284,6 +291,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "execution heartbeat reaches lease", key: "OMNIGREX_AGENT_TURN_EXECUTION_HEARTBEAT_INTERVAL", value: "30s"},
 		{name: "execution poll value", key: "OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL", value: "0s"},
 		{name: "execution turn timeout syntax", key: "OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT", value: "eventually"},
+		{name: "terminal corroboration window syntax", key: "OMNIGREX_TERMINAL_CORROBORATION_DURATION", value: "eventually"},
+		{name: "terminal corroboration window zero", key: "OMNIGREX_TERMINAL_CORROBORATION_DURATION", value: "0s"},
 		{name: "execution turn timeout above maximum", key: "OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT", value: "8760h1us"},
 		{name: "execution cleanup value", key: "OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT", value: "0s"},
 		{name: "MCP mutation operation timeout syntax", key: "OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT", value: "eventually"},

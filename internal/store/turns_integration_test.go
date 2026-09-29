@@ -109,7 +109,7 @@ func TestAgentTurnFenceRejectsStaleEpochOwnerAndControlRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
-	lease, err := claimAndAcquireFixtureAgentTurn(t, databases[0], pool, ctx, turn, "runtime-a", 80*time.Millisecond, 1)
+	lease, err := claimAndAcquireFixtureAgentTurn(t, databases[0], pool, ctx, turn, "runtime-a", 2*time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestAgentTurnFenceRejectsStaleEpochOwnerAndControlRevision(t *testing.T) {
 		t.Errorf("HeartbeatJob() for Agent Turn execution error = %v, want ErrAgentTurnJobRequiresTurnFence", err)
 	}
 	time.Sleep(35 * time.Millisecond)
-	refreshed, err := databases[0].RefreshAgentTurnLease(ctx, lease, 150*time.Millisecond)
+	refreshed, err := databases[0].RefreshAgentTurnLease(ctx, lease, 10*time.Second)
 	if err != nil {
 		t.Fatalf("RefreshAgentTurnLease() error = %v", err)
 	}
@@ -125,7 +125,7 @@ func TestAgentTurnFenceRejectsStaleEpochOwnerAndControlRevision(t *testing.T) {
 		!refreshed.JobLease.LeaseExpiresAt.Equal(refreshed.LeaseExpiresAt) {
 		t.Fatalf("RefreshAgentTurnLease() expiration = turn %v, job %v, original %v", refreshed.LeaseExpiresAt, refreshed.JobLease.LeaseExpiresAt, lease.LeaseExpiresAt)
 	}
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	if err := databases[0].ValidateTurnFence(ctx, lease); err != nil {
 		t.Fatalf("ValidateTurnFence() after heartbeat and original expiry error = %v", err)
 	}
@@ -561,6 +561,60 @@ func TestAgentTurnMutationOperationIDIsScopedToLineage(t *testing.T) {
 	}
 }
 
+func TestProposedPublicationTipIsFencedAndDurableBeforePush(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	fixture := seedAgentSession(t, pool, 39)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := claimAndAcquireFixtureAgentTurn(t, databases[0], pool, ctx, turn, "publication-runtime", 10*time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	const oldHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const proposed = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	reservation, err := databases[0].ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "publish-exact-tip", ToolName: "publish_changes", Request: json.RawMessage(`{"operation_id":"publish-exact-tip"}`),
+		ExternalService: "git", ExternalResourceID: "39:omnigrex/issue-39", ExpectedSHA: oldHead,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(reserved) != 1 || !reserved[0].HistoryPublication || reserved[0].ProposedSHA != "" {
+		t.Fatalf("reserved publication format before tip recording = %#v, %v", reserved, err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, proposed); !errors.Is(err, store.ErrMutationStateConflict) {
+		t.Fatalf("record before starting = %v", err)
+	}
+	if _, err := databases[0].StartMutation(ctx, lease, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, proposed); err != nil {
+		t.Fatalf("record proposed tip = %v", err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, strings.Repeat("c", 40)); !errors.Is(err, store.ErrMutationStateConflict) {
+		t.Fatalf("record second tip = %v", err)
+	}
+	mutations, err := databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(mutations) != 1 || mutations[0].ExpectedSHA != oldHead || mutations[0].ProposedSHA != proposed || !mutations[0].HistoryPublication {
+		t.Fatalf("durable proposed tip = %#v, %v", mutations, err)
+	}
+	if err := databases[0].MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("push outcome unknown")); err != nil {
+		t.Fatal(err)
+	}
+	mutations, err = databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(mutations) != 1 || mutations[0].ProposedSHA != proposed {
+		t.Fatalf("recovery candidate = %#v, %v", mutations, err)
+	}
+}
+
 func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
@@ -580,7 +634,9 @@ func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing
 		t.Fatalf("PrepareAgentTurn() root error = %v", err)
 	}
 	rootJob := agentTurnExecutionJob(t, pool, ctx, root)
-	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, rootJob, root.ControlRevision, "runtime-root", 70*time.Millisecond, 1)
+	// Leave enough live-lease headroom for race-instrumented Docker-backed SQL
+	// calls before deliberately observing expiry below.
+	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, rootJob, root.ControlRevision, "runtime-root", 2*time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() root error = %v", err)
 	}
@@ -612,7 +668,7 @@ SELECT result::text, updated_at, finished_at FROM tool_invocations WHERE id = $1
 		t.Fatal(err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	recovery, err := database.RecoverExpiredAgentTurn(ctx, root.ID, root.ExecutionEpoch)
 	if err != nil {
 		t.Fatalf("RecoverExpiredAgentTurn() error = %v", err)
@@ -873,7 +929,7 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
 	job := agentTurnExecutionJob(t, pool, ctx, turn)
-	lease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "runtime", 80*time.Millisecond, 1)
+	lease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "runtime", 2*time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
@@ -898,7 +954,7 @@ func TestAgentTurnRecoveryBlocksSuccessorWhileMutationIsUnsettled(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ReserveMutation() for unstarted operation error = %v", err)
 	}
-	time.Sleep(110 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	if reclaimed, err := databases[0].ClaimJobKind(ctx, store.AgentTurnQueue, store.RunAgentTurnJobKind, "replacement", time.Second); err != nil || reclaimed != nil {
 		t.Errorf("ClaimJobKind() for expired Agent Turn job = (%#v, %v), want (nil, nil)", reclaimed, err)
 	}
@@ -1572,7 +1628,7 @@ func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) 
 				t.Fatal(err)
 			}
 			job := agentTurnExecutionJob(t, pool, ctx, turn)
-			lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "runtime-post-close", 80*time.Millisecond, 1)
+			lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "runtime-post-close", 2*time.Second, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1608,7 +1664,7 @@ func TestRecoverExpiredAgentTurnAcceptsPostAdmissionCloseStatuses(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			time.Sleep(110 * time.Millisecond)
+			time.Sleep(2100 * time.Millisecond)
 			recovery, err := database.RecoverExpiredAgentTurn(ctx, turn.ID, turn.ExecutionEpoch)
 			if err != nil {
 				t.Fatalf("RecoverExpiredAgentTurn() after CloseMutationAdmission() error = %v", err)

@@ -20,6 +20,7 @@ The writable paths are:
 | Assignment workspace | `/workspace` | Disposable between Agent Turns |
 | OpenCode database and sidecars | `/home/opencode/.local/share/opencode` | Persistent per Agent Assignment |
 | Repository tools installed by mise | `/home/opencode/.local/share/mise` | Persistent per Agent Assignment |
+| Requested tool scratch and caches | `/home/opencode/.local/share/omnigrex-tool-data` | Turn scratch or Assignment cache |
 | Runtime-owned OpenCode configuration | `/home/opencode/.config` | Disposable or read-only injected configuration |
 | OpenCode cache | `/home/opencode/.cache` | Disposable |
 | OpenCode state | `/home/opencode/.local/state` | Disposable |

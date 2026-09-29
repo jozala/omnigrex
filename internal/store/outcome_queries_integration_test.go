@@ -17,7 +17,6 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestListAgentTurnMutationInvocationsRequiresClosedSettledLedgerAndPreservesOrder(t *testing.T) {
@@ -85,7 +84,7 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, root), root.ControlRevision, "replay-root", time.Second, 1)
+	rootLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, root), root.ControlRevision, "replay-root", 20*time.Second, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +130,7 @@ func TestRetryMutationReplayIsExplicitOrderedAndVisibleToOutcomeReconciliation(t
 		if err != nil {
 			t.Fatalf("PrepareAgentTurn() retry error = %v", err)
 		}
-		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, owner, time.Second, 1)
+		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, owner, 20*time.Second, 1)
 		if err != nil {
 			t.Fatalf("ClaimAndAcquireAgentTurn() retry error = %v", err)
 		}
@@ -356,7 +355,7 @@ func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *t
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptError: agentturn.PromptErrorFailure,
 		PromptDiagnostic: "submit ACP prompt: EOF", RepositoryCredential: "developer-token",
-		Paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()},
+		Paths: committedPublicationPaths(t),
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != head || github.calls != 1 {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -51,6 +52,7 @@ type Store interface {
 	ReserveMutation(context.Context, store.AgentTurnLease, store.MutationSpec) (store.MutationReservation, error)
 	AcknowledgeMutationReplay(context.Context, store.AgentTurnLease, string, store.MutationSpec) error
 	StartMutation(context.Context, store.AgentTurnLease, string) (store.MutationReservation, error)
+	RecordProposedPublicationTip(context.Context, store.AgentTurnLease, string, string) error
 	CompleteMutation(context.Context, store.AgentTurnLease, string, json.RawMessage) error
 	FailMutation(context.Context, store.AgentTurnLease, string, error) error
 	MarkMutationUnknown(context.Context, store.AgentTurnLease, string, error) error
@@ -83,6 +85,7 @@ type ReadLedger interface {
 
 type Config struct {
 	EndpointURL                 string
+	Logger                      *slog.Logger
 	Store                       Store
 	Backend                     Backend
 	Ledger                      ReadLedger
@@ -115,46 +118,55 @@ type PullRequestScope struct {
 
 // TokenScope is the complete authority captured by one per-turn token.
 type TokenScope struct {
-	Lease         store.AgentTurnLease
-	WorkflowID    string
-	Role          workflow.Role
-	Repository    RepositoryScope
-	Issue         IssueScope
-	PullRequest   *PullRequestScope
-	Branch        string
-	DefaultBranch string
-	HeadSHA       string
-	AllowedTools  []string
-	ExpiresAt     time.Time
+	Lease                store.AgentTurnLease
+	WorkflowID           string
+	Role                 workflow.Role
+	Repository           RepositoryScope
+	Issue                IssueScope
+	PullRequest          *PullRequestScope
+	Branch               string
+	BranchExists         bool
+	RecoveredPublication bool
+	DefaultBranch        string
+	HeadSHA              string
+	AllowedTools         []string
+	ExpiresAt            time.Time
 }
 
 // ToolScope is credential-free context passed to the backend.
 type ToolScope struct {
-	WorkflowID        string            `json:"workflow_id"`
-	AgentAssignmentID string            `json:"agent_assignment_id"`
-	AgentSessionID    string            `json:"agent_session_id"`
-	AgentTurnID       string            `json:"agent_turn_id"`
-	ExecutionEpoch    int64             `json:"execution_epoch"`
-	Role              workflow.Role     `json:"role"`
-	AgentProfileName  string            `json:"agent_profile_name"`
-	RoleDisplayName   string            `json:"role_display_name"`
-	Repository        RepositoryScope   `json:"repository"`
-	Issue             IssueScope        `json:"issue"`
-	PullRequest       *PullRequestScope `json:"pull_request,omitempty"`
-	Branch            string            `json:"branch"`
-	DefaultBranch     string            `json:"default_branch"`
-	HeadSHA           string            `json:"head_sha"`
-	TurnCreatedAt     time.Time         `json:"turn_created_at"`
+	WorkflowID           string            `json:"workflow_id"`
+	AgentAssignmentID    string            `json:"agent_assignment_id"`
+	AgentSessionID       string            `json:"agent_session_id"`
+	AgentTurnID          string            `json:"agent_turn_id"`
+	ExecutionEpoch       int64             `json:"execution_epoch"`
+	Role                 workflow.Role     `json:"role"`
+	AgentProfileName     string            `json:"agent_profile_name"`
+	RoleDisplayName      string            `json:"role_display_name"`
+	Repository           RepositoryScope   `json:"repository"`
+	Issue                IssueScope        `json:"issue"`
+	PullRequest          *PullRequestScope `json:"pull_request,omitempty"`
+	Branch               string            `json:"branch"`
+	BranchExists         bool              `json:"branch_exists,omitempty"`
+	RecoveredPublication bool              `json:"recovered_publication,omitempty"`
+	DefaultBranch        string            `json:"default_branch"`
+	HeadSHA              string            `json:"head_sha"`
+	TurnCreatedAt        time.Time         `json:"turn_created_at"`
 }
 
 type Invocation struct {
-	Name        string
-	Arguments   json.RawMessage
-	Scope       ToolScope
-	Class       ToolClass
-	OperationID string
-	Mutation    MutationMetadata
+	Name              string
+	Arguments         json.RawMessage
+	Scope             ToolScope
+	Class             ToolClass
+	OperationID       string
+	Mutation          MutationMetadata
+	lease             store.AgentTurnLease
+	recordProposedTip func(context.Context, string) error
 }
+
+func (Invocation) String() string   { return "MCP tool invocation" }
+func (Invocation) GoString() string { return "mcp.Invocation{<authority redacted>}" }
 
 type MutationMetadata struct {
 	ExternalService    string
@@ -209,6 +221,7 @@ func (registration Registration) GoString() string {
 
 type Gateway struct {
 	endpointURL                 string
+	logger                      *slog.Logger
 	store                       Store
 	backend                     Backend
 	ledger                      ReadLedger
@@ -306,6 +319,7 @@ func New(config Config) (*Gateway, error) {
 	}
 	return &Gateway{
 		endpointURL:                 config.EndpointURL,
+		logger:                      config.Logger,
 		store:                       config.Store,
 		backend:                     config.Backend,
 		ledger:                      config.Ledger,
@@ -702,6 +716,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	invocation := Invocation{
 		Name: params.Name, Arguments: append(json.RawMessage(nil), canonicalArguments...),
 		Scope: gateway.backendScope(registration.scope), Class: tool.Class,
+		lease: registration.scope.Lease,
 	}
 	if tool.Class == MutationTool {
 		gateway.callMutation(response, request, registration, rpc.ID, invocation)
@@ -880,7 +895,7 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 			return
 		}
 		finishCall(true)
-		writeToolError(response, id, "mutation previously failed")
+		writeToolError(response, id, cachedFailureMessage(reservation.LastError))
 		return
 	case store.MutationUnknown, store.MutationReconciling, store.MutationInFlight:
 		finishCall(true)
@@ -890,9 +905,8 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		invocation.OperationID = reservation.ID
 		// Execute exactly what the reservation recorded. A reused RESERVED
 		// mutation (same turn retry or successor turn) carries its original
-		// persisted footer — including an explicitly empty footer for legacy
-		// unsigned reservations — so publication can never diverge from what
-		// recovery reconciles against.
+		// persisted footer, including an explicitly empty footer for legacy
+		// unsigned reservations. Publication uses its separately recorded tip.
 		invocation.Arguments = ensureReservationSignature(invocation.Name, reservation.Request)
 	default:
 		finishCall(true)
@@ -998,6 +1012,11 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		}
 	}()
 
+	if invocation.Name == ToolPublishChanges {
+		invocation.recordProposedTip = func(ctx context.Context, head string) error {
+			return gateway.store.RecordProposedPublicationTip(ctx, lease, reservation.ID, head)
+		}
+	}
 	result, err := gateway.backend.Execute(backendContext, invocation)
 	watcherMutex.Lock()
 	stoppingWatcher = true
@@ -1016,21 +1035,27 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		return mutationOutcome{message: "mutation outcome is unresolved", durablyResolved: true}
 	}
 	if err != nil || len(result) == 0 || !json.Valid(result) {
+		failure := safeMutationFailure(err)
+		if err == nil {
+			failure = mutationFailure{code: "backend_result_invalid", message: "mutation returned an invalid result"}
+		}
 		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
-			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("backend mutation failed"))
+			return gateway.store.FailMutation(ctx, lease, reservation.ID, failure)
 		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
-		return mutationOutcome{message: "mutation failed", durablyResolved: true}
+		gateway.logMutationFailure(invocation, reservation, failure)
+		return mutationOutcome{message: failure.toolMessage(), durablyResolved: true}
 	}
 	result, err = canonicalJSON(result)
 	if err != nil {
 		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
-			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("backend returned an invalid result"))
+			return gateway.store.FailMutation(ctx, lease, reservation.ID, mutationFailure{code: "backend_result_invalid"})
 		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
-		return mutationOutcome{message: "mutation failed", durablyResolved: true}
+		gateway.logMutationFailure(invocation, reservation, mutationFailure{code: "backend_result_invalid"})
+		return mutationOutcome{message: "mutation returned an invalid result", durablyResolved: true}
 	}
 	if err := gateway.finalizeMutation(func(ctx context.Context) error {
 		return gateway.store.CompleteMutation(ctx, lease, reservation.ID, result)
@@ -1043,6 +1068,24 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		return mutationOutcome{message: "mutation outcome is unresolved", durablyResolved: true}
 	}
 	return mutationOutcome{result: result, durablyResolved: true}
+}
+
+func (gateway *Gateway) logMutationFailure(invocation Invocation, reservation store.MutationReservation, failure mutationFailure) {
+	if gateway.logger == nil {
+		return
+	}
+	gateway.logger.Warn("MCP mutation failed",
+		"workflow_id", invocation.Scope.WorkflowID,
+		"agent_turn_id", invocation.Scope.AgentTurnID,
+		"execution_epoch", invocation.Scope.ExecutionEpoch,
+		"mutation_id", reservation.ID,
+		"operation_id", reservation.OperationID,
+		"tool_name", invocation.Name,
+		"failure_code", failure.code,
+		"github_http_status", failure.httpCode,
+		"github_request_id", failure.requestID,
+		"expected_sha", failure.expectedSHA,
+		"observed_sha", failure.observedSHA)
 }
 
 func (gateway *Gateway) finalizeMutation(operation func(context.Context) error) error {
@@ -1264,7 +1307,8 @@ func (gateway *Gateway) backendScope(scope TokenScope) ToolScope {
 		ExecutionEpoch: scope.Lease.ExecutionEpoch, Role: scope.Role,
 		AgentProfileName: profileName, RoleDisplayName: displayName,
 		Repository: scope.Repository, Issue: scope.Issue, PullRequest: pullRequest,
-		Branch: scope.Branch, DefaultBranch: scope.DefaultBranch, HeadSHA: scope.HeadSHA,
+		Branch: scope.Branch, BranchExists: scope.BranchExists, RecoveredPublication: scope.RecoveredPublication,
+		DefaultBranch: scope.DefaultBranch, HeadSHA: scope.HeadSHA,
 		TurnCreatedAt: scope.Lease.CreatedAt,
 	}
 }

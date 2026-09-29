@@ -24,13 +24,15 @@ const (
 
 // PublicationReconciliation identifies one possibly published commit and its branch precondition.
 type PublicationReconciliation struct {
-	AssignmentID    string
-	RepositoryURL   string
-	Credential      string
-	BaseRevision    string
-	ExpectedOldHead string
-	Branch          string
-	OperationID     string
+	AssignmentID       string
+	RepositoryURL      string
+	Credential         string
+	BaseRevision       string
+	ProposedRevision   string
+	HistoryPublication bool
+	ExpectedOldHead    string
+	Branch             string
+	OperationID        string
 }
 
 // PublicationReconciliationResult reports the observed branch head, or the matching publication commit when found.
@@ -68,6 +70,19 @@ func (lifecycle *Lifecycle) ReconcilePublication(ctx context.Context, input Publ
 	if err := lifecycle.git(ctx, "fetch reconciliation branch head", paths.Publication, input.Credential,
 		"fetch", "--force", "--no-tags", "origin", actual); err != nil {
 		return PublicationReconciliationResult{}, err
+	}
+	if input.ProposedRevision != "" {
+		if err := lifecycle.git(ctx, "verify proposed publication is reachable", paths.Publication, "",
+			"merge-base", "--is-ancestor", input.ProposedRevision, actual); err != nil {
+			return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
+		}
+		if err := lifecycle.verifyFirstParentBase(ctx, paths.Publication, base, input.ProposedRevision); err != nil {
+			return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
+		}
+		return PublicationReconciliationResult{Outcome: PublicationReconciliationFound, Head: input.ProposedRevision}, nil
+	}
+	if input.HistoryPublication {
+		return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
 	}
 	targetTrailer := "Omnigrex-Operation-ID: " + input.OperationID
 	output, err := lifecycle.gitOutput(ctx, "find publication operation", paths.Publication, "", nil,
@@ -126,6 +141,57 @@ func (lifecycle *Lifecycle) prepareReconciliation(ctx context.Context, destinati
 		"config", "--local", "core.hooksPath", os.DevNull)
 }
 
+// ObserveRemoteBranch reads a feature ref before a new Turn is given publication
+// authority. It does not accept an agent-controlled remote or retain credentials.
+func (lifecycle *Lifecycle) ObserveRemoteBranch(ctx context.Context, repositoryURL, credential, branch string) (string, error) {
+	if err := validateRemote(repositoryURL); err != nil {
+		return "", err
+	}
+	if err := validateCredential(credential); err != nil {
+		return "", err
+	}
+	if !validBranch(branch) {
+		return "", ErrInvalidPublicationReconciliation
+	}
+	branchRef := "refs/heads/" + branch
+	output, err := lifecycle.gitOutput(ctx, "observe publication branch", "", credential, nil,
+		"ls-remote", "--refs", repositoryURL, branchRef)
+	if err != nil {
+		return "", err
+	}
+	if output == "" {
+		return "", nil
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 2 || fields[1] != branchRef {
+		return "", ErrInvalidPublicationReconciliation
+	}
+	return normalizeObjectID(fields[0])
+}
+
+// PrepareRecoveredPublication restores the trusted comparison tree for a
+// previously published head. A later Developer handoff must still compare it
+// to the agent workspace before becoming a Change Proposal.
+func (lifecycle *Lifecycle) PrepareRecoveredPublication(ctx context.Context, assignmentID, repositoryURL, credential, head string) error {
+	if err := validateRemote(repositoryURL); err != nil {
+		return err
+	}
+	if err := validateCredential(credential); err != nil {
+		return err
+	}
+	revision, err := normalizeObjectID(head)
+	if err != nil {
+		return err
+	}
+	paths, err := lifecycle.Paths(assignmentID)
+	if err != nil {
+		return err
+	}
+	release := lifecycle.acquirePublicationLock(assignmentID)
+	defer release()
+	return lifecycle.preparePublication(ctx, paths.Publication, Publication{RepositoryURL: repositoryURL, Credential: credential}, revision)
+}
+
 func (lifecycle *Lifecycle) remoteBranchHead(ctx context.Context, directory, credential, branch string) (string, error) {
 	branchRef := "refs/heads/" + branch
 	output, err := lifecycle.gitOutput(ctx, "read reconciliation branch head", directory, credential, nil,
@@ -157,6 +223,11 @@ func validatePublicationReconciliation(input PublicationReconciliation) (string,
 	base, err := normalizeObjectID(input.BaseRevision)
 	if err != nil {
 		return "", "", err
+	}
+	if input.ProposedRevision != "" {
+		if _, err := normalizeObjectID(input.ProposedRevision); err != nil || input.ProposedRevision == base || !input.HistoryPublication {
+			return "", "", ErrInvalidPublicationReconciliation
+		}
 	}
 	expected := ""
 	if input.ExpectedOldHead != "" {

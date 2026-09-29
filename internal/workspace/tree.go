@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -58,91 +59,87 @@ func SnapshotTree(root string) (TreeSnapshot, error) {
 	return TreeSnapshot{entries: entries}, nil
 }
 
+// snapshotTrackedTree reads only Git-tracked paths. Ignored caches and other
+// local artifacts are not traversed, but tracked files are opened without
+// following a substituted directory or regular-file symlink.
+func snapshotTrackedTree(root string, paths []string) (TreeSnapshot, error) {
+	directory, _, err := openDirectoryNoFollow(root)
+	if err != nil {
+		return TreeSnapshot{}, err
+	}
+	defer directory.Close()
+	sort.Strings(paths)
+	entries := make([]treeEntry, 0, len(paths))
+	for _, path := range paths {
+		if len(entries) > 0 && entries[len(entries)-1].path == path {
+			return TreeSnapshot{}, fmt.Errorf("%w: duplicate tracked path", ErrUnsupportedTreeEntry)
+		}
+		entry, err := trackedTreeEntry(directory, path)
+		if err != nil {
+			return TreeSnapshot{}, err
+		}
+		entries = append(entries, entry)
+	}
+	return TreeSnapshot{entries: entries}, nil
+}
+
+func trackedTreeEntry(root *os.File, path string) (treeEntry, error) {
+	segments := strings.Split(path, "/")
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." || segment == ".git" {
+			return treeEntry{}, ErrUnsupportedTreeEntry
+		}
+	}
+	directory := root
+	for _, segment := range segments[:len(segments)-1] {
+		child, err := openDirectoryAtNoFollow(int(directory.Fd()), segment)
+		if directory != root {
+			directory.Close()
+		}
+		if err != nil {
+			return treeEntry{}, err
+		}
+		directory = child
+	}
+	if directory != root {
+		defer directory.Close()
+	}
+	name := segments[len(segments)-1]
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(directory.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return treeEntry{}, err
+	}
+	entry := treeEntry{path: path}
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		file, err := openRegularAtNoFollow(int(directory.Fd()), name)
+		if err != nil {
+			return treeEntry{}, err
+		}
+		defer file.Close()
+		var opened unix.Stat_t
+		if err := unix.Fstat(int(file.Fd()), &opened); err != nil {
+			return treeEntry{}, err
+		}
+		if opened.Mode&unix.S_IFMT != unix.S_IFREG {
+			return treeEntry{}, ErrUnsupportedTreeEntry
+		}
+		entry.kind = 'f'
+		entry.executable = opened.Mode&0o111 != 0
+		entry.digest, err = digestFile(file)
+		return entry, err
+	case unix.S_IFLNK:
+		target, err := readlinkAt(int(directory.Fd()), name)
+		entry.kind = 'l'
+		entry.digest = sha256.Sum256([]byte(target))
+		return entry, err
+	default:
+		return treeEntry{}, ErrUnsupportedTreeEntry
+	}
+}
+
 func (snapshot TreeSnapshot) Equal(other TreeSnapshot) bool {
 	return slices.Equal(snapshot.entries, other.entries)
-}
-
-func SyncTree(source, destination string) error {
-	source, err := filepath.Abs(source)
-	if err != nil {
-		return fmt.Errorf("resolve source tree: %w", err)
-	}
-	destination, err = filepath.Abs(destination)
-	if err != nil {
-		return fmt.Errorf("resolve destination tree: %w", err)
-	}
-	if pathsOverlap(source, destination) {
-		return ErrOverlappingPaths
-	}
-	sourceDirectory, source, err := openDirectoryNoFollow(source)
-	if err != nil {
-		return fmt.Errorf("inspect source tree: %w", err)
-	}
-	defer sourceDirectory.Close()
-	destinationInfo, err := os.Lstat(destination)
-	if err == nil && !destinationInfo.IsDir() {
-		return fmt.Errorf("%w: destination root is not a directory", ErrUnsupportedTreeEntry)
-	}
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("inspect destination tree: %w", err)
-	}
-	if os.IsNotExist(err) {
-		if err := os.MkdirAll(destination, 0o755); err != nil {
-			return fmt.Errorf("create destination tree: %w", err)
-		}
-	}
-	children, err := os.ReadDir(destination)
-	if err != nil {
-		return fmt.Errorf("read destination tree: %w", err)
-	}
-	for _, child := range children {
-		if child.Name() == ".git" {
-			gitInfo, err := os.Lstat(filepath.Join(destination, child.Name()))
-			if err != nil {
-				return fmt.Errorf("inspect destination Git metadata: %w", err)
-			}
-			if !gitInfo.IsDir() {
-				return fmt.Errorf("%w: destination .git is not a directory", ErrUnsupportedTreeEntry)
-			}
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(destination, child.Name())); err != nil {
-			return fmt.Errorf("remove stale destination entry: %w", err)
-		}
-	}
-
-	var directories []directoryMode
-	err = walkSourceTree(sourceDirectory, source, "", "sync", func(entry sourceTreeEntry) error {
-		target := filepath.Join(destination, filepath.FromSlash(entry.path))
-		switch entry.kind {
-		case 'd':
-			if err := os.Mkdir(target, 0o700); err != nil {
-				return err
-			}
-			directories = append(directories, directoryMode{path: target, mode: entry.mode})
-			return nil
-		case 'f':
-			return copyRegularFile(entry.file, target, entry.mode)
-		case 'l':
-			return os.Symlink(entry.linkTarget, target)
-		default:
-			return fmt.Errorf("%w: %s", ErrUnsupportedTreeEntry, entry.path)
-		}
-	})
-	if err != nil {
-		return fmt.Errorf("copy workspace tree: %w", err)
-	}
-	for index := len(directories) - 1; index >= 0; index-- {
-		if err := os.Chmod(directories[index].path, directories[index].mode); err != nil {
-			return fmt.Errorf("preserve directory mode: %w", err)
-		}
-	}
-	return nil
-}
-
-type directoryMode struct {
-	path string
-	mode os.FileMode
 }
 
 func digestFile(file *os.File) ([sha256.Size]byte, error) {
@@ -153,22 +150,6 @@ func digestFile(file *os.File) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	return digest, nil
-}
-
-func copyRegularFile(input *os.File, destination string, mode os.FileMode) (err error) {
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := output.Close(); err == nil {
-			err = closeErr
-		}
-	}()
-	if _, err = io.Copy(output, input); err != nil {
-		return err
-	}
-	return os.Chmod(destination, mode)
 }
 
 type sourceTreeEntry struct {

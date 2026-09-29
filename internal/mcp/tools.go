@@ -23,20 +23,21 @@ const (
 )
 
 const (
-	ServerName                 = "omnigrex"
-	ToolGetIssue               = "get_issue"
-	ToolListIssueComments      = "list_issue_comments"
-	ToolGetPullRequest         = "get_pull_request"
-	ToolListPullRequestReviews = "list_pull_request_reviews"
-	ToolListReviewThreads      = "list_review_threads"
-	ToolGetCheckRuns           = "get_check_runs"
-	ToolPublishChanges         = "publish_changes"
-	ToolOpenPR                 = "open_pr"
-	ToolRequestReview          = "request_review"
-	ToolSubmitReview           = "submit_review"
-	ToolCommentOnIssue         = "comment_on_issue"
-	ToolCommentOnPullRequest   = "comment_on_pull_request"
-	ToolReportBlocked          = "report_blocked"
+	ServerName                     = "omnigrex"
+	ToolGetIssue                   = "get_issue"
+	ToolListIssueComments          = "list_issue_comments"
+	ToolGetPullRequest             = "get_pull_request"
+	ToolListPullRequestReviews     = "list_pull_request_reviews"
+	ToolListReviewThreads          = "list_review_threads"
+	ToolGetCheckRuns               = "get_check_runs"
+	ToolPublishChanges             = "publish_changes"
+	ToolOpenPR                     = "open_pr"
+	ToolRequestReview              = "request_review"
+	ToolSubmitReview               = "submit_review"
+	ToolCommentOnIssue             = "comment_on_issue"
+	ToolCommentOnPullRequest       = "comment_on_pull_request"
+	ToolReportBlocked              = "report_blocked"
+	ToolConfirmPriorTerminalIntent = "confirm_prior_terminal_intent"
 )
 
 type ToolDefinition struct {
@@ -53,9 +54,9 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolListPullRequestReviews, Description: "List native reviews on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolListReviewThreads, Description: "List review threads on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolGetCheckRuns, Description: "Get check runs for the scoped head commit.", InputSchema: emptyObjectSchema(), Class: ReadTool},
-	{Name: ToolPublishChanges, Description: "Publish workspace changes to the scoped branch.", InputSchema: objectSchema(map[string]any{
+	{Name: ToolPublishChanges, Description: "Publish a clean, fully committed workspace history to the scoped branch. The optional message is an audit summary, not a commit message.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "message": stringSchema(1, 4096),
-	}, "operation_id", "message"), Class: MutationTool},
+	}, "operation_id"), Class: MutationTool},
 	{Name: ToolOpenPR, Description: "Open the scoped branch as a Pull Request linked to the Issue.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "title": stringSchema(1, 256), "body": stringSchema(1, 65536),
 	}, "operation_id", "title", "body"), Class: MutationTool},
@@ -86,6 +87,9 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolReportBlocked, Description: "Create a Human Handoff for a blocker.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "reason": stringSchema(1, 4096), "details": stringSchema(1, 65536),
 	}, "operation_id", "reason"), Class: MutationTool},
+	{Name: ToolConfirmPriorTerminalIntent, Description: "Explicitly confirm a successful terminal intent from an interrupted prior Turn without repeating its GitHub effect.", InputSchema: objectSchema(map[string]any{
+		"operation_id": operationIDSchema(), "source_invocation_id": stringSchema(36, 36),
+	}, "operation_id", "source_invocation_id"), Class: MutationTool},
 }
 
 // CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.

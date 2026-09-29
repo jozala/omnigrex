@@ -53,22 +53,25 @@ const (
 	recoveryContinuationMutationHandoff       = "MUTATION_RECONCILIATION_HANDOFF_APPLIED"
 	recoveryContinuationMigrationHandoff      = "MIGRATION_HANDOFF_APPLIED"
 	recoveryContinuationDefinitionHandoff     = "WORKFLOW_DEFINITION_HANDOFF_APPLIED"
+	recoveryContinuationTerminalPending       = "TERMINAL_CORROBORATION_PENDING"
+	recoveryContinuationTerminalApplied       = "TERMINAL_CORROBORATION_APPLIED"
 )
 
 // AgentTurnStatus is the durable lifecycle state of an Agent Turn.
 type AgentTurnStatus string
 
 const (
-	AgentTurnQueued      AgentTurnStatus = "QUEUED"
-	AgentTurnStarting    AgentTurnStatus = "STARTING"
-	AgentTurnRunning     AgentTurnStatus = "RUNNING"
-	AgentTurnCancelling  AgentTurnStatus = "CANCELLING"
-	AgentTurnSettling    AgentTurnStatus = "SETTLING"
-	AgentTurnReconciling AgentTurnStatus = "RECONCILING"
-	AgentTurnSucceeded   AgentTurnStatus = "SUCCEEDED"
-	AgentTurnFailed      AgentTurnStatus = "FAILED"
-	AgentTurnInterrupted AgentTurnStatus = "INTERRUPTED"
-	AgentTurnTimedOut    AgentTurnStatus = "TIMED_OUT"
+	AgentTurnQueued        AgentTurnStatus = "QUEUED"
+	AgentTurnStarting      AgentTurnStatus = "STARTING"
+	AgentTurnRunning       AgentTurnStatus = "RUNNING"
+	AgentTurnCancelling    AgentTurnStatus = "CANCELLING"
+	AgentTurnSettling      AgentTurnStatus = "SETTLING"
+	AgentTurnReconciling   AgentTurnStatus = "RECONCILING"
+	AgentTurnCorroborating AgentTurnStatus = "CORROBORATING"
+	AgentTurnSucceeded     AgentTurnStatus = "SUCCEEDED"
+	AgentTurnFailed        AgentTurnStatus = "FAILED"
+	AgentTurnInterrupted   AgentTurnStatus = "INTERRUPTED"
+	AgentTurnTimedOut      AgentTurnStatus = "TIMED_OUT"
 )
 
 // AgentTurnSpec captures the immutable inputs of an Agent Turn.
@@ -84,6 +87,7 @@ type AgentTurnSpec struct {
 	AgentProfileCommitSHA     string
 	AgentProfileContentSHA256 []byte
 	AgentProfileConfig        json.RawMessage
+	TurnConfiguration         json.RawMessage
 }
 
 // AgentTurn identifies one prompt-response interaction and its execution fence.
@@ -139,16 +143,38 @@ type AgentTurnChangeProposal struct {
 	HeadSHA           string
 }
 
+// AgentTurnPublication is verified in-progress Developer work, not a review-ready Change Proposal.
+type AgentTurnPublication struct {
+	HeadRef                 string
+	HeadSHA                 string
+	BaseRef                 string
+	PullRequestID           int64
+	PullRequestNumber       int64
+	PullRequestNodeID       string
+	SourcePublishMutationID string
+	SourceOpenPRMutationID  string
+}
+
 // AgentTurnExecutionContext contains only durable launch inputs read under the live turn fence.
 type AgentTurnExecutionContext struct {
-	WorkflowID     string
-	Repository     AgentTurnRepository
-	Issue          AgentTurnIssue
-	ChangeProposal *AgentTurnChangeProposal
-	Participant    AgentParticipant
-	Assignment     AgentAssignment
-	Session        AgentSession
-	Turn           AgentTurn
+	WorkflowID               string
+	Repository               AgentTurnRepository
+	Issue                    AgentTurnIssue
+	ChangeProposal           *AgentTurnChangeProposal
+	Publication              *AgentTurnPublication
+	Participant              AgentParticipant
+	Assignment               AgentAssignment
+	Session                  AgentSession
+	Turn                     AgentTurn
+	PriorTerminalIntent      *AgentTurnPriorTerminalIntent
+	PriorReviewRequiresHuman *AgentTurnPriorTerminalIntent
+}
+
+type AgentTurnPriorTerminalIntent struct {
+	SourceInvocationID string
+	SourceTurnID       string
+	ToolName           string
+	ExpectedHeadSHA    string
 }
 
 // AgentTurnCompletion describes the guarded terminal state of an Agent Turn.
@@ -218,6 +244,8 @@ type MutationReservation struct {
 	ExternalService    string
 	ExternalResourceID string
 	ExpectedSHA        string
+	ProposedSHA        string
+	HistoryPublication bool
 	Result             json.RawMessage
 	LastError          string
 	AdmittedAt         time.Time
@@ -962,20 +990,7 @@ func (store *Store) OpenMutationAdmission(ctx context.Context, lease AgentTurnLe
 // CloseMutationAdmission serializes with reservation and starts the settlement barrier.
 func (store *Store) CloseMutationAdmission(ctx context.Context, lease AgentTurnLease) error {
 	return store.withLockedAgentTurnLease(ctx, lease, "close mutation admission", func(tx pgx.Tx, turn lockedTurn) error {
-		if turn.Status != AgentTurnRunning && turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling {
-			return ErrAgentTurnFenceLost
-		}
-		var reconciliation bool
-		if err := tx.QueryRow(ctx, `
-SELECT EXISTS (SELECT 1 FROM tool_invocations WHERE agent_turn_id = $1 AND execution_epoch = $2
-AND kind = 'MUTATION' AND state IN ('UNKNOWN', 'RECONCILING'))`, lease.ID, lease.ExecutionEpoch).Scan(&reconciliation); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `
-UPDATE agent_turns SET mutation_admission_open = FALSE,
-mutation_admission_closed_at = COALESCE(mutation_admission_closed_at, clock_timestamp()),
-status = CASE WHEN $2 THEN 'RECONCILING' ELSE 'SETTLING' END WHERE id = $1`, lease.ID, reconciliation)
-		return err
+		return closeLiveMutationAdmissionTx(ctx, tx, turn, false, "", "")
 	})
 }
 
@@ -1039,8 +1054,94 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		execution.Assignment = participant
 		execution.Session = session
 		execution.Turn = turn.AgentTurn
+		if turn.RetryOfTurnID != "" {
+			prior := &AgentTurnPriorTerminalIntent{}
+			err := tx.QueryRow(ctx, `
+WITH RECURSIVE ancestors (id) AS (
+    SELECT retry_of_turn_id FROM agent_turns WHERE id = $1
+    UNION ALL
+    SELECT source.retry_of_turn_id FROM agent_turns AS source
+    JOIN ancestors ON source.id = ancestors.id WHERE ancestors.id IS NOT NULL
+)
+SELECT mutation.id::text, source.id::text, mutation.tool_name, COALESCE(mutation.expected_sha, '')
+FROM ancestors
+JOIN agent_turns AS source ON source.id = ancestors.id
+JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
+WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
+  AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
+  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
+       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+  AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
+  AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
+       AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
+  AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
+  AND mutation.tool_name IN ('request_review', 'submit_review')
+	  AND (SELECT count(DISTINCT CASE WHEN terminal.tool_name = 'confirm_prior_terminal_intent'
+	                  THEN COALESCE(terminal.result->>'source_invocation_id', terminal.id::text)
+	                  ELSE terminal.id::text END) FROM ancestors AS prior_turn
+       JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
+       WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
+         AND terminal.tool_name IN ('request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
+  AND EXISTS (SELECT 1 FROM agent_turn_settlements AS settlement
+              WHERE settlement.agent_turn_id = source.id
+                AND settlement.workflow_outcome = 'INFRASTRUCTURE_FAILED')
+  AND NOT EXISTS (SELECT 1 FROM agent_turn_corroborations AS checkpoint
+                  WHERE checkpoint.agent_turn_id = source.id)
+ORDER BY source.turn_number DESC, mutation.invocation_number DESC LIMIT 1`,
+				turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID, turn.operationLineageID).Scan(
+				&prior.SourceInvocationID, &prior.SourceTurnID, &prior.ToolName, &prior.ExpectedHeadSHA)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				execution.PriorTerminalIntent = prior
+			}
+			if execution.PriorTerminalIntent == nil && participant.Role == workflow.RoleReviewer {
+				unconfirmable := &AgentTurnPriorTerminalIntent{}
+				err := tx.QueryRow(ctx, `
+WITH RECURSIVE ancestors (id) AS (
+    SELECT retry_of_turn_id FROM agent_turns WHERE id = $1
+    UNION ALL
+    SELECT source.retry_of_turn_id FROM agent_turns AS source
+    JOIN ancestors ON source.id = ancestors.id WHERE ancestors.id IS NOT NULL
+)
+SELECT mutation.id::text, source.id::text, mutation.tool_name, mutation.expected_sha
+FROM ancestors JOIN agent_turns AS source ON source.id = ancestors.id
+JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
+WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
+  AND source.operation_lineage_id = $4 AND mutation.kind = 'MUTATION'
+  AND mutation.state = 'SUCCEEDED' AND mutation.tool_name = 'submit_review'
+  AND mutation.expected_sha = $5
+ORDER BY source.turn_number DESC, mutation.invocation_number DESC LIMIT 1`,
+					turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID, turn.operationLineageID,
+					turn.ExpectedHeadSHA).Scan(&unconfirmable.SourceInvocationID, &unconfirmable.SourceTurnID,
+					&unconfirmable.ToolName, &unconfirmable.ExpectedHeadSHA)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+				if err == nil {
+					execution.PriorReviewRequiresHuman = unconfirmable
+				}
+			}
+		}
 
 		if lease.ChangeProposalID == "" {
+			publication := &AgentTurnPublication{}
+			err := tx.QueryRow(ctx, `
+SELECT head_ref, head_sha, base_ref, COALESCE(pull_request_id, 0), COALESCE(pull_request_number, 0),
+       COALESCE(pull_request_node_id, ''), source_publish_mutation_id::text,
+       COALESCE(source_open_pr_mutation_id::text, '')
+FROM agent_turn_publications WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch).Scan(
+				&publication.HeadRef, &publication.HeadSHA, &publication.BaseRef,
+				&publication.PullRequestID, &publication.PullRequestNumber, &publication.PullRequestNodeID,
+				&publication.SourcePublishMutationID, &publication.SourceOpenPRMutationID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			execution.Publication = publication
 			return nil
 		}
 		proposal := &AgentTurnChangeProposal{}
@@ -1108,6 +1209,9 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 				if err := validateMutationReplayAncestor(ctx, tx, turn.ID, existing.AgentTurnID); err != nil {
 					return err
 				}
+				if err := rejectIneligibleTerminalReplay(ctx, tx, existing); err != nil {
+					return err
+				}
 			}
 			reservation = existing
 			return nil
@@ -1127,16 +1231,17 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			InvocationNumber: number, OperationID: spec.OperationID, ToolName: spec.ToolName,
 			Request: spec.Request, State: MutationReserved, ExternalService: spec.ExternalService,
 			ExternalResourceID: spec.ExternalResourceID, ExpectedSHA: spec.ExpectedSHA,
+			HistoryPublication: spec.ToolName == "publish_changes",
 		}
 		return tx.QueryRow(ctx, `
 INSERT INTO tool_invocations (
 	    id, agent_turn_id, execution_epoch, operation_lineage_id, invocation_number, tool_name, kind, state,
-	    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha
+	    idempotency_key, operation_id, request, external_service, external_resource_id, expected_sha, history_publication
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'MUTATION', 'RESERVED', $7, $7, $8, $9, $10, $11)
+VALUES ($1, $2, $3, $4, $5, $6, 'MUTATION', 'RESERVED', $7, $7, $8, $9, $10, $11, $12)
 RETURNING admitted_at`, invocationID, lease.ID, lease.ExecutionEpoch, turn.operationLineageID, number, spec.ToolName,
 			spec.OperationID, spec.Request, nullableString(spec.ExternalService),
-			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA)).Scan(&reservation.AdmittedAt)
+			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA), reservation.HistoryPublication).Scan(&reservation.AdmittedAt)
 	})
 	return reservation, err
 }
@@ -1164,6 +1269,9 @@ func (store *Store) AcknowledgeMutationReplay(ctx context.Context, lease AgentTu
 			return ErrMutationOperationConflict
 		}
 		if err := validateMutationReplayAncestor(ctx, tx, turn.ID, source.AgentTurnID); err != nil {
+			return err
+		}
+		if err := rejectIneligibleTerminalReplay(ctx, tx, source); err != nil {
 			return err
 		}
 		return recordTerminalMutationReplay(ctx, tx, turn, source)
@@ -1250,6 +1358,43 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 		return err
 	})
 	return mutation, err
+}
+
+// RecordProposedPublicationTip binds one validated Git commit to a live
+// publication mutation before the external push can start.
+func (store *Store) RecordProposedPublicationTip(ctx context.Context, lease AgentTurnLease, mutationID, tip string) error {
+	if !validUUID(mutationID) || !validPublicationObjectID(tip) {
+		return ErrMutationStateConflict
+	}
+	return store.withLockedAgentTurnLease(ctx, lease, "record proposed publication tip", func(tx pgx.Tx, turn lockedTurn) error {
+		if turn.Status != AgentTurnRunning {
+			return ErrAgentTurnFenceLost
+		}
+		result, err := tx.Exec(ctx, `
+UPDATE tool_invocations SET proposed_sha = $4, updated_at = clock_timestamp()
+WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3
+  AND kind = 'MUTATION' AND tool_name = 'publish_changes'
+  AND state = 'IN_FLIGHT' AND history_publication AND proposed_sha IS NULL`, mutationID, lease.ID, lease.ExecutionEpoch, tip)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return ErrMutationStateConflict
+		}
+		return nil
+	})
+}
+
+func validPublicationObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CompleteMutation records a known successful outcome from IN_FLIGHT or RECONCILING.
@@ -1798,12 +1943,15 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2 AND turn.recovery_started_at IS
 	if err := queryer.QueryRow(ctx, unsettledMutationsForTurnSQL, turnID, epoch).Scan(&recovery.MutationsUnsettled); err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil
+	recovery.SuccessorAllowed = recovery.RecoverySettledAt != nil &&
+		recovery.Continuation != recoveryContinuationTerminalPending &&
+		recovery.Continuation != recoveryContinuationTerminalApplied
 	return recovery, nil
 }
 
 func isAgentTurnRecoveryJob(kind string) bool {
-	return kind == StopStaleRuntimeJobKind || kind == ReconcileAgentTurnMutationsJobKind
+	return kind == StopStaleRuntimeJobKind || kind == ReconcileAgentTurnMutationsJobKind ||
+		kind == VerifyTerminalIntentJobKind || kind == RevalidateTerminalIntentJobKind
 }
 
 func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, error) {
@@ -1815,14 +1963,14 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	COALESCE(owner_id, ''), COALESCE(owner_token::text, ''), lease_expires_at IS NOT NULL,
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
 	stage_id, COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
-	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, created_at
+	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration, created_at
 FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
 		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,
 		&turn.ExecutionEpoch, &turn.ControlRevision, &turn.Status, &turn.MutationAdmissionOpen,
 		&turn.active, &turn.ownerID, &turn.ownerToken, &turn.leasePresent, &turn.leaseLive,
 		&turn.RetryOfTurnID, &turn.Stage, &turn.Purpose, &turn.ChangeProposalID, &turn.ExpectedHeadSHA,
 		&turn.AgentProfileCommitSHA, &turn.AgentProfileContentSHA256,
-		&profileConfig, &turn.CreatedAt,
+		&profileConfig, &turn.TurnConfiguration, &turn.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return lockedTurn{}, ErrAgentTurnFenceLost
@@ -1988,20 +2136,20 @@ WHERE id = $1 AND (status = 'ACTIVE' OR ($3 AND status = 'WAITING_FOR_HUMAN'))
 const mutationSelect = `
 SELECT id::text, agent_turn_id::text, execution_epoch, invocation_number,
 COALESCE(operation_id, ''), tool_name, request, state,
-COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''),
+COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''), COALESCE(proposed_sha, ''), history_publication,
 result, COALESCE(last_error, ''), admitted_at, started_at, finished_at
 FROM tool_invocations`
 
 const mutationLedgerSelect = `
 SELECT id::text, agent_turn_id::text, execution_epoch, invocation_number,
        COALESCE(operation_id, ''), tool_name, request, state,
-       COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''),
+       COALESCE(external_service, ''), COALESCE(external_resource_id, ''), COALESCE(expected_sha, ''), COALESCE(proposed_sha, ''), history_publication,
        result, COALESCE(last_error, ''), admitted_at, started_at, finished_at
 FROM (
     SELECT invocation.id, invocation.agent_turn_id, invocation.execution_epoch,
            invocation.invocation_number, invocation.operation_id, invocation.tool_name,
            invocation.request, invocation.state, invocation.external_service,
-           invocation.external_resource_id, invocation.expected_sha, invocation.result,
+            invocation.external_resource_id, invocation.expected_sha, invocation.proposed_sha, invocation.history_publication, invocation.result,
            invocation.last_error, invocation.admitted_at, invocation.started_at,
            invocation.finished_at
     FROM tool_invocations AS invocation
@@ -2013,7 +2161,7 @@ FROM (
     SELECT source.id, replay.agent_turn_id, replay.execution_epoch,
            replay.invocation_number, source.operation_id, source.tool_name,
            source.request, source.state, source.external_service,
-           source.external_resource_id, source.expected_sha, source.result,
+            source.external_resource_id, source.expected_sha, source.proposed_sha, source.history_publication, source.result,
            source.last_error, source.admitted_at, source.started_at,
            source.finished_at
     FROM tool_invocation_replays AS replay
@@ -2085,6 +2233,31 @@ SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, turnID, sourceTurnID).Sc
 	return nil
 }
 
+func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source MutationReservation) error {
+	if source.State != MutationSucceeded {
+		return nil
+	}
+	switch source.ToolName {
+	case "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
+	default:
+		return nil
+	}
+	var eligible bool
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE((outcome IS NULL OR outcome->>'stop_reason' = 'end_turn')
+   AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'end_turn'
+        OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (last_error IS NULL OR (last_error NOT LIKE 'ACP prompt was cancelled%'
+       AND last_error NOT LIKE 'ACP prompt returned an invalid stop reason%')), FALSE)
+FROM agent_turns WHERE id = $1`, source.AgentTurnID).Scan(&eligible); err != nil {
+		return err
+	}
+	if !eligible {
+		return ErrMutationOperationConflict
+	}
+	return nil
+}
+
 func getMutationByOperation(ctx context.Context, tx pgx.Tx, operationLineageID, toolName, operationID string) (MutationReservation, error) {
 	return scanMutation(tx.QueryRow(ctx, mutationSelect+`
 WHERE operation_lineage_id = $1 AND tool_name = $2 AND operation_id = $3 AND kind = 'MUTATION'`, operationLineageID, toolName, operationID))
@@ -2100,7 +2273,7 @@ func scanMutation(row rowScanner) (MutationReservation, error) {
 	err := row.Scan(
 		&mutation.ID, &mutation.AgentTurnID, &mutation.ExecutionEpoch, &mutation.InvocationNumber,
 		&mutation.OperationID, &mutation.ToolName, &request, &mutation.State,
-		&mutation.ExternalService, &mutation.ExternalResourceID, &mutation.ExpectedSHA,
+		&mutation.ExternalService, &mutation.ExternalResourceID, &mutation.ExpectedSHA, &mutation.ProposedSHA, &mutation.HistoryPublication,
 		&result, &mutation.LastError, &mutation.AdmittedAt, &mutation.StartedAt, &mutation.FinishedAt,
 	)
 	if err != nil {

@@ -261,6 +261,40 @@ Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `patch`.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
+### Agent Turn Tool Paths
+
+An optional `.omnigrex/turn-configuration.yaml` on the default branch requests disk-backed directories for tool environment variables.
+Omnigrex reads it from the same pinned default-branch commit as the Agent Profiles for each Agent Turn and applies it to both Roles.
+The file is strictly validated; unknown fields, unsupported sizes, unapproved variables, and invalid directories cause a configuration Human Handoff before the Runtime Process starts.
+For example:
+
+```yaml
+version: 1
+environment-paths:
+  directories:
+    build-tmp:
+      lifecycle: turn
+    go-build-cache:
+      lifecycle: assignment
+  environment:
+    - name: TMPDIR
+      directory: build-tmp
+    - name: GOTMPDIR
+      directory: build-tmp
+    - name: GOCACHE
+      directory: go-build-cache
+```
+
+Set `OMNIGREX_AGENT_PATH_ENV_ALLOWLIST` to a comma-separated list of approved variable names in the deployment configuration, such as `TMPDIR,GOTMPDIR,GOCACHE,GOPATH`.
+The operator allowlist is shared across Roles; the repository may request only approved names and cannot supply path values.
+Omnigrex always rejects runtime-control and credential-related names such as `OPENCODE_*`, `OMNIGREX_*`, `HOME`, and `PATH` even if listed by the operator.
+Without the optional file, `TMPDIR` continues to use the 64 MiB `/tmp/opencode` tmpfs.
+Requested paths are created on the disk-backed mise volume under an isolated Assignment subpath, outside the repository workspace and Change Proposal tree.
+Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-lifecycle caches remain across turns and are removed during Assignment collection.
+These directories have no per-Assignment disk quota, like the existing workspace volume, so monitor available Docker-volume storage.
+Moving build output to disk does not increase the Agent Turn container's memory limit or constrain compiler parallelism.
+This implementation changes the `opencode-acp/v1` Runtime Profile content hash; existing Agent Sessions bound to the earlier contract cannot continue unless the deployment resets their stored associations before upgrading.
+
 Agent Profiles are loaded from the latest default-branch commit before each Agent Turn.
 Directory listing and every Profile file are read from the same exact commit.
 Every direct Markdown file is treated as configuration; malformed files and unknown or unreferenced Roles fail discovery.
@@ -420,12 +454,17 @@ Do not edit PostgreSQL records to force a transition.
 
 ## Retry And Review Budgets
 
-A failed or timed-out Agent Turn receives one infrastructure retry as a new Agent Turn in the same Agent Session.
+An Agent Turn with no eligible successful terminal intent receives one infrastructure retry as a new Agent Turn in the same Agent Session.
 If a unique terminal mutation intent succeeded before an ACP response was lost or the prompt deadline elapsed, Omnigrex can settle the turn successfully after corroborating the current Pull Request, review, or workspace state.
 For a successful Developer or Reviewer outcome, the prompt failure remains in the settlement diagnostic; a turn without a successful terminal intent still follows the infrastructure retry policy.
 Explicit cancellation and non-normal ACP stop reasons do not take this successful settlement path.
 Infrastructure retries do not consume the review budget.
 After the second failure, Omnigrex publishes diagnostics and creates a Human Handoff.
+
+When `request_review` or `submit_review` succeeded and the ACP ending is eligible but a fresh corroboration read is unavailable, Omnigrex stops the Runtime Process and keeps the original Turn fenced while a separate worker retries the read. It does not prompt the agent or repeat the GitHub mutation. The default window is 30 minutes, configured by `OMNIGREX_TERMINAL_CORROBORATION_DURATION`. Its start is durable across orchestrator restarts; changing the configured duration changes the remaining window at the next check. The Issue retains its current developing/reviewing label while verification is pending. A clear access prerequisite or exhausted window creates a Human Handoff explaining that the mutation succeeded but the outcome was not accepted. Closing the Issue cancels pending verification.
+If Runtime Process cleanup or the orchestrator fails after the ACP ending was atomically recorded with closed mutation admission, recovery first proves the process stopped and settles the mutation ledger before creating the original Turn's pending verifier.
+
+After that specific Human Handoff, a new human `omnigrex:run` first revalidates the old intent without another agent prompt **when** the Stage and Role still match, the Assignment Generation has not been replaced, and the Agent Session is automation-controlled. The old failed settlement is not rewritten; a fresh read must still prove the current PR/review identity and Developer workspace tree. If the Session is human-controlled, the trigger remains in Human Handoff rather than starting an unpreparable Turn. If the Stage or Assignment Generation changed, normal reactivation applies instead of adopting the old intent. If the old ACP ending was **not** durably known because execution crashed earlier, ordinary infrastructure recovery gives the successor Agent Turn an explicit prior-intent notice. That agent can call `confirm_prior_terminal_intent` for the recorded source mutation; Omnigrex verifies it without submitting a duplicate review. A review submitted before a **known explicit cancellation** cannot be confirmed or resubmitted in the retry; the successor is instructed to report the blocker for Human Handoff. Mere Agent Session memory or a final text response is not a terminal intent.
 
 Each Workflow Attempt permits at most three accepted Review Cycles.
 A review counts only after the Reviewer App publishes it for the expected Pull Request head and that head remains current.
@@ -649,6 +688,11 @@ Use this recovery sequence:
 
 Re-adding the command label resets retry and review budgets but does not erase history.
 Retained Agent Sessions are reused when their exact Runtime Profile image and state remain available.
+If an earlier Developer Turn published a branch or opened a Pull Request but did not successfully request review, a later Turn for the same Agent Participant verifies that publication against its durable MCP mutations and fresh GitHub state before using it as in-progress work.
+The later Turn starts at the verified published head and must explicitly request review; publication alone never schedules Reviewer.
+An unproven branch, changed head, different Participant, or publication that cannot be matched to its recorded proposed commit (or, for older publications, its operation marker) causes a publication-conflict Human Handoff rather than automatic adoption.
+If Git or GitHub cannot be reached during verification, execution follows bounded infrastructure retries instead of claiming a conflict.
+Developer publication preserves committed Git history: an uncommitted workspace is rejected, while ignored local build artifacts are not published. A validated proposed commit is recorded before pushing; if an interrupted push cannot be corroborated on the branch, recovery does not reconstruct it from a later workspace and may require a Human Handoff.
 
 For an apparently stuck deployment, inspect safe operational metadata:
 
@@ -658,6 +702,9 @@ docker compose logs --since 15m orchestrator
 docker ps --filter label=io.omnigrex.runtime-process=true \
   --format '{{.ID}} {{.Names}} {{.Status}}'
 ```
+
+The orchestrator logs `MCP mutation failed` with a safe `failure_code`, operation and mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
+The corresponding `tool_invocations.last_error` contains the safe failure code and available allowlisted details for definite failures; unknown external outcomes remain subject to mutation reconciliation.
 
 An Agent Turn diagnostic containing `runtime_oom_killed` means Docker confirmed that its Runtime Process was OOM-killed before Omnigrex removed the container.
 Omnigrex keeps the normal single infrastructure retry, then includes this diagnosis in the Human Handoff if the retry also fails this way.

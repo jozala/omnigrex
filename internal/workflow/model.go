@@ -50,6 +50,9 @@ const (
 	ReasonAgentBlocked                             Reason = "agent_blocked"
 	ReasonInfrastructureRetry                      Reason = "infrastructure_retry"
 	ReasonInfrastructureRetriesExhausted           Reason = "infrastructure_retries_exhausted"
+	ReasonTerminalCorroborationExhausted           Reason = "terminal_corroboration_exhausted"
+	ReasonTerminalCorroborationPrerequisite        Reason = "terminal_corroboration_prerequisite"
+	ReasonTerminalRevalidationHumanControl         Reason = "terminal_revalidation_human_control"
 	ReasonClosureStarted                           Reason = "closure_started"
 	ReasonClosureSettled                           Reason = "closure_settled"
 	ReasonClosureCancellationRecorded              Reason = "closure_cancellation_recorded"
@@ -224,8 +227,12 @@ type EventMetadata struct {
 // TriggerEvent records an accepted human command to start a new Workflow Attempt.
 type TriggerEvent struct {
 	EventMetadata
-	AttemptID     string
-	AttemptNumber uint64
+	AttemptID                   string
+	AttemptNumber               uint64
+	PriorTerminalTurnID         string
+	PriorTerminalStage          StageID
+	PriorTerminalRole           Role
+	PriorTerminalControlBlocked bool
 }
 
 func (TriggerEvent) isWorkflowEvent() {}
@@ -249,17 +256,43 @@ type PendingEventsObservation struct {
 // TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
 type TurnSettledEvent struct {
 	EventMetadata
-	Turn                      TurnGuard
+	Turn                       TurnGuard
+	Outcome                    TurnOutcome
+	ChangeProposal             *ChangeProposal
+	Review                     *ReviewIdentity
+	ExistingReview             *ReviewIdentity
+	AuthorizedReviewerActorID  int64
+	PendingEvents              PendingEventsObservation
+	Diagnostic                 string
+	CorroborationHandoffReason Reason
+}
+
+func (TurnSettledEvent) isWorkflowEvent() {}
+
+// TerminalIntentRevalidatedEvent accepts previously uncorroborated evidence
+// under a new human-triggered Attempt, without fabricating a new Agent Turn.
+type TerminalIntentRevalidatedEvent struct {
+	EventMetadata
+	AttemptID                 string
+	SourceTurn                TurnGuard
 	Outcome                   TurnOutcome
 	ChangeProposal            *ChangeProposal
 	Review                    *ReviewIdentity
 	ExistingReview            *ReviewIdentity
 	AuthorizedReviewerActorID int64
-	PendingEvents             PendingEventsObservation
-	Diagnostic                string
 }
 
-func (TurnSettledEvent) isWorkflowEvent() {}
+func (TerminalIntentRevalidatedEvent) isWorkflowEvent() {}
+
+type TerminalRevalidationFailedEvent struct {
+	EventMetadata
+	AttemptID    string
+	SourceTurnID string
+	Reason       Reason
+	Diagnostic   string
+}
+
+func (TerminalRevalidationFailedEvent) isWorkflowEvent() {}
 
 // SynchronizationEvent records that the linked Change Proposal head moved to a new commit.
 type SynchronizationEvent struct {
@@ -365,6 +398,8 @@ type EventKind string
 const (
 	EventKindTrigger                                  EventKind = "TRIGGER"
 	EventKindTurnSettled                              EventKind = "TURN_SETTLED"
+	EventKindTerminalIntentRevalidated                EventKind = "TERMINAL_INTENT_REVALIDATED"
+	EventKindTerminalRevalidationFailed               EventKind = "TERMINAL_REVALIDATION_FAILED"
 	EventKindSynchronization                          EventKind = "SYNCHRONIZATION"
 	EventKindReviewObserved                           EventKind = "REVIEW_OBSERVED"
 	EventKindChangeProposalObserved                   EventKind = "CHANGE_PROPOSAL_OBSERVED"
@@ -439,6 +474,12 @@ type EnqueueTurnAction struct {
 }
 
 func (EnqueueTurnAction) isWorkflowAction() {}
+
+type EnqueueTerminalRevalidationAction struct {
+	SourceTurnID string
+}
+
+func (EnqueueTerminalRevalidationAction) isWorkflowAction() {}
 
 // ReconcileLabelsAction synchronizes repository labels with the Workflow state.
 type ReconcileLabelsAction struct {
