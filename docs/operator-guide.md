@@ -494,11 +494,14 @@ Create a unique private recovery-set directory, then write each artifact atomica
     pg_restore --list < "$BACKUP_DIR/omnigrex.dump.tmp" > /dev/null
   mv "$BACKUP_DIR/omnigrex.dump.tmp" "$BACKUP_DIR/omnigrex.dump"
 
+  : "${BACKUP_DIR:?BACKUP_DIR must be set}"
+  test -d "$BACKUP_DIR"
   HELPER='alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b'
   docker run --rm --network none --read-only \
     --mount type=volume,src=omnigrex-runtime-state,dst=/source,readonly \
-    --mount "type=bind,src=$BACKUP_DIR,dst=/backup" \
-    "$HELPER" sh -ec 'umask 077; cd /source; tar -czf /backup/runtime-state.tar.gz.tmp .'
+    "$HELPER" sh -ec 'cd /source; tar -czf - .' \
+    > "$BACKUP_DIR/runtime-state.tar.gz.tmp"
+  tar -tzf "$BACKUP_DIR/runtime-state.tar.gz.tmp" > /dev/null
   mv "$BACKUP_DIR/runtime-state.tar.gz.tmp" "$BACKUP_DIR/runtime-state.tar.gz"
 
   (
