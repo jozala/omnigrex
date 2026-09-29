@@ -147,3 +147,38 @@ func (err *TransientError) Unwrap() error {
 func (err *TransientError) Transient() bool {
 	return true
 }
+
+// ErrGraphQLQueryFailed means GitHub returned GraphQL errors or no data.
+// The response messages are intentionally excluded from diagnostics.
+var ErrGraphQLQueryFailed = errors.New("GitHub GraphQL query returned errors or no data")
+
+// GraphQLQueryError retains only the request ID from a successful HTTP response
+// whose GraphQL result contained errors or no data. Consumers must validate the
+// header before including it in a log or other diagnostic.
+type GraphQLQueryError struct{ RequestID string }
+
+func (err *GraphQLQueryError) Error() string { return ErrGraphQLQueryFailed.Error() }
+func (err *GraphQLQueryError) Is(target error) bool {
+	return target == ErrGraphQLQueryFailed || target == ErrInvalidAPIResponse
+}
+
+// ReviewThreadReadStage identifies the part of a review-thread read that failed.
+// These values are fixed diagnostics, not GitHub response data.
+type ReviewThreadReadStage string
+
+const (
+	ReviewThreadsQuery       ReviewThreadReadStage = "review_threads_query"
+	ReviewThreadsValidation  ReviewThreadReadStage = "review_threads_validation"
+	ReviewCommentsQuery      ReviewThreadReadStage = "review_comments_query"
+	ReviewCommentsValidation ReviewThreadReadStage = "review_comments_validation"
+)
+
+// ReviewThreadReadError preserves a safe stage alongside the underlying error.
+type ReviewThreadReadError struct {
+	Stage     ReviewThreadReadStage
+	RequestID string
+	Cause     error
+}
+
+func (err *ReviewThreadReadError) Error() string { return "GitHub review-thread read failed" }
+func (err *ReviewThreadReadError) Unwrap() error { return err.Cause }
