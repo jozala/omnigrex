@@ -2,8 +2,8 @@
 name: reviewer
 role: REVIEWER
 runtime: opencode-acp/v1
-model: opencode-go/muse-spark-1.3-contributor
-variant: xhigh
+model: opencode-go/glm-5.3-flash
+variant: max
 steps: 100
 permissions:
   read: allow
