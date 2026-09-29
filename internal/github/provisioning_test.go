@@ -41,12 +41,40 @@ func TestAPIClientListsInstallationRepositoriesAcrossPages(t *testing.T) {
 		t.Fatalf("NewAPIClient() error = %v", err)
 	}
 
-	repositories, err := client.ListInstallationRepositories(context.Background(), "installation-token")
+	repositories, invalid, err := client.ListInstallationRepositories(context.Background(), "installation-token")
 	if err != nil {
 		t.Fatalf("ListInstallationRepositories() error = %v", err)
 	}
 	if len(repositories) != 3 || repositories[0].ID != 1 || repositories[0].Owner != "acme" || repositories[2].Name != "three" {
 		t.Errorf("repositories = %#v, want three acme repositories", repositories)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid = %#v, want none", invalid)
+	}
+}
+
+func TestAPIClientListsMixedInstallationRepositoriesPreservingValid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(writer, `{"total_count":3,"repositories":[
+			{"id":1,"name":"one","full_name":"acme/one"},
+			{"id":0,"name":"","full_name":""},
+			{"id":3,"name":"mismatch","full_name":"acme/other"}]}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("NewAPIClient() error = %v", err)
+	}
+
+	repositories, invalid, err := client.ListInstallationRepositories(context.Background(), "installation-token")
+	if err != nil {
+		t.Fatalf("ListInstallationRepositories() error = %v", err)
+	}
+	if len(repositories) != 1 || repositories[0].ID != 1 {
+		t.Errorf("repositories = %#v, want only the valid entry", repositories)
+	}
+	if len(invalid) != 2 {
+		t.Errorf("invalid = %#v, want two reported entries", invalid)
 	}
 }
 
@@ -56,8 +84,6 @@ func TestAPIClientRejectsInvalidInstallationRepositories(t *testing.T) {
 		body string
 	}{
 		{name: "missing total", body: `{"repositories":[]}`},
-		{name: "incomplete entry", body: `{"total_count":1,"repositories":[{"id":0,"name":"","full_name":""}]}`},
-		{name: "full name mismatch", body: `{"total_count":1,"repositories":[{"id":1,"name":"one","full_name":"acme/two"}]}`},
 		{name: "count mismatch", body: `{"total_count":2,"repositories":[{"id":1,"name":"one","full_name":"acme/one"}]}`},
 		{name: "duplicate id", body: `{"total_count":2,"repositories":[{"id":1,"name":"one","full_name":"acme/one"},{"id":1,"name":"two","full_name":"acme/two"}]}`},
 	}
@@ -71,7 +97,7 @@ func TestAPIClientRejectsInvalidInstallationRepositories(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := client.ListInstallationRepositories(context.Background(), "installation-token"); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
+			if _, _, err := client.ListInstallationRepositories(context.Background(), "installation-token"); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
 				t.Errorf("error = %v, want ErrInvalidAPIResponse", err)
 			}
 		})
@@ -135,12 +161,15 @@ func TestInstallationEnumeratorMintsTokenThenLists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repositories, err := enumerator.EnumerateInstallationRepositories(context.Background(), 99)
+	repositories, invalid, err := enumerator.EnumerateInstallationRepositories(context.Background(), 99)
 	if err != nil {
 		t.Fatalf("Enumerate() error = %v", err)
 	}
 	if len(repositories) != 1 || repositories[0].ID != 9123 {
 		t.Errorf("repositories = %#v", repositories)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid = %#v, want none", invalid)
 	}
 	if len(paths) != 2 || paths[0] != "POST /app/installations/99/access_tokens" {
 		t.Errorf("requests = %#v, want token mint then list", paths)

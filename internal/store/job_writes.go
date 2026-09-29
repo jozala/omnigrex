@@ -166,7 +166,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 func jobInsertArgs(id string, job jobInsert) []any {
 	return []any{
 		id, job.queue, job.kind, job.payload, job.priority, job.maxAttempts, job.idempotencyKey,
-		job.scope.workflowID, nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
+		nullableString(job.scope.workflowID), nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
 		nullableString(job.scope.agentSessionID), nullableString(job.scope.agentTurnID), nullableEpoch(job.scope.executionEpoch),
 		nullableString(job.provenance.normalizedEventID), nullableString(job.provenance.agentTurnSettlementID),
 		nullableString(job.provenance.workflowInternalEventID), nullableString(job.provenance.actionKey),

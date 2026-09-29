@@ -2,6 +2,7 @@ package webhook_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -14,15 +15,16 @@ import (
 
 type fakeEnumerator struct {
 	repositories []githubapi.InstallationRepository
+	invalid      []string
 	err          error
 	calls        int
 	lastID       int64
 }
 
-func (fake *fakeEnumerator) EnumerateInstallationRepositories(_ context.Context, installationID int64) ([]githubapi.InstallationRepository, error) {
+func (fake *fakeEnumerator) EnumerateInstallationRepositories(_ context.Context, installationID int64) ([]githubapi.InstallationRepository, []string, error) {
 	fake.calls++
 	fake.lastID = installationID
-	return fake.repositories, fake.err
+	return fake.repositories, fake.invalid, fake.err
 }
 
 func provisioningClaim(eventName, action, payload string) *store.WebhookClaim {
@@ -242,14 +244,122 @@ type blockingEnumerator struct {
 	repositories []githubapi.InstallationRepository
 }
 
-func (fake *blockingEnumerator) EnumerateInstallationRepositories(ctx context.Context, _ int64) ([]githubapi.InstallationRepository, error) {
+func (fake *blockingEnumerator) EnumerateInstallationRepositories(ctx context.Context, _ int64) ([]githubapi.InstallationRepository, []string, error) {
 	fake.mu.Lock()
 	fake.started = true
 	fake.mu.Unlock()
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	case <-fake.release:
-		return fake.repositories, nil
+		return fake.repositories, nil, nil
 	}
+}
+
+func TestProcessorKeepsClaimLiveThroughSlowCompletion(t *testing.T) {
+	durable := &slowCompletionStore{
+		claim: &store.WebhookClaim{
+			WebhookDelivery: store.WebhookDelivery{
+				DeliveryID: validDeliveryID(), EventName: "repository", Action: "created",
+				Payload: []byte(`{"action":"created","installation":{"id":99},"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}}`),
+			},
+			ClaimToken: "323e4567-e89b-12d3-a456-426614174000", AttemptCount: 1,
+		},
+		release: make(chan struct{}),
+	}
+	processor, err := webhook.NewProcessor(durable, webhook.ProcessorConfig{
+		ClaimOwner: "processor-a", LeaseDuration: 5 * time.Second, IdlePollInterval: time.Second,
+		AssignmentRetentionDuration: 30 * 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor() error = %v", err)
+	}
+
+	processed := make(chan error, 1)
+	go func() {
+		ok, err := processor.ProcessNext(context.Background())
+		if err == nil && !ok {
+			err = errors.New("ProcessNext() processed nothing")
+		}
+		processed <- err
+	}()
+	// Hold the job-insert transaction past the background renewal interval
+	// (lease/3) so renewals must fire while insertion is still blocked.
+	deadline := time.After(15 * time.Second)
+	for {
+		durable.mu.Lock()
+		renewals := durable.renewals
+		durable.mu.Unlock()
+		if renewals >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("only %d renewals while completion blocked, want at least 3", renewals)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	close(durable.release)
+	select {
+	case err := <-processed:
+		if err != nil {
+			t.Fatalf("ProcessNext() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ProcessNext() did not complete after insertion finished")
+	}
+	durable.mu.Lock()
+	defer durable.mu.Unlock()
+	if !durable.provisioned {
+		t.Errorf("provisioned = false, want the blocked transition to complete")
+	}
+}
+
+// slowCompletionStore blocks the provisioning transition until released,
+// proving claim renewal continues through durable job insertion.
+type slowCompletionStore struct {
+	mu          sync.Mutex
+	claim       *store.WebhookClaim
+	renewals    int
+	release     chan struct{}
+	provisioned bool
+}
+
+func (durable *slowCompletionStore) ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error) {
+	return durable.claim, nil
+}
+
+func (durable *slowCompletionStore) RenewWebhookClaim(_ context.Context, _, _ string, _ time.Duration) error {
+	durable.mu.Lock()
+	defer durable.mu.Unlock()
+	durable.renewals++
+	return nil
+}
+
+func (durable *slowCompletionStore) CompleteLabelProvisioningTransition(ctx context.Context, _, _ string, _ int64, _ []store.LabelProvisioningRepository, _ []string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-durable.release:
+		durable.mu.Lock()
+		defer durable.mu.Unlock()
+		durable.provisioned = true
+		return nil
+	}
+}
+
+func (*slowCompletionStore) CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error {
+	return nil
+}
+
+func (*slowCompletionStore) CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error) {
+	return store.WorkflowApplication{}, nil
+}
+
+func (*slowCompletionStore) ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error) {
+	return store.WorkflowApplication{}, false, nil
+}
+
+func (*slowCompletionStore) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {
+	return nil
 }

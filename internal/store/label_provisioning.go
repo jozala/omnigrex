@@ -26,7 +26,6 @@ const (
 	ProvisionManagedLabelsJobKind = "PROVISION_MANAGED_LABELS"
 
 	labelProvisioningMaxAttempts = 5
-	labelProvisioningActionKey   = "provision-labels"
 )
 
 // LabelProvisioningRepository is one repository that must receive the managed labels.
@@ -119,6 +118,11 @@ FOR UPDATE`, deliveryID).Scan(&status, &currentToken, &leaseLive)
 		return ErrWebhookClaimLost
 	}
 
+	// Source identity is carried solely by the idempotency key. Provenance
+	// must stay empty: there is no normalized_events row for provisioning
+	// deliveries (so a normalized_event_id foreign key could never resolve),
+	// and sharing one action key across a delivery's repositories would
+	// collide on the (normalized_event_id, action_key) uniqueness scope.
 	seen := make(map[int64]struct{}, len(repositories))
 	for _, repository := range repositories {
 		if _, exists := seen[repository.ID]; exists {
@@ -133,7 +137,6 @@ FOR UPDATE`, deliveryID).Scan(&status, &currentToken, &leaseLive)
 			queue: LabelProvisioningQueue, kind: ProvisionManagedLabelsJobKind, payload: payload,
 			maxAttempts:    labelProvisioningMaxAttempts,
 			idempotencyKey: LabelProvisioningIdempotencyKey(deliveryID, repository.ID),
-			provenance:     jobInsertProvenance{normalizedEventID: deliveryID, actionKey: labelProvisioningActionKey},
 		}); err != nil {
 			return fmt.Errorf("insert label provisioning job: %w", err)
 		}
@@ -179,12 +182,15 @@ func truncateInvalidEntries(invalid []string) []string {
 
 // isWorkflowlessProvisioningJob reports whether a job is repository-scoped
 // label provisioning, the only kind allowed without a Workflow scope.
+// Its source identity is the idempotency key; provenance stays empty because
+// provisioning deliveries have no normalized_events row to reference.
 func isWorkflowlessProvisioningJob(job jobInsert) bool {
 	return job.kind == ProvisionManagedLabelsJobKind &&
 		job.scope.workflowID == "" && job.scope.workflowAttemptID == "" &&
 		job.scope.agentAssignmentID == "" && job.scope.agentSessionID == "" &&
 		job.scope.agentTurnID == "" && job.scope.executionEpoch == 0 &&
-		job.provenance.normalizedEventID != "" &&
+		job.provenance.normalizedEventID == "" &&
 		job.provenance.agentTurnSettlementID == "" &&
-		job.provenance.workflowInternalEventID == ""
+		job.provenance.workflowInternalEventID == "" &&
+		job.provenance.actionKey == ""
 }

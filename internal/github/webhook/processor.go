@@ -31,7 +31,7 @@ type ProcessorStore interface {
 // It is used only for installation.created, whose webhook repository list may be
 // incomplete, and keeps provisioning complete without trusting that list.
 type InstallationEnumerator interface {
-	EnumerateInstallationRepositories(context.Context, int64) ([]githubapi.InstallationRepository, error)
+	EnumerateInstallationRepositories(context.Context, int64) ([]githubapi.InstallationRepository, []string, error)
 }
 
 // ProcessorConfig controls claim ownership, lease duration, and idle polling.
@@ -157,28 +157,36 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 }
 
 func (processor *Processor) completeProvisioning(ctx context.Context, claim *store.WebhookClaim, event ProvisioningEvent) error {
-	// Renew the claim before any potentially slow enumeration so a large
-	// installation scan runs under a fresh lease window instead of expiring
-	// the delivery before repository jobs are queued.
-	if err := processor.store.RenewWebhookClaim(ctx, claim.DeliveryID, claim.ClaimToken, processor.leaseDuration); err != nil {
-		return err
-	}
+	// Keep the webhook claim live from enumeration through durable job
+	// insertion. For a large installation both the page scan and the single
+	// job-insert transaction can outlast one lease window; without renewal
+	// the transaction would roll back on an expired lease and eventually
+	// exhaust the delivery without provisioning anything. Renewal loss
+	// aborts the work below, and because jobs are queued only by the final
+	// transaction, the delivery is simply reclaimed and retried.
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	renewDone := make(chan struct{})
+	go processor.renewLoop(workCtx, claim, cancelWork, renewDone)
+
 	repositories := make([]store.LabelProvisioningRepository, 0, len(event.Repositories))
+	invalid := append([]string{}, event.Invalid...)
+	var err error
 	if event.EventName == "installation" && event.Action == "created" {
-		if processor.enumerator == nil {
-			return fmt.Errorf("%w: installation enumerator is not configured", errInvalidPendingNormalizedEvent)
-		}
-		enumerated, err := processor.enumerateWithRenewal(ctx, claim, event.InstallationID)
-		if err != nil {
-			return err
-		}
-		for _, repository := range enumerated {
-			if repository.ID <= 0 || strings.TrimSpace(repository.Owner) == "" || strings.TrimSpace(repository.Name) == "" {
-				return fmt.Errorf("%w: enumerated repository identity is invalid", errInvalidPendingNormalizedEvent)
+		var enumerated []githubapi.InstallationRepository
+		var enumeratedInvalid []string
+		enumerated, enumeratedInvalid, err = processor.enumerateInstallation(workCtx, event.InstallationID)
+		if err == nil {
+			for _, repository := range enumerated {
+				if repository.ID <= 0 || strings.TrimSpace(repository.Owner) == "" || strings.TrimSpace(repository.Name) == "" {
+					err = fmt.Errorf("%w: enumerated repository identity is invalid", errInvalidPendingNormalizedEvent)
+					break
+				}
+				repositories = append(repositories, store.LabelProvisioningRepository{
+					ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
+				})
 			}
-			repositories = append(repositories, store.LabelProvisioningRepository{
-				ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
-			})
+			invalid = append(invalid, enumeratedInvalid...)
 		}
 	} else {
 		for _, repository := range event.Repositories {
@@ -187,48 +195,52 @@ func (processor *Processor) completeProvisioning(ctx context.Context, claim *sto
 			})
 		}
 	}
-	return processor.store.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories, event.Invalid)
+	if err == nil {
+		err = processor.store.CompleteLabelProvisioningTransition(workCtx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories, invalid)
+	}
+	cancelWork()
+	<-renewDone
+	return err
 }
 
-// enumerateWithRenewal pages an installation while renewing the webhook claim
-// in the background, so slow scans cannot expire the delivery before any
-// repository jobs are queued. Renewal loss aborts enumeration; the unexpired
-// work is simply reclaimed and retried without losing provisioning.
-func (processor *Processor) enumerateWithRenewal(ctx context.Context, claim *store.WebhookClaim, installationID int64) ([]githubapi.InstallationRepository, error) {
-	renewCtx, cancelRenew := context.WithCancel(ctx)
-	defer cancelRenew()
-	renewDone := make(chan error, 1)
-	go func() {
-		interval := processor.leaseDuration / 3
-		if interval < time.Second {
-			interval = time.Second
+func (processor *Processor) enumerateInstallation(ctx context.Context, installationID int64) ([]githubapi.InstallationRepository, []string, error) {
+	if processor.enumerator == nil {
+		return nil, nil, fmt.Errorf("%w: installation enumerator is not configured", errInvalidPendingNormalizedEvent)
+	}
+	return processor.enumerator.EnumerateInstallationRepositories(ctx, installationID)
+}
+
+// renewLoop renews the webhook claim immediately and then periodically until
+// ctx ends. Any renewal failure cancels the provisioning work: the claim is
+// already lost, so enumeration and insertion abort instead of racing expiry.
+func (processor *Processor) renewLoop(ctx context.Context, claim *store.WebhookClaim, cancel context.CancelFunc, done chan<- struct{}) {
+	defer close(done)
+	interval := processor.leaseDuration / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	renew := func() bool {
+		if err := processor.store.RenewWebhookClaim(ctx, claim.DeliveryID, claim.ClaimToken, processor.leaseDuration); err != nil {
+			cancel()
+			return false
 		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-renewCtx.Done():
-				renewDone <- nil
+		return true
+	}
+	if !renew() {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !renew() {
 				return
-			case <-ticker.C:
-				if err := processor.store.RenewWebhookClaim(renewCtx, claim.DeliveryID, claim.ClaimToken, processor.leaseDuration); err != nil {
-					renewDone <- err
-					return
-				}
 			}
 		}
-	}()
-
-	repositories, err := processor.enumerator.EnumerateInstallationRepositories(ctx, installationID)
-	cancelRenew()
-	renewErr := <-renewDone
-	if err != nil {
-		return nil, err
 	}
-	if renewErr != nil {
-		return nil, renewErr
-	}
-	return repositories, nil
 }
 
 func deterministicProvisioningFailure(err error) bool {
