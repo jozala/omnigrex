@@ -10,6 +10,90 @@ import (
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
+// githubReadError carries only allowlisted diagnostics across the backend boundary.
+type githubReadError struct{ failure readFailure }
+
+func (err githubReadError) Error() string        { return ErrToolDependency.Error() }
+func (err githubReadError) Is(target error) bool { return target == ErrToolDependency }
+
+type readFailure struct {
+	code, stage, requestID string
+	httpStatus             int
+}
+
+func safeReadFailure(err error) readFailure {
+	var githubRead githubReadError
+	if errors.As(err, &githubRead) {
+		return githubRead.failure
+	}
+	if errors.Is(err, ErrToolDependency) {
+		return readFailure{code: "tool_dependency_failed"}
+	}
+	if errors.Is(err, ErrToolPrecondition) {
+		return readFailure{code: "read_precondition_failed"}
+	}
+	return readFailure{code: "backend_read_failed"}
+}
+
+func newGitHubReadError(cause error) error {
+	failure := readFailure{}
+	failure.httpStatus, failure.requestID = githubFailureMetadata(cause)
+	if !safeGitHubReadRequestID(failure.requestID) {
+		failure.requestID = ""
+	}
+	var graphql *githubapi.GraphQLQueryError
+	if errors.As(cause, &graphql) && safeGitHubReadRequestID(graphql.RequestID) {
+		failure.requestID = graphql.RequestID
+	}
+	var staged *githubapi.ReviewThreadReadError
+	if errors.As(cause, &staged) {
+		switch staged.Stage {
+		case githubapi.ReviewThreadsQuery, githubapi.ReviewThreadsValidation,
+			githubapi.ReviewCommentsQuery, githubapi.ReviewCommentsValidation:
+			failure.stage = string(staged.Stage)
+		}
+		if safeGitHubReadRequestID(staged.RequestID) {
+			failure.requestID = staged.RequestID
+		}
+	}
+	var transient *githubapi.TransientError
+	switch {
+	case failure.httpStatus != 0:
+		failure.code = "github_request_rejected"
+	case errors.Is(cause, githubapi.ErrGraphQLQueryFailed):
+		failure.code = "github_graphql_errors_or_no_data"
+	case errors.Is(cause, githubapi.ErrInvalidAPIResponse):
+		failure.code = "github_invalid_response"
+	case errors.As(cause, &transient):
+		failure.code = "github_transport_failed"
+	default:
+		failure.code = "github_read_failed"
+	}
+	return githubReadError{failure: failure}
+}
+
+// GitHub's request IDs use colon-separated hexadecimal groups. Do not log an
+// arbitrary response header merely because its characters are printable.
+func safeGitHubReadRequestID(value string) bool {
+	groups := strings.Split(value, ":")
+	if len(groups) != 5 {
+		return false
+	}
+	for _, group := range groups {
+		if len(group) < 3 || len(group) > 12 {
+			return false
+		}
+		for _, digit := range group {
+			if digit < '0' || digit > '9' {
+				if digit < 'A' || digit > 'F' {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // FailurePullRequestHeadMismatch is durable evidence of a definite, fresh
 // identity/head conflict, unlike an unavailable GitHub observation.
 const FailurePullRequestHeadMismatch = "pull_request_head_mismatch"

@@ -158,6 +158,151 @@ func TestReadToolDoesNotReturnDataWhenLedgerRecordingFails(t *testing.T) {
 	}
 }
 
+func TestReviewThreadReadFailureLogsSafeDiagnosticWithoutDisclosingGitHubError(t *testing.T) {
+	const requestID = "A41A:2AF0FB:6AAAD0:6A71D9:6ABC2962"
+	for _, test := range []struct {
+		name, wantCode, wantStage, wantStatus, wantRequestID string
+		err                                                  error
+		credentialErr                                        error
+		ledgerErr                                            error
+	}{
+		{
+			name: "response validation", wantCode: "github_invalid_response", wantStage: "review_comments_validation", wantRequestID: `,"github_request_id":"` + requestID + `"`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: private-review-text", githubapi.ErrInvalidAPIResponse)},
+		},
+		{
+			name: "untrusted validation request ID", wantCode: "github_invalid_response", wantStage: "review_threads_validation",
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsValidation, RequestID: "private-review-text!", Cause: githubapi.ErrInvalidAPIResponse},
+		},
+		{
+			name: "GitHub rejection", wantCode: "github_request_rejected", wantStage: "review_threads_query", wantStatus: `,"github_http_status":403`, wantRequestID: `,"github_request_id":"` + requestID + `"`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.APIError{StatusCode: 403, RequestID: requestID, Message: "private-review-text", Path: "/private-path"}},
+		},
+		{
+			name: "GraphQL response errors", wantCode: "github_graphql_errors_or_no_data", wantStage: "review_threads_query",
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: fmt.Errorf("%w: %w: private-review-text", githubapi.ErrInvalidAPIResponse, githubapi.ErrGraphQLQueryFailed)},
+		},
+		{
+			name: "untrusted request ID", wantCode: "github_request_rejected", wantStage: "review_threads_query", wantStatus: `,"github_http_status":403`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.APIError{StatusCode: 403, RequestID: "private-review-text!", Message: "private-review-text"}},
+		},
+		{
+			name: "valid-character review text in request ID", wantCode: "github_request_rejected", wantStage: "review_threads_query", wantStatus: `,"github_http_status":403`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.APIError{StatusCode: 403, RequestID: "private-review-text", Message: "private-review-text"}},
+		},
+		{
+			name: "GraphQL request ID", wantCode: "github_graphql_errors_or_no_data", wantStage: "review_threads_query", wantRequestID: `,"github_request_id":"` + requestID + `"`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.GraphQLQueryError{RequestID: requestID}},
+		},
+		{
+			name: "untrusted GraphQL request ID", wantCode: "github_graphql_errors_or_no_data", wantStage: "review_threads_query",
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.GraphQLQueryError{RequestID: "private-review-text!"}},
+		},
+		{
+			name: "valid-character review text in GraphQL request ID", wantCode: "github_graphql_errors_or_no_data", wantStage: "review_threads_query",
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.GraphQLQueryError{RequestID: "private-review-text"}},
+		},
+		{
+			name: "credential acquisition", wantCode: "credential_unavailable",
+			credentialErr: errors.New("private-review-text credential error"),
+		},
+		{
+			name: "read and recording failure", wantCode: "github_request_rejected", wantStage: "review_threads_query", wantStatus: `,"github_http_status":403`, wantRequestID: `,"github_request_id":"` + requestID + `"`,
+			err:       &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.APIError{StatusCode: 403, RequestID: requestID, Message: "private-review-text"}},
+			ledgerErr: errors.New("private-review-text ledger error"),
+		},
+		{
+			name: "redacted server rejection", wantCode: "github_request_rejected", wantStage: "review_threads_query", wantStatus: `,"github_http_status":502`, wantRequestID: `,"github_request_id":"` + requestID + `"`,
+			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.TransientError{Cause: &githubapi.APIError{StatusCode: 502, RequestID: requestID, Message: "private-review-text"}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+			api := &backendGitHub{readErr: test.err}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+				GitHub: api, Credentials: &backendCredentials{developer: "developer-secret", err: test.credentialErr},
+				Publisher: &backendPublisher{}, Workflow: &backendWorkflow{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			ledger := &recordingLedger{err: test.ledgerErr}
+			gateway, err := mcp.New(mcp.Config{
+				EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: backend, Ledger: ledger,
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Now:    func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x32}, 32)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := validScope(now)
+			scope.HeadSHA = productionHeadSHA
+			scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
+			registration, err := gateway.Register(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initialize(t, gateway, registration)
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":"read-threads","method":"tools/call","params":{"name":"list_review_threads","arguments":{}}}`))
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"isError":true`) || ledger.count() != 1 || ledger.records[0].LastError != "read tool failed" {
+				t.Fatalf("read result = %d %s, ledger = %#v", response.Code, response.Body.String(), ledger.records)
+			}
+			for _, want := range []string{`"msg":"MCP read failed"`, `"workflow_id":"workflow-1"`, `"agent_turn_id":"turn-1"`, `"execution_epoch":4`, `"tool_name":"list_review_threads"`, `"failure_code":"` + test.wantCode + `"`, `"failure_stage":"` + test.wantStage + `"`, test.wantStatus, test.wantRequestID} {
+				if want != "" && !strings.Contains(logs.String(), want) {
+					t.Errorf("log missing %s: %s", want, logs.String())
+				}
+			}
+			if test.ledgerErr != nil && (!strings.Contains(logs.String(), `"failure_code":"read_recording_failed"`) || strings.Count(logs.String(), `"msg":"MCP read failed"`) != 2) {
+				t.Errorf("read and recording diagnostics = %s, want both failures", logs.String())
+			}
+			if test.credentialErr != nil && len(api.calls) != 0 {
+				t.Errorf("credential failure made GitHub API calls: %#v", api.calls)
+			}
+			for _, secret := range []string{"private-review-text", "private-path", "developer-secret", "lease-secret"} {
+				if strings.Contains(logs.String()+response.Body.String()+ledger.records[0].LastError, secret) {
+					t.Errorf("failure disclosed %s", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestScopedPullRequestMismatchLogsReadPreconditionFailure(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
+		GitHub:      &backendGitHub{currentHead: advancedHeadSHA},
+		Credentials: &backendCredentials{developer: "developer-secret"},
+		Publisher:   &backendPublisher{}, Workflow: &backendWorkflow{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	gateway, err := mcp.New(mcp.Config{
+		EndpointURL: "https://gateway.internal/mcp", Store: &fakeStore{}, Backend: backend,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Now:    func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x32}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":"read-pr","method":"tools/call","params":{"name":"get_pull_request","arguments":{}}}`))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"isError":true`) || !strings.Contains(logs.String(), `"failure_code":"read_precondition_failed"`) || strings.Contains(logs.String(), "developer-secret") {
+		t.Fatalf("response = %d %s; logs = %s", response.Code, response.Body.String(), logs.String())
+	}
+}
+
 func TestReviewerCannotCallDeveloperMutation(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{}

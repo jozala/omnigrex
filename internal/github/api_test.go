@@ -340,6 +340,44 @@ func TestAPIClientNeverLeaksRequestCredentialInErrors(t *testing.T) {
 			t.Errorf("error leaked credential: %v", err)
 		}
 	})
+	t.Run("transient API error body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("X-GitHub-Request-Id", "A41A:2AF0FB:6AAAD0:6A71D9:6ABC2962")
+			writer.WriteHeader(http.StatusBadGateway)
+			_, _ = fmt.Fprintf(writer, `{"message":"credential %s rejected"}`, credential)
+		}))
+		defer server.Close()
+		client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.ListReviewThreads(context.Background(), credential, "acme", "widgets", 23)
+		var transient *githubapi.TransientError
+		var api *githubapi.APIError
+		if !errors.As(err, &transient) || !errors.As(err, &api) || api.StatusCode != http.StatusBadGateway || api.RequestID != "A41A:2AF0FB:6AAAD0:6A71D9:6ABC2962" {
+			t.Errorf("ListReviewThreads() error = %T %v, want typed redacted transient status and request ID", err, err)
+		}
+		if err != nil && strings.Contains(err.Error(), credential) {
+			t.Errorf("error leaked credential: %v", err)
+		}
+	})
+	t.Run("transient API request ID echoes credential", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("X-GitHub-Request-Id", credential)
+			writer.WriteHeader(http.StatusBadGateway)
+			_, _ = fmt.Fprint(writer, `{"message":"upstream failed"}`)
+		}))
+		defer server.Close()
+		client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.ListReviewThreads(context.Background(), credential, "acme", "widgets", 23)
+		var api *githubapi.APIError
+		if !errors.As(err, &api) || api.StatusCode != http.StatusBadGateway || strings.Contains(api.RequestID, credential) || strings.Contains(err.Error(), credential) {
+			t.Errorf("ListReviewThreads() error = %T %v, want typed 502 without credential", err, err)
+		}
+	})
 }
 
 func TestAPIClientVerifiesExpectedRepositoryInstallation(t *testing.T) {
@@ -973,6 +1011,7 @@ func TestAPIClientRejectsInvalidGraphQLReviewThreadResponses(t *testing.T) {
 			})
 			test.mutate(data)
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("X-GitHub-Request-Id", "GH-VALIDATION-123")
 				writeGraphQLData(t, writer, data)
 			}))
 			defer server.Close()
@@ -982,6 +1021,15 @@ func TestAPIClientRejectsInvalidGraphQLReviewThreadResponses(t *testing.T) {
 			}
 			if _, err := client.ListReviewThreads(context.Background(), "token", "acme", "widgets", 23); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
 				t.Errorf("ListReviewThreads() error = %T %v, want ErrInvalidAPIResponse", err, err)
+			} else if test.name == "missing author" || test.name == "unsafe path" || test.name == "duplicate thread node id" || test.name == "missing repository" {
+				var failure *githubapi.ReviewThreadReadError
+				wantStage := githubapi.ReviewCommentsValidation
+				if test.name == "unsafe path" || test.name == "duplicate thread node id" || test.name == "missing repository" {
+					wantStage = githubapi.ReviewThreadsValidation
+				}
+				if !errors.As(err, &failure) || failure.Stage != wantStage || failure.RequestID != "GH-VALIDATION-123" {
+					t.Errorf("ListReviewThreads() error = %T %v, want %s stage and GH-VALIDATION-123 request ID", err, err, wantStage)
+				}
 			}
 		})
 	}
@@ -998,6 +1046,7 @@ func TestAPIClientRejectsMismatchedReviewCommentContinuation(t *testing.T) {
 			}))
 			return
 		}
+		writer.Header().Set("X-GitHub-Request-Id", "GH-COMMENTS-123")
 		reply := reviewCommentGraphQLFixture("PRRC_402", 402, "developer", "Fixed", false, true)
 		thread := reviewThreadGraphQLFixture("PRRT_401", false, false, 2, graphQLPageFixture(false, true, "last", "last"), []any{reply})
 		thread["pullRequest"].(map[string]any)["number"] = 24
@@ -1010,11 +1059,38 @@ func TestAPIClientRejectsMismatchedReviewCommentContinuation(t *testing.T) {
 	}
 	if _, err := client.ListReviewThreads(context.Background(), "token", "acme", "widgets", 23); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
 		t.Errorf("ListReviewThreads() error = %T %v, want ErrInvalidAPIResponse", err, err)
+	} else {
+		var failure *githubapi.ReviewThreadReadError
+		if !errors.As(err, &failure) || failure.RequestID != "GH-COMMENTS-123" {
+			t.Errorf("ListReviewThreads() error = %T %v, want continuation request ID GH-COMMENTS-123", err, err)
+		}
+	}
+}
+
+func TestAPIClientRetainsRequestIDForMalformedGraphQLData(t *testing.T) {
+	for _, body := range []string{`{"data":{"repository":"unexpected shape"}}`, `{"data":`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("X-GitHub-Request-Id", "GH-DECODE-123")
+				_, _ = fmt.Fprint(writer, body)
+			}))
+			defer server.Close()
+			client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ListReviewThreads(context.Background(), "token", "acme", "widgets", 23)
+			var failure *githubapi.ReviewThreadReadError
+			if !errors.Is(err, githubapi.ErrInvalidAPIResponse) || !errors.As(err, &failure) || failure.Stage != githubapi.ReviewThreadsQuery || failure.RequestID != "GH-DECODE-123" {
+				t.Errorf("ListReviewThreads() error = %T %v, want invalid response and query request ID", err, err)
+			}
+		})
 	}
 }
 
 func TestAPIClientRejectsGraphQLReviewThreadErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("X-GitHub-Request-Id", "GH-GQL-123")
 		_, _ = fmt.Fprint(writer, `{"data":{"repository":null},"errors":[{"message":"resource not accessible"}]}`)
 	}))
 	defer server.Close()
@@ -1022,8 +1098,17 @@ func TestAPIClientRejectsGraphQLReviewThreadErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.ListReviewThreads(context.Background(), "token", "acme", "widgets", 23); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
-		t.Errorf("ListReviewThreads() error = %T %v, want ErrInvalidAPIResponse", err, err)
+	if _, err := client.ListReviewThreads(context.Background(), "token", "acme", "widgets", 23); !errors.Is(err, githubapi.ErrInvalidAPIResponse) || !errors.Is(err, githubapi.ErrGraphQLQueryFailed) {
+		t.Errorf("ListReviewThreads() error = %T %v, want ErrInvalidAPIResponse and ErrGraphQLQueryFailed", err, err)
+	} else {
+		var failure *githubapi.ReviewThreadReadError
+		if !errors.As(err, &failure) || failure.Stage != githubapi.ReviewThreadsQuery {
+			t.Errorf("ListReviewThreads() error = %T %v, want review_threads_query stage", err, err)
+		}
+		var graphql *githubapi.GraphQLQueryError
+		if !errors.As(err, &graphql) || graphql.RequestID != "GH-GQL-123" {
+			t.Errorf("ListReviewThreads() error = %T %v, want GraphQL request ID", err, err)
+		}
 	}
 }
 

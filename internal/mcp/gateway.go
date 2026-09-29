@@ -731,6 +731,13 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	recordedInvocation := cloneInvocation(invocation)
 	result, err := gateway.backend.Execute(request.Context(), invocation)
 	succeeded := err == nil && len(result) != 0 && json.Valid(result)
+	if !succeeded {
+		if err != nil {
+			gateway.logReadFailure(invocation, safeReadFailure(err))
+		} else {
+			gateway.logReadFailure(invocation, readFailure{code: "backend_result_invalid"})
+		}
+	}
 	if gateway.ledger != nil {
 		record := ReadRecord{
 			Invocation: recordedInvocation, StartedAt: started, FinishedAt: gateway.now(), Succeeded: succeeded,
@@ -741,6 +748,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 			record.LastError = "read tool failed"
 		}
 		if err := gateway.ledger.RecordRead(context.WithoutCancel(request.Context()), registration.scope.Lease, record); err != nil {
+			gateway.logReadFailure(invocation, readFailure{code: "read_recording_failed"})
 			writeToolError(response, rpc.ID, "tool call could not be recorded")
 			return
 		}
@@ -750,6 +758,21 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		return
 	}
 	writeToolResult(response, rpc.ID, result)
+}
+
+func (gateway *Gateway) logReadFailure(invocation Invocation, failure readFailure) {
+	if gateway.logger == nil {
+		return
+	}
+	gateway.logger.Warn("MCP read failed",
+		"workflow_id", invocation.Scope.WorkflowID,
+		"agent_turn_id", invocation.Scope.AgentTurnID,
+		"execution_epoch", invocation.Scope.ExecutionEpoch,
+		"tool_name", invocation.Name,
+		"failure_code", failure.code,
+		"failure_stage", failure.stage,
+		"github_http_status", failure.httpStatus,
+		"github_request_id", failure.requestID)
 }
 
 func validRequestMetadata(raw json.RawMessage) bool {
