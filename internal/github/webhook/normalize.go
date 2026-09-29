@@ -371,6 +371,9 @@ func normalizeProvisioning(delivery Delivery) (Normalization, error) {
 	case "installation.created":
 		// Enumerated through the installation-token API; do not trust the webhook list.
 	case "installation_repositories.added":
+		if len(payload.RepositoriesAdded) == 0 {
+			return Normalization{}, malformed("installation_repositories.added names no repositories")
+		}
 		seen := make(map[int64]struct{}, len(payload.RepositoriesAdded))
 		for _, entry := range payload.RepositoriesAdded {
 			if entry.ID <= 0 || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.FullName) == "" {

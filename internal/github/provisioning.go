@@ -48,6 +48,11 @@ func (client *APIClient) GetRepository(ctx context.Context, installationToken, o
 }
 
 // ListInstallationRepositories returns every repository accessible to an installation token.
+//
+// Pagination is bounded at 100 pages of 100 repositories. Installations with
+// more than 10,000 accessible repositories fail with ErrInvalidAPIResponse so
+// the provisioning delivery is retried to exhaustion and then recorded as an
+// observable terminal failure for operator follow-up.
 func (client *APIClient) ListInstallationRepositories(ctx context.Context, installationToken string) ([]InstallationRepository, error) {
 	repositories := make([]InstallationRepository, 0)
 	seenIDs := make(map[int64]struct{})

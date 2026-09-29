@@ -106,6 +106,8 @@ func TestNormalizeRejectsMalformedProvisioning(t *testing.T) {
 	tests := []webhook.Delivery{
 		{DeliveryID: validDeliveryID(), EventName: "installation", Action: "created", Payload: []byte(`{"action":"created"}`)},
 		{DeliveryID: validDeliveryID(), EventName: "installation", Action: "", Payload: []byte(`{"installation":{"id":99}}`)},
+		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[]}`)},
+		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[{"id":0,"name":"","full_name":""}]}`)},
 		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[{"id":9123,"name":"omnigrex","full_name":"wrong/name"}]}`)},
 		{DeliveryID: validDeliveryID(), EventName: "repository", Action: "created", Payload: []byte(`{"action":"created","installation":{"id":99},"repository":{"id":9123,"name":"omnigrex","owner":{"login":""}}}`)},

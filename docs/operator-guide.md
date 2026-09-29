@@ -419,6 +419,9 @@ credentials:
 - A new Developer App installation provisions every accessible repository.
   Accessible repositories are enumerated through a paginated
   installation-token request, not the webhook repository list.
+  Enumeration is bounded at 100 pages of 100 repositories; an installation
+  with more than 10,000 accessible repositories fails observably for
+  operator follow-up instead of provisioning partially.
 - Explicitly added repositories are provisioned from the
   `installation_repositories.added` delivery.
 - Repositories created under all-repository access are provisioned from the
