@@ -298,8 +298,13 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	if api.openRequest.Marker != wantMarker || strings.Contains(api.openRequest.Marker, "shared") {
 		t.Fatalf("open Pull Request marker = %q, want reservation identity only", api.openRequest.Marker)
 	}
-	if len(publisher.publications) != 2 || publisher.publications[0].Message != "First" || publisher.publications[1].Message != "Second" {
-		t.Fatalf("publication audit summaries = %#v", publisher.publications)
+	for index, want := range []string{"First", "Second"} {
+		var request struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(specs[index].Request, &request); err != nil || request.Message != want {
+			t.Fatalf("reserved publication %d audit summary = %q, %v; want %q", index+1, request.Message, err, want)
+		}
 	}
 }
 

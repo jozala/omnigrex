@@ -107,8 +107,7 @@ func TestProductionBackendPublishesOrderedCommittedHeads(t *testing.T) {
 	first := publisher.publications[0]
 	second := publisher.publications[1]
 	if first.RepositoryURL != "https://github.com/acme/widgets.git" || first.BaseRevision != productionHeadSHA || first.ExpectedOldHead != productionHeadSHA ||
-		first.Branch != scope.Branch || first.DefaultBranch != scope.DefaultBranch || first.Credential != "developer-secret" ||
-		first.Message != "Publish changes" {
+		first.Branch != scope.Branch || first.DefaultBranch != scope.DefaultBranch || first.Credential != "developer-secret" {
 		t.Fatalf("first publication = %#v", first)
 	}
 	if second.BaseRevision != firstHead || second.ExpectedOldHead != firstHead || second.RepositoryURL != first.RepositoryURL {

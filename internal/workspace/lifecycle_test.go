@@ -94,7 +94,7 @@ func TestLifecycleOperationsRejectSymlinkedAssignmentMountPaths(t *testing.T) {
 			case "publication":
 				_, err = lifecycle.Publish(context.Background(), workspace.Publication{
 					AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.first,
-					Branch: "feature", Message: "publish",
+					Branch: "feature",
 				})
 			}
 			if !errors.Is(err, workspace.ErrUnsafeAssignmentPath) {

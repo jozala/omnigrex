@@ -75,7 +75,7 @@ done
 	}
 	if _, err := lifecycle.Publish(context.Background(), Publication{
 		AssignmentID: publishAssignment, RepositoryURL: repository, BaseRevision: baseRevision,
-		Branch: "feature", Message: "publish",
+		Branch: "feature",
 	}); err != nil {
 		t.Fatalf("Publish() success-path error = %v", err)
 	}
@@ -101,7 +101,7 @@ done
 		if index%2 == 0 {
 			_, operationErr = lifecycle.Publish(context.Background(), Publication{
 				AssignmentID: assignmentID, RepositoryURL: repository, BaseRevision: baseRevision,
-				Branch: "feature", Message: "publish",
+				Branch: "feature",
 			})
 		} else {
 			_, operationErr = lifecycle.ReconcilePublication(context.Background(), PublicationReconciliation{

@@ -38,7 +38,6 @@ type Publication struct {
 	ExpectedOldHead   string
 	Branch            string
 	DefaultBranch     string
-	Message           string
 	RecordProposedTip func(context.Context, string) error
 }
 

@@ -1049,12 +1049,6 @@ func publicationTurnKey(scope ToolScope) publicationTurn {
 }
 
 func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
-	var arguments struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(invocation.Arguments, &arguments) != nil {
-		return nil, ErrInvalidInvocation
-	}
 	turnKey := publicationTurnKey(invocation.Scope)
 	lock := backend.publicationLock(turnKey)
 	lock.Lock()
@@ -1078,7 +1072,7 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		AssignmentID:  invocation.Scope.AgentAssignmentID,
 		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: progress.head, ExpectedOldHead: expectedOldHead,
-		Branch: invocation.Scope.Branch, DefaultBranch: invocation.Scope.DefaultBranch, Message: arguments.Message,
+		Branch: invocation.Scope.Branch, DefaultBranch: invocation.Scope.DefaultBranch,
 		RecordProposedTip: invocation.recordProposedTip,
 	})
 	if err != nil {
