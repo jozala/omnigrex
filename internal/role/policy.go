@@ -105,7 +105,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			Role: Developer,
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
-				"publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
+				"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
 			TrustedToolsRevision:          TurnRevisionTrustedTools,
@@ -116,10 +116,10 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			Role: Reviewer,
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
-				"submit_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
+				"submit_review", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RequiresChangeProposal: true, RepositoryCredentialAuthority: OrchestratorAuthority,
-			ToolCredentialAuthorities: map[string]CredentialAuthority{"submit_review": ReviewerAuthority, "confirm_prior_terminal_intent": ReviewerAuthority},
+			ToolCredentialAuthorities: map[string]CredentialAuthority{"submit_review": ReviewerAuthority},
 			TrustedToolsRevision:      DefaultBranchTrustedTools,
 			OpenCode:                  OpenCodePolicy{HardenProjectConfiguration: true},
 			DiscardWorkspace:          true, AllowHumanSessionControl: true,
@@ -187,13 +187,10 @@ func validatePolicy(policy Policy) error {
 		if tool == "submit_review" && policy.ToolCredentialAuthorities[tool] != ReviewerAuthority {
 			return errors.New("submit_review must use Reviewer credential authority")
 		}
-		if tool == "confirm_prior_terminal_intent" && policy.Role == Reviewer && policy.ToolCredentialAuthorities[tool] != ReviewerAuthority {
-			return errors.New("Reviewer terminal confirmation must use Reviewer credential authority")
-		}
 	}
 	for tool, authority := range policy.ToolCredentialAuthorities {
 		if _, granted := seen[tool]; !granted || !validCredentialAuthority(authority) ||
-			authority == ReviewerAuthority && tool != "submit_review" && tool != "confirm_prior_terminal_intent" {
+			authority == ReviewerAuthority && tool != "submit_review" {
 			return fmt.Errorf("invalid credential authority override for %q", tool)
 		}
 	}

@@ -90,10 +90,6 @@ func TestLifecycleRejectsUnexpectedOldHeadBeforePublishing(t *testing.T) {
 	if !errors.Is(err, workspace.ErrUnexpectedHead) {
 		t.Errorf("Publish() error = %v, want ErrUnexpectedHead", err)
 	}
-	var mismatch *workspace.UnexpectedHeadError
-	if !errors.As(err, &mismatch) || mismatch.Expected != fixture.first || mismatch.Actual != fixture.second {
-		t.Errorf("publication mismatch = %#v, error %v", mismatch, err)
-	}
 	if got := gitOutput(t, fixture.remote, "rev-parse", "refs/heads/feature"); got != fixture.second {
 		t.Errorf("remote feature head = %q, want unchanged %q", got, fixture.second)
 	}

@@ -372,7 +372,7 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := agentprofile.NewLoader(api, role.BuiltinPolicyCatalog(), state.settings.AgentPathEnvironmentAllowlist...).Load(ctx, state.developerToken, state.repo.Owner, state.repo.Name)
+	snapshot, err := agentprofile.NewLoader(api, role.BuiltinPolicyCatalog()).Load(ctx, state.developerToken, state.repo.Owner, state.repo.Name)
 	if err != nil {
 		return err
 	}

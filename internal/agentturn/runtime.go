@@ -22,7 +22,6 @@ import (
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 
@@ -55,8 +54,6 @@ type LauncherStore interface {
 type RuntimeWorkspace interface {
 	PrepareWorkspace(context.Context, workspace.Checkout) (workspace.Paths, error)
 	ProvisionMise(context.Context, workspace.MiseProvision) (workspace.MiseActivation, error)
-	PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error)
-	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
 	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
 }
 
@@ -120,22 +117,21 @@ var (
 
 // LauncherConfig supplies stable deployment dependencies and named Docker resources.
 type LauncherConfig struct {
-	Store                    LauncherStore
-	Registry                 RuntimeBindingResolver
-	Workspace                RuntimeWorkspace
-	Gateway                  MCPRegistrar
-	Docker                   RuntimeEngineFactory
-	ACP                      RuntimeACPFactory
-	Sessions                 RuntimeSessionPreparer
-	Network                  string
-	WorkspaceVolume          string
-	RuntimeStateVolume       string
-	MiseVolume               string
-	MemoryBytes              int64
-	ACPOptions               acp.ClientOptions
-	StopTimeout              time.Duration
-	Policies                 role.PolicyCatalog
-	PathEnvironmentAllowlist []string
+	Store              LauncherStore
+	Registry           RuntimeBindingResolver
+	Workspace          RuntimeWorkspace
+	Gateway            MCPRegistrar
+	Docker             RuntimeEngineFactory
+	ACP                RuntimeACPFactory
+	Sessions           RuntimeSessionPreparer
+	Network            string
+	WorkspaceVolume    string
+	RuntimeStateVolume string
+	MiseVolume         string
+	MemoryBytes        int64
+	ACPOptions         acp.ClientOptions
+	StopTimeout        time.Duration
+	Policies           role.PolicyCatalog
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -160,22 +156,21 @@ func (LaunchRequest) GoString() string { return "agentturn.LaunchRequest{<creden
 
 // Launcher composes one epoch-fenced Runtime Process and Agent Session attachment.
 type Launcher struct {
-	store                    LauncherStore
-	registry                 RuntimeBindingResolver
-	workspace                RuntimeWorkspace
-	gateway                  MCPRegistrar
-	docker                   RuntimeEngineFactory
-	acp                      RuntimeACPFactory
-	sessions                 RuntimeSessionPreparer
-	network                  string
-	workspaceVolume          string
-	runtimeStateVolume       string
-	miseVolume               string
-	memoryBytes              int64
-	acpOptions               acp.ClientOptions
-	stopTimeout              time.Duration
-	policies                 role.PolicyCatalog
-	pathEnvironmentAllowlist []string
+	store              LauncherStore
+	registry           RuntimeBindingResolver
+	workspace          RuntimeWorkspace
+	gateway            MCPRegistrar
+	docker             RuntimeEngineFactory
+	acp                RuntimeACPFactory
+	sessions           RuntimeSessionPreparer
+	network            string
+	workspaceVolume    string
+	runtimeStateVolume string
+	miseVolume         string
+	memoryBytes        int64
+	acpOptions         acp.ClientOptions
+	stopTimeout        time.Duration
+	policies           role.PolicyCatalog
 }
 
 // RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
@@ -205,9 +200,6 @@ type RuntimeHandle struct {
 	processStopped     bool
 	processRemoved     bool
 	workspaceDiscarded bool
-	scratchCleaned     bool
-	scratchPrepared    bool
-	discardWorkspace   bool
 	engineClosed       bool
 }
 
@@ -246,7 +238,6 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
 		memoryBytes: config.MemoryBytes,
 		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
-		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 	}, nil
 }
 
@@ -315,10 +306,11 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		store:   launcher.store,
 		secrets: append([]string(nil), secrets...),
 	}
-	resources.workspace = launcher.workspace
-	resources.store = launcher.store
-	resources.assignmentID = execution.Assignment.ID
-	resources.discardWorkspace = rolePolicy.DiscardWorkspace
+	if rolePolicy.DiscardWorkspace {
+		resources.workspace = launcher.workspace
+		resources.store = launcher.store
+		resources.assignmentID = execution.Assignment.ID
+	}
 	defer func() {
 		if err == nil {
 			return
@@ -365,26 +357,6 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, err
 	}
-	var turnConfiguration turnconfig.Configuration
-	if len(execution.Turn.TurnConfiguration) > 0 {
-		if err := json.Unmarshal(execution.Turn.TurnConfiguration, &turnConfiguration); err != nil {
-			return nil, fmt.Errorf("%w: turn configuration snapshot: %v", ErrRuntimeBinding, err)
-		}
-	}
-	if err := turnConfiguration.Validate(launcher.pathEnvironmentAllowlist); err != nil {
-		return nil, fmt.Errorf("%w: turn configuration snapshot: %v", ErrRuntimeBinding, err)
-	}
-	resources.scratchPrepared = len(turnConfiguration.Directories) != 0
-	pathEnvironment, err := launcher.workspace.PrepareTurnPaths(ctx, execution.Assignment.ID, execution.Turn.ID, turnConfiguration,
-		func(ctx context.Context, operation func(context.Context) error) error {
-			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
-		})
-	if err != nil {
-		return nil, fmt.Errorf("prepare Agent Turn paths: %w", err)
-	}
-	for name, value := range pathEnvironment {
-		environment[name] = value
-	}
 	refreshedLease, err := launcher.store.RefreshAgentTurnLease(ctx, request.Lease, request.LeaseDuration)
 	if err != nil {
 		return nil, fmt.Errorf("refresh Agent Turn lease before Runtime Process launch: %w", err)
@@ -396,9 +368,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number}, PullRequest: pullRequest,
-		Branch: branch, BranchExists: execution.Publication != nil || execution.ChangeProposal != nil,
-		RecoveredPublication: execution.Publication != nil,
-		DefaultBranch:        request.DefaultBranchName, HeadSHA: headSHA, ExpiresAt: request.Lease.LeaseExpiresAt,
+		Branch: branch, DefaultBranch: request.DefaultBranchName, HeadSHA: headSHA, ExpiresAt: request.Lease.LeaseExpiresAt,
 	})
 	resources.registration = registration
 	secrets = append(secrets, registrationSecrets(registration)...)
@@ -424,8 +394,8 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		MemoryBytes: launcher.memoryBytes,
 		Network:     launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
 		AgentTurnID: execution.Turn.ID, ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch),
-		VolumeBindings:     map[string]string{"workspace": launcher.workspaceVolume, "state": launcher.runtimeStateVolume, "mise": launcher.miseVolume, "tool-data": launcher.miseVolume},
-		AssignmentSubpaths: map[string]string{"workspace": assignmentRoot + "/workspace", "state": statePath, "mise": assignmentRoot + "/mise", "tool-data": assignmentRoot + "/tool-data"},
+		VolumeBindings:     map[string]string{"workspace": launcher.workspaceVolume, "state": launcher.runtimeStateVolume, "mise": launcher.miseVolume},
+		AssignmentSubpaths: map[string]string{"workspace": assignmentRoot + "/workspace", "state": statePath, "mise": assignmentRoot + "/mise"},
 		Environment:        environment, Labels: map[string]string{"io.omnigrex.workflow": execution.WorkflowID},
 	})
 	if err != nil {
@@ -642,17 +612,7 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 		}
 	}
 	processRemoved := handle.process == nil || handle.processRemoved
-	if processRemoved && handle.scratchPrepared && handle.workspace != nil && !handle.scratchCleaned {
-		fence := func(ctx context.Context, operation func(context.Context) error) error {
-			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
-		}
-		if err := handle.workspace.CleanupTurnPaths(ctx, handle.assignmentID, handle.lease.ID, fence); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("clean Agent Turn scratch: %w", err))
-		} else {
-			handle.scratchCleaned = true
-		}
-	}
-	if processRemoved && handle.discardWorkspace && handle.workspace != nil && !handle.workspaceDiscarded {
+	if processRemoved && handle.workspace != nil && !handle.workspaceDiscarded {
 		fence := func(ctx context.Context, operation func(context.Context) error) error {
 			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
 		}
@@ -775,17 +735,6 @@ func checkoutSelection(execution store.AgentTurnExecutionContext, request Launch
 	if execution.ChangeProposal == nil {
 		if policy.Role != execution.Assignment.Role || policy.RequiresChangeProposal {
 			return "", "", "", nil, fmt.Errorf("%w: Role requires a Change Proposal", ErrRuntimeBinding)
-		}
-		if publication := execution.Publication; publication != nil {
-			if publication.HeadRef != request.InitialFeatureBranch || publication.BaseRef != request.DefaultBranchName || publication.HeadSHA == "" ||
-				(publication.PullRequestID == 0) != (publication.PullRequestNumber == 0) {
-				return "", "", "", nil, fmt.Errorf("%w: in-progress publication", ErrRuntimeBinding)
-			}
-			var pullRequest *mcp.PullRequestScope
-			if publication.PullRequestID > 0 {
-				pullRequest = &mcp.PullRequestScope{ID: publication.PullRequestID, Number: publication.PullRequestNumber}
-			}
-			return publication.HeadSHA, publication.HeadRef, publication.HeadSHA, pullRequest, nil
 		}
 		if strings.TrimSpace(request.InitialFeatureBranch) == "" {
 			return "", "", "", nil, fmt.Errorf("%w: initial Developer branch", ErrRuntimeBinding)

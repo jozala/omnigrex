@@ -94,27 +94,6 @@ func (reducer Reducer) DefinitionIncompatible(snapshot Snapshot) Decision {
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonWorkflowDefinitionIncompatible, Actions: actions}
 }
 
-// CorroborationDefinitionIncompatible applies the same Human Handoff after a
-// Runtime Process and execution job have already stopped. No second stop or
-// mutation-admission action may target that completed execution authority.
-func (reducer Reducer) CorroborationDefinitionIncompatible(snapshot Snapshot) Decision {
-	decision := reducer.DefinitionIncompatible(snapshot)
-	if decision.Disposition != DispositionApplied {
-		return decision
-	}
-	actions := make([]Action, 0, len(decision.Actions))
-	for _, action := range decision.Actions {
-		switch action.(type) {
-		case CloseMutationAdmissionAction, InterruptTurnForHumanHandoffAction:
-			continue
-		default:
-			actions = append(actions, action)
-		}
-	}
-	decision.Actions = actions
-	return decision
-}
-
 // Reduce applies an Event using the Reducer's immutable Workflow Definition.
 func (reducer Reducer) Reduce(snapshot Snapshot, event Event) Decision {
 	base := cloneSnapshot(snapshot)
@@ -156,10 +135,6 @@ func (reducer Reducer) dispatch(snapshot Snapshot, event Event) Decision {
 		return reducer.reduceTrigger(snapshot, event)
 	case TurnSettledEvent:
 		return reducer.reduceTurnSettled(snapshot, event)
-	case TerminalIntentRevalidatedEvent:
-		return reducer.reduceTerminalIntentRevalidated(snapshot, event)
-	case TerminalRevalidationFailedEvent:
-		return reducer.reduceTerminalRevalidationFailed(snapshot, event)
 	case SynchronizationEvent:
 		return reducer.reduceSynchronization(snapshot, event)
 	case ReviewObservedEvent:
@@ -343,18 +318,6 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	if !legalInState(snapshot.State, EventKindTrigger) {
 		return illegalInState(snapshot)
 	}
-	if event.PriorTerminalControlBlocked && snapshot.State == StateNeedsHuman {
-		next := cloneSnapshot(snapshot)
-		next.Revision++
-		return Decision{Snapshot: next, Disposition: DispositionApplied,
-			Reason: ReasonTerminalRevalidationHumanControl,
-			Actions: []Action{
-				ConsumeRunLabelAction{},
-				MarkHumanHandoffAction{Reason: ReasonTerminalRevalidationHumanControl,
-					Diagnostic: "Agent Session is human-controlled; transfer control to automation before re-adding omnigrex:run"},
-				ReconcileLabelsAction{State: StateNeedsHuman},
-			}}
-	}
 	if event.AttemptNumber != snapshot.LastAttemptNumber+1 || (snapshot.CurrentAttempt != nil && event.AttemptID == snapshot.CurrentAttempt.ID) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
@@ -415,122 +378,10 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	actions = append(actions,
 		CreateAttemptAction{Attempt: attempt},
 		ConsumeRunLabelAction{},
+		EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: purpose, ExpectedHeadSHA: head},
 		ReconcileLabelsAction{State: next.State},
 	)
-	if event.PriorTerminalTurnID != "" && snapshot.State == StateNeedsHuman &&
-		event.PriorTerminalStage == stage.ID && event.PriorTerminalRole == stage.Role &&
-		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew {
-		actions = append(actions, EnqueueTerminalRevalidationAction{SourceTurnID: event.PriorTerminalTurnID})
-	} else {
-		actions = append(actions, EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: purpose, ExpectedHeadSHA: head})
-	}
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonTriggered, Actions: actions}
-}
-
-func (reducer Reducer) reduceTerminalIntentRevalidated(snapshot Snapshot, event TerminalIntentRevalidatedEvent) Decision {
-	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
-		return decision
-	}
-	if snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != event.AttemptID ||
-		snapshot.ActiveTurn != nil || snapshot.CurrentAttempt.CurrentStage != event.SourceTurn.Stage ||
-		(snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
-	}
-	stage, ok := reducer.definition.Stage(event.SourceTurn.Stage)
-	if !ok || stage.Role != event.SourceTurn.Role || stage.State != snapshot.State {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
-	}
-	if event.ExistingReview != nil {
-		if event.Review == nil || *event.ExistingReview != *event.Review {
-			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonReviewIdentityConflict}
-		}
-		return reducer.reducePreviouslyAcceptedTerminalReview(snapshot, event)
-	}
-	if _, ok := reducer.definition.Transition(stage.ID, event.Outcome); !ok {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
-	}
-	next := cloneSnapshot(snapshot)
-	next.ResumeRole = ""
-	reused := TurnSettledEvent{
-		EventMetadata: event.EventMetadata, Turn: event.SourceTurn, Outcome: event.Outcome,
-		ChangeProposal: event.ChangeProposal, Review: event.Review,
-		AuthorizedReviewerActorID: event.AuthorizedReviewerActorID,
-	}
-	if event.Outcome == TurnOutcomeChangeProposalReady {
-		return reducer.reduceDeveloperSettled(snapshot, next, reused)
-	}
-	return reducer.reduceReviewSettled(snapshot, next, reused)
-}
-
-func (reducer Reducer) reducePreviouslyAcceptedTerminalReview(snapshot Snapshot, event TerminalIntentRevalidatedEvent) Decision {
-	if snapshot.ChangeProposal == nil || event.ChangeProposal == nil || event.Review == nil ||
-		event.SourceTurn.ChangeProposalID != snapshot.ChangeProposal.ID ||
-		event.Review.ChangeProposalID != snapshot.ChangeProposal.ID || event.ChangeProposal.ID != snapshot.ChangeProposal.ID ||
-		event.Review.ActorID != event.AuthorizedReviewerActorID {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
-	}
-	transition, ok := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome)
-	if !ok {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
-	}
-	next := cloneSnapshot(snapshot)
-	proposal := *event.ChangeProposal
-	proposal.ReadyForSHA = ""
-	next.ChangeProposal = &proposal
-	next.CurrentAttempt.InfrastructureRetryBudget.Used = 0
-	next.Revision++
-	if event.Review.HeadSHA != event.SourceTurn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
-		snapshot.ChangeProposal.HeadSHA != event.SourceTurn.ExpectedHeadSHA {
-		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced,
-			Actions: []Action{
-				EnqueueTurnAction{Stage: snapshot.CurrentAttempt.CurrentStage, Role: event.SourceTurn.Role,
-					Purpose: TurnPurposeSynchronization, ExpectedHeadSHA: proposal.HeadSHA},
-				ReconcileLabelsAction{State: snapshot.State},
-			}}
-	}
-	if event.Outcome == TurnOutcomeApproved {
-		next.State = transition.TerminalState
-		next.CurrentAttempt.CurrentStage = transition.ContinuationStage
-		next.ChangeProposal.ReadyForSHA = event.Review.HeadSHA
-		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonApproved,
-			Actions: []Action{ReconcileLabelsAction{State: StatePRReady, ReadyForSHA: event.Review.HeadSHA}}}
-	}
-	target, ok := reducer.definition.Stage(transition.NextStage)
-	if !ok {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
-	}
-	next.CurrentAttempt.CurrentStage = target.ID
-	next.State = target.State
-	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonChangesRequested,
-		Actions: []Action{
-			EnqueueTurnAction{Stage: target.ID, Role: target.Role,
-				Purpose: transition.NextPurpose, ExpectedHeadSHA: proposal.HeadSHA},
-			ReconcileLabelsAction{State: target.State},
-		}}
-}
-
-func (reducer Reducer) reduceTerminalRevalidationFailed(snapshot Snapshot, event TerminalRevalidationFailedEvent) Decision {
-	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
-		return decision
-	}
-	if snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != event.AttemptID || snapshot.ActiveTurn != nil ||
-		(snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
-	}
-	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
-	if !ok || stage.State != snapshot.State {
-		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
-	}
-	next := cloneSnapshot(snapshot)
-	next.State = StateNeedsHuman
-	next.ResumeRole = stage.Role
-	next.Assignments.Status = AssignmentWaitingForHuman
-	next.Revision++
-	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: event.Reason,
-		Actions: []Action{
-			MarkHumanHandoffAction{Reason: event.Reason, Diagnostic: event.Diagnostic},
-			ReconcileLabelsAction{State: StateNeedsHuman},
-		}}
 }
 
 func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEvent) Decision {
@@ -566,9 +417,6 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 	case TurnOutcomeBlocked:
 		return reduceBlocked(next, event)
 	case TurnOutcomeInfrastructureFailed:
-		if event.CorroborationHandoffReason != "" {
-			return reduceTerminalCorroborationHandoff(next, event)
-		}
 		return reduceInfrastructureFailure(next, event)
 	default:
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
@@ -724,21 +572,6 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 		actions = append([]Action{reconcilePendingAction(event.Turn, event.PendingEvents, EnqueueTurnAction{})}, actions...)
 	}
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonInfrastructureRetriesExhausted, Actions: actions}
-}
-
-func reduceTerminalCorroborationHandoff(next Snapshot, event TurnSettledEvent) Decision {
-	next.State = StateNeedsHuman
-	next.ResumeRole = event.Turn.Role
-	next.Assignments.Status = AssignmentWaitingForHuman
-	next.Revision++
-	actions := []Action{
-		MarkHumanHandoffAction{Reason: event.CorroborationHandoffReason, Diagnostic: event.Diagnostic},
-		ReconcileLabelsAction{State: StateNeedsHuman},
-	}
-	if pendingRequiresReconciliation(event.PendingEvents) {
-		actions = append([]Action{reconcilePendingAction(event.Turn, event.PendingEvents, EnqueueTurnAction{})}, actions...)
-	}
-	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: event.CorroborationHandoffReason, Actions: actions}
 }
 
 func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event SynchronizationEvent) Decision {

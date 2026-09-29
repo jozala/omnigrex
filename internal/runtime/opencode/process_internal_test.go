@@ -18,9 +18,9 @@ func TestBuildProcessMergesDuplicateEnvironmentAndRejectsConflicts(t *testing.T)
 	}
 	options := ProcessOptions{
 		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
-		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "tool-data": "mise", "workspace": "workspace"},
+		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "workspace": "workspace"},
 		AssignmentSubpaths: map[string]string{
-			"mise": "assignment-1/mise", "state": "assignment-1/state", "tool-data": "assignment-1/tool-data", "workspace": "assignment-1/workspace",
+			"mise": "assignment-1/mise", "state": "assignment-1/state", "workspace": "assignment-1/workspace",
 		},
 	}
 	rendered := &RenderedProfile{role: RoleDeveloper, environ: []string{
@@ -64,9 +64,9 @@ func TestBuildProcessRequiresOpenCodeConfigurationEnvironment(t *testing.T) {
 	}
 	options := ProcessOptions{
 		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
-		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "tool-data": "mise", "workspace": "workspace"},
+		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "workspace": "workspace"},
 		AssignmentSubpaths: map[string]string{
-			"mise": "assignment-1/mise", "state": "assignment-1/state", "tool-data": "assignment-1/tool-data", "workspace": "assignment-1/workspace",
+			"mise": "assignment-1/mise", "state": "assignment-1/state", "workspace": "assignment-1/workspace",
 		},
 	}
 	_, _, err = BuildProcess(runtimeProfile, &RenderedProfile{}, ProviderCredentials{Role: RoleDeveloper, Content: []byte(`{}`)}, options)

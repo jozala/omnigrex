@@ -6,10 +6,6 @@ func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 		return event.EventMetadata, EventKindTrigger, true
 	case TurnSettledEvent:
 		return event.EventMetadata, EventKindTurnSettled, true
-	case TerminalIntentRevalidatedEvent:
-		return event.EventMetadata, EventKindTerminalIntentRevalidated, true
-	case TerminalRevalidationFailedEvent:
-		return event.EventMetadata, EventKindTerminalRevalidationFailed, true
 	case SynchronizationEvent:
 		return event.EventMetadata, EventKindSynchronization, true
 	case ReviewObservedEvent:
@@ -49,45 +45,21 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 	}
 	switch event := event.(type) {
 	case TriggerEvent:
-		return event.AttemptID != "" && event.AttemptNumber > 0 &&
-			(!event.PriorTerminalControlBlocked || event.PriorTerminalTurnID != "") &&
-			(event.PriorTerminalTurnID == "" && event.PriorTerminalStage == "" && event.PriorTerminalRole == "" ||
-				event.PriorTerminalTurnID != "" && event.PriorTerminalStage != "" && definition.ContainsRole(event.PriorTerminalRole))
+		return event.AttemptID != "" && event.AttemptNumber > 0
 	case TurnSettledEvent:
 		if !validTurnGuard(definition, event.Turn) || !validPendingObservation(event.PendingEvents) {
 			return false
 		}
 		switch event.Outcome {
 		case TurnOutcomeChangeProposalReady:
-			return event.CorroborationHandoffReason == "" && validChangeProposal(event.ChangeProposal) && event.Review == nil && event.ExistingReview == nil
-		case TurnOutcomeChangesRequested, TurnOutcomeApproved:
-			return event.CorroborationHandoffReason == "" && event.AuthorizedReviewerActorID > 0 && validChangeProposal(event.ChangeProposal) && validReview(event.Review) && (event.ExistingReview == nil || validReview(event.ExistingReview))
-		case TurnOutcomeBlocked:
-			return event.CorroborationHandoffReason == "" && event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
-		case TurnOutcomeInfrastructureFailed:
-			return (event.CorroborationHandoffReason == "" ||
-				event.CorroborationHandoffReason == ReasonTerminalCorroborationExhausted ||
-				event.CorroborationHandoffReason == ReasonTerminalCorroborationPrerequisite) &&
-				event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
-		default:
-			return false
-		}
-	case TerminalIntentRevalidatedEvent:
-		if event.AttemptID == "" || !validTurnGuard(definition, event.SourceTurn) || event.SourceTurn.AttemptID == event.AttemptID {
-			return false
-		}
-		switch event.Outcome {
-		case TurnOutcomeChangeProposalReady:
 			return validChangeProposal(event.ChangeProposal) && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangesRequested, TurnOutcomeApproved:
-			return validChangeProposal(event.ChangeProposal) && validReview(event.Review) &&
-				event.AuthorizedReviewerActorID > 0 && (event.ExistingReview == nil || validReview(event.ExistingReview))
+			return event.AuthorizedReviewerActorID > 0 && validChangeProposal(event.ChangeProposal) && validReview(event.Review) && (event.ExistingReview == nil || validReview(event.ExistingReview))
+		case TurnOutcomeBlocked, TurnOutcomeInfrastructureFailed:
+			return event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
 		default:
 			return false
 		}
-	case TerminalRevalidationFailedEvent:
-		return event.AttemptID != "" && event.SourceTurnID != "" && event.Diagnostic != "" &&
-			(event.Reason == ReasonTerminalCorroborationExhausted || event.Reason == ReasonTerminalCorroborationPrerequisite)
 	case SynchronizationEvent:
 		return event.ChangeProposalID > 0 && event.PreviousHeadSHA != "" && event.HeadSHA != ""
 	case ReviewObservedEvent:

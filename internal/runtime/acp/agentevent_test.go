@@ -123,11 +123,6 @@ func TestEmitAgentEventClassifiesOnlyKnownToolFailures(t *testing.T) {
 		want         string
 	}{
 		{errorMessage: "mutation operation identity conflict", want: "mutation_operation_identity_conflict"},
-		{errorMessage: "publication remote head mismatch", want: "publication_remote_head_mismatch"},
-		{errorMessage: "publication remote head mismatch (expected_sha=0123456789abcdef0123456789abcdef01234567, observed_sha=1123456789abcdef0123456789abcdef01234567)", want: "publication_remote_head_mismatch"},
-		{errorMessage: "Pull Request context is missing for this turn", want: "pull_request_context_missing"},
-		{errorMessage: "GitHub rejected the mutation", want: "github_request_rejected"},
-		{errorMessage: "GitHub rejected the mutation (http_status=422, request_id=GH-123)", want: "github_request_rejected"},
 		{errorMessage: "credential-sentinel database failure", want: ""},
 	} {
 		sink := &capturingAgentEventSink{}

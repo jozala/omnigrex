@@ -243,35 +243,10 @@ func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context,
 	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return nil, err
 	}
-	skipSucceeded := false
-	var stopReason, errorClass string
-	var recorded bool
-	if err := tx.QueryRow(ctx, `
-SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
-       prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, job.AgentTurnID).Scan(
-		&stopReason, &errorClass, &recorded); err != nil {
-		return nil, err
-	}
-	if recorded && (stopReason == "end_turn" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
-		var participantRole workflow.Role
-		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, job.AgentAssignmentID).Scan(&participantRole); err != nil {
-			return nil, err
-		}
-		if _, eligible, err := findTerminalCorroborationSourceTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch, participantRole, ""); err != nil {
-			return nil, err
-		} else if eligible {
-			// The later verifier corroborates publication and review readiness.
-			// Unrelated successful effects, including comments, still need the
-			// existing mutation-reconciliation barrier.
-			skipSucceeded = true
-		}
-	}
 	rows, err := tx.Query(ctx, mutationSelect+`
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
-  AND (state IN ('UNKNOWN', 'RECONCILING')
-       OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
-           ('publish_changes', 'open_pr', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
-ORDER BY invocation_number`, job.AgentTurnID, job.ExecutionEpoch, skipSucceeded)
+  AND state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')
+ORDER BY invocation_number`, job.AgentTurnID, job.ExecutionEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("list Agent Turn mutations for reconciliation: %w", err)
 	}

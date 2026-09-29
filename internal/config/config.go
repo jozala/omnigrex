@@ -11,7 +11,6 @@ import (
 
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
-	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 const (
@@ -43,7 +42,6 @@ const (
 	defaultExecutionPollInterval       = 250 * time.Millisecond
 	defaultExecutionTurnTimeout        = 2 * time.Hour
 	defaultExecutionCleanupTimeout     = 10 * time.Second
-	defaultTerminalCorroboration       = 30 * time.Minute
 	defaultWorkflowEffectLeaseDuration = 30 * time.Second
 	defaultWorkflowEffectHeartbeat     = 10 * time.Second
 	defaultWorkflowEffectPollInterval  = 250 * time.Millisecond
@@ -92,7 +90,6 @@ type Config struct {
 	AgentTurnExecutionPollInterval         time.Duration
 	AgentTurnExecutionTurnTimeout          time.Duration
 	AgentTurnExecutionCleanupTimeout       time.Duration
-	TerminalCorroborationDuration          time.Duration
 	WorkflowEffectLeaseDuration            time.Duration
 	WorkflowEffectHeartbeatInterval        time.Duration
 	WorkflowEffectPollInterval             time.Duration
@@ -100,7 +97,6 @@ type Config struct {
 	AssignmentRetentionDuration            time.Duration
 	AgentTurnConcurrencyLimit              int
 	AgentTurnMemoryBytes                   int64
-	AgentPathEnvironmentAllowlist          []string
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
 	ShutdownTimeout                        time.Duration
@@ -162,7 +158,6 @@ func Load(getenv func(string) string) (Config, error) {
 		AgentTurnExecutionPollInterval:         defaultExecutionPollInterval,
 		AgentTurnExecutionTurnTimeout:          defaultExecutionTurnTimeout,
 		AgentTurnExecutionCleanupTimeout:       defaultExecutionCleanupTimeout,
-		TerminalCorroborationDuration:          defaultTerminalCorroboration,
 		WorkflowEffectLeaseDuration:            defaultWorkflowEffectLeaseDuration,
 		WorkflowEffectHeartbeatInterval:        defaultWorkflowEffectHeartbeat,
 		WorkflowEffectPollInterval:             defaultWorkflowEffectPollInterval,
@@ -332,7 +327,6 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_AGENT_TURN_EXECUTION_POLL_INTERVAL", destination: &config.AgentTurnExecutionPollInterval},
 		{name: "OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT", destination: &config.AgentTurnExecutionTurnTimeout},
 		{name: "OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT", destination: &config.AgentTurnExecutionCleanupTimeout},
-		{name: "OMNIGREX_TERMINAL_CORROBORATION_DURATION", destination: &config.TerminalCorroborationDuration},
 		{name: "OMNIGREX_WORKFLOW_EFFECT_LEASE_DURATION", destination: &config.WorkflowEffectLeaseDuration},
 		{name: "OMNIGREX_WORKFLOW_EFFECT_HEARTBEAT_INTERVAL", destination: &config.WorkflowEffectHeartbeatInterval},
 		{name: "OMNIGREX_WORKFLOW_EFFECT_POLL_INTERVAL", destination: &config.WorkflowEffectPollInterval},
@@ -387,10 +381,6 @@ func Load(getenv func(string) string) (Config, error) {
 		} else {
 			config.AgentTurnMemoryBytes = mib << 20
 		}
-	}
-	config.AgentPathEnvironmentAllowlist, err = turnconfig.Allowlist(getenv("OMNIGREX_AGENT_PATH_ENV_ALLOWLIST"))
-	if err != nil {
-		problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_PATH_ENV_ALLOWLIST: %w", err))
 	}
 
 	if len(problems) != 0 {

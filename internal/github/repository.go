@@ -101,10 +101,6 @@ func (client *APIClient) ListRepositoryDirectoryFiles(ctx context.Context, insta
 			return nil, fmt.Errorf("%w: duplicate Contents directory entry path", ErrInvalidAPIResponse)
 		}
 		seen[entry.Path] = struct{}{}
-		if entry.Path == ".omnigrex/turn-configuration.yaml" &&
-			(entry.Type != "file" || entry.Target != nil || entry.SubmoduleGitURL != nil) {
-			return nil, fmt.Errorf("%w: turn configuration must be a regular file", ErrInvalidAPIResponse)
-		}
 
 		switch entry.Type {
 		case "file":

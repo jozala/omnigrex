@@ -35,7 +35,6 @@ type ExactRuntimeCleaner interface {
 // WorkspaceDiscarder removes recovered Reviewer workspace changes.
 type WorkspaceDiscarder interface {
 	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
-	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
 }
 
 // StopWorkerConfig controls stale-runtime recovery claims, heartbeats, retries, and idle polling.
@@ -180,14 +179,11 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {
 		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
 	}
-	fence := func(ctx context.Context, operation func(context.Context) error) error {
-		return worker.store.WithRecoveredRuntimeCleanupFence(ctx, lease, operation)
-	}
-	if err := worker.workspaces.CleanupTurnPaths(ctx, cleanup.AssignmentID, lease.AgentTurnID, fence); err != nil {
-		return fmt.Errorf("clean recovered Agent Turn scratch: %w", err)
-	}
 
 	if cleanup.DiscardWorkspace {
+		fence := func(ctx context.Context, operation func(context.Context) error) error {
+			return worker.store.WithRecoveredRuntimeCleanupFence(ctx, lease, operation)
+		}
 		if err := worker.workspaces.DiscardWorkspaceFenced(ctx, cleanup.AssignmentID, lease.ExecutionEpoch, fence); err != nil {
 			return fmt.Errorf("discard recovered Agent workspace: %w", err)
 		}

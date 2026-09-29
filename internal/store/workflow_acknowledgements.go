@@ -195,7 +195,7 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		if resolvedWorkflowID != job.WorkflowID {
 			return PendingEventReconciliation{}, ErrWorkflowLocatorMismatch
 		}
-		decision, err := store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+		decision, err := store.reduceWorkflowEvent(snapshot, workflow.EventMetadata{
 			ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
 			WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 		}, eventFactory)
@@ -1294,48 +1294,7 @@ func settleClosedAgentTurnTx(ctx context.Context, tx pgx.Tx, barrier lockedClosu
 	if err != nil {
 		return fmt.Errorf("lock closed Agent Turn execution job: %w", err)
 	}
-	corroborating := executionJob.Status == JobSucceeded || executionJob.Status == JobFailed
-	if corroborating {
-		var verifierID string
-		if err := tx.QueryRow(ctx, `
-SELECT verification_job_id::text FROM agent_turn_corroborations
-WHERE agent_turn_id = $1 AND execution_epoch = $2 AND state = 'PENDING' FOR UPDATE`,
-			barrier.SourceTurnID, barrier.ExecutionEpoch).Scan(&verifierID); err != nil {
-			return ErrClosureSettlementFenceLost
-		}
-		verifier, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, verifierID))
-		if err != nil || verifier.Kind != VerifyTerminalIntentJobKind || verifier.AgentTurnID != barrier.SourceTurnID ||
-			verifier.ExecutionEpoch != barrier.ExecutionEpoch ||
-			verifier.Status != JobAvailable && verifier.Status != JobLeased {
-			return ErrClosureSettlementFenceLost
-		}
-		if verifier.Status == JobLeased {
-			result, err := tx.Exec(ctx, `
-UPDATE job_attempts SET status = 'FAILED', finished_at = clock_timestamp(),
-    retryable = FALSE, last_error = 'Issue closure cancelled terminal corroboration'
-WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEASED'`,
-				verifier.ID, verifier.AttemptCount, verifier.LeaseToken)
-			if err != nil || result.RowsAffected() != 1 {
-				return ErrClosureSettlementFenceLost
-			}
-		}
-		result, err := tx.Exec(ctx, `
-UPDATE jobs SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL,
-    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-    updated_at = clock_timestamp(), completed_at = clock_timestamp(),
-    last_error = 'Issue closure cancelled terminal corroboration'
-WHERE id = $1 AND status IN ('AVAILABLE', 'LEASED')`, verifier.ID)
-		if err != nil || result.RowsAffected() != 1 {
-			return ErrClosureSettlementFenceLost
-		}
-		result, err = tx.Exec(ctx, `
-UPDATE agent_turn_corroborations SET state = 'CANCELLED', resolved_at = clock_timestamp()
-WHERE agent_turn_id = $1 AND execution_epoch = $2 AND state = 'PENDING'`,
-			barrier.SourceTurnID, barrier.ExecutionEpoch)
-		if err != nil || result.RowsAffected() != 1 {
-			return ErrClosureSettlementFenceLost
-		}
-	} else if executionJob.Status == JobLeased {
+	if executionJob.Status == JobLeased {
 		result, err := tx.Exec(ctx, `
 UPDATE job_attempts
 SET status = 'FAILED', finished_at = clock_timestamp(), retryable = FALSE,
@@ -1351,18 +1310,16 @@ WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3 AND status = 'LEA
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_turn_slots WHERE agent_turn_id = $1`, barrier.SourceTurnID); err != nil {
 		return fmt.Errorf("release closed Agent Turn slot: %w", err)
 	}
-	if !corroborating {
-		result, err := tx.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 UPDATE jobs
 SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL, leased_at = NULL,
     lease_expires_at = NULL, heartbeat_at = NULL, updated_at = clock_timestamp(),
     completed_at = clock_timestamp(), last_error = 'Issue closure stopped Agent Turn'
 WHERE id = $1 AND status IN ('AVAILABLE', 'LEASED')`, executionJob.ID)
-		if err != nil || result.RowsAffected() != 1 {
-			return ErrClosureSettlementFenceLost
-		}
+	if err != nil || result.RowsAffected() != 1 {
+		return ErrClosureSettlementFenceLost
 	}
-	result, err := tx.Exec(ctx, `
+	result, err = tx.Exec(ctx, `
 UPDATE agent_turns
 SET status = 'INTERRUPTED', active = FALSE, owner_id = NULL, owner_token = NULL,
     leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,

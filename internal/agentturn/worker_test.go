@@ -3,7 +3,6 @@ package agentturn_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +12,6 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 type workerStore struct {
@@ -290,7 +288,6 @@ func TestWorkerClassifiesPreparationFailuresAndRedactsCredential(t *testing.T) {
 		wantDelay     time.Duration
 	}{
 		{name: "permanent", failure: permanentWorkerError{message: "bad profile token-secret"}, wantDelay: 2 * time.Second},
-		{name: "invalid repository turn configuration", failure: fmt.Errorf("%w: GOTMPDIR is not allowed", turnconfig.ErrInvalid), wantDelay: 2 * time.Second},
 		{name: "GitHub profile missing", failure: &githubapi.APIError{StatusCode: 404, Message: "profile missing token-secret"}, wantDelay: 2 * time.Second},
 		{name: "request timeout", failure: &githubapi.APIError{StatusCode: 408, Message: "request timed out token-secret"}, wantRetryable: true, wantDelay: 2 * time.Second},
 		{name: "too many requests", failure: &githubapi.APIError{StatusCode: 429, Message: "rate limited token-secret"}, wantRetryable: true, wantDelay: 2 * time.Second},

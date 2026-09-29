@@ -11,7 +11,6 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 const maximumWorkerDuration = 365 * 24 * time.Hour
@@ -213,7 +212,7 @@ func (worker *Worker) classify(err error) (bool, time.Duration) {
 }
 
 func isPermanentWorkerError(err error) bool {
-	return errors.Is(err, turnconfig.ErrInvalid) || errors.Is(err, ErrDependencyNil) || errors.Is(err, ErrInvalidRequest) ||
+	return errors.Is(err, ErrDependencyNil) || errors.Is(err, ErrInvalidRequest) ||
 		errors.Is(err, ErrInvalidRuntimeProfileReference) || errors.Is(err, ErrRuntimeProfileReferenceMismatch) ||
 		errors.Is(err, agentprofile.ErrInvalidCommitSHA) || errors.Is(err, agentprofile.ErrMissingSource) ||
 		errors.Is(err, agentprofile.ErrInvalidProfile) || errors.Is(err, agentprofile.ErrProfileTooLarge) ||

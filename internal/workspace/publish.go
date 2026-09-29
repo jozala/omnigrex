@@ -18,17 +18,6 @@ var (
 	ErrUnexpectedHead     = errors.New("unexpected remote branch head")
 )
 
-// UnexpectedHeadError contains only validated Git object IDs and the branch
-// ref; Git command output and credentials are never retained in this error.
-type UnexpectedHeadError struct {
-	Expected string
-	Actual   string
-	Branch   string
-}
-
-func (err *UnexpectedHeadError) Error() string { return ErrUnexpectedHead.Error() + ": " + err.Branch }
-func (err *UnexpectedHeadError) Unwrap() error { return ErrUnexpectedHead }
-
 type CommitIdentity struct {
 	Name  string
 	Email string
@@ -182,7 +171,7 @@ func (lifecycle *Lifecycle) expectRemoteHead(ctx context.Context, directory, cre
 		}
 	}
 	if actual != expected {
-		return &UnexpectedHeadError{Expected: expected, Actual: actual, Branch: branchRef}
+		return fmt.Errorf("%w: %s", ErrUnexpectedHead, branchRef)
 	}
 	return nil
 }

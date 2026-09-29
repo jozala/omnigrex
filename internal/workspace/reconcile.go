@@ -126,57 +126,6 @@ func (lifecycle *Lifecycle) prepareReconciliation(ctx context.Context, destinati
 		"config", "--local", "core.hooksPath", os.DevNull)
 }
 
-// ObserveRemoteBranch reads a feature ref before a new Turn is given publication
-// authority. It does not accept an agent-controlled remote or retain credentials.
-func (lifecycle *Lifecycle) ObserveRemoteBranch(ctx context.Context, repositoryURL, credential, branch string) (string, error) {
-	if err := validateRemote(repositoryURL); err != nil {
-		return "", err
-	}
-	if err := validateCredential(credential); err != nil {
-		return "", err
-	}
-	if !validBranch(branch) {
-		return "", ErrInvalidPublicationReconciliation
-	}
-	branchRef := "refs/heads/" + branch
-	output, err := lifecycle.gitOutput(ctx, "observe publication branch", "", credential, nil,
-		"ls-remote", "--refs", repositoryURL, branchRef)
-	if err != nil {
-		return "", err
-	}
-	if output == "" {
-		return "", nil
-	}
-	fields := strings.Fields(output)
-	if len(fields) != 2 || fields[1] != branchRef {
-		return "", ErrInvalidPublicationReconciliation
-	}
-	return normalizeObjectID(fields[0])
-}
-
-// PrepareRecoveredPublication restores the trusted comparison tree for a
-// previously published head. A later Developer handoff must still compare it
-// to the agent workspace before becoming a Change Proposal.
-func (lifecycle *Lifecycle) PrepareRecoveredPublication(ctx context.Context, assignmentID, repositoryURL, credential, head string) error {
-	if err := validateRemote(repositoryURL); err != nil {
-		return err
-	}
-	if err := validateCredential(credential); err != nil {
-		return err
-	}
-	revision, err := normalizeObjectID(head)
-	if err != nil {
-		return err
-	}
-	paths, err := lifecycle.Paths(assignmentID)
-	if err != nil {
-		return err
-	}
-	release := lifecycle.acquirePublicationLock(assignmentID)
-	defer release()
-	return lifecycle.preparePublication(ctx, paths.Publication, Publication{RepositoryURL: repositoryURL, Credential: credential}, revision)
-}
-
 func (lifecycle *Lifecycle) remoteBranchHead(ctx context.Context, directory, credential, branch string) (string, error) {
 	branchRef := "refs/heads/" + branch
 	output, err := lifecycle.gitOutput(ctx, "read reconciliation branch head", directory, credential, nil,

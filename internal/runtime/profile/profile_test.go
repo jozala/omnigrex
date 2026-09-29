@@ -61,6 +61,7 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 			{Name: "OPENCODE_DISABLE_AUTOUPDATE", Value: "1"},
 			{Name: "OPENCODE_DISABLE_MODELS_FETCH", Value: "true"},
 			{Name: "OPENCODE_DISABLE_SHARE", Value: "1"},
+			{Name: "TMPDIR", Value: "/tmp/opencode"},
 			{Name: "XDG_CACHE_HOME", Value: "/home/opencode/.cache"},
 			{Name: "XDG_CONFIG_HOME", Value: "/home/opencode/.config"},
 			{Name: "XDG_DATA_HOME", Value: "/home/opencode/.local/share"},
@@ -69,7 +70,6 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 		Mounts: []profile.Mount{
 			{Name: "mise", Path: "/home/opencode/.local/share/mise"},
 			{Name: "state", Path: "/home/opencode/.local/share/opencode"},
-			{Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"},
 			{Name: "workspace", Path: "/workspace"},
 		},
 		Capabilities: []string{"session/list", "session/load", "session/resume"},

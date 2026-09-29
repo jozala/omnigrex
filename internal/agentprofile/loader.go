@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
 var (
@@ -26,19 +24,17 @@ type Source interface {
 type Loader struct {
 	source   Source
 	policies role.PolicyCatalog
-	allowed  []string
 }
 
-func NewLoader(source Source, policies role.PolicyCatalog, allowed ...string) *Loader {
-	return &Loader{source: source, policies: policies, allowed: append([]string(nil), allowed...)}
+func NewLoader(source Source, policies role.PolicyCatalog) *Loader {
+	return &Loader{source: source, policies: policies}
 }
 
 type Snapshot struct {
-	commitSHA         string
-	catalog           Catalog
-	policies          role.PolicyCatalog
-	profiles          map[Name]Profile
-	turnConfiguration turnconfig.Configuration
+	commitSHA string
+	catalog   Catalog
+	policies  role.PolicyCatalog
+	profiles  map[Name]Profile
 }
 
 func (loader *Loader) Load(ctx context.Context, credential, owner, repository string) (Snapshot, error) {
@@ -51,23 +47,6 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 	}
 	if !validObjectID(commitSHA) {
 		return Snapshot{}, ErrInvalidCommitSHA
-	}
-	var turnConfiguration turnconfig.Configuration
-	rootFiles, err := loader.source.ListRepositoryDirectoryFiles(ctx, credential, owner, repository, ".omnigrex", commitSHA)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("list turn configuration directory: %w", err)
-	}
-	for _, file := range rootFiles {
-		if file == turnconfig.Path {
-			content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, turnconfig.Path, commitSHA)
-			if err != nil {
-				return Snapshot{}, fmt.Errorf("fetch turn configuration: %w", err)
-			}
-			turnConfiguration, err = turnconfig.Parse(content, loader.allowed)
-			if err != nil {
-				return Snapshot{}, err
-			}
-		}
 	}
 
 	paths, err := loader.source.ListRepositoryDirectoryFiles(ctx, credential, owner, repository, ".omnigrex/team", commitSHA)
@@ -99,16 +78,10 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{commitSHA: commitSHA, catalog: catalog, policies: loader.policies, profiles: profiles, turnConfiguration: turnConfiguration}, nil
+	return Snapshot{commitSHA: commitSHA, catalog: catalog, policies: loader.policies, profiles: profiles}, nil
 }
 
 func (snapshot Snapshot) CommitSHA() string { return snapshot.commitSHA }
-func (snapshot Snapshot) TurnConfiguration() turnconfig.Configuration {
-	return turnconfig.Configuration{
-		Directories: maps.Clone(snapshot.turnConfiguration.Directories),
-		Environment: maps.Clone(snapshot.turnConfiguration.Environment),
-	}
-}
 
 func (snapshot Snapshot) Profile(name Name) (Profile, bool) {
 	profile, ok := snapshot.profiles[name]

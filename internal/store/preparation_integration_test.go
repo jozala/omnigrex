@@ -518,7 +518,6 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
   "instructions": "Perform development."
 }`)
 	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", "openai/gpt-5.2", "", 40, "Perform development.", nil)
-	spec.Developer.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn"},"environment":{"GOTMPDIR":"build"}}`)
 	spec.Reviewer.Profile = store.AgentProfileSnapshot{}
 	prepared, err := database.PrepareAgentTurn(ctx, preparationJob, spec)
 	if err != nil {
@@ -556,14 +555,6 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	turnLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, runJob, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() for CREATING Session error = %v", err)
-	}
-	execution, err := database.GetAgentTurnExecutionContext(ctx, turnLease)
-	var saved struct {
-		Directories map[string]string `json:"directories"`
-		Environment map[string]string `json:"environment"`
-	}
-	if err != nil || json.Unmarshal(execution.Turn.TurnConfiguration, &saved) != nil || saved.Directories["build"] != "turn" || saved.Environment["GOTMPDIR"] != "build" {
-		t.Fatalf("turn configuration survived preparation and acquisition = (%s, %v)", execution.Turn.TurnConfiguration, err)
 	}
 	bound, err := database.BindAgentSessionACP(ctx, turnLease, "opaque-acp-session", json.RawMessage(`{"z":true,"resume":true}`))
 	if err != nil {

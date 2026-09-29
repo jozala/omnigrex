@@ -677,9 +677,6 @@ func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWo
 		Store: workerStore, DeveloperCredentials: credential, ReviewerCredentials: credential,
 		DefaultBranch: phaseNineDefaultBranch{}, Launcher: launcher, Sessions: prompter,
 		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}},
-		PublicationRecovery: phaseNinePublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
-			return nil
-		}),
 		Definition: workflowConfig.Reducer.Definition(), Policies: workflowConfig.Policies,
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: "phase-nine-execution", LeaseDuration: 2 * time.Second, HeartbeatInterval: 200 * time.Millisecond,
@@ -690,12 +687,6 @@ func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWo
 		t.Fatal(err)
 	}
 	return worker
-}
-
-type phaseNinePublicationRecoveryFunc func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error
-
-func (recover phaseNinePublicationRecoveryFunc) Recover(ctx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, url, credential, base string) error {
-	return recover(ctx, lease, execution, url, credential, base)
 }
 
 type phaseNineSettlementResponseLossStore struct {
@@ -789,10 +780,6 @@ type phaseNineWorkspaceDiscarder struct{}
 func (phaseNineWorkspaceDiscarder) DiscardWorkspace(string) error { return nil }
 
 func (phaseNineWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, _ string, _ int64, fence workspace.WorkspaceFence) error {
-	return fence(ctx, func(context.Context) error { return nil })
-}
-
-func (phaseNineWorkspaceDiscarder) CleanupTurnPaths(ctx context.Context, _, _ string, fence workspace.WorkspaceFence) error {
 	return fence(ctx, func(context.Context) error { return nil })
 }
 

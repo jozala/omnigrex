@@ -79,9 +79,6 @@ func BuildProcess(runtimeProfile profile.Profile, rendered *RenderedProfile, cre
 		}
 		environment[name] = value
 	}
-	if _, present := environment["TMPDIR"]; !present {
-		environment["TMPDIR"] = "/tmp/opencode"
-	}
 	if environment["OPENCODE_AUTH_CONTENT"] != "{}" {
 		return dockerruntime.RuntimePolicy{}, dockerruntime.Spec{}, fmt.Errorf("%w: static OpenCode authentication placeholder is invalid", ErrInvalidProcess)
 	}
