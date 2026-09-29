@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1181,14 +1182,26 @@ func outcomeCleanPaths(t *testing.T) workspace.Paths {
 	t.Helper()
 	root := t.TempDir()
 	paths := workspace.Paths{Workspace: filepath.Join(root, "workspace"), Publication: filepath.Join(root, "publication")}
-	for _, path := range []string{paths.Workspace, paths.Publication} {
-		if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "tracked.txt"), []byte("same\n"), 0o644); err != nil {
-			t.Fatal(err)
+	runGit := func(directory string, arguments ...string) {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = directory
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
 		}
 	}
+	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(paths.Workspace, "init")
+	runGit(paths.Workspace, "config", "user.name", "Fixture Developer")
+	runGit(paths.Workspace, "config", "user.email", "developer@example.test")
+	if err := os.WriteFile(filepath.Join(paths.Workspace, "tracked.txt"), []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(paths.Workspace, "add", "tracked.txt")
+	runGit(paths.Workspace, "commit", "-m", "Published tree")
+	runGit(root, "clone", paths.Workspace, paths.Publication)
 	if err := os.WriteFile(filepath.Join(paths.Workspace, ".git", "workspace-only"), []byte("ignored"), 0o644); err != nil {
 		t.Fatal(err)
 	}

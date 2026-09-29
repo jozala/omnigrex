@@ -142,6 +142,31 @@ func TestPublicationRecoveryResumesPublishedBranchBeforePRCreation(t *testing.T)
 	}
 }
 
+func TestPublicationRecoveryBindsRecordedMultiCommitTipAfterWorkspaceReplacement(t *testing.T) {
+	const publicationID = "10000000-0000-4000-8000-000000000001"
+	ledger := &publicationRecoveryStore{mutations: []store.MutationReservation{{
+		ID: publicationID, State: store.MutationSucceeded, ToolName: mcp.ToolPublishChanges,
+		ExternalService: "git", ExternalResourceID: "41:omnigrex/issue-18", ExpectedSHA: recoveryBase,
+		ProposedSHA: recoveryHead, HistoryPublication: true,
+		Result: json.RawMessage(`{"head":"` + recoveryHead + `","branch":"omnigrex/issue-18","changed":true}`),
+	}}}
+	remote := &publicationRecoveryRemote{head: recoveryHead}
+	lease, execution := recoveryTurn()
+	recovery := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{})
+	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if ledger.binding.HeadSHA != recoveryHead || remote.preparedHead != recoveryHead || remote.request.ProposedRevision != recoveryHead {
+		t.Fatalf("recovered candidate = %#v, %#v", ledger.binding, remote.request)
+	}
+	ledger.mutations[0].ProposedSHA = "2123456789abcdef0123456789abcdef01234567"
+	ledger.binding = store.AgentTurnPublication{}
+	remote.preparedHead = ""
+	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" {
+		t.Fatalf("mismatched candidate recovery = %v, binding %#v", err, ledger.binding)
+	}
+}
+
 func TestPublicationRecoveryAcceptsSHA256CommitIdentity(t *testing.T) {
 	const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	ledger := &publicationRecoveryStore{mutations: []store.MutationReservation{{
@@ -203,6 +228,7 @@ type publicationRecoveryRemote struct {
 	head, preparedHead string
 	heads              []string
 	observeCalls       int
+	request            workspace.PublicationReconciliation
 }
 
 func (remote *publicationRecoveryRemote) ObserveRemoteBranch(context.Context, string, string, string) (string, error) {
@@ -215,6 +241,7 @@ func (remote *publicationRecoveryRemote) ObserveRemoteBranch(context.Context, st
 }
 
 func (remote *publicationRecoveryRemote) ReconcilePublication(_ context.Context, request workspace.PublicationReconciliation) (workspace.PublicationReconciliationResult, error) {
+	remote.request = request
 	found := remote.head
 	if found == "" {
 		found = recoveryHead

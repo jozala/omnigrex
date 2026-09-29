@@ -130,7 +130,6 @@ type ProductionBackend struct {
 	workflow     WorkflowMutations
 	priorIntents PriorTerminalIntentReader
 	remoteBase   gitremote.BaseURL
-	identity     workspace.CommitIdentity
 	policies     role.PolicyCatalog
 	roleCatalog  role.Catalog
 
@@ -188,7 +187,6 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
 		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
-		identity:         workspace.CommitIdentity{Name: "Omnigrex Developer", Email: "developer@omnigrex.invalid"},
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
 		restoredMutations: make(map[publicationTurn]map[string][sha256.Size]byte),
@@ -375,6 +373,8 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 			Changed *bool  `json:"changed"`
 		}
 		if !decodeExactResult(source.Result, &result) || result.Changed == nil || !validRevision(result.Head) || result.Branch != invocation.Scope.Branch ||
+			source.HistoryPublication && *result.Changed && source.ProposedSHA == "" ||
+			source.ProposedSHA != "" && (!*result.Changed || result.Head != source.ProposedSHA) ||
 			*result.Changed && result.Head == source.ExpectedSHA || !*result.Changed && result.Head != source.ExpectedSHA {
 			return ErrToolPrecondition
 		}
@@ -1049,12 +1049,6 @@ func publicationTurnKey(scope ToolScope) publicationTurn {
 }
 
 func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
-	var arguments struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(invocation.Arguments, &arguments) != nil {
-		return nil, ErrInvalidInvocation
-	}
 	turnKey := publicationTurnKey(invocation.Scope)
 	lock := backend.publicationLock(turnKey)
 	lock.Lock()
@@ -1078,8 +1072,8 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		AssignmentID:  invocation.Scope.AgentAssignmentID,
 		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: progress.head, ExpectedOldHead: expectedOldHead,
-		Branch: invocation.Scope.Branch, Message: arguments.Message + "\n\nOmnigrex-Operation-ID: " + invocation.OperationID,
-		Identity: backend.identity, Time: invocation.Scope.TurnCreatedAt.UTC(),
+		Branch: invocation.Scope.Branch, DefaultBranch: invocation.Scope.DefaultBranch,
+		RecordProposedTip: invocation.recordProposedTip,
 	})
 	if err != nil {
 		if errors.Is(err, workspace.ErrPushRejected) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1090,6 +1084,12 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		}
 		if errors.Is(err, workspace.ErrTreeMismatch) {
 			return nil, mutationFailure{code: "publication_tree_mismatch", message: "workspace and publication trees differ"}
+		}
+		if errors.Is(err, workspace.ErrUncommittedWorkspace) {
+			return nil, mutationFailure{code: "publication_uncommitted_workspace", message: "commit staged, unstaged, and untracked changes before publishing"}
+		}
+		if errors.Is(err, workspace.ErrInvalidPublicationHistory) {
+			return nil, mutationFailure{code: "publication_invalid_history", message: "commit history must descend from the scoped head and merge only the verified default branch"}
 		}
 		return nil, mutationFailure{code: "publication_dependency_failed", message: "publication could not be prepared"}
 	}
@@ -1168,9 +1168,10 @@ func mutationReplayFingerprint(source store.MutationReservation) [sha256.Size]by
 		ExternalService    string          `json:"external_service"`
 		ExternalResourceID string          `json:"external_resource_id"`
 		ExpectedSHA        string          `json:"expected_sha"`
+		ProposedSHA        string          `json:"proposed_sha"`
 		Result             json.RawMessage `json:"result"`
 	}{source.AgentTurnID, source.ExecutionEpoch, source.OperationID, source.ToolName, source.Request,
-		source.ExternalService, source.ExternalResourceID, source.ExpectedSHA, result})
+		source.ExternalService, source.ExternalResourceID, source.ExpectedSHA, source.ProposedSHA, result})
 	return sha256.Sum256(encoded)
 }
 

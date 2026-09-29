@@ -561,6 +561,60 @@ func TestAgentTurnMutationOperationIDIsScopedToLineage(t *testing.T) {
 	}
 }
 
+func TestProposedPublicationTipIsFencedAndDurableBeforePush(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	fixture := seedAgentSession(t, pool, 39)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := claimAndAcquireFixtureAgentTurn(t, databases[0], pool, ctx, turn, "publication-runtime", 10*time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	const oldHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const proposed = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	reservation, err := databases[0].ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "publish-exact-tip", ToolName: "publish_changes", Request: json.RawMessage(`{"operation_id":"publish-exact-tip"}`),
+		ExternalService: "git", ExternalResourceID: "39:omnigrex/issue-39", ExpectedSHA: oldHead,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(reserved) != 1 || !reserved[0].HistoryPublication || reserved[0].ProposedSHA != "" {
+		t.Fatalf("reserved publication format before tip recording = %#v, %v", reserved, err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, proposed); !errors.Is(err, store.ErrMutationStateConflict) {
+		t.Fatalf("record before starting = %v", err)
+	}
+	if _, err := databases[0].StartMutation(ctx, lease, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, proposed); err != nil {
+		t.Fatalf("record proposed tip = %v", err)
+	}
+	if err := databases[0].RecordProposedPublicationTip(ctx, lease, reservation.ID, strings.Repeat("c", 40)); !errors.Is(err, store.ErrMutationStateConflict) {
+		t.Fatalf("record second tip = %v", err)
+	}
+	mutations, err := databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(mutations) != 1 || mutations[0].ExpectedSHA != oldHead || mutations[0].ProposedSHA != proposed || !mutations[0].HistoryPublication {
+		t.Fatalf("durable proposed tip = %#v, %v", mutations, err)
+	}
+	if err := databases[0].MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("push outcome unknown")); err != nil {
+		t.Fatal(err)
+	}
+	mutations, err = databases[1].ListUnsettledMutations(ctx, lease)
+	if err != nil || len(mutations) != 1 || mutations[0].ProposedSHA != proposed {
+		t.Fatalf("recovery candidate = %#v, %v", mutations, err)
+	}
+}
+
 func TestAgentTurnMutationReservationSurvivesProcessDeathRetryLineage(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]

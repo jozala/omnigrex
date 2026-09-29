@@ -40,6 +40,59 @@ func TestLifecycleReconcilesPublishedCommitByExactOperationTrailer(t *testing.T)
 	}
 }
 
+func TestLifecycleReconcilesExactPublishedTipAfterLaterBranchAdvancement(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/feature", fixture.second)
+	proposed := commitFixtureChange(t, fixture.remote, fixture.second, "feature", "published\n", "Agent commit without an operation trailer")
+	input := workspace.PublicationReconciliation{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		ExpectedOldHead: fixture.second, ProposedRevision: proposed, HistoryPublication: true,
+		Branch: "feature", OperationID: "exact-tip-publication",
+	}
+	lifecycle := newLifecycle(t)
+	result, err := lifecycle.ReconcilePublication(context.Background(), input)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationFound || result.Head != proposed {
+		t.Fatalf("reconcile exact tip = %#v, %v", result, err)
+	}
+	descendant := commitFixtureChange(t, fixture.remote, proposed, "feature", "later\n", "Subsequent publication")
+	result, err = lifecycle.ReconcilePublication(context.Background(), input)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationFound || result.Head != proposed || result.Head == descendant {
+		t.Fatalf("reconcile under later head = %#v, %v", result, err)
+	}
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/feature", fixture.second)
+	result, err = lifecycle.ReconcilePublication(context.Background(), input)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationAbsent {
+		t.Fatalf("absent push = %#v, %v", result, err)
+	}
+	unrelated := commitFixtureChange(t, fixture.remote, fixture.second, "feature", "unrelated\n", "Unexpected branch advancement")
+	result, err = lifecycle.ReconcilePublication(context.Background(), input)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationUnknown || result.Head != unrelated {
+		t.Fatalf("unrelated advancement = %#v, %v", result, err)
+	}
+}
+
+func TestLifecycleNeverInfersUnrecordedNewPublicationFromLegacyTrailer(t *testing.T) {
+	fixture := newGitFixture(t)
+	gitRun(t, fixture.remote, "update-ref", "refs/heads/feature", fixture.second)
+	const operationID = "unrecorded-new-operation"
+	forged := commitFixtureChange(t, fixture.remote, fixture.second, "feature", "forged\n",
+		"Unrelated commit\n\nOmnigrex-Operation-ID: "+operationID)
+	lifecycle := newLifecycle(t)
+	request := workspace.PublicationReconciliation{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
+		ExpectedOldHead: fixture.second, Branch: "feature", OperationID: operationID, HistoryPublication: true,
+	}
+	result, err := lifecycle.ReconcilePublication(context.Background(), request)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationUnknown || result.Head != forged {
+		t.Fatalf("unrecorded new publication = %#v, %v", result, err)
+	}
+	request.HistoryPublication = false
+	result, err = lifecycle.ReconcilePublication(context.Background(), request)
+	if err != nil || result.Outcome != workspace.PublicationReconciliationFound || result.Head != forged {
+		t.Fatalf("legacy publication = %#v, %v", result, err)
+	}
+}
+
 func TestLifecycleRestoresPublishedHeadAsComparisonTreeForNextTurn(t *testing.T) {
 	fixture := newGitFixture(t)
 	gitRun(t, fixture.remote, "update-ref", "refs/heads/omnigrex/feature", fixture.second)

@@ -495,18 +495,13 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	if containsCredentialInProposal(proposal, request.RepositoryCredential) {
 		return failure("fresh Developer Pull Request contains unsafe credential material")
 	}
-	workspaceTree, err := workspace.SnapshotTree(request.Paths.Workspace)
+	matching, err := workspace.CommittedTreesEqual(ctx, request.Paths)
 	if err != nil {
 		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
-		return failure("Developer workspace tree observation failed")
+		return failure("Developer committed workspace observation failed")
 	}
-	publicationTree, err := workspace.SnapshotTree(request.Paths.Publication)
-	if err != nil {
-		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
-		return failure("Developer publication tree observation failed")
-	}
-	if !workspaceTree.Equal(publicationTree) {
-		return failure("Developer workspace has unpublished normalized tree changes")
+	if !matching {
+		return failure("Developer workspace has unpublished committed changes")
 	}
 	return store.AgentTurnSettlementObservation{
 		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeChangeProposalReady, ChangeProposal: proposal,

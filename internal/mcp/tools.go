@@ -54,9 +54,9 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolListPullRequestReviews, Description: "List native reviews on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolListReviewThreads, Description: "List review threads on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolGetCheckRuns, Description: "Get check runs for the scoped head commit.", InputSchema: emptyObjectSchema(), Class: ReadTool},
-	{Name: ToolPublishChanges, Description: "Publish workspace changes to the scoped branch.", InputSchema: objectSchema(map[string]any{
+	{Name: ToolPublishChanges, Description: "Publish a clean, fully committed workspace history to the scoped branch. The optional message is an audit summary, not a commit message.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "message": stringSchema(1, 4096),
-	}, "operation_id", "message"), Class: MutationTool},
+	}, "operation_id"), Class: MutationTool},
 	{Name: ToolOpenPR, Description: "Open the scoped branch as a Pull Request linked to the Issue.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "title": stringSchema(1, 256), "body": stringSchema(1, 65536),
 	}, "operation_id", "title", "body"), Class: MutationTool},

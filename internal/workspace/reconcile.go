@@ -24,13 +24,15 @@ const (
 
 // PublicationReconciliation identifies one possibly published commit and its branch precondition.
 type PublicationReconciliation struct {
-	AssignmentID    string
-	RepositoryURL   string
-	Credential      string
-	BaseRevision    string
-	ExpectedOldHead string
-	Branch          string
-	OperationID     string
+	AssignmentID       string
+	RepositoryURL      string
+	Credential         string
+	BaseRevision       string
+	ProposedRevision   string
+	HistoryPublication bool
+	ExpectedOldHead    string
+	Branch             string
+	OperationID        string
 }
 
 // PublicationReconciliationResult reports the observed branch head, or the matching publication commit when found.
@@ -68,6 +70,19 @@ func (lifecycle *Lifecycle) ReconcilePublication(ctx context.Context, input Publ
 	if err := lifecycle.git(ctx, "fetch reconciliation branch head", paths.Publication, input.Credential,
 		"fetch", "--force", "--no-tags", "origin", actual); err != nil {
 		return PublicationReconciliationResult{}, err
+	}
+	if input.ProposedRevision != "" {
+		if err := lifecycle.git(ctx, "verify proposed publication is reachable", paths.Publication, "",
+			"merge-base", "--is-ancestor", input.ProposedRevision, actual); err != nil {
+			return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
+		}
+		if err := lifecycle.verifyFirstParentBase(ctx, paths.Publication, base, input.ProposedRevision); err != nil {
+			return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
+		}
+		return PublicationReconciliationResult{Outcome: PublicationReconciliationFound, Head: input.ProposedRevision}, nil
+	}
+	if input.HistoryPublication {
+		return PublicationReconciliationResult{Outcome: PublicationReconciliationUnknown, Head: actual}, nil
 	}
 	targetTrailer := "Omnigrex-Operation-ID: " + input.OperationID
 	output, err := lifecycle.gitOutput(ctx, "find publication operation", paths.Publication, "", nil,
@@ -208,6 +223,11 @@ func validatePublicationReconciliation(input PublicationReconciliation) (string,
 	base, err := normalizeObjectID(input.BaseRevision)
 	if err != nil {
 		return "", "", err
+	}
+	if input.ProposedRevision != "" {
+		if _, err := normalizeObjectID(input.ProposedRevision); err != nil || input.ProposedRevision == base || !input.HistoryPublication {
+			return "", "", ErrInvalidPublicationReconciliation
+		}
 	}
 	expected := ""
 	if input.ExpectedOldHead != "" {

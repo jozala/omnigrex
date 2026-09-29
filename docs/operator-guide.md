@@ -659,8 +659,9 @@ Re-adding the command label resets retry and review budgets but does not erase h
 Retained Agent Sessions are reused when their exact Runtime Profile image and state remain available.
 If an earlier Developer Turn published a branch or opened a Pull Request but did not successfully request review, a later Turn for the same Agent Participant verifies that publication against its durable MCP mutations and fresh GitHub state before using it as in-progress work.
 The later Turn starts at the verified published head and must explicitly request review; publication alone never schedules Reviewer.
-An unproven branch, changed head, edited operation marker, or different Participant causes a publication-conflict Human Handoff rather than automatic adoption.
+An unproven branch, changed head, different Participant, or publication that cannot be matched to its recorded proposed commit (or, for older publications, its operation marker) causes a publication-conflict Human Handoff rather than automatic adoption.
 If Git or GitHub cannot be reached during verification, execution follows bounded infrastructure retries instead of claiming a conflict.
+Developer publication preserves committed Git history: an uncommitted workspace is rejected, while ignored local build artifacts are not published. A validated proposed commit is recorded before pushing; if an interrupted push cannot be corroborated on the branch, recovery does not reconstruct it from a later workspace and may require a Human Handoff.
 
 For an apparently stuck deployment, inspect safe operational metadata:
 

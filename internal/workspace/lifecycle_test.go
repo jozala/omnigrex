@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -95,8 +94,7 @@ func TestLifecycleOperationsRejectSymlinkedAssignmentMountPaths(t *testing.T) {
 			case "publication":
 				_, err = lifecycle.Publish(context.Background(), workspace.Publication{
 					AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.first,
-					Branch: "feature", Message: "publish", Identity: workspace.CommitIdentity{Name: "Agent", Email: "agent@example.test"},
-					Time: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
+					Branch: "feature",
 				})
 			}
 			if !errors.Is(err, workspace.ErrUnsafeAssignmentPath) {

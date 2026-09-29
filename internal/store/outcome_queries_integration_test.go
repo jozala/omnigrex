@@ -17,7 +17,6 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestListAgentTurnMutationInvocationsRequiresClosedSettledLedgerAndPreservesOrder(t *testing.T) {
@@ -356,7 +355,7 @@ func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *t
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptError: agentturn.PromptErrorFailure,
 		PromptDiagnostic: "submit ACP prompt: EOF", RepositoryCredential: "developer-token",
-		Paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()},
+		Paths: committedPublicationPaths(t),
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != head || github.calls != 1 {

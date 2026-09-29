@@ -1,6 +1,6 @@
 # First-Iteration Implementation Plan
 
-This plan implements the behavior defined in [First Iteration](./first-iteration.md).
+This plan implements the behavior defined in [First Iteration](./plans/first-iteration.md).
 Each phase has a verification gate and should leave the repository in a working state.
 
 ## Engineering Principles

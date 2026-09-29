@@ -63,7 +63,7 @@ FROM agent_sessions WHERE id = $2`, replacementSession, fixture.sessionID); err 
 	fixture.sessionID = replacementSession
 	_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, pool, fixture, store.AgentTurn{}, "publication-new-session")
 	mutations, err := database.ListParticipantPublicationMutations(ctx, retryLease)
-	if err != nil || len(mutations) != 2 || mutations[0].State != store.MutationSucceeded || mutations[1].State != store.MutationSucceeded {
+	if err != nil || len(mutations) != 2 || mutations[0].State != store.MutationSucceeded || mutations[0].ProposedSHA != head || mutations[1].State != store.MutationSucceeded {
 		t.Fatalf("prior publication evidence = %#v, %v", mutations, err)
 	}
 	binding := store.AgentTurnPublication{
@@ -163,7 +163,7 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: nextLease, Execution: bound, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()},
+		RepositoryCredential: "developer-token", Paths: committedPublicationPaths(t),
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {
 		t.Fatalf("recovered PR handoff = %#v, error %v", observation, err)

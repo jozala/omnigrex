@@ -138,6 +138,9 @@ func (lifecycle *Lifecycle) gitOutput(ctx context.Context, operation, directory,
 	}
 	output, err := command.CombinedOutput()
 	if err == nil {
+		if strings.IndexByte(string(output), 0) >= 0 {
+			return string(output), nil
+		}
 		return strings.TrimSpace(string(output)), nil
 	}
 	detail := strings.TrimSpace(redact(string(output), credential))
@@ -162,6 +165,7 @@ func commandEnvironment(credential, miseDataDir string) []string {
 		"HOME=",
 		"LANG=C",
 		"LC_ALL=C",
+		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
@@ -169,12 +173,14 @@ func commandEnvironment(credential, miseDataDir string) []string {
 		"GIT_CONFIG_VALUE_0="+os.DevNull,
 		"GIT_CONFIG_KEY_1=credential.helper",
 		"GIT_CONFIG_VALUE_1=",
+		"GIT_CONFIG_KEY_2=core.fsmonitor",
+		"GIT_CONFIG_VALUE_2=false",
 	)
-	configCount := 2
+	configCount := 3
 	if credential != "" {
 		environment = append(environment,
-			"GIT_CONFIG_KEY_2=http.extraHeader",
-			"GIT_CONFIG_VALUE_2="+gitAuthorizationHeader(credential),
+			"GIT_CONFIG_KEY_3=http.extraHeader",
+			"GIT_CONFIG_VALUE_3="+gitAuthorizationHeader(credential),
 		)
 		configCount++
 	}
