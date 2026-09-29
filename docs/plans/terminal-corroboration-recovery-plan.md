@@ -2,8 +2,8 @@
 
 Status: **Implemented on `fix/terminal-intent-corroboration`, not deployed or release-qualified.**
 This file records the design and verification boundaries for a future agent, not an accepted specification or an operator recovery procedure.
-Follow [AGENTS.md](../AGENTS.md), [CONTEXT.md](../CONTEXT.md), the relevant [ADRs](adr/), and the [operator guide](operator-guide.md).
-Do not edit `docs/first-iteration.md` or manually repair PostgreSQL or runtime-state files.
+Follow [AGENTS.md](../../AGENTS.md), [CONTEXT.md](../../CONTEXT.md), the relevant [ADRs](../adr/), and the [operator guide](../operator-guide.md).
+Do not edit `docs/plans/first-iteration.md` or manually repair PostgreSQL or runtime-state files.
 
 ## Observed failure and intended outcome
 
@@ -57,7 +57,7 @@ This change applies to future Turns and does not rewrite the historical settleme
    An explicitly cancelled Reviewer Turn instead receives a non-confirmable review notice directing Human Handoff; new `submit_review` calls and exact mutation replay are fenced against duplicate or ineligible native reviews.
 6. **Safe diagnostics and configuration.**
    The orchestrator logs only fixed failure categories and allowlisted GitHub status values, not upstream request IDs, raw dependency errors, response bodies, or credentials.
-   `OMNIGREX_TERMINAL_CORROBORATION_DURATION` defaults to 30 minutes in configuration and both Compose/environment examples; consult the [operator guide](operator-guide.md) for deployment and recovery procedures.
+   `OMNIGREX_TERMINAL_CORROBORATION_DURATION` defaults to 30 minutes in configuration and both Compose/environment examples; consult the [operator guide](../operator-guide.md) for deployment and recovery procedures.
 
 ## Verification and release boundaries
 

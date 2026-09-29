@@ -22,7 +22,8 @@ Read the minimum repository context needed for the change.
 
 - When an Issue is assigned, read it and the relevant code before changing anything; otherwise follow the task's stated requirements. Keep changes focused accordingly.
 - Follow `CONTEXT.md` terms and the ADRs that apply; do not reintroduce rejected alternatives.
-- Do not modify `docs/first-iteration.md`; it is an accepted specification.
+- Put any implementation plans or designs you prepare in `docs/plans/`.
+- Do not modify `docs/plans/first-iteration.md`; it is an accepted specification.
 - Capture implementation failures and regression behavior in tests when possible, rather than adding incident notes or implementation details to accepted specifications.
 - When tests are insufficient to explain an operational issue, use focused documentation under a dedicated `docs/` directory with one file per area.
 
