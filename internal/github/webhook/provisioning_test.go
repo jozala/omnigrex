@@ -102,14 +102,61 @@ func TestNormalizeIgnoresProvisioningRemovals(t *testing.T) {
 	}
 }
 
+func TestNormalizeKeepsValidEntriesProvisionableWhileReportingInvalid(t *testing.T) {
+	delivery := webhook.Delivery{
+		DeliveryID: validDeliveryID(),
+		EventName:  "installation_repositories",
+		Action:     "added",
+		Payload: []byte(`{"action":"added","installation":{"id":99},
+			"repositories_added":[
+				{"id":9123,"name":"omnigrex","full_name":"jozala/omnigrex"},
+				{"id":0,"name":"","full_name":""},
+				{"id":9124,"name":"widgets","full_name":"wrong/name"}
+			]}`),
+	}
+
+	result, err := webhook.Normalize(delivery)
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if result.Outcome != webhook.NormalizationProvisioning || result.Provisioning == nil {
+		t.Fatalf("result = %#v, want provisioning outcome", result)
+	}
+	provisioning := result.Provisioning
+	if len(provisioning.Repositories) != 1 || provisioning.Repositories[0].ID != 9123 {
+		t.Errorf("repositories = %#v, want only the valid entry", provisioning.Repositories)
+	}
+	if len(provisioning.Invalid) != 2 {
+		t.Errorf("invalid = %#v, want two reported entries", provisioning.Invalid)
+	}
+}
+
+func TestNormalizeReportsEmptyAddedListAsInvalid(t *testing.T) {
+	for _, payload := range []string{
+		`{"action":"added","installation":{"id":99},"repositories_added":[]}`,
+		`{"action":"added","installation":{"id":99}}`,
+	} {
+		delivery := webhook.Delivery{
+			DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added",
+			Payload: []byte(payload),
+		}
+		result, err := webhook.Normalize(delivery)
+		if err != nil {
+			t.Fatalf("Normalize(%s) error = %v", payload, err)
+		}
+		if result.Outcome != webhook.NormalizationProvisioning || result.Provisioning == nil {
+			t.Fatalf("Normalize(%s) = %#v, want provisioning outcome", payload, result)
+		}
+		if len(result.Provisioning.Repositories) != 0 || len(result.Provisioning.Invalid) != 1 {
+			t.Errorf("result = %#v, want zero jobs with one invalid entry", result.Provisioning)
+		}
+	}
+}
+
 func TestNormalizeRejectsMalformedProvisioning(t *testing.T) {
 	tests := []webhook.Delivery{
 		{DeliveryID: validDeliveryID(), EventName: "installation", Action: "created", Payload: []byte(`{"action":"created"}`)},
 		{DeliveryID: validDeliveryID(), EventName: "installation", Action: "", Payload: []byte(`{"installation":{"id":99}}`)},
-		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[]}`)},
-		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99}}`)},
-		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[{"id":0,"name":"","full_name":""}]}`)},
-		{DeliveryID: validDeliveryID(), EventName: "installation_repositories", Action: "added", Payload: []byte(`{"action":"added","installation":{"id":99},"repositories_added":[{"id":9123,"name":"omnigrex","full_name":"wrong/name"}]}`)},
 		{DeliveryID: validDeliveryID(), EventName: "repository", Action: "created", Payload: []byte(`{"action":"created","installation":{"id":99},"repository":{"id":9123,"name":"omnigrex","owner":{"login":""}}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "repository", Action: "created", Payload: []byte(`{"action":"added","installation":{"id":99},"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}}`)},
 		{DeliveryID: "not-a-uuid", EventName: "installation", Action: "created", Payload: []byte(`{"action":"created","installation":{"id":99}}`)},

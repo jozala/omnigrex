@@ -29,7 +29,7 @@ func TestCompleteLabelProvisioningTransitionDedupesAndMarksDelivery(t *testing.T
 		{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		{ID: 9124, Owner: "jozala", Name: "widgets"},
 	}
-	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, repositories); err != nil {
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, repositories, nil); err != nil {
 		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
 	}
 
@@ -44,29 +44,42 @@ func TestCompleteLabelProvisioningTransitionDedupesAndMarksDelivery(t *testing.T
 		t.Errorf("GetNormalizedEvent() succeeded, want no Workflow event for provisioning")
 	}
 
-	first, err := database.ClaimLabelProvisioningJob(ctx, "provisioner", 30*time.Second)
+	first, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
 	if err != nil || first == nil {
-		t.Fatalf("first ClaimLabelProvisioningJob() = (%#v, %v), want lease", first, err)
+		t.Fatalf("first ClaimJobKind() = (%#v, %v), want lease", first, err)
 	}
-	second, err := database.ClaimLabelProvisioningJob(ctx, "provisioner", 30*time.Second)
+	second, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
 	if err != nil || second == nil {
-		t.Fatalf("second ClaimLabelProvisioningJob() = (%#v, %v), want second repository", second, err)
+		t.Fatalf("second ClaimJobKind() = (%#v, %v), want second repository", second, err)
 	}
-	if first.RepositoryID == second.RepositoryID {
-		t.Errorf("claimed repository IDs = (%d, %d), want distinct repositories", first.RepositoryID, second.RepositoryID)
+	firstPayload, err := store.ParseLabelProvisioningPayload(first.Payload)
+	if err != nil {
+		t.Fatalf("parse first payload: %v", err)
 	}
-	if first.InstallationID != 99 || first.SourceDeliveryID != deliveryID {
-		t.Errorf("first job = (%d, %q), want installation 99 from delivery %s", first.InstallationID, first.SourceDeliveryID, deliveryID)
+	secondPayload, err := store.ParseLabelProvisioningPayload(second.Payload)
+	if err != nil {
+		t.Fatalf("parse second payload: %v", err)
 	}
-	if err := database.CompleteLabelProvisioningJob(ctx, *first, json.RawMessage(`{"provisioned":true}`)); err != nil {
-		t.Fatalf("CompleteLabelProvisioningJob() error = %v", err)
+	if firstPayload.RepositoryID == secondPayload.RepositoryID {
+		t.Errorf("claimed repository IDs = (%d, %d), want distinct repositories", firstPayload.RepositoryID, secondPayload.RepositoryID)
 	}
-	if err := database.FailLabelProvisioningJob(ctx, *second, errProvisioningBoom, true, 0); err != nil {
-		t.Fatalf("FailLabelProvisioningJob() error = %v", err)
+	if firstPayload.InstallationID != 99 {
+		t.Errorf("first installation ID = %d, want 99", firstPayload.InstallationID)
 	}
-	retry, err := database.ClaimLabelProvisioningJob(ctx, "provisioner", 30*time.Second)
-	if err != nil || retry == nil || retry.RepositoryID != second.RepositoryID || retry.Attempt != 2 {
-		t.Errorf("retry ClaimLabelProvisioningJob() = (%#v, %v), want failed repository attempt 2", retry, err)
+	if first.IdempotencyKey == "" || first.IdempotencyKey == second.IdempotencyKey {
+		t.Errorf("idempotency keys = (%q, %q), want distinct keys", first.IdempotencyKey, second.IdempotencyKey)
+	}
+	if err := database.CompleteJob(ctx, *first, json.RawMessage(`{"provisioned":true}`)); err != nil {
+		t.Fatalf("CompleteJob() error = %v", err)
+	}
+	if err := database.FailJob(ctx, *second, errProvisioningBoom, true, 0); err != nil {
+		t.Fatalf("FailJob() error = %v", err)
+	}
+	retry, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
+	if err != nil || retry == nil || retry.Attempt != 2 {
+		t.Errorf("retry ClaimJobKind() = (%#v, %v), want failed repository attempt 2", retry, err)
+	} else if retryPayload, err := store.ParseLabelProvisioningPayload(retry.Payload); err != nil || retryPayload.RepositoryID != secondPayload.RepositoryID {
+		t.Errorf("retry payload = (%#v, %v), want repository %d", retryPayload, err, secondPayload.RepositoryID)
 	}
 }
 
@@ -83,22 +96,60 @@ func TestLabelProvisioningFailureIsolationAcrossRepositories(t *testing.T) {
 	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, []store.LabelProvisioningRepository{
 		{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		{ID: 9124, Owner: "jozala", Name: "widgets"},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
 	}
-	first, err := database.ClaimLabelProvisioningJob(ctx, "provisioner", 30*time.Second)
+	first, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
 	if err != nil || first == nil {
-		t.Fatalf("ClaimLabelProvisioningJob() = (%#v, %v)", first, err)
+		t.Fatalf("ClaimJobKind() = (%#v, %v)", first, err)
 	}
-	if err := database.FailLabelProvisioningJob(ctx, *first, errProvisioningBoom, false, 0); err != nil {
-		t.Fatalf("FailLabelProvisioningJob() error = %v", err)
+	if err := database.FailJob(ctx, *first, errProvisioningBoom, false, 0); err != nil {
+		t.Fatalf("FailJob() error = %v", err)
 	}
-	second, err := database.ClaimLabelProvisioningJob(ctx, "provisioner", 30*time.Second)
+	second, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
 	if err != nil || second == nil {
-		t.Fatalf("second ClaimLabelProvisioningJob() = (%#v, %v), want unaffected repository", second, err)
+		t.Fatalf("second ClaimJobKind() = (%#v, %v), want unaffected repository", second, err)
 	}
-	if second.RepositoryID == first.RepositoryID {
-		t.Errorf("second repository = %d, want the other repository", second.RepositoryID)
+	firstPayload, _ := store.ParseLabelProvisioningPayload(first.Payload)
+	secondPayload, _ := store.ParseLabelProvisioningPayload(second.Payload)
+	if secondPayload.RepositoryID == firstPayload.RepositoryID {
+		t.Errorf("second repository = %d, want the other repository", secondPayload.RepositoryID)
+	}
+}
+
+func TestCompleteLabelProvisioningTransitionRecordsInvalidEntriesAsDeliveryFailure(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deliveryID := "323e4567-e89b-12d3-a456-426614174000"
+	insertProvisioningDelivery(t, database, ctx, deliveryID)
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99,
+		[]store.LabelProvisioningRepository{{ID: 9123, Owner: "jozala", Name: "omnigrex"}},
+		[]string{"repositories_added[1] has an incomplete repository entry"}); err != nil {
+		t.Fatalf("CompleteLabelProvisioningTransition() error = %v", err)
+	}
+
+	record, err := database.GetWebhookDelivery(ctx, deliveryID)
+	if err != nil {
+		t.Fatalf("GetWebhookDelivery() error = %v", err)
+	}
+	if record.Status != store.WebhookFailed {
+		t.Errorf("delivery status = %q, want FAILED with queued jobs", record.Status)
+	}
+	if record.LastError == nil || *record.LastError == "" {
+		t.Errorf("delivery last error = %v, want invalid entry diagnostic", record.LastError)
+	}
+
+	provisioned, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
+	if err != nil || provisioned == nil {
+		t.Fatalf("ClaimJobKind() = (%#v, %v), want valid repository job despite invalid entries", provisioned, err)
+	}
+	if payload, err := store.ParseLabelProvisioningPayload(provisioned.Payload); err != nil || payload.RepositoryID != 9123 {
+		t.Errorf("provisioned payload = (%#v, %v), want repository 9123", payload, err)
 	}
 }
 

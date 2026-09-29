@@ -438,6 +438,8 @@ type processorInbox struct {
 	drained        []recordedTransition
 	transitions    []recordedTransition
 	provisioned    []recordedProvisioning
+	renewals       []recordedRenewal
+	renewErr       error
 	atomicSnapshot workflow.Snapshot
 	drainSnapshot  workflow.Snapshot
 	transitionErr  error
@@ -452,6 +454,12 @@ type recordedProvisioning struct {
 	claimToken     string
 	installationID int64
 	repositories   []store.LabelProvisioningRepository
+	invalid        []string
+}
+
+type recordedRenewal struct {
+	deliveryID string
+	claimToken string
 }
 
 type recordedTransition struct {
@@ -559,10 +567,16 @@ func (inbox *processorInbox) CompleteWebhookDelivery(_ context.Context, delivery
 	return inbox.completeErr
 }
 
-func (inbox *processorInbox) CompleteLabelProvisioningTransition(_ context.Context, deliveryID, claimToken string, installationID int64, repositories []store.LabelProvisioningRepository) error {
+func (inbox *processorInbox) CompleteLabelProvisioningTransition(_ context.Context, deliveryID, claimToken string, installationID int64, repositories []store.LabelProvisioningRepository, invalid []string) error {
 	inbox.operations = append(inbox.operations, "provision")
-	inbox.provisioned = append(inbox.provisioned, recordedProvisioning{deliveryID: deliveryID, claimToken: claimToken, installationID: installationID, repositories: repositories})
+	inbox.provisioned = append(inbox.provisioned, recordedProvisioning{deliveryID: deliveryID, claimToken: claimToken, installationID: installationID, repositories: repositories, invalid: invalid})
 	return inbox.provisionErr
+}
+
+func (inbox *processorInbox) RenewWebhookClaim(_ context.Context, deliveryID, claimToken string, _ time.Duration) error {
+	inbox.operations = append(inbox.operations, "renew")
+	inbox.renewals = append(inbox.renewals, recordedRenewal{deliveryID: deliveryID, claimToken: claimToken})
+	return inbox.renewErr
 }
 
 func (inbox *processorInbox) AcknowledgeWebhookDeliveryFailure(_ context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool) error {
@@ -601,7 +615,11 @@ func (*retryingInbox) CompleteWebhookTransition(context.Context, string, string,
 	return store.WorkflowApplication{}, nil
 }
 
-func (*retryingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository) error {
+func (*retryingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string) error {
+	return nil
+}
+
+func (*retryingInbox) RenewWebhookClaim(context.Context, string, string, time.Duration) error {
 	return nil
 }
 
@@ -628,7 +646,11 @@ func (*pollingInbox) CompleteWebhookTransition(context.Context, string, string, 
 	return store.WorkflowApplication{}, nil
 }
 
-func (*pollingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository) error {
+func (*pollingInbox) CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string) error {
+	return nil
+}
+
+func (*pollingInbox) RenewWebhookClaim(context.Context, string, string, time.Duration) error {
 	return nil
 }
 

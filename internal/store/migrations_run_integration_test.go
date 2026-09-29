@@ -92,8 +92,8 @@ FOR EACH ROW EXECUTE FUNCTION reject_attempt_backfill()`); err != nil {
 	if err := retryPool.QueryRow(ctx, `SELECT max(version), count(*) FROM schema_migrations`).Scan(&latestVersion, &migrationCount); err != nil {
 		t.Fatalf("read migration history after retry: %v", err)
 	}
-	if latestVersion != 29 || migrationCount != 29 {
-		t.Errorf("migration history after retry = max %d, count %d; want max 29, count 29", latestVersion, migrationCount)
+	if latestVersion != 28 || migrationCount != 28 {
+		t.Errorf("migration history after retry = max %d, count %d; want max 28, count 28", latestVersion, migrationCount)
 	}
 	if err := retryPool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000001'`).Scan(&attemptLimit); err != nil {
 		t.Fatalf("read delivery after retry: %v", err)
@@ -114,7 +114,7 @@ func TestUpgradeFromSchema25PreservesExistingAcceptedReview(t *testing.T) {
 	}
 	var earlier []string
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || strings.HasPrefix(entry.Name(), "000026_") || strings.HasPrefix(entry.Name(), "000027_") || strings.HasPrefix(entry.Name(), "000028_") || strings.HasPrefix(entry.Name(), "000029_") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || strings.HasPrefix(entry.Name(), "000026_") || strings.HasPrefix(entry.Name(), "000027_") || strings.HasPrefix(entry.Name(), "000028_") {
 			continue
 		}
 		earlier = append(earlier, entry.Name())
@@ -164,7 +164,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
 		deliveryID, fixture.workflowID).Scan(&version, &reviews, &checkpoints); err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 || reviews != 1 || checkpoints != 0 {
+	if version != 28 || reviews != 1 || checkpoints != 0 {
 		t.Fatalf("upgraded history = v%d, preserved reviews %d, retroactive checkpoints %d", version, reviews, checkpoints)
 	}
 }
@@ -262,8 +262,8 @@ func TestRunSerializesConcurrentCallsAndReleasesLock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("read migration history: %v", err)
 	}
-	if migrationCount != 29 {
-		t.Errorf("migration history count = %d, want 29", migrationCount)
+	if migrationCount != 28 {
+		t.Errorf("migration history count = %d, want 28", migrationCount)
 	}
 
 	observerPool := openPool(t, postgres.databaseURL(true))

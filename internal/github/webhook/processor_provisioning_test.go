@@ -3,6 +3,7 @@ package webhook_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,5 +148,108 @@ func TestProcessorProvisioningNeverCreatesWorkflowTransition(t *testing.T) {
 	}
 	if len(inbox.provisioned) != 1 {
 		t.Fatalf("provisioned = %#v, want one provisioning transition", inbox.provisioned)
+	}
+}
+
+func TestProcessorQueuesValidRepositoriesWhileReportingInvalid(t *testing.T) {
+	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation_repositories", "added",
+		`{"action":"added","installation":{"id":99},"repositories_added":[
+			{"id":9123,"name":"omnigrex","full_name":"jozala/omnigrex"},
+			{"id":0,"name":"","full_name":""}]}`)}}
+	processor := newTestProcessor(t, inbox)
+
+	processed, err := processor.ProcessNext(context.Background())
+	if !processed || err != nil {
+		t.Fatalf("ProcessNext() = (%t, %v), want mixed provisioning processed", processed, err)
+	}
+	if len(inbox.provisioned) != 1 {
+		t.Fatalf("provisioned = %#v, want one provisioning transition", inbox.provisioned)
+	}
+	transition := inbox.provisioned[0]
+	if len(transition.repositories) != 1 || transition.repositories[0].ID != 9123 {
+		t.Errorf("repositories = %#v, want only the valid entry", transition.repositories)
+	}
+	if len(transition.invalid) != 1 {
+		t.Errorf("invalid = %#v, want the malformed entry reported", transition.invalid)
+	}
+	if len(inbox.failures) != 0 {
+		t.Errorf("failures = %#v, want none: invalid entries travel with the transition", inbox.failures)
+	}
+}
+
+func TestProcessorRenewsClaimDuringSlowEnumeration(t *testing.T) {
+	release := make(chan struct{})
+	enumerator := &blockingEnumerator{
+		release: release,
+		repositories: []githubapi.InstallationRepository{
+			{ID: 9123, Owner: "jozala", Name: "omnigrex"},
+		},
+	}
+	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation", "created",
+		`{"action":"created","installation":{"id":99}}`)}}
+	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
+		ClaimOwner: "processor-a", LeaseDuration: 5 * time.Second, IdlePollInterval: time.Second,
+		AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor() error = %v", err)
+	}
+
+	processed := make(chan error, 1)
+	go func() {
+		_, err := processor.ProcessNext(context.Background())
+		processed <- err
+	}()
+	deadline := time.After(10 * time.Second)
+	for {
+		enumerator.mu.Lock()
+		started := enumerator.started
+		enumerator.mu.Unlock()
+		if started {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("enumeration did not start")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	// Hold enumeration past the background renewal interval (lease/3) so the
+	// slow path is exercised: the claim must be renewed while no repository
+	// jobs exist yet.
+	time.Sleep(4 * time.Second)
+	close(release)
+	select {
+	case err := <-processed:
+		if err != nil {
+			t.Fatalf("ProcessNext() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ProcessNext() did not complete after enumeration finished")
+	}
+	if len(inbox.renewals) < 2 {
+		t.Errorf("renewals = %d, want the pre-enumeration renewal plus background renewals", len(inbox.renewals))
+	}
+	if len(inbox.provisioned) != 1 || len(inbox.provisioned[0].repositories) != 1 {
+		t.Errorf("provisioned = %#v, want one enumerated repository", inbox.provisioned)
+	}
+}
+
+type blockingEnumerator struct {
+	mu           sync.Mutex
+	started      bool
+	release      chan struct{}
+	repositories []githubapi.InstallationRepository
+}
+
+func (fake *blockingEnumerator) EnumerateInstallationRepositories(ctx context.Context, _ int64) ([]githubapi.InstallationRepository, error) {
+	fake.mu.Lock()
+	fake.started = true
+	fake.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-fake.release:
+		return fake.repositories, nil
 	}
 }

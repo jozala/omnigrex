@@ -20,12 +20,14 @@ var (
 	ErrLabelProvisioningRepositoryMismatch = errors.New("label provisioning repository identity mismatch")
 )
 
-// LabelProvisioningWorkerStore is the durable job boundary used by the provisioning Worker.
+// LabelProvisioningWorkerStore is the generic job boundary used by the provisioning Worker.
+// Provisioning jobs reuse the shared jobs lifecycle (claim, heartbeat, retry,
+// lease expiry in internal/store/jobs.go) so lifecycle fixes apply once.
 type LabelProvisioningWorkerStore interface {
-	ClaimLabelProvisioningJob(context.Context, string, time.Duration) (*store.LabelProvisioningLease, error)
-	HeartbeatLabelProvisioningJob(context.Context, store.LabelProvisioningLease, time.Duration) error
-	CompleteLabelProvisioningJob(context.Context, store.LabelProvisioningLease, json.RawMessage) error
-	FailLabelProvisioningJob(context.Context, store.LabelProvisioningLease, error, bool, time.Duration) error
+	ClaimJobKind(context.Context, string, string, string, time.Duration) (*store.JobLease, error)
+	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
+	CompleteJob(context.Context, store.JobLease, json.RawMessage) error
+	FailJob(context.Context, store.JobLease, error, bool, time.Duration) error
 }
 
 // LabelProvisioningCredentialProvider supplies Developer repository credentials.
@@ -91,7 +93,7 @@ func NewLabelProvisioningWorker(workerStore LabelProvisioningWorkerStore, signer
 
 // ProcessNext claims and handles at most one repository provisioning job.
 func (worker *LabelProvisioningWorker) ProcessNext(ctx context.Context) (bool, error) {
-	lease, err := worker.store.ClaimLabelProvisioningJob(ctx, worker.claimOwner, worker.lease)
+	lease, err := worker.store.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, worker.claimOwner, worker.lease)
 	if err != nil {
 		return false, fmt.Errorf("claim label provisioning job: %w", err)
 	}
@@ -150,12 +152,18 @@ func (worker *LabelProvisioningWorker) Run(ctx context.Context) error {
 	}
 }
 
-func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease store.LabelProvisioningLease) error {
-	job := lease.LabelProvisioningJob
-	if job.RepositoryID <= 0 || strings.TrimSpace(job.RepositoryOwner) == "" || strings.TrimSpace(job.RepositoryName) == "" ||
-		strings.Contains(job.RepositoryOwner, "/") || strings.Contains(job.RepositoryName, "/") || job.InstallationID <= 0 {
-		return worker.fail(ctx, lease, permanentProvisioningError{cause: fmt.Errorf("%w: provisioning job repository identity is invalid", ErrLabelProvisioningRepositoryMismatch)})
+func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease store.JobLease) error {
+	if lease.Kind != store.ProvisionManagedLabelsJobKind || lease.Queue != store.LabelProvisioningQueue {
+		return worker.fail(ctx, lease, permanentProvisioningError{cause: fmt.Errorf("%w: provisioning job kind is %q", ErrLabelProvisioningRepositoryMismatch, lease.Kind)})
 	}
+	payload, err := store.ParseLabelProvisioningPayload(lease.Payload)
+	if err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		return worker.fail(ctx, lease, permanentProvisioningError{cause: err})
+	}
+	job := payload
 
 	appJWT, err := worker.signer.AppJWT(ctx)
 	if err != nil {
@@ -217,15 +225,15 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 	if err != nil {
 		return worker.fail(ctx, lease, err)
 	}
-	if err := worker.store.CompleteLabelProvisioningJob(ctx, lease, result); err != nil {
+	if err := worker.store.CompleteJob(ctx, lease, result); err != nil {
 		return fmt.Errorf("acknowledge label provisioning job: %w", err)
 	}
 	return nil
 }
 
-func (worker *LabelProvisioningWorker) fail(ctx context.Context, lease store.LabelProvisioningLease, cause error) error {
+func (worker *LabelProvisioningWorker) fail(ctx context.Context, lease store.JobLease, cause error) error {
 	retryable, delay := worker.classify(cause)
-	if err := worker.store.FailLabelProvisioningJob(ctx, lease, cause, retryable, delay); err != nil {
+	if err := worker.store.FailJob(ctx, lease, cause, retryable, delay); err != nil {
 		return errors.Join(cause, fmt.Errorf("record label provisioning job failure: %w", err))
 	}
 	return cause
@@ -253,7 +261,7 @@ func (worker *LabelProvisioningWorker) classify(err error) (bool, time.Duration)
 	return true, worker.retryDelay
 }
 
-func (worker *LabelProvisioningWorker) heartbeatLoop(ctx context.Context, lease store.LabelProvisioningLease) error {
+func (worker *LabelProvisioningWorker) heartbeatLoop(ctx context.Context, lease store.JobLease) error {
 	ticker := time.NewTicker(worker.heartbeat)
 	defer ticker.Stop()
 	for {
@@ -261,7 +269,7 @@ func (worker *LabelProvisioningWorker) heartbeatLoop(ctx context.Context, lease 
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := worker.store.HeartbeatLabelProvisioningJob(ctx, lease, worker.lease); err != nil {
+			if err := worker.store.HeartbeatJob(ctx, lease, worker.lease); err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}

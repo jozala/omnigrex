@@ -138,7 +138,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 			return jobInsert{}, errors.New("insert job: identity is not a UUID")
 		}
 	}
-	if job.scope.workflowID == "" ||
+	if job.scope.workflowID == "" && !isWorkflowlessProvisioningJob(job) ||
 		job.scope.workflowAttemptID != "" && job.scope.workflowID == "" ||
 		job.scope.agentAssignmentID != "" && job.scope.workflowID == "" ||
 		job.scope.agentSessionID != "" && job.scope.agentAssignmentID == "" ||

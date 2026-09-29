@@ -12,21 +12,23 @@ import (
 )
 
 type provisioningStore struct {
-	lease      *store.LabelProvisioningLease
+	lease      *store.JobLease
+	claimQueue string
+	claimKind  string
 	claimOwner string
-	completed  []store.LabelProvisioningLease
+	completed  []store.JobLease
 	failed     []provisioningFailure
 	claimErr   error
 }
 
 type provisioningFailure struct {
-	lease     store.LabelProvisioningLease
+	lease     store.JobLease
 	cause     error
 	retryable bool
 }
 
-func (durable *provisioningStore) ClaimLabelProvisioningJob(_ context.Context, owner string, _ time.Duration) (*store.LabelProvisioningLease, error) {
-	durable.claimOwner = owner
+func (durable *provisioningStore) ClaimJobKind(_ context.Context, queue, kind, owner string, _ time.Duration) (*store.JobLease, error) {
+	durable.claimQueue, durable.claimKind, durable.claimOwner = queue, kind, owner
 	if durable.claimErr != nil {
 		return nil, durable.claimErr
 	}
@@ -35,16 +37,16 @@ func (durable *provisioningStore) ClaimLabelProvisioningJob(_ context.Context, o
 	return lease, nil
 }
 
-func (durable *provisioningStore) HeartbeatLabelProvisioningJob(context.Context, store.LabelProvisioningLease, time.Duration) error {
+func (durable *provisioningStore) HeartbeatJob(context.Context, store.JobLease, time.Duration) error {
 	return nil
 }
 
-func (durable *provisioningStore) CompleteLabelProvisioningJob(_ context.Context, lease store.LabelProvisioningLease, _ json.RawMessage) error {
+func (durable *provisioningStore) CompleteJob(_ context.Context, lease store.JobLease, _ json.RawMessage) error {
 	durable.completed = append(durable.completed, lease)
 	return nil
 }
 
-func (durable *provisioningStore) FailLabelProvisioningJob(_ context.Context, lease store.LabelProvisioningLease, cause error, retryable bool, _ time.Duration) error {
+func (durable *provisioningStore) FailJob(_ context.Context, lease store.JobLease, cause error, retryable bool, _ time.Duration) error {
 	durable.failed = append(durable.failed, provisioningFailure{lease: lease, cause: cause, retryable: retryable})
 	return nil
 }
@@ -105,12 +107,19 @@ func (api *provisioningAPI) RemoveIssueLabel(context.Context, string, string, st
 	return nil
 }
 
-func provisioningLease() *store.LabelProvisioningLease {
-	return &store.LabelProvisioningLease{
-		LabelProvisioningJob: store.LabelProvisioningJob{
-			ID: "40000000-0000-4000-8000-000000000001", RepositoryID: 9123,
-			RepositoryOwner: "jozala", RepositoryName: "omnigrex",
-			InstallationID: 99, SourceDeliveryID: "123e4567-e89b-12d3-a456-426614174000",
+func provisioningLease() *store.JobLease {
+	payload, err := store.MarshalLabelProvisioningPayload(
+		store.LabelProvisioningRepository{ID: 9123, Owner: "jozala", Name: "omnigrex"}, 99)
+	if err != nil {
+		panic(err)
+	}
+	return &store.JobLease{
+		Job: store.Job{
+			JobSpec: store.JobSpec{
+				Queue: store.LabelProvisioningQueue, Kind: store.ProvisionManagedLabelsJobKind,
+				Payload: payload, IdempotencyKey: "label-provisioning:delivery:9123",
+			},
+			ID:         "40000000-0000-4000-8000-000000000001",
 			LeaseToken: "50000000-0000-4000-8000-000000000001",
 		},
 		Attempt: 1,
@@ -152,8 +161,9 @@ func TestLabelProvisioningWorkerCreatesOnlyMissingLabels(t *testing.T) {
 			t.Errorf("existing omnigrex:run was recreated")
 		}
 	}
-	if durable.claimOwner != "provisioner" {
-		t.Errorf("claim owner = %q, want provisioner", durable.claimOwner)
+	if durable.claimQueue != store.LabelProvisioningQueue || durable.claimKind != store.ProvisionManagedLabelsJobKind || durable.claimOwner != "provisioner" {
+		t.Errorf("claim = (%q, %q, %q), want label provisioning queue/kind owned by provisioner",
+			durable.claimQueue, durable.claimKind, durable.claimOwner)
 	}
 }
 
@@ -186,6 +196,22 @@ func TestLabelProvisioningWorkerFailsTerminallyOnIdentityMismatch(t *testing.T) 
 	}
 	if len(durable.failed) != 1 || durable.failed[0].retryable {
 		t.Errorf("failures = %#v, want one terminal mismatch failure", durable.failed)
+	}
+}
+
+func TestLabelProvisioningWorkerFailsTerminallyOnCorruptPayload(t *testing.T) {
+	lease := provisioningLease()
+	lease.Payload = json.RawMessage(`{"repository_id":0}`)
+	durable := &provisioningStore{lease: lease}
+	api := &provisioningAPI{}
+	worker := provisioningWorker(durable, api)
+
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || err == nil {
+		t.Fatalf("ProcessNext() = (%t, %v), want terminal payload failure", processed, err)
+	}
+	if len(durable.failed) != 1 || durable.failed[0].retryable {
+		t.Errorf("failures = %#v, want one terminal payload failure", durable.failed)
 	}
 }
 

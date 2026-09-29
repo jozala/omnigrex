@@ -51,6 +51,11 @@ type ProvisioningEvent struct {
 	// installation-token API instead of trusting the webhook list, so this
 	// field is empty for installation.created.
 	Repositories []Repository `json:"repositories,omitempty"`
+	// Invalid describes webhook-listed entries that could not be trusted.
+	// Valid entries still receive durable provisioning jobs while invalid
+	// entries fail the delivery observably, preserving per-repository
+	// failure isolation.
+	Invalid []string `json:"invalid,omitempty"`
 }
 
 // NormalizedEvent contains only GitHub identities and revisions needed by workflow transitions.
@@ -372,19 +377,23 @@ func normalizeProvisioning(delivery Delivery) (Normalization, error) {
 		// Enumerated through the installation-token API; do not trust the webhook list.
 	case "installation_repositories.added":
 		if len(payload.RepositoriesAdded) == 0 {
-			return Normalization{}, malformed("installation_repositories.added names no repositories")
+			event.Invalid = append(event.Invalid, "installation_repositories.added names no repositories")
+			break
 		}
 		seen := make(map[int64]struct{}, len(payload.RepositoriesAdded))
-		for _, entry := range payload.RepositoriesAdded {
+		for index, entry := range payload.RepositoriesAdded {
 			if entry.ID <= 0 || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.FullName) == "" {
-				return Normalization{}, malformed("installation_repositories.added has an incomplete repository entry")
+				event.Invalid = append(event.Invalid, fmt.Sprintf("repositories_added[%d] has an incomplete repository entry", index))
+				continue
 			}
 			owner, name, found := splitProvisioningFullName(entry.FullName)
 			if !found || !strings.EqualFold(name, entry.Name) {
-				return Normalization{}, malformed("installation_repositories.added repository full name does not match name")
+				event.Invalid = append(event.Invalid, fmt.Sprintf("repositories_added[%d] full name does not match name", index))
+				continue
 			}
 			if strings.TrimSpace(owner) == "" || strings.Contains(owner, "/") || strings.Contains(name, "/") {
-				return Normalization{}, malformed("installation_repositories.added repository owner and name are invalid")
+				event.Invalid = append(event.Invalid, fmt.Sprintf("repositories_added[%d] owner and name are invalid", index))
+				continue
 			}
 			if _, exists := seen[entry.ID]; exists {
 				continue

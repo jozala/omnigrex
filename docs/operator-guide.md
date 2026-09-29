@@ -434,6 +434,20 @@ Duplicate or overlapping deliveries are harmless, one repository's failure
 does not block other repositories, and terminal failures are recorded as
 observable provisioning and delivery failures for operator follow-up.
 
+Inspect failures in two places. A webhook delivery in state `FAILED` with a
+`last_error` means the delivery itself could not be turned into durable
+work: malformed payloads, installation enumeration failures, and deliveries
+whose webhook-listed entries were all invalid. Such a delivery queued no
+repository jobs, except that a delivery carrying both valid and invalid
+entries still queues jobs for the valid repositories while recording the
+invalid entries in its own `last_error`. Once jobs are queued the delivery
+becomes `PROCESSED`, so a later terminal failure of one repository appears
+only on that repository's `jobs` row: look for
+`kind = 'PROVISION_MANAGED_LABELS'` rows in state `FAILED`, whose
+`last_error` carries the cause and whose `payload` identifies the
+repository; the originating delivery is referenced by
+`normalized_event_id`.
+
 Repositories installed before this provisioning was deployed are not
 backfilled on startup. Their missing labels are created by the existing
 Workflow label reconciliation the next time a Workflow runs. Labels deleted
