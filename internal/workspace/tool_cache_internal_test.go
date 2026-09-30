@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -116,8 +117,8 @@ func TestTruncatedBelowThresholdPreservesPriorWarning(t *testing.T) {
 	if err != nil || complete.Truncated {
 		t.Fatalf("complete measure = (%#v, %v), want complete", complete, err)
 	}
-	// Choose a threshold between a 5-entry partial and the complete sum.
-	threshold := complete.Bytes / 2
+	// Choose a threshold just below complete so a 5-entry partial stays below.
+	threshold := complete.Bytes - 8192
 	if threshold <= 1024 || threshold >= complete.Bytes {
 		t.Fatalf("complete bytes = %d, cannot pick truncating threshold", complete.Bytes)
 	}
@@ -150,5 +151,62 @@ func TestTruncatedBelowThresholdPreservesPriorWarning(t *testing.T) {
 	maxToolCacheEntries = oldMax
 	if _, warned, err := monitor.Observe(ctx, assignment); err != nil || warned {
 		t.Fatalf("complete after truncated below = (_, %v, %v), want suppressed (state preserved)", warned, err)
+	}
+}
+
+func TestEventualWarningForHeavySubtreeBehindLightSiblings(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Light siblings exhaust a tiny budget when visited first; the heavy
+	// file alone exceeds the threshold but starts behind them in listing
+	// order. Per-directory cursors must eventually bring it within budget.
+	lightDir := filepath.Join(cache, "light")
+	if err := os.MkdirAll(lightDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := os.WriteFile(filepath.Join(lightDir, string(rune('a'+i))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	heavyDir := filepath.Join(cache, "heavy")
+	if err := os.MkdirAll(heavyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(heavyDir, "big"), bytes.Repeat([]byte("x"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 50 << 10, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warned := false
+	for i := 0; i < 10 && !warned; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned = warned || w
+	}
+	if !warned {
+		t.Fatal("heavy subtree never warned within 10 bounded polls")
 	}
 }

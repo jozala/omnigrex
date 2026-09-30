@@ -26,6 +26,7 @@ import (
 const (
 	maxToolCacheAssignmentsPerPoll = 2000
 	toolCachePerAssignmentTimeout  = 30 * time.Second
+	toolCacheDirBatchSize          = 128
 )
 
 var maxToolCacheEntries = 500_000
@@ -49,181 +50,306 @@ type ToolCacheUsage struct {
 // Missing cache areas report zero usage. The measurement is read-only:
 // it never changes permissions, retention, or cleanup state.
 func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, participantID string) (ToolCacheUsage, error) {
-	return lifecycle.measureAssignmentToolCache(ctx, participantID, 0)
+	usage, _, err := lifecycle.measureWithCursors(ctx, participantID, nil)
+	return usage, err
 }
 
-func (lifecycle *Lifecycle) measureAssignmentToolCache(ctx context.Context, participantID string, rotation uint64) (ToolCacheUsage, error) {
+// measureWithCursors performs one bounded poll starting at the given
+// per-directory offsets (relative dir path -> start index in readdir order).
+// It returns the partial usage for this poll and the updated offsets for the
+// next poll. Offsets advance only based on their own directory's progress, so
+// every entry is eventually enumerated regardless of tree shape. Enumeration
+// is batched (never materializing whole directories) and bounded by the
+// global entry budget.
+func (lifecycle *Lifecycle) measureWithCursors(ctx context.Context, participantID string, cursors map[string]int) (ToolCacheUsage, map[string]int, error) {
 	if lifecycle == nil || !uuidtext.Valid(participantID) {
-		return ToolCacheUsage{}, ErrInvalidAssignmentID
+		return ToolCacheUsage{}, cursors, ErrInvalidAssignmentID
 	}
 	root, err := lifecycle.toolDataRoot(participantID)
 	if err != nil {
-		return ToolCacheUsage{}, err
+		return ToolCacheUsage{}, cursors, err
 	}
 	assignmentRoot := filepath.Dir(root)
 	for _, parent := range []string{lifecycle.miseRoot, assignmentRoot} {
 		exists, err := inspectOwnedDirectory(parent)
 		if err != nil {
-			return ToolCacheUsage{}, err
+			return ToolCacheUsage{}, cursors, err
 		}
 		if !exists {
-			return ToolCacheUsage{}, nil
+			return ToolCacheUsage{}, cursors, nil
 		}
 	}
 	exists, err := inspectOwnedDirectory(root)
 	if err != nil {
-		return ToolCacheUsage{}, err
+		return ToolCacheUsage{}, cursors, err
 	}
 	if !exists {
-		return ToolCacheUsage{}, nil
+		return ToolCacheUsage{}, cursors, nil
 	}
 	cache := filepath.Join(root, "assignment")
 	cacheDir, _, err := openDirectoryNoFollow(cache)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ToolCacheUsage{}, nil
+			return ToolCacheUsage{}, cursors, nil
 		}
-		return ToolCacheUsage{}, fmt.Errorf("open Participant tool cache: %w", err)
+		return ToolCacheUsage{}, cursors, fmt.Errorf("open Participant tool cache: %w", err)
 	}
 	defer cacheDir.Close()
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(int(cacheDir.Fd()), &rootStat); err != nil {
-		return ToolCacheUsage{}, fmt.Errorf("inspect Participant tool cache: %w", err)
+		return ToolCacheUsage{}, cursors, fmt.Errorf("inspect Participant tool cache: %w", err)
 	}
 	if rootStat.Mode&unix.S_IFMT != unix.S_IFDIR || int(rootStat.Uid) != os.Geteuid() {
-		return ToolCacheUsage{}, fmt.Errorf("%w: Participant tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+		return ToolCacheUsage{}, cursors, fmt.Errorf("%w: Participant tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
 	}
-	rootDev := rootStat.Dev
-	rootIno := rootStat.Ino
+	rootDev := uint64(rootStat.Dev)
+	rootIno := uint64(rootStat.Ino)
+	if cursors == nil {
+		cursors = make(map[string]int)
+	}
+	nextCursors := make(map[string]int, len(cursors)+8)
+	for k, v := range cursors {
+		if v >= 0 {
+			nextCursors[k] = v
+		}
+	}
 	seen := make(map[[16]byte]struct{})
 	usage := ToolCacheUsage{}
 	addAllocated(&usage, rootStat)
-	pending := []ownedDirectoryEntry{{path: "", dev: uint64(rootDev), ino: rootIno}}
+	pending := []ownedDirectoryEntry{{path: "", dev: rootDev, ino: rootIno}}
 	entries := 0
+	truncated := false
 	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
-			return ToolCacheUsage{}, err
+			return ToolCacheUsage{}, cursors, err
+		}
+		if entries >= maxToolCacheEntries {
+			truncated = true
+			break
 		}
 		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		directory := cacheDir
-		owned := false
-		if current.path != "" {
-			reopened, err := reopenToolCacheDirectory(cacheDir, current.path)
+		completed, visitErr := lifecycle.visitToolCacheDir(ctx, cacheDir, rootDev, current, nextCursors, seen, &usage, &entries, &pending)
+		if visitErr != nil {
+			return ToolCacheUsage{}, cursors, visitErr
+		}
+		if !completed {
+			truncated = true
+			break
+		}
+	}
+	usage.Truncated = usage.Truncated || truncated || entries > maxToolCacheEntries
+	return usage, nextCursors, nil
+}
+
+// visitToolCacheDir processes one directory starting at its persisted offset,
+// in bounded batches, wrapping to the prefix when the suffix completes within
+// budget. It updates nextCursors for dirPath: reset to 0 when fully
+// enumerated, otherwise set to the resume offset. It returns completed=false
+// when the global budget is exhausted (truncated) or when an access skip
+// marks the overall scan incomplete. Pending subdirectories are queued for
+// depth-first traversal.
+func (lifecycle *Lifecycle) visitToolCacheDir(ctx context.Context, cacheDir *os.File, rootDev uint64, current ownedDirectoryEntry, nextCursors map[string]int, seen map[[16]byte]struct{}, usage *ToolCacheUsage, entries *int, pending *[]ownedDirectoryEntry) (bool, error) {
+	dirPath := current.path
+	startOffset := nextCursors[dirPath]
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	openDir := func() (*os.File, bool, error) {
+		if dirPath == "" {
+			// Reopen the root from its path so prefix wraps use a fresh
+			// listing position without relying on directory Seek semantics.
+			// cacheDir itself is kept open by the caller; duplicate a fresh
+			// fd for position-independent enumeration.
+			dup, err := reopenToolCacheDirectorySelf(cacheDir)
 			if err != nil {
+				return nil, false, err
+			}
+			return dup, true, nil
+		}
+		reopened, err := reopenToolCacheDirectory(cacheDir, dirPath)
+		return reopened, true, err
+	}
+	// Phase 1: suffix from startOffset to EOF.
+	directory, owned, err := openDir()
+	if err != nil {
+		if os.IsNotExist(err) {
+			delete(nextCursors, dirPath)
+			return true, nil
+		}
+		if isToolCacheAccessError(err) {
+			usage.Truncated = true
+			return true, nil
+		}
+		return false, fmt.Errorf("reopen Participant tool cache directory: %w", err)
+	}
+	closeDir := func() {
+		if owned && directory != nil && directory != cacheDir {
+			_ = directory.Close()
+		}
+	}
+	defer closeDir()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+		return false, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() ||
+		uint64(stat.Dev) != current.dev || uint64(stat.Ino) != current.ino {
+		return false, fmt.Errorf("%w: Participant tool cache directory changed", ErrUnsafeAssignmentPath)
+	}
+	if uint64(stat.Dev) != rootDev {
+		return false, fmt.Errorf("%w: Participant tool cache crossed devices", ErrUnsafeAssignmentPath)
+	}
+	processedSuffix, suffixDone, err := processToolCacheBatchRange(ctx, directory, startOffset, -1, rootDev, current, nextCursors, seen, usage, entries, pending)
+	if err != nil {
+		return false, err
+	}
+	if !suffixDone {
+		// Budget exhausted mid-suffix; resume here next poll.
+		nextCursors[dirPath] = startOffset + processedSuffix
+		return false, nil
+	}
+	if startOffset == 0 {
+		nextCursors[dirPath] = 0
+		return true, nil
+	}
+	// Phase 2: prefix 0..startOffset-1 to complete full enumeration within
+	// budget when possible.
+	_ = directory.Close()
+	directory = nil
+	fresh, _, err := openDir()
+	if err != nil {
+		if os.IsNotExist(err) {
+			delete(nextCursors, dirPath)
+			return true, nil
+		}
+		if isToolCacheAccessError(err) {
+			// Suffix was fully enumerated; prefix access failure still
+			// leaves the scan incomplete but preserves suffix progress.
+			usage.Truncated = true
+			nextCursors[dirPath] = 0
+			return true, nil
+		}
+		return false, fmt.Errorf("reopen Participant tool cache directory: %w", err)
+	}
+	directory = fresh
+	defer func() {
+		if directory != nil && directory != cacheDir {
+			_ = directory.Close()
+		}
+	}()
+	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+		return false, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() ||
+		uint64(stat.Dev) != current.dev || uint64(stat.Ino) != current.ino {
+		return false, fmt.Errorf("%w: Participant tool cache directory changed", ErrUnsafeAssignmentPath)
+	}
+	processedPrefix, prefixDone, err := processToolCacheBatchRange(ctx, directory, 0, startOffset, rootDev, current, nextCursors, seen, usage, entries, pending)
+	if err != nil {
+		return false, err
+	}
+	_ = processedSuffix
+	if !prefixDone {
+		// Budget exhausted within prefix; resume inside prefix next poll.
+		nextCursors[dirPath] = processedPrefix
+		return false, nil
+	}
+	nextCursors[dirPath] = 0
+	return true, nil
+}
+
+// processToolCacheBatchRange enumerates one listing pass in bounded batches.
+// Starting at skip offsets in readdir order, it processes up to limit entries
+// (limit < 0 means until EOF or global budget). It returns processed count
+// and whether the pass reached EOF without hitting the global budget.
+func processToolCacheBatchRange(ctx context.Context, directory *os.File, skip int, limit int, rootDev uint64, current ownedDirectoryEntry, nextCursors map[string]int, seen map[[16]byte]struct{}, usage *ToolCacheUsage, entries *int, pending *[]ownedDirectoryEntry) (int, bool, error) {
+	skipped := 0
+	processed := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return processed, false, err
+		}
+		if *entries >= maxToolCacheEntries {
+			return processed, false, nil
+		}
+		if limit >= 0 && processed >= limit {
+			// Prefix limit reached; pass complete (caller decides wrap).
+			// Drain to EOF to distinguish fully-enumerated vs truncated?
+			// For prefix passes limit==startOffset bounds the prefix length,
+			// reaching limit means prefix fully processed.
+			return processed, true, nil
+		}
+		names, readErr := directory.Readdirnames(toolCacheDirBatchSize)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			if isToolCacheAccessError(readErr) {
+				usage.Truncated = true
+				return processed, true, nil
+			}
+			return processed, false, readErr
+		}
+		for _, name := range names {
+			if skipped < skip {
+				skipped++
+				continue
+			}
+			if limit >= 0 && processed >= limit {
+				break
+			}
+			if *entries >= maxToolCacheEntries {
+				return processed, false, nil
+			}
+			var childStat unix.Stat_t
+			if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
 				if isToolCacheAccessError(err) {
-					// Read-only skip: an unreadable nested directory
-					// must not change modes and must not fail the
-					// whole measurement. The partial sum is marked
-					// incomplete so warning state is preserved.
 					usage.Truncated = true
 					continue
 				}
-				return ToolCacheUsage{}, fmt.Errorf("reopen Participant tool cache directory: %w", err)
+				return processed, false, err
 			}
-			directory = reopened
-			owned = true
-		}
-		visitErr := func() error {
-			var stat unix.Stat_t
-			if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
-				return err
+			*entries++
+			if *entries > maxToolCacheEntries {
+				return processed, false, nil
 			}
-			if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() ||
-				uint64(stat.Dev) != current.dev || stat.Ino != current.ino {
-				return fmt.Errorf("%w: Participant tool cache directory changed", ErrUnsafeAssignmentPath)
-			}
-			if uint64(stat.Dev) != uint64(rootDev) {
-				return fmt.Errorf("%w: Participant tool cache crossed devices", ErrUnsafeAssignmentPath)
-			}
-			names, err := listToolCacheNames(ctx, directory)
-			if err != nil {
-				if isToolCacheAccessError(err) {
-					usage.Truncated = true
-					return nil
-				}
-				return err
-			}
-			if len(names) > 1 {
-				rotateToolCacheNames(names, rotation)
-			}
-			for _, name := range names {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				var childStat unix.Stat_t
-				if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-					if os.IsNotExist(err) {
-						continue
-					}
-					if isToolCacheAccessError(err) {
-						usage.Truncated = true
-						continue
-					}
-					return err
-				}
-				entries++
-				if entries > maxToolCacheEntries {
-					usage.Truncated = true
-					return nil
-				}
-				switch childStat.Mode & unix.S_IFMT {
-				case unix.S_IFDIR:
-					// Never follow symlinks: Fstatat with NOFOLLOW plus
-					// O_NOFOLLOW open below pins the exact inode.
-					if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != uint64(rootDev) {
-						// Skip foreign-owned or cross-device directories
-						// rather than traversing outside the cache.
-						continue
-					}
-					// Count owned directory allocation once when encountered;
-					// directories cannot be hardlinked and symlinks are never
-					// followed, so each inode is counted at most once.
-					addAllocated(&usage, childStat)
-					childPath := name
-					if current.path != "" {
-						childPath = filepath.Join(current.path, name)
-					}
-					pending = append(pending, ownedDirectoryEntry{
-						path: childPath, dev: uint64(childStat.Dev), ino: childStat.Ino,
-					})
-				case unix.S_IFREG:
-					key := fileIdentity(childStat.Dev, childStat.Ino)
-					if _, duplicate := seen[key]; duplicate {
-						continue
-					}
-					seen[key] = struct{}{}
-					addAllocated(&usage, childStat)
-					usage.Files++
-				default:
-					// Symlinks, sockets, fifos, and devices are ignored:
-					// their targets are never followed and their sizes
-					// never contribute to the cache signal.
+			switch childStat.Mode & unix.S_IFMT {
+			case unix.S_IFDIR:
+				if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != rootDev {
 					continue
 				}
-				if usage.Truncated {
-					return nil
+				addAllocated(usage, childStat)
+				childPath := name
+				if current.path != "" {
+					childPath = filepath.Join(current.path, name)
 				}
+				*pending = append(*pending, ownedDirectoryEntry{
+					path: childPath, dev: uint64(childStat.Dev), ino: uint64(childStat.Ino),
+				})
+			case unix.S_IFREG:
+				key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
+				if _, duplicate := seen[key]; duplicate {
+					continue
+				}
+				seen[key] = struct{}{}
+				addAllocated(usage, childStat)
+				usage.Files++
+			default:
+				continue
 			}
-			return nil
-		}()
-		if owned {
-			closeErr := directory.Close()
-			if visitErr == nil {
-				visitErr = closeErr
+			processed++
+			if *entries >= maxToolCacheEntries {
+				return processed, false, nil
 			}
 		}
-		if visitErr != nil {
-			return ToolCacheUsage{}, visitErr
+		if errors.Is(readErr, io.EOF) {
+			return processed, true, nil
 		}
-		if usage.Truncated {
-			return usage, nil
+		if len(names) == 0 {
+			return processed, true, nil
 		}
 	}
-	return usage, nil
 }
 
 func fileIdentity(dev uint64, ino uint64) [16]byte {
@@ -323,32 +449,32 @@ func reopenToolCacheDirectory(root *os.File, relative string) (*os.File, error) 
 	return parent, nil
 }
 
+// reopenToolCacheDirectorySelf duplicates a fresh listing fd for an already
+// open cache directory without relying on directory Seek semantics.
+func reopenToolCacheDirectorySelf(dir *os.File) (*os.File, error) {
+	fd, err := unix.Openat(int(dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	dup := os.NewFile(uintptr(fd), dir.Name())
+	var a, b unix.Stat_t
+	if err := unix.Fstat(int(dir.Fd()), &a); err != nil {
+		_ = dup.Close()
+		return nil, err
+	}
+	if err := unix.Fstat(int(dup.Fd()), &b); err != nil {
+		_ = dup.Close()
+		return nil, err
+	}
+	if a.Dev != b.Dev || a.Ino != b.Ino {
+		_ = dup.Close()
+		return nil, ErrUnsafeAssignmentPath
+	}
+	return dup, nil
+}
+
 func isToolCacheAccessError(err error) bool {
 	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
-}
-
-func listToolCacheNames(ctx context.Context, directory *os.File) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	names, err := directory.Readdirnames(-1)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-func rotateToolCacheNames(names []string, rotation uint64) {
-	if len(names) <= 1 || rotation == 0 {
-		return
-	}
-	offset := int(rotation % uint64(len(names)))
-	if offset == 0 {
-		return
-	}
-	rotated := append(append([]string(nil), names[offset:]...), names[:offset]...)
-	copy(names, rotated)
 }
 
 // ToolCacheMonitor emits a bounded soft operational signal when an Agent
@@ -364,10 +490,10 @@ type ToolCacheMonitor struct {
 	logger         *slog.Logger
 	onError        func(error)
 
-	mu          sync.Mutex
-	lastWarned  map[string]int64
-	scanCursor  string
-	dirRotation map[string]uint64
+	mu         sync.Mutex
+	lastWarned map[string]int64
+	scanCursor string
+	dirCursors map[string]map[string]int
 }
 
 // ToolCacheMonitorConfig bounds the soft cache-growth signal.
@@ -406,7 +532,7 @@ func NewToolCacheMonitor(lifecycle *Lifecycle, config ToolCacheMonitorConfig) (*
 		logger:         config.Logger,
 		onError:        config.OnError,
 		lastWarned:     make(map[string]int64),
-		dirRotation:    make(map[string]uint64),
+		dirCursors:     make(map[string]map[string]int),
 	}, nil
 }
 
@@ -416,8 +542,9 @@ func NewToolCacheMonitor(lifecycle *Lifecycle, config ToolCacheMonitorConfig) (*
 // warns again. Incomplete (truncated or access-skipped) measurements never
 // clear warning state: a partial below-threshold sum preserves prior state,
 // and a partial at or above threshold warns at most once until a complete
-// measurement updates state. Measurement failures are returned and must not
-// block Agent Turns.
+// measurement updates state. Per-directory cursors persist across polls so
+// bounded scans eventually enumerate every entry. Measurement failures are
+// returned and must not block Agent Turns.
 func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID string) (ToolCacheUsage, bool, error) {
 	if monitor == nil || monitor.lifecycle == nil {
 		return ToolCacheUsage{}, false, fmt.Errorf("%w: tool cache monitor is nil", ErrInvalidOptions)
@@ -426,15 +553,20 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 		return ToolCacheUsage{}, false, ErrInvalidAssignmentID
 	}
 	monitor.mu.Lock()
-	rotation := monitor.dirRotation[participantID]
-	monitor.dirRotation[participantID] = rotation + 1
+	cursors := make(map[string]int, len(monitor.dirCursors[participantID])+4)
+	for k, v := range monitor.dirCursors[participantID] {
+		if v >= 0 {
+			cursors[k] = v
+		}
+	}
 	monitor.mu.Unlock()
-	usage, err := monitor.lifecycle.measureAssignmentToolCache(ctx, participantID, rotation)
+	usage, updated, err := monitor.lifecycle.measureWithCursors(ctx, participantID, cursors)
 	if err != nil {
 		return ToolCacheUsage{}, false, err
 	}
 	monitor.mu.Lock()
 	defer monitor.mu.Unlock()
+	monitor.dirCursors[participantID] = updated
 	if usage.Truncated {
 		if usage.Bytes >= monitor.thresholdBytes {
 			if _, warned := monitor.lastWarned[participantID]; warned {
@@ -451,6 +583,8 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 		}
 		return usage, false, nil
 	}
+	// Complete scans reset per-directory cursors for the next cycle.
+	monitor.dirCursors[participantID] = make(map[string]int)
 	if usage.Bytes < monitor.thresholdBytes {
 		delete(monitor.lastWarned, participantID)
 		return usage, false, nil
@@ -490,8 +624,6 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 		cancel()
 		checked++
 		if observeErr != nil {
-			// Measurement is best-effort and read-only; a single
-			// Participant failure must not fail the scan or block turns.
 			continue
 		}
 		if didWarn {
