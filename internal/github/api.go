@@ -31,6 +31,7 @@ var (
 	ErrInvalidPullRequest       = errors.New("invalid GitHub Pull Request")
 	ErrInvalidPullRequestNumber = errors.New("GitHub Pull Request number must be positive")
 	ErrInvalidRepository        = errors.New("GitHub repository owner and name are required")
+	ErrInvalidRepositoryID      = errors.New("GitHub repository ID must be positive")
 	ErrInvalidReview            = errors.New("invalid GitHub review")
 	ErrInvalidReviewEvent       = errors.New("invalid GitHub review event")
 	ErrMissingCredential        = errors.New("GitHub credential is required")

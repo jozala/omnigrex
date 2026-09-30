@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -15,13 +16,26 @@ import (
 
 var errInvalidPendingNormalizedEvent = store.ErrPendingNormalizedEventInvalid
 
+const maximumProvisioningRetryDelay = 365 * 24 * time.Hour
+
 // ProcessorStore is the durable inbox boundary used by Processor.
 type ProcessorStore interface {
-	ClaimWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
+	ClaimWorkflowWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
+	ClaimProvisioningWebhookDelivery(context.Context, string, time.Duration) (*store.WebhookClaim, error)
 	CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error
 	CompleteWebhookTransition(context.Context, string, string, json.RawMessage, store.WorkflowLocator, store.WorkflowEventFactory) (store.WorkflowApplication, error)
+	CompleteLabelProvisioningTransition(context.Context, string, string, int64, []store.LabelProvisioningRepository, []string, time.Duration) error
+	RenewWebhookClaim(context.Context, string, string, time.Duration) error
 	ApplyNextPendingNormalizedEvent(context.Context, store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error)
 	AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error
+	AcknowledgeWebhookDeliveryFailureAfter(context.Context, string, string, int, error, bool, time.Duration) error
+}
+
+// InstallationEnumerator lists every repository accessible to one installation.
+// It is used only for installation.created, whose webhook repository list may be
+// incomplete, and keeps provisioning complete without trusting that list.
+type InstallationEnumerator interface {
+	EnumerateInstallationRepositories(context.Context, int64) ([]githubapi.InstallationRepository, []string, error)
 }
 
 // ProcessorConfig controls claim ownership, lease duration, and idle polling.
@@ -29,7 +43,9 @@ type ProcessorConfig struct {
 	ClaimOwner                  string
 	LeaseDuration               time.Duration
 	IdlePollInterval            time.Duration
+	RetryDelay                  time.Duration
 	AssignmentRetentionDuration time.Duration
+	Enumerator                  InstallationEnumerator
 	OnError                     func(error)
 }
 
@@ -39,12 +55,24 @@ type Processor struct {
 	claimOwner                  string
 	leaseDuration               time.Duration
 	idlePollInterval            time.Duration
+	retryDelay                  time.Duration
 	assignmentRetentionDuration time.Duration
+	enumerator                  InstallationEnumerator
 	onError                     func(error)
+	provisioning                bool
 }
 
-// NewProcessor creates a durable webhook processor with explicit polling bounds.
+// NewProcessor processes Workflow deliveries and pending normalized events.
 func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Processor, error) {
+	return newProcessor(processorStore, config, false)
+}
+
+// NewProvisioningProcessor processes repository onboarding deliveries independently of Workflow events.
+func NewProvisioningProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Processor, error) {
+	return newProcessor(processorStore, config, true)
+}
+
+func newProcessor(processorStore ProcessorStore, config ProcessorConfig, provisioning bool) (*Processor, error) {
 	if processorStore == nil {
 		return nil, errors.New("webhook processor store is nil")
 	}
@@ -57,6 +85,9 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 	if config.IdlePollInterval <= 0 {
 		return nil, errors.New("webhook processor idle poll interval must be positive")
 	}
+	if config.RetryDelay <= 0 || config.RetryDelay > maximumProvisioningRetryDelay {
+		return nil, errors.New("webhook processor retry delay is out of range")
+	}
 	if config.AssignmentRetentionDuration <= 0 {
 		return nil, errors.New("webhook processor assignment retention duration must be positive")
 	}
@@ -65,21 +96,32 @@ func NewProcessor(processorStore ProcessorStore, config ProcessorConfig) (*Proce
 		claimOwner:                  config.ClaimOwner,
 		leaseDuration:               config.LeaseDuration,
 		idlePollInterval:            config.IdlePollInterval,
+		retryDelay:                  config.RetryDelay,
 		assignmentRetentionDuration: config.AssignmentRetentionDuration,
+		enumerator:                  config.Enumerator,
 		onError:                     config.OnError,
+		provisioning:                provisioning,
 	}, nil
 }
 
 // ProcessNext durably applies at most one historical event or claimed delivery.
 // The returned boolean reports whether work was processed.
 func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
-	if _, applied, err := processor.store.ApplyNextPendingNormalizedEvent(ctx, processor.pendingEventFactory); err != nil {
-		return false, fmt.Errorf("apply pending normalized event: %w", err)
-	} else if applied {
-		return true, nil
+	if !processor.provisioning {
+		if _, applied, err := processor.store.ApplyNextPendingNormalizedEvent(ctx, processor.pendingEventFactory); err != nil {
+			return false, fmt.Errorf("apply pending normalized event: %w", err)
+		} else if applied {
+			return true, nil
+		}
 	}
 
-	claim, err := processor.store.ClaimWebhookDelivery(ctx, processor.claimOwner, processor.leaseDuration)
+	var claim *store.WebhookClaim
+	var err error
+	if processor.provisioning {
+		claim, err = processor.store.ClaimProvisioningWebhookDelivery(ctx, processor.claimOwner, processor.leaseDuration)
+	} else {
+		claim, err = processor.store.ClaimWorkflowWebhookDelivery(ctx, processor.claimOwner, processor.leaseDuration)
+	}
 	if err != nil {
 		return false, fmt.Errorf("claim webhook delivery: %w", err)
 	}
@@ -119,7 +161,7 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
 	case NormalizationIgnored:
-		if normalization.Event != nil {
+		if normalization.Event != nil || normalization.Provisioning != nil {
 			cause := errors.New("normalize webhook delivery: ignored outcome has an event")
 			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
@@ -127,11 +169,153 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			cause := fmt.Errorf("complete ignored webhook delivery %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, true)
 		}
+	case NormalizationProvisioning:
+		if normalization.Event != nil || normalization.Provisioning == nil {
+			cause := errors.New("normalize webhook delivery: provisioning outcome has no provisioning event")
+			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
+		}
+		if err := processor.completeProvisioning(ctx, claim, *normalization.Provisioning); err != nil {
+			cause := fmt.Errorf("complete label provisioning %s: %w", claim.DeliveryID, err)
+			return true, processor.acknowledgeProvisioningFailure(ctx, claim, cause)
+		}
 	default:
 		cause := fmt.Errorf("normalize webhook delivery: invalid outcome %q", normalization.Outcome)
 		return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 	}
 	return true, nil
+}
+
+func (processor *Processor) completeProvisioning(ctx context.Context, claim *store.WebhookClaim, event ProvisioningEvent) error {
+	// Keep the webhook claim live from enumeration through durable job
+	// insertion. For a large installation both the page scan and the
+	// bounded job-insert batches can outlast one lease window; without
+	// renewal a batch would roll back on an expired lease and eventually
+	// exhaust the delivery without provisioning anything. Renewal loss
+	// aborts the work below. Committed batches are durable before delivery
+	// acknowledgement: a retry replays them idempotently through the same
+	// per-delivery idempotency keys, converging on one job per repository
+	// instead of starting with no queued work.
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	renewDone := make(chan struct{})
+	go processor.renewLoop(workCtx, claim, cancelWork, renewDone)
+
+	repositories := make([]store.LabelProvisioningRepository, 0, len(event.Repositories))
+	invalid := append([]string{}, event.Invalid...)
+	var err error
+	if event.EventName == "installation" && event.Action == "created" {
+		var enumerated []githubapi.InstallationRepository
+		var enumeratedInvalid []string
+		enumerated, enumeratedInvalid, err = processor.enumerateInstallation(workCtx, event.InstallationID)
+		if err == nil {
+			for _, repository := range enumerated {
+				if repository.ID <= 0 || strings.TrimSpace(repository.Owner) == "" || strings.TrimSpace(repository.Name) == "" {
+					err = fmt.Errorf("%w: enumerated repository identity is invalid", errInvalidPendingNormalizedEvent)
+					break
+				}
+				repositories = append(repositories, store.LabelProvisioningRepository{
+					ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
+				})
+			}
+			invalid = append(invalid, enumeratedInvalid...)
+		}
+	} else {
+		for _, repository := range event.Repositories {
+			repositories = append(repositories, store.LabelProvisioningRepository{
+				ID: repository.ID, Owner: repository.Owner, Name: repository.Name,
+			})
+		}
+	}
+	if err == nil {
+		err = processor.store.CompleteLabelProvisioningTransition(workCtx, claim.DeliveryID, claim.ClaimToken, event.InstallationID, repositories, invalid, processor.leaseDuration)
+	}
+	cancelWork()
+	<-renewDone
+	return err
+}
+
+func (processor *Processor) enumerateInstallation(ctx context.Context, installationID int64) ([]githubapi.InstallationRepository, []string, error) {
+	if processor.enumerator == nil {
+		return nil, nil, fmt.Errorf("%w: installation enumerator is not configured", errInvalidPendingNormalizedEvent)
+	}
+	return processor.enumerator.EnumerateInstallationRepositories(ctx, installationID)
+}
+
+// renewLoop renews the webhook claim immediately and then periodically until
+// ctx ends. Any renewal failure cancels the provisioning work: the claim is
+// already lost, so enumeration and insertion abort instead of racing expiry.
+func (processor *Processor) renewLoop(ctx context.Context, claim *store.WebhookClaim, cancel context.CancelFunc, done chan<- struct{}) {
+	defer close(done)
+	interval := processor.leaseDuration / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	renew := func() bool {
+		if err := processor.store.RenewWebhookClaim(ctx, claim.DeliveryID, claim.ClaimToken, processor.leaseDuration); err != nil {
+			cancel()
+			return false
+		}
+		return true
+	}
+	if !renew() {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !renew() {
+				return
+			}
+		}
+	}
+}
+
+func deterministicProvisioningFailure(err error) bool {
+	return errors.Is(err, errInvalidPendingNormalizedEvent) ||
+		errors.Is(err, store.ErrLabelProvisioningInvalid) ||
+		errors.Is(err, store.ErrNormalizedEventDeliveryMismatch) ||
+		errors.Is(err, store.ErrWorkflowLocatorMismatch) ||
+		errors.Is(err, store.ErrWorkflowDecisionInvalid)
+}
+
+func (processor *Processor) acknowledgeProvisioningFailure(ctx context.Context, claim *store.WebhookClaim, cause error) error {
+	metadata := githubapi.ExtractSafeErrorMetadata(cause)
+	retryable := !deterministicProvisioningFailure(cause) && !metadata.Permanent && (!metadata.APIClientError || metadata.APIRetryable || metadata.Transient)
+	delay := time.Duration(0)
+	if retryable {
+		delay = processor.retryAfter(claim.AttemptCount, metadata)
+	}
+	if err := processor.store.AcknowledgeWebhookDeliveryFailureAfter(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, cause, retryable, delay); err != nil {
+		return errors.Join(cause, fmt.Errorf("acknowledge provisioning delivery %s failure: %w", claim.DeliveryID, err))
+	}
+	if retryable {
+		return cause
+	}
+	return nil
+}
+
+func (processor *Processor) retryAfter(attempt int, metadata githubapi.SafeErrorMetadata) time.Duration {
+	delay := processor.retryDelay
+	for range max(0, attempt-1) {
+		if delay > maximumProvisioningRetryDelay/2 {
+			delay = maximumProvisioningRetryDelay
+			break
+		}
+		delay *= 2
+	}
+	if metadata.RetryAfter > delay {
+		delay = metadata.RetryAfter
+	}
+	if !metadata.ResetAt.IsZero() {
+		if untilReset := time.Until(metadata.ResetAt); untilReset > delay {
+			delay = untilReset
+		}
+	}
+	return min(delay, maximumProvisioningRetryDelay)
 }
 
 func (processor *Processor) acknowledgeFailure(ctx context.Context, claim *store.WebhookClaim, cause error, retryable bool) error {

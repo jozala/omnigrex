@@ -174,6 +174,33 @@ func TestClaimWebhookDeliveryAllowsConcurrentProcessorsToSkipLockedRows(t *testi
 	}
 }
 
+func TestProvisioningClaimDoesNotBlockWorkflowDelivery(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	workflowDelivery := webhookDelivery("123e4567-e89b-12d3-a456-426614174000")
+	provisioningDelivery := store.WebhookDelivery{
+		DeliveryID: "223e4567-e89b-12d3-a456-426614174000", EventName: "installation", Action: "created",
+		Payload: []byte(`{"action":"created","installation":{"id":99}}`),
+	}
+	for _, delivery := range []store.WebhookDelivery{workflowDelivery, provisioningDelivery} {
+		if _, err := database.InsertWebhookDelivery(ctx, delivery); err != nil {
+			t.Fatalf("insert %s: %v", delivery.EventName, err)
+		}
+	}
+	provisioning, err := database.ClaimProvisioningWebhookDelivery(ctx, "provisioner", 30*time.Second)
+	if err != nil || provisioning == nil || provisioning.DeliveryID != provisioningDelivery.DeliveryID {
+		t.Fatalf("provisioning claim = (%#v, %v), want installation delivery", provisioning, err)
+	}
+	workflow, err := database.ClaimWorkflowWebhookDelivery(ctx, "workflow-processor", 30*time.Second)
+	if err != nil || workflow == nil || workflow.DeliveryID != workflowDelivery.DeliveryID {
+		t.Fatalf("Workflow claim while installation is still leased = (%#v, %v), want Issue delivery", workflow, err)
+	}
+	if next, err := database.ClaimWorkflowWebhookDelivery(ctx, "workflow-processor", 30*time.Second); err != nil || next != nil {
+		t.Errorf("second Workflow claim = (%#v, %v), want no provisioning delivery", next, err)
+	}
+}
+
 func TestCompleteWebhookDeliveryAtomicallyRecordsSupportedOrIgnoredOutcome(t *testing.T) {
 	database := openWebhookStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -351,6 +378,99 @@ func TestWebhookFailureAcknowledgementKeepsTransientFailureRetryable(t *testing.
 	second, err := database.ClaimWebhookDelivery(ctx, "processor-b", 30*time.Second)
 	if err != nil || second == nil || second.DeliveryID != delivery.DeliveryID || second.AttemptCount != 2 {
 		t.Errorf("retry ClaimWebhookDelivery() = (%#v, %v), want same delivery at attempt 2", second, err)
+	}
+}
+
+func TestWebhookProvisioningFailureDefersRetryWithoutBlockingOtherDeliveries(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const provisioningID = "123e4567-e89b-12d3-a456-426614174000"
+	if _, err := database.InsertWebhookDelivery(ctx, store.WebhookDelivery{
+		DeliveryID: provisioningID, EventName: "installation", Action: "created",
+		Payload: []byte(`{"action":"created","installation":{"id":99}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", time.Second)
+	if err != nil || first == nil {
+		t.Fatalf("first claim = (%#v, %v)", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailureAfter(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("rate limited"), true, -time.Second); err == nil {
+		t.Fatal("negative retry delay was accepted")
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailureAfter(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("rate limited"), true, time.Second); err != nil {
+		t.Fatalf("schedule retry: %v", err)
+	}
+	record, err := database.GetWebhookDelivery(ctx, provisioningID)
+	if err != nil || record.Status != store.WebhookPending || record.MaxAttempts != 8 || record.RetryAt == nil || record.RetryAt.Before(time.Now()) {
+		t.Fatalf("scheduled delivery = (%#v, %v), want future PENDING retry", record, err)
+	}
+	if claim, err := database.ClaimWebhookDelivery(ctx, "processor-b", time.Second); err != nil || claim != nil {
+		t.Fatalf("claim before retry time = (%#v, %v), want no claim", claim, err)
+	}
+	other := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	independent, err := database.ClaimWebhookDelivery(ctx, "processor-b", time.Second)
+	if err != nil || independent == nil || independent.DeliveryID != other.DeliveryID {
+		t.Fatalf("independent claim = (%#v, %v), want other delivery", independent, err)
+	}
+	if err := database.CompleteWebhookDelivery(ctx, independent.DeliveryID, independent.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored}); err != nil {
+		t.Fatal(err)
+	}
+	if pause := time.Until(*record.RetryAt) + 20*time.Millisecond; pause > 0 {
+		time.Sleep(pause)
+	}
+	second, err := database.ClaimWebhookDelivery(ctx, "processor-c", time.Second)
+	if err != nil || second == nil || second.DeliveryID != provisioningID || second.AttemptCount != 2 {
+		t.Fatalf("claim after retry time = (%#v, %v), want provisioning attempt 2", second, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailureAfter(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("stale"), false, 0); !errors.Is(err, store.ErrWebhookClaimLost) {
+		t.Errorf("stale claimant error = %v, want lost claim", err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailureAfter(ctx, second.DeliveryID, second.ClaimToken, second.AttemptCount, errors.New("permanent"), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	final, err := database.GetWebhookDelivery(ctx, provisioningID)
+	if err != nil || final.Status != store.WebhookFailed || final.RetryAt != nil {
+		t.Errorf("terminal delivery = (%#v, %v), want FAILED without retry time", final, err)
+	}
+}
+
+func TestClaimWebhookDeliveryPrefersDueProvisioningRetryOverLaterFreshWork(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const provisioningID = "123e4567-e89b-12d3-a456-426614174000"
+	if _, err := database.InsertWebhookDelivery(ctx, store.WebhookDelivery{
+		DeliveryID: provisioningID, EventName: "installation", Action: "created",
+		Payload: []byte(`{"action":"created","installation":{"id":99}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := database.ClaimWebhookDelivery(ctx, "processor-a", time.Second)
+	if err != nil || first == nil {
+		t.Fatalf("initial claim = (%#v, %v)", first, err)
+	}
+	if err := database.AcknowledgeWebhookDeliveryFailureAfter(ctx, first.DeliveryID, first.ClaimToken, first.AttemptCount, errors.New("temporary"), true, 150*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	record, err := database.GetWebhookDelivery(ctx, provisioningID)
+	if err != nil || record.RetryAt == nil {
+		t.Fatalf("retry time = (%#v, %v)", record, err)
+	}
+	if pause := time.Until(*record.RetryAt) + 20*time.Millisecond; pause > 0 {
+		time.Sleep(pause)
+	}
+	fresh := webhookDelivery("223e4567-e89b-12d3-a456-426614174000")
+	if _, err := database.InsertWebhookDelivery(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	due, err := database.ClaimWebhookDelivery(ctx, "processor-b", time.Second)
+	if err != nil || due == nil || due.DeliveryID != provisioningID {
+		t.Fatalf("claim with later fresh delivery = (%#v, %v), want due provisioning retry", due, err)
 	}
 }
 

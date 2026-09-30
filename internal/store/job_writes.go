@@ -138,7 +138,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 			return jobInsert{}, errors.New("insert job: identity is not a UUID")
 		}
 	}
-	if job.scope.workflowID == "" ||
+	if job.scope.workflowID == "" && !isWorkflowlessProvisioningJob(job) ||
 		job.scope.workflowAttemptID != "" && job.scope.workflowID == "" ||
 		job.scope.agentAssignmentID != "" && job.scope.workflowID == "" ||
 		job.scope.agentSessionID != "" && job.scope.agentAssignmentID == "" ||
@@ -166,7 +166,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 func jobInsertArgs(id string, job jobInsert) []any {
 	return []any{
 		id, job.queue, job.kind, job.payload, job.priority, job.maxAttempts, job.idempotencyKey,
-		job.scope.workflowID, nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
+		nullableString(job.scope.workflowID), nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
 		nullableString(job.scope.agentSessionID), nullableString(job.scope.agentTurnID), nullableEpoch(job.scope.executionEpoch),
 		nullableString(job.provenance.normalizedEventID), nullableString(job.provenance.agentTurnSettlementID),
 		nullableString(job.provenance.workflowInternalEventID), nullableString(job.provenance.actionKey),

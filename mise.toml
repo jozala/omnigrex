@@ -53,8 +53,8 @@ go test -race -tags=integration ./internal/deployment -run TestComposeFullStack 
 '''
 
 [tasks.test-live-github]
-description = "Run the opt-in live Reviewer GitHub App review gate"
-run = "go test -tags=live ./internal/github -run TestLiveReviewerAppSubmitsApproveAndRequestChanges -count=1 -v"
+description = "Run the opt-in live GitHub App repository read and review gate"
+run = "go test -tags=live ./internal/github -run 'TestLive(DeveloperAppGetsRepositoryByID|ReviewerAppSubmitsApproveAndRequestChanges)' -count=1 -v"
 
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"

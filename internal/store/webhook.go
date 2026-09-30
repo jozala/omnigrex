@@ -25,6 +25,10 @@ var ErrNormalizedEventNotFound = errors.New("normalized event not found")
 // ErrNormalizedEventDeliveryMismatch means normalized JSON does not identify its delivery row.
 var ErrNormalizedEventDeliveryMismatch = errors.New("normalized event delivery ID mismatch")
 
+const maximumWebhookRetryDelay = 365 * 24 * time.Hour
+
+const provisioningWebhookMaxAttempts = 8
+
 // WebhookStatus is the durable processing state of a webhook delivery.
 type WebhookStatus string
 
@@ -55,6 +59,8 @@ type WebhookDeliveryRecord struct {
 	WebhookDelivery
 	Status         WebhookStatus
 	AttemptCount   int
+	MaxAttempts    int
+	RetryAt        *time.Time
 	ClaimOwner     *string
 	ClaimToken     *string
 	ClaimedAt      *time.Time
@@ -122,12 +128,17 @@ func (store *Store) InsertWebhookDelivery(ctx context.Context, delivery WebhookD
 	if err != nil {
 		return false, fmt.Errorf("encode webhook headers: %w", err)
 	}
+	maxAttempts := 3
+	switch delivery.EventName {
+	case "installation", "installation_repositories", "repository":
+		maxAttempts = provisioningWebhookMaxAttempts
+	}
 	result, err := store.pool.Exec(ctx, `
 INSERT INTO webhook_deliveries (
     delivery_id, event_name, action, repository_id, repository_owner,
-    repository_name, issue_id, issue_number, headers, payload
+    repository_name, issue_id, issue_number, headers, payload, max_attempts
 )
-VALUES ($1, $2, NULLIF($3, ''), NULLIF($4::BIGINT, 0), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7::BIGINT, 0), NULLIF($8::BIGINT, 0), $9, $10)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4::BIGINT, 0), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7::BIGINT, 0), NULLIF($8::BIGINT, 0), $9, $10, $11)
 ON CONFLICT (delivery_id) DO NOTHING`,
 		delivery.DeliveryID,
 		delivery.EventName,
@@ -139,6 +150,7 @@ ON CONFLICT (delivery_id) DO NOTHING`,
 		delivery.IssueNumber,
 		headers,
 		delivery.Payload,
+		maxAttempts,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert webhook delivery: %w", err)
@@ -153,7 +165,7 @@ func (store *Store) GetWebhookDelivery(ctx context.Context, deliveryID string) (
 	err := store.pool.QueryRow(ctx, `
 SELECT delivery_id::text, event_name, COALESCE(action, ''), COALESCE(repository_id, 0),
        COALESCE(repository_owner, ''), COALESCE(repository_name, ''), COALESCE(issue_id, 0), COALESCE(issue_number, 0), headers, payload, status,
-       attempt_count, claim_owner, claim_token::text, claimed_at,
+       attempt_count, max_attempts, retry_at, claim_owner, claim_token::text, claimed_at,
        lease_expires_at, received_at, processed_at, last_error
 FROM webhook_deliveries
 WHERE delivery_id = $1`, deliveryID).Scan(
@@ -169,6 +181,8 @@ WHERE delivery_id = $1`, deliveryID).Scan(
 		&record.Payload,
 		&record.Status,
 		&record.AttemptCount,
+		&record.MaxAttempts,
+		&record.RetryAt,
 		&record.ClaimOwner,
 		&record.ClaimToken,
 		&record.ClaimedAt,
@@ -189,8 +203,30 @@ WHERE delivery_id = $1`, deliveryID).Scan(
 	return record, nil
 }
 
+type webhookClaimScope string
+
+const (
+	allWebhookDeliveries          webhookClaimScope = ""
+	workflowWebhookDeliveries     webhookClaimScope = "workflow"
+	provisioningWebhookDeliveries webhookClaimScope = "provisioning"
+)
+
 // ClaimWebhookDelivery atomically leases pending or expired deliveries, preferring fresh work without overtaking an unresolved Issue reopen.
 func (store *Store) ClaimWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*WebhookClaim, error) {
+	return store.claimWebhookDelivery(ctx, owner, lease, allWebhookDeliveries)
+}
+
+// ClaimWorkflowWebhookDelivery leaves repository onboarding deliveries to the provisioning processor.
+func (store *Store) ClaimWorkflowWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*WebhookClaim, error) {
+	return store.claimWebhookDelivery(ctx, owner, lease, workflowWebhookDeliveries)
+}
+
+// ClaimProvisioningWebhookDelivery leaves Workflow deliveries to the Workflow processor.
+func (store *Store) ClaimProvisioningWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*WebhookClaim, error) {
+	return store.claimWebhookDelivery(ctx, owner, lease, provisioningWebhookDeliveries)
+}
+
+func (store *Store) claimWebhookDelivery(ctx context.Context, owner string, lease time.Duration, scope webhookClaimScope) (*WebhookClaim, error) {
 	if strings.TrimSpace(owner) == "" {
 		return nil, errors.New("claim webhook delivery: owner is empty")
 	}
@@ -206,8 +242,9 @@ func (store *Store) ClaimWebhookDelivery(ctx context.Context, owner string, leas
 	var headers []byte
 	err = store.pool.QueryRow(ctx, `
 WITH exhausted AS (
-    UPDATE webhook_deliveries
+    UPDATE webhook_deliveries AS delivery
     SET status = 'FAILED',
+        retry_at = NULL,
         claim_owner = NULL,
         claim_token = NULL,
         claimed_at = NULL,
@@ -217,6 +254,7 @@ WITH exhausted AS (
     WHERE (status = 'PENDING'
        OR (status = 'PROCESSING' AND lease_expires_at <= clock_timestamp()))
       AND attempt_count >= max_attempts
+      AND ($4::text = '' OR (delivery.event_name IN ('installation', 'installation_repositories', 'repository')) = ($4::text = 'provisioning'))
     RETURNING delivery_id
 ), claimable AS (
     SELECT delivery_id
@@ -224,6 +262,8 @@ WITH exhausted AS (
     WHERE delivery.attempt_count < delivery.max_attempts
       AND (delivery.status = 'PENDING'
        OR (delivery.status = 'PROCESSING' AND delivery.lease_expires_at <= clock_timestamp()))
+      AND (delivery.retry_at IS NULL OR delivery.retry_at <= clock_timestamp())
+      AND ($4::text = '' OR (delivery.event_name IN ('installation', 'installation_repositories', 'repository')) = ($4::text = 'provisioning'))
       AND NOT EXISTS (
           SELECT 1
           FROM webhook_deliveries AS earlier
@@ -238,12 +278,16 @@ WITH exhausted AS (
             AND (earlier.status IN ('PENDING', 'PROCESSING')
                  OR (earlier.status = 'PROCESSED' AND earlier_event.status = 'PENDING'))
       )
-    ORDER BY delivery.attempt_count, delivery.received_at, delivery.delivery_id
+    -- A due delayed retry is ordered by its due time; immediate retries stay behind fresh work.
+    ORDER BY CASE WHEN delivery.attempt_count > 0 AND delivery.retry_at IS NULL
+                  THEN statement_timestamp() ELSE COALESCE(delivery.retry_at, delivery.received_at) END,
+             delivery.attempt_count, delivery.delivery_id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
 UPDATE webhook_deliveries AS delivery
 SET status = 'PROCESSING',
+    retry_at = NULL,
     attempt_count = delivery.attempt_count + 1,
     claim_owner = $1,
     claim_token = $2,
@@ -258,7 +302,7 @@ RETURNING delivery.delivery_id::text, delivery.event_name, COALESCE(delivery.act
           COALESCE(delivery.issue_id, 0), COALESCE(delivery.issue_number, 0),
           delivery.headers, delivery.payload, delivery.claim_owner,
 	          delivery.claim_token::text, delivery.attempt_count, delivery.claimed_at,
-	          delivery.lease_expires_at, delivery.received_at`, owner, claimToken, lease.Microseconds()).Scan(
+	          delivery.lease_expires_at, delivery.received_at`, owner, claimToken, lease.Microseconds(), string(scope)).Scan(
 		&claim.DeliveryID,
 		&claim.EventName,
 		&claim.Action,
@@ -446,8 +490,16 @@ WHERE delivery_id = $1
 
 // AcknowledgeWebhookDeliveryFailure releases a fenced claim for retry or terminally fails an exhausted delivery.
 func (store *Store) AcknowledgeWebhookDeliveryFailure(ctx context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool) error {
+	return store.AcknowledgeWebhookDeliveryFailureAfter(ctx, deliveryID, claimToken, attemptCount, cause, retryable, 0)
+}
+
+// AcknowledgeWebhookDeliveryFailureAfter durably defers a retry while keeping the delivery unclaimed.
+func (store *Store) AcknowledgeWebhookDeliveryFailureAfter(ctx context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool, retryDelay time.Duration) error {
 	if cause == nil {
 		return errors.New("acknowledge webhook delivery failure: cause is nil")
+	}
+	if retryDelay < 0 || retryDelay > maximumWebhookRetryDelay {
+		return fmt.Errorf("acknowledge webhook delivery failure: retry delay must be between zero and %s", maximumWebhookRetryDelay)
 	}
 	if !validUUID(deliveryID) || !validUUID(claimToken) || attemptCount <= 0 {
 		return ErrWebhookClaimLost
@@ -455,6 +507,8 @@ func (store *Store) AcknowledgeWebhookDeliveryFailure(ctx context.Context, deliv
 	result, err := store.pool.Exec(ctx, `
 UPDATE webhook_deliveries
 SET status = CASE WHEN $5 AND attempt_count < max_attempts THEN 'PENDING' ELSE 'FAILED' END,
+    retry_at = CASE WHEN $5 AND attempt_count < max_attempts AND $6::BIGINT > 0
+                    THEN clock_timestamp() + $6 * interval '1 microsecond' ELSE NULL END,
     claim_owner = NULL,
     claim_token = NULL,
     claimed_at = NULL,
@@ -465,7 +519,7 @@ WHERE delivery_id = $1
   AND status = 'PROCESSING'
   AND claim_token = $2
   AND attempt_count = $3
-  AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, attemptCount, cause.Error(), retryable)
+  AND lease_expires_at > clock_timestamp()`, deliveryID, claimToken, attemptCount, cause.Error(), retryable, retryDelay.Microseconds())
 	if err != nil {
 		return fmt.Errorf("acknowledge webhook delivery failure: %w", err)
 	}

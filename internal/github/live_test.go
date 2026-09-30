@@ -14,6 +14,44 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 )
 
+func TestLiveDeveloperAppGetsRepositoryByID(t *testing.T) {
+	required := []string{
+		"OMNIGREX_LIVE_GITHUB_OWNER",
+		"OMNIGREX_LIVE_GITHUB_REPOSITORY",
+		"OMNIGREX_LIVE_GITHUB_DEVELOPER_APP_ID",
+		"OMNIGREX_LIVE_GITHUB_DEVELOPER_PRIVATE_KEY_FILE",
+	}
+	values := make(map[string]string, len(required))
+	var missing []string
+	for _, name := range required {
+		values[name] = os.Getenv(name)
+		if values[name] == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Skipf("live GitHub test is not configured; missing %s", strings.Join(missing, ", "))
+	}
+
+	client, err := githubapi.NewAPIClient(nil, os.Getenv("OMNIGREX_LIVE_GITHUB_API_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	owner, repository := values["OMNIGREX_LIVE_GITHUB_OWNER"], values["OMNIGREX_LIVE_GITHUB_REPOSITORY"]
+	developer := liveAppSigner(t, values["OMNIGREX_LIVE_GITHUB_DEVELOPER_APP_ID"], values["OMNIGREX_LIVE_GITHUB_DEVELOPER_PRIVATE_KEY_FILE"])
+	token := liveInstallationToken(t, ctx, client, developer, owner, repository)
+	byName, err := client.GetRepository(ctx, token, owner, repository)
+	if err != nil {
+		t.Fatalf("GetRepository() error = %v", err)
+	}
+	byID, err := client.GetRepositoryByID(ctx, token, byName.ID)
+	if err != nil || byID != byName {
+		t.Fatalf("GetRepositoryByID() = (%#v, %v), want current installation repository %#v", byID, err, byName)
+	}
+}
+
 func TestLiveReviewerAppSubmitsApproveAndRequestChanges(t *testing.T) {
 	required := []string{
 		"OMNIGREX_LIVE_GITHUB_OWNER",
