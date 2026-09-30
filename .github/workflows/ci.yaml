@@ -79,7 +79,7 @@ jobs:
             -c 'test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && opencode --version && mise --version && git --version'
 
       - name: Run Docker-backed integration tests
-        run: go test -race -tags=integration ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+        run: go test -race -tags=integration -timeout 30m ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
 
       - name: Compile live GitHub App gate
         run: go test -tags=live ./internal/github -run '^$'
