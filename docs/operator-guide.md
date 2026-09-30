@@ -292,6 +292,8 @@ Without the optional file, `TMPDIR` continues to use the 64 MiB `/tmp/opencode` 
 Requested paths are created on the disk-backed mise volume under an isolated Assignment subpath, outside the repository workspace and Change Proposal tree.
 Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-lifecycle caches remain across turns and are removed during Assignment collection.
 These directories have no per-Assignment disk quota, like the existing workspace volume, so monitor available Docker-volume storage.
+A background monitor measures only the assignment-lifecycle cache area every `OMNIGREX_ASSIGNMENT_TOOL_CACHE_POLL_INTERVAL` (default `5m`) and logs a soft warning when it reaches `OMNIGREX_ASSIGNMENT_TOOL_CACHE_WARNING_MIB` (default `1024` MiB).
+The warning carries only `assignment_id`, `size_bytes`, and `threshold_bytes`, is emitted once per unchanged size, never blocks an Agent Turn, and never changes retention or cleanup behavior.
 Moving build output to disk does not increase the Agent Turn container's memory limit or constrain compiler parallelism.
 This implementation changes the `opencode-acp/v1` Runtime Profile content hash; existing Agent Sessions bound to the earlier contract cannot continue unless the deployment resets their stored associations before upgrading.
 

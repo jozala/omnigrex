@@ -480,6 +480,15 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Assignment retention Worker: %w", err)
 	}
+	toolCacheMonitor, err := workspace.NewToolCacheMonitor(workspaces, workspace.ToolCacheMonitorConfig{
+		ThresholdBytes: settings.AssignmentToolCacheWarningBytes,
+		PollInterval:   settings.AssignmentToolCachePollInterval,
+		Logger:         logger,
+		OnError:        func(err error) { logger.Error("monitor Assignment tool cache", "error", err) },
+	})
+	if err != nil {
+		return fmt.Errorf("configure Assignment tool cache monitor: %w", err)
+	}
 
 	reconciliation, err := prepareStartup(ctx, settings.ReadinessTimeout, profileAvailability, startupReconciler)
 	if err != nil {
@@ -535,6 +544,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		closureStopWorker.Run,
 		closureSettlementWorker.Run,
 		retentionWorker.Run,
+		toolCacheMonitor.Run,
 	)
 }
 
