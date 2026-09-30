@@ -16,10 +16,12 @@ import (
 	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
-// maxPayloadBytes bounds authenticated webhook bodies.
-// Installation events can list many repositories in one delivery, so the bound
-// accommodates larger installation payloads while remaining bounded.
-const maxPayloadBytes = 2 << 20
+// maxPayloadBytes bounds raw webhook bodies before signature verification.
+// GitHub caps webhook payloads at 25 MB; 25 MiB admits the full supported delivery size.
+const maxPayloadBytes = 25 << 20
+
+// Limit the number of large unverified bodies retained at once within the orchestrator.
+const maxConcurrentWebhookBodies = 8
 
 // DeliveryInbox is the durable insert boundary used by Handler.
 type DeliveryInbox interface {
@@ -28,9 +30,10 @@ type DeliveryInbox interface {
 
 // Handler authenticates GitHub webhooks and writes them to the durable inbox.
 type Handler struct {
-	secret  []byte
-	inbox   DeliveryInbox
-	onError func(error)
+	secret    []byte
+	inbox     DeliveryInbox
+	onError   func(error)
+	bodySlots chan struct{}
 }
 
 // NewHandler creates a GitHub webhook HTTP handler.
@@ -41,7 +44,7 @@ func NewHandler(secret []byte, inbox DeliveryInbox, onError func(error)) (*Handl
 	if inbox == nil {
 		return nil, errors.New("webhook inbox is nil")
 	}
-	return &Handler{secret: append([]byte(nil), secret...), inbox: inbox, onError: onError}, nil
+	return &Handler{secret: append([]byte(nil), secret...), inbox: inbox, onError: onError, bodySlots: make(chan struct{}, maxConcurrentWebhookBodies)}, nil
 }
 
 // ServeHTTP handles one GitHub webhook request.
@@ -49,6 +52,12 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	if request.Method != http.MethodPost {
 		response.Header().Set("Allow", http.MethodPost)
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	select {
+	case handler.bodySlots <- struct{}{}:
+		defer func() { <-handler.bodySlots }()
+	case <-request.Context().Done():
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxPayloadBytes+1))

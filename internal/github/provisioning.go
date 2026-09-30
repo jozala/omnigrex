@@ -16,23 +16,56 @@ type InstallationRepository struct {
 	Name  string
 }
 
+type repositoryIdentityResponse struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	FullName string `json:"full_name"`
+	Owner    struct {
+		Login string `json:"login"`
+	} `json:"owner"`
+}
+
 // GetRepository returns the canonical repository identity for owner/name using an installation token.
 func (client *APIClient) GetRepository(ctx context.Context, installationToken, owner, repository string) (InstallationRepository, error) {
 	if err := validateRepository(owner, repository); err != nil {
 		return InstallationRepository{}, err
 	}
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repository)
-	var response struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		FullName string `json:"full_name"`
-		Owner    struct {
-			Login string `json:"login"`
-		} `json:"owner"`
-	}
+	var response repositoryIdentityResponse
 	if err := client.doJSON(ctx, http.MethodGet, path, installationToken, nil, &response); err != nil {
 		return InstallationRepository{}, err
 	}
+	observed, err := parseRepositoryIdentity(response)
+	if err != nil {
+		return InstallationRepository{}, err
+	}
+	if !strings.EqualFold(observed.Owner, owner) || !strings.EqualFold(observed.Name, repository) {
+		return InstallationRepository{}, fmt.Errorf("%w: repository response does not match request", ErrInvalidAPIResponse)
+	}
+	return observed, nil
+}
+
+// GetRepositoryByID resolves a repository's current name using one installation-token request.
+func (client *APIClient) GetRepositoryByID(ctx context.Context, installationToken string, repositoryID int64) (InstallationRepository, error) {
+	if repositoryID <= 0 {
+		return InstallationRepository{}, &ConfigurationError{Cause: ErrInvalidRepositoryID}
+	}
+	path := fmt.Sprintf("/repositories/%d", repositoryID)
+	var response repositoryIdentityResponse
+	if err := client.doJSON(ctx, http.MethodGet, path, installationToken, nil, &response); err != nil {
+		return InstallationRepository{}, err
+	}
+	observed, err := parseRepositoryIdentity(response)
+	if err != nil {
+		return InstallationRepository{}, err
+	}
+	if observed.ID != repositoryID {
+		return InstallationRepository{}, fmt.Errorf("%w: repository ID does not match request", ErrInvalidAPIResponse)
+	}
+	return observed, nil
+}
+
+func parseRepositoryIdentity(response repositoryIdentityResponse) (InstallationRepository, error) {
 	if response.ID <= 0 || strings.TrimSpace(response.Name) == "" || strings.TrimSpace(response.FullName) == "" ||
 		strings.TrimSpace(response.Owner.Login) == "" {
 		return InstallationRepository{}, fmt.Errorf("%w: repository response is incomplete", ErrInvalidAPIResponse)
@@ -40,9 +73,6 @@ func (client *APIClient) GetRepository(ctx context.Context, installationToken, o
 	ownerFromFull, nameFromFull, found := splitInstallationFullName(response.FullName)
 	if !found || !strings.EqualFold(ownerFromFull, response.Owner.Login) || !strings.EqualFold(nameFromFull, response.Name) {
 		return InstallationRepository{}, fmt.Errorf("%w: repository full name does not match owner and name", ErrInvalidAPIResponse)
-	}
-	if !strings.EqualFold(response.Owner.Login, owner) || !strings.EqualFold(response.Name, repository) {
-		return InstallationRepository{}, fmt.Errorf("%w: repository response does not match request", ErrInvalidAPIResponse)
 	}
 	return InstallationRepository{ID: response.ID, Owner: response.Owner.Login, Name: response.Name}, nil
 }

@@ -33,12 +33,13 @@ type LabelProvisioningWorkerStore interface {
 // LabelProvisioningCredentialProvider supplies Developer installation credentials.
 type LabelProvisioningCredentialProvider interface {
 	InstallationCredential(context.Context, int64) (string, error)
+	VerifyRepositoryInstallation(context.Context, int64, string, string) error
 }
 
 // LabelProvisioningAPI is the narrow GitHub API surface needed for verification and creation.
 type LabelProvisioningAPI interface {
 	LabelAPI
-	ListInstallationRepositories(context.Context, string) ([]InstallationRepository, []string, error)
+	GetRepositoryByID(context.Context, string, int64) (InstallationRepository, error)
 	GetRepository(context.Context, string, string, string) (InstallationRepository, error)
 }
 
@@ -178,29 +179,62 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 	if strings.TrimSpace(credential) == "" {
 		return worker.fail(ctx, lease, permanentProvisioningError{cause: errors.New("Developer installation credential is empty")})
 	}
-	owner, name, err := worker.resolveRepositoryName(ctx, credential, job)
-	if err != nil {
-		if ctx.Err() != nil {
-			return err
-		}
-		return worker.fail(ctx, lease, err)
-	}
-
-	observed, err := worker.api.GetRepository(ctx, credential, owner, name)
+	resolved, err := worker.api.GetRepositoryByID(ctx, credential, job.RepositoryID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return redactProvisioningError(err, credential)
 		}
 		return worker.fail(ctx, lease, redactProvisioningError(err, credential))
 	}
-	if observed.ID != job.RepositoryID {
+	if resolved.ID != job.RepositoryID {
 		return worker.fail(ctx, lease, permanentProvisioningError{
-			cause: fmt.Errorf("%w: observed repository %d does not match durable %d",
-				ErrLabelProvisioningRepositoryMismatch, observed.ID, job.RepositoryID),
+			cause: fmt.Errorf("%w: resolved repository %d does not match durable %d",
+				ErrLabelProvisioningRepositoryMismatch, resolved.ID, job.RepositoryID),
+		})
+	}
+	if err := worker.credentials.VerifyRepositoryInstallation(ctx, job.InstallationID, resolved.Owner, resolved.Name); err != nil {
+		safeErr := redactProvisioningError(err, credential)
+		if ctx.Err() != nil {
+			return safeErr
+		}
+		if ExtractSafeErrorMetadata(err).Permanent {
+			// A name may have changed after the ID lookup. Check the stable ID
+			// again before treating the old name's missing installation as final.
+			refreshed, refreshErr := worker.api.GetRepositoryByID(ctx, credential, job.RepositoryID)
+			if refreshErr == nil && refreshed.ID == job.RepositoryID &&
+				(!strings.EqualFold(refreshed.Owner, resolved.Owner) || !strings.EqualFold(refreshed.Name, resolved.Name)) {
+				return worker.fail(ctx, lease, &TransientError{Cause: fmt.Errorf("%w: repository renamed during installation verification", ErrLabelProvisioningRepositoryMismatch)})
+			}
+			if refreshErr != nil {
+				metadata := ExtractSafeErrorMetadata(refreshErr)
+				if metadata.Transient || metadata.APIRetryable {
+					return worker.fail(ctx, lease, redactProvisioningError(refreshErr, credential))
+				}
+			}
+		}
+		return worker.fail(ctx, lease, safeErr)
+	}
+
+	observed, err := worker.api.GetRepository(ctx, credential, resolved.Owner, resolved.Name)
+	if err != nil {
+		safeErr := redactProvisioningError(err, credential)
+		if ctx.Err() != nil {
+			return safeErr
+		}
+		if isAPIStatus(err, 404) {
+			// A rename between the ID lookup and this read can invalidate the old name.
+			return worker.fail(ctx, lease, &TransientError{Cause: safeErr})
+		}
+		return worker.fail(ctx, lease, safeErr)
+	}
+	if observed.ID != job.RepositoryID || !strings.EqualFold(observed.Owner, resolved.Owner) || !strings.EqualFold(observed.Name, resolved.Name) {
+		return worker.fail(ctx, lease, &TransientError{
+			Cause: fmt.Errorf("%w: repository identity changed while provisioning %d",
+				ErrLabelProvisioningRepositoryMismatch, job.RepositoryID),
 		})
 	}
 
-	if err := worker.reconciler.EnsureManagedLabels(ctx, credential, owner, name); err != nil {
+	if err := worker.reconciler.EnsureManagedLabels(ctx, credential, resolved.Owner, resolved.Name); err != nil {
 		if ctx.Err() != nil {
 			return redactProvisioningError(err, credential)
 		}
@@ -209,7 +243,7 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 
 	result, err := json.Marshal(map[string]any{
 		"repository_id": job.RepositoryID, "installation_id": job.InstallationID,
-		"owner": owner, "name": name,
+		"owner": resolved.Owner, "name": resolved.Name,
 	})
 	if err != nil {
 		return worker.fail(ctx, lease, err)
@@ -218,25 +252,6 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 		return fmt.Errorf("acknowledge label provisioning job: %w", err)
 	}
 	return nil
-}
-
-// resolveRepositoryName maps the durable repository ID to its current
-// owner and name through the installation listing. A repository absent
-// from its installation lost Developer App access and fails terminally.
-func (worker *LabelProvisioningWorker) resolveRepositoryName(ctx context.Context, credential string, job store.LabelProvisioningPayload) (string, string, error) {
-	repositories, _, err := worker.api.ListInstallationRepositories(ctx, credential)
-	if err != nil {
-		return "", "", redactProvisioningError(err, credential)
-	}
-	for _, repository := range repositories {
-		if repository.ID == job.RepositoryID {
-			return repository.Owner, repository.Name, nil
-		}
-	}
-	return "", "", permanentProvisioningError{
-		cause: fmt.Errorf("%w: repository %d is no longer accessible to installation %d",
-			ErrLabelProvisioningRepositoryMismatch, job.RepositoryID, job.InstallationID),
-	}
 }
 
 func (worker *LabelProvisioningWorker) fail(ctx context.Context, lease store.JobLease, cause error) error {
@@ -254,14 +269,15 @@ func (worker *LabelProvisioningWorker) classify(err error) (bool, time.Duration)
 	}
 	if metadata.Transient || metadata.APIRetryable {
 		delay := worker.retryDelay
-		rateLimitDelay := metadata.RetryAfter
-		if rateLimitDelay <= 0 && !metadata.ResetAt.IsZero() {
-			rateLimitDelay = time.Until(metadata.ResetAt)
+		if metadata.RetryAfter > delay {
+			delay = metadata.RetryAfter
 		}
-		if rateLimitDelay > delay {
-			delay = min(rateLimitDelay, maximumLabelProvisioningWorkerDuration)
+		if !metadata.ResetAt.IsZero() {
+			if untilReset := time.Until(metadata.ResetAt); untilReset > delay {
+				delay = untilReset
+			}
 		}
-		return true, delay
+		return true, min(delay, maximumLabelProvisioningWorkerDuration)
 	}
 	if metadata.APIClientError {
 		return false, worker.retryDelay

@@ -33,6 +33,7 @@ func ReviewerAppPermissions() InstallationPermissions {
 // RepositoryInstallationAPI is the narrow GitHub API surface needed to mint repository credentials.
 type RepositoryInstallationAPI interface {
 	ResolveRepositoryInstallation(context.Context, string, string, string) (int64, error)
+	VerifyRepositoryInstallation(context.Context, string, int64, string, string) error
 	CreateInstallationToken(context.Context, string, int64) (InstallationToken, error)
 }
 
@@ -89,7 +90,7 @@ func (provider *RepositoryInstallationCredentialProvider) RepositoryCredential(c
 // given installation ID without resolving a repository name. Label
 // provisioning stores only stable repository and installation IDs so a
 // repository rename cannot strand its job; the worker resolves the current
-// owner and name from the installation listing instead.
+// owner and name by repository ID instead.
 func (provider *RepositoryInstallationCredentialProvider) InstallationCredential(ctx context.Context, installationID int64) (credential string, err error) {
 	if provider == nil || provider.appJWT == nil || provider.api == nil || provider.tokens == nil {
 		return "", errors.New("repository installation credential provider is not configured")
@@ -111,6 +112,27 @@ func (provider *RepositoryInstallationCredentialProvider) InstallationCredential
 		return "", fmt.Errorf("create GitHub installation credential: %w", err)
 	}
 	return credential, nil
+}
+
+// VerifyRepositoryInstallation checks that the current repository identity still belongs to the expected Developer App installation.
+// An installation token can read a public repository even after losing access, so this check uses the App identity.
+func (provider *RepositoryInstallationCredentialProvider) VerifyRepositoryInstallation(ctx context.Context, installationID int64, owner, repository string) (err error) {
+	if provider == nil || provider.appJWT == nil || provider.api == nil || provider.tokens == nil {
+		return errors.New("repository installation credential provider is not configured")
+	}
+	if installationID <= 0 {
+		return &ConfigurationError{Cause: ErrInvalidInstallationID}
+	}
+	appJWT, err := provider.appJWT.AppJWT(ctx)
+	if err != nil {
+		return fmt.Errorf("create GitHub App JWT for repository verification: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = redactSecret(err, appJWT)
+		}
+	}()
+	return provider.api.VerifyRepositoryInstallation(ctx, appJWT, installationID, owner, repository)
 }
 
 type secretSafeError struct {

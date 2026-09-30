@@ -142,6 +142,41 @@ func TestAPIClientGetsRepositoryAndVerifiesIdentity(t *testing.T) {
 	}
 }
 
+func TestAPIClientGetsRepositoryByIDAfterRename(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/repositories/9123" {
+			t.Errorf("request = %s %s, want GET /repositories/9123", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer installation-token" {
+			t.Errorf("authorization = %q, want installation token", request.Header.Get("Authorization"))
+		}
+		_, _ = fmt.Fprint(writer, `{"id":9123,"name":"renamed","full_name":"acme/renamed","owner":{"login":"acme"}}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := client.GetRepositoryByID(context.Background(), "installation-token", 9123)
+	if err != nil || observed.ID != 9123 || observed.Owner != "acme" || observed.Name != "renamed" {
+		t.Errorf("GetRepositoryByID() = (%#v, %v), want renamed repository", observed, err)
+	}
+}
+
+func TestAPIClientRejectsMismatchedRepositoryByID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(writer, `{"id":9999,"name":"widgets","full_name":"acme/widgets","owner":{"login":"acme"}}`)
+	}))
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetRepositoryByID(context.Background(), "installation-token", 9123); !errors.Is(err, githubapi.ErrInvalidAPIResponse) {
+		t.Errorf("GetRepositoryByID() error = %v, want mismatched identity rejection", err)
+	}
+}
+
 func TestInstallationEnumeratorMintsTokenThenLists(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -347,7 +347,7 @@ The reverse proxy must:
 - Forward `POST /webhooks/github` to `http://127.0.0.1:8080/webhooks/github` without changing the path.
 - Preserve the exact raw request body.
 - Preserve `X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event`.
-- Allow request bodies up to 2 MiB.
+- Allow request bodies up to 25 MiB.
 - Complete request headers within five seconds and the request within fifteen seconds.
 - Keep port 8081 and the `omnigrex-agent` network private.
 
@@ -412,9 +412,8 @@ Do not add `omnigrex:run` until preflight and webhook delivery verification both
 
 ## Automatic Label Provisioning
 
-When the Developer App gains access to a repository, Omnigrex provisions the
-five managed labels before the first Workflow, using only Developer App
-credentials:
+When the Developer App gains access to a repository, Omnigrex queues provisioning of the five managed labels using only Developer App credentials:
+Provisioning is asynchronous; wait until the managed labels, including `omnigrex:run`, appear before adding the trigger label to an Issue.
 
 - A new Developer App installation provisions every accessible repository.
   Accessible repositories are enumerated through a paginated
@@ -427,6 +426,7 @@ credentials:
 - Repositories created under all-repository access are provisioned from the
   `repository.created` delivery.
 
+Onboarding deliveries use a separate processor, so installation enumeration does not block Issue and Pull Request webhook processing.
 Provisioning creates missing label names only, preserves the color and
 description of existing labels, leaves unrelated labels untouched, and never
 applies a state label to an Issue or Pull Request or starts a Workflow.
@@ -434,38 +434,24 @@ Duplicate or overlapping deliveries are harmless, one repository's failure
 does not block other repositories, and terminal failures are recorded as
 observable provisioning and delivery failures for operator follow-up.
 
-Inspect failures in two places. A webhook delivery in state `FAILED` with a
-`last_error` means the delivery itself could not be turned into durable
-work: malformed payloads and installation enumeration failures queue no
-repository jobs. A delivery carrying both valid and invalid entries is a
-mixed outcome: it still queues jobs for the valid repositories and finishes
-`FAILED` with the invalid entries in its own `last_error`, so an operator
-inspecting that `FAILED` delivery must also look for its already-queued
-repository jobs. A delivery with only valid entries becomes `PROCESSED`
-once its jobs are queued, so a later terminal failure of one repository
-appears only on that repository's `jobs` row: look for
-`kind = 'PROVISION_MANAGED_LABELS'` rows in state `FAILED`, whose
-`last_error` carries the cause and whose `payload` identifies the
-repository. Provisioning jobs intentionally leave `normalized_event_id`
-empty, so trace a failed job back to its delivery through its
-`idempotency_key`, which has the form
-`label-provisioning:<delivery-id>:<repository-id>`.
+Inspect webhook deliveries and their repository jobs together when provisioning fails.
+A delivery in state `FAILED` with a `last_error` may have queued no jobs because its payload or installation enumeration failed, but valid entries in a mixed delivery or earlier committed batches can leave jobs even when a later attempt exhausts the delivery.
+Look for `kind = 'PROVISION_MANAGED_LABELS'` rows in `jobs` for that delivery; each job's `idempotency_key` has the form `label-provisioning:<delivery-id>:<repository-id>` and its `payload` identifies the repository.
+A delivery with only valid entries becomes `PROCESSED` after its jobs are queued; a later terminal failure of one repository appears on its `jobs` row with status `FAILED` and a `last_error`.
+Provisioning jobs leave `normalized_event_id` empty because onboarding deliveries do not create normalized Workflow events.
 
-Repositories installed before this provisioning was deployed are not
-backfilled on startup. Their missing labels are created by the existing
-Workflow label reconciliation the next time a Workflow runs. Labels deleted
-from an idle repository are likewise restored only when a Workflow runs.
+Repositories installed before this provisioning was deployed are not backfilled on startup.
+Their missing labels are created by the existing Workflow label reconciliation the next time a Workflow runs.
+Labels deleted from an idle repository are likewise restored only when a Workflow runs.
 
-Onboarding scale and webhook admission are bounded. Webhook deliveries
-larger than the 2 MiB ingress bound are rejected with HTTP `413` before
-authentication, so no durable record exists: if the Developer App's Recent
-Deliveries page shows rejected installation deliveries for a very large
-installation, provisioning never triggered for it. Large installations are
-otherwise queued in bounded batches with claim renewal between batches, so
-interruption resumes through idempotent replay rather than restarting from
-scratch; progress is observable as `PROVISION_MANAGED_LABELS` job rows.
-In every over-limit case the fallback is the same Workflow label
-reconciliation, which creates any still-missing labels when work starts.
+Onboarding scale and webhook admission are bounded.
+The ingress accepts webhook bodies up to 25 MiB, covering GitHub's 25 MB payload cap; larger bodies receive HTTP `413` before authentication or durable recording.
+GitHub does not deliver payloads exceeding its own cap, so no webhook-triggered provisioning occurs in that case either.
+Large installations within these limits are queued in bounded batches with claim renewal between batches; progress is observable as `PROVISION_MANAGED_LABELS` job rows.
+Transient failures while converting a provisioning webhook into durable work defer the next delivery attempt with increasing delays and GitHub rate-limit timing; these deliveries allow up to eight attempts.
+If onboarding was not delivered or an installation exceeds the 100-page enumeration limit, the operator must create the missing `omnigrex:run` repository label before it can be applied to an Issue.
+The same manual trigger-label step applies to repositories installed before this feature when that label is absent.
+After the first Workflow starts, existing Workflow label reconciliation creates any other missing managed labels.
 
 ## Start A Workflow
 

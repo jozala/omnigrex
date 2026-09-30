@@ -37,6 +37,17 @@ func (api *repositoryInstallationAPI) ResolveRepositoryInstallation(_ context.Co
 	return api.installationID, api.resolveErr
 }
 
+func (api *repositoryInstallationAPI) VerifyRepositoryInstallation(ctx context.Context, jwt string, installationID int64, owner, repository string) error {
+	resolvedID, err := api.ResolveRepositoryInstallation(ctx, jwt, owner, repository)
+	if err != nil {
+		return err
+	}
+	if resolvedID != installationID {
+		return &githubapi.NotInstalledError{Owner: owner, Repository: repository, InstallationID: installationID}
+	}
+	return nil
+}
+
 func (api *repositoryInstallationAPI) CreateInstallationToken(_ context.Context, jwt string, installationID int64) (githubapi.InstallationToken, error) {
 	api.tokenJWT, api.tokenID = jwt, installationID
 	if api.tokenErr != nil {
@@ -171,6 +182,38 @@ func TestRepositoryInstallationCredentialProviderResolvesInstallationAndUsesToke
 	}
 	if jwt.calls != 3 {
 		t.Errorf("AppJWT() calls = %d, want two resolutions and one cached token creation", jwt.calls)
+	}
+}
+
+func TestRepositoryInstallationCredentialProviderVerifiesExpectedInstallation(t *testing.T) {
+	jwt := &credentialJWTProvider{token: "app-jwt"}
+	api := &repositoryInstallationAPI{installationID: 42}
+	provider, err := githubapi.NewRepositoryInstallationCredentialProvider(jwt, api, githubapi.DeveloperAppPermissions(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.VerifyRepositoryInstallation(context.Background(), 42, "acme", "renamed"); err != nil {
+		t.Fatalf("VerifyRepositoryInstallation() error = %v", err)
+	}
+	if api.resolveJWT != "app-jwt" || api.resolveOwner != "acme" || api.resolveRepository != "renamed" {
+		t.Errorf("resolution = (%q, %q, %q), want current repository identity", api.resolveJWT, api.resolveOwner, api.resolveRepository)
+	}
+	if err := provider.VerifyRepositoryInstallation(context.Background(), 99, "acme", "renamed"); err == nil || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
+		t.Errorf("mismatched installation error = %v, want permanent failure", err)
+	}
+	if api.tokenID != 0 {
+		t.Error("verification minted an unnecessary installation token")
+	}
+}
+
+func TestRepositoryInstallationCredentialProviderRedactsVerificationJWT(t *testing.T) {
+	api := &repositoryInstallationAPI{resolveErr: &secretBearingError{message: "request rejected app-jwt"}}
+	provider, err := githubapi.NewRepositoryInstallationCredentialProvider(&credentialJWTProvider{token: "app-jwt"}, api, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.VerifyRepositoryInstallation(context.Background(), 42, "acme", "widgets"); err == nil || strings.Contains(err.Error(), "app-jwt") {
+		t.Errorf("VerifyRepositoryInstallation() error = %v, want redacted error", err)
 	}
 }
 

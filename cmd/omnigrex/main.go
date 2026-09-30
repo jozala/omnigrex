@@ -520,6 +520,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			return server.RunHandler(ctx, settings.MCPAddr, settings.ShutdownTimeout, logger, "mcp", toolGateway)
 		},
 		githubServices.webhookProcessor.Run,
+		githubServices.provisioningProcessor.Run,
 		reconciliationWorker.Run,
 		preparationWorker.Run,
 		executionWorker.Run,
@@ -719,12 +720,13 @@ func (credentials roleRepositoryCredentials) ReviewerCredential(ctx context.Cont
 }
 
 type configuredGitHub struct {
-	api              *githubapi.APIClient
-	developerSigner  *githubapi.AppJWTSigner
-	reviewerSigner   *githubapi.AppJWTSigner
-	webhookHandler   *webhook.Handler
-	webhookProcessor *webhook.Processor
-	claimOwner       string
+	api                   *githubapi.APIClient
+	developerSigner       *githubapi.AppJWTSigner
+	reviewerSigner        *githubapi.AppJWTSigner
+	webhookHandler        *webhook.Handler
+	webhookProcessor      *webhook.Processor
+	provisioningProcessor *webhook.Processor
+	claimOwner            string
 }
 
 func configureGitHub(settings config.Config, database *store.Store, logger *slog.Logger) (*configuredGitHub, error) {
@@ -769,22 +771,30 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("configure label provisioning enumerator: %w", err)
 	}
-	processor, err := webhook.NewProcessor(database, webhook.ProcessorConfig{
+	processorConfig := webhook.ProcessorConfig{
 		ClaimOwner:                  claimOwner,
 		LeaseDuration:               settings.WebhookLeaseDuration,
 		IdlePollInterval:            settings.WebhookPollInterval,
+		RetryDelay:                  settings.WorkflowEffectRetryDelay,
 		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
-		Enumerator:                  installationEnumerator,
 		OnError: func(err error) {
-			logger.Error("process GitHub webhook delivery", "error", err)
+			logger.Error("process GitHub Workflow webhook delivery", "error", err)
 		},
-	})
+	}
+	processor, err := webhook.NewProcessor(database, processorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("configure GitHub webhook processor: %w", err)
 	}
+	processorConfig.ClaimOwner = claimOwner + ":provisioning-webhook"
+	processorConfig.Enumerator = installationEnumerator
+	processorConfig.OnError = func(err error) { logger.Error("process GitHub provisioning webhook delivery", "error", err) }
+	provisioningProcessor, err := webhook.NewProvisioningProcessor(database, processorConfig)
+	if err != nil {
+		return nil, fmt.Errorf("configure GitHub provisioning webhook processor: %w", err)
+	}
 	return &configuredGitHub{
 		api: api, developerSigner: developerSigner, reviewerSigner: reviewerSigner,
-		webhookHandler: handler, webhookProcessor: processor, claimOwner: claimOwner,
+		webhookHandler: handler, webhookProcessor: processor, provisioningProcessor: provisioningProcessor, claimOwner: claimOwner,
 	}, nil
 }
 

@@ -7,11 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	"github.com/jozala/omnigrex/internal/store"
@@ -198,9 +201,9 @@ func TestHandlerOnlyAcceptsPost(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsBodyLargerThanTwoMiB(t *testing.T) {
+func TestHandlerRejectsBodyLargerThanGitHubPayloadCap(t *testing.T) {
 	const secret = "webhook-secret"
-	body := bytes.Repeat([]byte("x"), 2<<20+1)
+	body := bytes.Repeat([]byte("x"), 25<<20+1)
 	inbox := &recordingInbox{}
 	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
 	if err != nil {
@@ -216,6 +219,86 @@ func TestHandlerRejectsBodyLargerThanTwoMiB(t *testing.T) {
 	if inbox.calls != 0 {
 		t.Errorf("inbox calls = %d, want 0", inbox.calls)
 	}
+}
+
+func TestHandlerBoundsConcurrentBodyReads(t *testing.T) {
+	const secret = "webhook-secret"
+	inbox := &blockingWebhookInbox{entered: make(chan struct{}, 9), release: make(chan struct{})}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(inbox.release) }) })
+	handler, err := webhook.NewHandler([]byte(secret), inbox, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan int, 9)
+	serve := func(request *http.Request) {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		completed <- response.Code
+	}
+	newRequest := func() *http.Request {
+		request := signedRequest([]byte(validEnvelope()), secret)
+		request.Header.Set("X-GitHub-Delivery", validDeliveryID())
+		request.Header.Set("X-GitHub-Event", "issues")
+		return request
+	}
+	for range 8 {
+		go serve(newRequest())
+	}
+	for range 8 {
+		select {
+		case <-inbox.entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("eight webhook bodies did not reach the inbox")
+		}
+	}
+	request := newRequest()
+	bodyRead := make(chan struct{})
+	request.Body = io.NopCloser(&observedBodyRead{reader: request.Body, firstRead: bodyRead})
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		serve(request)
+	}()
+	<-started
+	select {
+	case <-bodyRead:
+		t.Fatal("ninth webhook body was read while eight bodies were retained")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release.Do(func() { close(inbox.release) })
+	for range 9 {
+		select {
+		case status := <-completed:
+			if status != http.StatusAccepted {
+				t.Errorf("webhook status = %d, want 202", status)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("webhook did not complete after capacity became available")
+		}
+	}
+}
+
+type blockingWebhookInbox struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (inbox *blockingWebhookInbox) InsertWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
+	inbox.entered <- struct{}{}
+	<-inbox.release
+	return true, nil
+}
+
+type observedBodyRead struct {
+	reader    io.Reader
+	firstRead chan struct{}
+	once      sync.Once
+}
+
+func (body *observedBodyRead) Read(buffer []byte) (int, error) {
+	body.once.Do(func() { close(body.firstRead) })
+	return body.reader.Read(buffer)
 }
 
 func TestHandlerRejectsAuthenticatedMalformedHeadersAndEnvelope(t *testing.T) {

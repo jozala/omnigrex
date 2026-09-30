@@ -112,7 +112,7 @@ The full-stack test deliberately recreates the stable local networks and volumes
 mise run test-compose
 ```
 
-The live GitHub gate uses a pre-existing Developer App-authored Pull Request and submits both Reviewer App outcomes.
+The live GitHub gate checks the Developer App's repository-ID read and uses a pre-existing Developer App-authored Pull Request to submit both Reviewer App outcomes.
 Set the `OMNIGREX_LIVE_GITHUB_*` variables listed by the skipped test, then run:
 
 ```sh

@@ -40,8 +40,9 @@ func TestProcessorProvisionsAddedRepositoriesWithoutEnumeration(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation_repositories", "added",
 		`{"action":"added","installation":{"id":99},"repositories_added":[{"id":9123,"name":"omnigrex","full_name":"jozala/omnigrex"}]}`)}}
 	enumerator := &fakeEnumerator{}
-	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
 		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
 	})
 	if err != nil {
@@ -75,8 +76,9 @@ func TestProcessorEnumeratesNewInstallationInsteadOfTrustingWebhookList(t *testi
 		{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		{ID: 9124, Owner: "jozala", Name: "widgets"},
 	}}
-	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
 		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
 	})
 	if err != nil {
@@ -99,8 +101,9 @@ func TestProcessorRetriesTransientEnumerationFailure(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation", "created",
 		`{"action":"created","installation":{"id":99}}`)}}
 	enumerator := &fakeEnumerator{err: &githubapi.TransientError{Cause: errors.New("unavailable")}}
-	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
 		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
 	})
 	if err != nil {
@@ -111,18 +114,76 @@ func TestProcessorRetriesTransientEnumerationFailure(t *testing.T) {
 	if !processed || err == nil {
 		t.Fatalf("ProcessNext() = (%t, %v), want retryable enumeration failure", processed, err)
 	}
-	if len(inbox.failures) != 1 || !inbox.failures[0].retryable {
-		t.Errorf("failures = %#v, want one retryable failure", inbox.failures)
+	if len(inbox.failures) != 1 || !inbox.failures[0].retryable || inbox.failures[0].retryDelay != 5*time.Second {
+		t.Errorf("failures = %#v, want retry deferred for five seconds", inbox.failures)
 	}
 	if len(inbox.provisioned) != 0 {
 		t.Errorf("provisioned = %#v, want none after enumeration failure", inbox.provisioned)
 	}
 }
 
+func TestProcessorHonorsRateLimitResetWhenDeferringInstallationEnumeration(t *testing.T) {
+	claim := provisioningClaim("installation", "created", `{"action":"created","installation":{"id":99}}`)
+	claim.AttemptCount = 2
+	inbox := &processorInbox{claims: []*store.WebhookClaim{claim}}
+	reset := time.Now().Add(time.Minute)
+	enumerator := &fakeEnumerator{err: &githubapi.RateLimitError{
+		APIError: &githubapi.APIError{StatusCode: 403, Method: "GET", Path: "/installation/repositories"}, ResetAt: reset,
+	}}
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
+		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay: 5 * time.Second, AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := processor.ProcessNext(context.Background())
+	if !processed || err == nil || len(inbox.failures) != 1 || !inbox.failures[0].retryable {
+		t.Fatalf("ProcessNext() = (%t, %v), failures = %#v, want deferred rate-limit failure", processed, err, inbox.failures)
+	}
+	if delay := inbox.failures[0].retryDelay; delay < 50*time.Second || delay > time.Minute {
+		t.Errorf("retry delay = %s, want GitHub reset in approximately one minute", delay)
+	}
+}
+
+func TestProcessorBacksOffRepeatedTransientEnumeration(t *testing.T) {
+	claim := provisioningClaim("installation", "created", `{"action":"created","installation":{"id":99}}`)
+	claim.AttemptCount = 3
+	inbox := &processorInbox{claims: []*store.WebhookClaim{claim}}
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
+		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay: 5 * time.Second, AssignmentRetentionDuration: 30 * 24 * time.Hour,
+		Enumerator: &fakeEnumerator{err: &githubapi.TransientError{Cause: errors.New("unavailable")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := processor.ProcessNext(context.Background())
+	if !processed || err == nil || len(inbox.failures) != 1 || !inbox.failures[0].retryable || inbox.failures[0].retryDelay != 20*time.Second {
+		t.Errorf("ProcessNext() = (%t, %v), failures = %#v, want third attempt retry in 20s", processed, err, inbox.failures)
+	}
+}
+
+func TestProcessorTerminallyFailsLostInstallationWithoutSchedulingRetry(t *testing.T) {
+	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation", "created", `{"action":"created","installation":{"id":99}}`)}}
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
+		ClaimOwner: "processor-a", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay: 5 * time.Second, AssignmentRetentionDuration: 30 * 24 * time.Hour,
+		Enumerator: &fakeEnumerator{err: &githubapi.NotInstalledError{InstallationID: 99}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := processor.ProcessNext(context.Background())
+	if !processed || err != nil || len(inbox.failures) != 1 || inbox.failures[0].retryable || inbox.failures[0].retryDelay != 0 {
+		t.Errorf("ProcessNext() = (%t, %v), failures = %#v, want terminal lost-access failure", processed, err, inbox.failures)
+	}
+}
+
 func TestProcessorTerminallyFailsMalformedProvisioning(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("repository", "created",
 		`{"action":"created","installation":{"id":99}}`)}}
-	processor := newTestProcessor(t, inbox)
+	processor := newTestProvisioningProcessor(t, inbox)
 
 	processed, err := processor.ProcessNext(context.Background())
 	if !processed || err != nil {
@@ -139,7 +200,7 @@ func TestProcessorTerminallyFailsMalformedProvisioning(t *testing.T) {
 func TestProcessorProvisioningNeverCreatesWorkflowTransition(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("repository", "created",
 		`{"action":"created","installation":{"id":99},"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}}`)}}
-	processor := newTestProcessor(t, inbox)
+	processor := newTestProvisioningProcessor(t, inbox)
 
 	processed, err := processor.ProcessNext(context.Background())
 	if !processed || err != nil {
@@ -153,12 +214,31 @@ func TestProcessorProvisioningNeverCreatesWorkflowTransition(t *testing.T) {
 	}
 }
 
+func TestProvisioningProcessorLeavesPendingWorkflowEventsForWorkflowProcessor(t *testing.T) {
+	inbox := &processorInbox{
+		pending: []store.NormalizedEventRecord{{DeliveryID: validDeliveryID(), Payload: json.RawMessage(`{}`)}},
+		claims: []*store.WebhookClaim{provisioningClaim("installation_repositories", "added",
+			`{"action":"added","installation":{"id":99},"repositories_added":[{"id":9123,"name":"omnigrex","full_name":"jozala/omnigrex"}]}`)},
+	}
+	processor := newTestProvisioningProcessor(t, inbox)
+	processed, err := processor.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want repository provisioning", processed, err)
+	}
+	if len(inbox.pending) != 1 || len(inbox.drained) != 0 || len(inbox.provisioned) != 1 {
+		t.Errorf("pending/drained/provisioned = %d/%d/%d, want 1/0/1", len(inbox.pending), len(inbox.drained), len(inbox.provisioned))
+	}
+	if len(inbox.claimScopes) != 1 || inbox.claimScopes[0] != "provisioning" {
+		t.Errorf("claim scopes = %v, want provisioning", inbox.claimScopes)
+	}
+}
+
 func TestProcessorQueuesValidRepositoriesWhileReportingInvalid(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation_repositories", "added",
 		`{"action":"added","installation":{"id":99},"repositories_added":[
 			{"id":9123,"name":"omnigrex","full_name":"jozala/omnigrex"},
 			{"id":0,"name":"","full_name":""}]}`)}}
-	processor := newTestProcessor(t, inbox)
+	processor := newTestProvisioningProcessor(t, inbox)
 
 	processed, err := processor.ProcessNext(context.Background())
 	if !processed || err != nil {
@@ -189,8 +269,9 @@ func TestProcessorRenewsClaimDuringSlowEnumeration(t *testing.T) {
 	}
 	inbox := &processorInbox{claims: []*store.WebhookClaim{provisioningClaim("installation", "created",
 		`{"action":"created","installation":{"id":99}}`)}}
-	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
 		ClaimOwner: "processor-a", LeaseDuration: 5 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour, Enumerator: enumerator,
 	})
 	if err != nil {
@@ -267,8 +348,9 @@ func TestProcessorKeepsClaimLiveThroughSlowCompletion(t *testing.T) {
 		},
 		release: make(chan struct{}),
 	}
-	processor, err := webhook.NewProcessor(durable, webhook.ProcessorConfig{
+	processor, err := webhook.NewProvisioningProcessor(durable, webhook.ProcessorConfig{
 		ClaimOwner: "processor-a", LeaseDuration: 5 * time.Second, IdlePollInterval: time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour,
 	})
 	if err != nil {
@@ -329,6 +411,14 @@ func (durable *slowCompletionStore) ClaimWebhookDelivery(context.Context, string
 	return durable.claim, nil
 }
 
+func (durable *slowCompletionStore) ClaimWorkflowWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return durable.ClaimWebhookDelivery(ctx, owner, lease)
+}
+
+func (durable *slowCompletionStore) ClaimProvisioningWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return durable.ClaimWebhookDelivery(ctx, owner, lease)
+}
+
 func (durable *slowCompletionStore) RenewWebhookClaim(_ context.Context, _, _ string, _ time.Duration) error {
 	durable.mu.Lock()
 	defer durable.mu.Unlock()
@@ -361,5 +451,9 @@ func (*slowCompletionStore) ApplyNextPendingNormalizedEvent(context.Context, sto
 }
 
 func (*slowCompletionStore) AcknowledgeWebhookDeliveryFailure(context.Context, string, string, int, error, bool) error {
+	return nil
+}
+
+func (*slowCompletionStore) AcknowledgeWebhookDeliveryFailureAfter(context.Context, string, string, int, error, bool, time.Duration) error {
 	return nil
 }

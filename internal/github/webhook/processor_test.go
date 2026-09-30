@@ -42,6 +42,7 @@ func TestProcessorAppliesSupportedDeliveryAtomically(t *testing.T) {
 		ClaimOwner:                  "processor-a",
 		LeaseDuration:               30 * time.Second,
 		IdlePollInterval:            time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour,
 	})
 	if err != nil {
@@ -60,6 +61,9 @@ func TestProcessorAppliesSupportedDeliveryAtomically(t *testing.T) {
 	}
 	if !reflect.DeepEqual(inbox.operations, []string{"drain", "claim", "transition"}) {
 		t.Fatalf("operations = %#v, want drain before claim and transition", inbox.operations)
+	}
+	if !reflect.DeepEqual(inbox.claimScopes, []string{"workflow"}) {
+		t.Errorf("claim scopes = %v, want Workflow deliveries only", inbox.claimScopes)
 	}
 	if len(inbox.transitions) != 1 || len(inbox.completions) != 0 {
 		t.Fatalf("transitions/completions = (%#v, %#v), want one atomic transition and no legacy completion", inbox.transitions, inbox.completions)
@@ -354,7 +358,7 @@ func TestProcessorReturnsDurableOperationErrors(t *testing.T) {
 }
 
 func TestNewProcessorValidatesConfig(t *testing.T) {
-	valid := webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second, AssignmentRetentionDuration: 30 * 24 * time.Hour}
+	valid := webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second, RetryDelay: 5 * time.Second, AssignmentRetentionDuration: 30 * 24 * time.Hour}
 	tests := []struct {
 		name   string
 		store  webhook.ProcessorStore
@@ -365,6 +369,7 @@ func TestNewProcessorValidatesConfig(t *testing.T) {
 		{name: "short lease", store: &processorInbox{}, config: webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: time.Second, IdlePollInterval: time.Second}},
 		{name: "zero idle poll", store: &processorInbox{}, config: webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: time.Second}},
 		{name: "zero assignment retention", store: &processorInbox{}, config: webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second}},
+		{name: "zero retry delay", store: &processorInbox{}, config: webhook.ProcessorConfig{ClaimOwner: "processor", LeaseDuration: 30 * time.Second, IdlePollInterval: time.Second, AssignmentRetentionDuration: time.Hour}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -382,6 +387,7 @@ func TestProcessorRunUsesBoundedIdlePollingUntilContextEnds(t *testing.T) {
 		ClaimOwner:                  "processor",
 		LeaseDuration:               30 * time.Second,
 		IdlePollInterval:            time.Millisecond,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour,
 	})
 	if err != nil {
@@ -406,6 +412,7 @@ func TestProcessorRunReportsAndRetriesOperationFailures(t *testing.T) {
 		ClaimOwner:                  "processor",
 		LeaseDuration:               30 * time.Second,
 		IdlePollInterval:            time.Millisecond,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour,
 		OnError: func(err error) {
 			if !errors.Is(err, operationErr) {
@@ -429,6 +436,7 @@ func TestProcessorRunReportsAndRetriesOperationFailures(t *testing.T) {
 type processorInbox struct {
 	mu             sync.Mutex
 	claims         []*store.WebhookClaim
+	claimScopes    []string
 	claimOwner     string
 	claimLease     time.Duration
 	claimErr       error
@@ -492,6 +500,7 @@ type recordedFailure struct {
 	attemptCount int
 	cause        error
 	retryable    bool
+	retryDelay   time.Duration
 }
 
 func (inbox *processorInbox) ClaimWebhookDelivery(_ context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
@@ -508,6 +517,16 @@ func (inbox *processorInbox) ClaimWebhookDelivery(_ context.Context, owner strin
 	inbox.claims = inbox.claims[1:]
 	inbox.claimedAt = claim.ReceivedAt
 	return claim, nil
+}
+
+func (inbox *processorInbox) ClaimWorkflowWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	inbox.claimScopes = append(inbox.claimScopes, "workflow")
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
+}
+
+func (inbox *processorInbox) ClaimProvisioningWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	inbox.claimScopes = append(inbox.claimScopes, "provisioning")
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
 }
 
 func (inbox *processorInbox) ApplyNextPendingNormalizedEvent(_ context.Context, factory store.PendingWorkflowEventFactory) (store.WorkflowApplication, bool, error) {
@@ -599,6 +618,11 @@ func (inbox *processorInbox) AcknowledgeWebhookDeliveryFailure(_ context.Context
 	return inbox.failErr
 }
 
+func (inbox *processorInbox) AcknowledgeWebhookDeliveryFailureAfter(_ context.Context, deliveryID, claimToken string, attemptCount int, cause error, retryable bool, delay time.Duration) error {
+	inbox.failures = append(inbox.failures, recordedFailure{deliveryID: deliveryID, claimToken: claimToken, attemptCount: attemptCount, cause: cause, retryable: retryable, retryDelay: delay})
+	return inbox.failErr
+}
+
 type pollingInbox struct {
 	calls  atomic.Int32
 	cancel context.CancelFunc
@@ -616,6 +640,14 @@ func (inbox *retryingInbox) ClaimWebhookDelivery(context.Context, string, time.D
 		return nil, nil
 	}
 	return nil, inbox.operationErr
+}
+
+func (inbox *retryingInbox) ClaimWorkflowWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
+}
+
+func (inbox *retryingInbox) ClaimProvisioningWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
 }
 
 func (*retryingInbox) CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error {
@@ -642,11 +674,23 @@ func (*retryingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string,
 	return nil
 }
 
+func (*retryingInbox) AcknowledgeWebhookDeliveryFailureAfter(context.Context, string, string, int, error, bool, time.Duration) error {
+	return nil
+}
+
 func (inbox *pollingInbox) ClaimWebhookDelivery(_ context.Context, _ string, _ time.Duration) (*store.WebhookClaim, error) {
 	if inbox.calls.Add(1) == 3 {
 		inbox.cancel()
 	}
 	return nil, nil
+}
+
+func (inbox *pollingInbox) ClaimWorkflowWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
+}
+
+func (inbox *pollingInbox) ClaimProvisioningWebhookDelivery(ctx context.Context, owner string, lease time.Duration) (*store.WebhookClaim, error) {
+	return inbox.ClaimWebhookDelivery(ctx, owner, lease)
 }
 
 func (*pollingInbox) CompleteWebhookDelivery(context.Context, string, string, store.WebhookCompletion) error {
@@ -673,16 +717,34 @@ func (*pollingInbox) AcknowledgeWebhookDeliveryFailure(context.Context, string, 
 	return nil
 }
 
+func (*pollingInbox) AcknowledgeWebhookDeliveryFailureAfter(context.Context, string, string, int, error, bool, time.Duration) error {
+	return nil
+}
+
 func newTestProcessor(t *testing.T, inbox webhook.ProcessorStore) *webhook.Processor {
 	t.Helper()
 	processor, err := webhook.NewProcessor(inbox, webhook.ProcessorConfig{
 		ClaimOwner:                  "processor-a",
 		LeaseDuration:               30 * time.Second,
 		IdlePollInterval:            time.Second,
+		RetryDelay:                  5 * time.Second,
 		AssignmentRetentionDuration: 30 * 24 * time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("NewProcessor() error = %v", err)
+	}
+	return processor
+}
+
+func newTestProvisioningProcessor(t *testing.T, inbox webhook.ProcessorStore) *webhook.Processor {
+	t.Helper()
+	processor, err := webhook.NewProvisioningProcessor(inbox, webhook.ProcessorConfig{
+		ClaimOwner: "provisioner", LeaseDuration: 30 * time.Second,
+		IdlePollInterval: time.Second, RetryDelay: 5 * time.Second,
+		AssignmentRetentionDuration: 30 * 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return processor
 }
