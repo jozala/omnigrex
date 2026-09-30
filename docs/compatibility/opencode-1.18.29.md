@@ -8,13 +8,15 @@ The amd64 musl release artifact is pinned by SHA-256 `294bfa0f4647e0fc5d3edceed9
 The common agent image also pins mise `2026.8.10`, Alpine `3.24` by multi-platform digest, and every direct and transitive APK by version and SHA-256.
 A deployment Runtime Profile must use the pushed image's registry digest rather than a development tag or local image ID.
 
-OpenCode `1.18.29` was selected because its bundled offline model catalog contains the required `opencode-go/muse-spark-1.3-contributor` model.
-OpenCode `1.18.19` exposes only `opencode-go/muse-spark-1.2-contributor`, so it cannot enforce the requested Agent Profile through ACP session configuration.
+OpenCode `1.18.29` was selected because its bundled offline model catalog contains `opencode-go/muse-spark-1.3-contributor`, the model requested by this repository's Agent Profile at the time.
+OpenCode `1.18.19` exposes only `opencode-go/muse-spark-1.2-contributor`, so it could not enforce that Agent Profile through ACP session configuration.
+This historical selection does not make that model an Omnigrex application acceptance requirement.
 
 ## Automated Results
 
 The complete Docker-backed integration suite passes against the native `linux/arm64` image.
-The required-model assertion passes independently against both `linux/arm64` and `linux/amd64` images with runtime model fetching disabled.
+At qualification time, a model-catalog assertion passed independently against both `linux/arm64` and `linux/amd64` images with runtime model fetching disabled.
+That assertion has since been removed so application tests do not depend on this repository's Agent Profile model choices.
 The suite verifies same-version Agent Session creation, recovery, continuation, History Replay, cancellation, MCP operation handling, workspace replacement, provider-credential isolation, Reviewer controls, runtime readiness, and deployment topology.
 
 Run the complete local gate with:
