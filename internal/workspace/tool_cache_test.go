@@ -59,11 +59,16 @@ func TestMeasureAssignmentToolCacheExcludesTurnScratch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Bytes != 1024 || usage.Files != 1 {
-		t.Fatalf("usage = %#v, want 1024 bytes in 1 file", usage)
+	if usage.Files != 1 {
+		t.Fatalf("usage files = %d, want 1", usage.Files)
 	}
 	if usage.Truncated {
 		t.Fatal("usage truncated unexpectedly")
+	}
+	// Allocated usage for one 1 KiB file plus directories is well below the
+	// 1 MiB scratch file; counting scratch would exceed 1 MiB.
+	if usage.Bytes <= 0 || usage.Bytes >= 1<<20 {
+		t.Fatalf("usage bytes = %d, want small allocated cache without 1 MiB scratch", usage.Bytes)
 	}
 }
 
@@ -115,8 +120,11 @@ func TestMeasureAssignmentToolCacheIgnoresSymlinksWithoutLeavingSubpath(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Bytes != 512 || usage.Files != 1 {
-		t.Fatalf("symlink usage = %#v, want 512 bytes in 1 file", usage)
+	if usage.Files != 1 {
+		t.Fatalf("symlink usage files = %d, want 1", usage.Files)
+	}
+	if usage.Bytes <= 0 || usage.Bytes >= 1<<20 {
+		t.Fatalf("symlink usage bytes = %d, want small cache without 1 MiB outside", usage.Bytes)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "big")); err != nil {
 		t.Fatalf("outside file changed: %v", err)
@@ -146,6 +154,66 @@ func TestMeasureAssignmentToolCacheRefusesSymlinkedRoot(t *testing.T) {
 	}
 }
 
+func TestMeasureAssignmentToolCacheReportsAllocatedDiskUsage(t *testing.T) {
+	lifecycle, root := newToolCacheLifecycle(t)
+	cache := toolCacheDir(t, root, toolCacheAssignment)
+	const files = 10
+	for i := 0; i < files; i++ {
+		writeSizedFile(t, filepath.Join(cache, "tiny", string(rune('a'+i))), 1)
+	}
+	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), toolCacheAssignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Files != files {
+		t.Fatalf("usage files = %d, want %d", usage.Files, files)
+	}
+	// Ten 1-byte files allocate far more than 10 bytes on any filesystem
+	// with block allocation (typically 4 KiB per file plus directories).
+	// Apparent-size accounting would report only 10 bytes and miss pressure.
+	if usage.Bytes < 10*4096 {
+		t.Fatalf("allocated usage bytes = %d, want at least %d for %d tiny files", usage.Bytes, 10*4096, files)
+	}
+	if usage.Truncated {
+		t.Fatal("usage truncated unexpectedly")
+	}
+}
+
+func TestMeasureAssignmentToolCacheLeavesUnreadableNestedDirectoryUnchanged(t *testing.T) {
+	lifecycle, root := newToolCacheLifecycle(t)
+	assignment := toolCacheAssignment
+	cache := toolCacheDir(t, root, assignment)
+	writeSizedFile(t, filepath.Join(cache, "visible", "file"), 1024)
+	unreadable := filepath.Join(cache, "unreadable")
+	writeSizedFile(t, filepath.Join(unreadable, "hidden"), 1024)
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), assignment)
+	if err != nil {
+		t.Fatalf("measure with unreadable nested dir error = %v", err)
+	}
+	info, err := os.Stat(unreadable)
+	if err != nil {
+		// If the directory cannot even be stated, modes were not changed
+		// by measurement; treat as pass only when measurement skipped.
+		if !usage.Truncated {
+			t.Fatalf("unreadable dir stat error = %v without truncation", err)
+		}
+		return
+	}
+	if info.Mode().Perm() != 0 {
+		t.Fatalf("unreadable dir mode = %o, want 0 (measurement must not chmod)", info.Mode().Perm())
+	}
+	if !usage.Truncated {
+		t.Fatal("usage should be truncated when a nested directory is skipped")
+	}
+	if usage.Files != 1 {
+		t.Fatalf("usage files = %d, want 1 visible file", usage.Files)
+	}
+}
+
 func TestToolCacheMonitorWarnsOncePerUnchangedUsage(t *testing.T) {
 	lifecycle, root := newToolCacheLifecycle(t)
 	assignment := toolCacheAssignment
@@ -160,19 +228,22 @@ func TestToolCacheMonitorWarnsOncePerUnchangedUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	usage, warned, err := monitor.Observe(ctx, assignment)
-	if err != nil || !warned || usage.Bytes != 2048 {
-		t.Fatalf("first observe = (%#v, %v, %v), want warned", usage, warned, err)
+	first, warned, err := monitor.Observe(ctx, assignment)
+	if err != nil || !warned {
+		t.Fatalf("first observe = (%#v, %v, %v), want warned", first, warned, err)
 	}
 	_, warned, err = monitor.Observe(ctx, assignment)
 	if err != nil || warned {
 		t.Fatalf("repeated observe = (_, %v, %v), want suppressed", warned, err)
 	}
-	// Growth warns again with updated size.
+	// Growth warns again with increased allocated usage.
 	writeSizedFile(t, filepath.Join(toolCacheDir(t, root, assignment), "cache", "more"), 1024)
-	usage, warned, err = monitor.Observe(ctx, assignment)
-	if err != nil || !warned || usage.Bytes != 3072 {
-		t.Fatalf("grown observe = (%#v, %v, %v), want warned", usage, warned, err)
+	grown, warned, err := monitor.Observe(ctx, assignment)
+	if err != nil || !warned {
+		t.Fatalf("grown observe = (%#v, %v, %v), want warned", grown, warned, err)
+	}
+	if grown.Bytes <= first.Bytes {
+		t.Fatalf("grown bytes = %d, want more than first %d", grown.Bytes, first.Bytes)
 	}
 	// Dropping below threshold clears state so a future crossing warns again.
 	if err := os.RemoveAll(toolCacheDir(t, root, assignment)); err != nil {
@@ -195,14 +266,17 @@ func TestToolCacheMonitorWarnsOncePerUnchangedUsage(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatal(err)
 		}
-		if entry["assignment_id"] != assignment {
-			t.Fatalf("log entry assignment = %v: %s", entry["assignment_id"], line)
+		if entry["agent_participant_id"] != assignment {
+			t.Fatalf("log entry participant = %v: %s", entry["agent_participant_id"], line)
 		}
 		if _, ok := entry["size_bytes"]; !ok {
 			t.Fatalf("log entry missing size_bytes: %s", line)
 		}
 		if entry["threshold_bytes"] != float64(1024) {
 			t.Fatalf("log entry threshold = %v: %s", entry["threshold_bytes"], line)
+		}
+		if _, ok := entry["assignment_id"]; ok {
+			t.Fatalf("log entry uses legacy assignment_id key: %s", line)
 		}
 		for key := range entry {
 			lower := strings.ToLower(key)
@@ -220,7 +294,7 @@ func TestToolCacheMonitorBelowThresholdNeverWarns(t *testing.T) {
 	lifecycle, root := newToolCacheLifecycle(t)
 	writeSizedFile(t, filepath.Join(toolCacheDir(t, root, toolCacheAssignment), "cache", "small"), 100)
 	monitor, err := workspace.NewToolCacheMonitor(lifecycle, workspace.ToolCacheMonitorConfig{
-		ThresholdBytes: 1 << 20, PollInterval: time.Minute,
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -261,6 +335,59 @@ func TestToolCacheMonitorCheckSkipsFailedMeasurements(t *testing.T) {
 	}
 }
 
+func TestToolCacheMonitorRotatesBoundedSelectionAcrossPolls(t *testing.T) {
+	lifecycle, root := newToolCacheLifecycle(t)
+	ids := []string{
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		"33333333-3333-4333-8333-333333333333",
+	}
+	for _, id := range ids {
+		writeSizedFile(t, filepath.Join(toolCacheDir(t, root, id), "cache", "blob"), 2048)
+	}
+	monitor, err := workspace.NewToolCacheMonitor(lifecycle, workspace.ToolCacheMonitorConfig{
+		ThresholdBytes: 1024, PollInterval: time.Millisecond, MaxAssignments: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]int)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		checked, _, err := monitor.Check(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checked != 1 {
+			t.Fatalf("poll %d checked = %d, want 1", i, checked)
+		}
+		// Observe directly to learn which ID was selected via cursor:
+		// the monitor warns once per ID, so a second Check warns for a
+		// different ID until all three have warned.
+		_ = seen
+	}
+	// After three single-item polls every ID must have been measured once.
+	// Re-check with a fresh monitor that records warnings per ID.
+	fresh, err := workspace.NewToolCacheMonitor(lifecycle, workspace.ToolCacheMonitorConfig{
+		ThresholdBytes: 1024, PollInterval: time.Millisecond, MaxAssignments: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		checked, warned, err := fresh.Check(ctx)
+		if err != nil || checked != 1 || warned != 1 {
+			t.Fatalf("fresh poll %d = (%d, %d, %v), want (1, 1, nil)", i, checked, warned, err)
+		}
+	}
+	// Fourth poll wraps around and finds all already warned, so no new warning.
+	if checked, warned, err := fresh.Check(ctx); err != nil || checked != 1 || warned != 0 {
+		t.Fatalf("wrap poll = (%d, %d, %v), want (1, 0, nil)", checked, warned, err)
+	}
+	_ = seen
+	_ = monitor
+}
+
 func TestMeasureAssignmentToolCacheLeavesRetentionAndCleanupUnchanged(t *testing.T) {
 	lifecycle, root := newToolCacheLifecycle(t)
 	assignment := toolCacheAssignment
@@ -271,7 +398,10 @@ func TestMeasureAssignmentToolCacheLeavesRetentionAndCleanupUnchanged(t *testing
 		t.Fatal(err)
 	}
 	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), assignment)
-	if err != nil || usage.Bytes != 512 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Files != 1 || usage.Bytes <= 0 {
 		t.Fatalf("measure = (%#v, %v)", usage, err)
 	}
 	after, err := os.Stat(cacheFile)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,34 +19,44 @@ import (
 )
 
 // ToolCacheWarningThresholdReason documents the default soft signal.
-// Assignment tool-data caches on the disk-backed mise volume survive turns
-// and are collected only with their Assignment. A 1 GiB warning surfaces
-// unusual growth without imposing a hard quota.
+// Agent Participant tool-data caches on the disk-backed mise volume survive
+// turns and are collected only with their Participant. A 1 GiB warning
+// surfaces unusual growth without imposing a hard quota. The on-disk layout
+// keeps the historical assignment-<ID> prefix.
 const (
-	maxToolCacheEntries            = 500_000
 	maxToolCacheAssignmentsPerPoll = 2000
 	toolCachePerAssignmentTimeout  = 30 * time.Second
 )
 
-// ToolCacheUsage is the bounded operational measurement for one Assignment's
-// assignment-lifecycle cache. Turn-lifecycle scratch is never included.
+var maxToolCacheEntries = 500_000
+
+// ToolCacheUsage is the bounded operational measurement for one Agent
+// Participant's assignment-lifecycle cache. Turn-lifecycle scratch is never
+// included. Bytes reports allocated disk usage (filesystem blocks), not
+// apparent file length, so many small files correctly reflect storage
+// pressure.
 type ToolCacheUsage struct {
 	Bytes     int64
 	Files     int64
 	Truncated bool
 }
 
-// MeasureAssignmentToolCache sums regular-file sizes under
+// MeasureAssignmentToolCache sums allocated disk usage under
 // assignment-<ID>/tool-data/assignment without following agent-created
-// symlinks and without traversing outside the Assignment subpath.
+// symlinks and without traversing outside the Participant subpath. The ID is
+// the Agent Participant identity; assignment- is the existing storage prefix.
 // Turn scratch under tool-data/turn is excluded by construction.
 // Missing cache areas report zero usage. The measurement is read-only:
 // it never changes permissions, retention, or cleanup state.
-func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, assignmentID string) (ToolCacheUsage, error) {
-	if lifecycle == nil || !uuidtext.Valid(assignmentID) {
+func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, participantID string) (ToolCacheUsage, error) {
+	return lifecycle.measureAssignmentToolCache(ctx, participantID, 0)
+}
+
+func (lifecycle *Lifecycle) measureAssignmentToolCache(ctx context.Context, participantID string, rotation uint64) (ToolCacheUsage, error) {
+	if lifecycle == nil || !uuidtext.Valid(participantID) {
 		return ToolCacheUsage{}, ErrInvalidAssignmentID
 	}
-	root, err := lifecycle.toolDataRoot(assignmentID)
+	root, err := lifecycle.toolDataRoot(participantID)
 	if err != nil {
 		return ToolCacheUsage{}, err
 	}
@@ -72,20 +83,21 @@ func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, assi
 		if os.IsNotExist(err) {
 			return ToolCacheUsage{}, nil
 		}
-		return ToolCacheUsage{}, fmt.Errorf("open Assignment tool cache: %w", err)
+		return ToolCacheUsage{}, fmt.Errorf("open Participant tool cache: %w", err)
 	}
 	defer cacheDir.Close()
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(int(cacheDir.Fd()), &rootStat); err != nil {
-		return ToolCacheUsage{}, fmt.Errorf("inspect Assignment tool cache: %w", err)
+		return ToolCacheUsage{}, fmt.Errorf("inspect Participant tool cache: %w", err)
 	}
 	if rootStat.Mode&unix.S_IFMT != unix.S_IFDIR || int(rootStat.Uid) != os.Geteuid() {
-		return ToolCacheUsage{}, fmt.Errorf("%w: Assignment tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+		return ToolCacheUsage{}, fmt.Errorf("%w: Participant tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
 	}
 	rootDev := rootStat.Dev
 	rootIno := rootStat.Ino
 	seen := make(map[[16]byte]struct{})
 	usage := ToolCacheUsage{}
+	addAllocated(&usage, rootStat)
 	pending := []ownedDirectoryEntry{{path: "", dev: uint64(rootDev), ino: rootIno}}
 	entries := 0
 	for len(pending) != 0 {
@@ -97,12 +109,20 @@ func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, assi
 		directory := cacheDir
 		owned := false
 		if current.path != "" {
-			reopened, err := reopenOwnedDirectory(cacheDir, current.path)
+			reopened, err := reopenToolCacheDirectory(cacheDir, current.path)
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
-				return ToolCacheUsage{}, fmt.Errorf("reopen Assignment tool cache directory: %w", err)
+				if isToolCacheAccessError(err) {
+					// Read-only skip: an unreadable nested directory
+					// must not change modes and must not fail the
+					// whole measurement. The partial sum is marked
+					// incomplete so warning state is preserved.
+					usage.Truncated = true
+					continue
+				}
+				return ToolCacheUsage{}, fmt.Errorf("reopen Participant tool cache directory: %w", err)
 			}
 			directory = reopened
 			owned = true
@@ -114,84 +134,77 @@ func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, assi
 			}
 			if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() ||
 				uint64(stat.Dev) != current.dev || stat.Ino != current.ino {
-				return fmt.Errorf("%w: Assignment tool cache directory changed", ErrUnsafeAssignmentPath)
+				return fmt.Errorf("%w: Participant tool cache directory changed", ErrUnsafeAssignmentPath)
 			}
 			if uint64(stat.Dev) != uint64(rootDev) {
-				return fmt.Errorf("%w: Assignment tool cache crossed devices", ErrUnsafeAssignmentPath)
+				return fmt.Errorf("%w: Participant tool cache crossed devices", ErrUnsafeAssignmentPath)
 			}
-			for {
+			names, err := listToolCacheNames(ctx, directory)
+			if err != nil {
+				if isToolCacheAccessError(err) {
+					usage.Truncated = true
+					return nil
+				}
+				return err
+			}
+			if len(names) > 1 {
+				rotateToolCacheNames(names, rotation)
+			}
+			for _, name := range names {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				names, readErr := directory.Readdirnames(128)
-				if readErr != nil && !errors.Is(readErr, io.EOF) {
-					return readErr
-				}
-				for _, name := range names {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					var childStat unix.Stat_t
-					if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-						if os.IsNotExist(err) {
-							continue
-						}
-						return err
-					}
-					entries++
-					if entries > maxToolCacheEntries {
-						usage.Truncated = true
-						return nil
-					}
-					switch childStat.Mode & unix.S_IFMT {
-					case unix.S_IFDIR:
-						// Never follow symlinks: Fstatat with NOFOLLOW plus
-						// O_NOFOLLOW open below pins the exact inode.
-						if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != uint64(rootDev) {
-							// Skip foreign-owned or cross-device directories
-							// rather than traversing outside the cache.
-							continue
-						}
-						childPath := name
-						if current.path != "" {
-							childPath = filepath.Join(current.path, name)
-						}
-						pending = append(pending, ownedDirectoryEntry{
-							path: childPath, dev: uint64(childStat.Dev), ino: childStat.Ino,
-						})
-					case unix.S_IFREG:
-						key := fileIdentity(childStat.Dev, childStat.Ino)
-						if _, duplicate := seen[key]; duplicate {
-							continue
-						}
-						seen[key] = struct{}{}
-						size := int64(childStat.Size)
-						if size < 0 {
-							size = 0
-						}
-						if usage.Bytes > math.MaxInt64-size {
-							usage.Bytes = math.MaxInt64
-						} else {
-							usage.Bytes += size
-						}
-						usage.Files++
-					default:
-						// Symlinks, sockets, fifos, and devices are ignored:
-						// their targets are never followed and their sizes
-						// never contribute to the cache signal.
+				var childStat unix.Stat_t
+				if err := unix.Fstatat(int(directory.Fd()), name, &childStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+					if os.IsNotExist(err) {
 						continue
 					}
-					if usage.Truncated {
-						return nil
+					if isToolCacheAccessError(err) {
+						usage.Truncated = true
+						continue
 					}
+					return err
 				}
-				if errors.Is(readErr, io.EOF) {
+				entries++
+				if entries > maxToolCacheEntries {
+					usage.Truncated = true
 					return nil
+				}
+				switch childStat.Mode & unix.S_IFMT {
+				case unix.S_IFDIR:
+					// Never follow symlinks: Fstatat with NOFOLLOW plus
+					// O_NOFOLLOW open below pins the exact inode.
+					if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != uint64(rootDev) {
+						// Skip foreign-owned or cross-device directories
+						// rather than traversing outside the cache.
+						continue
+					}
+					childPath := name
+					if current.path != "" {
+						childPath = filepath.Join(current.path, name)
+					}
+					pending = append(pending, ownedDirectoryEntry{
+						path: childPath, dev: uint64(childStat.Dev), ino: childStat.Ino,
+					})
+				case unix.S_IFREG:
+					key := fileIdentity(childStat.Dev, childStat.Ino)
+					if _, duplicate := seen[key]; duplicate {
+						continue
+					}
+					seen[key] = struct{}{}
+					addAllocated(&usage, childStat)
+					usage.Files++
+				default:
+					// Symlinks, sockets, fifos, and devices are ignored:
+					// their targets are never followed and their sizes
+					// never contribute to the cache signal.
+					continue
 				}
 				if usage.Truncated {
 					return nil
 				}
 			}
+			return nil
 		}()
 		if owned {
 			closeErr := directory.Close()
@@ -218,10 +231,127 @@ func fileIdentity(dev uint64, ino uint64) [16]byte {
 	return key
 }
 
-// ToolCacheMonitor emits a bounded soft operational signal when an
-// Assignment's assignment-lifecycle cache crosses a configurable warning
+// allocatedDiskBytes reports filesystem block allocation for one stat result.
+// Blocks counts 512-byte units independently of apparent length, so sparse
+// files and small files reflect true storage pressure.
+func allocatedDiskBytes(stat unix.Stat_t) int64 {
+	if stat.Blocks < 0 {
+		return 0
+	}
+	if stat.Blocks > math.MaxInt64/512 {
+		return math.MaxInt64
+	}
+	return stat.Blocks * 512
+}
+
+func addAllocated(usage *ToolCacheUsage, stat unix.Stat_t) {
+	allocated := allocatedDiskBytes(stat)
+	if usage.Bytes > math.MaxInt64-allocated {
+		usage.Bytes = math.MaxInt64
+	} else {
+		usage.Bytes += allocated
+	}
+}
+
+// openToolCacheChildNoFollow pins one owned child directory without ever
+// changing its mode. Unlike the cleanup opener, it never restores
+// permissions: EACCES and other open failures are returned so the caller can
+// skip the subtree while leaving modes untouched.
+func openToolCacheChildNoFollow(parentFD int, name string, expected unix.Stat_t) (*os.File, error) {
+	if expected.Mode&unix.S_IFMT != unix.S_IFDIR || int(expected.Uid) != os.Geteuid() {
+		return nil, fmt.Errorf("%w: Participant tool cache directory is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	child := os.NewFile(uintptr(fd), name)
+	var opened unix.Stat_t
+	if err := unix.Fstat(int(child.Fd()), &opened); err != nil {
+		_ = child.Close()
+		return nil, err
+	}
+	if opened.Mode&unix.S_IFMT != unix.S_IFDIR || int(opened.Uid) != os.Geteuid() ||
+		opened.Dev != expected.Dev || opened.Ino != expected.Ino {
+		_ = child.Close()
+		return nil, ErrUnsafeAssignmentPath
+	}
+	return child, nil
+}
+
+// reopenToolCacheDirectory reopens a relative cache directory from its pinned
+// root using only read-only, no-follow opens. No chmod is ever performed.
+func reopenToolCacheDirectory(root *os.File, relative string) (*os.File, error) {
+	parent := root
+	owned := false
+	defer func() {
+		if owned && parent != root {
+			_ = parent.Close()
+		}
+	}()
+	for _, name := range strings.Split(relative, string(filepath.Separator)) {
+		if name == "" || name == "." || name == ".." {
+			return nil, ErrUnsafeAssignmentPath
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(parent.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if owned && parent != root {
+				_ = parent.Close()
+				owned = false
+			}
+			return nil, err
+		}
+		child, err := openToolCacheChildNoFollow(int(parent.Fd()), name, stat)
+		if owned && parent != root {
+			_ = parent.Close()
+			owned = false
+		}
+		if err != nil {
+			return nil, err
+		}
+		parent = child
+		owned = true
+	}
+	if !owned {
+		return nil, fmt.Errorf("%w: empty Participant tool cache path", ErrUnsafeAssignmentPath)
+	}
+	owned = false
+	return parent, nil
+}
+
+func isToolCacheAccessError(err error) bool {
+	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
+}
+
+func listToolCacheNames(ctx context.Context, directory *os.File) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	names, err := directory.Readdirnames(-1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func rotateToolCacheNames(names []string, rotation uint64) {
+	if len(names) <= 1 || rotation == 0 {
+		return
+	}
+	offset := int(rotation % uint64(len(names)))
+	if offset == 0 {
+		return
+	}
+	rotated := append(append([]string(nil), names[offset:]...), names[:offset]...)
+	copy(names, rotated)
+}
+
+// ToolCacheMonitor emits a bounded soft operational signal when an Agent
+// Participant's assignment-lifecycle cache crosses a configurable warning
 // threshold. It never enforces a quota and never changes retention or
-// cleanup behavior.
+// cleanup behavior. The on-disk layout keeps the historical assignment-
+// prefix.
 type ToolCacheMonitor struct {
 	lifecycle      *Lifecycle
 	thresholdBytes int64
@@ -230,8 +360,10 @@ type ToolCacheMonitor struct {
 	logger         *slog.Logger
 	onError        func(error)
 
-	mu         sync.Mutex
-	lastWarned map[string]int64
+	mu          sync.Mutex
+	lastWarned  map[string]int64
+	scanCursor  string
+	dirRotation map[string]uint64
 }
 
 // ToolCacheMonitorConfig bounds the soft cache-growth signal.
@@ -270,57 +402,82 @@ func NewToolCacheMonitor(lifecycle *Lifecycle, config ToolCacheMonitorConfig) (*
 		logger:         config.Logger,
 		onError:        config.OnError,
 		lastWarned:     make(map[string]int64),
+		dirRotation:    make(map[string]uint64),
 	}, nil
 }
 
-// Observe measures one Assignment's cache and emits at most one warning per
-// distinct size at or above the threshold. Unchanged usage does not re-warn.
-// Usage below the threshold clears prior state so a future crossing warns
-// again. Measurement failures are returned and must not block Agent Turns.
-func (monitor *ToolCacheMonitor) Observe(ctx context.Context, assignmentID string) (ToolCacheUsage, bool, error) {
+// Observe measures one Participant's cache and emits at most one warning per
+// distinct complete size at or above the threshold. Unchanged usage does not
+// re-warn. Usage below the threshold clears prior state so a future crossing
+// warns again. Incomplete (truncated or access-skipped) measurements never
+// clear warning state: a partial below-threshold sum preserves prior state,
+// and a partial at or above threshold warns at most once until a complete
+// measurement updates state. Measurement failures are returned and must not
+// block Agent Turns.
+func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID string) (ToolCacheUsage, bool, error) {
 	if monitor == nil || monitor.lifecycle == nil {
 		return ToolCacheUsage{}, false, fmt.Errorf("%w: tool cache monitor is nil", ErrInvalidOptions)
 	}
-	if !uuidtext.Valid(assignmentID) {
+	if !uuidtext.Valid(participantID) {
 		return ToolCacheUsage{}, false, ErrInvalidAssignmentID
 	}
-	usage, err := monitor.lifecycle.MeasureAssignmentToolCache(ctx, assignmentID)
+	monitor.mu.Lock()
+	rotation := monitor.dirRotation[participantID]
+	monitor.dirRotation[participantID] = rotation + 1
+	monitor.mu.Unlock()
+	usage, err := monitor.lifecycle.measureAssignmentToolCache(ctx, participantID, rotation)
 	if err != nil {
 		return ToolCacheUsage{}, false, err
 	}
-	if usage.Bytes < monitor.thresholdBytes {
-		monitor.mu.Lock()
-		delete(monitor.lastWarned, assignmentID)
-		monitor.mu.Unlock()
-		return usage, false, nil
-	}
 	monitor.mu.Lock()
 	defer monitor.mu.Unlock()
-	if last, warned := monitor.lastWarned[assignmentID]; warned && last == usage.Bytes {
+	if usage.Truncated {
+		if usage.Bytes >= monitor.thresholdBytes {
+			if _, warned := monitor.lastWarned[participantID]; warned {
+				return usage, false, nil
+			}
+			monitor.lastWarned[participantID] = usage.Bytes
+			if monitor.logger != nil {
+				monitor.logger.Warn("Participant tool cache exceeds warning threshold",
+					"agent_participant_id", participantID,
+					"size_bytes", usage.Bytes,
+					"threshold_bytes", monitor.thresholdBytes)
+			}
+			return usage, true, nil
+		}
 		return usage, false, nil
 	}
-	monitor.lastWarned[assignmentID] = usage.Bytes
+	if usage.Bytes < monitor.thresholdBytes {
+		delete(monitor.lastWarned, participantID)
+		return usage, false, nil
+	}
+	if last, warned := monitor.lastWarned[participantID]; warned && last == usage.Bytes {
+		return usage, false, nil
+	}
+	monitor.lastWarned[participantID] = usage.Bytes
 	if monitor.logger != nil {
-		monitor.logger.Warn("Assignment tool cache exceeds warning threshold",
-			"assignment_id", assignmentID,
+		monitor.logger.Warn("Participant tool cache exceeds warning threshold",
+			"agent_participant_id", participantID,
 			"size_bytes", usage.Bytes,
 			"threshold_bytes", monitor.thresholdBytes)
 	}
 	return usage, true, nil
 }
 
-// Check scans at most maxAssignments Assignment caches with a per-Assignment
-// timeout. Per-Assignment measurement failures are skipped without failing
-// the scan; only listing failures are returned.
+// Check scans at most maxAssignments Participant caches with a per-Participant
+// timeout, rotating the bounded selection across polls so every retained
+// cache is eventually measured. Per-Participant measurement failures are
+// skipped without failing the scan; only listing failures are returned.
 func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned int, err error) {
 	if monitor == nil || monitor.lifecycle == nil {
 		return 0, 0, fmt.Errorf("%w: tool cache monitor is nil", ErrInvalidOptions)
 	}
-	ids, err := monitor.lifecycle.assignmentToolCacheIDs(monitor.maxAssignments)
+	all, err := monitor.lifecycle.listAssignmentParticipantIDs()
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, id := range ids {
+	selected := monitor.selectAssignments(all)
+	for _, id := range selected {
 		if err := ctx.Err(); err != nil {
 			return checked, warned, err
 		}
@@ -330,7 +487,7 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 		checked++
 		if observeErr != nil {
 			// Measurement is best-effort and read-only; a single
-			// Assignment failure must not fail the scan or block turns.
+			// Participant failure must not fail the scan or block turns.
 			continue
 		}
 		if didWarn {
@@ -367,33 +524,59 @@ func (monitor *ToolCacheMonitor) Run(ctx context.Context) error {
 	}
 }
 
-func (lifecycle *Lifecycle) assignmentToolCacheIDs(max int) ([]string, error) {
+// selectAssignments returns the next bounded window in sorted order starting
+// after the stored cursor, wrapping around. The cursor advances to the last
+// returned ID so later polls rotate through all retained Participants.
+func (monitor *ToolCacheMonitor) selectAssignments(all []string) []string {
+	monitor.mu.Lock()
+	defer monitor.mu.Unlock()
+	if len(all) == 0 || monitor.maxAssignments <= 0 {
+		return nil
+	}
+	start := 0
+	if monitor.scanCursor != "" {
+		start = sort.SearchStrings(all, monitor.scanCursor)
+		if start < len(all) && all[start] == monitor.scanCursor {
+			start++
+		}
+		if start >= len(all) {
+			start = 0
+		}
+	}
+	selected := make([]string, 0, monitor.maxAssignments)
+	for i := 0; i < len(all) && len(selected) < monitor.maxAssignments; i++ {
+		selected = append(selected, all[(start+i)%len(all)])
+	}
+	if len(selected) > 0 {
+		monitor.scanCursor = selected[len(selected)-1]
+	}
+	return selected
+}
+
+func (lifecycle *Lifecycle) listAssignmentParticipantIDs() ([]string, error) {
 	if lifecycle == nil {
 		return nil, fmt.Errorf("%w: nil lifecycle", ErrInvalidOptions)
-	}
-	if max <= 0 {
-		return nil, nil
 	}
 	root, _, err := openDirectoryNoFollow(lifecycle.miseRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("list Assignment tool caches: %w", err)
+		return nil, fmt.Errorf("list Participant tool caches: %w", err)
 	}
 	defer root.Close()
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(int(root.Fd()), &rootStat); err != nil {
-		return nil, fmt.Errorf("inspect Assignment tool cache root: %w", err)
+		return nil, fmt.Errorf("inspect Participant tool cache root: %w", err)
 	}
 	if rootStat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return nil, fmt.Errorf("%w: Assignment tool cache root is not a directory", ErrUnsafeAssignmentPath)
+		return nil, fmt.Errorf("%w: Participant tool cache root is not a directory", ErrUnsafeAssignmentPath)
 	}
 	names, err := root.Readdirnames(-1)
 	if err != nil {
-		return nil, fmt.Errorf("list Assignment tool caches: %w", err)
+		return nil, fmt.Errorf("list Participant tool caches: %w", err)
 	}
-	ids := make([]string, 0)
+	ids := make([]string, 0, len(names))
 	for _, name := range names {
 		id, found := cutAssignmentPrefix(name)
 		if !found || !uuidtext.Valid(id) {
@@ -409,9 +592,6 @@ func (lifecycle *Lifecycle) assignmentToolCacheIDs(max int) ([]string, error) {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	if len(ids) > max {
-		ids = ids[:max]
-	}
 	return ids, nil
 }
 
