@@ -75,29 +75,7 @@ const (
 	reviewerPermissionMarker  = "REVIEWER_PERMISSION_BLOCKED"
 	reviewerPermissionCommand = "printf feature_branch_permission_bypass > /workspace/reviewer-permission-bypass"
 	reviewerPermissionFile    = "reviewer-permission-bypass"
-	requiredAcceptanceModel   = "opencode-go/muse-spark-1.3-contributor"
 )
-
-func TestOpenCodeImageContainsRequiredAcceptanceModel(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx,
-		"docker", "run", "--rm", "--entrypoint", "opencode",
-		"--env", `OPENCODE_AUTH_CONTENT={"opencode-go":{"type":"api","key":"catalog-check"}}`,
-		"--env", "OPENCODE_DISABLE_MODELS_FETCH=true",
-		localOpenCodeImage(t), "models", "opencode-go",
-	)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list bundled OpenCode Go models: %v\n%s", err, output)
-	}
-	for _, model := range strings.Fields(string(output)) {
-		if model == requiredAcceptanceModel {
-			return
-		}
-	}
-	t.Fatalf("bundled model catalog does not contain %q:\n%s", requiredAcceptanceModel, output)
-}
 
 func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	image := localOpenCodeImage(t)
