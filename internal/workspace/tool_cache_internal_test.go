@@ -154,6 +154,106 @@ func TestTruncatedBelowThresholdPreservesPriorWarning(t *testing.T) {
 	}
 }
 
+func TestExactlyBudgetEntriesCompletes(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 5
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Root lists one dir (1 entry) containing four files (4 entries): total
+	// exactly budget (5). Must complete, not truncate.
+	dir := filepath.Join(cache, "a")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := os.WriteFile(filepath.Join(dir, string(rune('a'+i))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Truncated {
+		t.Fatalf("exactly-budget usage = %#v, want complete", usage)
+	}
+	if usage.Files != 4 {
+		t.Fatalf("exactly-budget files = %d, want 4", usage.Files)
+	}
+}
+
+func TestFrontierStarvationCounterexampleWarnsWithinBoundedPolls(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Counterexample shape: root lists heavy X first, then S1 (3 files) and
+	// S2 (3 files); budget 6. Without frontier persistence each poll re-walks
+	// root+S2 (6 entries exactly) and starves S1/X forever. With persisted
+	// frontier completed regions are skipped and X is reached within 2 polls
+	// under either readdir ordering, so the warning must fire.
+	for _, dir := range []string{"heavy", "s1", "s2"} {
+		if err := os.MkdirAll(filepath.Join(cache, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(cache, "s1", string(rune('a'+i))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "s2", string(rune('a'+i))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cache, "heavy", "big"), bytes.Repeat([]byte("x"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 50 << 10, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warned := false
+	for i := 0; i < 10 && !warned; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned = warned || w
+	}
+	if !warned {
+		t.Fatal("starvation counterexample never warned within 10 bounded polls")
+	}
+}
+
 func TestEventualWarningForHeavySubtreeBehindLightSiblings(t *testing.T) {
 	oldMax := maxToolCacheEntries
 	maxToolCacheEntries = 6
