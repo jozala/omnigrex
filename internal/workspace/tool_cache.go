@@ -179,6 +179,10 @@ func (lifecycle *Lifecycle) measureAssignmentToolCache(ctx context.Context, part
 						// rather than traversing outside the cache.
 						continue
 					}
+					// Count owned directory allocation once when encountered;
+					// directories cannot be hardlinked and symlinks are never
+					// followed, so each inode is counted at most once.
+					addAllocated(&usage, childStat)
 					childPath := name
 					if current.path != "" {
 						childPath = filepath.Join(current.path, name)

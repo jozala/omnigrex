@@ -179,6 +179,30 @@ func TestMeasureAssignmentToolCacheReportsAllocatedDiskUsage(t *testing.T) {
 	}
 }
 
+func TestMeasureAssignmentToolCacheIncludesNestedDirectoryAllocation(t *testing.T) {
+	lifecycle, root := newToolCacheLifecycle(t)
+	cache := toolCacheDir(t, root, toolCacheAssignment)
+	nested := filepath.Join(cache, "a", "b", "c")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), toolCacheAssignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Files != 0 {
+		t.Fatalf("usage files = %d, want 0 for directory-only cache", usage.Files)
+	}
+	// Root plus three nested directories each allocate at least one block.
+	// Apparent-size accounting would report zero for no files.
+	if usage.Bytes < 3*4096 {
+		t.Fatalf("directory-only usage bytes = %d, want at least %d for nested directory allocation", usage.Bytes, 3*4096)
+	}
+	if usage.Truncated {
+		t.Fatal("usage truncated unexpectedly")
+	}
+}
+
 func TestMeasureAssignmentToolCacheLeavesUnreadableNestedDirectoryUnchanged(t *testing.T) {
 	lifecycle, root := newToolCacheLifecycle(t)
 	assignment := toolCacheAssignment
