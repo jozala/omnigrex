@@ -37,19 +37,19 @@ type LabelProvisioningRepository struct {
 }
 
 // LabelProvisioningPayload is the immutable per-repository job definition stored
-// in the generic jobs table.
+// in the generic jobs table. Only stable installation and repository IDs are
+// stored: owner and name are resolved at execution time so a repository rename
+// between queueing and execution (including idempotent replay of committed
+// batches) can never strand a job on a stale identity.
 type LabelProvisioningPayload struct {
-	RepositoryID    int64  `json:"repository_id"`
-	RepositoryOwner string `json:"repository_owner"`
-	RepositoryName  string `json:"repository_name"`
-	InstallationID  int64  `json:"installation_id"`
+	RepositoryID   int64 `json:"repository_id"`
+	InstallationID int64 `json:"installation_id"`
 }
 
 // MarshalLabelProvisioningPayload encodes one repository provisioning job definition.
 func MarshalLabelProvisioningPayload(repository LabelProvisioningRepository, installationID int64) (json.RawMessage, error) {
 	return json.Marshal(LabelProvisioningPayload{
-		RepositoryID: repository.ID, RepositoryOwner: repository.Owner,
-		RepositoryName: repository.Name, InstallationID: installationID,
+		RepositoryID: repository.ID, InstallationID: installationID,
 	})
 }
 
@@ -59,8 +59,7 @@ func ParseLabelProvisioningPayload(payload json.RawMessage) (LabelProvisioningPa
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return LabelProvisioningPayload{}, fmt.Errorf("decode label provisioning payload: %w", err)
 	}
-	if parsed.RepositoryID <= 0 || strings.TrimSpace(parsed.RepositoryOwner) == "" || strings.TrimSpace(parsed.RepositoryName) == "" ||
-		strings.Contains(parsed.RepositoryOwner, "/") || strings.Contains(parsed.RepositoryName, "/") || parsed.InstallationID <= 0 {
+	if parsed.RepositoryID <= 0 || parsed.InstallationID <= 0 {
 		return LabelProvisioningPayload{}, fmt.Errorf("%w: provisioning job repository identity is invalid", ErrLabelProvisioningInvalid)
 	}
 	return parsed, nil
@@ -154,6 +153,25 @@ func (store *Store) insertLabelProvisioningBatch(ctx context.Context, deliveryID
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Queue the batch's jobs before taking the delivery row lock. Job
+	// insertion only touches jobs rows, so a concurrent claim renewal of the
+	// delivery row proceeds instead of blocking behind a slow batch. The
+	// fence below is re-validated immediately before committing, so a failed
+	// fence still rolls the batch back.
+	for _, repository := range repositories {
+		payload, err := MarshalLabelProvisioningPayload(repository, installationID)
+		if err != nil {
+			return fmt.Errorf("encode label provisioning job: %w", err)
+		}
+		if _, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+			queue: LabelProvisioningQueue, kind: ProvisionManagedLabelsJobKind, payload: payload,
+			maxAttempts:    labelProvisioningMaxAttempts,
+			idempotencyKey: LabelProvisioningIdempotencyKey(deliveryID, repository.ID),
+		}); err != nil {
+			return fmt.Errorf("insert label provisioning job: %w", err)
+		}
+	}
+
 	var status WebhookStatus
 	var currentToken *string
 	var leaseLive bool
@@ -170,20 +188,6 @@ FOR UPDATE`, deliveryID).Scan(&status, &currentToken, &leaseLive)
 	}
 	if status != WebhookProcessing || currentToken == nil || *currentToken != claimToken || !leaseLive {
 		return ErrWebhookClaimLost
-	}
-
-	for _, repository := range repositories {
-		payload, err := MarshalLabelProvisioningPayload(repository, installationID)
-		if err != nil {
-			return fmt.Errorf("encode label provisioning job: %w", err)
-		}
-		if _, err := insertIdempotentJobTx(ctx, tx, jobInsert{
-			queue: LabelProvisioningQueue, kind: ProvisionManagedLabelsJobKind, payload: payload,
-			maxAttempts:    labelProvisioningMaxAttempts,
-			idempotencyKey: LabelProvisioningIdempotencyKey(deliveryID, repository.ID),
-		}); err != nil {
-			return fmt.Errorf("insert label provisioning job: %w", err)
-		}
 	}
 
 	if last {

@@ -51,32 +51,31 @@ func (durable *provisioningStore) FailJob(_ context.Context, lease store.JobLeas
 	return nil
 }
 
-type provisioningSigner struct{ token string }
-
-func (signer *provisioningSigner) AppJWT(context.Context) (string, error) { return signer.token, nil }
-
 type provisioningCredentials struct {
-	token string
-	err   error
+	token          string
+	installationID int64
+	err            error
 }
 
-func (provider *provisioningCredentials) RepositoryCredential(context.Context, string, string) (string, error) {
+func (provider *provisioningCredentials) InstallationCredential(_ context.Context, installationID int64) (string, error) {
+	provider.installationID = installationID
 	return provider.token, provider.err
 }
 
 type provisioningAPI struct {
 	githubapi.LabelAPI
-	installationID int64
-	resolveErr     error
-	repository     githubapi.InstallationRepository
-	repositoryErr  error
-	listed         []githubapi.Label
-	created        []string
-	createErr      error
+	listed        []githubapi.InstallationRepository
+	listInvalid   []string
+	listErr       error
+	repository    githubapi.InstallationRepository
+	repositoryErr error
+	labels        []githubapi.Label
+	created       []string
+	createErr     error
 }
 
-func (api *provisioningAPI) ResolveRepositoryInstallation(context.Context, string, string, string) (int64, error) {
-	return api.installationID, api.resolveErr
+func (api *provisioningAPI) ListInstallationRepositories(context.Context, string) ([]githubapi.InstallationRepository, []string, error) {
+	return api.listed, api.listInvalid, api.listErr
 }
 
 func (api *provisioningAPI) GetRepository(context.Context, string, string, string) (githubapi.InstallationRepository, error) {
@@ -84,7 +83,7 @@ func (api *provisioningAPI) GetRepository(context.Context, string, string, strin
 }
 
 func (api *provisioningAPI) ListRepositoryLabels(context.Context, string, string, string) ([]githubapi.Label, error) {
-	return api.listed, nil
+	return api.labels, nil
 }
 
 func (api *provisioningAPI) CreateRepositoryLabel(_ context.Context, _, _, _ string, label githubapi.Label) (githubapi.Label, error) {
@@ -109,7 +108,7 @@ func (api *provisioningAPI) RemoveIssueLabel(context.Context, string, string, st
 
 func provisioningLease() *store.JobLease {
 	payload, err := store.MarshalLabelProvisioningPayload(
-		store.LabelProvisioningRepository{ID: 9123, Owner: "jozala", Name: "omnigrex"}, 99)
+		store.LabelProvisioningRepository{ID: 9123}, 99)
 	if err != nil {
 		panic(err)
 	}
@@ -126,12 +125,11 @@ func provisioningLease() *store.JobLease {
 	}
 }
 
-func provisioningWorker(durable *provisioningStore, api *provisioningAPI) *githubapi.LabelProvisioningWorker {
-	worker, err := githubapi.NewLabelProvisioningWorker(durable, &provisioningSigner{token: "app-jwt"},
-		&provisioningCredentials{token: "installation-token"}, api, githubapi.LabelProvisioningWorkerConfig{
-			ClaimOwner: "provisioner", LeaseDuration: 30 * time.Second,
-			HeartbeatInterval: 10 * time.Second, IdlePollInterval: time.Second, RetryDelay: 5 * time.Second,
-		})
+func provisioningWorker(durable *provisioningStore, credentials *provisioningCredentials, api *provisioningAPI) *githubapi.LabelProvisioningWorker {
+	worker, err := githubapi.NewLabelProvisioningWorker(durable, credentials, api, githubapi.LabelProvisioningWorkerConfig{
+		ClaimOwner: "provisioner", LeaseDuration: 30 * time.Second,
+		HeartbeatInterval: 10 * time.Second, IdlePollInterval: time.Second, RetryDelay: 5 * time.Second,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -140,11 +138,13 @@ func provisioningWorker(durable *provisioningStore, api *provisioningAPI) *githu
 
 func TestLabelProvisioningWorkerCreatesOnlyMissingLabels(t *testing.T) {
 	durable := &provisioningStore{lease: provisioningLease()}
-	api := &provisioningAPI{installationID: 99,
+	credentials := &provisioningCredentials{token: "installation-token"}
+	api := &provisioningAPI{
+		listed:     []githubapi.InstallationRepository{{ID: 9123, Owner: "jozala", Name: "omnigrex"}},
 		repository: githubapi.InstallationRepository{ID: 9123, Owner: "jozala", Name: "omnigrex"},
-		listed:     []githubapi.Label{{Name: "omnigrex:run", Color: "old", Description: "old"}},
+		labels:     []githubapi.Label{{Name: "omnigrex:run", Color: "old", Description: "old"}},
 	}
-	worker := provisioningWorker(durable, api)
+	worker := provisioningWorker(durable, credentials, api)
 
 	processed, err := worker.ProcessNext(context.Background())
 	if err != nil || !processed {
@@ -152,6 +152,9 @@ func TestLabelProvisioningWorkerCreatesOnlyMissingLabels(t *testing.T) {
 	}
 	if len(durable.completed) != 1 || len(durable.failed) != 0 {
 		t.Fatalf("completed/failed = (%d, %d), want (1, 0)", len(durable.completed), len(durable.failed))
+	}
+	if credentials.installationID != 99 {
+		t.Errorf("installation credential ID = %d, want 99", credentials.installationID)
 	}
 	if len(api.created) != 4 {
 		t.Errorf("created labels = %#v, want four missing labels", api.created)
@@ -167,10 +170,32 @@ func TestLabelProvisioningWorkerCreatesOnlyMissingLabels(t *testing.T) {
 	}
 }
 
+func TestLabelProvisioningWorkerResolvesRenamedRepositoryByID(t *testing.T) {
+	durable := &provisioningStore{lease: provisioningLease()}
+	credentials := &provisioningCredentials{token: "installation-token"}
+	api := &provisioningAPI{
+		listed:     []githubapi.InstallationRepository{{ID: 9123, Owner: "jozala", Name: "renamed"}},
+		repository: githubapi.InstallationRepository{ID: 9123, Owner: "jozala", Name: "renamed"},
+	}
+	worker := provisioningWorker(durable, credentials, api)
+
+	processed, err := worker.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want renamed repository provisioned", processed, err)
+	}
+	if len(durable.completed) != 1 {
+		t.Fatalf("completed = %d, want 1", len(durable.completed))
+	}
+	if len(api.created) != 5 {
+		t.Errorf("created labels = %#v, want all five managed labels under the new name", api.created)
+	}
+}
+
 func TestLabelProvisioningWorkerFailsTerminallyOnLostAccess(t *testing.T) {
 	durable := &provisioningStore{lease: provisioningLease()}
-	api := &provisioningAPI{resolveErr: &githubapi.NotInstalledError{Owner: "jozala", Repository: "omnigrex"}}
-	worker := provisioningWorker(durable, api)
+	credentials := &provisioningCredentials{err: &githubapi.NotInstalledError{InstallationID: 99}}
+	api := &provisioningAPI{}
+	worker := provisioningWorker(durable, credentials, api)
 
 	processed, err := worker.ProcessNext(context.Background())
 	if !processed || err == nil {
@@ -184,18 +209,20 @@ func TestLabelProvisioningWorkerFailsTerminallyOnLostAccess(t *testing.T) {
 	}
 }
 
-func TestLabelProvisioningWorkerFailsTerminallyOnIdentityMismatch(t *testing.T) {
+func TestLabelProvisioningWorkerFailsTerminallyWhenRepositoryRemoved(t *testing.T) {
 	durable := &provisioningStore{lease: provisioningLease()}
-	api := &provisioningAPI{installationID: 100,
-		repository: githubapi.InstallationRepository{ID: 9123, Owner: "jozala", Name: "omnigrex"}}
-	worker := provisioningWorker(durable, api)
+	credentials := &provisioningCredentials{token: "installation-token"}
+	api := &provisioningAPI{
+		listed: []githubapi.InstallationRepository{{ID: 9999, Owner: "jozala", Name: "other"}},
+	}
+	worker := provisioningWorker(durable, credentials, api)
 
 	processed, err := worker.ProcessNext(context.Background())
 	if !processed || err == nil {
-		t.Fatalf("ProcessNext() = (%t, %v), want mismatch failure", processed, err)
+		t.Fatalf("ProcessNext() = (%t, %v), want terminal removal failure", processed, err)
 	}
 	if len(durable.failed) != 1 || durable.failed[0].retryable {
-		t.Errorf("failures = %#v, want one terminal mismatch failure", durable.failed)
+		t.Errorf("failures = %#v, want one terminal removal failure", durable.failed)
 	}
 }
 
@@ -203,8 +230,7 @@ func TestLabelProvisioningWorkerFailsTerminallyOnCorruptPayload(t *testing.T) {
 	lease := provisioningLease()
 	lease.Payload = json.RawMessage(`{"repository_id":0}`)
 	durable := &provisioningStore{lease: lease}
-	api := &provisioningAPI{}
-	worker := provisioningWorker(durable, api)
+	worker := provisioningWorker(durable, &provisioningCredentials{}, &provisioningAPI{})
 
 	processed, err := worker.ProcessNext(context.Background())
 	if !processed || err == nil {
@@ -217,11 +243,13 @@ func TestLabelProvisioningWorkerFailsTerminallyOnCorruptPayload(t *testing.T) {
 
 func TestLabelProvisioningWorkerRetriesTransientLabelFailure(t *testing.T) {
 	durable := &provisioningStore{lease: provisioningLease()}
-	api := &provisioningAPI{installationID: 99,
+	credentials := &provisioningCredentials{token: "installation-token"}
+	api := &provisioningAPI{
+		listed:     []githubapi.InstallationRepository{{ID: 9123, Owner: "jozala", Name: "omnigrex"}},
 		repository: githubapi.InstallationRepository{ID: 9123, Owner: "jozala", Name: "omnigrex"},
 		createErr:  &githubapi.TransientError{Cause: errors.New("unavailable")},
 	}
-	worker := provisioningWorker(durable, api)
+	worker := provisioningWorker(durable, credentials, api)
 
 	processed, err := worker.ProcessNext(context.Background())
 	if !processed || err == nil {

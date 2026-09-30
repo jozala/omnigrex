@@ -107,8 +107,11 @@ func TestRepositoryAgentProfilesAreValid(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
-		if profile.Runtime() != "opencode-acp/v1" || profile.Model() != "opencode-go/muse-spark-1.3-contributor" {
-			t.Errorf("%s runtime/model = (%q, %q)", path, profile.Runtime(), profile.Model())
+		if profile.Runtime() != "opencode-acp/v1" {
+			t.Errorf("%s runtime = %q, want pinned opencode-acp/v1 contract", path, profile.Runtime())
+		}
+		if provider, _, found := strings.Cut(profile.Model(), "/"); !found || strings.TrimSpace(provider) == "" {
+			t.Errorf("%s model = %q, want provider/model form without pinning the changeable model", path, profile.Model())
 		}
 	}
 }

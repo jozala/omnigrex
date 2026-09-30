@@ -158,12 +158,14 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 
 func (processor *Processor) completeProvisioning(ctx context.Context, claim *store.WebhookClaim, event ProvisioningEvent) error {
 	// Keep the webhook claim live from enumeration through durable job
-	// insertion. For a large installation both the page scan and the single
-	// job-insert transaction can outlast one lease window; without renewal
-	// the transaction would roll back on an expired lease and eventually
+	// insertion. For a large installation both the page scan and the
+	// bounded job-insert batches can outlast one lease window; without
+	// renewal a batch would roll back on an expired lease and eventually
 	// exhaust the delivery without provisioning anything. Renewal loss
-	// aborts the work below, and because jobs are queued only by the final
-	// transaction, the delivery is simply reclaimed and retried.
+	// aborts the work below. Committed batches are durable before delivery
+	// acknowledgement: a retry replays them idempotently through the same
+	// per-delivery idempotency keys, converging on one job per repository
+	// instead of starting with no queued work.
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 	renewDone := make(chan struct{})

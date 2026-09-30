@@ -30,15 +30,15 @@ type LabelProvisioningWorkerStore interface {
 	FailJob(context.Context, store.JobLease, error, bool, time.Duration) error
 }
 
-// LabelProvisioningCredentialProvider supplies Developer repository credentials.
+// LabelProvisioningCredentialProvider supplies Developer installation credentials.
 type LabelProvisioningCredentialProvider interface {
-	RepositoryCredential(context.Context, string, string) (string, error)
+	InstallationCredential(context.Context, int64) (string, error)
 }
 
 // LabelProvisioningAPI is the narrow GitHub API surface needed for verification and creation.
 type LabelProvisioningAPI interface {
 	LabelAPI
-	ResolveRepositoryInstallation(context.Context, string, string, string) (int64, error)
+	ListInstallationRepositories(context.Context, string) ([]InstallationRepository, []string, error)
 	GetRepository(context.Context, string, string, string) (InstallationRepository, error)
 }
 
@@ -55,7 +55,6 @@ type LabelProvisioningWorkerConfig struct {
 // LabelProvisioningWorker provisions managed labels for repositories without starting a Workflow.
 type LabelProvisioningWorker struct {
 	store       LabelProvisioningWorkerStore
-	signer      AppJWTProvider
 	credentials LabelProvisioningCredentialProvider
 	api         LabelProvisioningAPI
 	reconciler  *LabelReconciler
@@ -73,8 +72,8 @@ var (
 )
 
 // NewLabelProvisioningWorker creates a Worker that ensures managed labels exist.
-func NewLabelProvisioningWorker(workerStore LabelProvisioningWorkerStore, signer AppJWTProvider, credentials LabelProvisioningCredentialProvider, api LabelProvisioningAPI, config LabelProvisioningWorkerConfig) (*LabelProvisioningWorker, error) {
-	if workerStore == nil || signer == nil || credentials == nil || api == nil {
+func NewLabelProvisioningWorker(workerStore LabelProvisioningWorkerStore, credentials LabelProvisioningCredentialProvider, api LabelProvisioningAPI, config LabelProvisioningWorkerConfig) (*LabelProvisioningWorker, error) {
+	if workerStore == nil || credentials == nil || api == nil {
 		return nil, ErrInvalidLabelProvisioningWorkerConfiguration
 	}
 	if strings.TrimSpace(config.ClaimOwner) == "" ||
@@ -83,7 +82,7 @@ func NewLabelProvisioningWorker(workerStore LabelProvisioningWorkerStore, signer
 		return nil, ErrInvalidLabelProvisioningWorkerConfiguration
 	}
 	return &LabelProvisioningWorker{
-		store: workerStore, signer: signer, credentials: credentials, api: api,
+		store: workerStore, credentials: credentials, api: api,
 		reconciler: NewLabelReconciler(api),
 		claimOwner: config.ClaimOwner, lease: config.LeaseDuration,
 		heartbeat: config.HeartbeatInterval, idlePoll: config.IdlePollInterval,
@@ -165,27 +164,11 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 	}
 	job := payload
 
-	appJWT, err := worker.signer.AppJWT(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return err
-		}
-		return worker.fail(ctx, lease, err)
-	}
-	actualInstallationID, err := worker.api.ResolveRepositoryInstallation(ctx, appJWT, job.RepositoryOwner, job.RepositoryName)
-	if err != nil {
-		if ctx.Err() != nil {
-			return err
-		}
-		return worker.fail(ctx, lease, err)
-	}
-	if actualInstallationID != job.InstallationID {
-		return worker.fail(ctx, lease, permanentProvisioningError{
-			cause: fmt.Errorf("%w: repository %s/%s is installed as %d, want %d", ErrLabelProvisioningRepositoryMismatch, job.RepositoryOwner, job.RepositoryName, actualInstallationID, job.InstallationID),
-		})
-	}
-
-	credential, err := worker.credentials.RepositoryCredential(ctx, job.RepositoryOwner, job.RepositoryName)
+	// The durable payload carries only stable IDs. Resolve the current
+	// owner and name by repository ID on every attempt so a rename between
+	// queueing and execution provisions the repository under its live
+	// identity instead of stranding the job on a stale name.
+	credential, err := worker.credentials.InstallationCredential(ctx, job.InstallationID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return err
@@ -193,25 +176,31 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 		return worker.fail(ctx, lease, err)
 	}
 	if strings.TrimSpace(credential) == "" {
-		return worker.fail(ctx, lease, permanentProvisioningError{cause: errors.New("Developer repository credential is empty")})
+		return worker.fail(ctx, lease, permanentProvisioningError{cause: errors.New("Developer installation credential is empty")})
+	}
+	owner, name, err := worker.resolveRepositoryName(ctx, credential, job)
+	if err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		return worker.fail(ctx, lease, err)
 	}
 
-	observed, err := worker.api.GetRepository(ctx, credential, job.RepositoryOwner, job.RepositoryName)
+	observed, err := worker.api.GetRepository(ctx, credential, owner, name)
 	if err != nil {
 		if ctx.Err() != nil {
 			return redactProvisioningError(err, credential)
 		}
 		return worker.fail(ctx, lease, redactProvisioningError(err, credential))
 	}
-	if observed.ID != job.RepositoryID || !strings.EqualFold(observed.Owner, job.RepositoryOwner) || !strings.EqualFold(observed.Name, job.RepositoryName) {
+	if observed.ID != job.RepositoryID {
 		return worker.fail(ctx, lease, permanentProvisioningError{
-			cause: fmt.Errorf("%w: observed repository %d %s/%s does not match durable %d %s/%s",
-				ErrLabelProvisioningRepositoryMismatch, observed.ID, observed.Owner, observed.Name,
-				job.RepositoryID, job.RepositoryOwner, job.RepositoryName),
+			cause: fmt.Errorf("%w: observed repository %d does not match durable %d",
+				ErrLabelProvisioningRepositoryMismatch, observed.ID, job.RepositoryID),
 		})
 	}
 
-	if err := worker.reconciler.EnsureManagedLabels(ctx, credential, job.RepositoryOwner, job.RepositoryName); err != nil {
+	if err := worker.reconciler.EnsureManagedLabels(ctx, credential, owner, name); err != nil {
 		if ctx.Err() != nil {
 			return redactProvisioningError(err, credential)
 		}
@@ -220,7 +209,7 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 
 	result, err := json.Marshal(map[string]any{
 		"repository_id": job.RepositoryID, "installation_id": job.InstallationID,
-		"owner": job.RepositoryOwner, "name": job.RepositoryName,
+		"owner": owner, "name": name,
 	})
 	if err != nil {
 		return worker.fail(ctx, lease, err)
@@ -229,6 +218,25 @@ func (worker *LabelProvisioningWorker) provision(ctx context.Context, lease stor
 		return fmt.Errorf("acknowledge label provisioning job: %w", err)
 	}
 	return nil
+}
+
+// resolveRepositoryName maps the durable repository ID to its current
+// owner and name through the installation listing. A repository absent
+// from its installation lost Developer App access and fails terminally.
+func (worker *LabelProvisioningWorker) resolveRepositoryName(ctx context.Context, credential string, job store.LabelProvisioningPayload) (string, string, error) {
+	repositories, _, err := worker.api.ListInstallationRepositories(ctx, credential)
+	if err != nil {
+		return "", "", redactProvisioningError(err, credential)
+	}
+	for _, repository := range repositories {
+		if repository.ID == job.RepositoryID {
+			return repository.Owner, repository.Name, nil
+		}
+	}
+	return "", "", permanentProvisioningError{
+		cause: fmt.Errorf("%w: repository %d is no longer accessible to installation %d",
+			ErrLabelProvisioningRepositoryMismatch, job.RepositoryID, job.InstallationID),
+	}
 }
 
 func (worker *LabelProvisioningWorker) fail(ctx context.Context, lease store.JobLease, cause error) error {

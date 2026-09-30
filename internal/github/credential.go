@@ -85,6 +85,34 @@ func (provider *RepositoryInstallationCredentialProvider) RepositoryCredential(c
 	return credential, nil
 }
 
+// InstallationCredential returns a short-lived installation token for the
+// given installation ID without resolving a repository name. Label
+// provisioning stores only stable repository and installation IDs so a
+// repository rename cannot strand its job; the worker resolves the current
+// owner and name from the installation listing instead.
+func (provider *RepositoryInstallationCredentialProvider) InstallationCredential(ctx context.Context, installationID int64) (credential string, err error) {
+	if provider == nil || provider.appJWT == nil || provider.api == nil || provider.tokens == nil {
+		return "", errors.New("repository installation credential provider is not configured")
+	}
+	if installationID <= 0 {
+		return "", &ConfigurationError{Cause: ErrInvalidInstallationID}
+	}
+	appJWT, err := provider.appJWT.AppJWT(ctx)
+	if err != nil {
+		return "", fmt.Errorf("create GitHub App JWT for installation credential: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = redactSecret(err, appJWT)
+		}
+	}()
+	credential, err = provider.tokens.Token(ctx, installationID)
+	if err != nil {
+		return "", fmt.Errorf("create GitHub installation credential: %w", err)
+	}
+	return credential, nil
+}
+
 type secretSafeError struct {
 	message  string
 	metadata SafeErrorMetadata

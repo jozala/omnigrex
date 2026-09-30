@@ -218,3 +218,66 @@ func TestCompleteLabelProvisioningTransitionBatchesLargeInstallation(t *testing.
 		t.Errorf("distinct repositories = %d, want %d", len(seen), repositories)
 	}
 }
+
+func TestCompleteLabelProvisioningTransitionSurvivesRepositoryRename(t *testing.T) {
+	database := openWebhookStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	firstDeliveryID := "523e4567-e89b-12d3-a456-426614174000"
+	secondDeliveryID := "623e4567-e89b-12d3-a456-426614174000"
+	insertProvisioningDelivery(t, database, ctx, firstDeliveryID)
+	claim, err := database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	oldIdentity := []store.LabelProvisioningRepository{{ID: 9123, Owner: "jozala", Name: "omnigrex"}}
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, oldIdentity, nil, 30*time.Second); err != nil {
+		t.Fatalf("first CompleteLabelProvisioningTransition() error = %v", err)
+	}
+
+	// The repository is renamed, then a later delivery lists it under the
+	// new name. Payloads carry stable IDs only, so the second delivery's
+	// insert converges instead of conflicting and stranding later work.
+	insertProvisioningDelivery(t, database, ctx, secondDeliveryID)
+	claim, err = database.ClaimWebhookDelivery(ctx, "processor", 30*time.Second)
+	if err != nil || claim == nil {
+		t.Fatalf("second ClaimWebhookDelivery() = (%#v, %v), want claim", claim, err)
+	}
+	renamed := []store.LabelProvisioningRepository{
+		{ID: 9123, Owner: "jozala", Name: "renamed"},
+		{ID: 9124, Owner: "jozala", Name: "widgets"},
+	}
+	if err := database.CompleteLabelProvisioningTransition(ctx, claim.DeliveryID, claim.ClaimToken, 99, renamed, nil, 30*time.Second); err != nil {
+		t.Fatalf("second CompleteLabelProvisioningTransition() error = %v", err)
+	}
+
+	payloads := make([]store.LabelProvisioningPayload, 0, 3)
+	for range 3 {
+		lease, err := database.ClaimJobKind(ctx, store.LabelProvisioningQueue, store.ProvisionManagedLabelsJobKind, "provisioner", 30*time.Second)
+		if err != nil || lease == nil {
+			t.Fatalf("ClaimJobKind() = (%#v, %v), want three jobs across both deliveries", lease, err)
+		}
+		payload, err := store.ParseLabelProvisioningPayload(lease.Payload)
+		if err != nil {
+			t.Fatalf("parse payload: %v", err)
+		}
+		payloads = append(payloads, payload)
+		if err := database.CompleteJob(ctx, *lease, json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("CompleteJob() error = %v", err)
+		}
+	}
+	renamedCount := 0
+	for _, payload := range payloads {
+		if payload.RepositoryID == 9123 {
+			renamedCount++
+		}
+		if payload.RepositoryID == 9123 || payload.RepositoryID == 9124 {
+			if payload.InstallationID != 99 {
+				t.Errorf("installation ID = %d, want 99", payload.InstallationID)
+			}
+		}
+	}
+	if renamedCount != 2 {
+		t.Errorf("jobs for renamed repository = %d, want 2 (one per delivery, same stable payload)", renamedCount)
+	}
+}

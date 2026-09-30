@@ -432,7 +432,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure GitHub Human Handoff Worker: %w", err)
 	}
-	provisioningWorker, err := githubapi.NewLabelProvisioningWorker(database, githubServices.developerSigner, developerRepositoryCredentials, githubServices.api, githubapi.LabelProvisioningWorkerConfig{
+	provisioningWorker, err := githubapi.NewLabelProvisioningWorker(database, developerRepositoryCredentials, githubServices.api, githubapi.LabelProvisioningWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":provision-managed-labels", LeaseDuration: settings.WorkflowEffectLeaseDuration,
 		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
 		RetryDelay: settings.WorkflowEffectRetryDelay,
