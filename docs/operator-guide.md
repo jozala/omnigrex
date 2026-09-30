@@ -456,6 +456,17 @@ backfilled on startup. Their missing labels are created by the existing
 Workflow label reconciliation the next time a Workflow runs. Labels deleted
 from an idle repository are likewise restored only when a Workflow runs.
 
+Onboarding scale and webhook admission are bounded. Webhook deliveries
+larger than the 2 MiB ingress bound are rejected with HTTP `413` before
+authentication, so no durable record exists: if the Developer App's Recent
+Deliveries page shows rejected installation deliveries for a very large
+installation, provisioning never triggered for it. Large installations are
+otherwise queued in bounded batches with claim renewal between batches, so
+interruption resumes through idempotent replay rather than restarting from
+scratch; progress is observable as `PROVISION_MANAGED_LABELS` job rows.
+In every over-limit case the fallback is the same Workflow label
+reconciliation, which creates any still-missing labels when work starts.
+
 ## Start A Workflow
 
 Create a small Issue with explicit acceptance criteria and add the `omnigrex:run` label.
