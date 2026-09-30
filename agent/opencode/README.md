@@ -5,6 +5,14 @@ Every installed APK, including transitive dependencies, is downloaded as an exac
 Clean builds still depend on Alpine retaining those versioned artifacts at its release CDN, so pushed Runtime Profile images must be retained by registry digest rather than reconstructed as disaster recovery.
 The process runs as UID and GID `10001` and starts `opencode acp` in `/workspace`.
 
+## Repository Build Tools
+
+The image includes GCC, binutils, musl development headers, and their dependencies so Go tools installed through mise can use cgo and run `go test -race`.
+The orchestrator uses the same APK manifest because it provisions repository tools before launching Runtime Processes.
+Go enables cgo automatically when the compiler is available; no image-level `CGO_ENABLED` override is required.
+Repository-specific Go versions remain pinned by the repository tool configuration and installed through mise.
+Use the disk-backed tool directories requested in the repository's Turn configuration for compilation scratch space, build caches, and module caches.
+
 ## Runtime Paths
 
 Every Runtime Process must mount the assignment workspace at exactly `/workspace`.
@@ -85,3 +93,19 @@ Validate the bundled tools and non-root identity with:
 docker run --rm --entrypoint sh omnigrex/opencode:1.18.29 -c \
   'test "$(id -u)" = 10001 && opencode --version && mise --version && git --version'
 ```
+
+After building the image, verify race-enabled Go tests inside a hardened non-root container with:
+
+```sh
+go test -race -tags=integration -timeout 30m ./internal/runtime/docker -run '^TestOpenCodeImageRunsGoRaceTests$' -count=1 -v
+```
+
+This test downloads the repository's pinned Go version through mise into an isolated volume, then runs a synchronized fixture and verifies detection of an intentional race with networking disabled.
+Test execution uses a read-only root filesystem, dropped capabilities, `no-new-privileges`, Runtime Profile tmpfs limits, and disk-backed compilation paths outside `/workspace`.
+The test bounds its combined installation and execution phases to 15 minutes; the larger package timeout leaves time for resource cleanup.
+It also runs through `mise run test-integration` and the Docker-backed CI gate.
+Set `OMNIGREX_OPENCODE_IMAGE` to exercise another local tag or an exact registry digest; the test selects the image's architecture.
+
+Image packaging changes produce a new Runtime Profile digest even when the OpenCode version stays the same.
+Follow the [Runtime Profile image-change procedure](../../docs/operator-guide.md#runtime-profile-image-change) to qualify and deploy that digest.
+Existing Agent Sessions retain their original image binding, including its original build tools.

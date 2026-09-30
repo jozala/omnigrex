@@ -52,7 +52,7 @@ RUN --mount=type=bind,source=agent/opencode/apk-packages.sha256,target=/tmp/apk-
       echo "${checksum}  /tmp/apks/${package}.apk" | sha256sum -c - || exit 1; \
       installed=$((installed + 1)); \
     done < /tmp/apk-packages.sha256 && \
-    [ "$installed" -eq 27 ] && \
+    [ "$installed" -eq 38 ] && \
     apk add --no-cache --no-network /tmp/apks/*.apk && \
     rm -rf /tmp/apks && \
     addgroup -g 10001 opencode && \

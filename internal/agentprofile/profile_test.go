@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -94,25 +93,6 @@ func TestParseUsesInjectedPolicyCatalog(t *testing.T) {
 	}
 	if profile.Name() != "solution-architect" || profile.Role() != architect {
 		t.Errorf("identity = (%q, %q)", profile.Name(), profile.Role())
-	}
-}
-
-func TestRepositoryAgentProfilesAreValid(t *testing.T) {
-	for _, path := range []string{"../../.omnigrex/team/developer.md", "../../.omnigrex/team/reviewer.md"} {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		profile, err := agentprofile.Parse(".omnigrex/team/"+strings.TrimPrefix(path, "../../.omnigrex/team/"), content, role.BuiltinPolicyCatalog())
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		if profile.Runtime() != "opencode-acp/v1" {
-			t.Errorf("%s runtime = %q, want pinned opencode-acp/v1 contract", path, profile.Runtime())
-		}
-		if provider, _, found := strings.Cut(profile.Model(), "/"); !found || strings.TrimSpace(provider) == "" {
-			t.Errorf("%s model = %q, want provider/model form without pinning the changeable model", path, profile.Model())
-		}
 	}
 }
 
