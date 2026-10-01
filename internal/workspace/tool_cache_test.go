@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,7 +13,31 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/workspace"
+	"golang.org/x/sys/unix"
 )
+
+func allocatedOnDisk(t *testing.T, root string) int64 {
+	t.Helper()
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		var stat unix.Stat_t
+		if err := unix.Lstat(path, &stat); err != nil {
+			return err
+		}
+		if stat.Blocks < 0 {
+			return nil
+		}
+		total += stat.Blocks * 512
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return total
+}
 
 const toolCacheAssignment = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
@@ -168,11 +193,15 @@ func TestMeasureAssignmentToolCacheReportsAllocatedDiskUsage(t *testing.T) {
 	if usage.Files != files {
 		t.Fatalf("usage files = %d, want %d", usage.Files, files)
 	}
-	// Ten 1-byte files allocate far more than 10 bytes on any filesystem
-	// with block allocation (typically 4 KiB per file plus directories).
+	// Derive the expectation from the filesystem itself for portability:
+	// sum st_blocks*512 over the cache root, its subdirectories, and files.
 	// Apparent-size accounting would report only 10 bytes and miss pressure.
-	if usage.Bytes < 10*4096 {
-		t.Fatalf("allocated usage bytes = %d, want at least %d for %d tiny files", usage.Bytes, 10*4096, files)
+	want := allocatedOnDisk(t, cache)
+	if usage.Bytes != want {
+		t.Fatalf("allocated usage bytes = %d, want filesystem-derived %d", usage.Bytes, want)
+	}
+	if want <= 10 {
+		t.Fatalf("filesystem-derived usage = %d, want materially more than 10 apparent bytes", want)
 	}
 	if usage.Truncated {
 		t.Fatal("usage truncated unexpectedly")
@@ -193,10 +222,12 @@ func TestMeasureAssignmentToolCacheIncludesNestedDirectoryAllocation(t *testing.
 	if usage.Files != 0 {
 		t.Fatalf("usage files = %d, want 0 for directory-only cache", usage.Files)
 	}
-	// Root plus three nested directories each allocate at least one block.
-	// Apparent-size accounting would report zero for no files.
-	if usage.Bytes < 3*4096 {
-		t.Fatalf("directory-only usage bytes = %d, want at least %d for nested directory allocation", usage.Bytes, 3*4096)
+	// Directory-only cache: apparent size is zero; allocated usage must equal
+	// the filesystem-reported directory allocation exactly (portable across
+	// filesystems that report smaller or zero directory allocation).
+	want := allocatedOnDisk(t, cache)
+	if usage.Bytes != want {
+		t.Fatalf("directory-only usage bytes = %d, want filesystem-derived %d", usage.Bytes, want)
 	}
 	if usage.Truncated {
 		t.Fatal("usage truncated unexpectedly")

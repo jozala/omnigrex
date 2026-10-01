@@ -250,15 +250,21 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 		return false, fmt.Errorf("%w: Participant tool cache crossed devices", ErrUnsafeAssignmentPath)
 	}
 	// Batched enumeration from startOffset, no wrap, up to global budget.
+	// streamed tracks the readdir stream position past the skip window for the
+	// resume cursor, including ignored and access-skipped names (to avoid
+	// repinning on the same block every poll). Vanished (ENOENT) names are not
+	// counted since the next listing will not contain them.
 	skipped := 0
-	processedInDir := 0
+	streamed := 0
 	for {
 		if err := ctx.Err(); err != nil {
+			cursors[dirPath] = startOffset + streamed
+			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, err
 		}
 		if *entries > maxToolCacheEntries {
 			// Budget exhausted: save resume cursor, push dir back for next poll.
-			cursors[dirPath] = startOffset + processedInDir
+			cursors[dirPath] = startOffset + streamed
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, nil
 		}
@@ -270,6 +276,8 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				delete(cursors, dirPath)
 				return true, nil
 			}
+			cursors[dirPath] = startOffset + streamed
+			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, readErr
 		}
 		for _, name := range names {
@@ -278,7 +286,7 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				continue
 			}
 			if *entries > maxToolCacheEntries {
-				cursors[dirPath] = startOffset + processedInDir
+				cursors[dirPath] = startOffset + streamed
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, nil
 			}
@@ -290,28 +298,27 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				if isToolCacheAccessError(err) {
 					*hadSkip = true
 					usage.Truncated = true
+					streamed++
 					continue
 				}
+				cursors[dirPath] = startOffset + streamed
+				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, err
 			}
 			*entries++
 			if *entries > maxToolCacheEntries {
 				// Budget hit on this entry: do not count it this poll, resume
-				// at this entry next poll (cursor at current processed count,
-				// not including this entry).
-				cursors[dirPath] = startOffset + processedInDir
+				// at this entry next poll.
+				// entries already incremented for budget accounting; streamed
+				// does not advance for this uncounted entry so it is retried.
+				cursors[dirPath] = startOffset + streamed
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
-				// Undo entries increment for uncounted entry? entries counts
-				// processed entries for budget; this entry not processed (not
-				// counted in usage/accum), but entries already incremented.
-				// Keep entries>max to signal truncation; next poll starts fresh
-				// budget (entries reset per poll? Actually entries is per-poll
-				// budget counter, reset each poll (new measure call). Good.
 				return false, nil
 			}
 			switch childStat.Mode & unix.S_IFMT {
 			case unix.S_IFDIR:
 				if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != rootDev {
+					streamed++
 					continue
 				}
 				addAllocated(usage, childStat)
@@ -323,9 +330,11 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				*pending = append(*pending, ownedDirectoryEntry{
 					path: childPath, dev: uint64(childStat.Dev), ino: uint64(childStat.Ino),
 				})
+				streamed++
 			case unix.S_IFREG:
 				key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
 				if _, duplicate := seen[key]; duplicate {
+					streamed++
 					continue
 				}
 				seen[key] = struct{}{}
@@ -333,12 +342,13 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				*accumBytes += allocatedDiskBytes(childStat)
 				usage.Files++
 				*accumFiles++
+				streamed++
 			default:
+				streamed++
 				continue
 			}
-			processedInDir++
 			if *entries > maxToolCacheEntries {
-				cursors[dirPath] = startOffset + processedInDir
+				cursors[dirPath] = startOffset + streamed
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, nil
 			}
@@ -543,26 +553,32 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 		monitor.scans[participantID] = scan
 	}
 	// One bounded poll continuing the persisted frontier (or starting fresh).
+	// Adopt frontier and accumulation even when the poll ends in error so
+	// interrupted scans resume instead of restarting.
 	usage, pending, cursors, accumBytes, accumFiles, hadSkip, err := monitor.lifecycle.measureCyclePoll(ctx, participantID, scan.pending, scan.cursors, scan.accumBytes, scan.accumFiles, scan.hadSkip)
-	if err != nil {
-		return ToolCacheUsage{}, false, err
-	}
-	cycleComplete := len(pending) == 0
 	scan.pending = pending
 	scan.cursors = cursors
 	scan.accumBytes = accumBytes
 	scan.accumFiles = accumFiles
 	scan.hadSkip = hadSkip
+	if err != nil {
+		// Progress made before interruption is preserved in scan state above;
+		// report the error without warning so the next poll resumes.
+		_ = usage
+		return ToolCacheUsage{Bytes: accumBytes, Files: accumFiles, Truncated: true}, false, err
+	}
+	cycleComplete := len(pending) == 0
 	// Cycle total so far (lower bound when incomplete, exact when complete
 	// without skips).
 	total := ToolCacheUsage{Bytes: accumBytes, Files: accumFiles, Truncated: !cycleComplete || hadSkip}
 	if !cycleComplete {
-		// Incomplete cycle: preserve, warn at most once per cycle.
+		// Incomplete cycle: partial sums are lower bounds; suppress stale
+		// partials at or below the warned watermark to avoid repeated noise.
 		if total.Bytes >= monitor.thresholdBytes {
 			if scan.warned {
 				return total, false, nil
 			}
-			if last, warned := monitor.lastWarned[participantID]; warned && last == total.Bytes {
+			if last, warned := monitor.lastWarned[participantID]; warned && total.Bytes <= last {
 				scan.warned = true
 				return total, false, nil
 			}
@@ -588,7 +604,7 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 			if scan.warned {
 				return total, false, nil
 			}
-			if last, warned := monitor.lastWarned[participantID]; warned && last == total.Bytes {
+			if last, warned := monitor.lastWarned[participantID]; warned && total.Bytes <= last {
 				return total, false, nil
 			}
 			monitor.lastWarned[participantID] = total.Bytes
@@ -604,6 +620,9 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 	}
 	if total.Bytes < monitor.thresholdBytes {
 		delete(monitor.lastWarned, participantID)
+		return total, false, nil
+	}
+	if scan.warned {
 		return total, false, nil
 	}
 	if last, warned := monitor.lastWarned[participantID]; warned && last == total.Bytes {

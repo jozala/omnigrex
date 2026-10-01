@@ -310,3 +310,205 @@ func TestEventualWarningForHeavySubtreeBehindLightSiblings(t *testing.T) {
 		t.Fatal("heavy subtree never warned within 10 bounded polls")
 	}
 }
+
+func TestSymlinkRunDoesNotPinCursor(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	dir := filepath.Join(cache, "mixed")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Run of ignored symlinks followed by real files. Each symlink consumes
+	// budget but must still advance the resume cursor; otherwise the scan pins
+	// on the same symlink block every poll and never completes.
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := os.Symlink(outside, filepath.Join(dir, string(rune('s'+i)))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(dir, string(rune('a'+i))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// With budget 6 the first poll must truncate (5 symlinks + root/dir entries
+	// exceed it), but the second poll must resume past the symlink run instead
+	// of re-stating it. A full cycle must complete within a few polls.
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	completed := false
+	for i := 0; i < 10 && !completed; i++ {
+		usage, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		completed = !usage.Truncated
+	}
+	if !completed {
+		t.Fatal("symlink run pinned cursor; scan never completed")
+	}
+	maxToolCacheEntries = oldMax
+	usage, err := lifecycle.MeasureAssignmentToolCache(context.Background(), assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Files != 3 {
+		t.Fatalf("symlink-mixed files = %d, want 3 real files", usage.Files)
+	}
+}
+
+func TestUnchangedMultiPollCacheWarnsOnce(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "11111111-1111-4111-8111-111111111111"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Ten tiny files need two polls per cycle under budget 6. The first poll's
+	// partial already exceeds the tiny threshold and warns; the completed
+	// cycle must not warn again, and the next cycle's stale partial (at or
+	// below the warned watermark) must not warn either.
+	for i := 0; i < 10; i++ {
+		dir := filepath.Join(cache, "dir")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, string(rune('a'+i))+string(rune('0'+i%10))), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 1024, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warnings := 0
+	// Run enough polls for several full cycles (each cycle ~2 polls).
+	for i := 0; i < 6; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("unchanged multi-poll warnings = %d, want exactly 1", warnings)
+	}
+}
+
+func TestInterruptedScanResumesFromSavedCursor(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 1000000
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "22222222-2222-4222-8222-222222222222"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	dir := filepath.Join(cache, "big")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const files = 2000
+	for i := 0; i < files; i++ {
+		if err := os.WriteFile(filepath.Join(dir, string(rune('a'+i%26))+string(rune('0'+i%10))+string(rune('A'+i%26))+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Interrupt the first poll almost immediately; it must save progress.
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	_, _, err = monitor.Observe(timeoutCtx, assignment)
+	if err == nil {
+		t.Skip("poll completed before timeout; filesystem too fast to interrupt deterministically")
+	}
+	// Next poll with a live context must resume (not restart): total files must
+	// equal exactly the created count, proving no double-count from restarting.
+	maxToolCacheEntries = 1000000
+	// Drain the cycle to completion across bounded polls.
+	var total ToolCacheUsage
+	for i := 0; i < 10; i++ {
+		u, _, err := monitor.Observe(context.Background(), assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total = u
+		if !u.Truncated {
+			break
+		}
+	}
+	if total.Truncated {
+		t.Fatal("interrupted scan never completed after resume")
+	}
+	if total.Files != files {
+		t.Fatalf("resumed total files = %d, want %d (progress discarded or double-counted)", total.Files, files)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b [20]byte
+	pos := len(b)
+	for i > 0 {
+		pos--
+		b[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	return string(b[pos:])
+}
