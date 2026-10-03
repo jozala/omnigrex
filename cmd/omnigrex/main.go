@@ -561,9 +561,13 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 	}
 	level := slog.LevelDebug
 	message := "ACP tool update"
+	failureClass := event.Metadata.FailureClass
 	if event.Metadata.Status == "failed" && strings.HasPrefix(event.Metadata.ToolName, "omnigrex_") {
 		level = slog.LevelWarn
 		message = "ACP MCP tool failed"
+		if failureClass == "" {
+			failureClass = "unclassified"
+		}
 	}
 	sink.logger.Log(ctx, level, message,
 		"assignment_id", event.AssignmentID,
@@ -575,7 +579,7 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		"tool_call_id", event.Metadata.ToolCallID,
 		"tool_name", event.Metadata.ToolName,
 		"status", event.Metadata.Status,
-		"failure_class", event.Metadata.FailureClass,
+		"failure_class", failureClass,
 	)
 	return nil
 }

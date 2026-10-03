@@ -122,6 +122,14 @@ func TestEmitAgentEventClassifiesOnlyKnownToolFailures(t *testing.T) {
 		errorMessage string
 		want         string
 	}{
+		{errorMessage: "tool call failed", want: "read_failed"},
+		{errorMessage: "tool call could not be recorded", want: "read_recording_failed"},
+		{errorMessage: "tool is unavailable in this turn", want: "tool_unavailable"},
+		{errorMessage: "invalid tool call", want: "invalid_tool_call"},
+		{errorMessage: "invalid tool arguments", want: "invalid_tool_arguments"},
+		{errorMessage: "tool authorization is stale", want: "stale_authorization"},
+		{errorMessage: "MCP client is not initialized", want: "not_initialized"},
+		{errorMessage: "unauthorized", want: "authorization_failed"},
 		{errorMessage: "mutation operation identity conflict", want: "mutation_operation_identity_conflict"},
 		{errorMessage: "publication remote head mismatch", want: "publication_remote_head_mismatch"},
 		{errorMessage: "publication remote head mismatch (expected_sha=0123456789abcdef0123456789abcdef01234567, observed_sha=1123456789abcdef0123456789abcdef01234567)", want: "publication_remote_head_mismatch"},

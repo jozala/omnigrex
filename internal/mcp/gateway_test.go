@@ -206,7 +206,7 @@ func TestReviewThreadReadFailureLogsSafeDiagnosticWithoutDisclosingGitHubError(t
 			err: &githubapi.ReviewThreadReadError{Stage: githubapi.ReviewThreadsQuery, Cause: &githubapi.GraphQLQueryError{RequestID: "private-review-text"}},
 		},
 		{
-			name: "credential acquisition", wantCode: "credential_unavailable",
+			name: "credential acquisition", wantCode: "credential_unavailable", wantStage: "credential_acquisition",
 			credentialErr: errors.New("private-review-text credential error"),
 		},
 		{
