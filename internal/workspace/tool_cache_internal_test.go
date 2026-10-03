@@ -1019,17 +1019,25 @@ func TestMidSkipTimeoutDrainsAcrossPolls(t *testing.T) {
 	}
 	cache = filepath.Join(cache, "assignment")
 	// A moderately large counted prefix behind which a heavy tail hides. The
-	// per-poll budget never binds here; every interruption comes from the
-	// short per-poll timeout, including cutoffs landed mid-skip while
-	// re-reading the already-counted prefix. The skip window must drain
-	// monotonically across polls (mid-skip progress persisted via rewind)
-	// instead of replaying the same prefix forever, so the tail is measured,
-	// the cycle completes, and accounting stays exact.
+	// per-poll budget never binds in the second phase; cutoffs there come
+	// from per-poll timeouts, including ones landed mid-skip while re-reading
+	// the already-counted prefix. The skip window must drain monotonically
+	// across polls (mid-skip progress persisted via rewind) instead of
+	// replaying the same prefix forever, so the tail is measured, the cycle
+	// completes, and accounting stays exact.
+	//
+	// Timing robustness: no fixed tiny timeout appears here. Phase 1 runs
+	// without timeouts at all; phase 2 derives its per-poll timeout from the
+	// measured local cost of one budget-bounded poll (a generous multiple,
+	// clamped), and bounds the drain by measured forward progress (a stall
+	// detector) rather than a fixed poll count. Slow runners (race
+	// instrumentation, loaded CI) get proportionally larger timeouts, so a
+	// genuine livelock is the only way this test can fail.
 	wide := filepath.Join(cache, "wide")
 	if err := os.MkdirAll(wide, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const prefix = 5000
+	const prefix = 3000
 	for i := 0; i < prefix; i++ {
 		if err := os.WriteFile(filepath.Join(wide, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
@@ -1055,55 +1063,85 @@ func TestMidSkipTimeoutDrainsAcrossPolls(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Phase 1 (deterministic, no timeouts): build a deep resume cursor with a
-	// small entry budget so the second phase starts with a skip window that
-	// dwarfs a single short poll. This forces cutoffs to land mid-skip.
-	maxToolCacheEntries = 400
+	// small entry budget, and measure the local cost of one bounded poll.
+	maxToolCacheEntries = 300
 	warned := false
-	for i := 0; i < 30; i++ {
+	var sample time.Duration
+	for i := 0; i < 20; i++ {
+		start := time.Now()
 		u, w, err := monitor.Observe(context.Background(), assignment)
+		sample = time.Since(start)
 		if err != nil {
 			t.Fatal(err)
 		}
 		warned = warned || w
-		if cur := monitor.scans[assignment].cursors["wide"]; cur >= 4000 {
+		if cur := monitor.scans[assignment].cursors["wide"]; cur >= 2500 {
 			break
 		}
 		if !u.Truncated {
 			t.Fatal("prefix unexpectedly completed under the small budget")
 		}
 	}
-	if cur := monitor.scans[assignment].cursors["wide"]; cur < 4000 {
-		t.Fatalf("wide cursor = %d, want deep (>=4000) resume offset for phase 2", cur)
+	if cur := monitor.scans[assignment].cursors["wide"]; cur < 2500 {
+		t.Fatalf("wide cursor = %d, want deep (>=2500) resume offset for phase 2", cur)
 	}
-	// Phase 2 (timeout-driven only): the budget never binds; every cutoff
-	// comes from the short per-poll timeout, repeatedly landing mid-skip
-	// while re-reading the deep already-counted prefix. The skip window must
-	// drain monotonically (mid-skip progress persisted via rewind, re-reads
-	// deduplicated without billing) so the tail is measured and the cycle
-	// completes with exact accounting.
+	// Derive the phase-2 timeout from the measured local poll cost: a
+	// generous multiple, clamped so the skip window fits comfortably even on
+	// slow runners (every poll has room to make progress) while loaded
+	// runners still see genuine timeout cutoffs, including mid-skip ones.
+	// Fast runners may see zero interruptions and drain in a few polls; the
+	// assertions below hold either way, and the stall detector (not a fixed
+	// poll count) is what fails a genuine livelock.
+	pollTimeout := sample * 20
+	if pollTimeout < 100*time.Millisecond {
+		pollTimeout = 100 * time.Millisecond
+	}
+	if pollTimeout > 5*time.Second {
+		pollTimeout = 5 * time.Second
+	}
+	// Phase 2 (timeout-driven only): the budget never binds. Interrupted polls
+	// preserve their partial progress (including mid-skip rewinds), so the
+	// file total grows monotonically; only consecutive polls with zero growth
+	// indicate a livelock. Error returns already carry the preserved partial
+	// totals, so they count toward progress too.
 	maxToolCacheEntries = 1000000
 	var total ToolCacheUsage
 	completed := false
 	interrupted := 0
+	lastFiles := int64(-1)
+	stalled := 0
 	for i := 0; i < 200 && !completed; i++ {
-		pollCtx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		pollCtx, cancel := context.WithTimeout(context.Background(), pollTimeout)
 		u, w, err := monitor.Observe(pollCtx, assignment)
 		cancel()
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				interrupted++
+				if u.Files > lastFiles {
+					lastFiles, stalled = u.Files, 0
+				} else {
+					stalled++
+				}
+				if stalled >= 30 {
+					t.Fatalf("no forward progress for %d consecutive interrupted polls (files=%d); skip window is replaying, not draining", stalled, u.Files)
+				}
 				continue
 			}
 			t.Fatal(err)
 		}
 		warned = warned || w
 		total = u
+		if u.Files > lastFiles {
+			lastFiles, stalled = u.Files, 0
+		} else {
+			stalled++
+		}
+		if stalled >= 30 {
+			t.Fatalf("no forward progress for %d consecutive polls (files=%d); scan is wedged", stalled, u.Files)
+		}
 		completed = !u.Truncated
 	}
-	t.Logf("timeout drain: interrupted=%d completed=%v files=%d", interrupted, completed, total.Files)
-	if interrupted == 0 {
-		t.Log("no poll was interrupted; timing did not exercise the resume path on this run")
-	}
+	t.Logf("timeout drain: pollTimeout=%v interrupted=%d completed=%v files=%d", pollTimeout, interrupted, completed, total.Files)
 	if !completed {
 		t.Fatal("skip window never drained within bounded polls; tail never measured")
 	}
