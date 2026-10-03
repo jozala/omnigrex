@@ -784,3 +784,217 @@ func TestMidSkipRewindDoesNotDoubleCount(t *testing.T) {
 		t.Fatalf("rewind final files = %d, want 10 (no double-count, no loss)", total.Files)
 	}
 }
+
+func TestDeepRewindRegionStillProgressesWithinBudget(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "77777777-7777-4777-8777-777777777777"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Twenty files need several polls under budget 6. Simulating a deep
+	// rewind (cursor back to 0, i.e. a rewind region larger than the per-poll
+	// budget) before every poll reproduces the timeout-driven starvation
+	// chain: without dedup-before-bill every poll re-bills already-counted
+	// names and the tail never advances. Deduplicated re-reads must be
+	// verification only (no budget), so the tail progresses every poll.
+	dir := filepath.Join(cache, "dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const files = 20
+	for i := 0; i < files; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var total ToolCacheUsage
+	for i := 0; i < 10; i++ {
+		// Force a deep rewind into the already-counted prefix before every
+		// poll after the first, simulating a timeout mid-skip that saved a
+		// rewind cursor. The rewind region quickly exceeds the budget.
+		if i > 0 {
+			if scan := monitor.scans[assignment]; scan != nil {
+				for path := range scan.cursors {
+					scan.cursors[path] = 0
+				}
+			}
+		}
+		u, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total = u
+		if !u.Truncated {
+			break
+		}
+	}
+	if total.Truncated {
+		t.Fatal("deep rewind region starved the tail; cycle never completed within bounded polls")
+	}
+	if total.Files != files {
+		t.Fatalf("deep rewind final files = %d, want %d (double-count or loss)", total.Files, files)
+	}
+}
+
+func TestCacheRecreationResetsStaleScanState(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "88888888-8888-4888-8888-888888888888"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	dir := filepath.Join(cache, "dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// Start a cycle and leave it mid-flight (partial frontier + cursor).
+	if _, _, err := monitor.Observe(ctx, assignment); err != nil {
+		t.Fatal(err)
+	}
+	if scan := monitor.scans[assignment]; scan == nil || (len(scan.pending) == 0 && len(scan.cursors) == 0) {
+		t.Fatal("expected mid-cycle scan state after first poll")
+	}
+	// Collect and recreate the cache: stale pending entries pin removed
+	// (dev, ino) values and cursors point into a vanished listing. The next
+	// poll must start a fresh cycle instead of failing permanently.
+	if err := os.RemoveAll(cache); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const recreated = 3
+	for i := 0; i < recreated; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "g"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Poison any surviving frontier pins to guarantee a mismatch even if the
+	// filesystem reuses inode numbers for the recreated directories. Stale
+	// state must be dropped (lower bound), never wedged as a permanent error.
+	if scan := monitor.scans[assignment]; scan != nil {
+		for i := range scan.pending {
+			scan.pending[i].dev, scan.pending[i].ino = 0xDEADBEEF, 0xDEADBEEF
+		}
+	}
+	// Drain across the stale-cycle boundary: the poll immediately after
+	// recreation may complete with the prior partial sum as a lower bound
+	// (stale entries dropped, hadSkip set); the following fresh cycle must
+	// then measure the recreated cache exactly, without permanent errors.
+	found := false
+	for i := 0; i < 10 && !found; i++ {
+		u, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatalf("recreated cache observe %d failed: %v (stale state wedged)", i, err)
+		}
+		if !u.Truncated && u.Files == recreated {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("recreated cache never measured %d files within bounded polls (stale state leaked)", recreated)
+	}
+}
+
+func TestCheckPrunesAbsentParticipants(t *testing.T) {
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep := "99999999-9999-4999-8999-999999999999"
+	gone := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab"
+	for _, assignment := range []string{keep, gone} {
+		cache, err := lifecycle.toolDataRoot(assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cache, "assignment"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "assignment", "f"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 1024, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, assignment := range []string{keep, gone} {
+		if _, _, err := monitor.Observe(ctx, assignment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := monitor.scans[gone]; !ok {
+		t.Fatal("expected scan state for gone participant before collection")
+	}
+	// Collect one assignment entirely so it disappears from the listing.
+	goneRoot, err := lifecycle.toolDataRoot(gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// toolDataRoot is mise/assignment-<ID>/tool-data; the listing scans
+	// mise/assignment-<ID>, so remove that parent.
+	if err := os.RemoveAll(filepath.Dir(goneRoot)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := monitor.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := monitor.scans[gone]; ok {
+		t.Fatal("collected participant scan state was not pruned")
+	}
+	if _, ok := monitor.lastWarned[gone]; ok {
+		t.Fatal("collected participant warning watermark was not pruned")
+	}
+	if _, ok := monitor.scans[keep]; !ok {
+		t.Fatal("retained participant scan state was pruned")
+	}
+}

@@ -37,25 +37,7 @@ func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, part
 	return usage, err
 }
 
-// participantScan persists the exploration frontier across polls so completed
-// regions are never re-enumerated and the frontier advances monotonically.
-// Pending holds remaining directories in the current cycle (stack, LIFO for
-// depth-first). Cursors holds resume offsets per directory path for partially
-// processed directories. Accum sums disjoint subsets visited so far in the
-// current cycle (no double-count, since each entry is visited once per cycle).
-// HadSkip marks access skips (lower bound). Warned marks whether this cycle
-// already warned (suppress further warnings in same cycle).
-type participantScan struct {
-	pending    []ownedDirectoryEntry
-	cursors    map[string]int
-	accumBytes int64
-	accumFiles int64
-	hadSkip    bool
-	warned     bool
-	started    bool
-}
-
-func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID string, pending []ownedDirectoryEntry, cursors map[string]int, seen map[[16]byte]struct{}, accumBytes, accumFiles int64, hadSkip bool) (ToolCacheUsage, []ownedDirectoryEntry, map[string]int, map[[16]byte]struct{}, int64, int64, bool, error) {
+func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID string, pending []ownedDirectoryEntry, cursors map[string]int, seen map[string]map[[16]byte]struct{}, accumBytes, accumFiles int64, hadSkip bool) (ToolCacheUsage, []ownedDirectoryEntry, map[string]int, map[string]map[[16]byte]struct{}, int64, int64, bool, error) {
 	if lifecycle == nil || !uuidtext.Valid(participantID) {
 		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, ErrInvalidAssignmentID
 	}
@@ -70,7 +52,7 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 			return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 		}
 		if !exists {
-			return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
+			return ToolCacheUsage{}, nil, make(map[string]int), make(map[string]map[[16]byte]struct{}), 0, 0, false, nil
 		}
 	}
 	exists, err := inspectOwnedDirectory(root)
@@ -78,13 +60,13 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 	}
 	if !exists {
-		return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
+		return ToolCacheUsage{}, nil, make(map[string]int), make(map[string]map[[16]byte]struct{}), 0, 0, false, nil
 	}
 	cache := filepath.Join(root, "assignment")
 	cacheDir, _, err := openDirectoryNoFollow(cache)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
+			return ToolCacheUsage{}, nil, make(map[string]int), make(map[string]map[[16]byte]struct{}), 0, 0, false, nil
 		}
 		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, fmt.Errorf("open Participant tool cache: %w", err)
 	}
@@ -102,27 +84,25 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 		cursors = make(map[string]int)
 	}
 	if seen == nil {
-		seen = make(map[[16]byte]struct{})
+		seen = make(map[string]map[[16]byte]struct{})
 	}
 	// Fresh cycle: initialize frontier with root, count root allocation once.
 	isFresh := len(pending) == 0 && accumBytes == 0 && accumFiles == 0 && len(cursors) == 0 && len(seen) == 0 && !hadSkip
 	usage := ToolCacheUsage{}
-	// Accum holds disjoint sum so far in cycle (excluding this poll's new).
-	// This poll adds new entries to accum; usage for warning is accum total.
-	// For fresh cycles, count root allocation once, deduplicated by identity.
 	if isFresh {
+		rootSet := make(map[[16]byte]struct{})
+		seen[""] = rootSet
 		rootKey := fileIdentity(uint64(rootStat.Dev), uint64(rootStat.Ino))
-		if _, duplicate := seen[rootKey]; !duplicate {
-			seen[rootKey] = struct{}{}
-			addAllocated(&usage, rootStat)
-			accumBytes += usage.Bytes
-		}
+		rootSet[rootKey] = struct{}{}
+		addAllocated(&usage, rootStat)
+		accumBytes += usage.Bytes
 		// Files: root dir itself not counted as file.
 		pending = []ownedDirectoryEntry{{path: "", dev: rootDev, ino: rootIno}}
 	} else {
 		// Resumed cycle: usage starts from 0 for this poll's new entries;
-		// accum holds prior polls' sum, to which we add. Per-cycle seen
-		// deduplicates re-processed names after mid-skip rewinds.
+		// accum holds prior polls' sum, to which we add. Per-directory seen
+		// sets deduplicate names re-processed after an interruption so they
+		// are verified without re-billing the per-poll budget or re-counting.
 		usage.Bytes = 0
 		usage.Files = 0
 	}
@@ -144,33 +124,17 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 			return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, visitErr
 		}
 		if !completed {
-			// Budget exhausted mid-dir or access pause; frontier saved for
-			// next poll (current dir already pushed back with updated cursor
-			// by visit helper when truncated due to budget; for access skips
-			// visit continues with next pending, not break? Actually visit
-			// returns completed=false only on budget exhaustion (truncated),
-			// access skips return completed=true with hadSkip set (continue).
-			// So !completed here means budget exhausted, stop poll.
+			// Budget exhausted or interrupted mid-directory; the visit helper
+			// already pushed the directory back with its updated cursor, so
+			// stopping here preserves the frontier for the next poll.
+			// Access skips return completed=true (continue with next pending).
 			break
 		}
 	}
-	// Poll partial usage for this poll is in usage (new entries this poll).
-	// Cycle accum total so far = accumBytes/accumFiles (including this poll,
-	// since visit added directly to accum? Actually visit adds to usage and
-	// accum? Let's have visit add to both usage (poll partial) and accum
-	// (cycle total). Currently visit adds to usage only; need to also add to
-	// accum. Simpler: after poll, accum total = accumBytes (updated by visit
-	// via pointers) + usage? No, double-count. Let's have visit add to accum
-	// directly via pointers, and usage tracks poll partial separately? Actually
-	// visit currently adds to usage only. Change to add to both: usage (poll)
-	// and accum (cycle). Implement by passing accum pointers and adding in
-	// visit when counting dirs/files.
-	// For now, to avoid confusion, compute cycle total as accumBytes/accumFiles
-	// updated by visit (visit adds to accum directly). Poll usage for return
-	// (for Measure compat, single poll from fresh cycle, accum==poll partial
-	// plus root? Root already added to accum at cycle start, poll partial
-	// includes root? Fresh cycle: accum starts 0, root added to usage and accum
-	// (both). Good.
+	// The visit helper adds each newly counted entry to both usage (this
+	// poll's partial) and accum (the cycle total); deduplicated re-reads
+	// update neither. Cycle accumulators therefore hold the exact total of
+	// distinct entries visited so far this cycle.
 	// Truncated when frontier non-empty (more work remains in cycle) or entries
 	// budget hit.
 	truncated := len(pending) != 0
@@ -196,11 +160,39 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 // frontier saved for next poll, current dir pushed back with updated cursor).
 // Access skips mark hadSkip and return completed=true (continue with next
 // pending, not break entire poll).
-func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir *os.File, rootDev uint64, current ownedDirectoryEntry, cursors map[string]int, seen map[[16]byte]struct{}, usage *ToolCacheUsage, entries *int, pending *[]ownedDirectoryEntry, accumBytes, accumFiles *int64, hadSkip *bool) (bool, error) {
+func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir *os.File, rootDev uint64, current ownedDirectoryEntry, cursors map[string]int, seen map[string]map[[16]byte]struct{}, usage *ToolCacheUsage, entries *int, pending *[]ownedDirectoryEntry, accumBytes, accumFiles *int64, hadSkip *bool) (bool, error) {
 	dirPath := current.path
 	startOffset := cursors[dirPath]
 	if startOffset < 0 {
 		startOffset = 0
+	}
+	// dset holds this cycle's counted identities for dirPath so names
+	// re-processed after an interruption deduplicate instead of re-counting.
+	// Re-reads bill nothing (only fresh names consume the per-poll budget);
+	// the per-Assignment timeout alone bounds re-read work. The set is dropped
+	// when the directory leaves the frontier, bounding retained memory to
+	// in-flight directories. Cross-directory hardlinks may then count twice
+	// (overestimate-safe for a soft signal).
+	dset, ok := seen[dirPath]
+	if !ok {
+		dset = make(map[[16]byte]struct{})
+		seen[dirPath] = dset
+	}
+	// skipped counts names re-read to reach the resume offset (no Fstatat, no
+	// budget); streamed counts names yielded past the skip window, including
+	// deduplicated re-reads (which bill nothing). Vanished (ENOENT) names
+	// advance neither, since the next listing will not contain them.
+	skipped := 0
+	streamed := 0
+	// saveResume records the resume cursor. It never moves the cursor
+	// backwards: an interruption during the skip window leaves the persisted
+	// frontier untouched so the next poll retries the same skip instead of
+	// re-billing an already-counted prefix. Only forward progress past the
+	// previous frontier advances the cursor.
+	saveResume := func() {
+		if skipped >= startOffset {
+			cursors[dirPath] = startOffset + streamed
+		}
 	}
 	var directory *os.File
 	var owned bool
@@ -209,13 +201,17 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 		if err != nil {
 			if os.IsNotExist(err) {
 				delete(cursors, dirPath)
+				delete(seen, dirPath)
 				return true, nil
 			}
 			if isToolCacheAccessError(err) {
 				*hadSkip = true
 				usage.Truncated = true
+				delete(cursors, dirPath)
+				delete(seen, dirPath)
 				return true, nil
 			}
+			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, fmt.Errorf("reopen Participant tool cache directory: %w", err)
 		}
 		directory = dup
@@ -225,13 +221,17 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 		if err != nil {
 			if os.IsNotExist(err) {
 				delete(cursors, dirPath)
+				delete(seen, dirPath)
 				return true, nil
 			}
 			if isToolCacheAccessError(err) {
 				*hadSkip = true
 				usage.Truncated = true
+				delete(cursors, dirPath)
+				delete(seen, dirPath)
 				return true, nil
 			}
+			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, fmt.Errorf("reopen Participant tool cache directory: %w", err)
 		}
 		directory = reopened
@@ -244,41 +244,40 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 	}()
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+		saveResume()
+		*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 		return false, err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || int(stat.Uid) != os.Geteuid() ||
 		uint64(stat.Dev) != current.dev || uint64(stat.Ino) != current.ino {
-		return false, fmt.Errorf("%w: Participant tool cache directory changed", ErrUnsafeAssignmentPath)
+		// The path now resolves to a different directory (concurrent
+		// replacement): drop the stale entry for this cycle instead of wedging
+		// the participant on every poll. The replacement is discovered fresh
+		// next cycle; the partial sum stays a lower bound.
+		*hadSkip = true
+		usage.Truncated = true
+		delete(cursors, dirPath)
+		delete(seen, dirPath)
+		return true, nil
 	}
 	if uint64(stat.Dev) != rootDev {
-		return false, fmt.Errorf("%w: Participant tool cache crossed devices", ErrUnsafeAssignmentPath)
+		*hadSkip = true
+		usage.Truncated = true
+		delete(cursors, dirPath)
+		delete(seen, dirPath)
+		return true, nil
 	}
-	// Batched enumeration from startOffset, no wrap, up to global budget.
-	// streamed tracks the readdir stream position past the skip window for the
-	// resume cursor, including ignored and access-skipped names (to avoid
-	// repinning on the same block every poll). Vanished (ENOENT) names are not
-	// counted since the next listing will not contain them.
-	skipped := 0
-	streamed := 0
+	// Batched enumeration from the persisted offset with the per-poll budget
+	// bounding fresh work; re-reads after an interruption bill nothing.
 	for {
 		if err := ctx.Err(); err != nil {
-			if skipped < startOffset {
-				cursors[dirPath] = skipped
-			} else {
-				cursors[dirPath] = startOffset + streamed
-			}
+			saveResume()
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, err
 		}
 		if *entries > maxToolCacheEntries {
 			// Budget exhausted: save resume cursor, push dir back for next poll.
-			// Mid-skip rewinds below the counted frontier are safe because
-			// per-cycle identity deduplication prevents recounting.
-			if skipped < startOffset {
-				cursors[dirPath] = skipped
-			} else {
-				cursors[dirPath] = startOffset + streamed
-			}
+			saveResume()
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, nil
 		}
@@ -288,13 +287,10 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				*hadSkip = true
 				usage.Truncated = true
 				delete(cursors, dirPath)
+				delete(seen, dirPath)
 				return true, nil
 			}
-			if skipped < startOffset {
-				cursors[dirPath] = skipped
-			} else {
-				cursors[dirPath] = startOffset + streamed
-			}
+			saveResume()
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, readErr
 		}
@@ -304,7 +300,7 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				continue
 			}
 			if *entries > maxToolCacheEntries {
-				cursors[dirPath] = startOffset + streamed
+				saveResume()
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, nil
 			}
@@ -319,32 +315,38 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 					streamed++
 					continue
 				}
-				cursors[dirPath] = startOffset + streamed
+				saveResume()
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, err
+			}
+			key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
+			if _, duplicate := dset[key]; duplicate {
+				// Already counted this cycle: verify without billing the
+				// per-poll budget or re-counting, so deep rewinds still let
+				// the uncounted tail make progress every poll.
+				streamed++
+				continue
 			}
 			*entries++
 			if *entries > maxToolCacheEntries {
 				// Budget hit on this entry: do not count it this poll, resume
 				// at this entry next poll.
 				// entries already incremented for budget accounting; streamed
-				// does not advance for this uncounted entry so it is retried.
-				cursors[dirPath] = startOffset + streamed
+				// does not advance for this uncounted entry so it is retried,
+				// and the identity is not recorded so the retry counts it.
+				saveResume()
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, nil
 			}
+			// Record the identity before counting so interruptions that
+			// re-read this name deduplicate instead of double-counting.
+			dset[key] = struct{}{}
 			switch childStat.Mode & unix.S_IFMT {
 			case unix.S_IFDIR:
 				if int(childStat.Uid) != os.Geteuid() || uint64(childStat.Dev) != rootDev {
 					streamed++
 					continue
 				}
-				key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
-				if _, duplicate := seen[key]; duplicate {
-					streamed++
-					continue
-				}
-				seen[key] = struct{}{}
 				addAllocated(usage, childStat)
 				*accumBytes += allocatedDiskBytes(childStat)
 				childPath := name
@@ -356,12 +358,6 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				})
 				streamed++
 			case unix.S_IFREG:
-				key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
-				if _, duplicate := seen[key]; duplicate {
-					streamed++
-					continue
-				}
-				seen[key] = struct{}{}
 				addAllocated(usage, childStat)
 				*accumBytes += allocatedDiskBytes(childStat)
 				usage.Files++
@@ -372,17 +368,19 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				continue
 			}
 			if *entries > maxToolCacheEntries {
-				cursors[dirPath] = startOffset + streamed
+				saveResume()
 				*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 				return false, nil
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
 			delete(cursors, dirPath)
+			delete(seen, dirPath)
 			return true, nil
 		}
 		if len(names) == 0 {
 			delete(cursors, dirPath)
+			delete(seen, dirPath)
 			return true, nil
 		}
 	}
@@ -523,7 +521,17 @@ type participantScanState struct {
 	accumFiles int64
 	hadSkip    bool
 	warned     bool
-	seen       map[[16]byte]struct{}
+	// seen holds this cycle's counted identities scoped per directory so
+	// re-processed names after an interruption deduplicate instead of
+	// re-counting. Each directory's set is dropped when it leaves the
+	// frontier, bounding retained memory to in-flight directories.
+	seen map[string]map[[16]byte]struct{}
+	// rootDev/rootIno pin the cache root identity for this cycle. A mismatch
+	// on a later poll means collection or recreation and must start a fresh
+	// cycle instead of wedging on stale state.
+	rootDev uint64
+	rootIno uint64
+	rootSet bool
 }
 
 type ToolCacheMonitorConfig struct {
@@ -563,6 +571,40 @@ func NewToolCacheMonitor(lifecycle *Lifecycle, config ToolCacheMonitorConfig) (*
 	}, nil
 }
 
+// scanStarted reports whether a scan holds any cycle state worth comparing
+// against the live cache root identity.
+func scanStarted(scan *participantScanState) bool {
+	return scan != nil && (len(scan.pending) > 0 || scan.accumBytes != 0 || scan.accumFiles != 0 ||
+		len(scan.cursors) > 0 || len(scan.seen) > 0 || scan.hadSkip)
+}
+
+// toolCacheRootIdentity stats the Participant's assignment-lifecycle cache
+// root without following symlinks. It reports exists=false when no cache area
+// is present (nothing to measure yet or already collected).
+func (lifecycle *Lifecycle) toolCacheRootIdentity(participantID string) (dev, ino uint64, exists bool, err error) {
+	root, err := lifecycle.toolDataRoot(participantID)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	cache := filepath.Join(root, "assignment")
+	dir, _, err := openDirectoryNoFollow(cache)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, err
+	}
+	defer dir.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(dir.Fd()), &stat); err != nil {
+		return 0, 0, false, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return 0, 0, false, nil
+	}
+	return uint64(stat.Dev), uint64(stat.Ino), true, nil
+}
+
 func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID string) (ToolCacheUsage, bool, error) {
 	if monitor == nil || monitor.lifecycle == nil {
 		return ToolCacheUsage{}, false, fmt.Errorf("%w: tool cache monitor is nil", ErrInvalidOptions)
@@ -574,14 +616,35 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 	defer monitor.mu.Unlock()
 	scan, ok := monitor.scans[participantID]
 	if !ok || scan == nil {
-		scan = &participantScanState{cursors: make(map[string]int), seen: make(map[[16]byte]struct{})}
+		scan = &participantScanState{cursors: make(map[string]int), seen: make(map[string]map[[16]byte]struct{})}
 		monitor.scans[participantID] = scan
 	}
 	if scan.cursors == nil {
 		scan.cursors = make(map[string]int)
 	}
 	if scan.seen == nil {
-		scan.seen = make(map[[16]byte]struct{})
+		scan.seen = make(map[string]map[[16]byte]struct{})
+	}
+	// A cache root identity change means collection or recreation: the stale
+	// frontier (pending paths with old device/inode pins, cursors into a
+	// vanished listing, and counted identities) no longer describes the
+	// current cache, so start a fresh cycle instead of wedging on it.
+	if dev, ino, exists, statErr := monitor.lifecycle.toolCacheRootIdentity(participantID); statErr == nil && exists {
+		if scanStarted(scan) {
+			if !scan.rootSet || scan.rootDev != dev || scan.rootIno != ino {
+				scan.pending = nil
+				scan.cursors = make(map[string]int)
+				scan.seen = make(map[string]map[[16]byte]struct{})
+				scan.accumBytes, scan.accumFiles, scan.hadSkip, scan.warned = 0, 0, false, false
+			}
+		}
+		scan.rootDev, scan.rootIno, scan.rootSet = dev, ino, true
+	} else if statErr == nil && !exists {
+		// Collected cache: drop any stale cycle state now rather than
+		// retaining it for the process lifetime.
+		delete(monitor.scans, participantID)
+		scan = &participantScanState{cursors: make(map[string]int), seen: make(map[string]map[[16]byte]struct{})}
+		monitor.scans[participantID] = scan
 	}
 	// One bounded poll continuing the persisted frontier (or starting fresh).
 	// Adopt frontier and accumulation even when the poll ends in error so
@@ -628,8 +691,9 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 	}
 	// Cycle complete: evaluate exact total (or lower bound if hadSkip).
 	defer func() {
-		// Reset for next cycle (fresh frontier and identity set).
-		monitor.scans[participantID] = &participantScanState{cursors: make(map[string]int), seen: make(map[[16]byte]struct{})}
+		// Reset for next cycle (fresh frontier and identity set; the cache
+		// root identity is re-recorded on the next poll).
+		monitor.scans[participantID] = &participantScanState{cursors: make(map[string]int), seen: make(map[string]map[[16]byte]struct{})}
 	}()
 	if hadSkip {
 		if total.Bytes >= monitor.thresholdBytes {
@@ -682,6 +746,7 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 	if err != nil {
 		return 0, 0, err
 	}
+	monitor.pruneAbsent(all)
 	selected := monitor.selectAssignments(all)
 	for _, id := range selected {
 		if err := ctx.Err(); err != nil {
@@ -699,6 +764,30 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 		}
 	}
 	return checked, warned, nil
+}
+
+// pruneAbsent drops per-Participant monitor state (scan frontier and warning
+// watermark) for Participants absent from the current listing so collected
+// Assignments cannot retain memory for the process lifetime. A recreated
+// cache under a reused identity is additionally caught by the cache root
+// identity check in Observe, which resets the scan before measuring.
+func (monitor *ToolCacheMonitor) pruneAbsent(all []string) {
+	monitor.mu.Lock()
+	defer monitor.mu.Unlock()
+	keep := make(map[string]struct{}, len(all))
+	for _, id := range all {
+		keep[id] = struct{}{}
+	}
+	for id := range monitor.scans {
+		if _, ok := keep[id]; !ok {
+			delete(monitor.scans, id)
+		}
+	}
+	for id := range monitor.lastWarned {
+		if _, ok := keep[id]; !ok {
+			delete(monitor.lastWarned, id)
+		}
+	}
 }
 
 func (monitor *ToolCacheMonitor) Run(ctx context.Context) error {
