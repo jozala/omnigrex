@@ -8,6 +8,7 @@ import (
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	mobyclient "github.com/moby/moby/client"
 	"github.com/opencontainers/image-spec/specs-go/v1"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 var ErrInvalidExactImageAvailability = errors.New("invalid exact image availability request")
@@ -23,7 +24,8 @@ type ExactImageAvailability struct {
 }
 
 func NewExactImageAvailability() (*ExactImageAvailability, error) {
-	client, err := mobyclient.New(mobyclient.FromEnv)
+	// This diagnostic client is also used by recurring readiness checks.
+	client, err := mobyclient.New(mobyclient.FromEnv, mobyclient.WithTraceProvider(noop.NewTracerProvider()))
 	if err != nil {
 		return nil, fmt.Errorf("create Docker image availability client: %w", err)
 	}
