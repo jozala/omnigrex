@@ -142,6 +142,22 @@ func safeToolFailureClass(raw json.RawMessage) string {
 		return ""
 	}
 	switch output.Error {
+	case "tool call failed":
+		return "read_failed"
+	case "tool call could not be recorded":
+		return "read_recording_failed"
+	case "tool is unavailable in this turn":
+		return "tool_unavailable"
+	case "invalid tool call":
+		return "invalid_tool_call"
+	case "invalid tool arguments":
+		return "invalid_tool_arguments"
+	case "tool authorization is stale":
+		return "stale_authorization"
+	case "MCP client is not initialized":
+		return "not_initialized"
+	case "unauthorized":
+		return "authorization_failed"
 	case "mutation planning failed":
 		return "mutation_planning_failed"
 	case "mutation operation identity conflict":

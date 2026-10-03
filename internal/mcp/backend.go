@@ -209,7 +209,11 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	credential, err := backend.credential(ctx, tool.Name, invocation.Scope.Role, invocation.Scope.Repository)
 	if err != nil {
 		if tool.Class == ReadTool {
-			return nil, githubReadError{failure: readFailure{code: "credential_unavailable"}}
+			var diagnostic githubReadError
+			if errors.As(err, &diagnostic) {
+				return nil, diagnostic
+			}
+			return nil, githubReadError{failure: readFailure{code: "credential_unavailable", stage: "credential_acquisition", reason: "credential_unavailable"}}
 		}
 		return nil, ErrToolDependency
 	}
@@ -229,7 +233,13 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 			return nil, newGitHubReadError(callErr)
 		}
 		if issue.ID != invocation.Scope.Issue.ID || int64(issue.Number) != invocation.Scope.Issue.Number {
-			return nil, ErrToolPrecondition
+			field := "issue.id"
+			if issue.ID == invocation.Scope.Issue.ID {
+				field = "issue.number"
+			}
+			return nil, githubReadError{precondition: true, failure: readFailure{
+				code: "read_precondition_failed", stage: "scoped_identity_validation", reason: "identity_mismatch", field: field,
+			}}
 		}
 		result = issue
 	case ToolListIssueComments:
@@ -1326,6 +1336,9 @@ func (backend *ProductionBackend) credential(ctx context.Context, tool string, r
 		credential, err = backend.credentials.DeveloperCredential(ctx, repository)
 	}
 	if err != nil || credential == "" {
+		if reason := githubapi.CancellationReason(err); reason != "" {
+			return "", githubReadError{failure: readFailure{code: reason, stage: "credential_acquisition", reason: reason}}
+		}
 		return "", ErrToolDependency
 	}
 	for _, character := range credential {

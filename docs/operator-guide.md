@@ -766,7 +766,33 @@ docker ps --filter label=io.omnigrex.runtime-process=true \
 
 The orchestrator logs `MCP mutation failed` with a safe `failure_code`, operation and mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 The corresponding `tool_invocations.last_error` contains the safe failure code and available allowlisted details for definite failures; unknown external outcomes remain subject to mutation reconciliation.
-For read-tool failures, look for `MCP read failed` with the `agent_turn_id` and `tool_name`. The log gives a safe `failure_code` (for example, `credential_unavailable`, `read_precondition_failed` for a scoped identity/head mismatch, `github_request_rejected`, `github_graphql_errors_or_no_data`, or `github_invalid_response`), a `failure_stage` for review-thread queries and validation, and allowlisted `github_http_status` and `github_request_id` when available, including an ID on a GraphQL error or malformed-data response when GitHub provides one. Read logs omit request IDs that do not match the expected GitHub hexadecimal format; a missing ID does not mean GitHub supplied none. If the read and its ledger recording both fail, both failures are logged. `tool_invocations.last_error` and the agent-facing message remain generic; logs never include GitHub response bodies or review text. A GraphQL error classification does not include GitHub's error message, so further investigation may still require a controlled reproduction.
+For read-tool failures, look for `MCP read failed` with the `agent_turn_id` and `tool_name`.
+`failure_code` gives the broad classification, while `failure_stage`, `failure_reason`, and optional `validation_field` identify the processing step and specific failed check.
+Detailed validation reasons initially cover issue lookup and review-thread reads; other read failures may have an `unclassified` reason.
+For example, `github_invalid_response`, `review_threads_validation`, `missing_field`, and `review_thread.originalLine` identify a missing original line without disclosing a repository path or comment.
+Cancellation and deadline expiry are classified before credential or GitHub errors are sanitized.
+
+`github_http_status` is the actual status of the response associated with the failure, and `github_request_id` is its strictly validated GitHub request ID.
+HTTP `200` does not imply GraphQL or tool success.
+A missing status means response metadata is unavailable, not status `0` or proof that no request was sent.
+A missing request ID can mean GitHub supplied none or its value failed validation.
+Continuation failures use the response that exposed the failure, and final aggregate count mismatches use the last contributing response; earlier successful responses are never substituted for a request that received no response.
+A scoped issue identity mismatch detected in the backend after a successful `GetIssue` has a precise `scoped_identity_validation` diagnostic but no response metadata because the successful-result interface does not carry it.
+
+Authenticated shared gateway rejections emit `MCP request rejected`, including envelope, initialization, argument, authorization, and fence-validation failures.
+Pre-dispatch failures can have no `tool_name`; arbitrary submitted tool names are never logged.
+Use `agent_turn_id` to locate the Agent Turn, then filter by `diagnostic_call_id` to distinguish repeated calls and link a read failure to a subsequent recording failure.
+Each rejected request emits one rejection entry; each failed read emits one execution entry and, if recording also fails, one additional entry at stage `read_recording` with the same ID.
+Sending the final generic tool error does not add a duplicate rejection entry.
+`duration_ms` measures elapsed processing from successful authentication to each log event, so the later recording entry can have a larger duration.
+Keep diagnostic call IDs and GitHub request IDs as log fields, not Loki stream labels or metric labels.
+
+`tool_invocations.last_error` and agent-facing read messages remain generic; these diagnostics never include arguments, GitHub response bodies, review text, or raw dependency errors.
+`ACP MCP tool failed` is a runtime summary with a fixed `failure_class`, or `unclassified` for an unknown failure, rather than the authoritative backend cause.
+ACP tool-call IDs and gateway diagnostic IDs are separate identities with no guaranteed direct mapping.
+Runtime-local failures that never reach the gateway and authentication failures without trusted live registration scope remain blind spots.
+Stale-authorization logs cover checks after successful authentication, not all expired or removed registrations.
+Mutation-specific planning, reservation, replay, and detached execution are outside this read-diagnostic correlation guarantee and retain their existing diagnostics.
 
 An Agent Turn diagnostic containing `runtime_oom_killed` means Docker confirmed that its Runtime Process was OOM-killed before Omnigrex removed the container.
 Omnigrex keeps the normal single infrastructure retry, then includes this diagnosis in the Human Handoff if the retry also fails this way.

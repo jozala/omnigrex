@@ -164,6 +164,35 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 	}
 }
 
+func TestAgentEventLogFallbackDoesNotChangeMetadataOrSuccessfulUpdates(t *testing.T) {
+	for _, test := range []struct{ status, tool, want string }{
+		{"failed", "omnigrex_get_issue", "unclassified"},
+		{"completed", "omnigrex_get_issue", ""},
+		{"failed", "local_tool", ""},
+	} {
+		t.Run(test.status+test.tool, func(t *testing.T) {
+			var output bytes.Buffer
+			sink := loggingAgentEventSink{logger: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+			event := agentevent.AgentEvent{Metadata: agentevent.OperationalMetadata{
+				ToolCallID: "call-1", ToolName: test.tool, Status: test.status, Runtime: json.RawMessage(`{"rawOutput":"credential-sentinel"}`),
+			}}
+			if err := sink.Emit(context.Background(), event); err != nil {
+				t.Fatal(err)
+			}
+			var logged map[string]any
+			if err := json.Unmarshal(output.Bytes(), &logged); err != nil {
+				t.Fatal(err)
+			}
+			if logged["failure_class"] != test.want || event.Metadata.FailureClass != "" || strings.Contains(output.String(), "credential-sentinel") {
+				t.Fatalf("fallback changed metadata or leaked output: %s", &output)
+			}
+			if test.status == "completed" && logged["msg"] != "ACP tool update" {
+				t.Fatalf("successful update labeled failure: %s", &output)
+			}
+		})
+	}
+}
+
 type mainTestOutcomeReconciler struct {
 	observation store.AgentTurnSettlementObservation
 }

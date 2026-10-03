@@ -594,34 +594,41 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	request = withCallDiagnostic(request, registration.scope)
 	if err := gateway.store.ValidateTurnFence(request.Context(), registration.scope.Lease); err != nil {
+		gateway.logRequestRejected(request, "", "turn_fence", fenceFailureReason(err))
 		response.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if !gateway.grantLive(registration) {
+		gateway.logRequestRejected(request, "", "tool_authorization", "stale_authorization")
 		response.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if request.URL.Path != parsedPath(gateway.endpointURL) {
+		gateway.logRequestRejected(request, "", "request_validation", "invalid_path")
 		http.NotFound(response, request)
 		return
 	}
 	switch request.Method {
 	case http.MethodGet:
-		if !ready(request, registration) {
+		if reason := readinessFailure(request, registration); reason != "" {
+			gateway.logRequestRejected(request, "", "initialization", reason)
 			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 			return
 		}
 		if !accepts(request.Header.Get("Accept"), "text/event-stream") {
+			gateway.logRequestRejected(request, "", "request_validation", "invalid_accept")
 			http.Error(response, "Accept must include text/event-stream", http.StatusNotAcceptable)
 			return
 		}
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	case http.MethodDelete:
-		if !ready(request, registration) {
+		if reason := readinessFailure(request, registration); reason != "" {
+			gateway.logRequestRejected(request, "", "initialization", reason)
 			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 			return
 		}
@@ -629,14 +636,17 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	case http.MethodPost:
 	default:
+		gateway.logRequestRejected(request, "", "request_validation", "unsupported_method")
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if !accepts(request.Header.Get("Accept"), "application/json") || !accepts(request.Header.Get("Accept"), "text/event-stream") {
+		gateway.logRequestRejected(request, "", "request_validation", "invalid_accept")
 		http.Error(response, "Accept must include application/json and text/event-stream", http.StatusNotAcceptable)
 		return
 	}
 	if !hasMediaType(request.Header.Get("Content-Type"), "application/json") {
+		gateway.logRequestRejected(request, "", "request_validation", "invalid_content_type")
 		http.Error(response, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -646,18 +656,32 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 	var rpc rpcRequest
 	if err := decoder.Decode(&rpc); err != nil {
 		status := http.StatusBadRequest
+		reason := "invalid_json"
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			status = http.StatusRequestEntityTooLarge
+			reason = "request_too_large"
 		}
+		gateway.logRequestRejected(request, "", "request_validation", reason)
 		http.Error(response, "invalid JSON-RPC request", status)
 		return
 	}
-	if decoder.Decode(&struct{}{}) != io.EOF || rpc.JSONRPC != "2.0" || rpc.Method == "" {
+	reason := ""
+	switch {
+	case decoder.Decode(&struct{}{}) != io.EOF:
+		reason = "trailing_json"
+	case rpc.JSONRPC != "2.0":
+		reason = "invalid_jsonrpc_version"
+	case rpc.Method == "":
+		reason = "missing_method"
+	}
+	if reason != "" {
+		gateway.logRequestRejected(request, "", "request_validation", reason)
 		http.Error(response, "invalid JSON-RPC request", http.StatusBadRequest)
 		return
 	}
 	if len(rpc.ID) != 0 && !validRequestID(rpc.ID) {
+		gateway.logRequestRejected(request, "", "request_validation", "invalid_request_id")
 		writeRPCError(response, json.RawMessage("null"), -32600, "invalid request")
 		return
 	}
@@ -672,7 +696,8 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 	case "tools/call":
 		gateway.callTool(response, request, registration, rpc)
 	default:
-		if !ready(request, registration) {
+		if reason := readinessFailure(request, registration); reason != "" {
+			gateway.logRequestRejected(request, "", "initialization", reason)
 			http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 			return
 		}
@@ -680,12 +705,19 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 			response.WriteHeader(http.StatusAccepted)
 			return
 		}
+		gateway.logRequestRejected(request, "", "request_validation", "unknown_method")
 		writeRPCError(response, rpc.ID, -32601, "method not found")
 	}
 }
 
 func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Request, registration *grant, rpc rpcRequest) {
-	if !ready(request, registration) || len(rpc.ID) == 0 {
+	if reason := readinessFailure(request, registration); reason != "" {
+		gateway.logRequestRejected(request, "", "initialization", reason)
+		http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+		return
+	}
+	if len(rpc.ID) == 0 {
+		gateway.logRequestRejected(request, "", "request_validation", "missing_request_id")
 		http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 		return
 	}
@@ -696,22 +728,44 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(rpc.Params)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
-		!validRequestMetadata(params.Metadata) || !slicesContains(registration.scope.AllowedTools, params.Name) {
+	if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		gateway.logRequestRejected(request, "", "request_validation", "invalid_call_parameters")
+		writeRPCError(response, rpc.ID, -32602, "invalid tool call")
+		return
+	}
+	if !validRequestMetadata(params.Metadata) {
+		gateway.logRequestRejected(request, params.Name, "request_validation", "invalid_metadata")
+		writeRPCError(response, rpc.ID, -32602, "invalid tool call")
+		return
+	}
+	if !slicesContains(registration.scope.AllowedTools, params.Name) {
+		reason := "disallowed_tool"
+		if _, found := definition(params.Name); !found {
+			reason = "unknown_tool"
+		}
+		gateway.logRequestRejected(request, params.Name, "tool_authorization", reason)
 		writeRPCError(response, rpc.ID, -32602, "invalid tool call")
 		return
 	}
 	tool, found := definition(params.Name)
-	if !found || validateArguments(params.Arguments, tool.InputSchema) != nil {
+	if !found {
+		gateway.logRequestRejected(request, "", "tool_authorization", "unknown_tool")
+		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
+		return
+	}
+	if validateArguments(params.Arguments, tool.InputSchema) != nil {
+		gateway.logRequestRejected(request, tool.Name, "argument_validation", "invalid_arguments")
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
 	}
 	if !scopeAllowsTool(registration.scope, params.Name) {
+		gateway.logRequestRejected(request, tool.Name, "tool_authorization", "missing_turn_context")
 		writeToolError(response, rpc.ID, "tool is unavailable in this turn")
 		return
 	}
 	canonicalArguments, err := canonicalJSON(params.Arguments)
 	if err != nil {
+		gateway.logRequestRejected(request, tool.Name, "argument_validation", "invalid_json")
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
 	}
@@ -725,6 +779,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		return
 	}
 	if !registration.admit() {
+		gateway.logRequestRejected(request, tool.Name, "admission", "stale_authorization")
 		writeRPCError(response, rpc.ID, -32001, "tool authorization is stale")
 		return
 	}
@@ -735,9 +790,9 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	succeeded := err == nil && len(result) != 0 && json.Valid(result)
 	if !succeeded {
 		if err != nil {
-			gateway.logReadFailure(invocation, safeReadFailure(err))
+			gateway.logCallFailure(request.Context(), "MCP read failed", invocation.Name, safeReadFailure(err))
 		} else {
-			gateway.logReadFailure(invocation, readFailure{code: "backend_result_invalid"})
+			gateway.logCallFailure(request.Context(), "MCP read failed", invocation.Name, readFailure{code: "backend_result_invalid", stage: "backend_result_validation", reason: "invalid_result"})
 		}
 	}
 	if gateway.ledger != nil {
@@ -750,7 +805,11 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 			record.LastError = "read tool failed"
 		}
 		if err := gateway.ledger.RecordRead(context.WithoutCancel(request.Context()), registration.scope.Lease, record); err != nil {
-			gateway.logReadFailure(invocation, readFailure{code: "read_recording_failed"})
+			reason := githubapi.CancellationReason(err)
+			if reason == "" {
+				reason = "recording_failed"
+			}
+			gateway.logCallFailure(request.Context(), "MCP read failed", invocation.Name, readFailure{code: "read_recording_failed", stage: "read_recording", reason: reason})
 			writeToolError(response, rpc.ID, "tool call could not be recorded")
 			return
 		}
@@ -760,21 +819,6 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		return
 	}
 	writeToolResult(response, rpc.ID, result)
-}
-
-func (gateway *Gateway) logReadFailure(invocation Invocation, failure readFailure) {
-	if gateway.logger == nil {
-		return
-	}
-	gateway.logger.Warn("MCP read failed",
-		"workflow_id", invocation.Scope.WorkflowID,
-		"agent_turn_id", invocation.Scope.AgentTurnID,
-		"execution_epoch", invocation.Scope.ExecutionEpoch,
-		"tool_name", invocation.Name,
-		"failure_code", failure.code,
-		"failure_stage", failure.stage,
-		"github_http_status", failure.httpStatus,
-		"github_request_id", failure.requestID)
 }
 
 func validRequestMetadata(raw json.RawMessage) bool {
@@ -1364,7 +1408,17 @@ func writeToolError(response http.ResponseWriter, id json.RawMessage, message st
 }
 
 func (gateway *Gateway) completeInitialization(response http.ResponseWriter, request *http.Request, registration *grant, rpc rpcRequest) {
-	if len(rpc.ID) != 0 || request.Header.Get("MCP-Protocol-Version") != ProtocolVersion || !emptyParams(rpc.Params) {
+	reason := ""
+	switch {
+	case len(rpc.ID) != 0:
+		reason = "unexpected_request_id"
+	case request.Header.Get("MCP-Protocol-Version") != ProtocolVersion:
+		reason = "invalid_protocol_version"
+	case !emptyParams(rpc.Params):
+		reason = "invalid_parameters"
+	}
+	if reason != "" {
+		gateway.logRequestRejected(request, "", "initialization", reason)
 		http.Error(response, "MCP initialization is invalid", http.StatusBadRequest)
 		return
 	}
@@ -1376,6 +1430,7 @@ func (gateway *Gateway) completeInitialization(response http.ResponseWriter, req
 	}
 	registration.mutex.Unlock()
 	if !valid {
+		gateway.logRequestRejected(request, "", "initialization", "not_initializing")
 		http.Error(response, "MCP initialization is invalid", http.StatusBadRequest)
 		return
 	}
@@ -1383,7 +1438,13 @@ func (gateway *Gateway) completeInitialization(response http.ResponseWriter, req
 }
 
 func (gateway *Gateway) listTools(response http.ResponseWriter, request *http.Request, registration *grant, rpc rpcRequest) {
-	if !ready(request, registration) || len(rpc.ID) == 0 {
+	if reason := readinessFailure(request, registration); reason != "" {
+		gateway.logRequestRejected(request, "", "initialization", reason)
+		http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
+		return
+	}
+	if len(rpc.ID) == 0 {
+		gateway.logRequestRejected(request, "", "request_validation", "missing_request_id")
 		http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 		return
 	}
@@ -1394,21 +1455,13 @@ func (gateway *Gateway) listTools(response http.ResponseWriter, request *http.Re
 		decoder := json.NewDecoder(strings.NewReader(string(rpc.Params)))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			gateway.logRequestRejected(request, "", "request_validation", "invalid_list_parameters")
 			writeRPCError(response, rpc.ID, -32602, "invalid tools/list params")
 			return
 		}
 	}
 	tools, _ := toolsForScope(gateway.policies, registration.scope)
 	writeRPCResult(response, rpc.ID, map[string]any{"tools": tools})
-}
-
-func ready(request *http.Request, registration *grant) bool {
-	if request.Header.Get("MCP-Protocol-Version") != ProtocolVersion {
-		return false
-	}
-	registration.mutex.Lock()
-	defer registration.mutex.Unlock()
-	return registration.initialized
 }
 
 type rpcRequest struct {
@@ -1420,6 +1473,11 @@ type rpcRequest struct {
 
 func (gateway *Gateway) initialize(response http.ResponseWriter, request *http.Request, registration *grant, rpc rpcRequest) {
 	if len(rpc.ID) == 0 || (request.Header.Get("MCP-Protocol-Version") != "" && request.Header.Get("MCP-Protocol-Version") != ProtocolVersion) {
+		reason := "missing_request_id"
+		if len(rpc.ID) != 0 {
+			reason = "invalid_protocol_version"
+		}
+		gateway.logRequestRejected(request, "", "initialization", reason)
 		writeRPCError(response, rpc.ID, -32600, "invalid initialize request")
 		return
 	}
@@ -1433,7 +1491,21 @@ func (gateway *Gateway) initialize(response http.ResponseWriter, request *http.R
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(rpc.Params)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF || params.ProtocolVersion != ProtocolVersion || params.Capabilities == nil || params.ClientInfo.Name == "" || params.ClientInfo.Version == "" {
+	reason := ""
+	switch {
+	case decoder.Decode(&params) != nil || decoder.Decode(&struct{}{}) != io.EOF:
+		reason = "invalid_parameters"
+	case params.ProtocolVersion != ProtocolVersion:
+		reason = "invalid_protocol_version"
+	case params.Capabilities == nil:
+		reason = "missing_capabilities"
+	case params.ClientInfo.Name == "":
+		reason = "missing_client_name"
+	case params.ClientInfo.Version == "":
+		reason = "missing_client_version"
+	}
+	if reason != "" {
+		gateway.logRequestRejected(request, "", "initialization", reason)
 		writeRPCError(response, rpc.ID, -32602, "invalid initialize params")
 		return
 	}

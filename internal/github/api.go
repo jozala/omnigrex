@@ -394,12 +394,13 @@ func (client *APIClient) GetIssue(ctx context.Context, installationToken, owner,
 	}
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repository), issueNumber)
 	var issue Issue
-	if err := client.doJSON(ctx, http.MethodGet, path, installationToken, nil, &issue); err != nil {
+	metadata, err := client.doJSONWithMetadata(ctx, http.MethodGet, path, installationToken, nil, &issue)
+	if err != nil {
 		return Issue{}, err
 	}
 	expectedHTMLPath := fmt.Sprintf("/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repository), issueNumber)
-	if issue.ID <= 0 || issue.NodeID == "" || issue.Number != issueNumber || strings.TrimSpace(issue.Title) == "" || !validIssueState(issue.State) || !resourcePathMatches(issue.HTMLURL, expectedHTMLPath) {
-		return Issue{}, fmt.Errorf("%w: Issue response is incomplete or does not match request", ErrInvalidAPIResponse)
+	if err := validateIssueResponse(issue, issueNumber, expectedHTMLPath); err != nil {
+		return Issue{}, responseFailure(metadata, "issue_validation", "", err)
 	}
 	return issue, nil
 }
@@ -563,18 +564,18 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 	var threadCursor *string
 	totalThreads := -1
 	var repositoryID, pullRequestID string
-	var lastRequestID string
+	var lastMetadata responseMetadata
 	for {
 		var data reviewThreadsQueryData
-		requestID, err := client.doGraphQL(ctx, installationToken, reviewThreadsQuery, map[string]any{
+		metadata, err := client.doGraphQL(ctx, installationToken, reviewThreadsQuery, map[string]any{
 			"owner": owner, "name": repository, "number": pullRequestNumber, "threadsCursor": threadCursor,
 		}, &data)
 		if err != nil {
-			return nil, &ReviewThreadReadError{Stage: ReviewThreadsQuery, RequestID: requestID, Cause: err}
+			return nil, reviewThreadFailure(ReviewThreadsQuery, metadata, err)
 		}
-		lastRequestID = requestID
+		lastMetadata = metadata
 		if err := validateReviewThreadsIdentity(data.Repository, owner, repository, pullRequestNumber, repositoryID, pullRequestID); err != nil {
-			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: err}
+			return nil, reviewThreadFailure(ReviewThreadsValidation, metadata, err)
 		}
 		if repositoryID == "" {
 			repositoryID = data.Repository.ID
@@ -585,19 +586,19 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 		if totalThreads < 0 {
 			totalThreads = *connection.TotalCount
 		} else if *connection.TotalCount != totalThreads {
-			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review thread total count changed during pagination", ErrInvalidAPIResponse)}
+			return nil, reviewThreadFailure(ReviewThreadsValidation, metadata, validationError("count_changed", "review_threads.totalCount"))
 		}
 		if err := validateGraphQLPageInfo(connection.PageInfo, len(connection.Nodes), threadCursor); err != nil {
-			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review thread pageInfo is invalid", err)}
+			return nil, reviewThreadFailure(ReviewThreadsValidation, metadata, err)
 		}
 		for _, node := range connection.Nodes {
-			thread, err := client.reviewThreadFromGraphQL(ctx, installationToken, owner, repository, pullRequestNumber, repositoryID, pullRequestID, requestID, node, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
+			thread, err := client.reviewThreadFromGraphQL(ctx, installationToken, owner, repository, pullRequestNumber, repositoryID, pullRequestID, metadata, node, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
 			if err != nil {
 				var staged *ReviewThreadReadError
 				if errors.As(err, &staged) {
 					return nil, err
 				}
-				return nil, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
+				return nil, reviewThreadFailure(ReviewCommentsValidation, metadata, err)
 			}
 			threads = append(threads, thread)
 		}
@@ -606,13 +607,13 @@ func (client *APIClient) ListReviewThreads(ctx context.Context, installationToke
 		}
 		next := *connection.PageInfo.EndCursor
 		if _, exists := seenThreadCursors[next]; exists {
-			return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: repeated review thread cursor", ErrInvalidAPIResponse)}
+			return nil, reviewThreadFailure(ReviewThreadsValidation, metadata, validationError("repeated_cursor", "page_info.endCursor"))
 		}
 		seenThreadCursors[next] = struct{}{}
 		threadCursor = &next
 	}
 	if totalThreads != len(threads) {
-		return nil, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: lastRequestID, Cause: fmt.Errorf("%w: review thread count does not match paginated results", ErrInvalidAPIResponse)}
+		return nil, reviewThreadFailure(ReviewThreadsValidation, lastMetadata, validationError("count_mismatch", "review_threads.totalCount"))
 	}
 	return threads, nil
 }
@@ -818,25 +819,57 @@ func validateReviewThreadsIdentity(actual *struct {
 		ReviewThreads *graphQLReviewThreadConnection `json:"reviewThreads"`
 	} `json:"pullRequest"`
 }, owner, repository string, pullRequestNumber int, expectedRepositoryID, expectedPullRequestID string) error {
-	if actual == nil || !validGraphQLNodeID(actual.ID) || actual.Name != repository || actual.Owner == nil || actual.Owner.Login != owner || actual.PullRequest == nil ||
-		!validGraphQLNodeID(actual.PullRequest.ID) || actual.PullRequest.Number == nil || *actual.PullRequest.Number != pullRequestNumber || actual.PullRequest.Repository == nil ||
-		actual.PullRequest.Repository.ID != actual.ID || actual.PullRequest.Repository.Name != repository || actual.PullRequest.Repository.Owner == nil || actual.PullRequest.Repository.Owner.Login != owner ||
-		actual.PullRequest.ReviewThreads == nil || actual.PullRequest.ReviewThreads.TotalCount == nil || *actual.PullRequest.ReviewThreads.TotalCount < 0 || actual.PullRequest.ReviewThreads.Nodes == nil ||
-		len(actual.PullRequest.ReviewThreads.Nodes) > 100 || *actual.PullRequest.ReviewThreads.TotalCount < len(actual.PullRequest.ReviewThreads.Nodes) {
-		return fmt.Errorf("%w: GraphQL repository or Pull Request response is incomplete or does not match request", ErrInvalidAPIResponse)
+	switch {
+	case actual == nil:
+		return validationError("missing_field", "repository")
+	case !validGraphQLNodeID(actual.ID):
+		return validationError("invalid_node_id", "repository.id")
+	case actual.Name != repository:
+		return validationError("identity_mismatch", "repository.name")
+	case actual.Owner == nil:
+		return validationError("missing_field", "repository.owner")
+	case actual.Owner.Login != owner:
+		return validationError("identity_mismatch", "repository.owner.login")
+	case actual.PullRequest == nil:
+		return validationError("missing_field", "pull_request")
+	case !validGraphQLNodeID(actual.PullRequest.ID):
+		return validationError("invalid_node_id", "pull_request.id")
+	case actual.PullRequest.Number == nil:
+		return validationError("missing_field", "pull_request.number")
+	case *actual.PullRequest.Number != pullRequestNumber:
+		return validationError("identity_mismatch", "pull_request.number")
 	}
-	if expectedRepositoryID != "" && (actual.ID != expectedRepositoryID || actual.PullRequest.ID != expectedPullRequestID) {
-		return fmt.Errorf("%w: GraphQL repository or Pull Request identity changed during pagination", ErrInvalidAPIResponse)
+	if err := validateGraphQLRepositoryIdentity(actual.PullRequest.Repository, owner, repository, actual.ID); err != nil {
+		return err
+	}
+	connection := actual.PullRequest.ReviewThreads
+	switch {
+	case connection == nil:
+		return validationError("missing_field", "review_threads")
+	case connection.TotalCount == nil:
+		return validationError("missing_field", "review_threads.totalCount")
+	case *connection.TotalCount < 0:
+		return validationError("invalid_count", "review_threads.totalCount")
+	case connection.Nodes == nil:
+		return validationError("missing_field", "review_threads.nodes")
+	case len(connection.Nodes) > 100:
+		return validationError("oversized_page", "review_threads.nodes")
+	case *connection.TotalCount < len(connection.Nodes):
+		return validationError("count_mismatch", "review_threads.totalCount")
+	case expectedRepositoryID != "" && actual.ID != expectedRepositoryID:
+		return validationError("identity_changed", "repository.id")
+	case expectedRepositoryID != "" && actual.PullRequest.ID != expectedPullRequestID:
+		return validationError("identity_changed", "pull_request.id")
 	}
 	return nil
 }
 
-func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installationToken, owner, repository string, pullRequestNumber int, repositoryID, pullRequestID, requestID string, node *graphQLReviewThread, seenNodeIDs map[string]struct{}, seenCommentDatabaseIDs map[int64]struct{}, commentDatabaseIDByNodeID map[string]int64) (ReviewThread, error) {
+func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installationToken, owner, repository string, pullRequestNumber int, repositoryID, pullRequestID string, metadata responseMetadata, node *graphQLReviewThread, seenNodeIDs map[string]struct{}, seenCommentDatabaseIDs map[int64]struct{}, commentDatabaseIDByNodeID map[string]int64) (ReviewThread, error) {
 	if err := validateGraphQLReviewThread(node); err != nil {
-		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: err}
+		return ReviewThread{}, reviewThreadFailure(ReviewThreadsValidation, metadata, err)
 	}
 	if _, exists := seenNodeIDs[node.ID]; exists {
-		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: duplicate GraphQL review thread id", ErrInvalidAPIResponse)}
+		return ReviewThread{}, reviewThreadFailure(ReviewThreadsValidation, metadata, validationError("duplicate_id", "review_thread.id"))
 	}
 	seenNodeIDs[node.ID] = struct{}{}
 
@@ -848,12 +881,12 @@ func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installati
 	seenCursors := make(map[string]struct{})
 	for {
 		if err := validateGraphQLPageInfo(connection.PageInfo, len(connection.Nodes), cursor); err != nil {
-			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review comment pageInfo is invalid", err)}
+			return ReviewThread{}, reviewThreadFailure(ReviewCommentsValidation, metadata, err)
 		}
 		for _, graphQLComment := range connection.Nodes {
 			comment, err := reviewCommentFromGraphQL(graphQLComment, node, pullRequestURL, pullRequestHTMLPath, seenNodeIDs, seenCommentDatabaseIDs, commentDatabaseIDByNodeID)
 			if err != nil {
-				return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
+				return ReviewThread{}, reviewThreadFailure(ReviewCommentsValidation, metadata, err)
 			}
 			thread.Comments = append(thread.Comments, comment)
 		}
@@ -862,69 +895,92 @@ func (client *APIClient) reviewThreadFromGraphQL(ctx context.Context, installati
 		}
 		next := *connection.PageInfo.EndCursor
 		if _, exists := seenCursors[next]; exists {
-			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: repeated review comment cursor", ErrInvalidAPIResponse)}
+			return ReviewThread{}, reviewThreadFailure(ReviewCommentsValidation, metadata, validationError("repeated_cursor", "page_info.endCursor"))
 		}
 		seenCursors[next] = struct{}{}
 		cursor = &next
 
 		var data reviewThreadCommentsQueryData
-		continuationID, err := client.doGraphQL(ctx, installationToken, reviewThreadCommentsQuery, map[string]any{"threadID": node.ID, "commentsCursor": next}, &data)
+		continuation, err := client.doGraphQL(ctx, installationToken, reviewThreadCommentsQuery, map[string]any{"threadID": node.ID, "commentsCursor": next}, &data)
 		if err != nil {
-			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsQuery, RequestID: continuationID, Cause: err}
+			return ReviewThread{}, reviewThreadFailure(ReviewCommentsQuery, continuation, err)
 		}
-		requestID = continuationID
-		if err := validateGraphQLReviewThread(data.Node); err != nil || !sameGraphQLReviewThread(node, data.Node) || *data.Node.Comments.TotalCount != *node.Comments.TotalCount ||
-			!matchesGraphQLPullRequestIdentity(data.Node.PullRequest, owner, repository, pullRequestNumber, repositoryID, pullRequestID) {
-			return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewThreadsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: paginated review thread response is incomplete or mismatched", ErrInvalidAPIResponse)}
+		metadata = continuation
+		if err := validateReviewThreadContinuation(node, data.Node, owner, repository, pullRequestNumber, repositoryID, pullRequestID); err != nil {
+			return ReviewThread{}, reviewThreadFailure(ReviewThreadsValidation, metadata, err)
 		}
 		connection = data.Node.Comments
 	}
 	if len(thread.Comments) != *node.Comments.TotalCount || len(thread.Comments) == 0 {
-		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: fmt.Errorf("%w: review comment count does not match paginated results", ErrInvalidAPIResponse)}
+		return ReviewThread{}, reviewThreadFailure(ReviewCommentsValidation, metadata, validationError("count_mismatch", "review_comments.totalCount"))
 	}
 	if err := validateReviewThreadReplies(thread.Comments); err != nil {
-		return ReviewThread{}, &ReviewThreadReadError{Stage: ReviewCommentsValidation, RequestID: requestID, Cause: err}
+		return ReviewThread{}, reviewThreadFailure(ReviewCommentsValidation, metadata, err)
 	}
 	return thread, nil
 }
 
 func validateGraphQLReviewThread(node *graphQLReviewThread) error {
-	if node == nil || !validGraphQLNodeID(node.ID) || node.IsResolved == nil || node.IsOutdated == nil || !validRepositoryPath(node.Path) || node.Comments == nil ||
-		node.Comments.TotalCount == nil || *node.Comments.TotalCount < 1 || node.Comments.Nodes == nil || len(node.Comments.Nodes) > 100 || *node.Comments.TotalCount < len(node.Comments.Nodes) || !validGraphQLReviewThreadLocation(node) {
-		return fmt.Errorf("%w: GraphQL review thread response is incomplete or invalid", ErrInvalidAPIResponse)
+	switch {
+	case node == nil:
+		return validationError("missing_field", "review_thread")
+	case !validGraphQLNodeID(node.ID):
+		return validationError("invalid_node_id", "review_thread.id")
+	case node.IsResolved == nil:
+		return validationError("missing_field", "review_thread.isResolved")
+	case node.IsOutdated == nil:
+		return validationError("missing_field", "review_thread.isOutdated")
+	case !validRepositoryPath(node.Path):
+		return validationError("invalid_path", "review_thread.path")
+	case node.Comments == nil:
+		return validationError("missing_field", "review_comments")
+	case node.Comments.TotalCount == nil:
+		return validationError("missing_field", "review_comments.totalCount")
+	case *node.Comments.TotalCount < 1:
+		return validationError("invalid_count", "review_comments.totalCount")
+	case node.Comments.Nodes == nil:
+		return validationError("missing_field", "review_comments.nodes")
+	case len(node.Comments.Nodes) > 100:
+		return validationError("oversized_page", "review_comments.nodes")
+	case *node.Comments.TotalCount < len(node.Comments.Nodes):
+		return validationError("count_mismatch", "review_comments.totalCount")
 	}
-	return nil
+	return validateGraphQLReviewThreadLocation(node)
 }
 
 func reviewCommentFromGraphQL(source *graphQLReviewComment, thread *graphQLReviewThread, pullRequestURL, pullRequestHTMLPath string, seenNodeIDs map[string]struct{}, seenDatabaseIDs map[int64]struct{}, databaseIDByNodeID map[string]int64) (ReviewComment, error) {
-	if source == nil || !validGraphQLNodeID(source.ID) || source.FullDatabaseID == nil || *source.FullDatabaseID <= 0 || strings.TrimSpace(source.Body) == "" || source.Path != thread.Path ||
-		source.Commit == nil || !validCommitSHA(source.Commit.OID) || source.OriginalCommit == nil || !validCommitSHA(source.OriginalCommit.OID) || !graphQLResourcePathMatches(source.URL, pullRequestHTMLPath) ||
-		source.Author == nil || !validGraphQLNodeID(source.Author.Login) || source.CreatedAt == nil || source.CreatedAt.IsZero() ||
-		source.UpdatedAt == nil || source.UpdatedAt.IsZero() || source.UpdatedAt.Before(*source.CreatedAt) ||
-		source.PullRequestReview != nil && (source.PullRequestReview.FullDatabaseID == nil || *source.PullRequestReview.FullDatabaseID <= 0) {
-		return ReviewComment{}, fmt.Errorf("%w: GraphQL review comment response is incomplete or invalid", ErrInvalidAPIResponse)
+	if err := validateGraphQLReviewComment(source, thread, pullRequestHTMLPath); err != nil {
+		return ReviewComment{}, err
 	}
 	if _, exists := seenNodeIDs[source.ID]; exists {
-		return ReviewComment{}, fmt.Errorf("%w: duplicate GraphQL review thread or comment id", ErrInvalidAPIResponse)
+		return ReviewComment{}, validationError("duplicate_id", "review_comment.id")
 	}
 	databaseID := int64(*source.FullDatabaseID)
 	if _, exists := seenDatabaseIDs[databaseID]; exists {
-		return ReviewComment{}, fmt.Errorf("%w: duplicate review comment database id", ErrInvalidAPIResponse)
+		return ReviewComment{}, validationError("duplicate_id", "review_comment.fullDatabaseId")
 	}
-	if !validGraphQLReviewCommentLocation(source, thread) {
-		return ReviewComment{}, fmt.Errorf("%w: GraphQL review comment location is invalid", ErrInvalidAPIResponse)
+	if err := validateGraphQLReviewCommentLocation(source, thread); err != nil {
+		return ReviewComment{}, err
 	}
 	seenNodeIDs[source.ID] = struct{}{}
 	seenDatabaseIDs[databaseID] = struct{}{}
 
 	inReplyToID := int64(0)
 	if source.ReplyTo != nil {
-		if !validGraphQLNodeID(source.ReplyTo.ID) || source.ReplyTo.FullDatabaseID == nil || *source.ReplyTo.FullDatabaseID <= 0 {
-			return ReviewComment{}, fmt.Errorf("%w: GraphQL review comment reply target is invalid", ErrInvalidAPIResponse)
+		if !validGraphQLNodeID(source.ReplyTo.ID) {
+			return ReviewComment{}, validationError("invalid_node_id", "review_comment.replyTo.id")
+		}
+		if source.ReplyTo.FullDatabaseID == nil {
+			return ReviewComment{}, validationError("missing_field", "review_comment.replyTo.fullDatabaseId")
+		}
+		if *source.ReplyTo.FullDatabaseID <= 0 {
+			return ReviewComment{}, validationError("invalid_id", "review_comment.replyTo.fullDatabaseId")
 		}
 		replyDatabaseID := int64(*source.ReplyTo.FullDatabaseID)
-		if knownDatabaseID, exists := databaseIDByNodeID[source.ReplyTo.ID]; !exists || knownDatabaseID != replyDatabaseID {
-			return ReviewComment{}, fmt.Errorf("%w: GraphQL review comment reply target is missing or mismatched", ErrInvalidAPIResponse)
+		if knownDatabaseID, exists := databaseIDByNodeID[source.ReplyTo.ID]; !exists {
+			return ReviewComment{}, validationError("missing_target", "review_comment.replyTo")
+		} else if knownDatabaseID != replyDatabaseID {
+			return ReviewComment{}, validationError("identity_mismatch", "review_comment.replyTo.fullDatabaseId")
 		}
 		inReplyToID = replyDatabaseID
 	}
@@ -948,37 +1004,97 @@ func reviewCommentFromGraphQL(source *graphQLReviewComment, thread *graphQLRevie
 	}, nil
 }
 
-func validGraphQLReviewCommentLocation(comment *graphQLReviewComment, thread *graphQLReviewThread) bool {
-	return (comment.Position == nil || *comment.Position > 0 && thread.SubjectType == "LINE") && comment.SubjectType == thread.SubjectType && equalOptionalInt(comment.Line, thread.Line) && equalOptionalInt(comment.StartLine, normalizedGraphQLReviewThreadStartLine(thread)) &&
-		equalOptionalInt(comment.OriginalLine, thread.OriginalLine) && equalOptionalInt(comment.OriginalStartLine, thread.OriginalStartLine)
+func validateGraphQLReviewCommentLocation(comment *graphQLReviewComment, thread *graphQLReviewThread) error {
+	switch {
+	case comment.Position != nil && *comment.Position <= 0:
+		return validationError("invalid_position", "review_comment.position")
+	case comment.Position != nil && thread.SubjectType != "LINE":
+		return validationError("position_on_file", "review_comment.position")
+	case comment.SubjectType != thread.SubjectType:
+		return validationError("location_mismatch", "review_comment.subjectType")
+	case !equalOptionalInt(comment.Line, thread.Line):
+		return validationError("location_mismatch", "review_comment.line")
+	case !equalOptionalInt(comment.StartLine, normalizedGraphQLReviewThreadStartLine(thread)):
+		return validationError("location_mismatch", "review_comment.startLine")
+	case !equalOptionalInt(comment.OriginalLine, thread.OriginalLine):
+		return validationError("location_mismatch", "review_comment.originalLine")
+	case !equalOptionalInt(comment.OriginalStartLine, thread.OriginalStartLine):
+		return validationError("location_mismatch", "review_comment.originalStartLine")
+	default:
+		return nil
+	}
 }
 
-func validGraphQLReviewThreadLocation(thread *graphQLReviewThread) bool {
+func validateGraphQLReviewThreadLocation(thread *graphQLReviewThread) error {
 	if thread.DiffSide != "LEFT" && thread.DiffSide != "RIGHT" {
-		return false
+		return validationError("invalid_diff_side", "review_thread.diffSide")
 	}
 	switch thread.SubjectType {
 	case "FILE":
-		return thread.Line == nil && thread.StartLine == nil && thread.OriginalLine == nil && thread.OriginalStartLine == nil && thread.StartDiffSide == nil
+		switch {
+		case thread.Line != nil:
+			return validationError("file_has_line", "review_thread.line")
+		case thread.StartLine != nil:
+			return validationError("file_has_line", "review_thread.startLine")
+		case thread.OriginalLine != nil:
+			return validationError("file_has_line", "review_thread.originalLine")
+		case thread.OriginalStartLine != nil:
+			return validationError("file_has_line", "review_thread.originalStartLine")
+		case thread.StartDiffSide != nil:
+			return validationError("file_has_diff_side", "review_thread.startDiffSide")
+		}
 	case "LINE":
-		if thread.OriginalLine == nil || *thread.OriginalLine <= 0 || thread.OriginalStartLine != nil && (*thread.OriginalStartLine <= 0 || *thread.OriginalStartLine >= *thread.OriginalLine) {
-			return false
+		switch {
+		case thread.OriginalLine == nil:
+			return validationError("missing_field", "review_thread.originalLine")
+		case *thread.OriginalLine <= 0:
+			return validationError("invalid_line", "review_thread.originalLine")
+		case thread.OriginalStartLine != nil && *thread.OriginalStartLine <= 0:
+			return validationError("invalid_line", "review_thread.originalStartLine")
+		case thread.OriginalStartLine != nil && *thread.OriginalStartLine >= *thread.OriginalLine:
+			return validationError("invalid_range", "review_thread.originalStartLine")
 		}
 		if *thread.IsOutdated {
-			if thread.Line != nil || thread.StartLine != nil {
-				return false
+			if thread.Line != nil {
+				return validationError("outdated_has_line", "review_thread.line")
 			}
-		} else if thread.Line == nil || *thread.Line <= 0 {
-			return false
+			if thread.StartLine != nil {
+				return validationError("outdated_has_line", "review_thread.startLine")
+			}
+		} else if thread.Line == nil {
+			return validationError("missing_field", "review_thread.line")
+		} else if *thread.Line <= 0 {
+			return validationError("invalid_line", "review_thread.line")
 		}
 		if thread.OriginalStartLine == nil {
-			return thread.StartDiffSide == nil && normalizedGraphQLReviewThreadStartLine(thread) == nil
+			if thread.StartDiffSide != nil {
+				return validationError("single_line_has_diff_side", "review_thread.startDiffSide")
+			}
+			if normalizedGraphQLReviewThreadStartLine(thread) != nil {
+				return validationError("single_line_has_start_line", "review_thread.startLine")
+			}
+			return nil
 		}
-		return thread.StartDiffSide != nil && (*thread.StartDiffSide == "LEFT" || *thread.StartDiffSide == "RIGHT") &&
-			(*thread.IsOutdated || thread.StartLine != nil && *thread.StartLine > 0 && *thread.StartLine < *thread.Line)
+		if thread.StartDiffSide == nil {
+			return validationError("missing_field", "review_thread.startDiffSide")
+		}
+		if *thread.StartDiffSide != "LEFT" && *thread.StartDiffSide != "RIGHT" {
+			return validationError("invalid_diff_side", "review_thread.startDiffSide")
+		}
+		if !*thread.IsOutdated {
+			switch {
+			case thread.StartLine == nil:
+				return validationError("missing_field", "review_thread.startLine")
+			case *thread.StartLine <= 0:
+				return validationError("invalid_line", "review_thread.startLine")
+			case *thread.StartLine >= *thread.Line:
+				return validationError("invalid_range", "review_thread.startLine")
+			}
+		}
 	default:
-		return false
+		return validationError("invalid_subject_type", "review_thread.subjectType")
 	}
+	return nil
 }
 
 func normalizedGraphQLReviewThreadStartLine(thread *graphQLReviewThread) *int {
@@ -987,17 +1103,6 @@ func normalizedGraphQLReviewThreadStartLine(thread *graphQLReviewThread) *int {
 		return nil
 	}
 	return thread.StartLine
-}
-
-func sameGraphQLReviewThread(first, second *graphQLReviewThread) bool {
-	return first.ID == second.ID && first.Path == second.Path && *first.IsResolved == *second.IsResolved && *first.IsOutdated == *second.IsOutdated && first.DiffSide == second.DiffSide &&
-		equalOptionalString(first.StartDiffSide, second.StartDiffSide) && equalOptionalInt(first.Line, second.Line) && equalOptionalInt(first.StartLine, second.StartLine) &&
-		equalOptionalInt(first.OriginalLine, second.OriginalLine) && equalOptionalInt(first.OriginalStartLine, second.OriginalStartLine) && first.SubjectType == second.SubjectType
-}
-
-func matchesGraphQLPullRequestIdentity(actual *graphQLPullRequestIdentity, owner, repository string, number int, repositoryID, pullRequestID string) bool {
-	return actual != nil && actual.ID == pullRequestID && actual.Number != nil && *actual.Number == number && actual.Repository != nil && actual.Repository.ID == repositoryID &&
-		actual.Repository.Name == repository && actual.Repository.Owner != nil && actual.Repository.Owner.Login == owner
 }
 
 func equalOptionalInt(first, second *int) bool {
@@ -1011,31 +1116,53 @@ func equalOptionalString(first, second *string) bool {
 func validateReviewThreadReplies(comments []ReviewComment) error {
 	root := comments[0]
 	if root.InReplyToID != 0 {
-		return fmt.Errorf("%w: first review thread comment is a reply", ErrInvalidAPIResponse)
+		return validationError("root_is_reply", "review_comment.replyTo")
 	}
 	for _, comment := range comments[1:] {
 		if comment.InReplyToID != root.ID {
-			return fmt.Errorf("%w: review reply does not reference its thread root", ErrInvalidAPIResponse)
+			return validationError("reply_not_to_root", "review_comment.replyTo")
 		}
 	}
 	return nil
 }
 
 func validateGraphQLPageInfo(pageInfo *graphQLPageInfo, nodeCount int, after *string) error {
-	if pageInfo == nil || pageInfo.HasNextPage == nil || pageInfo.HasPreviousPage == nil || nodeCount < 0 || nodeCount > 100 {
-		return ErrInvalidAPIResponse
+	switch {
+	case pageInfo == nil:
+		return validationError("missing_field", "page_info")
+	case pageInfo.HasNextPage == nil:
+		return validationError("missing_field", "page_info.hasNextPage")
+	case pageInfo.HasPreviousPage == nil:
+		return validationError("missing_field", "page_info.hasPreviousPage")
+	case nodeCount < 0 || nodeCount > 100:
+		return validationError("invalid_count", "page_info")
 	}
 	if nodeCount == 0 {
-		if after != nil || pageInfo.StartCursor != nil || pageInfo.EndCursor != nil || *pageInfo.HasNextPage {
-			return ErrInvalidAPIResponse
+		switch {
+		case after != nil:
+			return validationError("empty_continuation", "page_info")
+		case pageInfo.StartCursor != nil:
+			return validationError("empty_page_has_cursor", "page_info.startCursor")
+		case pageInfo.EndCursor != nil:
+			return validationError("empty_page_has_cursor", "page_info.endCursor")
+		case *pageInfo.HasNextPage:
+			return validationError("empty_page_has_next", "page_info.hasNextPage")
 		}
 		return nil
 	}
-	if pageInfo.StartCursor == nil || pageInfo.EndCursor == nil || !validGraphQLCursor(*pageInfo.StartCursor) || !validGraphQLCursor(*pageInfo.EndCursor) {
-		return ErrInvalidAPIResponse
-	}
-	if after != nil && (*pageInfo.StartCursor == *after || *pageInfo.EndCursor == *after) {
-		return ErrInvalidAPIResponse
+	switch {
+	case pageInfo.StartCursor == nil:
+		return validationError("missing_field", "page_info.startCursor")
+	case pageInfo.EndCursor == nil:
+		return validationError("missing_field", "page_info.endCursor")
+	case !validGraphQLCursor(*pageInfo.StartCursor):
+		return validationError("invalid_cursor", "page_info.startCursor")
+	case !validGraphQLCursor(*pageInfo.EndCursor):
+		return validationError("invalid_cursor", "page_info.endCursor")
+	case after != nil && *pageInfo.StartCursor == *after:
+		return validationError("repeated_cursor", "page_info.startCursor")
+	case after != nil && *pageInfo.EndCursor == *after:
+		return validationError("repeated_cursor", "page_info.endCursor")
 	}
 	return nil
 }
@@ -1053,28 +1180,30 @@ func validGraphQLCursor(value string) bool {
 	return validGraphQLNodeID(value)
 }
 
-func (client *APIClient) doGraphQL(ctx context.Context, installationToken, query string, variables map[string]any, destination any) (string, error) {
+func (client *APIClient) doGraphQL(ctx context.Context, installationToken, query string, variables map[string]any, destination any) (responseMetadata, error) {
 	var response struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	header, err := client.doJSONWithHeaders(ctx, http.MethodPost, "/graphql", installationToken, struct {
+	metadata, err := client.doJSONWithMetadata(ctx, http.MethodPost, "/graphql", installationToken, struct {
 		Query     string         `json:"query"`
 		Variables map[string]any `json:"variables"`
 	}{Query: query, Variables: variables}, &response)
-	requestID := header.Get("X-GitHub-Request-Id")
 	if err != nil {
-		return requestID, err
+		return metadata, err
 	}
-	if len(response.Errors) != 0 || len(response.Data) == 0 || string(response.Data) == "null" {
-		return requestID, &GraphQLQueryError{RequestID: requestID}
+	if len(response.Errors) != 0 {
+		return metadata, responseFailure(metadata, "graphql_envelope", "graphql_errors", &GraphQLQueryError{RequestID: metadata.requestID()})
+	}
+	if len(response.Data) == 0 || string(response.Data) == "null" {
+		return metadata, responseFailure(metadata, "graphql_envelope", "missing_data", &GraphQLQueryError{RequestID: metadata.requestID()})
 	}
 	if err := json.Unmarshal(response.Data, destination); err != nil {
-		return requestID, fmt.Errorf("%w: decode GraphQL data: %v", ErrInvalidAPIResponse, err)
+		return metadata, responseFailure(metadata, "graphql_data_decoding", "invalid_json", ErrInvalidAPIResponse)
 	}
-	return requestID, nil
+	return metadata, nil
 }
 
 func (client *APIClient) GetCheckRuns(ctx context.Context, installationToken, owner, repository, commitSHA string) ([]CheckRun, error) {
@@ -1372,9 +1501,14 @@ func (client *APIClient) doJSON(ctx context.Context, method, path, credential st
 	return err
 }
 
-func (client *APIClient) doJSONWithHeaders(ctx context.Context, method, path, credential string, body, destination any) (header http.Header, err error) {
+func (client *APIClient) doJSONWithHeaders(ctx context.Context, method, path, credential string, body, destination any) (http.Header, error) {
+	metadata, err := client.doJSONWithMetadata(ctx, method, path, credential, body, destination)
+	return metadata.header, err
+}
+
+func (client *APIClient) doJSONWithMetadata(ctx context.Context, method, path, credential string, body, destination any) (metadata responseMetadata, err error) {
 	if strings.TrimSpace(credential) == "" {
-		return nil, &ConfigurationError{Cause: ErrMissingCredential}
+		return metadata, &ConfigurationError{Cause: ErrMissingCredential}
 	}
 	defer func() {
 		if err != nil {
@@ -1385,13 +1519,13 @@ func (client *APIClient) doJSONWithHeaders(ctx context.Context, method, path, cr
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("encode GitHub API request: %w", err)
+			return metadata, fmt.Errorf("encode GitHub API request: %w", err)
 		}
 		requestBody = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub API request: %w", err)
+		return metadata, fmt.Errorf("create GitHub API request: %w", err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("X-GitHub-Api-Version", APIVersion)
@@ -1404,25 +1538,44 @@ func (client *APIClient) doJSONWithHeaders(ctx context.Context, method, path, cr
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return metadata, responseFailure(metadata, "github_http", CancellationReason(ctx.Err()), ctx.Err())
 		}
-		return nil, &TransientError{Cause: err}
+		reason := CancellationReason(err)
+		if reason == "" {
+			reason = "transport_failed"
+		}
+		return metadata, responseFailure(metadata, "github_http", reason, &TransientError{Cause: err})
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, classifyAPIError(response, method, path)
+	metadata = responseMetadata{header: response.Header.Clone(), status: response.StatusCode}
+	if credential != "" && strings.Contains(metadata.requestID(), credential) {
+		metadata.header.Del("X-GitHub-Request-Id")
 	}
-	header = response.Header.Clone()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return metadata, responseFailure(metadata, "github_http", "http_rejected", classifyAPIError(response, method, path))
+	}
 	if destination == nil || response.StatusCode == http.StatusNoContent {
-		return header, nil
+		return metadata, nil
 	}
 	if err := json.NewDecoder(response.Body).Decode(destination); err != nil {
-		return header, fmt.Errorf("%w: decode response: %v", ErrInvalidAPIResponse, err)
+		reason := CancellationReason(err)
+		if reason == "" {
+			reason = "invalid_json"
+		}
+		return metadata, responseFailure(metadata, "response_decoding", reason, ErrInvalidAPIResponse)
 	}
-	return header, nil
+	return metadata, nil
 }
 
 func redactAPIClientError(err error, credential string) error {
+	if diagnostic, ok := err.(*diagnosticError); ok {
+		copy := *diagnostic
+		copy.cause = redactAPIClientError(diagnostic.cause, credential)
+		if credential != "" && strings.Contains(copy.detail.RequestID, credential) {
+			copy.detail.RequestID = ""
+		}
+		return &copy
+	}
 	if credential == "" || !strings.Contains(err.Error(), credential) {
 		return err
 	}

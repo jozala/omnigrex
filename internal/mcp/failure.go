@@ -11,14 +11,24 @@ import (
 )
 
 // githubReadError carries only allowlisted diagnostics across the backend boundary.
-type githubReadError struct{ failure readFailure }
+type githubReadError struct {
+	failure      readFailure
+	precondition bool
+}
 
-func (err githubReadError) Error() string        { return ErrToolDependency.Error() }
-func (err githubReadError) Is(target error) bool { return target == ErrToolDependency }
+func (err githubReadError) Error() string {
+	if err.precondition {
+		return ErrToolPrecondition.Error()
+	}
+	return ErrToolDependency.Error()
+}
+func (err githubReadError) Is(target error) bool {
+	return err.precondition && target == ErrToolPrecondition || !err.precondition && target == ErrToolDependency
+}
 
 type readFailure struct {
-	code, stage, requestID string
-	httpStatus             int
+	code, stage, reason, field, requestID string
+	httpStatus                            int
 }
 
 func safeReadFailure(err error) readFailure {
@@ -26,39 +36,34 @@ func safeReadFailure(err error) readFailure {
 	if errors.As(err, &githubRead) {
 		return githubRead.failure
 	}
+	if reason := githubapi.CancellationReason(err); reason != "" {
+		return readFailure{code: reason, stage: "backend_execution", reason: reason}
+	}
 	if errors.Is(err, ErrToolDependency) {
-		return readFailure{code: "tool_dependency_failed"}
+		return readFailure{code: "tool_dependency_failed", stage: "backend_execution", reason: "dependency_failed"}
 	}
 	if errors.Is(err, ErrToolPrecondition) {
-		return readFailure{code: "read_precondition_failed"}
+		return readFailure{code: "read_precondition_failed", stage: "scoped_identity_validation", reason: "precondition_failed"}
 	}
-	return readFailure{code: "backend_read_failed"}
+	return readFailure{code: "backend_read_failed", stage: "backend_execution", reason: "unclassified"}
 }
 
 func newGitHubReadError(cause error) error {
-	failure := readFailure{}
-	failure.httpStatus, failure.requestID = githubFailureMetadata(cause)
-	if !safeGitHubReadRequestID(failure.requestID) {
-		failure.requestID = ""
+	detail := githubapi.SafeFailureDiagnostics(cause)
+	failure := readFailure{stage: detail.Stage, reason: detail.Reason, field: detail.Field,
+		httpStatus: detail.HTTPStatus, requestID: detail.RequestID}
+	if failure.stage == "" {
+		failure.stage = "github_read"
 	}
-	var graphql *githubapi.GraphQLQueryError
-	if errors.As(cause, &graphql) && safeGitHubReadRequestID(graphql.RequestID) {
-		failure.requestID = graphql.RequestID
+	if reason := githubapi.CancellationReason(cause); reason != "" {
+		failure.reason = reason
 	}
-	var staged *githubapi.ReviewThreadReadError
-	if errors.As(cause, &staged) {
-		switch staged.Stage {
-		case githubapi.ReviewThreadsQuery, githubapi.ReviewThreadsValidation,
-			githubapi.ReviewCommentsQuery, githubapi.ReviewCommentsValidation:
-			failure.stage = string(staged.Stage)
-		}
-		if safeGitHubReadRequestID(staged.RequestID) {
-			failure.requestID = staged.RequestID
-		}
-	}
+	rejectedStatus, _ := githubFailureMetadata(cause)
 	var transient *githubapi.TransientError
 	switch {
-	case failure.httpStatus != 0:
+	case failure.reason == "canceled" || failure.reason == "deadline_exceeded":
+		failure.code = failure.reason
+	case rejectedStatus != 0 || failure.reason == "http_rejected":
 		failure.code = "github_request_rejected"
 	case errors.Is(cause, githubapi.ErrGraphQLQueryFailed):
 		failure.code = "github_graphql_errors_or_no_data"
@@ -69,29 +74,10 @@ func newGitHubReadError(cause error) error {
 	default:
 		failure.code = "github_read_failed"
 	}
+	if failure.reason == "" {
+		failure.reason = "unclassified"
+	}
 	return githubReadError{failure: failure}
-}
-
-// GitHub's request IDs use colon-separated hexadecimal groups. Do not log an
-// arbitrary response header merely because its characters are printable.
-func safeGitHubReadRequestID(value string) bool {
-	groups := strings.Split(value, ":")
-	if len(groups) != 5 {
-		return false
-	}
-	for _, group := range groups {
-		if len(group) < 3 || len(group) > 12 {
-			return false
-		}
-		for _, digit := range group {
-			if digit < '0' || digit > '9' {
-				if digit < 'A' || digit > 'F' {
-					return false
-				}
-			}
-		}
-	}
-	return true
 }
 
 // FailurePullRequestHeadMismatch is durable evidence of a definite, fresh
