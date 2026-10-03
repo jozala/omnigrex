@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -470,6 +472,15 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, errors.New("start restricted Runtime Process: engine returned no transport")
 	}
 	clientOptions := launcher.acpOptions
+	if clientOptions.Logger == nil {
+		clientOptions.Logger = slog.Default()
+	}
+	clientOptions.Logger = clientOptions.Logger.With("workflow_id", execution.WorkflowID)
+	clientOptions.DiagnosticContext = agentevent.Context{
+		AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
+		ACPSessionID: execution.Session.ACPSessionID, TurnID: execution.Turn.ID,
+		ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch), ControlRevision: uint64(execution.Session.ControlRevision),
+	}
 	clientOptions.RequiredCapabilities = requiredACPCapabilities(runtimeProfile)
 	// The rendered profile is the sole ACP permission authority for this assignment.
 	clientOptions.DecidePermission = func(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {

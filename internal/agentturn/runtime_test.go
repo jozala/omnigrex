@@ -1,11 +1,15 @@
 package agentturn_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"reflect"
 	"slices"
 	"strings"
@@ -40,6 +44,7 @@ const (
 )
 
 func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *testing.T) {
+	var protocolLogs bytes.Buffer
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
@@ -74,6 +79,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: clientFactory, Sessions: sessions,
 		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 		MemoryBytes: 1024 << 20,
+		ACPOptions:  acp.ClientOptions{Logger: slog.New(slog.NewJSONHandler(&protocolLogs, nil))},
 	}
 	withoutMemory := launcherConfig
 	withoutMemory.MemoryBytes = 0
@@ -98,6 +104,43 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		t.Fatalf("Launch() error = %v", err)
 	}
 	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
+
+	// Exercise the real ACP logger with the options emitted at the launch boundary.
+	// Initialization failures must be correlated even before Session preparation.
+	transport, agent := net.Pipe()
+	protocolClient := acp.NewClient(transport, clientFactory.options)
+	t.Cleanup(func() { _ = protocolClient.Close(); _ = agent.Close() })
+	initializeDone := make(chan error, 1)
+	go func() { _, err := protocolClient.Initialize(context.Background()); initializeDone <- err }()
+	requestLine, err := bufio.NewReader(agent).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(requestLine, &request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(agent, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}\n", request.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-initializeDone; err == nil {
+		t.Fatal("Initialize unexpectedly succeeded")
+	}
+	var protocolLog map[string]any
+	if err := json.Unmarshal(protocolLogs.Bytes(), &protocolLog); err != nil {
+		t.Fatalf("missing ACP diagnostic log: %v", err)
+	}
+	for key, want := range map[string]any{
+		"workflow_id": runtimeTestWorkflow, "assignment_id": runtimeTestAssignment,
+		"agent_session_id": runtimeTestSession, "agent_turn_id": runtimeTestTurn,
+		"execution_epoch": float64(7), "method": "initialize",
+	} {
+		if protocolLog[key] != want {
+			t.Errorf("ACP log[%s] = %v, want %v", key, protocolLog[key], want)
+		}
+	}
 
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)

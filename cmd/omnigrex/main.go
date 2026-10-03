@@ -356,6 +356,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Sessions: sessions, Network: settings.DockerAgentNetwork,
 		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
 		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
+			Logger:         logger,
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
