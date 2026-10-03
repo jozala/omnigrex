@@ -52,6 +52,8 @@ Set `OTEL_TRACES_SAMPLER=always_on` to sample every trace, or use `parentbased_t
 
 Instrumentation covers incoming webhook and MCP HTTP requests and outbound GitHub API requests, with W3C trace-context and baggage propagation.
 Health and readiness requests are excluded from incoming tracing.
+Docker clients for readiness probes and exact Runtime Profile image availability checks also suppress tracing, including probe cleanup.
+Operational Docker clients retain tracing for Runtime Process operations.
 Request bodies, tool arguments, and agent prompts are not added as trace attributes.
 Asynchronous Workflow workers start independent traces for their GitHub requests; trace context is not persisted across durable queues.
 Completed spans are batched and flushed after services stop, within `OMNIGREX_SHUTDOWN_TIMEOUT`.

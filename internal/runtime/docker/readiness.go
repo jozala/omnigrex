@@ -12,6 +12,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	mobyclient "github.com/moby/moby/client"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -52,7 +53,8 @@ func NewReadinessProbe(options ReadinessProbeOptions) (*ReadinessProbe, error) {
 	if err := validateReadinessProbeOptions(options); err != nil {
 		return nil, err
 	}
-	client, err := mobyclient.New(mobyclient.FromEnv)
+	// Probe traffic, including cleanup, must not emit routine Docker spans.
+	client, err := mobyclient.New(mobyclient.FromEnv, mobyclient.WithTraceProvider(noop.NewTracerProvider()))
 	if err != nil {
 		return nil, fmt.Errorf("create Docker readiness client: %w", err)
 	}
