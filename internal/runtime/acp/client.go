@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"path/filepath"
 	"sync"
@@ -36,6 +37,9 @@ const (
 )
 
 type ClientOptions struct {
+	Logger *slog.Logger
+	// DiagnosticContext correlates failures before an ACP Session is bound.
+	DiagnosticContext       agentevent.Context
 	ClientInfo              Implementation
 	RequiredCapabilities    RequiredCapabilities
 	AgentEventSink          agentevent.Sink
@@ -65,6 +69,9 @@ type Client struct {
 }
 
 func NewClient(transport io.ReadWriteCloser, options ClientOptions) *Client {
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	if options.ClientInfo.Name == "" {
 		options.ClientInfo = Implementation{Name: "omnigrex", Version: "dev"}
 	}
@@ -101,15 +108,21 @@ func (client *Client) Initialize(ctx context.Context) (InitializeResponse, error
 		"clientInfo": client.options.ClientInfo,
 	}
 	var response InitializeResponse
-	if err := client.connection.Call(ctx, "initialize", request, &response); err != nil {
+	var validationErr error
+	if err := client.connection.callWithContexts(ctx, ctx, "initialize", request, &response, nil, func() error {
+		if response.ProtocolVersion != ProtocolVersion {
+			validationErr = fmt.Errorf("%w: agent returned %d, want %d", ErrProtocolVersion, response.ProtocolVersion, ProtocolVersion)
+		} else {
+			validationErr = validateRequiredCapabilities(response.AgentCapabilities, client.options.RequiredCapabilities)
+		}
+		return validationErr
+	}); err != nil {
+		if errors.Is(validationErr, ErrProtocolVersion) {
+			_ = client.Close()
+		} else if validationErr != nil {
+			return response, err
+		}
 		return InitializeResponse{}, err
-	}
-	if response.ProtocolVersion != ProtocolVersion {
-		_ = client.Close()
-		return InitializeResponse{}, fmt.Errorf("%w: agent returned %d, want %d", ErrProtocolVersion, response.ProtocolVersion, ProtocolVersion)
-	}
-	if err := validateRequiredCapabilities(response.AgentCapabilities, client.options.RequiredCapabilities); err != nil {
-		return response, err
 	}
 
 	client.mutex.Lock()
@@ -132,11 +145,13 @@ func (client *Client) CreateSession(ctx context.Context, request CreateSessionRe
 	}
 
 	var session Session
-	if err := client.connection.Call(ctx, "session/new", params, &session); err != nil {
+	if err := client.connection.callWithContexts(ctx, ctx, "session/new", params, &session, nil, func() error {
+		if session.ID == "" {
+			return ErrSessionIDEmpty
+		}
+		return nil
+	}); err != nil {
 		return Session{}, err
-	}
-	if session.ID == "" {
-		return Session{}, ErrSessionIDEmpty
 	}
 	client.recordSession(session.ID)
 	return session, nil
@@ -211,16 +226,18 @@ func (client *Client) DiscoverSessions(ctx context.Context, cwd, cursor string) 
 		params["cursor"] = cursor
 	}
 	var response ListSessionsResponse
-	if err := client.connection.Call(ctx, "session/list", params, &response); err != nil {
-		return ListSessionsResponse{}, err
-	}
-	if len(response.Sessions) > maxSessionsPerPage {
-		return ListSessionsResponse{}, ErrSessionDiscoveryLimit
-	}
-	for _, session := range response.Sessions {
-		if session.ID == "" {
-			return ListSessionsResponse{}, ErrSessionIDEmpty
+	if err := client.connection.callWithContexts(ctx, ctx, "session/list", params, &response, nil, func() error {
+		if len(response.Sessions) > maxSessionsPerPage {
+			return ErrSessionDiscoveryLimit
 		}
+		for _, session := range response.Sessions {
+			if session.ID == "" {
+				return ErrSessionIDEmpty
+			}
+		}
+		return nil
+	}); err != nil {
+		return ListSessionsResponse{}, err
 	}
 	return response, nil
 }
@@ -313,10 +330,20 @@ func (client *Client) Prompt(ctx context.Context, sessionID string, prompt []Con
 	submitted := make(chan error, 1)
 	go func() {
 		var response PromptResponse
+		responseValidated := false
 		err := client.connection.callWithContexts(ctx, context.Background(), "session/prompt", map[string]any{
 			"sessionId": sessionID,
 			"prompt":    prompt,
-		}, &response, submitted)
+		}, &response, submitted, func() error {
+			responseValidated = true
+			_, err := validatePromptResponse(response, nil)
+			return err
+		})
+		// Preserve decoded responses for semantic errors, but not for RPC or
+		// decoding failures, matching the previous validatePromptResponse behavior.
+		if !responseValidated {
+			response = PromptResponse{}
+		}
 		completed <- promptResult{response: response, err: err}
 	}()
 	if err := <-submitted; err != nil {
@@ -325,7 +352,7 @@ func (client *Client) Prompt(ctx context.Context, sessionID string, prompt []Con
 
 	select {
 	case result := <-completed:
-		return validatePromptResponse(result.response, result.err)
+		return result.response, result.err
 	case <-ctx.Done():
 		cancelCtx, cancel := context.WithTimeout(context.Background(), client.options.CancellationGracePeriod)
 		defer cancel()
@@ -339,9 +366,9 @@ func (client *Client) Prompt(ctx context.Context, sessionID string, prompt []Con
 		}
 		select {
 		case result := <-completed:
-			return validatePromptResponse(result.response, result.err)
+			return result.response, result.err
 		case <-cancelCtx.Done():
-			_ = client.Close()
+			client.connection.terminateDiagnostic(ErrConnectionClosed, "cancellation_grace", cancelCtx.Err())
 			return PromptResponse{}, fmt.Errorf("ACP prompt did not stop after cancellation: %w", cancelCtx.Err())
 		}
 	}

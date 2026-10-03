@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,7 @@ func (err *RPCError) Error() string {
 type Connection struct {
 	transport io.ReadWriteCloser
 	handler   Handler
+	logger    func() *slog.Logger
 	ctx       context.Context
 	cancel    context.CancelFunc
 
@@ -59,10 +61,11 @@ type Connection struct {
 	requests      chan struct{}
 	done          chan struct{}
 
-	mutex       sync.Mutex
-	pending     map[string]chan callResponse
-	terminalErr error
-	closeOnce   sync.Once
+	mutex          sync.Mutex
+	pending        map[string]chan callResponse
+	terminalErr    error
+	terminalLogErr error
+	closeOnce      sync.Once
 }
 
 type writeRequest struct {
@@ -102,10 +105,17 @@ type wireMessage struct {
 }
 
 func NewConnection(transport io.ReadWriteCloser, handler Handler) *Connection {
+	logger := slog.Default
+	// The ACP client supplies a per-operation snapshot of durable context.
+	// Other handlers retain the default logger without changing the public API.
+	if diagnostics, ok := handler.(interface{ diagnosticLogger() *slog.Logger }); ok {
+		logger = diagnostics.diagnosticLogger
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &Connection{
 		transport:     transport,
 		handler:       handler,
+		logger:        logger,
 		ctx:           ctx,
 		cancel:        cancel,
 		writes:        make(chan writeRequest, 64),
@@ -131,7 +141,7 @@ func (connection *Connection) call(
 	result any,
 	submitted chan<- error,
 ) error {
-	return connection.callWithContexts(ctx, ctx, method, params, result, submitted)
+	return connection.callWithContexts(ctx, ctx, method, params, result, submitted, nil)
 }
 
 func (connection *Connection) callWithContexts(
@@ -141,7 +151,21 @@ func (connection *Connection) callWithContexts(
 	params any,
 	result any,
 	submitted chan<- error,
-) error {
+	validate func() error,
+) (callErr error) {
+	started := time.Now()
+	logger := connection.logger()
+	stage := "submit"
+	var requestID any
+	defer func() {
+		if callErr != nil {
+			logErr := connection.diagnosticError(callErr)
+			if stage == "submit" && sendCtx.Err() != nil {
+				logErr = sendCtx.Err()
+			}
+			logRequestFailure(logger, method, requestID, "orchestrator_to_agent", stage, started, logErr)
+		}
+	}()
 	reportSubmission := func(err error) {
 		if submitted != nil {
 			submitted <- err
@@ -154,6 +178,7 @@ func (connection *Connection) callWithContexts(
 	}
 
 	id := connection.nextID.Add(1)
+	requestID = id
 	key := fmt.Sprintf("n:%d", id)
 	response := make(chan callResponse, 1)
 
@@ -178,10 +203,21 @@ func (connection *Connection) callWithContexts(
 		return err
 	}
 	reportSubmission(nil)
+	stage = "response"
 
 	select {
 	case received := <-response:
-		return decodeCallResponse(received, result)
+		if received.err == nil {
+			stage = "decode"
+		}
+		if err := decodeCallResponse(received, result); err != nil {
+			return err
+		}
+		if validate != nil {
+			stage = "validate"
+			return validate()
+		}
+		return nil
 	case <-waitCtx.Done():
 		connection.removePending(key)
 		cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -193,7 +229,21 @@ func (connection *Connection) callWithContexts(
 	}
 }
 
-func (connection *Connection) Notify(ctx context.Context, method string, params any) error {
+func (connection *Connection) Notify(ctx context.Context, method string, params any) (notifyErr error) {
+	started := time.Now()
+	logger := connection.logger()
+	defer func() {
+		if notifyErr != nil {
+			logErr := connection.diagnosticError(notifyErr)
+			if ctx.Err() != nil {
+				logErr = ctx.Err()
+			}
+			level, class := diagnosticFailure(logErr)
+			logger.Log(context.Background(), level, "ACP notification failed",
+				"method", method, "direction", "orchestrator_to_agent", "failure_stage", "submit",
+				"failure_class", class, "duration_ms", time.Since(started).Milliseconds())
+		}
+	}()
 	if method == "" {
 		return errors.New("ACP method is empty")
 	}
@@ -205,7 +255,7 @@ func (connection *Connection) Notify(ctx context.Context, method string, params 
 }
 
 func (connection *Connection) Close() error {
-	connection.terminate(ErrConnectionClosed)
+	connection.terminate(ErrConnectionClosed, "close")
 	return nil
 }
 
@@ -217,25 +267,31 @@ func (connection *Connection) readLoop() {
 		if err := connection.handleFrame(frame); err != nil {
 			var requestErr *incomingRequestError
 			if errors.As(err, &requestErr) {
+				method, requestID := diagnosticFrameMetadata(frame)
+				connection.logger().Warn("ACP protocol failed", "direction", "agent_to_orchestrator",
+					"failure_stage", "read", "failure_class", "protocol_error", "rpc_code", requestErr.code,
+					"method", method, "request_id", requestID)
 				if sendErr := connection.sendJSON(connection.ctx, map[string]any{
 					"jsonrpc": "2.0",
 					"id":      requestErr.id,
 					"error":   NewRPCError(requestErr.code, requestErr.message),
 				}); sendErr != nil {
-					connection.terminate(fmt.Errorf("write ACP protocol error: %w", sendErr))
+					connection.terminate(fmt.Errorf("write ACP protocol error: %w", sendErr), "write")
 					return
 				}
 				continue
 			}
-			connection.terminate(fmt.Errorf("read ACP message: %w", err))
+			connection.logger().Warn("ACP protocol failed", "direction", "agent_to_orchestrator",
+				"failure_stage", "read", "failure_class", "protocol_error")
+			connection.terminate(fmt.Errorf("read ACP message: %w", err), "protocol")
 			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		connection.terminate(fmt.Errorf("read ACP message: %w", err))
+		connection.terminate(fmt.Errorf("read ACP message: %w", err), "read")
 		return
 	}
-	connection.terminate(io.EOF)
+	connection.terminate(io.EOF, "read")
 }
 
 func (connection *Connection) writeLoop() {
@@ -253,7 +309,11 @@ func (connection *Connection) writeLoop() {
 			}
 			request.done <- err
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				connection.terminate(fmt.Errorf("write ACP message: %w", err))
+				logErr := err
+				if request.ctx.Err() != nil {
+					logErr = request.ctx.Err()
+				}
+				connection.terminateDiagnostic(fmt.Errorf("write ACP message: %w", err), "write", logErr)
 				return
 			}
 		case <-connection.done:
@@ -308,9 +368,10 @@ func (connection *Connection) handleFrame(frame []byte) error {
 		}
 		select {
 		case connection.requests <- struct{}{}:
+			logger := connection.logger()
 			go func() {
 				defer func() { <-connection.requests }()
-				connection.handleRequest(message)
+				connection.handleRequest(message, logger)
 			}()
 		case <-connection.done:
 		}
@@ -340,18 +401,22 @@ func (connection *Connection) handleFrame(frame []byte) error {
 	return nil
 }
 
-func (connection *Connection) handleRequest(message wireMessage) {
+func (connection *Connection) handleRequest(message wireMessage, logger *slog.Logger) {
+	started := time.Now()
 	result, rpcErr := connection.callHandler(message.Method, message.Params)
 	response := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      message.ID,
 	}
 	if rpcErr != nil {
+		logRequestFailure(logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "handler", started, rpcErr)
 		response["error"] = rpcErr
 	} else {
 		response["result"] = result
 	}
-	_ = connection.sendJSON(connection.ctx, response)
+	if err := connection.sendJSON(connection.ctx, response); err != nil {
+		logRequestFailure(logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "write", started, connection.diagnosticError(err))
+	}
 }
 
 func (connection *Connection) callHandler(method string, params json.RawMessage) (result any, rpcErr *RPCError) {
@@ -408,10 +473,10 @@ func (connection *Connection) sendJSON(ctx context.Context, message any) error {
 						return nil
 					}
 				}
-				connection.terminate(ctx.Err())
+				connection.terminate(ctx.Err(), "write")
 			}
 		default:
-			connection.terminate(ctx.Err())
+			connection.terminate(ctx.Err(), "write")
 		}
 		return ctx.Err()
 	case <-connection.done:
@@ -419,12 +484,21 @@ func (connection *Connection) sendJSON(ctx context.Context, message any) error {
 	}
 }
 
-func (connection *Connection) terminate(err error) {
+func (connection *Connection) terminate(err error, stage string) {
+	connection.terminateDiagnostic(err, stage, err)
+}
+
+func (connection *Connection) terminateDiagnostic(err error, stage string, logErr error) {
 	connection.closeOnce.Do(func() {
 		connection.mutex.Lock()
 		connection.terminalErr = err
+		connection.terminalLogErr = logErr
+		pending := len(connection.pending)
 		clear(connection.pending)
 		connection.mutex.Unlock()
+		level, class := diagnosticFailure(logErr)
+		connection.logger().Log(context.Background(), level, "ACP connection closed",
+			"failure_stage", stage, "failure_class", class, "pending_requests", pending)
 		connection.cancel()
 		close(connection.done)
 		_ = connection.transport.Close()
