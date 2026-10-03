@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type ReadinessChecker interface {
@@ -43,8 +45,12 @@ func Run(ctx context.Context, addr string, shutdownTimeout time.Duration, logger
 // RunHandler serves one explicitly supplied private or public HTTP handler with bounded shutdown.
 func RunHandler(ctx context.Context, addr string, shutdownTimeout time.Duration, logger *slog.Logger, name string, handler http.Handler) error {
 	httpServer := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
+		Addr: addr,
+		Handler: otelhttp.NewHandler(handler, name,
+			otelhttp.WithFilter(func(request *http.Request) bool {
+				return request.URL.Path != "/healthz" && request.URL.Path != "/readyz"
+			}),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,

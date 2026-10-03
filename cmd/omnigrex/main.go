@@ -34,9 +34,11 @@ import (
 	"github.com/jozala/omnigrex/internal/server"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workflowaction"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var version = "dev"
@@ -135,6 +137,17 @@ func runDoctorCommand(ctx context.Context, args []string, getenv func(string) st
 }
 
 func run(ctx context.Context, settings config.Config, logger *slog.Logger) error {
+	shutdownTracing, err := telemetry.Init(ctx, version)
+	if err != nil {
+		return fmt.Errorf("initialize tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), settings.ShutdownTimeout)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			logger.Error("shut down tracing", "error", err)
+		}
+	}()
 	roleCatalog := role.BuiltinCatalog()
 	definition, err := workflow.NewBuiltinDefinition(roleCatalog)
 	if err != nil {
@@ -749,7 +762,7 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	if developerSigner.PublicKeyFingerprint() == reviewerSigner.PublicKeyFingerprint() {
 		return nil, errors.New("Developer and Reviewer GitHub Apps must use distinct private keys")
 	}
-	api, err := githubapi.NewAPIClient(&http.Client{Timeout: 15 * time.Second}, settings.GitHubAPIURL)
+	api, err := githubapi.NewAPIClient(&http.Client{Timeout: 15 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)}, settings.GitHubAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("configure GitHub API: %w", err)
 	}
