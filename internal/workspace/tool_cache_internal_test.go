@@ -252,6 +252,28 @@ func TestFrontierStarvationCounterexampleWarnsWithinBoundedPolls(t *testing.T) {
 	if !warned {
 		t.Fatal("starvation counterexample never warned within 10 bounded polls")
 	}
+	// Drain to cycle completion and assert exact accounting (no double-count
+	// from mid-skip rewinds). With the rewind bug, already-counted prefix
+	// entries are recounted on resume, inflating Files/Bytes beyond the
+	// filesystem-derived total and producing spurious warnings.
+	var total ToolCacheUsage
+	for i := 0; i < 10; i++ {
+		u, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total = u
+		if !u.Truncated {
+			break
+		}
+	}
+	if total.Truncated {
+		t.Fatal("starvation counterexample never completed after warning")
+	}
+	// Files: s1 3 + s2 3 + heavy 1 = 7 (no double-count).
+	if total.Files != 7 {
+		t.Fatalf("starvation final files = %d, want 7 (double-count check)", total.Files)
+	}
 }
 
 func TestEventualWarningForHeavySubtreeBehindLightSiblings(t *testing.T) {
