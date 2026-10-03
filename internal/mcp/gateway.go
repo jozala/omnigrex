@@ -24,6 +24,8 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -846,7 +848,10 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		writeRPCError(response, id, -32001, "tool authorization is stale")
 		return
 	}
-	operationContext, cancelOperation := context.WithTimeout(registration.operationCtx, gateway.mutationOperationTimeout)
+	// Preserve observability from the request without inheriting its cancellation.
+	operationParent := trace.ContextWithSpanContext(registration.operationCtx, trace.SpanContextFromContext(request.Context()))
+	operationParent = baggage.ContextWithBaggage(operationParent, baggage.FromContext(request.Context()))
+	operationContext, cancelOperation := context.WithTimeout(operationParent, gateway.mutationOperationTimeout)
 	finishCall := func(durablyResolved bool) {
 		cancelOperation()
 		registration.finishCall(durablyResolved)

@@ -21,6 +21,9 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestDeveloperListsOnlyItsFixedConcreteToolSetAfterInitialization(t *testing.T) {
@@ -711,7 +714,7 @@ func TestAmbiguousReservationFailureDrainsUnresolvedWithoutStartingBackend(t *te
 func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{completionObserved: make(chan struct{}, 1)}
-	backend := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), contextCanceled: make(chan bool, 1)}
+	backend := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), contextCanceled: make(chan bool, 1), observedContext: make(chan context.Context, 1)}
 	gateway := newTestGateway(t, now, durable, backend)
 	registration, err := gateway.Register(validScope(now))
 	if err != nil {
@@ -719,7 +722,12 @@ func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	}
 	initialize(t, gateway, registration)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	parent := propagator.Extract(context.Background(), propagation.MapCarrier{
+		"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		"baggage":     "example=value",
+	})
+	ctx, cancel := context.WithCancel(parent)
 	request := rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"detached-1","body":"Still execute"}}}`).WithContext(ctx)
 	handlerReturned := make(chan struct{})
 	go func() {
@@ -727,6 +735,10 @@ func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 		close(handlerReturned)
 	}()
 	<-backend.started
+	observed := <-backend.observedContext
+	if !trace.SpanContextFromContext(observed).Equal(trace.SpanContextFromContext(parent)) || baggage.FromContext(observed).Member("example").Value() != "value" {
+		t.Fatal("admitted mutation lost request trace context or baggage")
+	}
 	cancel()
 	select {
 	case <-handlerReturned:
@@ -2236,6 +2248,7 @@ type blockingBackend struct {
 	started         chan struct{}
 	release         chan struct{}
 	contextCanceled chan bool
+	observedContext chan context.Context
 }
 
 type cancelingBackend struct {
@@ -2251,6 +2264,9 @@ func (backend *cancelingBackend) Execute(ctx context.Context, _ mcp.Invocation) 
 }
 
 func (backend *blockingBackend) Execute(ctx context.Context, _ mcp.Invocation) (json.RawMessage, error) {
+	if backend.observedContext != nil {
+		backend.observedContext <- ctx
+	}
 	close(backend.started)
 	<-backend.release
 	backend.contextCanceled <- ctx.Err() != nil

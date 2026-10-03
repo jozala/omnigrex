@@ -21,6 +21,45 @@ Narrow provider privileges, configure spending limits, and rotate the complete b
 Omnigrex does not enforce required GitHub checks before `omnigrex:pr-ready`.
 Use GitHub branch protection when checks must be mandatory.
 
+## Tracing
+
+The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.
+Tracing is inactive when neither endpoint is set, or when `OTEL_SDK_DISABLED=true`.
+Both Compose bundles pass the tracing settings from the deployment `.env` to the orchestrator.
+
+Configure an OTLP-compatible collector's HTTP endpoint in your private deployment `.env`:
+
+```dotenv
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.example:4318
+OTEL_SERVICE_NAME=omnigrex
+```
+
+If the collector requires authentication, set `OTEL_EXPORTER_OTLP_HEADERS` using OpenTelemetry's URL-encoded `key=value` format.
+Keep authentication headers in private deployment configuration alongside the other secrets described in [Prerequisites](#prerequisites).
+Recreate the orchestrator container after changing tracing environment settings.
+The generic endpoint automatically gets `/v1/traces` appended; `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, if set, is a complete trace URL and takes precedence.
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` can override the generic headers for traces.
+The exporter always uses OTLP/HTTP with protobuf encoding, so use the collector's HTTP endpoint rather than its gRPC endpoint.
+`OTEL_EXPORTER_OTLP_PROTOCOL` is not needed and does not select a different exporter in this implementation.
+For a collector running on the Docker host, use an address reachable from the orchestrator container; `127.0.0.1` inside the container refers to the container itself.
+Docker Desktop provides `host.docker.internal`; on Linux Docker Engine, that name requires a host-gateway mapping in a Compose override, or use a reachable host IP address.
+The collector must listen on an interface reachable from the container and have a trace receiver connected to its export pipeline.
+
+Traces identify the service as `omnigrex` by default and include its build version.
+Use `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` to override the service name or attach environment attributes.
+The default sampler is `parentbased_always_on`, which samples new root traces and respects upstream sampling decisions.
+Set `OTEL_TRACES_SAMPLER=always_on` to sample every trace, or use `parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` to sample 10% of root traces.
+
+Instrumentation covers incoming webhook and MCP HTTP requests and outbound GitHub API requests, with W3C trace-context and baggage propagation.
+Health and readiness requests are excluded from incoming tracing.
+Request bodies, tool arguments, and agent prompts are not added as trace attributes.
+Asynchronous Workflow workers start independent traces for their GitHub requests; trace context is not persisted across durable queues.
+Completed spans are batched and flushed after services stop, within `OMNIGREX_SHUTDOWN_TIMEOUT`.
+Compose allows one minute before forcibly stopping the orchestrator, configurable with `OMNIGREX_STOP_GRACE_PERIOD`.
+Keep that grace period longer than service draining and Agent Turn cleanup plus a separate `OMNIGREX_SHUTDOWN_TIMEOUT` budget for exporting the final traces, increasing it when those timeouts are increased.
+Exporter delivery failures are reported by the OpenTelemetry SDK without stopping Workflow processing.
+This setup exports traces only; metrics and log export are not enabled.
+
 ## Prerequisites
 
 Install the following software on the deployment host:
