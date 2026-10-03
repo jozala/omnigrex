@@ -650,3 +650,137 @@ func TestSkipRegionDrainsAcrossPolls(t *testing.T) {
 		t.Fatal("skip region never drained; heavy tail never measured")
 	}
 }
+
+func TestReplayDrainCompletesWithTailMeasured(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "55555555-5555-4555-8555-555555555555"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Moderately large ignored prefix (20 symlinks, budget 6) forces multiple
+	// polls with mid-skip cutoffs; the tail heavy file must still be measured
+	// within bounded polls with exact accounting (no double-count).
+	dir := filepath.Join(cache, "replay")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside-replay")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := os.Symlink(outside, filepath.Join(dir, "link"+itoa(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	heavy := filepath.Join(cache, "taily")
+	if err := os.MkdirAll(heavy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(heavy, "big"), bytes.Repeat([]byte("x"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 50 << 10, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warned := false
+	for i := 0; i < 20 && !warned; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned = warned || w
+	}
+	if !warned {
+		t.Fatal("replay drain never measured heavy tail within bounded polls")
+	}
+	var total ToolCacheUsage
+	for i := 0; i < 20; i++ {
+		u, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total = u
+		if !u.Truncated {
+			break
+		}
+	}
+	if total.Truncated {
+		t.Fatal("replay drain never completed")
+	}
+	if total.Files != 1 {
+		t.Fatalf("replay final files = %d, want 1 heavy file (no double-count)", total.Files)
+	}
+}
+
+func TestMidSkipRewindDoesNotDoubleCount(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "66666666-6666-4666-8666-666666666666"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Ten tiny files need multiple polls per cycle; mid-skip rewinds must not
+	// recount already-counted names. Drain to completion and assert exact
+	// filesystem-derived total with no spurious warning beyond the first.
+	dir := filepath.Join(cache, "dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 10 << 20, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var total ToolCacheUsage
+	for i := 0; i < 20; i++ {
+		u, _, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total = u
+		if !u.Truncated {
+			break
+		}
+	}
+	if total.Truncated {
+		t.Fatal("rewind drain never completed")
+	}
+	if total.Files != 10 {
+		t.Fatalf("rewind final files = %d, want 10 (no double-count, no loss)", total.Files)
+	}
+}

@@ -33,7 +33,7 @@ type ToolCacheUsage struct {
 }
 
 func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, participantID string) (ToolCacheUsage, error) {
-	usage, _, _, _, _, _, err := lifecycle.measureCyclePoll(ctx, participantID, nil, nil, 0, 0, false)
+	usage, _, _, _, _, _, _, err := lifecycle.measureCyclePoll(ctx, participantID, nil, nil, nil, 0, 0, false)
 	return usage, err
 }
 
@@ -55,80 +55,84 @@ type participantScan struct {
 	started    bool
 }
 
-func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID string, pending []ownedDirectoryEntry, cursors map[string]int, accumBytes, accumFiles int64, hadSkip bool) (ToolCacheUsage, []ownedDirectoryEntry, map[string]int, int64, int64, bool, error) {
+func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID string, pending []ownedDirectoryEntry, cursors map[string]int, seen map[[16]byte]struct{}, accumBytes, accumFiles int64, hadSkip bool) (ToolCacheUsage, []ownedDirectoryEntry, map[string]int, map[[16]byte]struct{}, int64, int64, bool, error) {
 	if lifecycle == nil || !uuidtext.Valid(participantID) {
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, ErrInvalidAssignmentID
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, ErrInvalidAssignmentID
 	}
 	root, err := lifecycle.toolDataRoot(participantID)
 	if err != nil {
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, err
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 	}
 	assignmentRoot := filepath.Dir(root)
 	for _, parent := range []string{lifecycle.miseRoot, assignmentRoot} {
 		exists, err := inspectOwnedDirectory(parent)
 		if err != nil {
-			return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, err
+			return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 		}
 		if !exists {
-			return ToolCacheUsage{}, nil, make(map[string]int), 0, 0, false, nil
+			return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
 		}
 	}
 	exists, err := inspectOwnedDirectory(root)
 	if err != nil {
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, err
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 	}
 	if !exists {
-		return ToolCacheUsage{}, nil, make(map[string]int), 0, 0, false, nil
+		return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
 	}
 	cache := filepath.Join(root, "assignment")
 	cacheDir, _, err := openDirectoryNoFollow(cache)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ToolCacheUsage{}, nil, make(map[string]int), 0, 0, false, nil
+			return ToolCacheUsage{}, nil, make(map[string]int), make(map[[16]byte]struct{}), 0, 0, false, nil
 		}
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, fmt.Errorf("open Participant tool cache: %w", err)
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, fmt.Errorf("open Participant tool cache: %w", err)
 	}
 	defer cacheDir.Close()
 	var rootStat unix.Stat_t
 	if err := unix.Fstat(int(cacheDir.Fd()), &rootStat); err != nil {
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, fmt.Errorf("inspect Participant tool cache: %w", err)
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, fmt.Errorf("inspect Participant tool cache: %w", err)
 	}
 	if rootStat.Mode&unix.S_IFMT != unix.S_IFDIR || int(rootStat.Uid) != os.Geteuid() {
-		return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, fmt.Errorf("%w: Participant tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
+		return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, fmt.Errorf("%w: Participant tool cache is not owned by the orchestrator", ErrUnsafeAssignmentPath)
 	}
 	rootDev := uint64(rootStat.Dev)
 	rootIno := uint64(rootStat.Ino)
 	if cursors == nil {
 		cursors = make(map[string]int)
 	}
+	if seen == nil {
+		seen = make(map[[16]byte]struct{})
+	}
 	// Fresh cycle: initialize frontier with root, count root allocation once.
-	isFresh := len(pending) == 0 && accumBytes == 0 && accumFiles == 0 && len(cursors) == 0 && !hadSkip
+	isFresh := len(pending) == 0 && accumBytes == 0 && accumFiles == 0 && len(cursors) == 0 && len(seen) == 0 && !hadSkip
 	usage := ToolCacheUsage{}
 	// Accum holds disjoint sum so far in cycle (excluding this poll's new).
 	// This poll adds new entries to accum; usage for warning is accum total.
-	// For fresh cycles, count root allocation once.
+	// For fresh cycles, count root allocation once, deduplicated by identity.
 	if isFresh {
-		addAllocated(&usage, rootStat)
-		accumBytes += usage.Bytes
+		rootKey := fileIdentity(uint64(rootStat.Dev), uint64(rootStat.Ino))
+		if _, duplicate := seen[rootKey]; !duplicate {
+			seen[rootKey] = struct{}{}
+			addAllocated(&usage, rootStat)
+			accumBytes += usage.Bytes
+		}
 		// Files: root dir itself not counted as file.
 		pending = []ownedDirectoryEntry{{path: "", dev: rootDev, ino: rootIno}}
 	} else {
 		// Resumed cycle: usage starts from 0 for this poll's new entries;
-		// accum holds prior polls' sum, to which we add.
+		// accum holds prior polls' sum, to which we add. Per-cycle seen
+		// deduplicates re-processed names after mid-skip rewinds.
 		usage.Bytes = 0
 		usage.Files = 0
 	}
-	// Track per-poll seen for hardlink dedup within this poll only.
-	// Cross-poll hardlink splits across disjoint subsets could double-count
-	// (overestimate, safe direction for soft signal); accepted as best-effort.
-	seen := make(map[[16]byte]struct{})
 	entries := 0
 	// entries counts processed entries in this poll only (for per-poll budget).
 	// Accum counts bytes/files across polls in cycle (disjoint, no double-count
 	// since each entry visited once per cycle via cursors+frontier persistence).
 	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
-			return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, err
+			return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err
 		}
 		if entries > maxToolCacheEntries {
 			break
@@ -137,7 +141,7 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 		pending = pending[:len(pending)-1]
 		completed, visitErr := lifecycle.visitToolCacheDirOnce(ctx, cacheDir, rootDev, current, cursors, seen, &usage, &entries, &pending, &accumBytes, &accumFiles, &hadSkip)
 		if visitErr != nil {
-			return ToolCacheUsage{}, pending, cursors, accumBytes, accumFiles, hadSkip, visitErr
+			return ToolCacheUsage{}, pending, cursors, seen, accumBytes, accumFiles, hadSkip, visitErr
 		}
 		if !completed {
 			// Budget exhausted mid-dir or access pause; frontier saved for
@@ -180,7 +184,7 @@ func (lifecycle *Lifecycle) measureCyclePoll(ctx context.Context, participantID 
 	// up to budget, returns cycleUsage (accum total after poll, which equals
 	// poll partial when fresh since accum started 0). Good.
 	_ = isFresh
-	return cycleUsage, pending, cursors, accumBytes, accumFiles, hadSkip, nil
+	return cycleUsage, pending, cursors, seen, accumBytes, accumFiles, hadSkip, nil
 }
 
 // visitToolCacheDirOnce processes one directory from its persisted offset to
@@ -258,15 +262,23 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 	streamed := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			// Never rewind below the counted frontier: discarding skip progress
-			// avoids double-counting already-counted prefix entries on resume.
-			cursors[dirPath] = startOffset + streamed
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, err
 		}
 		if *entries > maxToolCacheEntries {
 			// Budget exhausted: save resume cursor, push dir back for next poll.
-			cursors[dirPath] = startOffset + streamed
+			// Mid-skip rewinds below the counted frontier are safe because
+			// per-cycle identity deduplication prevents recounting.
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, nil
 		}
@@ -278,7 +290,11 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				delete(cursors, dirPath)
 				return true, nil
 			}
-			cursors[dirPath] = startOffset + streamed
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, readErr
 		}
@@ -323,6 +339,12 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 					streamed++
 					continue
 				}
+				key := fileIdentity(uint64(childStat.Dev), uint64(childStat.Ino))
+				if _, duplicate := seen[key]; duplicate {
+					streamed++
+					continue
+				}
+				seen[key] = struct{}{}
 				addAllocated(usage, childStat)
 				*accumBytes += allocatedDiskBytes(childStat)
 				childPath := name
@@ -501,6 +523,7 @@ type participantScanState struct {
 	accumFiles int64
 	hadSkip    bool
 	warned     bool
+	seen       map[[16]byte]struct{}
 }
 
 type ToolCacheMonitorConfig struct {
@@ -551,15 +574,22 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 	defer monitor.mu.Unlock()
 	scan, ok := monitor.scans[participantID]
 	if !ok || scan == nil {
-		scan = &participantScanState{cursors: make(map[string]int)}
+		scan = &participantScanState{cursors: make(map[string]int), seen: make(map[[16]byte]struct{})}
 		monitor.scans[participantID] = scan
+	}
+	if scan.cursors == nil {
+		scan.cursors = make(map[string]int)
+	}
+	if scan.seen == nil {
+		scan.seen = make(map[[16]byte]struct{})
 	}
 	// One bounded poll continuing the persisted frontier (or starting fresh).
 	// Adopt frontier and accumulation even when the poll ends in error so
 	// interrupted scans resume instead of restarting.
-	usage, pending, cursors, accumBytes, accumFiles, hadSkip, err := monitor.lifecycle.measureCyclePoll(ctx, participantID, scan.pending, scan.cursors, scan.accumBytes, scan.accumFiles, scan.hadSkip)
+	usage, pending, cursors, seen, accumBytes, accumFiles, hadSkip, err := monitor.lifecycle.measureCyclePoll(ctx, participantID, scan.pending, scan.cursors, scan.seen, scan.accumBytes, scan.accumFiles, scan.hadSkip)
 	scan.pending = pending
 	scan.cursors = cursors
+	scan.seen = seen
 	scan.accumBytes = accumBytes
 	scan.accumFiles = accumFiles
 	scan.hadSkip = hadSkip
@@ -598,8 +628,8 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 	}
 	// Cycle complete: evaluate exact total (or lower bound if hadSkip).
 	defer func() {
-		// Reset for next cycle (fresh frontier), keep lastWarned/cycle semantics.
-		monitor.scans[participantID] = &participantScanState{cursors: make(map[string]int)}
+		// Reset for next cycle (fresh frontier and identity set).
+		monitor.scans[participantID] = &participantScanState{cursors: make(map[string]int), seen: make(map[[16]byte]struct{})}
 	}()
 	if hadSkip {
 		if total.Bytes >= monitor.thresholdBytes {
