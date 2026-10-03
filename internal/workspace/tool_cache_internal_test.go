@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -996,5 +997,120 @@ func TestCheckPrunesAbsentParticipants(t *testing.T) {
 	}
 	if _, ok := monitor.scans[keep]; !ok {
 		t.Fatal("retained participant scan state was pruned")
+	}
+}
+
+func TestMidSkipTimeoutDrainsAcrossPolls(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 1000000
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "12121212-1212-4121-8121-121212121212"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// A moderately large counted prefix behind which a heavy tail hides. The
+	// per-poll budget never binds here; every interruption comes from the
+	// short per-poll timeout, including cutoffs landed mid-skip while
+	// re-reading the already-counted prefix. The skip window must drain
+	// monotonically across polls (mid-skip progress persisted via rewind)
+	// instead of replaying the same prefix forever, so the tail is measured,
+	// the cycle completes, and accounting stays exact.
+	wide := filepath.Join(cache, "wide")
+	if err := os.MkdirAll(wide, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const prefix = 5000
+	for i := 0; i < prefix; i++ {
+		if err := os.WriteFile(filepath.Join(wide, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	heavy := filepath.Join(cache, "heavy")
+	if err := os.MkdirAll(heavy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const tail = 4
+	for i := 0; i < tail-1; i++ {
+		if err := os.WriteFile(filepath.Join(heavy, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(heavy, "big"), bytes.Repeat([]byte("x"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 50 << 10, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Phase 1 (deterministic, no timeouts): build a deep resume cursor with a
+	// small entry budget so the second phase starts with a skip window that
+	// dwarfs a single short poll. This forces cutoffs to land mid-skip.
+	maxToolCacheEntries = 400
+	warned := false
+	for i := 0; i < 30; i++ {
+		u, w, err := monitor.Observe(context.Background(), assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned = warned || w
+		if cur := monitor.scans[assignment].cursors["wide"]; cur >= 4000 {
+			break
+		}
+		if !u.Truncated {
+			t.Fatal("prefix unexpectedly completed under the small budget")
+		}
+	}
+	if cur := monitor.scans[assignment].cursors["wide"]; cur < 4000 {
+		t.Fatalf("wide cursor = %d, want deep (>=4000) resume offset for phase 2", cur)
+	}
+	// Phase 2 (timeout-driven only): the budget never binds; every cutoff
+	// comes from the short per-poll timeout, repeatedly landing mid-skip
+	// while re-reading the deep already-counted prefix. The skip window must
+	// drain monotonically (mid-skip progress persisted via rewind, re-reads
+	// deduplicated without billing) so the tail is measured and the cycle
+	// completes with exact accounting.
+	maxToolCacheEntries = 1000000
+	var total ToolCacheUsage
+	completed := false
+	interrupted := 0
+	for i := 0; i < 200 && !completed; i++ {
+		pollCtx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		u, w, err := monitor.Observe(pollCtx, assignment)
+		cancel()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				interrupted++
+				continue
+			}
+			t.Fatal(err)
+		}
+		warned = warned || w
+		total = u
+		completed = !u.Truncated
+	}
+	t.Logf("timeout drain: interrupted=%d completed=%v files=%d", interrupted, completed, total.Files)
+	if interrupted == 0 {
+		t.Log("no poll was interrupted; timing did not exercise the resume path on this run")
+	}
+	if !completed {
+		t.Fatal("skip window never drained within bounded polls; tail never measured")
+	}
+	if !warned {
+		t.Fatal("heavy tail never warned despite exceeding the threshold")
+	}
+	if total.Files != prefix+tail {
+		t.Fatalf("timeout drain final files = %d, want %d (double-count or loss)", total.Files, prefix+tail)
 	}
 }

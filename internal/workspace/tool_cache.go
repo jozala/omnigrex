@@ -184,13 +184,17 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 	// advance neither, since the next listing will not contain them.
 	skipped := 0
 	streamed := 0
-	// saveResume records the resume cursor. It never moves the cursor
-	// backwards: an interruption during the skip window leaves the persisted
-	// frontier untouched so the next poll retries the same skip instead of
-	// re-billing an already-counted prefix. Only forward progress past the
-	// previous frontier advances the cursor.
+	// saveResume records the resume cursor, rewinding partway through the skip
+	// window when cut off before reaching it so the skip drains monotonically
+	// across polls instead of replaying the same prefix forever. The rewind is
+	// safe on all axes at once: re-read names deduplicate by identity before
+	// the per-poll budget increment (no re-billing) and are skipped without
+	// re-counting (no double-count), so the uncounted tail keeps progressing
+	// every poll regardless of rewind depth.
 	saveResume := func() {
-		if skipped >= startOffset {
+		if skipped < startOffset {
+			cursors[dirPath] = skipped
+		} else {
 			cursors[dirPath] = startOffset + streamed
 		}
 	}
