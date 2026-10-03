@@ -258,13 +258,23 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 	streamed := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			cursors[dirPath] = startOffset + streamed
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, err
 		}
 		if *entries > maxToolCacheEntries {
 			// Budget exhausted: save resume cursor, push dir back for next poll.
-			cursors[dirPath] = startOffset + streamed
+			// When still draining the skip region, persist skip progress so the
+			// tail is eventually reached instead of replaying the same prefix.
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, nil
 		}
@@ -276,7 +286,11 @@ func (lifecycle *Lifecycle) visitToolCacheDirOnce(ctx context.Context, cacheDir 
 				delete(cursors, dirPath)
 				return true, nil
 			}
-			cursors[dirPath] = startOffset + streamed
+			if skipped < startOffset {
+				cursors[dirPath] = skipped
+			} else {
+				cursors[dirPath] = startOffset + streamed
+			}
 			*pending = append(*pending, ownedDirectoryEntry{path: dirPath, dev: current.dev, ino: current.ino})
 			return false, readErr
 		}
@@ -623,6 +637,7 @@ func (monitor *ToolCacheMonitor) Observe(ctx context.Context, participantID stri
 		return total, false, nil
 	}
 	if scan.warned {
+		monitor.lastWarned[participantID] = total.Bytes
 		return total, false, nil
 	}
 	if last, warned := monitor.lastWarned[participantID]; warned && last == total.Bytes {

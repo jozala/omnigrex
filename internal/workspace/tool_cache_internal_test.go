@@ -512,3 +512,119 @@ func itoa(i int) string {
 	}
 	return string(b[pos:])
 }
+
+func TestCompletedRefreshesWatermarkAfterPartialWarning(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "33333333-3333-4333-8333-333333333333"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Ten tiny files need two polls per cycle under budget 6 (root 1 + dir 10
+	// = 11 entries; first poll 6 entries partial, second poll remaining 5 to
+	// complete). First poll partial already exceeds the tiny threshold and
+	// warns; completion is suppressed in-cycle but must refresh the watermark
+	// to the exact total so later identical cycles do not warn again.
+	dir := filepath.Join(cache, "dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(filepath.Join(dir, string(rune('a'+i))+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 1024, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warnings := 0
+	// Two full cycles (each ~2 polls): first cycle warns once at partial,
+	// completes higher suppressed with refresh; second identical cycle must
+	// suppress both polls (partial at/below refreshed watermark, complete
+	// equal to watermark).
+	for i := 0; i < 4; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("watermark-refresh warnings = %d, want exactly 1 across two identical cycles", warnings)
+	}
+}
+
+func TestSkipRegionDrainsAcrossPolls(t *testing.T) {
+	oldMax := maxToolCacheEntries
+	maxToolCacheEntries = 6
+	defer func() { maxToolCacheEntries = oldMax }()
+
+	root := t.TempDir()
+	lifecycle, err := New(Options{
+		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := "44444444-4444-4444-8444-444444444444"
+	cache, err := lifecycle.toolDataRoot(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = filepath.Join(cache, "assignment")
+	// Directory with a large prefix (already counted) followed by tail with a
+	// heavy file. With budget 6 the first poll truncates before the tail; the
+	// second poll must resume past the prefix (skip drains monotonically)
+	// instead of replaying it, so the heavy tail is eventually measured.
+	dir := filepath.Join(cache, "bigdir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "f"+itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	heavy := filepath.Join(cache, "heavy")
+	if err := os.MkdirAll(heavy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(heavy, "big"), bytes.Repeat([]byte("x"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(lifecycle, ToolCacheMonitorConfig{
+		ThresholdBytes: 50 << 10, PollInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	warned := false
+	for i := 0; i < 10 && !warned; i++ {
+		_, w, err := monitor.Observe(ctx, assignment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned = warned || w
+	}
+	if !warned {
+		t.Fatal("skip region never drained; heavy tail never measured")
+	}
+}
