@@ -110,6 +110,7 @@ jobs:
           set -eu
           TAG="ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
           docker build --platform linux/amd64 \
+            --build-arg VERSION="${{ github.sha }}" \
             --label org.opencontainers.image.source=https://github.com/jozala/omnigrex \
             --tag "$TAG" .
           docker push "$TAG"

@@ -11,7 +11,9 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/turnconfig"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const maximumWorkerDuration = 365 * 24 * time.Hour
@@ -97,6 +99,8 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 	if lease == nil {
 		return false, nil
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.AgentTurnPrepare, jobAttributes(*lease)...)
+	defer finishOperation(ctx, operation, &err)
 
 	var repositoryCredential string
 	defer func() {
@@ -127,11 +131,14 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 		if strings.TrimSpace(repositoryCredential) == "" {
 			return permanentError{cause: errors.New("preparation repository credential is empty")}
 		}
-		_, err = worker.preparer.Prepare(workCtx, Request{
+		result, err := worker.preparer.Prepare(workCtx, Request{
 			Lease: *lease, InstallationCredential: repositoryCredential,
 			RepositoryOwner: repository.Owner, RepositoryName: repository.Name,
 		})
 		if err == nil {
+			telemetry.AddAttributes(ctx, attribute.String("agent_participant_id", result.Commit.Participant.ID),
+				attribute.String("agent_session_id", result.Commit.Session.ID), attribute.String("agent_turn_id", result.Commit.Turn.ID),
+				attribute.String("role", string(result.Commit.Participant.Role)), attribute.String("stage", string(result.Commit.Turn.Stage)))
 			return nil
 		}
 		if errors.Is(err, ErrAssignmentConfigurationConflict) {
@@ -142,6 +149,7 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 			if _, acknowledgeErr := worker.store.AcknowledgeAssignmentConfigurationConflict(workCtx, *lease, conflict.Preparation); acknowledgeErr != nil {
 				return errors.Join(err, fmt.Errorf("acknowledge Agent Assignment configuration conflict: %w", acknowledgeErr))
 			}
+			telemetry.SetOutcome(ctx, telemetry.DomainOutcome, "")
 			return nil
 		}
 		return fmt.Errorf("prepare Agent Turn: %w", err)

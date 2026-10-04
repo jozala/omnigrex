@@ -12,7 +12,7 @@ import (
 
 // Only protocol metadata is logged. In particular, RPCError.Message/Data and
 // arbitrary transport or decoder error strings may contain sensitive payloads.
-func logRequestFailure(logger *slog.Logger, method string, id any, direction, stage string, started time.Time, err error) {
+func logRequestFailure(ctx context.Context, logger *slog.Logger, method string, id any, direction, stage string, started time.Time, err error) {
 	level, class := diagnosticFailure(err)
 	attributes := []any{
 		"method", method, "request_id", id, "direction", direction,
@@ -23,7 +23,7 @@ func logRequestFailure(logger *slog.Logger, method string, id any, direction, st
 	if errors.As(err, &rpcErr) {
 		attributes = append(attributes, "rpc_code", rpcErr.Code)
 	}
-	logger.Log(context.Background(), level, "ACP request failed", attributes...)
+	logger.Log(ctx, level, "ACP request failed", attributes...)
 }
 
 func diagnosticFailure(err error) (slog.Level, string) {

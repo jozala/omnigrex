@@ -10,6 +10,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -81,7 +82,7 @@ func (worker *TerminalCorroborationWorker) Run(ctx context.Context) error {
 
 // ProcessOne performs no agent prompt or GitHub mutation. Every durable result
 // is fenced by the claimed verification job's exact attempt and lease token.
-func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (bool, error) {
+func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (processed bool, err error) {
 	lease, err := worker.store.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind,
 		worker.config.ClaimOwner, worker.config.LeaseDuration)
 	if err == nil && lease == nil {
@@ -91,6 +92,8 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (bool
 	if err != nil || lease == nil {
 		return false, err
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.AgentTurnReconcileOutcome, jobAttributes(*lease)...)
+	defer finishOperation(ctx, operation, &err)
 	workCtx, cancel := context.WithCancel(ctx)
 	finished := make(chan struct{})
 	go func() {
@@ -113,6 +116,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (bool
 	ctx = workCtx
 	pending, err := worker.store.GetTerminalCorroborationContext(ctx, *lease)
 	if errors.Is(err, store.ErrJobLeaseLost) {
+		telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
 		return true, nil // Closure or another fenced transition won.
 	}
 	if errors.Is(err, store.ErrAgentTurnSettlementRejected) && lease.Kind == store.RevalidateTerminalIntentJobKind {
@@ -198,6 +202,9 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (bool
 			_, err = worker.store.SettleTerminalCorroboration(ctx, *lease, observation)
 		}
 		if err == nil || errors.Is(err, store.ErrJobLeaseLost) {
+			if err != nil {
+				telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
+			}
 			return true, nil
 		}
 		if errors.Is(err, store.ErrTerminalCorroborationHeadMoved) {
@@ -217,6 +224,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (bool
 }
 
 func (worker *TerminalCorroborationWorker) handoff(ctx context.Context, lease store.JobLease, reason workflow.Reason, code string) error {
+	telemetry.SetOutcome(ctx, telemetry.Failure, "corroboration_handoff")
 	var err error
 	if lease.Kind == store.RevalidateTerminalIntentJobKind {
 		err = worker.store.CompleteTerminalRevalidationHandoff(ctx, lease, reason, code)
@@ -224,6 +232,7 @@ func (worker *TerminalCorroborationWorker) handoff(ctx context.Context, lease st
 		_, err = worker.store.CompleteTerminalCorroborationHandoff(ctx, lease, reason, code)
 	}
 	if errors.Is(err, store.ErrJobLeaseLost) {
+		telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
 		return nil
 	}
 	return err
@@ -231,6 +240,7 @@ func (worker *TerminalCorroborationWorker) handoff(ctx context.Context, lease st
 
 func (worker *TerminalCorroborationWorker) retryOrHandoff(ctx context.Context, lease store.JobLease, checkpoint store.TerminalCorroboration,
 	remaining time.Duration, failure TerminalCorroborationFailure) error {
+	telemetry.SetOutcome(ctx, telemetry.Failure, "corroboration_unavailable")
 	if failure.Prerequisite {
 		return worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, failure.Code)
 	}

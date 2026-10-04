@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -189,7 +191,7 @@ WHERE delivery_id = $1 AND status = 'PROCESSING' AND claim_token = $2
 
 // ApplyNextPendingNormalizedEvent drains one historical Phase 4 event without polling DEFERRED rows.
 // Its inbox delivery was already completed, so this API cannot restore claim fencing for historical events.
-func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory PendingWorkflowEventFactory) (WorkflowApplication, bool, error) {
+func (store *Store) ApplyNextPendingNormalizedEvent(ctx context.Context, factory PendingWorkflowEventFactory) (result WorkflowApplication, applied bool, err error) {
 	if factory == nil {
 		return WorkflowApplication{}, false, errors.New("apply pending normalized event: factory is nil")
 	}
@@ -248,6 +250,8 @@ LIMIT 1`).Scan(&record.DeliveryID, &record.Payload, &record.Status, &record.Crea
 	if err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("select pending normalized event: %w", err)
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.WebhookProcess, attribute.String("delivery_id", record.DeliveryID))
+	defer operation.Finish(&err)
 	if _, err := tx.Exec(ctx, `SAVEPOINT defer_pending_normalized_event`); err != nil {
 		return WorkflowApplication{}, false, fmt.Errorf("save pending normalized event deferral: %w", err)
 	}
@@ -281,6 +285,7 @@ RETURNING attempt_count, max_attempts`, record.DeliveryID).Scan(&record.AttemptC
 	if err != nil {
 		return WorkflowApplication{}, false, finishPendingNormalizedEventFailure(ctx, tx, record, err)
 	}
+	telemetry.AddAttributes(ctx, attribute.String("workflow_id", application.WorkflowID))
 	if application.Status == NormalizedEventPending {
 		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT defer_pending_normalized_event`); err != nil {
 			return WorkflowApplication{}, false, fmt.Errorf("rollback deferred pending normalized event: %w", err)

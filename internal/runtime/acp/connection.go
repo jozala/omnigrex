@@ -163,7 +163,7 @@ func (connection *Connection) callWithContexts(
 			if stage == "submit" && sendCtx.Err() != nil {
 				logErr = sendCtx.Err()
 			}
-			logRequestFailure(logger, method, requestID, "orchestrator_to_agent", stage, started, logErr)
+			logRequestFailure(sendCtx, logger, method, requestID, "orchestrator_to_agent", stage, started, logErr)
 		}
 	}()
 	reportSubmission := func(err error) {
@@ -409,13 +409,13 @@ func (connection *Connection) handleRequest(message wireMessage, logger *slog.Lo
 		"id":      message.ID,
 	}
 	if rpcErr != nil {
-		logRequestFailure(logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "handler", started, rpcErr)
+		logRequestFailure(connection.ctx, logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "handler", started, rpcErr)
 		response["error"] = rpcErr
 	} else {
 		response["result"] = result
 	}
 	if err := connection.sendJSON(connection.ctx, response); err != nil {
-		logRequestFailure(logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "write", started, connection.diagnosticError(err))
+		logRequestFailure(connection.ctx, logger, message.Method, diagnosticRequestID(message.ID), "agent_to_orchestrator", "write", started, connection.diagnosticError(err))
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
@@ -784,11 +785,18 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		return
 	}
 	defer registration.finishCall(true)
+	toolCtx, operation := startToolOperation(request.Context(), invocation)
+	request = request.WithContext(toolCtx)
+	var operationErr error
+	defer operation.Finish(&operationErr)
 	started := gateway.now()
 	recordedInvocation := cloneInvocation(invocation)
 	result, err := gateway.backend.Execute(request.Context(), invocation)
 	succeeded := err == nil && len(result) != 0 && json.Valid(result)
 	if !succeeded {
+		operationErr = err
+		telemetry.SetOutcome(toolCtx, telemetry.Failure, "read_failed")
+		observeToolError(toolCtx, err)
 		if err != nil {
 			gateway.logCallFailure(request.Context(), "MCP read failed", invocation.Name, safeReadFailure(err))
 		} else {
@@ -805,6 +813,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 			record.LastError = "read tool failed"
 		}
 		if err := gateway.ledger.RecordRead(context.WithoutCancel(request.Context()), registration.scope.Lease, record); err != nil {
+			telemetry.SetOutcome(toolCtx, telemetry.Failure, "read_recording_failed")
 			reason := githubapi.CancellationReason(err)
 			if reason == "" {
 				reason = "recording_failed"
@@ -896,14 +905,35 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	operationParent := trace.ContextWithSpanContext(registration.operationCtx, trace.SpanContextFromContext(request.Context()))
 	operationParent = baggage.ContextWithBaggage(operationParent, baggage.FromContext(request.Context()))
 	operationContext, cancelOperation := context.WithTimeout(operationParent, gateway.mutationOperationTimeout)
+	operationContext, operation := startToolOperation(operationContext, invocation)
+	telemetry.SetOutcome(operationContext, telemetry.Failure, "mutation_failed")
+	handedOff := false
+	finished := false
+	finishOperation := func() {
+		if finished {
+			return
+		}
+		finished = true
+		operationErr := operationContext.Err()
+		observeToolError(operationContext, operationErr)
+		operation.Finish(&operationErr)
+	}
 	finishCall := func(durablyResolved bool) {
+		finishOperation()
 		cancelOperation()
 		registration.finishCall(durablyResolved)
 		<-gate
 	}
+	defer func() {
+		if !handedOff {
+			finishOperation()
+			cancelOperation()
+		}
+	}()
 	if planner, ok := gateway.backend.(MutationPlanner); ok {
 		invocation.Mutation, err = planner.PlanMutation(operationContext, invocation)
 		if err != nil {
+			observeToolError(operationContext, err)
 			finishCall(true)
 			writeToolError(response, id, "mutation planning failed")
 			return
@@ -916,6 +946,7 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	}
 	reservation, err := gateway.store.ReserveMutation(operationContext, registration.scope.Lease, spec)
 	if err != nil {
+		observeToolError(operationContext, err)
 		finishCall(false)
 		switch {
 		case errors.Is(err, store.ErrMutationOperationConflict):
@@ -945,31 +976,40 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 				ExternalService: reservation.ExternalService, ExternalResourceID: reservation.ExternalResourceID,
 				ExpectedSHA: reservation.ExpectedSHA,
 			}
-			if err := restorer.RestoreMutationReplay(operationContext, replayInvocation, reservation); err != nil ||
-				gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec) != nil {
+			replayErr := restorer.RestoreMutationReplay(operationContext, replayInvocation, reservation)
+			if replayErr == nil {
+				replayErr = gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec)
+			}
+			if replayErr != nil {
+				observeToolError(operationContext, replayErr)
+				finishCall(true)
+				writeToolError(response, id, "cached mutation replay failed")
+				return
+			}
+		}
+		if len(reservation.Result) == 0 || !json.Valid(reservation.Result) {
+			finishCall(true)
+			writeToolError(response, id, "cached mutation result is unavailable")
+			return
+		}
+		toolSucceeded(operationContext, invocation.Name)
+		finishCall(true)
+		writeToolResult(response, id, reservation.Result)
+		return
+	case store.MutationFailed:
+		if reservation.AgentTurnID != registration.scope.Lease.ID || reservation.ExecutionEpoch != registration.scope.Lease.ExecutionEpoch {
+			if replayErr := gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec); replayErr != nil {
+				observeToolError(operationContext, replayErr)
 				finishCall(true)
 				writeToolError(response, id, "cached mutation replay failed")
 				return
 			}
 		}
 		finishCall(true)
-		if len(reservation.Result) == 0 || !json.Valid(reservation.Result) {
-			writeToolError(response, id, "cached mutation result is unavailable")
-			return
-		}
-		writeToolResult(response, id, reservation.Result)
-		return
-	case store.MutationFailed:
-		if (reservation.AgentTurnID != registration.scope.Lease.ID || reservation.ExecutionEpoch != registration.scope.Lease.ExecutionEpoch) &&
-			gateway.store.AcknowledgeMutationReplay(operationContext, registration.scope.Lease, reservation.ID, spec) != nil {
-			finishCall(true)
-			writeToolError(response, id, "cached mutation replay failed")
-			return
-		}
-		finishCall(true)
 		writeToolError(response, id, cachedFailureMessage(reservation.LastError))
 		return
 	case store.MutationUnknown, store.MutationReconciling, store.MutationInFlight:
+		telemetry.SetOutcome(operationContext, telemetry.Failure, "mutation_unresolved")
 		finishCall(true)
 		writeToolError(response, id, "mutation outcome is unresolved")
 		return
@@ -987,10 +1027,18 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	}
 
 	outcome := make(chan mutationOutcome, 1)
+	handedOff = true
 	go func() {
 		defer func() { <-gate }()
 		defer cancelOperation()
+		defer finishOperation()
 		completed := gateway.executeMutation(operationContext, registration.scope.Lease, reservation, invocation)
+		if completed.message == "" {
+			toolSucceeded(operationContext, invocation.Name)
+		}
+		// Publish telemetry before signalling drain completion, so provider
+		// shutdown cannot race the last admitted operation's span/metrics.
+		finishOperation()
 		registration.finishCall(completed.durablyResolved)
 		outcome <- completed
 	}()
@@ -1038,11 +1086,11 @@ func (registration *grant) drainResult() error {
 }
 
 func (gateway *Gateway) executeMutation(operationContext context.Context, lease store.AgentTurnLease, reservation store.MutationReservation, invocation Invocation) mutationOutcome {
-	if err := gateway.finalizeMutation(func(ctx context.Context) error {
+	if err := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 		_, err := gateway.store.StartMutation(ctx, lease, reservation.ID)
 		return err
 	}); err != nil {
-		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		if failErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.FailMutation(ctx, lease, reservation.ID, errors.New("mutation could not start"))
 		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
@@ -1050,7 +1098,7 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		return mutationOutcome{message: "mutation could not start", durablyResolved: true}
 	}
 	if operationContext.Err() != nil {
-		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		if markErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("backend outcome is ambiguous"))
 		}); markErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
@@ -1063,6 +1111,7 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 	watcherDone := make(chan struct{})
 	var watcherMutex sync.Mutex
 	stoppingWatcher := false
+	fenceLost := false
 	go func() {
 		defer close(watcherDone)
 		ticker := time.NewTicker(gateway.mutationFenceCheckInterval)
@@ -1075,6 +1124,7 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 				if err := gateway.store.ValidateTurnFence(watcherContext, lease); err != nil {
 					watcherMutex.Lock()
 					if !stoppingWatcher {
+						fenceLost = true
 						cancelBackend()
 					}
 					watcherMutex.Unlock()
@@ -1099,7 +1149,16 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 	cancelBackend()
 
 	if operationCanceled || err != nil && (IsOutcomeUnknown(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		telemetry.SetOutcome(operationContext, telemetry.Failure, "mutation_unresolved")
+		if errors.Is(err, context.DeadlineExceeded) {
+			telemetry.SetOutcome(operationContext, telemetry.Timeout, "deadline_exceeded")
+		} else if operationCanceled || errors.Is(err, context.Canceled) {
+			telemetry.SetOutcome(operationContext, telemetry.Cancelled, "cancelled")
+		}
+		if fenceLost {
+			telemetry.SetOutcome(operationContext, telemetry.Cancelled, "fence_lost")
+		}
+		if markErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("backend outcome is ambiguous"))
 		}); markErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
@@ -1111,28 +1170,28 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		if err == nil {
 			failure = mutationFailure{code: "backend_result_invalid", message: "mutation returned an invalid result"}
 		}
-		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		if failErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.FailMutation(ctx, lease, reservation.ID, failure)
 		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
-		gateway.logMutationFailure(invocation, reservation, failure)
+		gateway.logMutationFailure(operationContext, invocation, reservation, failure)
 		return mutationOutcome{message: failure.toolMessage(), durablyResolved: true}
 	}
 	result, err = canonicalJSON(result)
 	if err != nil {
-		if failErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		if failErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.FailMutation(ctx, lease, reservation.ID, mutationFailure{code: "backend_result_invalid"})
 		}); failErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
 		}
-		gateway.logMutationFailure(invocation, reservation, mutationFailure{code: "backend_result_invalid"})
+		gateway.logMutationFailure(operationContext, invocation, reservation, mutationFailure{code: "backend_result_invalid"})
 		return mutationOutcome{message: "mutation returned an invalid result", durablyResolved: true}
 	}
-	if err := gateway.finalizeMutation(func(ctx context.Context) error {
+	if err := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 		return gateway.store.CompleteMutation(ctx, lease, reservation.ID, result)
 	}); err != nil {
-		if markErr := gateway.finalizeMutation(func(ctx context.Context) error {
+		if markErr := gateway.finalizeMutation(operationContext, func(ctx context.Context) error {
 			return gateway.store.MarkMutationUnknown(ctx, lease, reservation.ID, errors.New("mutation completion is uncertain"))
 		}); markErr != nil {
 			return mutationOutcome{message: "mutation durable state is unresolved"}
@@ -1142,11 +1201,11 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 	return mutationOutcome{result: result, durablyResolved: true}
 }
 
-func (gateway *Gateway) logMutationFailure(invocation Invocation, reservation store.MutationReservation, failure mutationFailure) {
+func (gateway *Gateway) logMutationFailure(ctx context.Context, invocation Invocation, reservation store.MutationReservation, failure mutationFailure) {
 	if gateway.logger == nil {
 		return
 	}
-	gateway.logger.Warn("MCP mutation failed",
+	gateway.logger.WarnContext(ctx, "MCP mutation failed",
 		"workflow_id", invocation.Scope.WorkflowID,
 		"agent_turn_id", invocation.Scope.AgentTurnID,
 		"execution_epoch", invocation.Scope.ExecutionEpoch,
@@ -1160,8 +1219,8 @@ func (gateway *Gateway) logMutationFailure(invocation Invocation, reservation st
 		"observed_sha", failure.observedSHA)
 }
 
-func (gateway *Gateway) finalizeMutation(operation func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(gateway.lifecycle), gateway.mutationFinalizationTimeout)
+func (gateway *Gateway) finalizeMutation(parent context.Context, operation func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(telemetry.CopyContext(context.WithoutCancel(gateway.lifecycle), parent), gateway.mutationFinalizationTimeout)
 	defer cancel()
 	return operation(ctx)
 }

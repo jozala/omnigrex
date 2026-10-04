@@ -13,7 +13,9 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -110,6 +112,7 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	if err != nil {
 		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
 	}
+	telemetry.AddAttributes(ctx, attribute.String("role", string(bindings.Role)), attribute.String("stage", string(bindings.Stage)))
 	snapshot, err := preparer.loader.Load(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName)
 	if err != nil {
 		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)

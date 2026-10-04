@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const maximumRecoveryWorkerDuration = 365 * 24 * time.Hour
@@ -70,7 +72,7 @@ func NewRecoveryWorker(recoveryStore RecoveryStore, reconciler MutationReconcile
 }
 
 // ProcessNext claims and handles at most one mutation reconciliation job.
-func (worker *RecoveryWorker) ProcessNext(ctx context.Context) (bool, error) {
+func (worker *RecoveryWorker) ProcessNext(ctx context.Context) (processed bool, err error) {
 	lease, err := worker.store.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.ReconcileAgentTurnMutationsJobKind, worker.claimOwner, worker.leaseDuration)
 	if err != nil {
 		return false, fmt.Errorf("claim mutation reconciliation: %w", err)
@@ -78,6 +80,15 @@ func (worker *RecoveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 	if lease == nil {
 		return false, nil
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.MutationRecover,
+		attribute.String("workflow_id", lease.WorkflowID), attribute.String("agent_participant_id", lease.AgentParticipantID),
+		attribute.String("agent_session_id", lease.AgentSessionID), attribute.String("agent_turn_id", lease.AgentTurnID))
+	defer func() {
+		if staleRecoveryFence(err) {
+			telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
+		}
+		operation.Finish(&err)
+	}()
 
 	workCtx, cancelWork := context.WithCancel(ctx)
 	heartbeatCtx, stopHeartbeat := context.WithCancel(workCtx)
@@ -144,6 +155,8 @@ func (worker *RecoveryWorker) reconcileJob(ctx, completionCtx context.Context, l
 			return err
 		}
 	}
+	telemetry.AddAttributes(ctx, attribute.String("role", string(reconciliation.Role)), attribute.String("stage", string(reconciliation.Turn.Stage)),
+		attribute.String("agent_participant_id", reconciliation.Turn.AgentParticipantID))
 	mutations, err := worker.store.ListAgentTurnMutationsForReconciliation(ctx, lease)
 	if err != nil {
 		return fmt.Errorf("list mutations for reconciliation: %w", err)
