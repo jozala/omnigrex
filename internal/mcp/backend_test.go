@@ -1317,7 +1317,7 @@ func (api *backendGitHub) CreatePullRequestComment(_ context.Context, credential
 	if api.mutationErr != nil {
 		return githubapi.IssueComment{}, api.mutationErr
 	}
-	return githubapi.IssueComment{ID: 702, NodeID: "IC_702", HTMLURL: "https://github.test/acme/widgets/pull/23#issuecomment-702"}, nil
+	return githubapi.IssueComment{ID: 702, NodeID: "IC_702", HTMLURL: "https://github.test/acme/widgets/pull/23#issuecomment-702", Body: githubapi.JoinBodyParts(request.Body, request.Marker)}, nil
 }
 
 func (api *backendGitHub) SubmitReview(_ context.Context, credential, _, _ string, number int, request githubapi.ReviewRequest) (githubapi.Review, error) {

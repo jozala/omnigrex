@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
@@ -138,6 +139,8 @@ type LauncherConfig struct {
 	StopTimeout              time.Duration
 	Policies                 role.PolicyCatalog
 	PathEnvironmentAllowlist []string
+	Definition               workflow.Definition
+	OperatorInstructions     agentinstructions.Operator
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -178,6 +181,8 @@ type Launcher struct {
 	stopTimeout              time.Duration
 	policies                 role.PolicyCatalog
 	pathEnvironmentAllowlist []string
+	definition               workflow.Definition
+	operatorInstructions     agentinstructions.Operator
 }
 
 // RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
@@ -241,6 +246,13 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if len(config.Policies.Roles()) == 0 {
 		config.Policies = role.BuiltinPolicyCatalog()
 	}
+	if !config.Definition.Valid() {
+		var err error
+		config.Definition, err = workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+		if err != nil {
+			return nil, fmt.Errorf("%w: Workflow Definition: %v", ErrInvalidLauncher, err)
+		}
+	}
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
 		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
@@ -249,6 +261,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		memoryBytes: config.MemoryBytes,
 		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
+		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
 	}, nil
 }
 
@@ -293,7 +306,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := validateRuntimeProfileBinding(runtimeProfile, execution); err != nil {
 		return nil, err
 	}
-	rendered, roleID, err := renderTurnProfile(execution, rolePolicy)
+	rendered, roleID, err := launcher.renderTurnProfile(execution, rolePolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -742,7 +755,7 @@ func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execut
 	return nil
 }
 
-func renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Policy) (*opencode.RenderedProfile, opencode.Role, error) {
+func (launcher *Launcher) renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Policy) (*opencode.RenderedProfile, opencode.Role, error) {
 	var snapshot struct {
 		Name         string            `json:"name"`
 		Path         string            `json:"path"`
@@ -765,6 +778,10 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Po
 		return nil, "", ErrRuntimeBinding
 	}
 	permissions := make(opencode.PermissionPolicy, len(snapshot.Permissions))
+	stage, ok := launcher.definition.Stage(execution.Turn.Stage)
+	if !ok || stage.Role != policy.Role || !launcher.definition.AcceptsPurpose(stage.ID, execution.Turn.Purpose) {
+		return nil, "", fmt.Errorf("%w: Stage instruction binding", ErrRuntimeBinding)
+	}
 	for name, value := range snapshot.Permissions {
 		permissions[name] = opencode.Permission(value)
 	}
@@ -773,7 +790,7 @@ func renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Po
 		runtimeTools[index] = mcp.ServerName + "_" + capability
 	}
 	rendered, err := opencode.RenderWithPolicy(policy, opencode.Profile{
-		Instructions: snapshot.Instructions, Model: snapshot.Model, Variant: snapshot.Variant,
+		Instructions: launcher.operatorInstructions.Compose(policy, stage, execution.Turn.Purpose, snapshot.Instructions), Model: snapshot.Model, Variant: snapshot.Variant,
 		Steps: snapshot.Steps, Permissions: permissions, RuntimeTools: runtimeTools,
 	})
 	if err != nil {

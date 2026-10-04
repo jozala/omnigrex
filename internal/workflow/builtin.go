@@ -13,6 +13,11 @@ func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 	return NewDefinition(catalog, StageEntry{Stage: StageImplementation, Purpose: TurnPurposeInitialDevelopment}, []StageDefinition{
 		{
 			ID: StageImplementation, Role: role.Developer, State: StateDeveloping,
+			Instructions: implementationInstructions,
+			PurposeInstructions: map[TurnPurpose]string{
+				TurnPurposeInitialDevelopment: "Implement the Work Item and create its initial Change Proposal.",
+				TurnPurposeRequestedChanges:   "Inspect all substantive review findings before revising the existing Change Proposal; explain the changes since the previous review in the new handoff summary.",
+			},
 			AcceptedPurposes: []TurnPurpose{
 				TurnPurposeInitialDevelopment, TurnPurposeRequestedChanges, TurnPurposeRetry, TurnPurposeReactivation,
 			},
@@ -22,6 +27,10 @@ func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 		},
 		{
 			ID: StageReview, Role: role.Reviewer, State: StateReviewing,
+			Instructions: reviewInstructions,
+			PurposeInstructions: map[TurnPurpose]string{
+				TurnPurposeSynchronization: "The Change Proposal head changed; evaluate the current head and recheck earlier findings rather than carrying forward a stale verdict.",
+			},
 			AcceptedPurposes: []TurnPurpose{
 				TurnPurposeReview, TurnPurposeRetry, TurnPurposeSynchronization, TurnPurposeReactivation,
 			},

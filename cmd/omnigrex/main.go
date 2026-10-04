@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/config"
@@ -162,6 +163,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Role Policy Catalog: %w", err)
 	}
+	operatorInstructions, err := agentinstructions.Load(settings.AgentInstructionsDir, rolePolicies)
+	if err != nil {
+		return fmt.Errorf("configure operator agent instructions: %w", err)
+	}
 	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
 	if err != nil {
 		return fmt.Errorf("configure Workflow Reducer: %w", err)
@@ -242,6 +247,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},
 		PriorIntents:     database,
+		Handoffs:         database,
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		Policies:         rolePolicies,
 		RoleCatalog:      roleCatalog,
@@ -370,6 +376,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
+		Definition: definition, OperatorInstructions: operatorInstructions,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)

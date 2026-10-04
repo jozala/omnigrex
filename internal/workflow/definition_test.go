@@ -143,10 +143,11 @@ func TestDefinitionResultsCannotMutateDefinition(t *testing.T) {
 	stage, _ := definition.Stage(workflow.StageReview)
 	stage.AcceptedPurposes[0] = workflow.TurnPurposeInitialDevelopment
 	stage.Transitions[0].NextStage = "mutated"
+	stage.PurposeInstructions[workflow.TurnPurposeSynchronization] = "mutated"
 
 	again, _ := definition.Stage(workflow.StageReview)
 	transition, _ := definition.Transition(workflow.StageReview, workflow.TurnOutcomeChangesRequested)
-	if again.AcceptedPurposes[0] != workflow.TurnPurposeReview || transition.NextStage != workflow.StageImplementation {
+	if again.AcceptedPurposes[0] != workflow.TurnPurposeReview || transition.NextStage != workflow.StageImplementation || again.PurposeInstructions[workflow.TurnPurposeSynchronization] == "mutated" {
 		t.Fatalf("Definition was mutated: %#v / %#v", again, transition)
 	}
 }

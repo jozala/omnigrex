@@ -11,11 +11,11 @@ import (
 
 func TestCapabilitiesForRoleReturnsDeterministicCredentialFreeNames(t *testing.T) {
 	wantDeveloper := []string{
-		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
+		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 		"publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 	}
 	wantReviewer := []string{
-		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
+		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 		"submit_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 	}
 	for _, test := range []struct {

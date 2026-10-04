@@ -3,10 +3,17 @@ package doctor
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
+	"github.com/jozala/omnigrex/internal/agentprofile"
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 func TestValidateDeveloperWebhookURL(t *testing.T) {
@@ -25,6 +32,42 @@ func TestValidateDeveloperWebhookURL(t *testing.T) {
 		if err := validateDeveloperWebhookURL(value); err == nil {
 			t.Errorf("validateDeveloperWebhookURL(%q) error = nil", value)
 		}
+	}
+}
+
+func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
+	runtime, err := runtimeprofile.NewOpenCodeV1(
+		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := runtimeprofile.NewRegistry(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := role.BuiltinPolicyCatalog()
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: opencode-acp/v1\nmodel: provider/model\nsteps: 1\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, agentinstructions.Operator{}, definition); err != nil {
+		t.Fatalf("Profile fits without operator additions: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "common.md"), []byte(strings.Repeat("o", 50<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := agentinstructions.Load(dir, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, operator, definition); err == nil || !strings.Contains(err.Error(), "120 KiB") {
+		t.Fatalf("preflight did not reject oversized composed instructions: %v", err)
 	}
 }
 

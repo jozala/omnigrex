@@ -83,6 +83,10 @@ type PriorTerminalIntentReader interface {
 	HasPriorSuccessfulReviewForTurn(context.Context, store.AgentTurnLease) (bool, error)
 }
 
+type HandoffReader interface {
+	GetReviewHandoff(context.Context, string, int64, int64, string) (*store.ReviewHandoff, error)
+}
+
 // LedgerWorkflowMutations returns workflow intents that become durable with the gateway's mutation completion.
 // Phase 8 consumes these terminal mutation results when it settles the Agent Turn.
 type LedgerWorkflowMutations struct{}
@@ -118,6 +122,7 @@ type ProductionBackendConfig struct {
 	Publisher        WorkspacePublisher
 	Workflow         WorkflowMutations
 	PriorIntents     PriorTerminalIntentReader
+	Handoffs         HandoffReader
 	GitRemoteBaseURL string
 	Policies         role.PolicyCatalog
 	RoleCatalog      role.Catalog
@@ -129,6 +134,7 @@ type ProductionBackend struct {
 	publisher    WorkspacePublisher
 	workflow     WorkflowMutations
 	priorIntents PriorTerminalIntentReader
+	handoffs     HandoffReader
 	remoteBase   gitremote.BaseURL
 	policies     role.PolicyCatalog
 	roleCatalog  role.Catalog
@@ -187,6 +193,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	return &ProductionBackend{
 		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
 		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
+		handoffs:         config.Handoffs,
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
 		restoredMutations: make(map[publicationTurn]map[string][sha256.Size]byte),
@@ -199,6 +206,15 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return nil, err
 	}
 	switch tool.Name {
+	case ToolGetHandoff:
+		if backend.handoffs == nil {
+			return nil, ErrToolDependency
+		}
+		handoff, err := backend.handoffs.GetReviewHandoff(ctx, invocation.Scope.WorkflowID, invocation.Scope.Repository.ID, invocation.Scope.PullRequest.ID, invocation.Scope.HeadSHA)
+		if err != nil {
+			return nil, ErrToolDependency
+		}
+		return json.Marshal(handoff)
 	case ToolRequestReview:
 		return backend.requestReview(ctx, invocation)
 	case ToolReportBlocked:
@@ -465,6 +481,9 @@ func (backend *ProductionBackend) requestReview(ctx context.Context, invocation 
 	if json.Unmarshal(invocation.Arguments, &arguments) != nil {
 		return nil, ErrInvalidInvocation
 	}
+	if strings.TrimSpace(arguments.Summary) == "" || !markerFree(arguments.Summary) {
+		return nil, ErrInvalidInvocation
+	}
 	effectiveScope := cloneToolScope(invocation.Scope)
 	if effectiveScope.PullRequest == nil {
 		effectiveScope.PullRequest = backend.currentPullRequest(invocation.Scope)
@@ -491,7 +510,36 @@ func (backend *ProductionBackend) requestReview(ctx context.Context, invocation 
 		Scope: effectiveScope, OperationID: invocation.OperationID,
 		HeadSHA: head, Summary: arguments.Summary,
 	})
-	return canonicalWorkflowResult(result, err)
+	result, err = canonicalWorkflowResult(result, err)
+	if err != nil {
+		return nil, err
+	}
+	footer, err := backend.reservedFooter(invocation.Scope, invocation.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	marker, err := operationMarker(invocation)
+	if err != nil {
+		return nil, err
+	}
+	body := githubapi.AppendSignature(reviewHandoffBody(arguments.Summary, head), footer)
+	if err := checkSignedBodyLength(body, marker); err != nil {
+		return nil, err
+	}
+	comment, err := backend.github.CreatePullRequestComment(ctx, credential, effectiveScope.Repository.Owner, effectiveScope.Repository.Name,
+		int(effectiveScope.PullRequest.Number), githubapi.CommentRequest{Body: body, Marker: marker})
+	if err != nil {
+		return nil, classifyGitHubMutationError(err)
+	}
+	if comment.ID <= 0 || comment.NodeID == "" || comment.HTMLURL == "" || comment.Body != githubapi.JoinBodyParts(body, marker) {
+		return nil, OutcomeUnknown(ErrToolPrecondition)
+	}
+	return result, nil
+}
+
+// Keep this format stable for reconciliation of persisted review handoffs.
+func reviewHandoffBody(summary, head string) string {
+	return fmt.Sprintf("## Review handoff\n\nHead: `%s`\n\n%s", head, summary)
 }
 
 func (backend *ProductionBackend) reportBlocked(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -949,7 +997,7 @@ func markerFree(body string) bool {
 // reservations reach the backend with it present. Identity comparison shares
 // the store's canonical interpretation via store.WithoutReservationSignature.
 func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
-	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview {
+	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview && invocation.Name != ToolRequestReview {
 		return invocation.Arguments
 	}
 	stripped := store.WithoutReservationSignature(invocation.Name, invocation.Arguments)
@@ -1154,6 +1202,10 @@ func (backend *ProductionBackend) validateMutationReplay(invocation Invocation, 
 		return ToolDefinition{}, ErrToolPrecondition
 	}
 	expected := replayMetadataForScope(invocation.Name, invocation.Scope)
+	if invocation.Name == ToolRequestReview && source.ExternalService == "omnigrex" {
+		// Completed pre-publication handoffs remain historical internal intents.
+		expected.ExternalService = "omnigrex"
+	}
 	if invocation.Mutation.ExternalService != source.ExternalService || invocation.Mutation.ExternalResourceID != source.ExternalResourceID ||
 		invocation.Mutation.ExpectedSHA != source.ExpectedSHA || source.ExternalService != expected.ExternalService ||
 		source.ExternalResourceID != expected.ExternalResourceID {
@@ -1199,7 +1251,6 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s:%s", scope.Repository.ID, scope.Branch, scope.DefaultBranch)
 		metadata.ExpectedSHA = scope.HeadSHA
 	case ToolRequestReview:
-		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
 		metadata.ExpectedSHA = scope.HeadSHA
 	case ToolConfirmPriorTerminalIntent:
@@ -1304,7 +1355,7 @@ func validRevision(value string) bool {
 
 func scopeAllowsBackendTool(scope ToolScope, tool string) bool {
 	switch tool {
-	case ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads,
+	case ToolGetPullRequest, ToolGetHandoff, ToolListPullRequestReviews, ToolListReviewThreads,
 		ToolSubmitReview, ToolCommentOnPullRequest:
 		return scope.PullRequest != nil && scope.PullRequest.ID > 0 && scope.PullRequest.Number > 0 && scope.PullRequest.Number <= int64(^uint(0)>>1)
 	case ToolOpenPR:

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -28,17 +29,19 @@ type productionState struct {
 	settings config.Config
 	repo     Repository
 
-	runtimeProfile   runtimeprofile.Profile
-	registry         runtimeprofile.Registry
-	database         *store.ReadOnlyStore
-	api              *githubapi.APIClient
-	developer        *githubapi.AppJWTSigner
-	reviewer         *githubapi.AppJWTSigner
-	developerToken   string
-	reviewerToken    string
-	profiles         agentprofile.Snapshot
-	profileSelection agentprofile.Selection
-	profilesLoaded   bool
+	runtimeProfile             runtimeprofile.Profile
+	registry                   runtimeprofile.Registry
+	database                   *store.ReadOnlyStore
+	api                        *githubapi.APIClient
+	developer                  *githubapi.AppJWTSigner
+	reviewer                   *githubapi.AppJWTSigner
+	developerToken             string
+	reviewerToken              string
+	profiles                   agentprofile.Snapshot
+	profileSelection           agentprofile.Selection
+	profilesLoaded             bool
+	operatorInstructions       agentinstructions.Operator
+	operatorInstructionsLoaded bool
 }
 
 // RunProduction runs read-only deployment and repository checks in deterministic order.
@@ -47,6 +50,7 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 	state := &productionState{settings: settings, repo: repository}
 	defer state.close()
 	checks := []Check{
+		{Name: "operator-agent-instructions", Run: state.checkOperatorInstructions},
 		{Name: "runtime-profile-contract", Run: state.checkRuntimeProfile},
 		{Name: "runtime-profile-compatibility-artifact", Run: state.checkCompatibilityArtifact},
 		{Name: "provider-credentials", Run: func(context.Context) error { return validateJSONObjectFile(settings.ProviderCredentialsFile) }},
@@ -93,6 +97,15 @@ func (state *productionState) checkRuntimeProfile(context.Context) error {
 	}
 	state.runtimeProfile = profile
 	state.registry = registry
+	return nil
+}
+
+func (state *productionState) checkOperatorInstructions(context.Context) error {
+	operator, err := agentinstructions.Load(state.settings.AgentInstructionsDir, role.BuiltinPolicyCatalog())
+	if err != nil {
+		return err
+	}
+	state.operatorInstructions, state.operatorInstructionsLoaded = operator, true
 	return nil
 }
 
@@ -390,13 +403,20 @@ func (state *productionState) checkEffectiveProfiles(context.Context) error {
 	if !state.profilesLoaded {
 		return errors.New("Agent Profile check did not pass")
 	}
+	if !state.operatorInstructionsLoaded {
+		return errors.New("operator agent instructions check did not pass")
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		return err
+	}
 	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
 		name, selected := state.profileSelection.Profile(roleID)
 		profile, ok := state.profiles.Profile(name)
 		if !selected || !ok {
 			return fmt.Errorf("%s: Agent Profile is unavailable", roleID)
 		}
-		if err := validateEffectiveProfile(state.registry, roleID, profile); err != nil {
+		if err := validateEffectiveProfile(state.registry, roleID, profile, state.operatorInstructions, definition); err != nil {
 			return fmt.Errorf("%s: %w", roleID, err)
 		}
 	}
@@ -476,7 +496,7 @@ func validateCompatibilityFile(path string, target runtimeprofile.Profile) error
 	return results.ValidateTarget(target)
 }
 
-func validateEffectiveProfile(registry runtimeprofile.Registry, role workflow.Role, profile agentprofile.Profile) error {
+func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.Role, profile agentprofile.Profile, operator agentinstructions.Operator, definition workflow.Definition) error {
 	name, version, found := strings.Cut(profile.Runtime(), "/")
 	if !found || name == "" || version == "" || strings.Contains(version, "/") {
 		return errors.New("invalid Runtime Profile reference")
@@ -493,7 +513,7 @@ func validateEffectiveProfile(registry runtimeprofile.Registry, role workflow.Ro
 	for name, action := range profile.Permissions() {
 		permissions[name] = opencode.Permission(action)
 	}
-	capabilities, err := mcp.CapabilitiesForRole(role)
+	capabilities, err := mcp.CapabilitiesForRole(roleID)
 	if err != nil {
 		return err
 	}
@@ -501,15 +521,24 @@ func validateEffectiveProfile(registry runtimeprofile.Registry, role workflow.Ro
 	for index, capability := range capabilities {
 		runtimeTools[index] = mcp.ServerName + "_" + capability
 	}
-	openCodeRole := opencode.RoleDeveloper
-	if role == workflow.RoleReviewer {
-		openCodeRole = opencode.RoleReviewer
+	policy, _ := role.BuiltinPolicyCatalog().Lookup(roleID)
+	for _, stageID := range definition.StageIDs() {
+		stage, _ := definition.Stage(stageID)
+		if stage.Role != roleID {
+			continue
+		}
+		for _, purpose := range stage.AcceptedPurposes {
+			_, err = opencode.Render(roleID, opencode.Profile{
+				Instructions: operator.Compose(policy, stage, purpose, profile.Instructions()),
+				Model:        profile.Model(), Variant: profile.Variant(), Steps: uint(profile.Steps()),
+				Permissions: permissions, RuntimeTools: runtimeTools,
+			})
+			if err != nil {
+				return fmt.Errorf("%s/%s: %w", stageID, purpose, err)
+			}
+		}
 	}
-	_, err = opencode.Render(openCodeRole, opencode.Profile{
-		Instructions: profile.Instructions(), Model: profile.Model(), Variant: profile.Variant(), Steps: uint(profile.Steps()),
-		Permissions: permissions, RuntimeTools: runtimeTools,
-	})
-	return err
+	return nil
 }
 
 func zero(contents []byte) {

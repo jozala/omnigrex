@@ -7,6 +7,7 @@ Read the minimum repository context needed for the change.
 - `README.md` — development commands, Compose secrets, and test entry points.
 - `CONTEXT.md` — domain terminology (Work Item, Workflow, Change Proposal, Role, Agent Session, and related terms). Use these terms.
 - `docs/adr/` — architecture decisions behind the current design.
+- `docs/decisions/README.md` - index of new project decisions and existing ADRs.
 - `docs/operator-guide.md` — deployment, GitHub Apps, secrets, backup/restore, and recovery procedures. Link to it; do not copy its procedures here.
 
 ## Repository map
@@ -23,6 +24,7 @@ Read the minimum repository context needed for the change.
 - When an Issue is assigned, read it and the relevant code before changing anything; otherwise follow the task's stated requirements. Keep changes focused accordingly.
 - Follow `CONTEXT.md` terms and the ADRs that apply; do not reintroduce rejected alternatives.
 - Put any implementation plans or designs you prepare in `docs/plans/`.
+- When making or reviewing a consequential product, engineering, operations, Workflow, or architectural decision, load the `omnigrex-decision-records` skill and follow its recording guidance.
 - Do not modify `docs/plans/first-iteration.md`; it is an accepted specification.
 - Capture implementation failures and regression behavior in tests when possible, rather than adding incident notes or implementation details to accepted specifications.
 - When tests are insufficient to explain an operational issue, use focused documentation under a dedicated `docs/` directory with one file per area.

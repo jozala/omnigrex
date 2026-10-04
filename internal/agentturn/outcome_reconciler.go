@@ -386,6 +386,7 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	var arguments struct {
 		OperationID string `json:"operation_id"`
 		Summary     string `json:"summary"`
+		Signature   string `json:"signature"`
 	}
 	var result struct {
 		Outcome           string `json:"outcome"`
@@ -394,7 +395,8 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 		HeadSHA           string `json:"head_sha"`
 	}
 	branch, resourceOK := exactBranchResource(intent.ExternalResourceID, request.Execution.Repository.ID)
-	if intent.ExternalService != "omnigrex" || !decodeExactObject(intent.Request, &arguments) ||
+	if (intent.ExternalService != "omnigrex" && intent.ExternalService != "github") || !decodeExactObject(intent.Request, &arguments) ||
+		intent.ExternalService == "github" && arguments.Signature == "" ||
 		arguments.OperationID != intent.OperationID || strings.TrimSpace(arguments.Summary) == "" ||
 		!decodeExactObject(intent.Result, &result) || result.Outcome != "REVIEW_REQUESTED" ||
 		result.PullRequestID <= 0 || result.PullRequestNumber <= 0 || strings.TrimSpace(result.HeadSHA) == "" ||

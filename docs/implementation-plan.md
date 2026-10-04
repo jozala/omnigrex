@@ -127,7 +127,8 @@ The first iteration does not migrate existing sessions even after a pair passes;
 - Loss of the initial session response recovers one session rather than creating a duplicate.
 - The exact previous-stable to candidate version pair has a documented compatibility result.
 - The candidate passes its own same-version create, dispose, continue, replay, and creation-recovery gate.
-- Feature-branch OpenCode configuration cannot add Reviewer agents, MCP servers, capabilities, skills, or configured instructions; any project-plugin execution or nested-instruction exposure must be pinned to the exact version, tested or source-verified, and explicitly accepted before qualification.
+- Feature-branch OpenCode configuration cannot add Reviewer agents, MCP servers, capabilities, or configured instructions; any project-plugin execution or nested-instruction exposure must be pinned to the exact version, tested or source-verified, and explicitly accepted before qualification.
+- Profiles permitting `skill` explicitly load checkout-local `.agents/skills/` through the native skill tool, including for the Reviewer, as decided in [ADR 0012](./adr/0012-load-repository-skills-from-the-current-checkout.md).
 
 ## Phase 3: Docker Compose and PostgreSQL
 
@@ -291,9 +292,10 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 - Developer and Reviewer sessions cannot see each other's runtime state.
 - A stale control revision cannot submit a prompt.
 - Mutable Agent Profile changes on the default branch apply to the next turn without changing session identity.
+- Current code-owned platform/Stage instructions and startup-loaded operator common/per-Role guidance are composed for every launch, including Session Continuation; see [decision 0002](./decisions/0002-use-current-deployment-agent-instructions.md).
 - A Runtime Profile reference change cannot mutate an existing Assignment.
 - The effective OpenCode model, variant, steps, and permissions match the latest permitted Agent Profile values.
-- A Pull Request that modifies `.opencode`, project MCP configuration, plugins, agents, or instruction files cannot change the Reviewer's effective configuration.
+- A Pull Request cannot replace the default-branch Reviewer Agent Profile or its effective permissions through project configuration; checkout-local skills are the deliberate instruction-source exception in ADR 0012, with plugin and nested-instruction limitations qualified separately.
 - A fake human controller integration test fences automation, waits for or cancels the active turn, drains MCP mutations, replays history, submits a prompt, and returns control without dual prompts.
 
 ## Phase 7: Workspaces and MCP Tool Gateway
@@ -310,6 +312,7 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 - Serialize provisioning of one Assignment's mise data across Runtime Processes so a stale Turn cannot replace a successor's installed tools.
 - Use the Developer workspace mise revision for Developer Turns and the latest default-branch mise configuration and lock data for Reviewer Turns.
 - Keep feature-branch mise files visible for review without evaluating or executing them.
+- Configure the fixed repository-local Git identity during staged workspace preparation so agents can commit and merge without prompt-driven setup.
 - Prepare publication in a clean checkout that the agent cannot modify.
 - Copy the agent's file tree without its Git metadata into the clean checkout.
 - Disable Git hooks and validate the expected base and branch before every commit and push.
