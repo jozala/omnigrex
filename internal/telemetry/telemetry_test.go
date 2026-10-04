@@ -23,13 +23,20 @@ func cleanEnvironment(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 		"OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
 		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
 	} {
 		t.Setenv(name, "")
 	}
 	provider, propagator := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	meter := otel.GetMeterProvider()
+	errorHandler := otel.GetErrorHandler()
 	t.Cleanup(func() {
 		otel.SetTracerProvider(provider)
 		otel.SetTextMapPropagator(propagator)
+		otel.SetMeterProvider(meter)
+		otel.SetErrorHandler(errorHandler)
 	})
 }
 

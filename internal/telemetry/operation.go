@@ -139,6 +139,7 @@ func (op *Operation) Finish(err *error) {
 		message = "Agent Turn outcome reconciled"
 	}
 	slog.InfoContext(op.ctx, message, attrs...)
+	recordOperation(op.ctx, op.name, op.outcome, time.Since(op.started))
 	op.span.End()
 }
 
