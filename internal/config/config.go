@@ -51,6 +51,8 @@ const (
 	defaultAssignmentRetention         = 30 * 24 * time.Hour
 	defaultAgentTurnConcurrencyLimit   = 2
 	defaultAgentTurnMemoryMiB          = 512
+	defaultToolCacheWarningMiB         = 1024
+	defaultToolCachePollInterval       = 5 * time.Minute
 	minimumWebhookLeaseDuration        = 5 * time.Second
 	maximumWorkerDuration              = 365 * 24 * time.Hour
 )
@@ -100,6 +102,8 @@ type Config struct {
 	AssignmentRetentionDuration            time.Duration
 	AgentTurnConcurrencyLimit              int
 	AgentTurnMemoryBytes                   int64
+	AssignmentToolCacheWarningBytes        int64
+	AssignmentToolCachePollInterval        time.Duration
 	AgentPathEnvironmentAllowlist          []string
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
@@ -170,6 +174,8 @@ func Load(getenv func(string) string) (Config, error) {
 		AssignmentRetentionDuration:            defaultAssignmentRetention,
 		AgentTurnConcurrencyLimit:              defaultAgentTurnConcurrencyLimit,
 		AgentTurnMemoryBytes:                   defaultAgentTurnMemoryMiB << 20,
+		AssignmentToolCacheWarningBytes:        defaultToolCacheWarningMiB << 20,
+		AssignmentToolCachePollInterval:        defaultToolCachePollInterval,
 		HTTPAddr:                               valueOrDefault(getenv("OMNIGREX_HTTP_ADDR"), defaultHTTPAddr),
 		ReadinessTimeout:                       defaultReadinessTimeout,
 		ShutdownTimeout:                        defaultShutdownTimeout,
@@ -386,6 +392,24 @@ func Load(getenv func(string) string) (Config, error) {
 			problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_TURN_MEMORY_MIB must be a positive integer of MiB that fits in int64 bytes"))
 		} else {
 			config.AgentTurnMemoryBytes = mib << 20
+		}
+	}
+	if value := getenv("OMNIGREX_ASSIGNMENT_TOOL_CACHE_WARNING_MIB"); value != "" {
+		mib, err := positiveInt64(value)
+		if err != nil || mib > math.MaxInt64/(1<<20) {
+			problems = append(problems, fmt.Errorf("OMNIGREX_ASSIGNMENT_TOOL_CACHE_WARNING_MIB must be a positive integer of MiB that fits in int64 bytes"))
+		} else {
+			config.AssignmentToolCacheWarningBytes = mib << 20
+		}
+	}
+	if value := getenv("OMNIGREX_ASSIGNMENT_TOOL_CACHE_POLL_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("OMNIGREX_ASSIGNMENT_TOOL_CACHE_POLL_INTERVAL must be a valid duration"))
+		} else if interval < time.Microsecond || interval > maximumWorkerDuration {
+			problems = append(problems, fmt.Errorf("OMNIGREX_ASSIGNMENT_TOOL_CACHE_POLL_INTERVAL must be between one microsecond and %s", maximumWorkerDuration))
+		} else {
+			config.AssignmentToolCachePollInterval = interval
 		}
 	}
 	config.AgentPathEnvironmentAllowlist, err = turnconfig.Allowlist(getenv("OMNIGREX_AGENT_PATH_ENV_ALLOWLIST"))
