@@ -294,7 +294,10 @@ Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-li
 These directories have no per-Assignment disk quota, like the existing workspace volume, so monitor available Docker-volume storage.
 A background monitor measures only the Agent Participant assignment-lifecycle cache area (on disk under the historical `assignment-<ID>` prefix) every `OMNIGREX_ASSIGNMENT_TOOL_CACHE_POLL_INTERVAL` (default `5m`) and logs a soft warning when allocated disk usage reaches `OMNIGREX_ASSIGNMENT_TOOL_CACHE_WARNING_MIB` (default `1024` MiB).
 The warning carries only `agent_participant_id`, `size_bytes`, and `threshold_bytes`, is emitted once per unchanged size, never blocks an Agent Turn, and never changes retention or cleanup behavior.
-Measurement is read-only, counts allocated filesystem blocks including directories, skips unreadable or unsafe entries without changing modes, and rotates its bounded scans across polls; very large caches may report partial (truncated) sizes, which preserve prior warning state until a complete scan updates it.
+Measurement is read-only, counts allocated filesystem blocks including directories, and resumes retained directory streams across bounded scan slices without replaying entries or changing modes.
+The monitor retains at most four active scans, each with at most 32 directory handles and 8192 hardlink identities; ordinary files require no retained identity set.
+Collection, cache replacement, fatal errors, completion, and shutdown release retained handles.
+Unreadable or unsafe entries and depth or hardlink limits produce partial (truncated) measurements, which never clear a warning based on a below-threshold partial sum.
 Moving build output to disk does not increase the Agent Turn container's memory limit or constrain compiler parallelism.
 This implementation changes the `opencode-acp/v1` Runtime Profile content hash; existing Agent Sessions bound to the earlier contract cannot continue unless the deployment resets their stored associations before upgrading.
 

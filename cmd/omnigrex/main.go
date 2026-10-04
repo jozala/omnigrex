@@ -484,10 +484,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		ThresholdBytes: settings.AssignmentToolCacheWarningBytes,
 		PollInterval:   settings.AssignmentToolCachePollInterval,
 		Logger:         logger,
-		OnError:        func(err error) { logger.Error("monitor Assignment tool cache", "error", err) },
+		OnError:        func(err error) { logger.Error("monitor Agent Participant tool cache", "error", err) },
 	})
 	if err != nil {
-		return fmt.Errorf("configure Assignment tool cache monitor: %w", err)
+		return fmt.Errorf("configure Agent Participant tool cache monitor: %w", err)
 	}
 
 	reconciliation, err := prepareStartup(ctx, settings.ReadinessTimeout, profileAvailability, startupReconciler)
