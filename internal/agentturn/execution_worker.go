@@ -16,8 +16,10 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var ErrInvalidExecutionWorker = errors.New("invalid Agent Turn execution Worker")
@@ -204,6 +206,8 @@ func (worker *ExecutionWorker) ProcessNext(ctx context.Context) (processed bool,
 	if !acquired {
 		return false, nil
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.AgentTurnExecute, jobAttributes(lease.JobLease)...)
+	defer finishOperation(ctx, operation, &err)
 
 	secrets := providerCredentialSecrets(worker.providerCredential)
 	defer func() {
@@ -235,6 +239,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	if err != nil {
 		return false, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
 	}
+	telemetry.AddAttributes(workCtx, executionAttributes(execution)...)
 	paths, pathsErr := worker.workspace.Paths(execution.Assignment.ID)
 	operationErr := pathsErr
 	if operationErr != nil {
@@ -305,7 +310,8 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	}
 	if operationErr == nil {
 		launchProviderCredential := append(json.RawMessage(nil), providerCredential...)
-		runtime, err = worker.launcher.LaunchExecution(workCtx, LaunchRequest{
+		launchCtx, launchOperation := telemetry.StartOperation(workCtx, telemetry.RuntimeProcessLaunch)
+		runtime, err = worker.launcher.LaunchExecution(launchCtx, LaunchRequest{
 			Lease: *lease, LeaseDuration: worker.leaseDuration, RepositoryURL: repositoryURL,
 			DefaultBranchName: defaultBranch.Name, DefaultBranchSHA: defaultBranch.CommitSHA,
 			InitialFeatureBranch: fmt.Sprintf("omnigrex/issue-%d", execution.Issue.Number),
@@ -326,6 +332,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		} else if nilDependency(runtime) || nilDependency(runtime.PromptClient()) {
 			operationErr = errors.Join(operationErr, errors.New("launch Agent Turn Runtime Process: launcher returned an invalid runtime"))
 		}
+		launchOperation.Finish(&operationErr)
 	}
 
 	if operationErr == nil {
@@ -390,6 +397,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
+	telemetry.SetOutcome(ctx, telemetry.DomainOutcome, "")
 	if err := worker.retryFinalization(ctx, func(ctx context.Context) error {
 		return worker.store.CloseMutationAdmission(ctx, lease)
 	}); err != nil {
@@ -413,7 +421,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 
 func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
-		return false, errors.Join(operationErr, worker.cleanupWithoutFence(runtime))
+		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
 
 	var closeErr error
@@ -431,16 +439,16 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		})
 	}
 	if closeErr != nil {
-		return false, errors.Join(operationErr, closeErr, worker.cleanupWithoutFence(runtime))
+		return false, errors.Join(operationErr, closeErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
 	drainRecoveryRequired, drainErr := worker.drainRuntime(leaseCtx, runtime)
 	if drainErr != nil {
-		return false, errors.Join(operationErr, wrapExecutionError("close and drain Agent Turn MCP authority", drainErr), worker.cleanupWithoutFence(runtime))
+		return false, errors.Join(operationErr, wrapExecutionError("close and drain Agent Turn MCP authority", drainErr), worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
 
 	unsettled, listErr := worker.waitForRecoverableMutations(leaseCtx, lease, drainRecoveryRequired)
 	if listErr != nil {
-		return false, errors.Join(operationErr, fmt.Errorf("inspect unsettled Agent Turn mutations: %w", listErr), worker.cleanupWithoutFence(runtime))
+		return false, errors.Join(operationErr, fmt.Errorf("inspect unsettled Agent Turn mutations: %w", listErr), worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
 
 	cleanupErr := worker.cleanupWithRetry(leaseCtx, runtime)
@@ -452,6 +460,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		return false, combinedErr
 	}
 	if cleanupErr != nil || drainRecoveryRequired || len(unsettled) != 0 {
+		telemetry.SetOutcome(leaseCtx, telemetry.Failure, "recovery_required")
 		recoveryErr := worker.beginAgentTurnRecovery(leaseCtx, lease)
 		if recoveryErr != nil {
 			return false, errors.Join(combinedErr, fmt.Errorf("begin Agent Turn recovery: %w", recoveryErr))
@@ -510,6 +519,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			wrapExecutionError("begin Agent Turn recovery", recoveryErr),
 		)
 	}
+	observeSettlement(leaseCtx, observation)
 	if corroborationFailure != nil && observation.Outcome == workflow.TurnOutcomeInfrastructureFailed &&
 		(corroborationFailure.Retryable || corroborationFailure.Prerequisite) {
 		starter, ok := worker.store.(interface {
@@ -568,7 +578,7 @@ type heartbeatRenewal struct {
 
 func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease store.AgentTurnLease) executionHeartbeat {
 	workCtx, cancelWork := context.WithCancelCause(parent)
-	leaseCtx, cancelLease := context.WithCancelCause(context.Background())
+	leaseCtx, cancelLease := context.WithCancelCause(telemetry.CopyContext(context.Background(), parent))
 	heartbeatCtx, stopSignal := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	initial := make(chan error, 1)
@@ -631,21 +641,26 @@ func (heartbeat executionHeartbeat) stop() error {
 	return <-heartbeat.done
 }
 
-func (worker *ExecutionWorker) cleanupWithoutFence(runtime ExecutionRuntime) error {
+func (worker *ExecutionWorker) cleanupWithoutFence(parent context.Context, runtime ExecutionRuntime) (err error) {
 	if nilDependency(runtime) {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), worker.cleanupTimeout)
+	ctx, operation := telemetry.StartOperation(telemetry.CopyContext(context.Background(), parent), telemetry.RuntimeProcessCleanup)
+	defer finishOperation(ctx, operation, &err)
+	ctx, cancel := context.WithTimeout(ctx, worker.cleanupTimeout)
 	defer cancel()
 	return runtime.Cleanup(ctx)
 }
 
-func (worker *ExecutionWorker) cleanupWithRetry(leaseCtx context.Context, runtime ExecutionRuntime) error {
+func (worker *ExecutionWorker) cleanupWithRetry(leaseCtx context.Context, runtime ExecutionRuntime) (err error) {
 	if nilDependency(runtime) {
 		return nil
 	}
+	leaseCtx, operation := telemetry.StartOperation(leaseCtx, telemetry.RuntimeProcessCleanup)
+	defer finishOperation(leaseCtx, operation, &err)
 	var cleanupErr error
 	for attempt := 0; attempt < 2; attempt++ {
+		telemetry.AddAttributes(leaseCtx, attribute.Int("retry_count", attempt))
 		cleanupErr = worker.withFinalizationTimeout(leaseCtx, runtime.Cleanup)
 		if cleanupErr == nil || lostLease(leaseCtx, cleanupErr) {
 			return cleanupErr

@@ -55,7 +55,18 @@ Health and readiness requests are excluded from incoming tracing.
 Docker clients for readiness probes and exact Runtime Profile image availability checks also suppress tracing, including probe cleanup.
 Operational Docker clients retain tracing for Runtime Process operations.
 Request bodies, tool arguments, and agent prompts are not added as trace attributes.
-Asynchronous Workflow workers start independent traces for their GitHub requests; trace context is not persisted across durable queues.
+Claimed preparation, execution, webhook processing, mutation recovery, runtime cleanup, and outcome reconciliation create fixed-name operation spans.
+Runtime launch and outcome reconciliation normally nest under execution, and GitHub/Docker client spans inherit the calling operation's context.
+Deferred terminal corroboration creates a separate reconciliation attempt, including credentials and durable acknowledgement.
+MCP tool operations cover admitted work through finalization, even after HTTP disconnection; a tool error can be recorded despite HTTP 200.
+Expected blocked outcomes are distinct from infrastructure failures.
+Asynchronous Workflow workers start independent traces; trace context is not persisted across durable queues or propagated across the Runtime Process MCP boundary.
+Search structured `workflow_id`, `agent_participant_id`, `agent_session_id`, and `agent_turn_id` fields to connect independent traces.
+JSON stdout records emitted with a valid operation context include `trace_id` and `span_id`, including unsampled contexts; a trace link may have no stored trace when sampling or delivery omitted it.
+Collection should preserve JSON fields and keep domain and trace identifiers out of log stream labels.
+There is no direct OpenTelemetry log export.
+Long execution spans export on completion; operation-start logs and shorter child spans provide earlier visibility.
+Published orchestrator builds identify their commit SHA, while unversioned local builds retain `dev`.
 Completed spans are batched and flushed after services stop, within `OMNIGREX_SHUTDOWN_TIMEOUT`.
 Compose allows one minute before forcibly stopping the orchestrator, configurable with `OMNIGREX_STOP_GRACE_PERIOD`.
 Keep that grace period longer than service draining and Agent Turn cleanup plus a separate `OMNIGREX_SHUTDOWN_TIMEOUT` budget for exporting the final traces, increasing it when those timeouts are increased.

@@ -10,8 +10,10 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var errInvalidPendingNormalizedEvent = store.ErrPendingNormalizedEventInvalid
@@ -106,7 +108,7 @@ func newProcessor(processorStore ProcessorStore, config ProcessorConfig, provisi
 
 // ProcessNext durably applies at most one historical event or claimed delivery.
 // The returned boolean reports whether work was processed.
-func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
+func (processor *Processor) ProcessNext(ctx context.Context) (processed bool, err error) {
 	if !processor.provisioning {
 		if _, applied, err := processor.store.ApplyNextPendingNormalizedEvent(ctx, processor.pendingEventFactory); err != nil {
 			return false, fmt.Errorf("apply pending normalized event: %w", err)
@@ -116,7 +118,6 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 	}
 
 	var claim *store.WebhookClaim
-	var err error
 	if processor.provisioning {
 		claim, err = processor.store.ClaimProvisioningWebhookDelivery(ctx, processor.claimOwner, processor.leaseDuration)
 	} else {
@@ -128,6 +129,8 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 	if claim == nil {
 		return false, nil
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.WebhookProcess, attribute.String("delivery_id", claim.DeliveryID))
+	defer operation.Finish(&err)
 
 	normalization, err := Normalize(Delivery{
 		DeliveryID: claim.DeliveryID,
@@ -156,11 +159,14 @@ func (processor *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			cause := fmt.Errorf("map normalized webhook delivery %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
-		if _, err := processor.store.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, payload, locator, eventFactory); err != nil {
+		application, err := processor.store.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, payload, locator, eventFactory)
+		if err != nil {
 			cause := fmt.Errorf("complete webhook transition %s: %w", claim.DeliveryID, err)
 			return true, processor.acknowledgeFailure(ctx, claim, cause, !deterministicWebhookFailure(err))
 		}
+		telemetry.AddAttributes(ctx, attribute.String("workflow_id", application.WorkflowID))
 	case NormalizationIgnored:
+		telemetry.SetOutcome(ctx, telemetry.DomainOutcome, "")
 		if normalization.Event != nil || normalization.Provisioning != nil {
 			cause := errors.New("normalize webhook delivery: ignored outcome has an event")
 			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
@@ -283,6 +289,7 @@ func deterministicProvisioningFailure(err error) bool {
 }
 
 func (processor *Processor) acknowledgeProvisioningFailure(ctx context.Context, claim *store.WebhookClaim, cause error) error {
+	telemetry.SetOutcome(ctx, telemetry.Failure, "provisioning_failed")
 	metadata := githubapi.ExtractSafeErrorMetadata(cause)
 	retryable := !deterministicProvisioningFailure(cause) && !metadata.Permanent && (!metadata.APIClientError || metadata.APIRetryable || metadata.Transient)
 	delay := time.Duration(0)
@@ -319,6 +326,7 @@ func (processor *Processor) retryAfter(attempt int, metadata githubapi.SafeError
 }
 
 func (processor *Processor) acknowledgeFailure(ctx context.Context, claim *store.WebhookClaim, cause error, retryable bool) error {
+	telemetry.SetOutcome(ctx, telemetry.Failure, "webhook_processing_failed")
 	if err := processor.store.AcknowledgeWebhookDeliveryFailure(ctx, claim.DeliveryID, claim.ClaimToken, claim.AttemptCount, cause, retryable); err != nil {
 		return errors.Join(cause, fmt.Errorf("acknowledge webhook delivery %s failure: %w", claim.DeliveryID, err))
 	}
