@@ -935,6 +935,10 @@ func startOpenCodeWithTransport(
 		"OPENCODE_DISABLE_PROJECT_CONFIG=true",
 		"OPENCODE_PURE=true",
 	}
+	if additional.rendered != nil {
+		environment = providerProfileEnvironment(t, providerConfig, additional.rendered)
+		environment = append(environment, "OPENCODE_DISABLE_MODELS_FETCH=true")
+	}
 	environment = append(environment, additional.environment...)
 
 	engine, err := dockerruntime.NewEngine(dockerruntime.EngineOptions{
@@ -1021,6 +1025,12 @@ func startOpenCodeWithTransport(
 		},
 		DecidePermission: func(ctx context.Context, request acp.PermissionRequest) acp.PermissionDecision {
 			process.permissionRequests <- request
+			if additional.decidePermission != nil {
+				return additional.decidePermission(request)
+			}
+			if additional.rendered != nil {
+				return additional.rendered.DecidePermission(request)
+			}
 			return compatibilityPermissionDecision(request, permissions, additional.authorizedCommand)
 		},
 	})
@@ -1036,6 +1046,8 @@ type openCodeTestOptions struct {
 	miseSubpath       string
 	environment       []string
 	authorizedCommand string
+	rendered          *opencode.RenderedProfile
+	decidePermission  func(acp.PermissionRequest) acp.PermissionDecision
 }
 
 func prompt(t *testing.T, process *openCodeProcess, sessionID, text string) {
@@ -1120,6 +1132,7 @@ func assertPermissionRequest(t *testing.T, requests <-chan acp.PermissionRequest
 func waitForAgentText(t *testing.T, updates <-chan acp.SessionUpdate, want string) {
 	t.Helper()
 
+	var observed strings.Builder
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	for {
@@ -1142,11 +1155,14 @@ func waitForAgentText(t *testing.T, updates <-chan acp.SessionUpdate, want strin
 			if err := json.Unmarshal(event.Content, &content); err != nil {
 				t.Fatalf("decode agent message content: %v", err)
 			}
-			if content.Type == "text" && strings.Contains(content.Text, want) {
-				return
+			if content.Type == "text" {
+				observed.WriteString(content.Text)
+				if strings.Contains(observed.String(), want) {
+					return
+				}
 			}
 		case <-timer.C:
-			t.Fatalf("agent did not emit text %q", want)
+			t.Fatalf("agent did not emit text %q; observed %q", want, observed.String())
 		}
 	}
 }
@@ -1215,14 +1231,18 @@ func waitForToolOutput(t *testing.T, updates <-chan acp.SessionUpdate, want stri
 	}
 }
 
-func startFakeProvider(t *testing.T) string {
+func startFakeProvider(t *testing.T, handlers ...http.Handler) string {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("start fake provider listener: %v", err)
 	}
-	server := &http.Server{Handler: http.HandlerFunc(handleFakeProvider)}
+	var handler http.Handler = http.HandlerFunc(handleFakeProvider)
+	if len(handlers) != 0 {
+		handler = handlers[0]
+	}
+	server := &http.Server{Handler: handler}
 	go func() {
 		_ = server.Serve(listener)
 	}()
@@ -1408,6 +1428,10 @@ func handleFakeProvider(response http.ResponseWriter, request *http.Request) {
 		reply = firstMarker
 	}
 
+	writeFakeText(response, reply)
+}
+
+func writeFakeText(response http.ResponseWriter, reply string) {
 	response.Header().Set("Content-Type", "text/event-stream")
 	writeSSE(response, map[string]any{
 		"id":     "chatcmpl-fake",
@@ -2091,19 +2115,19 @@ func writeReviewerIsolationFixture(t *testing.T, volume, mcpURL string) {
 		"--mount", "type=volume,src="+volume+",dst=/volume",
 		"alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
 		"sh", "-c", strings.Join([]string{
-			"mkdir -p /volume/assignment/.opencode/plugins /volume/assignment/.opencode/agents /volume/assignment/.opencode/skills/branch-poison /volume/assignment/.opencode/tools /volume/assignment/.agents/skills/branch-poison /volume/assignment/.claude/skills/branch-poison",
+			"mkdir -p /volume/assignment/.opencode/plugins /volume/assignment/.opencode/agents /volume/assignment/.opencode/skills/branch-poison /volume/assignment/.opencode/tools /volume/assignment/.agents/skills/" + repositorySkillName + " /volume/assignment/.claude/skills/branch-poison",
 			"printf '%s' \"$1\" > /volume/assignment/opencode.json",
 			"printf '%s' \"$1\" > /volume/assignment/.opencode/opencode.json",
 			"printf '%s' \"$2\" > /volume/assignment/.opencode/plugins/poison.js",
 			"printf '%s' \"$3\" > /volume/assignment/.opencode/agents/branch-poison.md",
 			"printf '%s' \"$4\" > /volume/assignment/.opencode/skills/branch-poison/SKILL.md",
-			"printf '%s' \"$4\" > /volume/assignment/.agents/skills/branch-poison/SKILL.md",
+			"printf '%s' \"$7\" > /volume/assignment/.agents/skills/" + repositorySkillName + "/SKILL.md",
 			"printf '%s' \"$4\" > /volume/assignment/.claude/skills/branch-poison/SKILL.md",
 			"printf '%s' \"$5\" > /volume/assignment/.opencode/tools/branch-poison.ts",
 			"printf '%s' \"$6\" > /volume/assignment/reviewer-instructions.md",
 			"chown -R 10001:10001 /volume/assignment",
 		}, " && "),
-		"sh", string(config), plugin, agent, skill, tool, reviewerPoison,
+		"sh", string(config), plugin, agent, skill, tool, reviewerPoison, repositorySkillDocument(repositorySkillBody),
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("write Reviewer isolation fixture to Docker volume %q: %v\n%s", volume, err, output)

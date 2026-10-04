@@ -356,6 +356,12 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			operations := []string{}
 			runtimeProfile := runtimeLauncherProfile(t)
 			execution, lease := runtimeExecutionContext(t, runtimeProfile, testCase.role, proposal)
+			var profileConfig map[string]any
+			if err := json.Unmarshal(execution.Turn.AgentProfileConfig, &profileConfig); err != nil {
+				t.Fatal(err)
+			}
+			profileConfig["permissions"].(map[string]any)["skill"] = "allow"
+			execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 			miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 			workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 				DataDir: miseDir, SourceRevision: testCase.wantMiseRevision,
@@ -404,7 +410,28 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 				})
 			}
 			assertRuntimeMCPPermissions(t, engineFactory.engine.spec.Environment, testCase.role)
+			var config struct {
+				Skills struct {
+					Paths []string `json:"paths"`
+				} `json:"skills"`
+			}
+			var configJSON string
+			for _, entry := range engineFactory.engine.spec.Environment {
+				if value, found := strings.CutPrefix(entry, "OPENCODE_CONFIG_CONTENT="); found {
+					configJSON = value
+					break
+				}
+			}
+			if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(config.Skills.Paths, []string{"/workspace/.agents/skills"}) {
+				t.Fatalf("launched skill paths = %v, want prepared checkout", config.Skills.Paths)
+			}
+			assertRuntimePermissionDecision(t, clientFactory.options, "skill", "other", "allow")
+			assertRuntimePermissionDecision(t, clientFactory.options, "task", "think", "reject")
 			if testCase.role == workflow.RoleReviewer {
+				assertRuntimePermissionDecision(t, clientFactory.options, "edit", "edit", "reject")
 				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "allow")
 				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "reject")
 			}

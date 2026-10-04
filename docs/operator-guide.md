@@ -347,6 +347,38 @@ Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `patch`.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
+### Repository Skills
+
+Both Roles can use native OpenCode skills when their Agent Profile includes `skill: allow` under `permissions`.
+Omnigrex then registers `/workspace/.agents/skills` as an explicit skill source, including for the Reviewer with project configuration and external automatic skill discovery disabled.
+This adds a repository skill source without enabling sub-agents or changing MCP authority.
+Profiles without skill permission do not receive this explicit source.
+
+Store each skill in `.agents/skills/<name>/SKILL.md` with front matter such as:
+
+```yaml
+---
+name: repository-example
+description: Explain the procedure and when the agent should load it.
+---
+```
+
+Use a unique name matching the directory and put the procedure after the front matter.
+The agent sees the skill description and can load its body on demand with the skill tool.
+Put optional examples and references in the same skill directory, with explicit instructions about when to read them.
+Keep Role authority, approval criteria, and publication or Human Handoff rules in the Agent Profile.
+
+Skills come from the prepared working checkout, not the default-branch snapshot used for Agent Profiles.
+The Developer may initially use default-branch skills and later use Change Proposal skills; the Reviewer uses skills from its Change Proposal checkout.
+New Runtime Processes rediscover skills when continuing retained Agent Sessions, but in-process edits are not guaranteed to hot-reload.
+Omnigrex's repository Profiles require loading their Role skill on every Agent Turn and reporting a blocker when it is unavailable.
+Publish those Profiles and their required skills together so the next Turn can find them.
+For an existing Change Proposal, ensure its checkout contains any newly required skills before starting or resuming work.
+
+A Change Proposal can modify skill instructions used in its own review.
+The separate [human approval gate for skill changes](https://github.com/jozala/omnigrex/issues/43) is planned, not currently enforced.
+See [ADR 0012](./adr/0012-load-repository-skills-from-the-current-checkout.md) for the checkout-local decision and the [runtime compatibility notes](../agent/opencode/README.md#reviewer-isolation) for other Reviewer limitations.
+
 ### Agent Turn Tool Paths
 
 An optional `.omnigrex/turn-configuration.yaml` on the default branch requests disk-backed directories for tool environment variables.

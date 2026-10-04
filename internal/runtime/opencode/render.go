@@ -3,12 +3,14 @@ package opencode
 import (
 	"encoding/json"
 	"errors"
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
+	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 type Role = role.ID
@@ -113,6 +115,9 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 		Steps      uint              `json:"steps,omitempty"`
 		Disable    bool              `json:"disable,omitempty"`
 	}
+	type skillConfig struct {
+		Paths []string `json:"paths"`
+	}
 	payload := struct {
 		Agent        map[string]agentConfig `json:"agent"`
 		Autoupdate   bool                   `json:"autoupdate"`
@@ -120,6 +125,7 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 		MCP          map[string]any         `json:"mcp"`
 		Permission   map[string]string      `json:"permission"`
 		Share        string                 `json:"share"`
+		Skills       *skillConfig           `json:"skills,omitempty"`
 	}{
 		Agent: map[string]agentConfig{
 			"build": {Disable: true},
@@ -136,6 +142,10 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 		MCP:          map[string]any{},
 		Permission:   permission,
 		Share:        "disabled",
+	}
+	if permissionPolicy["skill"] == PermissionAllow {
+		// Explicit paths remain discoverable with Reviewer project discovery disabled.
+		payload.Skills = &skillConfig{Paths: []string{path.Join(runtimeprofile.StableWorkspacePath, ".agents", "skills")}}
 	}
 	config, err := json.Marshal(payload)
 	if err != nil {

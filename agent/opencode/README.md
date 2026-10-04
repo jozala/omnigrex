@@ -54,7 +54,11 @@ OPENCODE_DISABLE_CLAUDE_CODE=true
 Pure mode alone does not disable project configuration, instructions, skills, or MCP servers.
 Reviewer configuration must also omit static MCP entries and pass only orchestrator-approved `mcpServers` in ACP session requests.
 Runtime-owned configuration must require ACP approval for every tool category and explicitly override branch-configurable tools such as bash; the ACP decision function cancels every permission request not authorized by the Agent Profile.
-The compatibility suite verifies that project config, agents, MCP entries, skills, and configured instructions do not reach the Reviewer model under these flags.
+The compatibility suite verifies that project config, agents, MCP entries, automatically discovered `.opencode` and `.claude` skills, and configured instructions do not reach the Reviewer model under these flags.
+When the Agent Profile allows `skill`, runtime-owned configuration explicitly registers `/workspace/.agents/skills` as the checkout-local skill source.
+The suite verifies on-demand native loading for both Roles, unavailable and rejected loads, and updated skill content after Agent Session continuation in a fresh Runtime Process.
+This is an intentional exception to Reviewer instruction isolation, described in [ADR 0012](../../docs/adr/0012-load-repository-skills-from-the-current-checkout.md).
+See [Repository Skills](../../docs/operator-guide.md#repository-skills) for layout, permissions, and revision behavior.
 
 OpenCode `1.18.29` still executes an auto-discovered project plugin during a prompt even when `OPENCODE_PURE` and `OPENCODE_DISABLE_PROJECT_CONFIG` are both `true`.
 It can also discover nested `AGENTS.md` and `CONTEXT.md` files when reading files because that resolver does not honor the project-config flag.

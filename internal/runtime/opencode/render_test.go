@@ -91,6 +91,55 @@ func TestRenderDeveloperEnvironmentAndDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestRenderRepositorySkillsRequireExplicitPermission(t *testing.T) {
+	for _, roleID := range []opencode.Role{opencode.RoleDeveloper, opencode.RoleReviewer} {
+		for _, permission := range []opencode.Permission{"", opencode.PermissionDeny, opencode.PermissionAllow} {
+			t.Run(string(roleID)+"/"+string(permission), func(t *testing.T) {
+				permissions := opencode.PermissionPolicy{}
+				if permission != "" {
+					permissions["skill"] = permission
+				}
+				rendered, err := opencode.Render(roleID, opencode.Profile{
+					Instructions: "Use repository skills.", Model: "provider/model", Steps: 10, Permissions: permissions,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var config struct {
+					Skills *struct {
+						Paths []string `json:"paths"`
+						URLs  []string `json:"urls"`
+					} `json:"skills"`
+					Permission map[string]string `json:"permission"`
+				}
+				if err := json.Unmarshal([]byte(renderedConfig(t, rendered)), &config); err != nil {
+					t.Fatal(err)
+				}
+				if permission == opencode.PermissionAllow {
+					if config.Skills == nil || !slices.Equal(config.Skills.Paths, []string{"/workspace/.agents/skills"}) || len(config.Skills.URLs) != 0 {
+						t.Fatalf("repository skill sources = %#v, want only the explicit workspace path", config.Skills)
+					}
+					if config.Permission["skill"] != "ask" {
+						t.Fatalf("skill permission = %q, want ACP mediation", config.Permission["skill"])
+					}
+				} else if config.Skills != nil {
+					t.Fatalf("repository skills configured without permission: %#v", config.Skills)
+				}
+				if config.Permission["*"] != "deny" || config.Permission["task"] != "" {
+					t.Fatalf("skills expanded unrelated permissions: %v", config.Permission)
+				}
+				if roleID == opencode.RoleReviewer {
+					for _, flag := range []string{"OPENCODE_DISABLE_PROJECT_CONFIG=true", "OPENCODE_DISABLE_EXTERNAL_SKILLS=true", "OPENCODE_PURE=true"} {
+						if !slices.Contains(rendered.Environment(), flag) {
+							t.Errorf("Reviewer lost %s", flag)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRenderWithPolicyUsesOpenCodePolicyInsteadOfRoleName(t *testing.T) {
 	policy := role.Policy{
 		Role: "SECURITY_REVIEWER",
@@ -264,6 +313,9 @@ func TestRenderedProfileMediatesACPRequestsFromPermissionPolicy(t *testing.T) {
 		{name: "individual edit category tool", permissions: opencode.PermissionPolicy{"patch": opencode.PermissionAllow}, kind: "edit", want: "allow"},
 		{name: "individual search category tool", permissions: opencode.PermissionPolicy{"grep": opencode.PermissionAllow}, kind: "search", want: "allow"},
 		{name: "individual other category tool", permissions: opencode.PermissionPolicy{"websearch": opencode.PermissionAllow}, kind: "other", want: "allow"},
+		{name: "skill loading", permissions: opencode.PermissionPolicy{"skill": opencode.PermissionAllow}, kind: "other", want: "allow"},
+		{name: "denied skill loading", permissions: opencode.PermissionPolicy{"skill": opencode.PermissionDeny}, kind: "other", want: "reject"},
+		{name: "skills do not enable delegation", permissions: opencode.PermissionPolicy{"skill": opencode.PermissionAllow}, kind: "think", want: "reject"},
 		{name: "known denied category", permissions: opencode.PermissionPolicy{"edit": opencode.PermissionDeny}, kind: "edit", want: "reject"},
 		{name: "unknown ACP category", permissions: opencode.PermissionPolicy{"bash": opencode.PermissionAllow}, kind: "unknown", want: "reject"},
 	}
