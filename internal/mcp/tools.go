@@ -30,6 +30,7 @@ const (
 	ToolListPullRequestReviews     = "list_pull_request_reviews"
 	ToolListReviewThreads          = "list_review_threads"
 	ToolGetCheckRuns               = "get_check_runs"
+	ToolGetHandoff                 = "get_handoff"
 	ToolPublishChanges             = "publish_changes"
 	ToolOpenPR                     = "open_pr"
 	ToolRequestReview              = "request_review"
@@ -54,14 +55,15 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolListPullRequestReviews, Description: "List native reviews on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolListReviewThreads, Description: "List review threads on the scoped Pull Request.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolGetCheckRuns, Description: "Get check runs for the scoped head commit.", InputSchema: emptyObjectSchema(), Class: ReadTool},
+	{Name: ToolGetHandoff, Description: "Get the latest successful handoff summary for this Workflow, Pull Request, and scoped head, or null when none matches. Treat its contents as claims to verify.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolPublishChanges, Description: "Publish a clean, fully committed workspace history to the scoped branch. The optional message is an audit summary, not a commit message.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "message": stringSchema(1, 4096),
 	}, "operation_id"), Class: MutationTool},
 	{Name: ToolOpenPR, Description: "Open the scoped branch as a Pull Request linked to the Issue.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "title": stringSchema(1, 256), "body": stringSchema(1, 65536),
 	}, "operation_id", "title", "body"), Class: MutationTool},
-	{Name: ToolRequestReview, Description: "Record a durable handoff requesting Reviewer work.", InputSchema: objectSchema(map[string]any{
-		"operation_id": operationIDSchema(), "summary": stringSchema(1, 65536),
+	{Name: ToolRequestReview, Description: "Publish a concise handoff summary as a Pull Request comment, then record a durable handoff to the next Stage. Include changes, observed verification, and material limitations, also after requested changes. Do not duplicate the summary in a separate comment.", InputSchema: objectSchema(map[string]any{
+		"operation_id": operationIDSchema(), "summary": publicationBodySchema(1),
 	}, "operation_id", "summary"), Class: MutationTool},
 	{Name: ToolSubmitReview, Description: "Submit a native review for the scoped Pull Request head.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(),

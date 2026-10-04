@@ -4,6 +4,8 @@ status: accepted
 
 # Load repository skills from the current checkout
 
+The instruction-ownership portion of this record is superseded by [decision 0003](../decisions/0003-separate-personality-from-platform-and-workflow-guidance.md); the checkout-local skill-source decision remains in effect.
+
 Agent Profiles retain Role responsibilities and completion criteria, while native repository skills hold detailed implementation and review procedures.
 Profiles that allow the `skill` tool load skills from `.agents/skills/` in the current Agent Turn checkout, including for the Reviewer.
 This keeps procedures alongside the code they describe and avoids a separate default-branch skill bundle and its preparation and revision-tracking machinery.

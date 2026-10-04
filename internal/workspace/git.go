@@ -75,6 +75,14 @@ func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Check
 		"config", "--local", "core.hooksPath", "/dev/null"); err != nil {
 		return Paths{}, err
 	}
+	for _, identity := range []struct{ key, value string }{
+		{"user.name", "Omnigrex"}, {"user.email", "agent@omnigrex.invalid"},
+	} {
+		if err = lifecycle.git(ctx, "configure workspace commit identity", staged, "",
+			"config", "--local", identity.key, identity.value); err != nil {
+			return Paths{}, err
+		}
+	}
 	if err = lifecycle.git(ctx, "fetch exact revision", staged, checkout.Credential,
 		"fetch", "--force", "--no-tags", "origin", revision); err != nil {
 		return Paths{}, err

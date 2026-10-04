@@ -470,6 +470,7 @@ WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCC
 		var arguments struct {
 			OperationID string `json:"operation_id"`
 			Summary     string `json:"summary"`
+			Signature   string `json:"signature"`
 		}
 		var evidence struct {
 			Outcome           string `json:"outcome"`
@@ -477,10 +478,11 @@ WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCC
 			PullRequestNumber int64  `json:"pull_request_number"`
 			HeadSHA           string `json:"head_sha"`
 		}
-		if tool != "request_review" || service != "omnigrex" ||
+		if tool != "request_review" || (service != "omnigrex" && service != "github") ||
 			resource != strconv.FormatInt(proposal.RepositoryID, 10)+":"+proposal.HeadRef ||
 			expectedSHA != proposal.HeadSHA ||
 			!decodeCorroborationObject(request, &arguments) || arguments.OperationID != operation || arguments.Summary == "" ||
+			service == "github" && arguments.Signature == "" ||
 			!decodeCorroborationObject(result, &evidence) || evidence.Outcome != "REVIEW_REQUESTED" ||
 			evidence.PullRequestID != proposal.PullRequestID || evidence.PullRequestNumber != proposal.PullRequestNumber ||
 			evidence.HeadSHA != proposal.HeadSHA || observation.Outcome != workflow.TurnOutcomeChangeProposalReady {

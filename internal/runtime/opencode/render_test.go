@@ -140,6 +140,17 @@ func TestRenderRepositorySkillsRequireExplicitPermission(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsConfigurationTooLargeForEnvironment(t *testing.T) {
+	for _, instructions := range []string{strings.Repeat("x", 128<<10), strings.Repeat("<", 21000)} {
+		_, err := opencode.Render(opencode.RoleReviewer, opencode.Profile{
+			Instructions: instructions, Model: "provider/model", Steps: 1,
+		})
+		if !errors.Is(err, opencode.ErrInvalidProfile) || !strings.Contains(err.Error(), "120 KiB") {
+			t.Fatalf("oversized serialized configuration error = %v", err)
+		}
+	}
+}
+
 func TestRenderWithPolicyUsesOpenCodePolicyInsteadOfRoleName(t *testing.T) {
 	policy := role.Policy{
 		Role: "SECURITY_REVIEWER",

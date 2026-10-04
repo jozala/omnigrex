@@ -3,7 +3,9 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jozala/omnigrex/internal/role"
 )
@@ -33,12 +35,14 @@ type OutcomeTransition struct {
 
 // StageDefinition describes one stable position in a Workflow Definition.
 type StageDefinition struct {
-	ID               StageID
-	Role             Role
-	State            State
-	AcceptedPurposes []TurnPurpose
-	Transitions      []OutcomeTransition
-	ReviewLimit      uint8
+	ID                  StageID
+	Role                Role
+	State               State
+	AcceptedPurposes    []TurnPurpose
+	Transitions         []OutcomeTransition
+	ReviewLimit         uint8
+	Instructions        string
+	PurposeInstructions map[TurnPurpose]string
 }
 
 // Definition is an immutable graph of Attempt Stages and domain-outcome transitions.
@@ -72,6 +76,14 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 				return Definition{}, fmt.Errorf("%w: duplicate Purpose for Stage %q", ErrInvalidDefinition, stage.ID)
 			}
 			purposeSet[purpose] = struct{}{}
+		}
+		if !utf8.ValidString(stage.Instructions) || strings.ContainsRune(stage.Instructions, '\x00') {
+			return Definition{}, fmt.Errorf("%w: invalid Stage instructions for %q", ErrInvalidDefinition, stage.ID)
+		}
+		for purpose, instructions := range stage.PurposeInstructions {
+			if _, accepted := purposeSet[purpose]; !accepted || !utf8.ValidString(instructions) || strings.ContainsRune(instructions, '\x00') {
+				return Definition{}, fmt.Errorf("%w: invalid purpose instructions for Stage %q", ErrInvalidDefinition, stage.ID)
+			}
 		}
 		if !containsPurpose(stage.AcceptedPurposes, TurnPurposeRetry) ||
 			!containsPurpose(stage.AcceptedPurposes, TurnPurposeReactivation) ||
@@ -248,6 +260,7 @@ func (definition Definition) AcceptsPurpose(stageID StageID, purpose TurnPurpose
 func cloneStageDefinition(stage StageDefinition) StageDefinition {
 	stage.AcceptedPurposes = append([]TurnPurpose(nil), stage.AcceptedPurposes...)
 	stage.Transitions = append([]OutcomeTransition(nil), stage.Transitions...)
+	stage.PurposeInstructions = maps.Clone(stage.PurposeInstructions)
 	return stage
 }
 

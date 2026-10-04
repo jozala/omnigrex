@@ -347,6 +347,65 @@ Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `patch`.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
+### Instruction Ownership and Operator Guidance
+
+Omnigrex supplies platform instructions and the current Workflow Stage's objective, completion criteria, and purpose-specific guidance.
+Repository Agent Profiles select skills and describe personality, communication style, and repository preferences.
+Skills provide engineering procedures rather than owning platform permissions or Workflow transitions.
+
+Instruction precedence is platform and Stage contracts, operator Role guidance, operator common guidance, and repository preferences, in that order.
+This describes how guidance is interpreted; actual capabilities and transitions remain code-enforced.
+Instructions from the running deployment supersede older deployment guidance in retained Agent Session history.
+
+Optionally set `OMNIGREX_AGENT_INSTRUCTIONS_DIR` to a clean absolute path inside the orchestrator containing:
+
+```text
+agent-instructions/
+  common.md
+  roles/
+    DEVELOPER.md
+    REVIEWER.md
+```
+
+Use exact Role IDs from the deployment's Role Policy Catalog, not repository Profile names.
+The common file and individual Role files are optional; an unset directory adds no operator guidance.
+A configured missing or unreadable directory, unexpected entry, unknown Role, non-text file, invalid UTF-8, NUL byte, or file exceeding 64 KiB fails startup and the operator-instruction preflight check.
+The common and applicable Role instructions must also fit a combined 64 KiB JSON-encoded budget, including escaped characters.
+Preflight and launch validate the fully composed OpenCode configuration against a 120 KiB limit so its environment entry stays below Linux's per-string execution limit.
+Empty instruction files add no guidance.
+
+Create a Compose override alongside the deployment files, for example `compose.instructions.yaml`:
+
+```yaml
+services:
+  orchestrator:
+    environment:
+      OMNIGREX_AGENT_INSTRUCTIONS_DIR: /etc/omnigrex/instructions
+    volumes:
+      - type: bind
+        source: ./agent-instructions
+        target: /etc/omnigrex/instructions
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+Create the host directory and make its files readable by the orchestrator before starting with both Compose files.
+The directory is mounted only into the orchestrator; Runtime Processes receive composed text, not the files or host paths.
+The standard Compose bundles also forward `OMNIGREX_AGENT_INSTRUCTIONS_DIR` if set through the deployment environment, but the operator must provide the corresponding mount.
+
+Files are loaded once at orchestrator startup.
+After editing them, recreate the orchestrator with the same Compose file set, for example:
+
+```sh
+docker compose -f compose.yaml -f compose.instructions.yaml up -d --force-recreate orchestrator
+```
+
+New launches, including Session Continuation and recovery, use the running binary's core/Stage guidance and its startup-loaded operator instructions.
+There is no persisted composed-instruction snapshot to replay after an upgrade and no hot reload inside an executing Agent Turn.
+Repository Profile provenance remains separate and follows the default-branch rules below.
+See [decision 0002](./decisions/0002-use-current-deployment-agent-instructions.md) and [decision 0003](./decisions/0003-separate-personality-from-platform-and-workflow-guidance.md).
+
 ### Repository Skills
 
 Both Roles can use native OpenCode skills when their Agent Profile includes `skill: allow` under `permissions`.
@@ -366,18 +425,36 @@ description: Explain the procedure and when the agent should load it.
 Use a unique name matching the directory and put the procedure after the front matter.
 The agent sees the skill description and can load its body on demand with the skill tool.
 Put optional examples and references in the same skill directory, with explicit instructions about when to read them.
-Keep Role authority, approval criteria, and publication or Human Handoff rules in the Agent Profile.
+Keep personality, communication preferences, and skill selection in the Agent Profile; platform and Stage instructions supply operational rules and approval criteria.
 
 Skills come from the prepared working checkout, not the default-branch snapshot used for Agent Profiles.
 The Developer may initially use default-branch skills and later use Change Proposal skills; the Reviewer uses skills from its Change Proposal checkout.
 New Runtime Processes rediscover skills when continuing retained Agent Sessions, but in-process edits are not guaranteed to hot-reload.
-Omnigrex's repository Profiles require loading their Role skill on every Agent Turn and reporting a blocker when it is unavailable.
+Omnigrex's repository Profiles require loading their Role skill on each applicable Agent Turn, and platform instructions require reporting a blocker when required guidance is unavailable.
 Publish those Profiles and their required skills together so the next Turn can find them.
 For an existing Change Proposal, ensure its checkout contains any newly required skills before starting or resuming work.
 
 A Change Proposal can modify skill instructions used in its own review.
 The separate [human approval gate for skill changes](https://github.com/jozala/omnigrex/issues/43) is planned, not currently enforced.
 See [ADR 0012](./adr/0012-load-repository-skills-from-the-current-checkout.md) for the checkout-local decision and the [runtime compatibility notes](../agent/opencode/README.md#reviewer-isolation) for other Reviewer limitations.
+
+### Git Identity and Review Handoffs
+
+Workspace preparation sets repository-local `user.name=Omnigrex` and `user.email=agent@omnigrex.invalid` before the agent starts.
+This fixed identity supports normal and merge commits without agent-side setup and does not change existing commits or global Git configuration.
+
+Each new `request_review` call publishes its summary as a signed PR comment identifying the exact head before its terminal handoff can succeed.
+This applies to the initial PR and subsequent requested-changes Turns; agents should not post a duplicate summary or call `open_pr` for an existing PR.
+The next Stage waits for confirmed publication.
+An uncertain response is reconciled against the exact reserved marker, summary, and signature instead of blindly posting again.
+Existing bounded mutation recovery applies, with Human Handoff when uncertainty cannot be resolved.
+
+Both Roles can use `get_handoff` to retrieve the latest successful summary for their scoped Workflow, PR, and head.
+The response contains the durable handoff ID, head, summary, creation time, and `publication_confirmed`; it is `null` when no handoff matches.
+Historical internal-only handoffs remain readable with `publication_confirmed=false`; they are not retroactively described as published comments.
+Already completed historical intents retain their recovery compatibility, while new requests use the publication barrier.
+The Reviewer treats the summary as a claim to verify against code and test evidence.
+Native inline findings are submitted through `submit_review.comments`, with the review body reserved for findings without valid diff locations.
 
 ### Agent Turn Tool Paths
 

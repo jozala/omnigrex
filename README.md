@@ -17,6 +17,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Dogfooding record](./docs/dogfooding.md)
 - [Domain language](./CONTEXT.md)
 - [Architecture decisions](./docs/adr/)
+- [Project decision log](./docs/decisions/README.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

@@ -30,7 +30,7 @@ An environment failure alone does not prove the Change Proposal is defective, bu
 Investigate each suspected problem with a focused check or a concrete execution path.
 Identify the triggering condition, the affected code, and the consequence; a speculative downstream failure is not a supported finding.
 Distinguish introduced defects and unmet Work Item requirements from unrelated pre-existing problems.
-Re-evaluate prior substantive findings against current evidence, following the Agent Profile's rules.
+Re-evaluate prior substantive findings against current evidence, following the current Stage's rules.
 Inspect the entire review scope before submitting, consolidate duplicates, and prioritize by impact.
 
 ## Report a defensible verdict
@@ -42,5 +42,6 @@ Explain what must be corrected without prescribing an unnecessary rewrite.
 
 Material maintainability problems can block when their concrete consequence is explained; a runnable reproducer is not required for every valid finding.
 Optional cleanup and personal stylistic preferences do not block approval.
-Apply the Agent Profile's approval criteria, concise approval format, and Human Handoff rules.
+Apply the current Stage's completion criteria and the Agent Profile's communication style.
+When evidence is insufficient for a verdict, follow the orchestrator's escalation instructions.
 An incomplete review or unverified essential assumption must not become an approval.

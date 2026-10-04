@@ -114,7 +114,7 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 	case ToolSubmitReview:
 		return reconciler.reconcileReview(ctx, reconciliation, mutation, marker)
 	case ToolRequestReview:
-		return reconciler.reconcileRequestReview(ctx, reconciliation, mutation)
+		return reconciler.reconcileRequestReview(ctx, reconciliation, mutation, marker)
 	case ToolReportBlocked:
 		return reconcileReportBlocked(reconciliation, mutation)
 	default:
@@ -441,44 +441,76 @@ func inlineCommentMatches(got githubapi.ReviewComment, want reservedReviewCommen
 	return want.StartSide != "" && start != nil && *start == want.StartLine && got.StartSide == string(want.StartSide)
 }
 
-func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
+func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string) (MutationReconciliationResult, error) {
 	var request struct {
-		Summary string `json:"summary"`
+		Summary   string `json:"summary"`
+		Signature string `json:"signature"`
 	}
-	if mutation.ExternalService != "omnigrex" || !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Summary) == "" {
+	if (mutation.ExternalService != "omnigrex" && mutation.ExternalService != "github") || !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Summary) == "" ||
+		mutation.ExternalService == "github" && request.Signature == "" {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	branch, resourceOK := exactBranchResource(mutation.ExternalResourceID, reconciliation.Repository.ID)
-	if !resourceOK || !exactTurnExpectedHead(reconciliation, mutation) {
+	// A returning Developer may have published a newer head during this Turn.
+	// Its server-reserved head and exact comment prove the new handoff; the
+	// original Turn head is only the starting revision, not the publication tip.
+	if !resourceOK || !validRevision(mutation.ExpectedSHA) || mutation.ExternalService == "omnigrex" && !exactTurnExpectedHead(reconciliation, mutation) {
 		return unresolvedReconciliation(), nil
 	}
+	var pullRequestID, number int64
 	if proposal := reconciliation.ChangeProposal; proposal != nil {
 		if proposal.HeadRef != branch {
 			return unresolvedReconciliation(), nil
 		}
-		return foundReviewRequest(proposal.PullRequestID, proposal.PullRequestNumber, mutation.ExpectedSHA)
+		pullRequestID, number = proposal.PullRequestID, proposal.PullRequestNumber
+		if mutation.ExternalService == "omnigrex" {
+			return foundReviewRequest(pullRequestID, number, mutation.ExpectedSHA)
+		}
 	}
 
 	credential, err := reconciler.credentialForTool(ctx, reconciliation.Role, ToolRequestReview, reconciliation.Repository)
 	if err != nil {
 		return MutationReconciliationResult{}, err
 	}
-	pullRequests, err := reconciler.github.ListPullRequests(ctx, credential, reconciliation.Repository.Owner, reconciliation.Repository.Name, githubapi.ListPullRequestsRequest{Head: branch})
-	if err != nil {
-		return MutationReconciliationResult{}, dependencyError("discover review Pull Request")
+	if pullRequestID == 0 {
+		pullRequests, err := reconciler.github.ListPullRequests(ctx, credential, reconciliation.Repository.Owner, reconciliation.Repository.Name, githubapi.ListPullRequestsRequest{Head: branch})
+		if err != nil {
+			return MutationReconciliationResult{}, dependencyError("discover review Pull Request")
+		}
+		matches := make([]githubapi.PullRequest, 0, 1)
+		for _, pullRequest := range pullRequests {
+			if pullRequest.Head.Ref == branch &&
+				hasAssignmentMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID) &&
+				strings.Contains(pullRequest.Body, fmt.Sprintf("Closes #%d", reconciliation.Issue.Number)) {
+				matches = append(matches, pullRequest)
+			}
+		}
+		if len(matches) != 1 {
+			return unresolvedReconciliation(), nil
+		}
+		pullRequestID, number = matches[0].ID, int64(matches[0].Number)
 	}
-	matches := make([]githubapi.PullRequest, 0, 1)
-	for _, pullRequest := range pullRequests {
-		if pullRequest.Head.Ref == branch &&
-			hasAssignmentMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID) &&
-			strings.Contains(pullRequest.Body, fmt.Sprintf("Closes #%d", reconciliation.Issue.Number)) {
-			matches = append(matches, pullRequest)
+	if mutation.ExternalService == "github" {
+		comments, err := reconciler.github.ListIssueComments(ctx, credential, reconciliation.Repository.Owner, reconciliation.Repository.Name, int(number))
+		if err != nil {
+			return MutationReconciliationResult{}, dependencyError("observe handoff publication")
+		}
+		expected := githubapi.JoinBodyParts(githubapi.AppendSignature(reviewHandoffBody(request.Summary, mutation.ExpectedSHA), request.Signature), marker)
+		matches := 0
+		for _, comment := range comments {
+			if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
+				continue
+			}
+			if _, err := encodeCommentResult(comment); err != nil || comment.Body != expected {
+				return unresolvedReconciliation(), nil
+			}
+			matches++
+		}
+		if matches != 1 {
+			return unresolvedReconciliation(), nil
 		}
 	}
-	if len(matches) != 1 {
-		return unresolvedReconciliation(), nil
-	}
-	return foundReviewRequest(matches[0].ID, int64(matches[0].Number), mutation.ExpectedSHA)
+	return foundReviewRequest(pullRequestID, number, mutation.ExpectedSHA)
 }
 
 func reconcileReportBlocked(reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {

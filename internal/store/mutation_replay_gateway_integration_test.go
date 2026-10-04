@@ -68,6 +68,13 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2", "message": "Second"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolOpenPR, map[string]any{"operation_id": "open-1", "title": "Changes", "body": "Ready"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
+	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
+	github.mutex.Lock()
+	commentCount := len(github.comments)
+	github.mutex.Unlock()
+	if commentCount != 1 {
+		t.Fatalf("replayed handoff published %d comments, want one", commentCount)
+	}
 
 	if publisher.callCount() != 2 || github.openCallCount() != 1 || workflowMutations.callCount() != 1 {
 		t.Fatalf("external calls after replay = publishes %d, opens %d, review requests %d", publisher.callCount(), github.openCallCount(), workflowMutations.callCount())
@@ -316,14 +323,16 @@ func (workflowBackend *replayGatewayWorkflow) callCount() int {
 }
 
 type replayGatewayGitHub struct {
-	mutex     sync.Mutex
-	head      string
-	branch    string
-	base      string
-	title     string
-	body      string
-	openCalls int
-	getCalls  int
+	mutex      sync.Mutex
+	head       string
+	branch     string
+	base       string
+	title      string
+	body       string
+	openCalls  int
+	getCalls   int
+	comments   []githubapi.IssueComment
+	commentErr error
 }
 
 func (github *replayGatewayGitHub) pullRequest() githubapi.PullRequest {
@@ -338,8 +347,10 @@ func (github *replayGatewayGitHub) pullRequest() githubapi.PullRequest {
 func (*replayGatewayGitHub) GetIssue(context.Context, string, string, string, int) (githubapi.Issue, error) {
 	return githubapi.Issue{}, errors.New("unexpected call")
 }
-func (*replayGatewayGitHub) ListIssueComments(context.Context, string, string, string, int) ([]githubapi.IssueComment, error) {
-	return nil, errors.New("unexpected call")
+func (github *replayGatewayGitHub) ListIssueComments(context.Context, string, string, string, int) ([]githubapi.IssueComment, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	return append([]githubapi.IssueComment(nil), github.comments...), nil
 }
 func (github *replayGatewayGitHub) GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error) {
 	github.mutex.Lock()
@@ -347,8 +358,10 @@ func (github *replayGatewayGitHub) GetPullRequest(context.Context, string, strin
 	github.getCalls++
 	return github.pullRequest(), nil
 }
-func (*replayGatewayGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
-	return nil, errors.New("unexpected call")
+func (github *replayGatewayGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	return []githubapi.PullRequest{github.pullRequest()}, nil
 }
 func (*replayGatewayGitHub) ListPullRequestFiles(context.Context, string, string, string, int) ([]githubapi.PullRequestFile, error) {
 	return nil, errors.New("unexpected call")
@@ -373,8 +386,12 @@ func (github *replayGatewayGitHub) OpenPullRequest(_ context.Context, _, _, _ st
 func (*replayGatewayGitHub) CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {
 	return githubapi.IssueComment{}, errors.New("unexpected call")
 }
-func (*replayGatewayGitHub) CreatePullRequestComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error) {
-	return githubapi.IssueComment{}, errors.New("unexpected call")
+func (github *replayGatewayGitHub) CreatePullRequestComment(_ context.Context, _, _, _ string, _ int, request githubapi.CommentRequest) (githubapi.IssueComment, error) {
+	github.mutex.Lock()
+	defer github.mutex.Unlock()
+	comment := githubapi.IssueComment{ID: int64(700 + len(github.comments)), NodeID: "IC_handoff", HTMLURL: "https://github.com/owner/repo/pull/23#issuecomment-700", Body: githubapi.JoinBodyParts(request.Body, request.Marker)}
+	github.comments = append(github.comments, comment)
+	return comment, github.commentErr
 }
 func (*replayGatewayGitHub) SubmitReview(context.Context, string, string, string, int, githubapi.ReviewRequest) (githubapi.Review, error) {
 	return githubapi.Review{}, errors.New("unexpected call")

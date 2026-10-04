@@ -41,4 +41,4 @@ Evidence must apply to the final changes: rerun checks invalidated by subsequent
 Verify each substantive finding against the current code and requirements before acting on it.
 Fix supported defects with regression coverage where practical, and recheck affected behavior.
 Explain disagreements with code, requirements, or test evidence rather than automatic agreement or dismissal.
-Escalate unresolved requirements conflicts through the Agent Profile's Human Handoff rules.
+Escalate unresolved requirements conflicts using the orchestrator's current instructions.

@@ -38,6 +38,9 @@ The writable paths are:
 Provider credentials must be supplied through process environment variables and must not be written to the persistent OpenCode data directory.
 `OPENCODE_AUTH_CONTENT={}` prevents credentials from being sourced from a persisted auth file.
 Automatic updates and session sharing are disabled through both environment guards and runtime-owned inline configuration.
+The orchestrator composes current platform, Stage, operator, and repository instructions before rendering the custom OpenCode agent prompt on each launch.
+Retained Agent Sessions receive the new deployment guidance when a fresh Runtime Process continues them; composed prompts are not restored from a historical instruction snapshot.
+See [Instruction Ownership and Operator Guidance](../../docs/operator-guide.md#instruction-ownership-and-operator-guidance).
 
 ## Reviewer Isolation
 

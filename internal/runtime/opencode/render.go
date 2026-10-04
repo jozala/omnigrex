@@ -3,6 +3,7 @@ package opencode
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path"
 	"strings"
 	"unicode"
@@ -150,6 +151,12 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 	config, err := json.Marshal(payload)
 	if err != nil {
 		return nil, ErrInvalidProfile
+	}
+	// Linux with 4 KiB pages limits each execve environment string to 128 KiB.
+	// Reserve headroom for the variable name and terminating byte, and validate
+	// encoded bytes because JSON escaping can significantly expand the prompt.
+	if len(config) > 120<<10 {
+		return nil, fmt.Errorf("%w: composed OpenCode configuration exceeds 120 KiB", ErrInvalidProfile)
 	}
 
 	environ := []string{

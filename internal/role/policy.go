@@ -104,7 +104,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 		Developer: {
 			Role: Developer,
 			MCPTools: []string{
-				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
+				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 				"publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
@@ -115,7 +115,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 		Reviewer: {
 			Role: Reviewer,
 			MCPTools: []string{
-				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
+				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 				"submit_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RequiresChangeProposal: true, RepositoryCredentialAuthority: OrchestratorAuthority,

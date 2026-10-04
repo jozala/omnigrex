@@ -76,6 +76,43 @@ func TestLifecyclePreparesExactCredentialFreeWorkspace(t *testing.T) {
 	}
 }
 
+func TestPreparedWorkspaceCanCommitAndMergeWithoutAgentIdentitySetup(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	fixture := newGitFixture(t)
+	lifecycle := newLifecycle(t)
+	checkout := workspace.Checkout{AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first, ExecutionEpoch: 1}
+	paths, err := lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Workspace, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, paths.Workspace, "add", "feature.txt")
+	gitRun(t, paths.Workspace, "commit", "-m", "feature")
+	want := "Omnigrex <agent@omnigrex.invalid>|Omnigrex <agent@omnigrex.invalid>"
+	if got := gitOutput(t, paths.Workspace, "log", "-1", "--format=%an <%ae>|%cn <%ce>"); got != want {
+		t.Fatalf("commit identity = %q, want %q", got, want)
+	}
+	gitRun(t, paths.Workspace, "merge", "--no-ff", "-m", "merge main", fixture.second)
+	if got := gitOutput(t, paths.Workspace, "log", "-1", "--format=%an <%ae>|%cn <%ce>"); got != want {
+		t.Fatalf("merge identity = %q, want %q", got, want)
+	}
+	if got := gitOutput(t, paths.Workspace, "log", "-1", "--format=%P"); len(strings.Fields(got)) != 2 {
+		t.Fatalf("merge parents = %q", got)
+	}
+	checkout.ExecutionEpoch++
+	checkout.Revision = fixture.second
+	paths, err = lifecycle.PrepareWorkspace(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOutput(t, paths.Workspace, "var", "GIT_AUTHOR_IDENT"); !strings.HasPrefix(got, "Omnigrex <agent@omnigrex.invalid> ") {
+		t.Fatalf("replacement workspace identity = %q", got)
+	}
+}
+
 func TestLifecycleReplacesReadOnlyAgentCacheWithoutFollowingSymlinks(t *testing.T) {
 	fixture := newGitFixture(t)
 	root := t.TempDir()

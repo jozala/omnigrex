@@ -58,7 +58,7 @@ func TestDeveloperListsOnlyItsFixedConcreteToolSetAfterInitialization(t *testing
 		t.Fatalf("decode tools/list: %v", err)
 	}
 	want := []string{
-		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs",
+		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 		"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked", "confirm_prior_terminal_intent",
 	}
 	got := make([]string, len(payload.Result.Tools))
@@ -432,15 +432,15 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 	if firstProposed != firstHead || secondProposed != secondHead {
 		t.Fatalf("durable proposed publication tips = (%q, %q), want (%q, %q)", firstProposed, secondProposed, firstHead, secondHead)
 	}
-	if specs[4].ExternalService != "omnigrex" || specs[4].ExternalResourceID != "9123:omnigrex/issue-12" {
+	if specs[4].ExternalService != "github" || specs[4].ExternalResourceID != "9123:omnigrex/issue-12" {
 		t.Fatalf("request_review reservation metadata = %#v", specs[4])
 	}
 	if specs[3].ExternalService != "github" || specs[3].ExternalResourceID != "9123:omnigrex/issue-12:main" {
 		t.Fatalf("open_pr reservation metadata = %#v", specs[3])
 	}
 	for index, spec := range specs {
-		if strings.Contains(string(spec.Request), `"signature"`) {
-			t.Errorf("reservation %d (%s) request contains a signature field: %s", index+1, spec.ToolName, spec.Request)
+		if got, want := strings.Contains(string(spec.Request), `"signature"`), spec.ToolName == mcp.ToolRequestReview; got != want {
+			t.Errorf("reservation %d (%s) signature present = %t, want %t", index+1, spec.ToolName, got, want)
 		}
 	}
 	wantMarker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: testMutationID(3)})

@@ -292,6 +292,7 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 - Developer and Reviewer sessions cannot see each other's runtime state.
 - A stale control revision cannot submit a prompt.
 - Mutable Agent Profile changes on the default branch apply to the next turn without changing session identity.
+- Current code-owned platform/Stage instructions and startup-loaded operator common/per-Role guidance are composed for every launch, including Session Continuation; see [decision 0002](./decisions/0002-use-current-deployment-agent-instructions.md).
 - A Runtime Profile reference change cannot mutate an existing Assignment.
 - The effective OpenCode model, variant, steps, and permissions match the latest permitted Agent Profile values.
 - A Pull Request cannot replace the default-branch Reviewer Agent Profile or its effective permissions through project configuration; checkout-local skills are the deliberate instruction-source exception in ADR 0012, with plugin and nested-instruction limitations qualified separately.
@@ -311,6 +312,7 @@ Its GitHub App webhook is disabled rather than merely left without selected repo
 - Serialize provisioning of one Assignment's mise data across Runtime Processes so a stale Turn cannot replace a successor's installed tools.
 - Use the Developer workspace mise revision for Developer Turns and the latest default-branch mise configuration and lock data for Reviewer Turns.
 - Keep feature-branch mise files visible for review without evaluating or executing them.
+- Configure the fixed repository-local Git identity during staged workspace preparation so agents can commit and merge without prompt-driven setup.
 - Prepare publication in a clean checkout that the agent cannot modify.
 - Copy the agent's file tree without its Git metadata into the clean checkout.
 - Disable Git hooks and validate the expected base and branch before every commit and push.

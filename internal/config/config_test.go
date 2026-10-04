@@ -15,6 +15,22 @@ import (
 
 const deploymentImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestLoadOperatorInstructionsDirectory(t *testing.T) {
+	for _, test := range []struct {
+		path  string
+		valid bool
+	}{{"", true}, {"/etc/omnigrex/instructions", true}, {"relative/instructions", false}, {"/etc/../instructions", false}} {
+		got, err := config.Load(environment(map[string]string{"OMNIGREX_AGENT_INSTRUCTIONS_DIR": test.path}))
+		if test.valid {
+			if err != nil || got.AgentInstructionsDir != test.path {
+				t.Fatalf("instructions directory %q = %q, %v", test.path, got.AgentInstructionsDir, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "OMNIGREX_AGENT_INSTRUCTIONS_DIR") {
+			t.Fatalf("invalid instructions directory %q error = %v", test.path, err)
+		}
+	}
+}
+
 func TestLoadUsesDefaults(t *testing.T) {
 	got, err := config.Load(environment(nil))
 	if err != nil {

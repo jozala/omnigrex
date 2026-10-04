@@ -46,7 +46,7 @@ func (backend *ProductionBackend) confirmPriorTerminalIntent(ctx context.Context
 	var reviewActor int64
 	switch invocation.Scope.Role {
 	case workflow.RoleDeveloper:
-		if source.ToolName != ToolRequestReview || source.ExternalService != "omnigrex" ||
+		if source.ToolName != ToolRequestReview || (source.ExternalService != "omnigrex" && source.ExternalService != "github") ||
 			source.ExternalResourceID != fmt.Sprintf("%d:%s", invocation.Scope.Repository.ID, invocation.Scope.Branch) {
 			return nil, ErrToolPrecondition
 		}

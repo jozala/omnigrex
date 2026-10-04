@@ -840,7 +840,7 @@ func validRequestMetadata(raw json.RawMessage) bool {
 
 func scopeAllowsTool(scope TokenScope, tool string) bool {
 	switch tool {
-	case ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads,
+	case ToolGetPullRequest, ToolGetHandoff, ToolListPullRequestReviews, ToolListReviewThreads,
 		ToolSubmitReview, ToolCommentOnPullRequest:
 		return scope.PullRequest != nil
 	case ToolOpenPR:
@@ -1264,7 +1264,6 @@ func mutationMetadata(tool string, scope TokenScope) MutationMetadata {
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s:%s", scope.Repository.ID, scope.Branch, scope.DefaultBranch)
 		metadata.ExpectedSHA = scope.HeadSHA
 	case ToolRequestReview:
-		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
 		metadata.ExpectedSHA = scope.HeadSHA
 	case ToolReportBlocked:
@@ -1300,7 +1299,7 @@ func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 // posting, and never truncates agent text. Any agent-supplied signature is
 // replaced with the validated participant identity.
 func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessage, scope TokenScope) (json.RawMessage, string) {
-	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview {
+	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
 		return args, ""
 	}
 	var object map[string]json.RawMessage
@@ -1312,6 +1311,15 @@ func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessa
 	}
 	if json.Unmarshal(args, &body) != nil {
 		return nil, "invalid tool arguments"
+	}
+	if tool == ToolRequestReview {
+		var handoff struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(args, &handoff) != nil {
+			return nil, "invalid tool arguments"
+		}
+		body.Body = reviewHandoffBody(handoff.Summary, scope.HeadSHA)
 	}
 	var inline []string
 	if tool == ToolSubmitReview {
@@ -1378,7 +1386,7 @@ const postedBodyTooLongMessage = "comment body with signature exceeds GitHub lim
 // backend publishes them unsigned, exactly as recovery expects. Tools
 // without a signature footer are returned untouched.
 func ensureReservationSignature(tool string, request json.RawMessage) json.RawMessage {
-	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview {
+	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
 		return request
 	}
 	var object map[string]json.RawMessage

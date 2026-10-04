@@ -105,6 +105,7 @@ type Config struct {
 	AssignmentToolCacheWarningBytes        int64
 	AssignmentToolCachePollInterval        time.Duration
 	AgentPathEnvironmentAllowlist          []string
+	AgentInstructionsDir                   string
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
 	ShutdownTimeout                        time.Duration
@@ -135,6 +136,7 @@ func (err *ValidationError) Problems() []error {
 
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
+		AgentInstructionsDir:                   getenv("OMNIGREX_AGENT_INSTRUCTIONS_DIR"),
 		DatabaseURL:                            valueOrDefault(getenv("OMNIGREX_DATABASE_URL"), defaultDatabaseURL),
 		DatabasePasswordSecretFile:             valueOrDefault(getenv("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE"), defaultDatabasePasswordSecretFile),
 		DockerAgentNetwork:                     valueOrDefault(getenv("OMNIGREX_DOCKER_AGENT_NETWORK"), defaultDockerAgentNetwork),
@@ -182,6 +184,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var problems []error
+	if config.AgentInstructionsDir != "" && (!filepath.IsAbs(config.AgentInstructionsDir) || filepath.Clean(config.AgentInstructionsDir) != config.AgentInstructionsDir) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_INSTRUCTIONS_DIR must be a clean absolute path"))
+	}
 	databaseURL, err := url.Parse(config.DatabaseURL)
 	if err != nil || (databaseURL.Scheme != "postgres" && databaseURL.Scheme != "postgresql") {
 		problems = append(problems, fmt.Errorf("OMNIGREX_DATABASE_URL must be a PostgreSQL URL"))

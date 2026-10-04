@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -17,8 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
@@ -362,6 +366,14 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			}
 			profileConfig["permissions"].(map[string]any)["skill"] = "allow"
 			execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
+			instructionsDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(instructionsDir, "common.md"), []byte("CURRENT_OPERATOR_GUIDANCE"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			operator, err := agentinstructions.Load(instructionsDir, role.BuiltinPolicyCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
 			miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 			workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 				DataDir: miseDir, SourceRevision: testCase.wantMiseRevision,
@@ -379,7 +391,8 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 				Workspace: workspaces, Gateway: gateway, Docker: engineFactory,
 				ACP: clientFactory, Sessions: sessions,
-				Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+				OperatorInstructions: operator,
+				Network:              "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 			})
 
 			handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -411,6 +424,9 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			}
 			assertRuntimeMCPPermissions(t, engineFactory.engine.spec.Environment, testCase.role)
 			var config struct {
+				Agent map[string]struct {
+					Prompt string `json:"prompt"`
+				} `json:"agent"`
 				Skills struct {
 					Paths []string `json:"paths"`
 				} `json:"skills"`
@@ -427,6 +443,10 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			}
 			if !slices.Equal(config.Skills.Paths, []string{"/workspace/.agents/skills"}) {
 				t.Fatalf("launched skill paths = %v, want prepared checkout", config.Skills.Paths)
+			}
+			prompt := config.Agent["omnigrex-"+strings.ToLower(string(testCase.role))].Prompt
+			if !strings.Contains(prompt, "CURRENT_OPERATOR_GUIDANCE") || !strings.Contains(prompt, "Current Stage: "+string(execution.Turn.Stage)) || !strings.Contains(prompt, "Omnigrex platform instructions") {
+				t.Fatal("launch omitted current deployment or Stage instructions")
 			}
 			assertRuntimePermissionDecision(t, clientFactory.options, "skill", "other", "allow")
 			assertRuntimePermissionDecision(t, clientFactory.options, "task", "think", "reject")
@@ -1382,15 +1402,20 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"opencode-acp/v1","steps":50}`)
 	}
 	stage := workflow.StageImplementation
+	purpose := workflow.TurnPurposeInitialDevelopment
+	if proposal != nil {
+		purpose = workflow.TurnPurposeRequestedChanges
+	}
 	if role == workflow.RoleReviewer {
 		stage = workflow.StageReview
+		purpose = workflow.TurnPurposeReview
 	}
 	binding := store.AssignmentRuntimeBinding{
 		AgentProfileName: profileName, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
 		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeTestImage,
 	}
 	turn := store.AgentTurn{
-		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, Stage: stage, ControlRevision: 9, AgentProfileConfig: config},
+		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, Stage: stage, Purpose: purpose, ControlRevision: 9, AgentProfileConfig: config},
 		ID:            runtimeTestTurn, AgentAssignmentID: runtimeTestAssignment, ExecutionEpoch: 7, CreatedAt: now,
 	}
 	if proposal != nil {
