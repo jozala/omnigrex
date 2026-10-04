@@ -64,7 +64,8 @@ func main() {
 		}
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(logger)
 	settings, err := config.Load(os.Getenv)
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
@@ -206,7 +207,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		IdlePollInterval:  settings.AgentTurnPreparationPollInterval,
 		RetryDelay:        settings.AgentTurnPreparationRetryDelay,
 		OnError: func(err error) {
-			logger.Error("prepare Agent Turn", "error", err)
+			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "prepare Agent Turn", "error", err)
 		},
 	})
 	if err != nil {
@@ -263,7 +264,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		IdlePollInterval:  settings.AgentTurnPreparationPollInterval,
 		RetryDelay:        settings.AgentTurnPreparationRetryDelay,
 		OnError: func(err error) {
-			logger.Error("reconcile Agent Turn mutations", "error", err)
+			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "reconcile Agent Turn mutations", "error", err)
 		},
 	})
 	if err != nil {
@@ -343,7 +344,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		CleanupRetryInterval: settings.AgentTurnPreparationRetryDelay,
 		Policies:             rolePolicies,
 		OnError: func(err error) {
-			logger.Error("stop stale Runtime Process", "error", err)
+			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "stop stale Runtime Process", "error", err)
 		},
 	})
 	if err != nil {
@@ -380,7 +381,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
 		Launcher: runtimeLauncher, Sessions: sessions,
-		Outcomes:            loggingOutcomeReconciler{delegate: outcomeReconciler, logger: logger},
+		Outcomes:            outcomeReconciler,
 		Workspace:           workspaces,
 		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
 		Policies:            rolePolicies,
@@ -392,7 +393,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		ConcurrencyLimit: settings.AgentTurnConcurrencyLimit, ProviderCredentialJSON: providerCredentialJSON,
 		GitRemoteBaseURL: settings.GitRemoteBaseURL,
 		OnError: func(err error) {
-			logger.Error("execute Agent Turn", "error", err)
+			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "execute Agent Turn", "error", err)
 		},
 	})
 	zeroBytes(providerCredentialJSON)
@@ -406,8 +407,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			Window:        settings.TerminalCorroborationDuration,
 			PollInterval:  settings.WorkflowEffectPollInterval,
 			LeaseDuration: max(settings.WorkflowEffectLeaseDuration, 3*time.Second),
-			OnError: func(error) {
-				logger.Error("verify terminal intent", "failure_code", "verification_attempt_unavailable")
+			OnError: func(err error) {
+				logger.ErrorContext(telemetry.ErrorContext(ctx, err), "verify terminal intent", "failure_code", "verification_attempt_unavailable")
 			},
 		})
 	if err != nil {
@@ -593,29 +594,6 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		"failure_class", failureClass,
 	)
 	return nil
-}
-
-type loggingOutcomeReconciler struct {
-	delegate agentturn.ExecutionOutcomeReconciler
-	logger   *slog.Logger
-}
-
-func (reconciler loggingOutcomeReconciler) Reconcile(ctx context.Context, request agentturn.OutcomeReconciliation) (store.AgentTurnSettlementObservation, error) {
-	observation, err := reconciler.delegate.Reconcile(ctx, request)
-	if err != nil || reconciler.logger == nil {
-		return observation, err
-	}
-	reconciler.logger.Info("Agent Turn outcome reconciled",
-		"workflow_id", request.Execution.WorkflowID,
-		"assignment_id", request.Execution.Assignment.ID,
-		"agent_session_id", request.Execution.Session.ID,
-		"agent_turn_id", request.Execution.Turn.ID,
-		"execution_epoch", request.Execution.Turn.ExecutionEpoch,
-		"role", request.Execution.Assignment.Role,
-		"status", observation.Completion.Status,
-		"outcome", observation.Outcome,
-	)
-	return observation, nil
 }
 
 type runtimeProcessInventory interface {
@@ -806,7 +784,7 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 		RetryDelay:                  settings.WorkflowEffectRetryDelay,
 		AssignmentRetentionDuration: settings.AssignmentRetentionDuration,
 		OnError: func(err error) {
-			logger.Error("process GitHub Workflow webhook delivery", "error", err)
+			logger.ErrorContext(telemetry.ErrorContext(context.Background(), err), "process GitHub Workflow webhook delivery", "error", err)
 		},
 	}
 	processor, err := webhook.NewProcessor(database, processorConfig)
@@ -815,7 +793,9 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	}
 	processorConfig.ClaimOwner = claimOwner + ":provisioning-webhook"
 	processorConfig.Enumerator = installationEnumerator
-	processorConfig.OnError = func(err error) { logger.Error("process GitHub provisioning webhook delivery", "error", err) }
+	processorConfig.OnError = func(err error) {
+		logger.ErrorContext(telemetry.ErrorContext(context.Background(), err), "process GitHub provisioning webhook delivery", "error", err)
+	}
 	provisioningProcessor, err := webhook.NewProvisioningProcessor(database, processorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("configure GitHub provisioning webhook processor: %w", err)

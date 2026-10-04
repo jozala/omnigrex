@@ -161,6 +161,8 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 
 // Reconcile reads the closed terminal ledger and corroborates its sole successful terminal intent.
 func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request OutcomeReconciliation) (observation store.AgentTurnSettlementObservation, err error) {
+	ctx, finish := startReconciliation(ctx, request)
+	defer func() { finish(observation, &err) }()
 	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
 	}
@@ -184,6 +186,8 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 // settled mutation ledger. It does not obtain or confer a live Agent Turn
 // lease; the Store must fence its source before providing these records.
 func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, request OutcomeReconciliation, mutations []store.MutationReservation) (observation store.AgentTurnSettlementObservation, err error) {
+	ctx, finish := startReconciliation(ctx, request)
+	defer func() { finish(observation, &err) }()
 	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
 	}
@@ -465,7 +469,7 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(result.PullRequestNumber))
 	if err != nil {
-		reconciler.logGitHubObservationFailure(request, "get_pull_request", result.PullRequestNumber, err)
+		reconciler.logGitHubObservationFailure(ctx, request, "get_pull_request", result.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Developer Pull Request observation failed")
 	}
@@ -572,7 +576,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
 	if err != nil {
-		reconciler.logGitHubObservationFailure(request, "get_pull_request", proposalScope.PullRequestNumber, err)
+		reconciler.logGitHubObservationFailure(ctx, request, "get_pull_request", proposalScope.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Reviewer Pull Request observation failed")
 	}
@@ -582,7 +586,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	reviews, err := reconciler.listPullRequestReviews(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
 		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
 	if err != nil {
-		reconciler.logGitHubObservationFailure(request, "list_pull_request_reviews", proposalScope.PullRequestNumber, err)
+		reconciler.logGitHubObservationFailure(ctx, request, "list_pull_request_reviews", proposalScope.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
 		return failure("fresh Pull Request review observation failed")
 	}
@@ -712,7 +716,7 @@ func shortRetryableGitHubObservation(err error) bool {
 
 // Log only reconciler-authored classifications and allowlisted GitHub response
 // metadata. Dependency errors can contain credentials or response bodies.
-func (reconciler *OutcomeReconciler) logGitHubObservationFailure(request OutcomeReconciliation, operation string, pullRequestNumber int64, err error) {
+func (reconciler *OutcomeReconciler) logGitHubObservationFailure(ctx context.Context, request OutcomeReconciliation, operation string, pullRequestNumber int64, err error) {
 	if reconciler.logger == nil {
 		return
 	}
@@ -729,7 +733,7 @@ func (reconciler *OutcomeReconciler) logGitHubObservationFailure(request Outcome
 	if failure.status != 0 {
 		attributes = append(attributes, "github_http_status", failure.status)
 	}
-	reconciler.logger.Warn("Agent Turn GitHub outcome observation failed", attributes...)
+	reconciler.logger.WarnContext(ctx, "Agent Turn GitHub outcome observation failed", attributes...)
 }
 
 type openPullRequestEvidence struct {

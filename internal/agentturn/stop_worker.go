@@ -11,8 +11,10 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // StopWorkerStore is the durable recovery-job boundary used by StopWorker.
@@ -92,7 +94,7 @@ func NewStopWorker(workerStore StopWorkerStore, cleaner ExactRuntimeCleaner, wor
 }
 
 // ProcessNext claims and handles at most one STOP_STALE_RUNTIME recovery job.
-func (worker *StopWorker) ProcessNext(ctx context.Context) (bool, error) {
+func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err error) {
 	lease, err := worker.store.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, worker.claimOwner, worker.leaseDuration)
 	if err != nil {
 		return false, fmt.Errorf("claim stale Runtime Process stop: %w", err)
@@ -100,6 +102,8 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (bool, error) {
 	if lease == nil {
 		return false, nil
 	}
+	ctx, operation := telemetry.StartOperation(ctx, telemetry.RuntimeProcessCleanup, jobAttributes(*lease)...)
+	defer finishOperation(ctx, operation, &err)
 	labels, err := recoveryRuntimeLabels(*lease)
 	if err != nil {
 		return true, err
@@ -159,6 +163,7 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	if err != nil {
 		return fmt.Errorf("read stale Runtime Process cleanup context: %w", err)
 	}
+	telemetry.AddAttributes(ctx, attribute.String("role", string(cleanup.Role)))
 	if cleanup.RuntimeProfileName == "" || cleanup.RuntimeProfileVersion == "" {
 		return errors.New("stale Runtime Process has no immutable Runtime Profile identity")
 	}

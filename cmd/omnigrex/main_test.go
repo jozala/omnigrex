@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/doctor"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
@@ -23,7 +22,6 @@ import (
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 func TestDoctorCommandReportsAllChecksAndFailsWhenAnyCheckFails(t *testing.T) {
@@ -131,24 +129,8 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	reconciler := loggingOutcomeReconciler{
-		delegate: mainTestOutcomeReconciler{observation: store.AgentTurnSettlementObservation{
-			Outcome: workflow.TurnOutcomeInfrastructureFailed, Diagnostic: "arbitrary agent diagnostic with provider-value-sentinel",
-			Completion: store.AgentTurnCompletion{Status: store.AgentTurnFailed},
-		}},
-		logger: logger,
-	}
-	_, err := reconciler.Reconcile(context.Background(), agentturn.OutcomeReconciliation{Execution: store.AgentTurnExecutionContext{
-		WorkflowID: "workflow-1",
-		Assignment: store.AgentAssignment{ID: "assignment-1", Role: workflow.RoleDeveloper},
-		Session:    store.AgentSession{ID: "session-1"},
-		Turn:       store.AgentTurn{ID: "turn-1", ExecutionEpoch: 2},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	logged := output.String()
-	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted", "Agent Turn outcome reconciled", `"status":"FAILED"`, `"outcome":"INFRASTRUCTURE_FAILED"`} {
+	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("operational logs do not contain %q: %s", want, logged)
 		}
@@ -191,14 +173,6 @@ func TestAgentEventLogFallbackDoesNotChangeMetadataOrSuccessfulUpdates(t *testin
 			}
 		})
 	}
-}
-
-type mainTestOutcomeReconciler struct {
-	observation store.AgentTurnSettlementObservation
-}
-
-func (reconciler mainTestOutcomeReconciler) Reconcile(context.Context, agentturn.OutcomeReconciliation) (store.AgentTurnSettlementObservation, error) {
-	return reconciler.observation, nil
 }
 
 func TestReadNonemptyJSONObject(t *testing.T) {

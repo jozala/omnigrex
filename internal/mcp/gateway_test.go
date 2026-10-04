@@ -21,8 +21,12 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -712,6 +716,11 @@ func TestAmbiguousReservationFailureDrainsUnresolvedWithoutStartingBackend(t *te
 }
 
 func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	durable := &fakeStore{completionObserved: make(chan struct{}, 1)}
 	backend := &blockingBackend{started: make(chan struct{}), release: make(chan struct{}), contextCanceled: make(chan bool, 1), observedContext: make(chan context.Context, 1)}
@@ -736,7 +745,7 @@ func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	}()
 	<-backend.started
 	observed := <-backend.observedContext
-	if !trace.SpanContextFromContext(observed).Equal(trace.SpanContextFromContext(parent)) || baggage.FromContext(observed).Member("example").Value() != "value" {
+	if trace.SpanContextFromContext(observed).TraceID() != trace.SpanContextFromContext(parent).TraceID() || baggage.FromContext(observed).Member("example").Value() != "value" {
 		t.Fatal("admitted mutation lost request trace context or baggage")
 	}
 	cancel()
@@ -744,6 +753,9 @@ func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	case <-handlerReturned:
 	case <-time.After(time.Second):
 		t.Fatal("HTTP handler did not stop waiting after cancellation")
+	}
+	if len(recorder.Ended()) != 0 {
+		t.Fatal("mutation span ended with HTTP handler")
 	}
 	close(backend.release)
 	select {
@@ -758,6 +770,68 @@ func TestAdmittedMutationContinuesAfterHTTPRequestCancellation(t *testing.T) {
 	case <-durable.completionObserved:
 	case <-time.After(time.Second):
 		t.Fatal("admitted mutation was not completed durably")
+	}
+	deadline := time.After(time.Second)
+	for len(recorder.Ended()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("mutation span never ended")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "mcp.tool.execute" || spans[0].Parent().SpanID() != trace.SpanContextFromContext(parent).SpanID() || spans[0].Status().Code == codes.Error {
+		t.Fatalf("incorrect admitted operation span: %v", spans)
+	}
+}
+
+func TestHTTP200MutationErrorsHaveOperationOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		cause   error
+		outcome string
+		status  codes.Code
+	}{
+		{"failure", errors.New("secret-database-error"), "failure", codes.Error},
+		{"dependency deadline", context.DeadlineExceeded, "timeout", codes.Error},
+		{"lost fence", store.ErrAgentTurnFenceLost, "cancelled", codes.Unset},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			previous := otel.GetTracerProvider()
+			otel.SetTracerProvider(provider)
+			t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
+			now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+			gateway := newTestGateway(t, now, &fakeStore{reserveErr: test.cause}, fakeBackend{})
+			registration, err := gateway.Register(validScope(now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			initialize(t, gateway, registration)
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"comment_on_issue","arguments":{"operation_id":"observed-failure","body":"secret-prompt"}}}`))
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"isError":true`) {
+				t.Fatalf("response: %d %s", response.Code, response.Body.String())
+			}
+			spans := recorder.Ended()
+			if len(spans) != 1 || spans[0].Status().Code != test.status {
+				t.Fatalf("spans: %v", spans)
+			}
+			found := false
+			for _, attr := range spans[0].Attributes() {
+				if string(attr.Key) == "outcome" && attr.Value.AsString() == test.outcome {
+					found = true
+				}
+				if strings.Contains(attr.Value.Emit(), "secret-") {
+					t.Fatal("secret leaked into span")
+				}
+			}
+			if !found || len(spans[0].Events()) != 0 {
+				t.Fatal("missing bounded outcome or unexpected error event")
+			}
+		})
 	}
 }
 
