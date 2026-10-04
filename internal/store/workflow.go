@@ -56,6 +56,11 @@ type WorkflowLocator struct {
 	PullRequestNumber     int64
 	WorkflowID            string
 	WorkflowMarkerInvalid bool
+	// PullRequestActivation marks a human `omnigrex:run` command issued on a
+	// Pull Request. Unlike revision observations, activation requires the
+	// durable current Change Proposal association and never creates a Workflow
+	// from marker evidence alone.
+	PullRequestActivation bool
 }
 
 // WorkflowRepository is the immutable repository identity captured when a Workflow is created.
@@ -363,6 +368,9 @@ func validateWorkflowLocator(locator WorkflowLocator, envelope workflowEnvelope)
 		(locator.WorkflowMarkerInvalid && locator.WorkflowID != "") {
 		return ErrWorkflowLocatorMismatch
 	}
+	if locator.PullRequestActivation && (locator.PullRequestID <= 0 || locator.PullRequestNumber <= 0 || locator.IssueID != 0 || locator.IssueNumber != 0) {
+		return ErrWorkflowLocatorMismatch
+	}
 	if envelope.issueID > 0 && (locator.IssueID != envelope.issueID || locator.IssueNumber != envelope.issueNumber) {
 		return ErrWorkflowLocatorMismatch
 	}
@@ -401,6 +409,36 @@ func (store *Store) applyWorkflowEventTx(ctx context.Context, tx pgx.Tx, event N
 			return WorkflowApplication{
 				DeliveryID: event.DeliveryID, WorkflowID: workflowID, Status: NormalizedEventPending,
 				State: snapshot.State, Revision: snapshot.Revision,
+			}, nil
+		}
+	}
+	if locator.PullRequestActivation {
+		eligible, err := pullRequestActivationEligibleTx(ctx, tx, locator, workflowID, snapshot)
+		if err != nil {
+			return WorkflowApplication{}, err
+		}
+		if !eligible {
+			unrelated := workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonChangeProposalUnrelated}
+			if err := validateWorkflowDecision(snapshot, unrelated); err != nil {
+				return WorkflowApplication{}, err
+			}
+			result, err := tx.Exec(ctx, `
+UPDATE normalized_events
+SET status = $2, workflow_id = $3, disposition = $4, reason = $5,
+    applied_revision = $6, deferred_for_turn_id = NULL, processed_at = clock_timestamp()
+WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, NormalizedEventCompleted,
+				nullableString(workflowID), unrelated.Disposition, unrelated.Reason,
+				int64(unrelated.Snapshot.Revision))
+			if err != nil {
+				return WorkflowApplication{}, fmt.Errorf("complete ineligible pull request activation: %w", err)
+			}
+			if result.RowsAffected() != 1 {
+				return WorkflowApplication{}, errors.New("normalized event is no longer pending")
+			}
+			return WorkflowApplication{
+				DeliveryID: event.DeliveryID, WorkflowID: workflowID, Status: NormalizedEventCompleted,
+				Disposition: unrelated.Disposition, Reason: unrelated.Reason,
+				State: unrelated.Snapshot.State, Revision: unrelated.Snapshot.Revision,
 			}, nil
 		}
 	}
@@ -602,6 +640,43 @@ WHERE repository_id = $1 AND pull_request_id = $2`, locator.RepositoryID, locato
 		return "", ErrWorkflowLocatorMismatch
 	}
 	return resolved, nil
+}
+
+// pullRequestActivationEligibleTx requires the durable current Change Proposal
+// association for a Pull Request `omnigrex:run` command. The marker-based
+// lookup in resolveWorkflowID alone is insufficient: an unresolved, historical,
+// or marker-only command must not activate a Workflow, while conflicting
+// evidence continues to fail through resolveWorkflowID before this check.
+func pullRequestActivationEligibleTx(ctx context.Context, tx pgx.Tx, locator WorkflowLocator, workflowID string, snapshot workflow.Snapshot) (bool, error) {
+	if !locator.PullRequestActivation {
+		return true, nil
+	}
+	if workflowID == "" {
+		return false, nil
+	}
+	if snapshot.WorkItem.RepositoryID != locator.RepositoryID {
+		return false, nil
+	}
+	if snapshot.ChangeProposal == nil ||
+		snapshot.ChangeProposal.ID != locator.PullRequestID ||
+		snapshot.ChangeProposal.Number != locator.PullRequestNumber {
+		return false, nil
+	}
+	var activeRepository, activeID, activeNumber int64
+	err := tx.QueryRow(ctx, `
+SELECT repository_id, pull_request_id, pull_request_number
+FROM change_proposals
+WHERE workflow_id = $1 AND active`, workflowID).Scan(&activeRepository, &activeID, &activeNumber)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify current Change Proposal for pull request activation: %w", err)
+	}
+	if activeRepository != locator.RepositoryID || activeID != locator.PullRequestID || activeNumber != locator.PullRequestNumber {
+		return false, nil
+	}
+	return true, nil
 }
 
 func rehydrateWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) (workflow.Snapshot, error) {
