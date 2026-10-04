@@ -71,7 +71,41 @@ Completed spans are batched and flushed after services stop, within `OMNIGREX_SH
 Compose allows one minute before forcibly stopping the orchestrator, configurable with `OMNIGREX_STOP_GRACE_PERIOD`.
 Keep that grace period longer than service draining and Agent Turn cleanup plus a separate `OMNIGREX_SHUTDOWN_TIMEOUT` budget for exporting the final traces, increasing it when those timeouts are increased.
 Exporter delivery failures are reported by the OpenTelemetry SDK without stopping Workflow processing.
-This setup exports traces only; metrics and log export are not enabled.
+Application metrics are separately opt-in as described below; direct log export is not enabled.
+
+## Application Metrics
+
+The orchestrator exports the bounded application instrument set over OTLP/HTTP with protobuf encoding.
+There is no public metrics endpoint.
+Both Compose bundles accept the same metrics settings, and both environment examples document them.
+
+| Configuration | Traces | Application metrics |
+| --- | --- | --- |
+| No endpoints | Disabled | Disabled |
+| Generic `OTEL_EXPORTER_OTLP_ENDPOINT` only | Enabled | Disabled |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` only | Enabled | Disabled |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` only | Disabled | Enabled |
+| Generic endpoint with `OTEL_METRICS_EXPORTER=otlp` | Enabled | Enabled |
+| Trace and metrics signal-specific endpoints | Enabled | Enabled |
+| `OTEL_METRICS_EXPORTER=none` | Existing endpoint-based behavior | Disabled |
+| `OTEL_SDK_DISABLED=true` | Disabled | Disabled |
+
+`OTEL_METRICS_EXPORTER=otlp` requires a generic or metrics-specific endpoint; unsupported exporter selections fail startup.
+The generic endpoint appends `/v1/metrics`; the metrics-specific endpoint is a complete URL and takes precedence.
+`OTEL_EXPORTER_OTLP_METRICS_HEADERS` overrides generic OTLP headers for metrics, using the same URL-encoded format and private configuration rules as tracing.
+Use HTTP(S) endpoints and header authentication, not credentials embedded in URLs.
+The default `OTEL_METRIC_EXPORT_INTERVAL` is `60000` milliseconds; `OTEL_METRIC_EXPORT_TIMEOUT` defaults to `30000` milliseconds and `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` to `10000` milliseconds in Compose.
+Configured timing values must be positive integers in milliseconds.
+A longer interval reduces samples, not the number of distinct series.
+
+Traces and metrics share service/build/resource identity.
+SDK views exclude unplanned library metrics and drop non-allowlisted application dimensions.
+Durable gauges use one read-only observation with a five-second deadline, including connection acquisition, and a four-second server statement timeout.
+An observation failure omits all durable gauges for that collection and increments `omnigrex.observation.failures`; it never substitutes zeros or cached state.
+Traces and metrics shut down concurrently under a fresh bounded shutdown context after services stop; the observation registration and database remain open until that finishes.
+Delivery failures are reported using safe categories without stopping Workflow processing.
+
+See the [application observability contract and deployment handoff](./observability/application.md) for instrument names, queue eligibility, series budget, dashboard/alert requirements, and outstanding deployment verification.
 
 ## Prerequisites
 
