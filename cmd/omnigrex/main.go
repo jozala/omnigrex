@@ -138,16 +138,20 @@ func runDoctorCommand(ctx context.Context, args []string, getenv func(string) st
 }
 
 func run(ctx context.Context, settings config.Config, logger *slog.Logger) error {
-	shutdownTracing, err := telemetry.Init(ctx, version)
+	shutdownTelemetry, err := telemetry.Init(ctx, version)
 	if err != nil {
-		return fmt.Errorf("initialize tracing: %w", err)
+		return fmt.Errorf("initialize telemetry: %w", err)
 	}
+	closeDatabase := func() {}
+	unregisterObservations := func() {}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), settings.ShutdownTimeout)
 		defer cancel()
-		if err := shutdownTracing(shutdownCtx); err != nil {
-			logger.Error("shut down tracing", "error", err)
+		if err := shutdownTelemetry(shutdownCtx); err != nil {
+			logger.Error("shut down telemetry", "failure_category", "export_failed")
 		}
+		unregisterObservations()
+		closeDatabase()
 	}()
 	roleCatalog := role.BuiltinCatalog()
 	definition, err := workflow.NewBuiltinDefinition(roleCatalog)
@@ -170,7 +174,12 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("initialize database: %w", err)
 	}
-	defer database.Close()
+	closeDatabase = database.Close
+	unregisterObservations, err = telemetry.RegisterStateObserver(database.ObserveDurableState)
+	if err != nil {
+		unregisterObservations = func() {}
+		return errors.New("register durable telemetry observations")
+	}
 	openCodeV1, err := runtimeprofile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
 	if err != nil {
 		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
