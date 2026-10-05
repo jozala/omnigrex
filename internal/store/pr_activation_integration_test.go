@@ -481,32 +481,16 @@ func settleDeferredPRActivation(t *testing.T, seedNumber int, replaceProposal bo
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	repository := int64(seedNumber)
-	prID := repository*1000 + 100
+	prID := repository * 100
 	prNumber := repository
 	const head = "head"
 
-	fixture := seedAgentSession(t, pool, seedNumber)
-	if _, err := pool.Exec(ctx, `UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE' WHERE id = $1`, fixture.workflowID); err != nil {
-		t.Fatalf("make DEVELOPING: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1, current_stage = 'implementation', review_usage = '{}'::jsonb WHERE id = $1`, fixture.attemptID); err != nil {
-		t.Fatalf("set attempt: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO change_proposals (id, workflow_id, repository_id, repository_owner, repository_name, pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha) VALUES (gen_random_uuid(), $1, $2, 'owner', 'repo', $3, $4, 'OPEN', 'main', 'base', 'feature', $5)`,
-		fixture.workflowID, repository, prID, prNumber, head); err != nil {
-		t.Fatalf("seed proposal: %v", err)
-	}
-	turnSpec := fixture.turnSpec()
-	turnSpec.ExpectedHeadSHA = head
-	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, turnSpec)
-	if err != nil {
-		t.Fatalf("PrepareAgentTurn() error = %v", err)
-	}
-	executionJob := agentTurnExecutionJob(t, pool, ctx, turn)
-	turnLease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, executionJob, turn.ControlRevision, "runtime", 10*time.Second, 1)
-	if err != nil {
-		t.Fatalf("acquire Agent Turn error = %v", err)
-	}
+	// Follow the production Agent Turn lifecycle: prepare and acquire a Reviewer
+	// turn bound to the current proposal, defer the PR activation through the
+	// webhook seam while the turn is active, then settle through SettleAgentTurn
+	// so terminal completion, the Workflow transition, and the linked
+	// RECONCILE_PENDING_EVENTS job are created with production barriers.
+	fixture, lease, _ := prepareSettlementTurn(t, databases[0], pool, ctx, seedNumber, workflow.RoleReviewer, head)
 
 	prDeliveryID := fmt.Sprintf("40000000-0000-4000-8000-%012d", seedNumber*1000+1)
 	prDelivery := workflowDelivery(prDeliveryID)
@@ -526,40 +510,17 @@ func settleDeferredPRActivation(t *testing.T, seedNumber int, replaceProposal bo
 		t.Fatalf("PR activation = %#v, want DEFERRED during active turn", prApplication)
 	}
 
-	settleDeliveryID := fmt.Sprintf("40000000-0000-4000-8000-%012d", seedNumber*1000+2)
-	settleDelivery := workflowDelivery(settleDeliveryID)
-	settleDelivery.RepositoryID, settleDelivery.RepositoryOwner, settleDelivery.RepositoryName = repository, "owner", "repo"
-	settleDelivery.IssueID, settleDelivery.IssueNumber = repository, repository
-	settleClaim := claimWorkflowDelivery(t, databases[0], ctx, settleDelivery)
-	settleApplication, err := databases[0].CompleteWebhookTransition(ctx, settleClaim.DeliveryID, settleClaim.ClaimToken,
-		normalizedPayload(settleClaim.DeliveryID, "turn-settled"),
-		store.WorkflowLocator{RepositoryID: repository, IssueID: repository, IssueNumber: repository},
-		func(context store.WorkflowEventContext) (workflow.Event, error) {
-			return workflow.TurnSettledEvent{
-				EventMetadata: context.Metadata,
-				Turn: workflow.TurnGuard{
-					TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
-					Stage: workflow.StageImplementation, Role: workflow.RoleDeveloper,
-					Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
-					ChangeProposalID: prID, ExpectedHeadSHA: head,
-				},
-				Outcome: workflow.TurnOutcomeBlocked,
-				PendingEvents: workflow.PendingEventsObservation{
-					Count: 1, LatestObservedHeadSHA: head,
-				},
-			}, nil
-		})
+	observation := successfulSettlementObservation(workflow.TurnOutcomeBlocked, nil)
+	observation.Diagnostic = "blocked for deferred PR replay"
+	settled, err := databases[0].SettleAgentTurn(ctx, lease, observation)
 	if err != nil {
-		t.Fatalf("settle blocked turn error = %v", err)
+		t.Fatalf("SettleAgentTurn() blocked error = %v", err)
 	}
-	if settleApplication.Disposition != workflow.DispositionApplied || settleApplication.State != workflow.StateNeedsHuman {
-		t.Fatalf("settlement = %#v, want applied NEEDS_HUMAN", settleApplication)
+	if settled.PendingEventCount != 1 || settled.ReconciliationJobID == "" || settled.SuccessorJobID != "" {
+		t.Fatalf("blocked settlement = %#v, want one pending event with reconciliation and no direct successor", settled)
 	}
-	if err := databases[0].CloseMutationAdmission(ctx, turnLease); err != nil {
-		t.Fatalf("CloseMutationAdmission() error = %v", err)
-	}
-	if err := databases[0].FinalizeAgentTurn(ctx, turnLease, store.AgentTurnCompletion{Status: store.AgentTurnFailed}); err != nil {
-		t.Fatalf("FinalizeAgentTurn() error = %v", err)
+	if settled.State != workflow.StateNeedsHuman {
+		t.Fatalf("blocked settlement state = %s, want NEEDS_HUMAN", settled.State)
 	}
 
 	if replaceProposal {
@@ -588,8 +549,8 @@ func settleDeferredPRActivation(t *testing.T, seedNumber int, replaceProposal bo
 	if err != nil {
 		t.Fatalf("AcknowledgePendingEventReconciliation() error = %v", err)
 	}
-	if acknowledged.CompletedCount != 1 || acknowledged.SourceTurnID != turn.ID {
-		t.Fatalf("reconciliation acknowledgement = %#v, want one event from turn %s", acknowledged, turn.ID)
+	if acknowledged.CompletedCount != 1 || acknowledged.SourceTurnID != lease.ID {
+		t.Fatalf("reconciliation acknowledgement = %#v, want one event from turn %s", acknowledged, lease.ID)
 	}
 
 	event, err := databases[0].GetNormalizedEvent(ctx, prDeliveryID)
@@ -615,8 +576,8 @@ func settleDeferredPRActivation(t *testing.T, seedNumber int, replaceProposal bo
 	if event.Status != store.NormalizedEventCompleted || event.Disposition != workflow.DispositionApplied || string(event.Reason) != string(workflow.ReasonTriggered) {
 		t.Errorf("replayed event = %#v, want COMPLETED APPLIED workflow_triggered", event)
 	}
-	if acknowledged.Successor.Role != workflow.RoleDeveloper || acknowledged.Successor.Purpose != workflow.TurnPurposeReactivation || acknowledged.SuccessorJobID == "" {
-		t.Errorf("successor = %#v, want Developer reactivation with job", acknowledged.Successor)
+	if acknowledged.Successor.Role != workflow.RoleReviewer || acknowledged.Successor.Purpose != workflow.TurnPurposeReactivation || acknowledged.SuccessorJobID == "" {
+		t.Errorf("successor = %#v, want Reviewer reactivation with job", acknowledged.Successor)
 	}
 	var state string
 	var activeAttempts int
@@ -626,8 +587,8 @@ func settleDeferredPRActivation(t *testing.T, seedNumber int, replaceProposal bo
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow_attempts WHERE workflow_id = $1 AND active`, fixture.workflowID).Scan(&activeAttempts); err != nil {
 		t.Fatalf("count active attempts: %v", err)
 	}
-	if state != string(workflow.StateDeveloping) || activeAttempts != 1 {
-		t.Errorf("workflow after eligible replay = %s with %d active attempts, want DEVELOPING with 1", state, activeAttempts)
+	if state != string(workflow.StateReviewing) || activeAttempts != 1 {
+		t.Errorf("workflow after eligible replay = %s with %d active attempts, want REVIEWING with 1", state, activeAttempts)
 	}
 	var lastAttempt uint64
 	if err := pool.QueryRow(ctx, `SELECT MAX(attempt_number) FROM workflow_attempts WHERE workflow_id = $1`, fixture.workflowID).Scan(&lastAttempt); err != nil {
