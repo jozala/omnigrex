@@ -203,7 +203,14 @@ func Normalize(delivery Delivery) (Normalization, error) {
 			return Normalization{Outcome: NormalizationIgnored}, nil
 		}
 	case "pull_request":
-		if delivery.Action != "opened" && delivery.Action != "synchronize" {
+		if delivery.Action == "labeled" {
+			if payload.Label == nil || strings.TrimSpace(payload.Label.Name) == "" {
+				return Normalization{}, malformed("pull_request.labeled has no label identity")
+			}
+			if payload.Label.Name != "omnigrex:run" {
+				return Normalization{Outcome: NormalizationIgnored}, nil
+			}
+		} else if delivery.Action != "opened" && delivery.Action != "synchronize" {
 			return Normalization{Outcome: NormalizationIgnored}, nil
 		}
 		if delivery.Action == "synchronize" && strings.TrimSpace(payload.Before) == "" {
@@ -272,6 +279,12 @@ func Normalize(delivery Delivery) (Normalization, error) {
 			HeadRef: payload.PullRequest.Head.Ref,
 			HeadSHA: payload.PullRequest.Head.SHA,
 		}
+		if delivery.EventName == "pull_request" && delivery.Action == "labeled" {
+			if payload.Label == nil || payload.Label.Name != "omnigrex:run" {
+				return Normalization{}, malformed("pull_request.labeled has no trigger label identity")
+			}
+			event.Label = payload.Label.Name
+		}
 		if delivery.Action == "synchronize" {
 			event.PullRequest.BeforeSHA = payload.Before
 		}
@@ -316,7 +329,7 @@ func supportedEventAction(eventName, action string) bool {
 	case "issues":
 		return action == "labeled" || action == "closed" || action == "reopened"
 	case "pull_request":
-		return action == "opened" || action == "synchronize"
+		return action == "opened" || action == "synchronize" || action == "labeled"
 	case "pull_request_review":
 		return action == "submitted"
 	default:

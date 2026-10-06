@@ -362,10 +362,14 @@ func (processor *Processor) eventFactory(event NormalizedEvent) (store.WorkflowL
 		locator.WorkflowMarkerInvalid = event.PullRequest.WorkflowMarkerInvalid
 	}
 
+	if event.EventName == "pull_request" && event.Action == "labeled" {
+		locator.PullRequestActivation = true
+	}
+
 	var attemptID, closureID, retentionToken string
 	var err error
 	switch event.EventName + "." + event.Action {
-	case "issues.labeled":
+	case "issues.labeled", "pull_request.labeled":
 		attemptID, err = randomEventUUID()
 	case "issues.closed":
 		closureID, err = randomEventUUID()
@@ -386,6 +390,11 @@ func (processor *Processor) eventFactory(event NormalizedEvent) (store.WorkflowL
 		case "issues.labeled":
 			if event.Issue == nil || event.Label != "omnigrex:run" {
 				return nil, fmt.Errorf("%w: invalid issues.labeled event", errInvalidPendingNormalizedEvent)
+			}
+			return workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
+		case "pull_request.labeled":
+			if event.PullRequest == nil || event.Label != "omnigrex:run" {
+				return nil, fmt.Errorf("%w: invalid pull_request.labeled event", errInvalidPendingNormalizedEvent)
 			}
 			return workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
 		case "issues.closed":

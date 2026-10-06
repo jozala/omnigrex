@@ -87,6 +87,149 @@ func TestProcessorAppliesSupportedDeliveryAtomically(t *testing.T) {
 	}
 }
 
+func TestProcessorMapsPullRequestLabeledRunToSharedTrigger(t *testing.T) {
+	receivedAt := time.Date(2026, time.September, 2, 7, 30, 0, 0, time.UTC)
+	inbox := &processorInbox{
+		claims: []*store.WebhookClaim{{
+			WebhookDelivery: store.WebhookDelivery{
+				DeliveryID:      validDeliveryID(),
+				EventName:       "pull_request",
+				Action:          "labeled",
+				RepositoryID:    9123,
+				RepositoryOwner: "jozala",
+				RepositoryName:  "omnigrex",
+				Payload:         []byte(`{"action":"labeled","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"label":{"name":"omnigrex:run"},"pull_request":{"id":654,"number":21,"body":"<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->","base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}}}`),
+			},
+			ClaimOwner: "processor-a",
+			ClaimToken: "323e4567-e89b-12d3-a456-426614174000",
+			ReceivedAt: receivedAt,
+		}},
+		atomicSnapshot: workflow.Snapshot{
+			State:             workflow.StateNeedsHuman,
+			Revision:          2,
+			WorkItem:          workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12},
+			LastAttemptNumber: 1,
+			CurrentAttempt: &workflow.WorkflowAttempt{
+				ID: "50000000-0000-4000-8000-000000000001", Number: 1,
+				StartedAt: time.Date(2026, time.August, 30, 10, 0, 0, 0, time.UTC), Lifecycle: workflow.AttemptActive,
+				CurrentStage: workflow.StageImplementation, ReviewUsage: map[workflow.StageID]uint8{},
+				InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
+			},
+			Assignments: workflow.Assignments{Status: workflow.AssignmentWaitingForHuman, RuntimeState: workflow.RuntimeStateActive},
+			ResumeRole:  workflow.RoleDeveloper,
+		},
+	}
+	processor := newTestProcessor(t, inbox)
+
+	processed, err := processor.ProcessNext(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessNext() error = %v", err)
+	}
+	if !processed {
+		t.Fatal("ProcessNext() processed = false, want true")
+	}
+	if len(inbox.transitions) != 1 {
+		t.Fatalf("transitions = %#v, want one atomic pull request activation", inbox.transitions)
+	}
+	transition := inbox.transitions[0]
+	if !transition.locator.PullRequestActivation {
+		t.Errorf("locator.PullRequestActivation = false, want true for pull_request.labeled")
+	}
+	if transition.locator.RepositoryID != 9123 || transition.locator.PullRequestID != 654 || transition.locator.PullRequestNumber != 21 {
+		t.Errorf("locator PR identity = (%d, %d, %d), want (9123, 654, 21)", transition.locator.RepositoryID, transition.locator.PullRequestID, transition.locator.PullRequestNumber)
+	}
+	if transition.locator.IssueID != 0 || transition.locator.IssueNumber != 0 {
+		t.Errorf("locator Issue identity = (%d, %d), want no Issue for pull request activation", transition.locator.IssueID, transition.locator.IssueNumber)
+	}
+	if transition.locator.WorkflowID != "40000000-0000-4000-8000-000000000001" {
+		t.Errorf("locator WorkflowID = %q, want marker Workflow for conflict detection", transition.locator.WorkflowID)
+	}
+	var event webhook.NormalizedEvent
+	if err := json.Unmarshal(transition.payload, &event); err != nil {
+		t.Fatalf("decode normalized completion: %v", err)
+	}
+	if event.EventName != "pull_request" || event.Action != "labeled" || event.Label != "omnigrex:run" {
+		t.Errorf("normalized event = (%q, %q, %q), want pull_request.labeled omnigrex:run", event.EventName, event.Action, event.Label)
+	}
+	if event.DeliveryID != validDeliveryID() || event.PullRequest == nil || event.PullRequest.ID != 654 {
+		t.Errorf("normalized PR identity = %#v, want delivery and PR 654", event)
+	}
+	decision := transition.decision
+	if decision.Disposition != workflow.DispositionApplied || decision.Snapshot.State != workflow.StateDeveloping || decision.Snapshot.Revision != 3 {
+		t.Fatalf("trigger decision = %#v, want applied DEVELOPING revision 3", decision)
+	}
+	if decision.Snapshot.CurrentAttempt == nil || decision.Snapshot.CurrentAttempt.Number != 2 || !decision.Snapshot.CurrentAttempt.StartedAt.Equal(receivedAt) {
+		t.Errorf("trigger attempt = %#v, want attempt 2 observed at ReceivedAt", decision.Snapshot.CurrentAttempt)
+	}
+	if decision.Snapshot.WorkItem != (workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12}) {
+		t.Errorf("trigger WorkItem = %#v, want associated Issue 456/12 not PR number", decision.Snapshot.WorkItem)
+	}
+}
+
+func TestProcessorIgnoresNonRunPullRequestLabelWithoutTransition(t *testing.T) {
+	inbox := &processorInbox{claims: []*store.WebhookClaim{{
+		WebhookDelivery: store.WebhookDelivery{
+			DeliveryID: validDeliveryID(),
+			EventName:  "pull_request",
+			Action:     "labeled",
+			Payload:    []byte(`{"action":"labeled","repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},"label":{"name":"bug"},"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"head"}}}`),
+		},
+		ClaimToken: "323e4567-e89b-12d3-a456-426614174000",
+	}}}
+	processor := newTestProcessor(t, inbox)
+
+	processed, err := processor.ProcessNext(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessNext() error = %v", err)
+	}
+	if !processed {
+		t.Fatal("ProcessNext() processed = false, want true")
+	}
+	if len(inbox.transitions) != 0 || len(inbox.completions) != 1 {
+		t.Fatalf("transitions/completions = (%#v, %#v), want ignored without transition", inbox.transitions, inbox.completions)
+	}
+	if inbox.completions[0].completion.Outcome != store.WebhookOutcomeIgnored {
+		t.Errorf("completion = %#v, want ignored for non-run label", inbox.completions[0].completion)
+	}
+}
+
+func TestProcessorPendingReplayRetainsPullRequestActivationSemantics(t *testing.T) {
+	createdAt := time.Date(2026, time.August, 31, 19, 0, 0, 0, time.UTC)
+	payload := json.RawMessage(`{"delivery_id":"223e4567-e89b-12d3-a456-426614174000","event":"pull_request","action":"labeled","repository":{"id":9123,"owner":"jozala","name":"omnigrex"},"label":"omnigrex:run","pull_request":{"id":654,"number":21,"base_ref":"main","base_sha":"base123","head_ref":"feature","head_sha":"head456","workflow_marker_id":"40000000-0000-4000-8000-000000000001"}}`)
+	inbox := &processorInbox{
+		pending: []store.NormalizedEventRecord{{DeliveryID: "223e4567-e89b-12d3-a456-426614174000", Payload: payload, Status: store.NormalizedEventPending, CreatedAt: createdAt}},
+		drainSnapshot: workflow.Snapshot{
+			State: workflow.StateNeedsHuman, Revision: 2,
+			WorkItem:          workflow.WorkItem{RepositoryID: 9123, IssueID: 456, IssueNumber: 12},
+			LastAttemptNumber: 1,
+			CurrentAttempt: &workflow.WorkflowAttempt{
+				ID: "50000000-0000-4000-8000-000000000001", Number: 1,
+				StartedAt: createdAt, Lifecycle: workflow.AttemptActive,
+				CurrentStage: workflow.StageImplementation, ReviewUsage: map[workflow.StageID]uint8{},
+				InfrastructureRetryBudget: workflow.AttemptBudget{Limit: 1},
+			},
+			Assignments: workflow.Assignments{Status: workflow.AssignmentWaitingForHuman, RuntimeState: workflow.RuntimeStateActive},
+			ResumeRole:  workflow.RoleDeveloper,
+		},
+	}
+	processor := newTestProcessor(t, inbox)
+
+	processed, err := processor.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want historical PR activation processed", processed, err)
+	}
+	if len(inbox.drained) != 1 {
+		t.Fatalf("drained = %#v, want one replayed PR activation", inbox.drained)
+	}
+	drained := inbox.drained[0]
+	if !drained.locator.PullRequestActivation || drained.locator.PullRequestID != 654 || drained.locator.WorkflowID != "40000000-0000-4000-8000-000000000001" {
+		t.Errorf("replayed locator = %#v, want PR activation with marker", drained.locator)
+	}
+	if drained.decision.Disposition != workflow.DispositionApplied || drained.decision.Snapshot.CurrentAttempt == nil || drained.decision.Snapshot.CurrentAttempt.Number != 2 {
+		t.Errorf("replayed decision = %#v, want applied attempt 2", drained.decision)
+	}
+}
+
 func TestProcessorRecordsIgnoredDeliveryWithoutNormalizedPayload(t *testing.T) {
 	inbox := &processorInbox{claims: []*store.WebhookClaim{{
 		WebhookDelivery: store.WebhookDelivery{
