@@ -634,6 +634,145 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 	}
 }
 
+func TestPrepareAgentTurnRepairsVerifiedStaleHead(t *testing.T) {
+	const (
+		staleHeadA    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		verifiedHeadB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		advancedHeadC = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+
+	setupVerifiedPreparation := func(t *testing.T, deliveryID, attemptID, proposalID, storedHead, payloadHead string, seedReadiness bool) (*store.Store, *pgxpool.Pool, context.Context, string) {
+		t.Helper()
+		databases, pool := openPhaseFiveStores(t, 1)
+		database := databases[0]
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		t.Cleanup(cancel)
+		application := triggerPreparationWorkflow(t, database, ctx, deliveryID, attemptID)
+		if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ($1, $2, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'feature', $3)`,
+			proposalID, application.WorkflowID, storedHead); err != nil {
+			t.Fatalf("seed Change Proposal: %v", err)
+		}
+		if seedReadiness {
+			if _, err := pool.Exec(ctx, `UPDATE change_proposals SET ready_for_sha = head_sha WHERE workflow_id = $1 AND active`, application.WorkflowID); err != nil {
+				t.Fatalf("seed stale readiness: %v", err)
+			}
+		}
+		payload, err := json.Marshal(map[string]any{
+			"mode": workflow.AssignmentGenerationNew, "stage": workflow.StageImplementation, "role": workflow.RoleDeveloper,
+			"purpose": workflow.TurnPurposeInitialDevelopment, "expected_head_sha": payloadHead,
+			"retry_of_turn_id": "", "revision": 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET payload = $2 WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID, payload); err != nil {
+			t.Fatalf("stage stale preparation payload: %v", err)
+		}
+		return database, pool, ctx, application.WorkflowID
+	}
+
+	verifiedSpec := func() store.AgentTurnPreparationSpec {
+		spec := preparationSpec("verified-profile", "openai/gpt-5.2")
+		spec.VerifiedHeadSHA = verifiedHeadB
+		spec.VerifiedPRID = 10
+		spec.VerifiedPRNumber = 10
+		return spec
+	}
+
+	storedHead := func(t *testing.T, pool *pgxpool.Pool, ctx context.Context, workflowID string) (string, *string) {
+		t.Helper()
+		var head string
+		var ready *string
+		if err := pool.QueryRow(ctx, `SELECT head_sha, ready_for_sha FROM change_proposals WHERE workflow_id = $1 AND active`, workflowID).Scan(&head, &ready); err != nil {
+			t.Fatalf("read Change Proposal head: %v", err)
+		}
+		return head, ready
+	}
+
+	turnCount := func(t *testing.T, pool *pgxpool.Pool, ctx context.Context, workflowID string) int {
+		t.Helper()
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turns WHERE workflow_id = $1`, workflowID).Scan(&count); err != nil {
+			t.Fatalf("count Agent Turns: %v", err)
+		}
+		return count
+	}
+
+	t.Run("repair stale stored head", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupVerifiedPreparation(t,
+			"63000000-0000-4000-8000-000000000071", "64000000-0000-4000-8000-000000000071", "65000000-0000-4000-8000-000000000071",
+			staleHeadA, staleHeadA, true)
+		lease := claimPreparationJob(t, database, ctx)
+		prepared, err := database.PrepareAgentTurn(ctx, lease, verifiedSpec())
+		if err != nil {
+			t.Fatalf("PrepareAgentTurn() error = %v", err)
+		}
+		if prepared.Turn.ExpectedHeadSHA != verifiedHeadB || prepared.Turn.ChangeProposalID != "65000000-0000-4000-8000-000000000071" {
+			t.Errorf("Turn = (proposal %q, head %q), want (65000000-0000-4000-8000-000000000071, %q)",
+				prepared.Turn.ChangeProposalID, prepared.Turn.ExpectedHeadSHA, verifiedHeadB)
+		}
+		if head, ready := storedHead(t, pool, ctx, workflowID); head != verifiedHeadB || ready != nil {
+			t.Errorf("stored head = (%q, readiness %v), want (%q, cleared)", head, ready, verifiedHeadB)
+		}
+	})
+
+	t.Run("discard stale payload when durable already advanced", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupVerifiedPreparation(t,
+			"63000000-0000-4000-8000-000000000072", "64000000-0000-4000-8000-000000000072", "65000000-0000-4000-8000-000000000072",
+			verifiedHeadB, staleHeadA, false)
+		lease := claimPreparationJob(t, database, ctx)
+		prepared, err := database.PrepareAgentTurn(ctx, lease, verifiedSpec())
+		if err != nil {
+			t.Fatalf("PrepareAgentTurn() error = %v", err)
+		}
+		if prepared.Turn.ExpectedHeadSHA != verifiedHeadB {
+			t.Errorf("Turn head = %q, want %q", prepared.Turn.ExpectedHeadSHA, verifiedHeadB)
+		}
+		if head, _ := storedHead(t, pool, ctx, workflowID); head != verifiedHeadB {
+			t.Errorf("stored head = %q, want %q", head, verifiedHeadB)
+		}
+	})
+
+	t.Run("stale observation requests fresh retry", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupVerifiedPreparation(t,
+			"63000000-0000-4000-8000-000000000073", "64000000-0000-4000-8000-000000000073", "65000000-0000-4000-8000-000000000073",
+			advancedHeadC, staleHeadA, false)
+		lease := claimPreparationJob(t, database, ctx)
+		if _, err := database.PrepareAgentTurn(ctx, lease, verifiedSpec()); !errors.Is(err, store.ErrAgentTurnPreparationVerificationStale) {
+			t.Fatalf("PrepareAgentTurn() error = %v, want ErrAgentTurnPreparationVerificationStale", err)
+		}
+		if count := turnCount(t, pool, ctx, workflowID); count != 0 {
+			t.Errorf("Agent Turns = %d, want none after stale observation", count)
+		}
+		if head, _ := storedHead(t, pool, ctx, workflowID); head != advancedHeadC {
+			t.Errorf("stored head = %q, want unchanged %q", head, advancedHeadC)
+		}
+	})
+
+	t.Run("identity mismatch is fenced", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupVerifiedPreparation(t,
+			"63000000-0000-4000-8000-000000000074", "64000000-0000-4000-8000-000000000074", "65000000-0000-4000-8000-000000000074",
+			staleHeadA, staleHeadA, false)
+		lease := claimPreparationJob(t, database, ctx)
+		spec := verifiedSpec()
+		spec.VerifiedPRID = 99
+		if _, err := database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
+			t.Fatalf("PrepareAgentTurn() error = %v, want ErrAgentTurnPreparationFenceLost", err)
+		}
+		if count := turnCount(t, pool, ctx, workflowID); count != 0 {
+			t.Errorf("Agent Turns = %d, want none after identity mismatch", count)
+		}
+		if head, _ := storedHead(t, pool, ctx, workflowID); head != staleHeadA {
+			t.Errorf("stored head = %q, want unchanged %q", head, staleHeadA)
+		}
+	})
+}
+
 func TestPrepareAgentTurnBlocksReviewerWhileDeveloperRecoveryIsUnsettled(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
