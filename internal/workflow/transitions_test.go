@@ -776,6 +776,39 @@ func TestRetriggerWithChangedHeadSkipsTerminalRevalidation(t *testing.T) {
 	})
 }
 
+func TestTriggerDefersVisibleLabelsUntilVerifiedPreparation(t *testing.T) {
+	t.Run("handoff activation queues preparation without label effects", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-1")
+		event := workflow.TriggerEvent{
+			EventMetadata: metadata(snapshot, "deferred-labels"), AttemptID: "attempt-2", AttemptNumber: 2,
+		}
+
+		decision := reduce(snapshot, event)
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 1)
+		assertActionCount[workflow.ConsumeRunLabelAction](t, decision.Actions, 0)
+		assertActionCount[workflow.ReconcileLabelsAction](t, decision.Actions, 0)
+	})
+
+	t.Run("initial development keeps trigger-time labels", func(t *testing.T) {
+		snapshot := workflow.Snapshot{State: workflow.StateAbsent}
+		event := workflow.TriggerEvent{
+			EventMetadata: workflow.EventMetadata{ID: "absent-trigger", ObservedAt: observedAt, WorkItem: workflow.WorkItem{RepositoryID: 91, IssueID: 45, IssueNumber: 12}},
+			AttemptID:     "attempt-1", AttemptNumber: 1,
+		}
+
+		decision := reduce(snapshot, event)
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, 1)
+		assertActionCount[workflow.ConsumeRunLabelAction](t, decision.Actions, 1)
+		assertActionCount[workflow.ReconcileLabelsAction](t, decision.Actions, 1)
+	})
+}
+
 func TestRetriggerCannotReusePriorAttemptIdentityOrSequence(t *testing.T) {
 	snapshot := baseSnapshot(workflow.StateNeedsHuman, 3)
 	snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman

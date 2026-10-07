@@ -470,6 +470,11 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 	if err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("enqueue prepared Agent Turn: %w", err)
 	}
+	if spec.VerifiedHeadSHA != "" {
+		if err := store.enqueueVerifiedPreparationLabelsTx(ctx, tx, job, payload); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+	}
 	jobResult, err := json.Marshal(map[string]any{
 		"agent_participant_id": participant.ID, "agent_assignment_id": participant.ID, "agent_session_id": session.ID,
 		"agent_turn_id": turnID, "execution_job_id": executionJobID, "execution_epoch": executionEpoch,
@@ -1292,6 +1297,37 @@ SELECT EXISTS (
 	default:
 		return "", "", ErrAgentTurnPreparationVerificationStale
 	}
+}
+
+// enqueueVerifiedPreparationLabelsTx publishes the visible active-state labels
+// once authoritative verification has succeeded and the Turn is allocated.
+// Activations with an existing Change Proposal defer their state labels at
+// trigger time (keeping the handoff/ready labels while verification is
+// pending, retrying, or about to fail), so this is the first moment the
+// orchestrator may advertise Developer/Reviewer activity. The job converges
+// current Workflow state like any label reconciliation and consumes the run
+// marker; handoff decisions carry their own label actions when verification
+// never succeeds. Only verified preparations enqueue it, so initial
+// development and existing unverified callers keep their trigger-time labels.
+func (store *Store) enqueueVerifiedPreparationLabelsTx(ctx context.Context, tx pgx.Tx, job Job, payload agentTurnPreparationPayload) error {
+	stage, ok := store.reducer.Definition().Stage(payload.Stage)
+	if !ok {
+		return ErrAgentTurnPreparationFenceLost
+	}
+	labelPayload, err := json.Marshal(map[string]any{
+		"state": string(stage.State), "ready_for_sha": "", "consume_run": true, "revision": payload.Revision,
+	})
+	if err != nil {
+		return fmt.Errorf("encode verified preparation labels: %w", err)
+	}
+	if _, err := insertJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: ReconcileGitHubLabelsJobKind, payload: labelPayload,
+		maxAttempts: 3, idempotencyKey: "prepare-agent-turn:" + job.ID + ":reconcile-github-labels",
+		scope: jobInsertScope{workflowID: job.WorkflowID, workflowAttemptID: job.WorkflowAttemptID},
+	}); err != nil {
+		return fmt.Errorf("enqueue verified preparation labels: %w", err)
+	}
+	return nil
 }
 
 func validVerifiedHeadSHA(value string) bool {

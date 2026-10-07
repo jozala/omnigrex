@@ -114,8 +114,12 @@ func TestPRActivationMatchesIssueReactivationFromNeedsHuman(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE kind = 'PREPARE_AGENT_TURN'), count(*) FILTER (WHERE kind = 'RECONCILE_GITHUB_LABELS') FROM jobs WHERE workflow_id = $1 AND normalized_event_id = $2`, app.WorkflowID, app.DeliveryID).Scan(&jobs, &labels); err != nil {
 			t.Fatalf("count reactivation jobs: %v", err)
 		}
-		if jobs != 1 || labels != 1 {
-			t.Errorf("workflow %s jobs = prepare %d, labels %d; want 1 and 1", app.WorkflowID, jobs, labels)
+		// Activations with an existing Change Proposal defer visible state
+		// labels until verified preparation succeeds; the trigger queues the
+		// preparation only, keeping the handoff labels while verification is
+		// pending.
+		if jobs != 1 || labels != 0 {
+			t.Errorf("workflow %s jobs = prepare %d, labels %d; want 1 and 0", app.WorkflowID, jobs, labels)
 		}
 	}
 }
