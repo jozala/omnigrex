@@ -222,23 +222,11 @@ func (preparer *Preparer) verifyChangeProposal(ctx context.Context, request Requ
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("fetch current Change Proposal for verification: %w", err)
 	}
-	if observed.ID != durable.PullRequestID || int64(observed.Number) != durable.PullRequestNumber {
-		return "", 0, 0, fmt.Errorf("%w: Pull Request identity changed (durable %d/%d, observed %d/%d); do not adopt, reopen, or retarget",
-			ErrChangeProposalVerificationFailed, durable.PullRequestID, durable.PullRequestNumber, observed.ID, observed.Number)
+	head, err := VerifyObservedChangeProposal(durable.PullRequestID, durable.PullRequestNumber, durable.HeadRef, durable.BaseRef, observed)
+	if err != nil {
+		return "", 0, 0, err
 	}
-	if observed.State != "open" {
-		return "", 0, 0, fmt.Errorf("%w: Pull Request %d is not open (state %q, merged=%v); do not adopt, reopen, or retarget",
-			ErrChangeProposalVerificationFailed, observed.Number, observed.State, observed.Merged)
-	}
-	if observed.Head.Ref != durable.HeadRef {
-		return "", 0, 0, fmt.Errorf("%w: Pull Request head branch changed (durable %q, observed %q); do not retarget",
-			ErrChangeProposalVerificationFailed, durable.HeadRef, observed.Head.Ref)
-	}
-	if observed.Base.Ref != durable.BaseRef {
-		return "", 0, 0, fmt.Errorf("%w: Pull Request base branch changed (durable %q, observed %q); do not retarget",
-			ErrChangeProposalVerificationFailed, durable.BaseRef, observed.Base.Ref)
-	}
-	return observed.Head.SHA, observed.ID, int64(observed.Number), nil
+	return head, observed.ID, int64(observed.Number), nil
 }
 
 func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding) (store.RolePreparation, runtimeprofile.Profile, error) {
