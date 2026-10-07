@@ -605,7 +605,11 @@ func (store *Store) AcknowledgeAgentTurnPreparationFailure(ctx context.Context, 
 		// A synchronization (or another applied transition) may have superseded
 		// the observation while it was in flight. Re-stage superseded-but-valid
 		// observations against current state instead of stranding the job.
-		if !isSupersededPreparationObservation(cause) {
+		// Supersession is decided from the durable fences, not only the error
+		// sentinel: a retryable external failure (such as a transient GitHub
+		// verification error) racing with a committed transition must also be
+		// discarded and reconciled again through bounded recovery.
+		if !retryable && !isSupersededPreparationObservation(cause) {
 			return AgentTurnPreparationFailureAcknowledgement{}, err
 		}
 		refreshed, currentRevision, ok, refreshErr := store.refreshSupersededPreparationTx(ctx, tx, job, payload)

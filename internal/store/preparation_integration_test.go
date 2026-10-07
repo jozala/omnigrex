@@ -695,6 +695,19 @@ WHERE workflow.id = $1 AND proposal.active`, application.WorkflowID).Scan(&head,
 		t.Errorf("synchronization jobs = %d preparations and %d label reconciliations, want 0 and 1", prepare, labels)
 	}
 
+	// The fixture trigger left an AVAILABLE preparation that a genuine settled
+	// handoff would have consumed; retire it so the retrigger does not trip
+	// the single-live-successor constraint. Production behavior is unchanged.
+	if _, err := pool.Exec(ctx, `
+UPDATE jobs
+SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL, leased_at = NULL,
+    lease_expires_at = NULL, heartbeat_at = NULL,
+    completed_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'fixture retires superseded preparation'
+WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status = 'AVAILABLE'`, application.WorkflowID); err != nil {
+		t.Fatalf("retire superseded preparation: %v", err)
+	}
+
 	retriggerClaim := claimWorkflowDelivery(t, database, ctx, workflowDelivery("63000000-0000-4000-8000-000000000083"))
 	retriggered, err := database.CompleteWebhookTransition(ctx, retriggerClaim.DeliveryID, retriggerClaim.ClaimToken,
 		normalizedPayload(retriggerClaim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
@@ -927,7 +940,9 @@ VALUES ($1, $2, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'fea
 		if !errors.Is(prepErr, store.ErrAgentTurnPreparationFenceLost) {
 			t.Fatalf("PrepareAgentTurn() error = %v, want fence lost after racing synchronization", prepErr)
 		}
-		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, prepErr, false, time.Second)
+		// Zero delay keeps this reschedule-then-prepare behavior test synchronous;
+		// scheduling-delay semantics are covered by the dedicated retry-delay test.
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, prepErr, false, 0)
 		if err != nil {
 			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
 		}
@@ -972,6 +987,36 @@ VALUES ($1, $2, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'fea
 		}
 		if revision, head, status := readPayloadHead(t, pool, ctx, lease.ID); revision != 2 || head != currentHead || status != string(store.JobAvailable) {
 			t.Errorf("re-staged job = (revision %d, head %q, %s), want (2, current head, AVAILABLE)", revision, head, status)
+		}
+	})
+
+	t.Run("transient verification failure racing synchronization reschedules", func(t *testing.T) {
+		database, pool, ctx, _ := setupRacingPreparation(t,
+			"63000000-0000-4000-8000-000000000097", "64000000-0000-4000-8000-000000000097", "65000000-0000-4000-8000-000000000097",
+			"63000000-0000-4000-8000-000000000098")
+		lease := claimPreparationJob(t, database, ctx)
+		transient := errors.New("GitHub verification transport failed")
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, transient, true, 0)
+		if err != nil {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
+		}
+		if !acknowledgement.RetryScheduled || acknowledgement.WorkflowRevision != 2 {
+			t.Fatalf("acknowledgement = %#v, want rescheduled retry at revision 2", acknowledgement)
+		}
+		if revision, head, status := readPayloadHead(t, pool, ctx, lease.ID); revision != 2 || head != currentHead || status != string(store.JobAvailable) {
+			t.Fatalf("re-staged job = (revision %d, head %q, %s), want (2, current head, AVAILABLE)", revision, head, status)
+		}
+		retry := claimPreparationJob(t, database, ctx)
+		spec := preparationSpec("racing-transient-profile", "openai/gpt-5.2")
+		spec.VerifiedHeadSHA = currentHead
+		spec.VerifiedPRID = 10
+		spec.VerifiedPRNumber = 10
+		prepared, err := database.PrepareAgentTurn(ctx, retry, spec)
+		if err != nil {
+			t.Fatalf("freshly verified retry PrepareAgentTurn() error = %v", err)
+		}
+		if prepared.Turn.ExpectedHeadSHA != currentHead {
+			t.Errorf("freshly verified Turn head = %q, want %q", prepared.Turn.ExpectedHeadSHA, currentHead)
 		}
 	})
 
