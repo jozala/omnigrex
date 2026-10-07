@@ -764,6 +764,15 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 	next.ChangeProposal.HeadSHA = event.HeadSHA
 	next.ChangeProposal.ReadyForSHA = ""
 	next.ActiveTurn = nil
+	if snapshot.State == StateNeedsHuman {
+		if _, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage); !stageExists {
+			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+		}
+		next.Revision++
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
+			ReconcileLabelsAction{State: StateNeedsHuman},
+		}}
+	}
 	stage, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 	if !stageExists {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}

@@ -213,7 +213,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
 	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
-	preparer := agentturn.NewPreparer(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database)
+	preparer := agentturn.NewPreparerWithChangeProposalVerifier(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database, githubServices.api)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
 		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,

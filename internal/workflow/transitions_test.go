@@ -818,6 +818,72 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 	})
 }
 
+func TestSynchronizationInHumanHandoffIsTrackingOnly(t *testing.T) {
+	snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+	snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+	snapshot.ResumeRole = workflow.RoleDeveloper
+	snapshot.ChangeProposal = proposal(64, "head-a")
+	before := snapshot.Clone()
+	event := workflow.SynchronizationEvent{
+		EventMetadata: metadata(snapshot, "sync-tracking"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-b",
+	}
+
+	decision := reduce(snapshot, event)
+
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateNeedsHuman, snapshot.Revision+1)
+	if decision.Snapshot.ChangeProposal.HeadSHA != "head-b" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+		t.Errorf("tracked head = %#v, want head-b without readiness", decision.Snapshot.ChangeProposal)
+	}
+	if decision.Snapshot.ResumeRole != workflow.RoleDeveloper || decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman ||
+		decision.Snapshot.CurrentAttempt.ID != before.CurrentAttempt.ID || decision.Snapshot.CurrentAttempt.CurrentStage != before.CurrentAttempt.CurrentStage {
+		t.Errorf("handoff mutated by tracking-only synchronization: %#v", decision.Snapshot)
+	}
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != before.CurrentAttempt.ReviewUsage[workflow.StageReview] ||
+		decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget != before.CurrentAttempt.InfrastructureRetryBudget {
+		t.Errorf("budgets mutated by tracking-only synchronization: %#v", decision.Snapshot.CurrentAttempt)
+	}
+	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 0)
+	if actionCount[workflow.ReconcileLabelsAction](decision.Actions) != 1 {
+		t.Errorf("actions = %#v, want one needs-human label reconciliation", decision.Actions)
+	}
+}
+
+func TestSynchronizationInHumanHandoffGuardsDuplicateAndStaleChains(t *testing.T) {
+	t.Run("duplicate is harmless", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-b")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-duplicate-handoff"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-b"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonSynchronizationDuplicate, workflow.StateNeedsHuman, snapshot.Revision)
+	})
+
+	t.Run("stale cannot rewind", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-b")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-stale-handoff"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-a"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonSynchronizationStale, workflow.StateNeedsHuman, snapshot.Revision)
+		if decision.Snapshot.ChangeProposal.HeadSHA != "head-b" {
+			t.Errorf("head rewound to %q", decision.Snapshot.ChangeProposal.HeadSHA)
+		}
+	})
+
+	t.Run("unrelated Change Proposal is ignored", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-a")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-unrelated-handoff"), ChangeProposalID: 65, PreviousHeadSHA: "head-a", HeadSHA: "head-b"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonChangeProposalUnrelated, workflow.StateNeedsHuman, snapshot.Revision)
+	})
+}
+
 func TestRevisionMismatchDoesNotMakeEventNonRetryable(t *testing.T) {
 	snapshot := reviewingSnapshot(0, "head-1")
 	snapshot.ActiveTurn = nil

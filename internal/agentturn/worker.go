@@ -223,6 +223,7 @@ func (worker *Worker) classify(err error) (bool, time.Duration) {
 func isPermanentWorkerError(err error) bool {
 	return errors.Is(err, turnconfig.ErrInvalid) || errors.Is(err, ErrDependencyNil) || errors.Is(err, ErrInvalidRequest) ||
 		errors.Is(err, ErrInvalidRuntimeProfileReference) || errors.Is(err, ErrRuntimeProfileReferenceMismatch) ||
+		errors.Is(err, ErrChangeProposalVerificationFailed) ||
 		errors.Is(err, agentprofile.ErrInvalidCommitSHA) || errors.Is(err, agentprofile.ErrMissingSource) ||
 		errors.Is(err, agentprofile.ErrInvalidProfile) || errors.Is(err, agentprofile.ErrProfileTooLarge) ||
 		errors.Is(err, agentprofile.ErrUnknownProfile) || errors.Is(err, agentprofile.ErrInvalidCatalog) ||
