@@ -430,6 +430,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure terminal corroboration Worker: %w", err)
 	}
+	terminalCorroborationWorker = terminalCorroborationWorker.WithChangeProposalVerifier(githubServices.api)
 	reconciliationWorker, err := webhook.NewReconciliationWorker(database, githubServices.webhookProcessor, webhook.ReconciliationWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":reconcile-pending-events", LeaseDuration: settings.WorkflowEffectLeaseDuration,
 		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,

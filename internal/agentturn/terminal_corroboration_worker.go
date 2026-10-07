@@ -24,6 +24,7 @@ type terminalCorroborationStore interface {
 	SettleTerminalRevalidation(context.Context, store.JobLease, int64, store.AgentTurnSettlementObservation) error
 	CompleteTerminalCorroborationHandoff(context.Context, store.JobLease, workflow.Reason, string) (store.AgentTurnSettlement, error)
 	CompleteTerminalRevalidationHandoff(context.Context, store.JobLease, workflow.Reason, string) error
+	RedirectRevalidationToFreshTurn(ctx context.Context, lease store.JobLease, expectedRevision int64, headSHA string, pullRequestID, pullRequestNumber int64) error
 }
 
 var _ terminalCorroborationStore = (*store.Store)(nil)
@@ -37,11 +38,12 @@ type TerminalCorroborationWorkerConfig struct {
 }
 
 type TerminalCorroborationWorker struct {
-	store     terminalCorroborationStore
-	outcomes  *OutcomeReconciler
-	developer RepositoryCredentialProvider
-	reviewer  RepositoryCredentialProvider
-	workspace interface {
+	store        terminalCorroborationStore
+	outcomes     *OutcomeReconciler
+	developer    RepositoryCredentialProvider
+	reviewer     RepositoryCredentialProvider
+	pullRequests ChangeProposalVerifier
+	workspace    interface {
 		Paths(string) (workspace.Paths, error)
 	}
 	config TerminalCorroborationWorkerConfig
@@ -58,6 +60,16 @@ func NewTerminalCorroborationWorker(database terminalCorroborationStore, outcome
 	}
 	return &TerminalCorroborationWorker{store: database, outcomes: outcomes, developer: developer,
 		reviewer: reviewer, workspace: paths, config: config}, nil
+}
+
+// WithChangeProposalVerifier adds authoritative GitHub verification for
+// terminal-intent revalidation and returns the worker for chaining. With a
+// verifier, a changed live head redirects the obsolete intent to a fresh Turn
+// instead of adopting it; without one, revalidation keeps its existing
+// behavior.
+func (worker *TerminalCorroborationWorker) WithChangeProposalVerifier(verifier ChangeProposalVerifier) *TerminalCorroborationWorker {
+	worker.pullRequests = verifier
+	return worker
 }
 
 func (worker *TerminalCorroborationWorker) Run(ctx context.Context) error {
@@ -153,6 +165,15 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if credential == "" {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
+	if lease.Kind == store.RevalidateTerminalIntentJobKind && worker.pullRequests != nil && pending.Execution.ChangeProposal != nil {
+		redirected, redirectErr := worker.redirectChangedHeadRevalidation(ctx, *lease, pending, credential, remaining)
+		if redirectErr != nil {
+			return true, redirectErr
+		}
+		if redirected {
+			return true, nil
+		}
+	}
 	paths, err := worker.workspace.Paths(pending.Execution.Assignment.ID)
 	if err != nil {
 		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
@@ -221,6 +242,52 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	default:
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
 	}
+}
+
+// redirectChangedHeadRevalidation reports whether a revalidation was redirected
+// to a fresh Turn. It fetches the current GitHub Pull Request outside database
+// locks; when its head moved beyond the source Turn's expected head, the
+// obsolete intent is never adopted. A matching head returns false so the
+// caller proceeds with no-new-prompt recovery as usual.
+func (worker *TerminalCorroborationWorker) redirectChangedHeadRevalidation(ctx context.Context, lease store.JobLease, pending store.TerminalCorroborationContext, credential string, remaining time.Duration) (bool, error) {
+	durable := pending.Execution.ChangeProposal
+	live, err := worker.pullRequests.GetPullRequest(ctx, credential, pending.Execution.Repository.Owner, pending.Execution.Repository.Name, int(durable.PullRequestNumber))
+	if err != nil {
+		classification := classifyGitHubCorroborationFailure(err)
+		metadata := githubapi.ExtractSafeErrorMetadata(err)
+		retryAfter := metadata.RetryAfter
+		if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
+			retryAfter = untilReset
+		}
+		return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+			TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
+				Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
+	}
+	head, err := VerifyObservedChangeProposal(durable.PullRequestID, durable.PullRequestNumber, durable.HeadRef, durable.BaseRef, live)
+	if err != nil {
+		return false, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+	}
+	if head == pending.Execution.Turn.ExpectedHeadSHA {
+		return false, nil
+	}
+	if err := worker.store.RedirectRevalidationToFreshTurn(ctx, lease, pending.WorkflowRevision, head, live.ID, int64(live.Number)); err != nil {
+		if errors.Is(err, store.ErrJobLeaseLost) {
+			telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
+			return true, nil
+		}
+		if errors.Is(err, store.ErrTerminalCorroborationHeadMoved) {
+			return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+				TerminalCorroborationFailure{Code: "head_changed_during_corroboration", Retryable: true})
+		}
+		if errors.Is(err, store.ErrTerminalCorroborationConflict) || errors.Is(err, store.ErrAgentTurnSettlementRejected) ||
+			errors.Is(err, store.ErrAgentTurnChangeProposalConflict) || errors.Is(err, store.ErrReviewerActorConflict) ||
+			errors.Is(err, store.ErrAgentTurnSettlementInvalid) {
+			return false, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+		}
+		return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+			TerminalCorroborationFailure{Code: "database_observation_unavailable", Retryable: true})
+	}
+	return true, nil
 }
 
 func (worker *TerminalCorroborationWorker) handoff(ctx context.Context, lease store.JobLease, reason workflow.Reason, code string) error {

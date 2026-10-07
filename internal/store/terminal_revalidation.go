@@ -282,3 +282,175 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 	}
 	return tx.Commit(ctx)
 }
+
+// RedirectRevalidationToFreshTurn abandons an obsolete terminal intent whose
+// current GitHub head moved beyond its expected head, repairs the stored head,
+// and schedules a fresh Turn for the verified head instead of adopting the old
+// intent or repeating its GitHub mutation. The caller fetches the live head
+// outside database locks; this method fences the observation against racing
+// state changes and commits the repair, the successor preparation, the
+// active-state labels, and the revalidation completion atomically.
+func (store *Store) RedirectRevalidationToFreshTurn(ctx context.Context, lease JobLease, expectedRevision int64, headSHA string, pullRequestID, pullRequestNumber int64) error {
+	if lease.Kind != RevalidateTerminalIntentJobKind || lease.Queue != "agent-turn-recovery" ||
+		!validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 ||
+		!validUUID(lease.WorkflowID) || !validUUID(lease.WorkflowAttemptID) || !validUUID(lease.AgentTurnID) ||
+		!validVerifiedHeadSHA(headSHA) || pullRequestID <= 0 || pullRequestNumber <= 0 {
+		return ErrJobLeaseLost
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var workflowStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1 FOR UPDATE`,
+		lease.WorkflowID).Scan(&workflowStatus); err != nil {
+		return corroborationReadError(err)
+	}
+	if workflowStatus != "DEVELOPING" && workflowStatus != "REVIEWING" {
+		return ErrJobLeaseLost
+	}
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.ID))
+	if err != nil {
+		return corroborationReadError(err)
+	}
+	if job.Kind != RevalidateTerminalIntentJobKind || job.Queue != "agent-turn-recovery" ||
+		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
+		job.AttemptCount != lease.Attempt || job.WorkflowID != lease.WorkflowID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
+		job.ExecutionEpoch != lease.ExecutionEpoch {
+		return ErrJobLeaseLost
+	}
+	var jobLive bool
+	if err := tx.QueryRow(ctx, `SELECT lease_expires_at > clock_timestamp() FROM jobs WHERE id = $1`,
+		lease.ID).Scan(&jobLive); err != nil || !jobLive {
+		return corroborationReadError(err)
+	}
+	var payload struct {
+		SourceTurnID string `json:"source_turn_id"`
+	}
+	if json.Unmarshal(job.Payload, &payload) != nil || payload.SourceTurnID != job.AgentTurnID {
+		return ErrJobLeaseLost
+	}
+	var handedOff int
+	if err := tx.QueryRow(ctx, `
+SELECT 1 FROM agent_turn_corroborations
+WHERE agent_turn_id = $1 AND workflow_id = $2 AND state = 'HANDED_OFF' FOR UPDATE`, job.AgentTurnID, job.WorkflowID).Scan(&handedOff); err != nil {
+		return corroborationReadError(err)
+	}
+	turn, err := lockAgentTurn(ctx, tx, job.AgentTurnID)
+	if err != nil {
+		return corroborationReadError(err)
+	}
+	if turn.active || turn.Status != AgentTurnFailed || turn.AgentSessionID != job.AgentSessionID ||
+		turn.ExecutionEpoch != job.ExecutionEpoch || turn.WorkflowAttemptID == job.WorkflowAttemptID {
+		return ErrJobLeaseLost
+	}
+	var sessionOwner SessionControlOwner
+	if err := tx.QueryRow(ctx, `SELECT control_owner FROM agent_sessions WHERE id = $1`,
+		job.AgentSessionID).Scan(&sessionOwner); err != nil {
+		return corroborationReadError(err)
+	}
+	if sessionOwner != SessionControlAutomation {
+		return ErrJobLeaseLost
+	}
+	turn.AgentAssignmentID, turn.AgentParticipantID = job.AgentAssignmentID, job.AgentAssignmentID
+	var role workflow.Role
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments
+WHERE id = $1 AND workflow_id = $2 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+		return corroborationReadError(err)
+	}
+	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
+	if err != nil {
+		return err
+	}
+	if snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != job.WorkflowAttemptID || snapshot.ActiveTurn != nil {
+		return ErrJobLeaseLost
+	}
+	if int64(snapshot.Revision) != expectedRevision {
+		return ErrTerminalCorroborationHeadMoved
+	}
+	if !store.reducer.DefinitionCompatible(snapshot) {
+		return ErrAgentTurnSettlementRejected
+	}
+	stage, ok := store.reducer.Definition().Stage(turn.Stage)
+	if !ok || snapshot.CurrentAttempt.CurrentStage != turn.Stage || stage.Role != role {
+		return ErrJobLeaseLost
+	}
+	var proposalID, storedHead string
+	var storedPRID, storedPRNumber int64
+	err = tx.QueryRow(ctx, `SELECT id::text, head_sha, pull_request_id, pull_request_number FROM change_proposals WHERE workflow_id = $1 AND active FOR UPDATE`, job.WorkflowID).Scan(
+		&proposalID, &storedHead, &storedPRID, &storedPRNumber)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAgentTurnSettlementRejected
+	}
+	if err != nil {
+		return fmt.Errorf("read redirect Change Proposal: %w", err)
+	}
+	if storedPRID != pullRequestID || storedPRNumber != pullRequestNumber {
+		return ErrAgentTurnSettlementRejected
+	}
+	if storedHead != headSHA {
+		if _, err := tx.Exec(ctx, `UPDATE change_proposals SET head_sha = $2, ready_for_sha = NULL, updated_at = clock_timestamp() WHERE id = $1`, proposalID, headSHA); err != nil {
+			return fmt.Errorf("repair redirect Change Proposal head: %w", err)
+		}
+	}
+	preparationPayload, err := json.Marshal(map[string]any{
+		"mode": workflow.AssignmentGenerationCurrent, "stage": turn.Stage, "role": role,
+		"purpose": workflow.TurnPurposeReactivation, "expected_head_sha": headSHA,
+		"retry_of_turn_id": "", "revision": snapshot.Revision,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: PrepareAgentTurnJobKind, payload: preparationPayload,
+		maxAttempts: 3, idempotencyKey: "workflow:" + job.WorkflowID + ":revalidation-redirect:" + job.ID + ":prepare-agent-turn",
+		scope: jobInsertScope{workflowID: job.WorkflowID, workflowAttemptID: job.WorkflowAttemptID},
+	}); err != nil {
+		if errors.Is(err, ErrJobIdempotencyConflict) {
+			return ErrTerminalCorroborationHeadMoved
+		}
+		return fmt.Errorf("enqueue redirect preparation: %w", err)
+	}
+	labelPayload, err := json.Marshal(map[string]any{
+		"state": string(stage.State), "ready_for_sha": "", "consume_run": true, "revision": snapshot.Revision,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := insertIdempotentJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: ReconcileGitHubLabelsJobKind, payload: labelPayload,
+		maxAttempts: 3, idempotencyKey: "workflow:" + job.WorkflowID + ":revalidation-redirect:" + job.ID + ":reconcile-github-labels",
+		scope: jobInsertScope{workflowID: job.WorkflowID, workflowAttemptID: job.WorkflowAttemptID},
+	}); err != nil {
+		if errors.Is(err, ErrJobIdempotencyConflict) {
+			return ErrTerminalCorroborationHeadMoved
+		}
+		return fmt.Errorf("enqueue redirect labels: %w", err)
+	}
+	jobResult, err := json.Marshal(map[string]any{
+		"redirected_to_head": headSHA, "source_turn_id": turn.ID,
+	})
+	if err != nil {
+		return err
+	}
+	attemptUpdated, err := tx.Exec(ctx, `
+UPDATE job_attempts SET status = 'SUCCEEDED', finished_at = clock_timestamp(), result = $4
+WHERE job_id = $1 AND lease_token = $2 AND attempt_number = $3 AND status = 'LEASED'`,
+		job.ID, job.LeaseToken, job.AttemptCount, jobResult)
+	if err != nil || attemptUpdated.RowsAffected() != 1 {
+		return ErrJobLeaseLost
+	}
+	jobUpdated, err := tx.Exec(ctx, `
+UPDATE jobs SET status = 'SUCCEEDED', lease_owner = NULL, lease_token = NULL,
+    leased_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+    updated_at = clock_timestamp(), completed_at = clock_timestamp(), result = $4
+WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`,
+		job.ID, job.LeaseToken, job.AttemptCount, jobResult)
+	if err != nil || jobUpdated.RowsAffected() != 1 {
+		return ErrJobLeaseLost
+	}
+	return tx.Commit(ctx)
+}
