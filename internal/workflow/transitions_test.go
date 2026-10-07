@@ -734,6 +734,48 @@ func TestRetriggerCompletesPriorAttemptBeforeCreatingFreshAttempt(t *testing.T) 
 	}
 }
 
+func TestRetriggerWithChangedHeadSkipsTerminalRevalidation(t *testing.T) {
+	newNeedsHumanWithHead := func(head string) workflow.Snapshot {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 3)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, head)
+		return snapshot
+	}
+	newPriorTerminalTrigger := func(snapshot workflow.Snapshot, sourceHead string) workflow.TriggerEvent {
+		return workflow.TriggerEvent{
+			EventMetadata: metadata(snapshot, "retrigger-"+sourceHead), AttemptID: "attempt-2", AttemptNumber: 2,
+			PriorTerminalTurnID: "old-turn", PriorTerminalStage: workflow.StageImplementation,
+			PriorTerminalRole:            workflow.RoleDeveloper,
+			PriorTerminalExpectedHeadSHA: sourceHead,
+		}
+	}
+
+	t.Run("changed head uses normal reactivation", func(t *testing.T) {
+		snapshot := newNeedsHumanWithHead("head-b")
+		decision := reduce(snapshot, newPriorTerminalTrigger(snapshot, "head-a"))
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		intent := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
+		if intent.Purpose != workflow.TurnPurposeReactivation || intent.ExpectedHeadSHA != "head-b" {
+			t.Errorf("reactivation intent = %#v, want fresh Developer Turn for head-b", intent)
+		}
+		assertActionCount[workflow.EnqueueTerminalRevalidationAction](t, decision.Actions, 0)
+	})
+
+	t.Run("matching head revalidates without a new prompt", func(t *testing.T) {
+		snapshot := newNeedsHumanWithHead("head-b")
+		decision := reduce(snapshot, newPriorTerminalTrigger(snapshot, "head-b"))
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		revalidation := onlyAction[workflow.EnqueueTerminalRevalidationAction](t, decision.Actions)
+		if revalidation.SourceTurnID != "old-turn" {
+			t.Errorf("revalidation = %#v, want source old-turn", revalidation)
+		}
+		assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	})
+}
+
 func TestRetriggerCannotReusePriorAttemptIdentityOrSequence(t *testing.T) {
 	snapshot := baseSnapshot(workflow.StateNeedsHuman, 3)
 	snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman

@@ -515,8 +515,10 @@ func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot
 		}
 		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.State == workflow.StateNeedsHuman && snapshot.CurrentAttempt != nil {
 			var controlOwner SessionControlOwner
+			var sourceExpectedHeadSHA *string
 			err := tx.QueryRow(ctx, `
-SELECT checkpoint.agent_turn_id::text, turn.stage_id, assignment.role, session.control_owner
+SELECT checkpoint.agent_turn_id::text, turn.stage_id, assignment.role, session.control_owner,
+       turn.expected_head_sha
 FROM agent_turn_corroborations AS checkpoint
 JOIN agent_turns AS turn ON turn.id = checkpoint.agent_turn_id
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
@@ -531,12 +533,15 @@ WHERE (checkpoint.workflow_attempt_id = $1 OR EXISTS (
   AND checkpoint.state = 'HANDED_OFF' AND turn.status = 'FAILED'
   AND workflow.human_handoff_reason IN ('terminal_corroboration_exhausted', 'terminal_corroboration_prerequisite', 'terminal_revalidation_human_control')
 ORDER BY checkpoint.pending_since DESC LIMIT 1`, snapshot.CurrentAttempt.ID).Scan(
-				&trigger.PriorTerminalTurnID, &trigger.PriorTerminalStage, &trigger.PriorTerminalRole, &controlOwner)
+				&trigger.PriorTerminalTurnID, &trigger.PriorTerminalStage, &trigger.PriorTerminalRole, &controlOwner, &sourceExpectedHeadSHA)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return workflow.Decision{}, fmt.Errorf("inspect prior terminal intent: %w", err)
 			}
 			if err == nil {
 				trigger.PriorTerminalControlBlocked = controlOwner != SessionControlAutomation
+				if sourceExpectedHeadSHA != nil {
+					trigger.PriorTerminalExpectedHeadSHA = *sourceExpectedHeadSHA
+				}
 				event = trigger
 			}
 		}
@@ -979,6 +984,18 @@ func persistWorkflowSnapshot(ctx context.Context, tx pgx.Tx, workflowID string, 
 	for _, action := range decision.Actions {
 		if handoff, ok := action.(workflow.MarkHumanHandoffAction); ok {
 			handoffReason = string(handoff.Reason)
+		}
+	}
+	if handoffReason == nil && snapshot.State == workflow.StateNeedsHuman {
+		// Tracking-only updates (such as synchronization during Human Handoff)
+		// carry no new handoff action; preserve the existing reason instead of
+		// clearing the blocker metadata the next activation may rely on.
+		var preserved *string
+		if err := tx.QueryRow(ctx, `SELECT human_handoff_reason FROM workflows WHERE id = $1`, workflowID).Scan(&preserved); err != nil {
+			return fmt.Errorf("preserve Human Handoff reason: %w", err)
+		}
+		if preserved != nil {
+			handoffReason = *preserved
 		}
 	}
 	result, err := tx.Exec(ctx, `

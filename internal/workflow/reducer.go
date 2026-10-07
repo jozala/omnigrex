@@ -419,7 +419,8 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	)
 	if event.PriorTerminalTurnID != "" && snapshot.State == StateNeedsHuman &&
 		event.PriorTerminalStage == stage.ID && event.PriorTerminalRole == stage.Role &&
-		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew {
+		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew &&
+		event.PriorTerminalExpectedHeadSHA == head {
 		actions = append(actions, EnqueueTerminalRevalidationAction{SourceTurnID: event.PriorTerminalTurnID})
 	} else {
 		actions = append(actions, EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: purpose, ExpectedHeadSHA: head})

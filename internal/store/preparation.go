@@ -597,8 +597,27 @@ func (store *Store) AcknowledgeAgentTurnPreparationFailure(ctx context.Context, 
 	if err != nil || !store.validAgentTurnPreparationPayload(payload, job) {
 		return AgentTurnPreparationFailureAcknowledgement{}, ErrAgentTurnPreparationFenceLost
 	}
+	eventRevision := payload.Revision
 	if _, err := store.lockPreparationWorkflow(ctx, tx, job, payload); err != nil {
-		return AgentTurnPreparationFailureAcknowledgement{}, err
+		if !errors.Is(err, ErrAgentTurnPreparationFenceLost) {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		// A synchronization (or another applied transition) may have superseded
+		// the observation while it was in flight. Re-stage superseded-but-valid
+		// observations against current state instead of stranding the job.
+		if !isSupersededPreparationObservation(cause) {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		refreshed, currentRevision, ok, refreshErr := store.refreshSupersededPreparationTx(ctx, tx, job, payload)
+		if refreshErr != nil {
+			return AgentTurnPreparationFailureAcknowledgement{}, refreshErr
+		}
+		if !ok {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		payload = refreshed
+		eventRevision = currentRevision
+		retryable = true
 	}
 	retryScheduled := retryable && job.AttemptCount < job.MaxAttempts
 	attemptResult, err := tx.Exec(ctx, `
@@ -643,7 +662,7 @@ SELECT EXISTS (
 		decision := store.reducer.Reduce(snapshot, workflow.AgentTurnPreparationFailedEvent{
 			EventMetadata: workflow.EventMetadata{
 				ID: job.ID, ObservedAt: job.CreatedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: uint64(payload.Revision),
+				ExpectedRevision: uint64(eventRevision),
 			},
 			Role: payload.Role, Diagnostic: cause.Error(), AssignmentsExist: assignmentsExist,
 		})
@@ -1285,6 +1304,79 @@ func validVerifiedHeadSHA(value string) bool {
 		}
 	}
 	return true
+}
+
+// isSupersededPreparationObservation reports whether a preparation failure
+// may reflect a committed transition (such as a tracking-only synchronization)
+// superseding the observation rather than a terminal fence such as closure,
+// cancellation, or a rejected Change Proposal identity.
+func isSupersededPreparationObservation(cause error) bool {
+	return errors.Is(cause, ErrAgentTurnPreparationFenceLost) ||
+		errors.Is(cause, ErrAgentTurnPreparationVerificationStale)
+}
+
+// refreshSupersededPreparationTx re-stages a superseded preparation job against
+// current durable state: the live revision and stored Change Proposal head.
+// It preserves closure, association, cancellation, and active-Turn restrictions
+// by only refreshing while the Workflow still allows Turns for the same active
+// attempt, Stage, and Role with no active Turn and an active Change Proposal.
+// Callers reschedule the refreshed job within its existing attempt budget, so
+// racing observations are discarded and reconciled again through bounded
+// recovery instead of stranding the job or launching a Turn on stale metadata.
+func (store *Store) refreshSupersededPreparationTx(ctx context.Context, tx pgx.Tx, job Job, payload agentTurnPreparationPayload) (agentTurnPreparationPayload, int64, bool, error) {
+	var status, assignmentStatus, runtimeState string
+	var revision int64
+	if err := tx.QueryRow(ctx, `
+SELECT status, state_revision, desired_assignment_status, desired_runtime_state
+FROM workflows WHERE id = $1`, job.WorkflowID).Scan(&status, &revision, &assignmentStatus, &runtimeState); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if revision == payload.Revision || !workflowAllowsTurns(status) || assignmentStatus != "ACTIVE" || runtimeState != "ACTIVE" {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(payload.Stage)
+	if !ok || string(stage.State) != status || stage.Role != payload.Role || !definition.AcceptsPurpose(payload.Stage, payload.Purpose) {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	var active bool
+	var currentStage workflow.StageID
+	if err := tx.QueryRow(ctx, `SELECT active, current_stage FROM workflow_attempts WHERE id = $1 AND workflow_id = $2`, job.WorkflowAttemptID, job.WorkflowID).Scan(&active, &currentStage); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agentTurnPreparationPayload{}, 0, false, nil
+		}
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if !active || currentStage != payload.Stage {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM agent_turns WHERE workflow_id = $1 AND active
+)`, job.WorkflowID).Scan(&active); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if active {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	var headSHA string
+	if err := tx.QueryRow(ctx, `SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active`, job.WorkflowID).Scan(&headSHA); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agentTurnPreparationPayload{}, 0, false, nil
+		}
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	refreshed := payload
+	refreshed.Revision = revision
+	refreshed.ExpectedHeadSHA = headSHA
+	refreshedPayload, err := json.Marshal(refreshed)
+	if err != nil {
+		return agentTurnPreparationPayload{}, 0, false, fmt.Errorf("encode refreshed preparation payload: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jobs SET payload = $2, updated_at = clock_timestamp() WHERE id = $1`, job.ID, refreshedPayload); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, fmt.Errorf("re-stage superseded preparation payload: %w", err)
+	}
+	return refreshed, revision, true, nil
 }
 
 func lockAgentTurnPreparationWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {

@@ -634,6 +634,91 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 	}
 }
 
+func TestTrackingOnlySynchronizationPreservesHandoffReason(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	application := triggerPreparationWorkflow(t, database, ctx, "63000000-0000-4000-8000-000000000081", "64000000-0000-4000-8000-000000000081")
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows
+SET status = 'NEEDS_HUMAN', desired_assignment_status = 'WAITING_FOR_HUMAN',
+    resume_role = 'DEVELOPER', human_handoff_reason = 'agent_blocked'
+WHERE id = $1`, application.WorkflowID); err != nil {
+		t.Fatalf("seed Human Handoff: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ('65000000-0000-4000-8000-000000000081', $1, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'feature', 'old-head')`,
+		application.WorkflowID); err != nil {
+		t.Fatalf("seed Change Proposal: %v", err)
+	}
+
+	syncDelivery := workflowDelivery("63000000-0000-4000-8000-000000000082")
+	syncDelivery.IssueID, syncDelivery.IssueNumber = 0, 0
+	syncClaim := claimWorkflowDelivery(t, database, ctx, syncDelivery)
+	sync, err := database.CompleteWebhookTransition(ctx, syncClaim.DeliveryID, syncClaim.ClaimToken,
+		normalizedPayload(syncClaim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 9123, PullRequestID: 10, PullRequestNumber: 10},
+		func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.SynchronizationEvent{
+				EventMetadata: context.Metadata, ChangeProposalID: 10,
+				PreviousHeadSHA: "old-head", HeadSHA: "new-head",
+			}, nil
+		})
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() synchronization error = %v", err)
+	}
+	if sync.Disposition != workflow.DispositionApplied || sync.Revision != 2 {
+		t.Fatalf("synchronization = (%s, %d), want (APPLIED, 2)", sync.Disposition, sync.Revision)
+	}
+	var head string
+	var reason *string
+	if err := pool.QueryRow(ctx, `
+SELECT proposal.head_sha, workflow.human_handoff_reason
+FROM change_proposals AS proposal
+JOIN workflows AS workflow ON workflow.id = proposal.workflow_id
+WHERE workflow.id = $1 AND proposal.active`, application.WorkflowID).Scan(&head, &reason); err != nil {
+		t.Fatalf("read tracked head and handoff reason: %v", err)
+	}
+	if head != "new-head" || reason == nil || *reason != string(workflow.ReasonAgentBlocked) {
+		t.Errorf("tracked state = (head %q, reason %v), want (new-head, agent_blocked)", head, reason)
+	}
+	var prepare, labels int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE kind = 'PREPARE_AGENT_TURN'), count(*) FILTER (WHERE kind = 'RECONCILE_GITHUB_LABELS') FROM jobs WHERE workflow_id = $1 AND normalized_event_id = $2`, application.WorkflowID, syncClaim.DeliveryID).Scan(&prepare, &labels); err != nil {
+		t.Fatalf("count synchronization jobs: %v", err)
+	}
+	if prepare != 0 || labels != 1 {
+		t.Errorf("synchronization jobs = %d preparations and %d label reconciliations, want 0 and 1", prepare, labels)
+	}
+
+	retriggerClaim := claimWorkflowDelivery(t, database, ctx, workflowDelivery("63000000-0000-4000-8000-000000000083"))
+	retriggered, err := database.CompleteWebhookTransition(ctx, retriggerClaim.DeliveryID, retriggerClaim.ClaimToken,
+		normalizedPayload(retriggerClaim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "64000000-0000-4000-8000-000000000083", AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
+		})
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() trigger error = %v", err)
+	}
+	if retriggered.Disposition != workflow.DispositionApplied {
+		t.Fatalf("retrigger disposition = %s, want APPLIED", retriggered.Disposition)
+	}
+	var state string
+	var clearedReason *string
+	if err := pool.QueryRow(ctx, `SELECT status, human_handoff_reason FROM workflows WHERE id = $1`, application.WorkflowID).Scan(&state, &clearedReason); err != nil {
+		t.Fatalf("read retriggered Workflow: %v", err)
+	}
+	if state != string(workflow.StateDeveloping) || clearedReason != nil {
+		t.Errorf("retriggered state = (%s, reason %v), want (DEVELOPING, cleared)", state, clearedReason)
+	}
+}
+
 func TestPrepareAgentTurnRepairsVerifiedStaleHead(t *testing.T) {
 	const (
 		staleHeadA    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -769,6 +854,156 @@ VALUES ($1, $2, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'fea
 		}
 		if head, _ := storedHead(t, pool, ctx, workflowID); head != staleHeadA {
 			t.Errorf("stored head = %q, want unchanged %q", head, staleHeadA)
+		}
+	})
+}
+
+func TestPreparationFailureRefreshesSupersededObservation(t *testing.T) {
+	const (
+		staleHead   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		currentHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+
+	setupRacingPreparation := func(t *testing.T, deliveryID, attemptID, proposalID, syncDeliveryID string) (*store.Store, *pgxpool.Pool, context.Context, string) {
+		t.Helper()
+		databases, pool := openPhaseFiveStores(t, 1)
+		database := databases[0]
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		t.Cleanup(cancel)
+		application := triggerPreparationWorkflow(t, database, ctx, deliveryID, attemptID)
+		if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ($1, $2, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'feature', $3)`,
+			proposalID, application.WorkflowID, staleHead); err != nil {
+			t.Fatalf("seed Change Proposal: %v", err)
+		}
+		payload, err := json.Marshal(map[string]any{
+			"mode": workflow.AssignmentGenerationNew, "stage": workflow.StageImplementation, "role": workflow.RoleDeveloper,
+			"purpose": workflow.TurnPurposeInitialDevelopment, "expected_head_sha": staleHead,
+			"retry_of_turn_id": "", "revision": 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET payload = $2 WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID, payload); err != nil {
+			t.Fatalf("stage stale preparation payload: %v", err)
+		}
+		syncDelivery := workflowDelivery(syncDeliveryID)
+		syncDelivery.IssueID, syncDelivery.IssueNumber = 0, 0
+		syncClaim := claimWorkflowDelivery(t, database, ctx, syncDelivery)
+		sync, err := database.CompleteWebhookTransition(ctx, syncClaim.DeliveryID, syncClaim.ClaimToken,
+			normalizedPayload(syncClaim.DeliveryID, "synchronize"), store.WorkflowLocator{RepositoryID: 9123, PullRequestID: 10, PullRequestNumber: 10},
+			func(context store.WorkflowEventContext) (workflow.Event, error) {
+				return workflow.SynchronizationEvent{
+					EventMetadata: context.Metadata, ChangeProposalID: 10,
+					PreviousHeadSHA: staleHead, HeadSHA: currentHead,
+				}, nil
+			})
+		if err != nil || sync.Disposition != workflow.DispositionApplied || sync.Revision != 2 {
+			t.Fatalf("racing synchronization = (%#v, %v), want APPLIED at revision 2", sync, err)
+		}
+		return database, pool, ctx, application.WorkflowID
+	}
+
+	readPayloadHead := func(t *testing.T, pool *pgxpool.Pool, ctx context.Context, jobID string) (int64, string, string) {
+		t.Helper()
+		var revision int64
+		var head, status string
+		if err := pool.QueryRow(ctx, `SELECT (payload->>'revision')::bigint, payload->>'expected_head_sha', status FROM jobs WHERE id = $1`, jobID).Scan(&revision, &head, &status); err != nil {
+			t.Fatalf("read preparation payload: %v", err)
+		}
+		return revision, head, status
+	}
+
+	t.Run("fence loss reschedules with refreshed observation", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupRacingPreparation(t,
+			"63000000-0000-4000-8000-000000000091", "64000000-0000-4000-8000-000000000091", "65000000-0000-4000-8000-000000000091",
+			"63000000-0000-4000-8000-000000000092")
+		lease := claimPreparationJob(t, database, ctx)
+		_, prepErr := database.PrepareAgentTurn(ctx, lease, preparationSpec("racing-profile", "openai/gpt-5.2"))
+		if !errors.Is(prepErr, store.ErrAgentTurnPreparationFenceLost) {
+			t.Fatalf("PrepareAgentTurn() error = %v, want fence lost after racing synchronization", prepErr)
+		}
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, prepErr, false, time.Second)
+		if err != nil {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
+		}
+		if !acknowledgement.RetryScheduled || acknowledgement.WorkflowRevision != 2 {
+			t.Fatalf("acknowledgement = %#v, want rescheduled retry at revision 2", acknowledgement)
+		}
+		if revision, head, status := readPayloadHead(t, pool, ctx, lease.ID); revision != 2 || head != currentHead || status != string(store.JobAvailable) {
+			t.Errorf("re-staged job = (revision %d, head %q, %s), want (2, current head, AVAILABLE)", revision, head, status)
+		}
+		retry := claimPreparationJob(t, database, ctx)
+		if retry.Attempt != 2 {
+			t.Fatalf("retry attempt = %d, want 2", retry.Attempt)
+		}
+		prepared, err := database.PrepareAgentTurn(ctx, retry, preparationSpec("racing-profile", "openai/gpt-5.2"))
+		if err != nil {
+			t.Fatalf("retry PrepareAgentTurn() error = %v", err)
+		}
+		if prepared.Turn.ExpectedHeadSHA != currentHead {
+			t.Errorf("retry Turn head = %q, want %q", prepared.Turn.ExpectedHeadSHA, currentHead)
+		}
+		var workflowStatus string
+		var reason *string
+		if err := pool.QueryRow(ctx, `SELECT status, human_handoff_reason FROM workflows WHERE id = $1`, workflowID).Scan(&workflowStatus, &reason); err != nil {
+			t.Fatalf("read Workflow after recovery: %v", err)
+		}
+		if workflowStatus != string(workflow.StateDeveloping) || reason != nil {
+			t.Errorf("Workflow after recovery = (%s, reason %v), want (DEVELOPING, no handoff)", workflowStatus, reason)
+		}
+	})
+
+	t.Run("stale verification observation reschedules", func(t *testing.T) {
+		database, pool, ctx, _ := setupRacingPreparation(t,
+			"63000000-0000-4000-8000-000000000093", "64000000-0000-4000-8000-000000000093", "65000000-0000-4000-8000-000000000093",
+			"63000000-0000-4000-8000-000000000094")
+		lease := claimPreparationJob(t, database, ctx)
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, store.ErrAgentTurnPreparationVerificationStale, true, time.Second)
+		if err != nil {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
+		}
+		if !acknowledgement.RetryScheduled || acknowledgement.WorkflowRevision != 2 {
+			t.Fatalf("acknowledgement = %#v, want rescheduled retry at revision 2", acknowledgement)
+		}
+		if revision, head, status := readPayloadHead(t, pool, ctx, lease.ID); revision != 2 || head != currentHead || status != string(store.JobAvailable) {
+			t.Errorf("re-staged job = (revision %d, head %q, %s), want (2, current head, AVAILABLE)", revision, head, status)
+		}
+	})
+
+	t.Run("exhaustion still hands off", func(t *testing.T) {
+		database, pool, ctx, workflowID := setupRacingPreparation(t,
+			"63000000-0000-4000-8000-000000000095", "64000000-0000-4000-8000-000000000095", "65000000-0000-4000-8000-000000000095",
+			"63000000-0000-4000-8000-000000000096")
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET max_attempts = 1 WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, workflowID); err != nil {
+			t.Fatal(err)
+		}
+		lease := claimPreparationJob(t, database, ctx)
+		_, prepErr := database.PrepareAgentTurn(ctx, lease, preparationSpec("racing-profile", "openai/gpt-5.2"))
+		if !errors.Is(prepErr, store.ErrAgentTurnPreparationFenceLost) {
+			t.Fatalf("PrepareAgentTurn() error = %v, want fence lost after racing synchronization", prepErr)
+		}
+		acknowledgement, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, prepErr, false, time.Second)
+		if err != nil {
+			t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
+		}
+		if acknowledgement.RetryScheduled || acknowledgement.WorkflowRevision != 3 {
+			t.Fatalf("acknowledgement = %#v, want terminal handoff at revision 3", acknowledgement)
+		}
+		var workflowStatus, reason, jobStatus string
+		if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.human_handoff_reason, preparation.status
+FROM workflows AS workflow
+JOIN jobs AS preparation ON preparation.workflow_id = workflow.id AND preparation.kind = 'PREPARE_AGENT_TURN'
+WHERE workflow.id = $1`, workflowID).Scan(&workflowStatus, &reason, &jobStatus); err != nil {
+			t.Fatalf("read exhausted Workflow: %v", err)
+		}
+		if workflowStatus != string(workflow.StateNeedsHuman) || reason != string(workflow.ReasonAgentTurnPreparationFailed) || jobStatus != string(store.JobFailed) {
+			t.Errorf("exhausted state = (%s, %s, job %s), want (NEEDS_HUMAN, preparation failed, FAILED)", workflowStatus, reason, jobStatus)
 		}
 	})
 }
