@@ -48,7 +48,9 @@ func ciRegressionLog() string {
 
 func ciRegressionServer(t *testing.T, logContent string) (*httptest.Server, *githubapi.APIClient) {
 	t.Helper()
-	var server *httptest.Server
+	// The redirect target is derived from the request host: closing over the
+	// server variable would race with the test goroutine's assignment under
+	// -race, since the handler runs on server goroutines.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/log-bytes" && r.Header.Get("Authorization") != "Bearer developer-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -72,7 +74,7 @@ func ciRegressionServer(t *testing.T, logContent string) (*httptest.Server, *git
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
 			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run Docker-backed integration tests","number":13,"status":"completed","conclusion":"failure"}]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d/logs", ciRegressionJob):
-			w.Header().Set("Location", server.URL+"/log-bytes")
+			w.Header().Set("Location", "http://"+r.Host+"/log-bytes")
 			w.WriteHeader(http.StatusFound)
 		case r.URL.Path == "/log-bytes":
 			if r.Header.Get("Authorization") != "" {
@@ -95,7 +97,7 @@ func ciRegressionServer(t *testing.T, logContent string) (*httptest.Server, *git
 			http.NotFound(w, r)
 		}
 	})
-	server = httptest.NewServer(handler)
+	server := httptest.NewServer(handler)
 	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
 	if err != nil {
 		server.Close()

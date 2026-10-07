@@ -375,6 +375,27 @@ func (*replayGatewayGitHub) ListReviewThreads(context.Context, string, string, s
 func (*replayGatewayGitHub) GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error) {
 	return nil, errors.New("unexpected call")
 }
+func (*replayGatewayGitHub) GetCheckRunDiagnostics(context.Context, string, string, string, int64, string, int64, string) (githubapi.CheckDiagnostics, error) {
+	return githubapi.CheckDiagnostics{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) ListWorkflowRunsForHead(context.Context, string, string, string, string, string, int64) (githubapi.CIRunList, error) {
+	return githubapi.CIRunList{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) GetWorkflowRun(context.Context, string, string, string, int64) (githubapi.CIRun, error) {
+	return githubapi.CIRun{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) GetWorkflowRunDetail(context.Context, string, string, string, int64, int, string, int64, string) (githubapi.CIRunDetail, error) {
+	return githubapi.CIRunDetail{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) GetCIJob(context.Context, string, string, string, int64) (githubapi.CIJob, error) {
+	return githubapi.CIJob{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, *int, string, int, int64) (githubapi.CILogExcerpt, error) {
+	return githubapi.CILogExcerpt{}, errors.New("unexpected call")
+}
+func (*replayGatewayGitHub) SearchCIJobLogs(context.Context, string, string, string, githubapi.JobScope, string, int, string, int64) (githubapi.CILogSearchResult, error) {
+	return githubapi.CILogSearchResult{}, errors.New("unexpected call")
+}
 func (github *replayGatewayGitHub) OpenPullRequest(_ context.Context, _, _, _ string, request githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
 	github.mutex.Lock()
 	defer github.mutex.Unlock()
@@ -581,6 +602,34 @@ func (*signedReviewerGitHub) ListReviewThreads(context.Context, string, string, 
 
 func (*signedReviewerGitHub) GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error) {
 	return nil, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetCheckRunDiagnostics(context.Context, string, string, string, int64, string, int64, string) (githubapi.CheckDiagnostics, error) {
+	return githubapi.CheckDiagnostics{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) ListWorkflowRunsForHead(context.Context, string, string, string, string, string, int64) (githubapi.CIRunList, error) {
+	return githubapi.CIRunList{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetWorkflowRun(context.Context, string, string, string, int64) (githubapi.CIRun, error) {
+	return githubapi.CIRun{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetWorkflowRunDetail(context.Context, string, string, string, int64, int, string, int64, string) (githubapi.CIRunDetail, error) {
+	return githubapi.CIRunDetail{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetCIJob(context.Context, string, string, string, int64) (githubapi.CIJob, error) {
+	return githubapi.CIJob{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, *int, string, int, int64) (githubapi.CILogExcerpt, error) {
+	return githubapi.CILogExcerpt{}, errors.New("unexpected call")
+}
+
+func (*signedReviewerGitHub) SearchCIJobLogs(context.Context, string, string, string, githubapi.JobScope, string, int, string, int64) (githubapi.CILogSearchResult, error) {
+	return githubapi.CILogSearchResult{}, errors.New("unexpected call")
 }
 
 func (github *signedReviewerGitHub) OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {

@@ -419,17 +419,25 @@ func (client *APIClient) SearchCIJobLogs(ctx context.Context, installationToken,
 			matches = kept
 		}
 	}
-	if len(matches) > MaxCISearchMatches {
+	// searchLogText retains one sentinel match beyond the cap. Evaluate it
+	// before truncating: otherwise an incomplete search reports complete
+	// results and the held-back matches become unretrievable.
+	overflow := len(matches) > MaxCISearchMatches
+	if overflow {
+		heldBack := matches[MaxCISearchMatches]
 		matches = matches[:MaxCISearchMatches]
-		nextOffset = matches[len(matches)-1].EndOffset
+		// Resume at the held-back match's query line, not at the last
+		// returned match's context end: the next query line can fall inside
+		// that context window and would otherwise be skipped.
+		nextOffset = queryLineByteOffset(text, offset, heldBack.LineNumber)
 		if nextOffset <= offset {
+			// Defensive: the 21st query line always starts past the page
+			// base (at least 20 lines precede it), so this only guards
+			// against a stuck cursor, never normal pagination.
 			nextOffset = offset + int64(len(window))
 		}
 	}
-	hasMore := searchedTruncated
-	if len(matches) == MaxCISearchMatches+1 {
-		hasMore = true
-	}
+	hasMore := searchedTruncated || overflow
 	result := CILogSearchResult{
 		HeadSHA: job.HeadSHA, JobID: job.ID, Query: query, Matches: matches,
 		HasMore: hasMore || searchedTruncated, ReachedEnd: reachedEnd && !searchedTruncated,
@@ -497,6 +505,23 @@ func searchLogText(text, query string, contextLines int, baseOffset int64) []CIL
 		}
 	}
 	return matches
+}
+
+// queryLineByteOffset returns the absolute byte offset where the given
+// window-relative 1-indexed line starts.
+func queryLineByteOffset(text string, baseOffset int64, lineNumber int) int64 {
+	if lineNumber <= 1 {
+		return baseOffset
+	}
+	lines := strings.SplitAfter(text, "\n")
+	if lineNumber-1 > len(lines) {
+		return baseOffset
+	}
+	var advance int64
+	for _, line := range lines[:lineNumber-1] {
+		advance += int64(len(line))
+	}
+	return baseOffset + advance
 }
 
 func mapLogLocationError(ctx context.Context, metadata responseMetadata, err error) error {

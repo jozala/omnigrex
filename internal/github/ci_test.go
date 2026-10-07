@@ -153,11 +153,14 @@ func TestListAndGetRunWithJobsAndMergeRef(t *testing.T) {
 
 func ciLogServer(t *testing.T, logContent string, supportRange bool) (*githubapi.APIClient, func()) {
 	t.Helper()
-	var apiServer *httptest.Server
+	// Derive the redirect target from the request host rather than closing
+	// over the server variable: the handler runs on server goroutines while
+	// the test goroutine assigns that variable, which the race detector
+	// reports as a data race.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/logs"):
-			w.Header().Set("Location", apiServer.URL+"/log-bytes")
+			w.Header().Set("Location", "http://"+r.Host+"/log-bytes")
 			w.WriteHeader(http.StatusFound)
 		case r.URL.Path == "/log-bytes":
 			if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
@@ -191,7 +194,7 @@ func ciLogServer(t *testing.T, logContent string, supportRange bool) (*githubapi
 			http.NotFound(w, r)
 		}
 	})
-	apiServer = httptest.NewServer(handler)
+	apiServer := httptest.NewServer(handler)
 	client, err := githubapi.NewAPIClient(apiServer.Client(), apiServer.URL)
 	if err != nil {
 		apiServer.Close()
@@ -265,6 +268,57 @@ func TestSearchPreservesContextAcrossChunksAndLongLines(t *testing.T) {
 		}
 	}
 	encoded, _ := json.Marshal(result)
+	if len(encoded) > 64<<10 {
+		t.Fatalf("search response exceeds 64KiB: %d", len(encoded))
+	}
+}
+
+func TestSearchBeyondMatchCapPaginatesWithoutLoss(t *testing.T) {
+	// 25 consecutive matching lines with context 2: the 21st query line
+	// falls inside the 20th match's context window, so resuming from the
+	// 20th match's end would skip it. The search must paginate instead of
+	// reporting a complete result.
+	var builder strings.Builder
+	lineOffsets := make([]int64, 0, 25)
+	var total int64
+	for i := 1; i <= 25; i++ {
+		lineOffsets = append(lineOffsets, total)
+		line := fmt.Sprintf("match line %d NEEDLE trailing filler text\n", i)
+		builder.WriteString(line)
+		total += int64(len(line))
+	}
+	client, done := ciLogServer(t, builder.String(), false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	if len(first.Matches) != 20 || !first.HasMore || first.NextCursor == "" || first.ReachedEnd {
+		t.Fatalf("first page = %d matches has_more=%v reached_end=%v cursor=%q", len(first.Matches), first.HasMore, first.ReachedEnd, first.NextCursor)
+	}
+	second, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, first.NextCursor, 9123)
+	if err != nil {
+		t.Fatalf("second search error = %v", err)
+	}
+	if len(second.Matches) != 5 || second.HasMore || !second.ReachedEnd {
+		t.Fatalf("second page = %d matches has_more=%v reached_end=%v", len(second.Matches), second.HasMore, second.ReachedEnd)
+	}
+	// The continuation must resume at the held-back 21st match's query line,
+	// which lies inside the 20th match's context window; resuming from the
+	// 20th match's context end would skip lines 21-22. The resumed window
+	// starts at line 21, so the re-found match's context is clamped there.
+	if got := second.Matches[0].StartOffset; got != lineOffsets[20] {
+		t.Fatalf("continuation resumed at offset %d, want 21st query line at %d", got, lineOffsets[20])
+	}
+	if text := second.Matches[0].Text; !strings.Contains(text, "match line 21 NEEDLE") ||
+		strings.Contains(text, "match line 19 NEEDLE") || strings.Contains(text, "match line 20 NEEDLE") {
+		t.Fatalf("resumed match does not start at line 21: %q", text)
+	}
+	if last := second.Matches[4]; last.EndOffset != total {
+		t.Fatalf("last match ends at offset %d, want %d", last.EndOffset, total)
+	}
+	encoded, _ := json.Marshal(first)
 	if len(encoded) > 64<<10 {
 		t.Fatalf("search response exceeds 64KiB: %d", len(encoded))
 	}
