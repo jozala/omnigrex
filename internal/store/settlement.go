@@ -297,7 +297,7 @@ func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, reducer workflow.
 	if err := tx.QueryRow(ctx, `
 SELECT turn.stop_runtime_job_id::text, COALESCE(turn.reconcile_mutations_job_id::text, ''),
        turn.recovery_continuation, turn.recovery_started_at,
-        turn.recovery_settled_at IS NOT NULL, turn.runtime_oom_container_id IS NOT NULL,
+        turn.recovery_settled_at IS NOT NULL, turn.runtime_oom_resource_ref IS NOT NULL,
         COALESCE(turn.recovery_original_owner_id, ''),
        COALESCE(turn.recovery_original_owner_token_sha256, ''::bytea),
        (SELECT status FROM jobs WHERE id = turn.stop_runtime_job_id),

@@ -3,7 +3,7 @@
 ## Status and purpose
 
 This is the Step 03 design for the [combined implementation plan](2026-10-05-pi-and-pluggable-execution-backends.md).
-It defines the contracts to implement in subsequent steps, not interfaces already available in production.
+It defines the contracts implemented incrementally in subsequent steps; [Step 04](2026-10-07-docker-execution-boundary.md) supplies the first production Docker execution/recovery boundary.
 The [Microsandbox](../experiments/microsandbox.md) and [Pi](../experiments/pi.md) experiments establish feasibility for the stated subset; they are not production adapters or a complete conformance suite.
 
 The contracts below are normative about ownership and observable behavior.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
 // AgentTurnRuntimeDisposition is the database-authoritative relationship between an Agent Turn and a Runtime Process.
@@ -22,14 +23,7 @@ const (
 )
 
 // AgentTurnRuntimeIdentity is the complete non-secret identity carried by a managed Runtime Process.
-type AgentTurnRuntimeIdentity struct {
-	AssignmentID          string
-	AgentSessionID        string
-	AgentTurnID           string
-	ExecutionEpoch        int64
-	RuntimeProfileName    string
-	RuntimeProfileVersion string
-}
+type AgentTurnRuntimeIdentity = execution.Key
 
 // AgentTurnRuntimeState classifies one durable Agent Turn and its exact Runtime Process identity.
 type AgentTurnRuntimeState struct {

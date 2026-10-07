@@ -19,6 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/doctor"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
@@ -305,7 +306,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 		}},
 	}}
 	cleaner := &startupCleanerFake{}
-	adapter := startupDockerAdapter{inventory: inventory, cleaner: cleaner}
+	adapter := dockerruntime.NewRecovery(inventory, cleaner)
 
 	snapshot, err := adapter.List(context.Background())
 	if err != nil {
@@ -319,7 +320,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	if len(snapshot.Processes) != 1 || snapshot.Processes[0].Identity != wantIdentity || len(snapshot.Duplicates) != 0 {
 		t.Fatalf("translated Runtime Processes = %#v, duplicates %#v", snapshot.Processes, snapshot.Duplicates)
 	}
-	if got := []string{snapshot.Malformed[0].ContainerID, snapshot.Malformed[1].ContainerID, snapshot.Malformed[2].ContainerID}; !slices.Equal(got, []string{"overflow-a", "overflow-b", "malformed"}) {
+	if got := []string{string(snapshot.Malformed[0].Resource), string(snapshot.Malformed[1].Resource), string(snapshot.Malformed[2].Resource)}; !slices.Equal(got, []string{"overflow-a", "overflow-b", "malformed"}) {
 		t.Fatalf("translated malformed containers = %v", got)
 	}
 
@@ -336,7 +337,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	if !maps.Equal(cleaner.labels, wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labels, wantLabels)
 	}
-	if err := adapter.EnsureMalformedAbsent(context.Background(), startup.MalformedManagedRuntimeProcess{ContainerID: "malformed"}); err != nil {
+	if err := adapter.EnsureMalformedAbsent(context.Background(), startup.MalformedManagedRuntimeProcess{Resource: "malformed"}); err != nil {
 		t.Fatalf("EnsureMalformedAbsent() error = %v", err)
 	}
 	if cleaner.malformedContainerID != "malformed" {
@@ -427,8 +428,16 @@ type startupCleanerFake struct {
 	malformedContainerID string
 }
 
-func (cleaner *startupCleanerFake) EnsureAbsent(_ context.Context, labels map[string]string) error {
-	cleaner.labels = maps.Clone(labels)
+func (*startupCleanerFake) EnsureOrphansAbsent(context.Context, execution.Key, []string) error {
+	return nil
+}
+
+func (cleaner *startupCleanerFake) EnsureKeyAbsent(_ context.Context, key execution.Key) error {
+	cleaner.labels = map[string]string{
+		dockerruntime.RuntimeProcessAssignmentLabel: key.AssignmentID, dockerruntime.RuntimeProcessSessionLabel: key.AgentSessionID,
+		dockerruntime.RuntimeProcessTurnLabel: key.AgentTurnID, dockerruntime.RuntimeProcessEpochLabel: "9",
+		dockerruntime.RuntimeProfileIdentityLabel: key.RuntimeProfileName + "/" + key.RuntimeProfileVersion,
+	}
 	return nil
 }
 

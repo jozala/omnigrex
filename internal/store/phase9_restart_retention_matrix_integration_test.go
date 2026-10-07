@@ -20,6 +20,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -775,11 +776,11 @@ type phaseNineExactCleaner struct {
 	calls int
 }
 
-func (*phaseNineExactCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+func (*phaseNineExactCleaner) ObserveKeyExit(context.Context, execution.Key) (dockerruntime.ExitObservation, error) {
 	return dockerruntime.ExitObservation{}, nil
 }
 
-func (cleaner *phaseNineExactCleaner) EnsureAbsent(context.Context, map[string]string) error {
+func (cleaner *phaseNineExactCleaner) EnsureKeyAbsent(context.Context, execution.Key) error {
 	cleaner.calls++
 	return nil
 }

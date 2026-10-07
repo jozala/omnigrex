@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	mobyclient "github.com/moby/moby/client"
@@ -62,6 +63,7 @@ const (
 	MalformedTurnID             MalformedRuntimeProcessReason = "invalid_agent_turn_id"
 	MalformedExecutionEpoch     MalformedRuntimeProcessReason = "invalid_execution_epoch"
 	MalformedRuntimeProfile     MalformedRuntimeProcessReason = "invalid_runtime_profile"
+	MalformedDiagnosticExpired  MalformedRuntimeProcessReason = "expired_diagnostic"
 )
 
 // MalformedManagedRuntimeProcess reports Docker evidence without copying untrusted labels.
@@ -118,6 +120,7 @@ func (inventory *RuntimeProcessInventory) List(ctx context.Context) (RuntimeProc
 	filters := []mobyclient.Filters{
 		make(mobyclient.Filters).Add("label", RuntimeProcessMarkerLabel+"="+RuntimeProcessMarkerValue),
 		make(mobyclient.Filters).Add("label", identityLabels...),
+		make(mobyclient.Filters).Add("label", diagnosticMarkerLabel+"=true"),
 	}
 	listedCandidates := make([]mobyclient.ContainerListResult, 0, len(filters))
 	for _, filter := range filters {
@@ -137,6 +140,12 @@ func (inventory *RuntimeProcessInventory) List(ctx context.Context) (RuntimeProc
 				continue
 			}
 			seen[candidate.ID] = struct{}{}
+			if candidate.Labels[diagnosticMarkerLabel] == "true" {
+				if diagnosticCleanupEligible(candidate.Labels, time.Now()) {
+					snapshot.Malformed = append(snapshot.Malformed, MalformedManagedRuntimeProcess{ContainerID: candidate.ID, Reason: MalformedDiagnosticExpired})
+				}
+				continue
+			}
 			if !runtimeProcessCandidateLabels(candidate.Labels) {
 				continue
 			}
@@ -208,7 +217,9 @@ func parseRuntimeProcessIdentity(containerID string, labels map[string]string) (
 		return RuntimeProcessIdentity{}, MalformedTurnID
 	}
 	epochText := labels[RuntimeProcessEpochLabel]
-	epoch, err := strconv.ParseUint(epochText, 10, 64)
+	// Durable execution epochs are positive signed 64-bit values. Reject the
+	// overflow here so malformed-resource cleanup applies the same classification.
+	epoch, err := strconv.ParseUint(epochText, 10, 63)
 	if err != nil || epoch == 0 || strconv.FormatUint(epoch, 10) != epochText {
 		return RuntimeProcessIdentity{}, MalformedExecutionEpoch
 	}

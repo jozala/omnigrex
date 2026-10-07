@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/role"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/uuidtext"
@@ -29,10 +28,7 @@ type StopWorkerStore interface {
 }
 
 // ExactRuntimeCleaner removes every Runtime Process carrying an exact runtime identity.
-type ExactRuntimeCleaner interface {
-	ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error)
-	EnsureAbsent(context.Context, map[string]string) error
-}
+type ExactRuntimeCleaner = execution.Cleaner
 
 // WorkspaceDiscarder removes recovered Reviewer workspace changes.
 type WorkspaceDiscarder interface {
@@ -104,7 +100,7 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 	}
 	ctx, operation := telemetry.StartOperation(ctx, telemetry.RuntimeProcessCleanup, jobAttributes(*lease)...)
 	defer finishOperation(ctx, operation, &err)
-	labels, err := recoveryRuntimeLabels(*lease)
+	key, err := recoveryRuntimeKey(*lease)
 	if err != nil {
 		return true, err
 	}
@@ -120,7 +116,7 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 		heartbeatDone <- heartbeatErr
 	}()
 
-	operationErr := worker.stopRuntime(workCtx, *lease, labels)
+	operationErr := worker.stopRuntime(workCtx, *lease, key)
 	stopHeartbeat()
 	heartbeatErr := <-heartbeatDone
 	cancelWork()
@@ -142,23 +138,21 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 	return true, operationErr
 }
 
-func recoveryRuntimeLabels(lease store.JobLease) (map[string]string, error) {
+func recoveryRuntimeKey(lease store.JobLease) (execution.Key, error) {
 	if lease.Queue != store.AgentTurnRecoveryQueue || lease.Kind != store.StopStaleRuntimeJobKind ||
 		!uuidtext.Valid(lease.AgentAssignmentID) ||
 		!uuidtext.Valid(lease.AgentSessionID) ||
 		!uuidtext.Valid(lease.AgentTurnID) ||
 		lease.ExecutionEpoch <= 0 {
-		return nil, errors.New("stale Runtime Process stop job has invalid identity")
+		return execution.Key{}, errors.New("stale Runtime Process stop job has invalid identity")
 	}
-	return map[string]string{
-		store.RuntimeLabelAssignmentID: lease.AgentAssignmentID,
-		store.RuntimeLabelSessionID:    lease.AgentSessionID,
-		store.RuntimeLabelTurnID:       lease.AgentTurnID,
-		store.RuntimeLabelEpoch:        strconv.FormatInt(lease.ExecutionEpoch, 10),
+	return execution.Key{
+		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: lease.ExecutionEpoch,
 	}, nil
 }
 
-func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, labels map[string]string) error {
+func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, key execution.Key) error {
 	cleanup, err := worker.store.GetAgentTurnRuntimeCleanupContext(ctx, lease)
 	if err != nil {
 		return fmt.Errorf("read stale Runtime Process cleanup context: %w", err)
@@ -167,22 +161,19 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	if cleanup.RuntimeProfileName == "" || cleanup.RuntimeProfileVersion == "" {
 		return errors.New("stale Runtime Process has no immutable Runtime Profile identity")
 	}
-	observationLabels := make(map[string]string, len(labels)+1)
-	for name, value := range labels {
-		observationLabels[name] = value
-	}
-	observationLabels[dockerruntime.RuntimeProfileIdentityLabel] = cleanup.RuntimeProfileName + "/" + cleanup.RuntimeProfileVersion
-	observation, err := worker.cleaner.ObserveExactExit(ctx, observationLabels)
+	observationKey := key
+	observationKey.RuntimeProfileName, observationKey.RuntimeProfileVersion = cleanup.RuntimeProfileName, cleanup.RuntimeProfileVersion
+	observation, err := worker.cleaner.ObserveKeyExit(ctx, observationKey)
 	if err != nil {
 		return fmt.Errorf("inspect stale Runtime Process before removal: %w", err)
 	}
 	if observation.Exited && observation.OOMKilled {
-		if err := worker.store.RecordRecoveredRuntimeOOM(ctx, lease, observation.ContainerID, observation.ExitCode); err != nil {
+		if err := worker.store.RecordRecoveredRuntimeOOM(ctx, lease, string(observation.Resource), observation.ExitCode); err != nil {
 			return fmt.Errorf("persist recovered Runtime Process OOM before removal: %w", err)
 		}
 	}
 
-	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {
+	if err := worker.cleaner.EnsureKeyAbsent(ctx, key); err != nil {
 		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
 	}
 	fence := func(ctx context.Context, operation func(context.Context) error) error {

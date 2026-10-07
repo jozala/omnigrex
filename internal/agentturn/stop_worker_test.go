@@ -3,7 +3,7 @@ package agentturn_test
 import (
 	"context"
 	"errors"
-	"maps"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -31,13 +31,11 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 		durable.claimOwner != "runtime-stop-worker" || durable.claimDuration != 100*time.Millisecond {
 		t.Fatalf("ClaimJobKind() = (%q, %q, %q, %s)", durable.claimQueue, durable.claimKind, durable.claimOwner, durable.claimDuration)
 	}
-	wantLabels := map[string]string{
-		store.RuntimeLabelAssignmentID: lease.AgentAssignmentID,
-		store.RuntimeLabelSessionID:    lease.AgentSessionID,
-		store.RuntimeLabelTurnID:       lease.AgentTurnID,
-		store.RuntimeLabelEpoch:        "7",
+	wantLabels := execution.Key{
+		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: 7,
 	}
-	if cleaner.callCount() != 1 || !maps.Equal(cleaner.labelsAt(0), wantLabels) {
+	if cleaner.callCount() != 1 || !reflect.DeepEqual(cleaner.labelsAt(0), wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labelsAt(0), wantLabels)
 	}
 	if durable.acknowledgements != 1 || durable.acknowledged.ID != lease.ID || durable.acknowledged.LeaseToken != lease.LeaseToken {
@@ -48,8 +46,8 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 func TestStopWorkerPersistsRecoveredOOMBeforeRemovingContainer(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease}
-	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
-		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	cleaner := &recordingRuntimeCleaner{exitObservation: execution.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, Resource: "stopped-oom",
 	}}
 	durable.cleaner = cleaner
 	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
@@ -64,8 +62,8 @@ func TestStopWorkerPersistsRecoveredOOMBeforeRemovingContainer(t *testing.T) {
 func TestStopWorkerKeepsContainerWhenOOMEvidenceCannotBeSaved(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, oomErr: errors.New("store unavailable")}
-	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
-		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	cleaner := &recordingRuntimeCleaner{exitObservation: execution.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, Resource: "stopped-oom",
 	}}
 	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
 	processed, err := worker.ProcessNext(context.Background())
@@ -549,20 +547,20 @@ func (durable *stopWorkerStore) AcknowledgeRecoveredRuntimeStopFailure(_ context
 type recordingRuntimeCleaner struct {
 	mutex              sync.Mutex
 	results            []error
-	labels             []map[string]string
+	labels             []execution.Key
 	blockUntilCanceled bool
 	canceled           bool
 	delay              time.Duration
-	exitObservation    dockerruntime.ExitObservation
+	exitObservation    execution.ExitObservation
 }
 
-func (cleaner *recordingRuntimeCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+func (cleaner *recordingRuntimeCleaner) ObserveKeyExit(context.Context, execution.Key) (execution.ExitObservation, error) {
 	return cleaner.exitObservation, nil
 }
 
-func (cleaner *recordingRuntimeCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
+func (cleaner *recordingRuntimeCleaner) EnsureKeyAbsent(ctx context.Context, labels execution.Key) error {
 	cleaner.mutex.Lock()
-	cleaner.labels = append(cleaner.labels, maps.Clone(labels))
+	cleaner.labels = append(cleaner.labels, labels)
 	block := cleaner.blockUntilCanceled
 	var result error
 	if len(cleaner.results) != 0 {
@@ -595,13 +593,13 @@ func (cleaner *recordingRuntimeCleaner) callCount() int {
 	return len(cleaner.labels)
 }
 
-func (cleaner *recordingRuntimeCleaner) labelsAt(index int) map[string]string {
+func (cleaner *recordingRuntimeCleaner) labelsAt(index int) execution.Key {
 	cleaner.mutex.Lock()
 	defer cleaner.mutex.Unlock()
 	if index >= len(cleaner.labels) {
-		return nil
+		return execution.Key{}
 	}
-	return maps.Clone(cleaner.labels[index])
+	return cleaner.labels[index]
 }
 
 func (cleaner *recordingRuntimeCleaner) wasCanceled() bool {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
 	"reflect"
 	"sync"
 	"testing"
@@ -35,14 +34,8 @@ func TestClosureStopWorkerClaimsExactKindAndCleansCompleteIdentityBeforeAcknowle
 	if durable.claimQueue != store.WorkflowActionQueue || durable.claimKind != store.StopAgentTurnJobKind || durable.claimOwner != "closure-worker" {
 		t.Fatalf("claim = (%q, %q, %q)", durable.claimQueue, durable.claimKind, durable.claimOwner)
 	}
-	want := map[string]string{
-		store.RuntimeLabelAssignmentID: closureAssignment,
-		store.RuntimeLabelSessionID:    closureSession,
-		store.RuntimeLabelTurnID:       closureTurn,
-		store.RuntimeLabelEpoch:        "7",
-		"io.omnigrex.runtime-profile":  "opencode-acp/v1",
-	}
-	if cleaner.calls != 1 || !maps.Equal(cleaner.labels, want) {
+	want := closureRuntimeIdentity()
+	if cleaner.calls != 1 || cleaner.labels != want {
 		t.Fatalf("cleanup = %d %#v, want %#v", cleaner.calls, cleaner.labels, want)
 	}
 	if durable.acknowledgements != 1 || durable.cleanerCallsAtAck != 1 || durable.failures != 0 {
@@ -283,13 +276,13 @@ func closureRuntimeIdentity() store.AgentTurnRuntimeIdentity {
 
 type closureCleaner struct {
 	mutex  sync.Mutex
-	labels map[string]string
+	labels store.AgentTurnRuntimeIdentity
 	calls  int
 	err    error
 	delay  time.Duration
 }
 
-func (cleaner *closureCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
+func (cleaner *closureCleaner) EnsureKeyAbsent(ctx context.Context, labels store.AgentTurnRuntimeIdentity) error {
 	if cleaner.delay > 0 {
 		timer := time.NewTimer(cleaner.delay)
 		defer timer.Stop()
@@ -302,7 +295,7 @@ func (cleaner *closureCleaner) EnsureAbsent(ctx context.Context, labels map[stri
 	cleaner.mutex.Lock()
 	defer cleaner.mutex.Unlock()
 	cleaner.calls++
-	cleaner.labels = maps.Clone(labels)
+	cleaner.labels = labels
 	return cleaner.err
 }
 

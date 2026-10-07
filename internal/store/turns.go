@@ -41,11 +41,6 @@ const (
 	stopStaleRuntimeJobPriority        = 100
 	reconcileTurnMutationsJobPriority  = 90
 
-	RuntimeLabelAssignmentID = "io.omnigrex.assignment"
-	RuntimeLabelSessionID    = "io.omnigrex.agent-session"
-	RuntimeLabelTurnID       = "io.omnigrex.agent-turn"
-	RuntimeLabelEpoch        = "io.omnigrex.execution-epoch"
-
 	agentTurnSlotsLockID = int64(0x4f4d4e49534c4f54)
 
 	recoveryContinuationPendingInfrastructure = "PENDING_INFRASTRUCTURE_FAILURE"

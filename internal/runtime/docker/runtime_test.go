@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -441,8 +442,11 @@ func TestProcessObservesOnlyDockerConfirmedOOMBeforeRemoval(t *testing.T) {
 		wantOOM    bool
 		wantExit   bool
 	}{
-		{name: "oom", state: &container.State{OOMKilled: true, ExitCode: 137}, wantOOM: true, wantExit: true},
-		{name: "exit 137 without oom", state: &container.State{ExitCode: 137}, wantExit: true},
+		{name: "oom", state: &container.State{Status: container.StateExited, OOMKilled: true, ExitCode: 137}, wantOOM: true, wantExit: true},
+		{name: "exit 137 without oom", state: &container.State{Status: container.StateExited, ExitCode: 137}, wantExit: true},
+		{name: "not started", state: &container.State{Status: container.StateCreated}},
+		{name: "missing state"},
+		{name: "unknown state", state: &container.State{}},
 		{name: "container removed", inspectErr: errdefs.ErrNotFound},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -467,6 +471,25 @@ func TestProcessObservesOnlyDockerConfirmedOOMBeforeRemoval(t *testing.T) {
 	process := &Process{ID: "runtime-container", api: api, labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}}
 	if _, err := process.ObserveExit(context.Background()); err == nil {
 		t.Fatal("replacement container was accepted as OOM evidence")
+	}
+}
+
+func TestLostStartAcknowledgementRequiresEnvironmentStop(t *testing.T) {
+	api := newRuntimeAPIFake()
+	api.startErr = context.DeadlineExceeded
+	process, err := create(context.Background(), api, runtimeProcessSpec(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Remove(context.Background())
+	if err := process.Start(context.Background()); !errors.Is(err, execution.ErrUnknownEffect) {
+		t.Fatalf("ambiguous start = %v", err)
+	}
+	if err := process.Stop(context.Background(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if api.stopCalls != 1 {
+		t.Fatal("failed start was treated as proof that execution never started")
 	}
 }
 

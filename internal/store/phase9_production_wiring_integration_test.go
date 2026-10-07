@@ -184,6 +184,9 @@ func (emptyStartupRuntimes) List(context.Context) (startup.RuntimeInventorySnaps
 func (emptyStartupRuntimes) EnsureAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
 	return nil
 }
+func (emptyStartupRuntimes) EnsureOrphansAbsent(context.Context, store.AgentTurnRuntimeIdentity, []string) error {
+	return nil
+}
 
 func (emptyStartupRuntimes) EnsureMalformedAbsent(context.Context, startup.MalformedManagedRuntimeProcess) error {
 	return nil
@@ -193,7 +196,7 @@ type wiringClosureCleaner struct {
 	calls int
 }
 
-func (cleaner *wiringClosureCleaner) EnsureAbsent(context.Context, map[string]string) error {
+func (cleaner *wiringClosureCleaner) EnsureKeyAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
 	cleaner.calls++
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -28,8 +28,6 @@ import (
 	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
-
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 )
 
 var (
@@ -46,6 +44,7 @@ const (
 
 // LauncherStore supplies launch context only under an already-acquired Agent Turn fence.
 type LauncherStore interface {
+	ExecutionLedger(store.AgentTurnLease) execution.Ledger
 	ValidateTurnFence(context.Context, store.AgentTurnLease) error
 	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
@@ -72,24 +71,13 @@ type MCPRegistrar interface {
 }
 
 // RuntimeProcess is the restricted process resource owned by a launch.
-type RuntimeProcess interface {
-	Start(context.Context) error
-	Transport() io.ReadWriteCloser
-	ObserveExit(context.Context) (dockerruntime.ExitObservation, error)
-	Stop(context.Context, time.Duration) error
-	Remove(context.Context) error
-}
+type RuntimeProcess = execution.Process
 
 // RuntimeEngine creates one stopped process under a compiled Runtime Policy.
-type RuntimeEngine interface {
-	Create(context.Context, dockerruntime.Spec, io.Writer) (RuntimeProcess, error)
-	Close() error
-}
+type RuntimeEngine = execution.Engine
 
 // RuntimeEngineFactory binds an engine to the exact policy compiled for a launch.
-type RuntimeEngineFactory interface {
-	New(dockerruntime.EngineOptions) (RuntimeEngine, error)
-}
+type RuntimeEngineFactory = execution.Factory
 
 // RuntimeBindingResolver resolves the complete immutable binding persisted for a generation.
 type RuntimeBindingResolver interface {
@@ -121,19 +109,15 @@ var (
 	_ RuntimeSessionPreparer = (*session.Coordinator)(nil)
 )
 
-// LauncherConfig supplies stable deployment dependencies and named Docker resources.
+// LauncherConfig supplies stable deployment dependencies.
 type LauncherConfig struct {
 	Store                    LauncherStore
 	Registry                 RuntimeBindingResolver
 	Workspace                RuntimeWorkspace
 	Gateway                  MCPRegistrar
-	Docker                   RuntimeEngineFactory
+	Execution                RuntimeEngineFactory
 	ACP                      RuntimeACPFactory
 	Sessions                 RuntimeSessionPreparer
-	Network                  string
-	WorkspaceVolume          string
-	RuntimeStateVolume       string
-	MiseVolume               string
 	MemoryBytes              int64
 	ACPOptions               acp.ClientOptions
 	StopTimeout              time.Duration
@@ -169,13 +153,9 @@ type Launcher struct {
 	registry                 RuntimeBindingResolver
 	workspace                RuntimeWorkspace
 	gateway                  MCPRegistrar
-	docker                   RuntimeEngineFactory
+	execution                RuntimeEngineFactory
 	acp                      RuntimeACPFactory
 	sessions                 RuntimeSessionPreparer
-	network                  string
-	workspaceVolume          string
-	runtimeStateVolume       string
-	miseVolume               string
 	memoryBytes              int64
 	acpOptions               acp.ClientOptions
 	stopTimeout              time.Duration
@@ -199,7 +179,7 @@ type RuntimeHandle struct {
 	assignmentID       string
 	engine             RuntimeEngine
 	process            RuntimeProcess
-	exitObservation    *dockerruntime.ExitObservation
+	exitObservation    *execution.ExitObservation
 	oomRecorded        bool
 	observeExit        bool
 	stopTimeout        time.Duration
@@ -221,18 +201,8 @@ type RuntimeHandle struct {
 // NewLauncher validates deployment dependencies before any turn is launched.
 func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if nilInterface(config.Store) || nilInterface(config.Registry) || nilInterface(config.Workspace) ||
-		nilInterface(config.Gateway) || nilInterface(config.Docker) || nilInterface(config.ACP) || nilInterface(config.Sessions) {
+		nilInterface(config.Gateway) || nilInterface(config.Execution) || nilInterface(config.ACP) || nilInterface(config.Sessions) {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidLauncher)
-	}
-	for _, field := range []struct{ name, value string }{
-		{name: "network", value: config.Network},
-		{name: "workspace volume", value: config.WorkspaceVolume},
-		{name: "runtime state volume", value: config.RuntimeStateVolume},
-		{name: "mise volume", value: config.MiseVolume},
-	} {
-		if strings.TrimSpace(field.value) == "" || strings.TrimSpace(field.value) != field.value {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidLauncher, field.name)
-		}
 	}
 	if config.MemoryBytes <= 0 {
 		return nil, fmt.Errorf("%w: Agent Turn memory must be positive", ErrInvalidLauncher)
@@ -255,9 +225,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	}
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
-		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
-		network: config.Network, workspaceVolume: config.WorkspaceVolume,
-		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
+		gateway: config.Gateway, execution: config.Execution, acp: config.ACP, sessions: config.Sessions,
 		memoryBytes: config.MemoryBytes,
 		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
@@ -432,44 +400,40 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if execution.Assignment.RuntimeStatePath != statePath || execution.Session.RuntimeStatePath != statePath {
 		return nil, fmt.Errorf("%w: runtime state path", ErrRuntimeBinding)
 	}
-	policy, spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
+	spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
 		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
 	}, opencode.ProcessOptions{
-		Name:        "omnigrex-turn-" + execution.Turn.ID + "-epoch-" + strconv.FormatInt(execution.Turn.ExecutionEpoch, 10),
 		MemoryBytes: launcher.memoryBytes,
-		Network:     launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
-		AgentTurnID: execution.Turn.ID, ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch),
-		VolumeBindings:     map[string]string{"workspace": launcher.workspaceVolume, "state": launcher.runtimeStateVolume, "mise": launcher.miseVolume, "tool-data": launcher.miseVolume},
-		AssignmentSubpaths: map[string]string{"workspace": assignmentRoot + "/workspace", "state": statePath, "mise": assignmentRoot + "/mise", "tool-data": assignmentRoot + "/tool-data"},
-		Environment:        environment, Labels: map[string]string{"io.omnigrex.workflow": execution.WorkflowID},
+		Key:         runtimeKey(execution), WorkflowID: execution.WorkflowID, Environment: environment,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
-	engine, err := launcher.docker.New(dockerruntime.EngineOptions{AgentNetwork: launcher.network, RuntimePolicy: policy})
+	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine
 	}
 	if err != nil {
-		return nil, fmt.Errorf("create restricted Docker Engine: %w", err)
+		return nil, fmt.Errorf("create restricted execution engine: %w", err)
 	}
 	if nilInterface(engine) {
-		return nil, errors.New("create restricted Docker Engine: factory returned nil")
+		return nil, errors.New("create restricted execution engine: factory returned nil")
 	}
-	var process RuntimeProcess
+	// The lease-bound ledger commits admission before dispatch. Provisioning must
+	// not run inside WithAgentTurnFence: its durable evidence operations need the
+	// same pool, and lease heartbeats must remain possible during external calls.
+	process, createErr := engine.Create(ctx, spec, request.Stderr)
+	if !nilInterface(process) {
+		resources.process = process
+	}
+	if createErr != nil {
+		return nil, fmt.Errorf("create restricted Runtime Process: %w", createErr)
+	}
+	if nilInterface(process) {
+		return nil, errors.New("create restricted Runtime Process: engine returned no process")
+	}
 	err = launcher.store.WithAgentTurnFence(ctx, request.Lease, func(fenceCtx context.Context) error {
-		created, createErr := engine.Create(fenceCtx, spec, request.Stderr)
-		process = created
-		if !nilInterface(created) {
-			resources.process = created
-		}
-		if createErr != nil {
-			return fmt.Errorf("create restricted Runtime Process: %w", createErr)
-		}
-		if nilInterface(created) {
-			return errors.New("create restricted Runtime Process: engine returned no process")
-		}
-		if startErr := created.Start(fenceCtx); startErr != nil {
+		if startErr := process.Start(fenceCtx); startErr != nil {
 			return fmt.Errorf("start restricted Runtime Process: %w", startErr)
 		}
 		return nil
@@ -515,10 +479,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	return resources, nil
 }
 
-// ErrRuntimeOOMKilled is attached only to a Docker-confirmed and durably recorded OOM exit.
+// ErrRuntimeOOMKilled is attached only to a backend-confirmed and durably recorded OOM exit.
 var ErrRuntimeOOMKilled = errors.New("Runtime Process was OOM-killed")
 
-// ObserveOOM saves a stopped Runtime Process's OOM state while Docker still retains it.
+// ObserveOOM saves a stopped Runtime Process's OOM state before resource removal.
 // A missing or running process cannot establish an OOM cause.
 func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	if handle == nil || handle.process == nil {
@@ -539,7 +503,7 @@ func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	}
 	if !handle.oomRecorded {
 		observation := handle.exitObservation
-		if err := handle.store.RecordAgentTurnRuntimeOOM(ctx, handle.lease, observation.ContainerID, observation.ExitCode); err != nil {
+		if err := handle.store.RecordAgentTurnRuntimeOOM(ctx, handle.lease, string(observation.Resource), observation.ExitCode); err != nil {
 			return false, fmt.Errorf("persist Runtime Process OOM before removal: %w", err)
 		}
 		handle.oomRecorded = true
@@ -547,7 +511,7 @@ func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ConfirmedOOM reports whether Docker's OOM exit state was durably recorded before cleanup.
+// ConfirmedOOM reports whether backend OOM exit evidence was recorded before cleanup.
 func (handle *RuntimeHandle) ConfirmedOOM() bool {
 	return handle != nil && handle.oomRecorded
 }
@@ -612,7 +576,7 @@ func (handle *RuntimeHandle) PromptClient() session.PromptClient {
 	return handle.Client
 }
 
-// Cleanup drains MCP authority, closes ACP, stops and removes the process, discards Reviewer changes, and closes Docker resources.
+// Cleanup drains MCP authority, closes ACP, stops and removes execution, discards Reviewer changes, and closes backend resources.
 func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	if handle == nil {
 		return nil
@@ -665,7 +629,17 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 			handle.processRemoved = true
 		}
 	}
-	processRemoved := handle.process == nil || handle.processRemoved
+	if handle.process == nil && handle.engine != nil && !handle.processRemoved {
+		removeCtx, cancel := handle.teardownContext(ctx)
+		err := handle.engine.EnsureAbsent(removeCtx)
+		cancel()
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		} else {
+			handle.processRemoved = true
+		}
+	}
+	processRemoved := handle.processRemoved || handle.process == nil && handle.engine == nil
 	if processRemoved && handle.scratchPrepared && handle.workspace != nil && !handle.scratchCleaned {
 		fence := func(ctx context.Context, operation func(context.Context) error) error {
 			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
@@ -688,7 +662,7 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	}
 	if processRemoved && handle.engine != nil && !handle.engineClosed {
 		if err := handle.engine.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("close Docker Engine: %w", err))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("close execution engine: %w", err))
 		} else {
 			handle.engineClosed = true
 		}
@@ -923,24 +897,13 @@ func nilInterface(value any) bool {
 	}
 }
 
-// ProductionDockerFactory creates Docker engines constrained by the launcher's compiled policy.
-type ProductionDockerFactory struct{}
-
-func (ProductionDockerFactory) New(options dockerruntime.EngineOptions) (RuntimeEngine, error) {
-	engine, err := dockerruntime.NewEngine(options)
-	if err != nil {
-		return nil, err
+func runtimeKey(context store.AgentTurnExecutionContext) execution.Key {
+	return execution.Key{
+		AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
+		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion,
 	}
-	return productionDockerEngine{engine: engine}, nil
 }
-
-type productionDockerEngine struct{ engine *dockerruntime.Engine }
-
-func (engine productionDockerEngine) Create(ctx context.Context, spec dockerruntime.Spec, stderr io.Writer) (RuntimeProcess, error) {
-	return engine.engine.Create(ctx, spec, stderr)
-}
-
-func (engine productionDockerEngine) Close() error { return engine.engine.Close() }
 
 // ProductionACPFactory creates the protocol client attached to Docker's stream transport.
 type ProductionACPFactory struct{}

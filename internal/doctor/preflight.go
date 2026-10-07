@@ -18,7 +18,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
@@ -148,7 +148,7 @@ func (state *productionState) checkDatabaseSchema(ctx context.Context) error {
 }
 
 func (state *productionState) checkDockerResources(ctx context.Context) error {
-	probe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
+	probe, err := composition.NewResourceProbe(composition.Resources{
 		AgentNetwork: state.settings.DockerAgentNetwork, WorkspaceVolume: state.settings.WorkspaceVolume,
 		RuntimeStateVolume: state.settings.RuntimeStateVolume, MiseVolume: state.settings.MiseVolume,
 		AgentImage: state.settings.AgentImageReference,
@@ -164,7 +164,7 @@ func (state *productionState) checkRuntimeImage(ctx context.Context) error {
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := dockerruntime.NewExactImageAvailability()
+	availability, err := composition.NewImageAvailability()
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func (state *productionState) checkProtectedRuntimeProfiles(ctx context.Context)
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := dockerruntime.NewExactImageAvailability()
+	availability, err := composition.NewImageAvailability()
 	if err != nil {
 		return err
 	}

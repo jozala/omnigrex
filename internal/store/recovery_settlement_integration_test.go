@@ -123,7 +123,7 @@ func TestRecoveredOOMSurvivesContainerRemovalAndRetainsSingleRetry(t *testing.T)
 	}
 	var diagnostic, containerID string
 	if err := pool.QueryRow(ctx, `
-SELECT settlement.terminal_last_error, turn.runtime_oom_container_id
+SELECT settlement.terminal_last_error, turn.runtime_oom_resource_ref
 FROM agent_turn_settlements AS settlement
 JOIN agent_turns AS turn ON turn.id = settlement.agent_turn_id
 WHERE turn.id = $1`, lease.ID).Scan(&diagnostic, &containerID); err != nil {
@@ -196,7 +196,7 @@ func TestLiveOOMObservationRequiresCurrentTurnFence(t *testing.T) {
 		t.Fatalf("stale epoch accepted OOM evidence: %v", err)
 	}
 	var containerID string
-	if err := pool.QueryRow(ctx, `SELECT runtime_oom_container_id FROM agent_turns WHERE id = $1`, lease.ID).Scan(&containerID); err != nil || containerID != "container-939" {
+	if err := pool.QueryRow(ctx, `SELECT runtime_oom_resource_ref FROM agent_turns WHERE id = $1`, lease.ID).Scan(&containerID); err != nil || containerID != "container-939" {
 		t.Fatalf("durable live evidence = (%q, %v)", containerID, err)
 	}
 }

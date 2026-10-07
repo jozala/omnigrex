@@ -22,7 +22,7 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(api.options) != 2 || !api.options[0].All || !api.options[1].All {
+	if len(api.options) != 3 || !api.options[0].All || !api.options[1].All || !api.options[2].All {
 		t.Fatalf("ContainerList() options = %#v", api.options)
 	}
 	wantFilters := []mobyclient.Filters{
@@ -34,6 +34,7 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 			RuntimeProcessEpochLabel,
 			RuntimeProfileIdentityLabel,
 		),
+		make(mobyclient.Filters).Add("label", diagnosticMarkerLabel+"=true"),
 	}
 	for index, want := range wantFilters {
 		if !maps.EqualFunc(api.options[index].Filters, want, maps.Equal) {
@@ -121,6 +122,7 @@ func TestRuntimeProcessInventoryQuarantinesMalformedManagedContainers(t *testing
 		}, reason: MalformedTurnID},
 		{name: "epoch zero", id: "zero", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "0" }, reason: MalformedExecutionEpoch},
 		{name: "epoch noncanonical", id: "epoch", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "09" }, reason: MalformedExecutionEpoch},
+		{name: "epoch overflow", id: "overflow", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "9223372036854775808" }, reason: MalformedExecutionEpoch},
 		{name: "profile", id: "profile", mutate: func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "opencode-acp/v1/extra" }, reason: MalformedRuntimeProfile},
 	}
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -17,11 +18,7 @@ func TestBuildProcessMergesDuplicateEnvironmentAndRejectsConflicts(t *testing.T)
 		t.Fatalf("NewOpenCodeV1() error = %v", err)
 	}
 	options := ProcessOptions{
-		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
-		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "tool-data": "mise", "workspace": "workspace"},
-		AssignmentSubpaths: map[string]string{
-			"mise": "assignment-1/mise", "state": "assignment-1/state", "tool-data": "assignment-1/tool-data", "workspace": "assignment-1/workspace",
-		},
+		Key: execution.Key{AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1"}, MemoryBytes: 512 << 20,
 	}
 	rendered := &RenderedProfile{role: RoleDeveloper, environ: []string{
 		"OPENCODE_AUTH_CONTENT={}",
@@ -30,7 +27,7 @@ func TestBuildProcessMergesDuplicateEnvironmentAndRejectsConflicts(t *testing.T)
 		"OPENCODE_CONFIG_CONTENT={}",
 	}}
 	credentials := ProviderCredentials{Role: RoleDeveloper, Content: []byte(`{}`)}
-	_, spec, err := BuildProcess(runtimeProfile, rendered, credentials, options)
+	spec, err := BuildProcess(runtimeProfile, rendered, credentials, options)
 	if err != nil {
 		t.Fatalf("BuildProcess() duplicate equal values error = %v", err)
 	}
@@ -45,7 +42,7 @@ func TestBuildProcessMergesDuplicateEnvironmentAndRejectsConflicts(t *testing.T)
 	}
 
 	rendered.environ = append(rendered.environ, "HOME=credential-sentinel")
-	_, _, err = BuildProcess(runtimeProfile, rendered, credentials, options)
+	_, err = BuildProcess(runtimeProfile, rendered, credentials, options)
 	if !errors.Is(err, ErrInvalidProcess) {
 		t.Fatalf("BuildProcess() conflicting values error = %v, want ErrInvalidProcess", err)
 	}
@@ -63,13 +60,9 @@ func TestBuildProcessRequiresOpenCodeConfigurationEnvironment(t *testing.T) {
 		t.Fatalf("NewOpenCodeV1() error = %v", err)
 	}
 	options := ProcessOptions{
-		Name: "process", Network: "network", AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
-		VolumeBindings: map[string]string{"mise": "mise", "state": "state", "tool-data": "mise", "workspace": "workspace"},
-		AssignmentSubpaths: map[string]string{
-			"mise": "assignment-1/mise", "state": "assignment-1/state", "tool-data": "assignment-1/tool-data", "workspace": "assignment-1/workspace",
-		},
+		Key: execution.Key{AssignmentID: "1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1"}, MemoryBytes: 512 << 20,
 	}
-	_, _, err = BuildProcess(runtimeProfile, &RenderedProfile{}, ProviderCredentials{Role: RoleDeveloper, Content: []byte(`{}`)}, options)
+	_, err = BuildProcess(runtimeProfile, &RenderedProfile{}, ProviderCredentials{Role: RoleDeveloper, Content: []byte(`{}`)}, options)
 	if !errors.Is(err, ErrInvalidProcess) {
 		t.Fatalf("BuildProcess() error = %v, want ErrInvalidProcess", err)
 	}

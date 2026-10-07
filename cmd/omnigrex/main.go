@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -286,7 +285,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Agent Turn mutation recovery Worker: %w", err)
 	}
 	runtimeCleaner, err := dockerruntime.NewExactLabelCleaner(dockerruntime.ExactLabelCleanerOptions{
-		StopTimeout: settings.ShutdownTimeout,
+		StopTimeout: settings.ShutdownTimeout, Ledger: database,
 	})
 	if err != nil {
 		return fmt.Errorf("configure stale Runtime Process cleanup: %w", err)
@@ -336,7 +335,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure protected Runtime Profile availability: %w", err)
 	}
-	startupDocker := startupDockerAdapter{inventory: runtimeInventory, cleaner: runtimeCleaner}
+	startupDocker := dockerruntime.NewRecovery(runtimeInventory, runtimeCleaner)
 	startupReconciler, err := startup.NewReconciler(database, startupDocker, startupDocker, startupDocker, startup.ReconcilerOptions{
 		MaxPasses: startupMaximumPasses, MaxRuntimeProcesses: startupMaximumRuntimeProcesses,
 		MaxRecoveries: startupMaximumRecoveries,
@@ -368,10 +367,11 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
-		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
-		Sessions: sessions, Network: settings.DockerAgentNetwork,
-		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
+		Execution: dockerruntime.ExecutionFactory{
+			Network: settings.DockerAgentNetwork, WorkspaceVolume: settings.WorkspaceVolume,
+			RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume,
+		}, ACP: agentturn.ProductionACPFactory{}, Sessions: sessions,
+		MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			Logger:         logger,
 			AgentEventSink: loggingAgentEventSink{logger: logger},
 		},
@@ -610,89 +610,6 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		"failure_class", failureClass,
 	)
 	return nil
-}
-
-type runtimeProcessInventory interface {
-	List(context.Context) (dockerruntime.RuntimeProcessInventorySnapshot, error)
-}
-
-type startupRuntimeCleaner interface {
-	EnsureAbsent(context.Context, map[string]string) error
-	EnsureManagedContainerAbsent(context.Context, string) error
-}
-
-type startupDockerAdapter struct {
-	inventory runtimeProcessInventory
-	cleaner   startupRuntimeCleaner
-}
-
-func (adapter startupDockerAdapter) List(ctx context.Context) (startup.RuntimeInventorySnapshot, error) {
-	dockerSnapshot, err := adapter.inventory.List(ctx)
-	if err != nil {
-		return startup.RuntimeInventorySnapshot{}, err
-	}
-	snapshot := startup.RuntimeInventorySnapshot{
-		Processes:  make([]startup.ManagedRuntimeProcess, 0, len(dockerSnapshot.Processes)),
-		Duplicates: make([]startup.DuplicateManagedRuntimeProcess, 0, len(dockerSnapshot.Duplicates)),
-		Malformed:  make([]startup.MalformedManagedRuntimeProcess, 0, len(dockerSnapshot.Malformed)),
-	}
-	for _, process := range dockerSnapshot.Processes {
-		identity, ok := startupRuntimeIdentity(process.Identity)
-		if !ok {
-			snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-				ContainerID: process.ContainerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
-			})
-			continue
-		}
-		snapshot.Processes = append(snapshot.Processes, startup.ManagedRuntimeProcess{
-			Identity: identity, ContainerID: process.ContainerID,
-		})
-	}
-	for _, duplicate := range dockerSnapshot.Duplicates {
-		identity, ok := startupRuntimeIdentity(duplicate.Identity)
-		if !ok {
-			for _, containerID := range duplicate.ContainerIDs {
-				snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-					ContainerID: containerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
-				})
-			}
-			continue
-		}
-		snapshot.Duplicates = append(snapshot.Duplicates, startup.DuplicateManagedRuntimeProcess{
-			Identity: identity, ContainerIDs: append([]string(nil), duplicate.ContainerIDs...),
-		})
-	}
-	for _, malformed := range dockerSnapshot.Malformed {
-		snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-			ContainerID: malformed.ContainerID, Reason: string(malformed.Reason),
-		})
-	}
-	return snapshot, nil
-}
-
-func (adapter startupDockerAdapter) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {
-	return adapter.cleaner.EnsureAbsent(ctx, map[string]string{
-		dockerruntime.RuntimeProcessAssignmentLabel: identity.AssignmentID,
-		dockerruntime.RuntimeProcessSessionLabel:    identity.AgentSessionID,
-		dockerruntime.RuntimeProcessTurnLabel:       identity.AgentTurnID,
-		dockerruntime.RuntimeProcessEpochLabel:      strconv.FormatInt(identity.ExecutionEpoch, 10),
-		dockerruntime.RuntimeProfileIdentityLabel:   identity.RuntimeProfileName + "/" + identity.RuntimeProfileVersion,
-	})
-}
-
-func (adapter startupDockerAdapter) EnsureMalformedAbsent(ctx context.Context, process startup.MalformedManagedRuntimeProcess) error {
-	return adapter.cleaner.EnsureManagedContainerAbsent(ctx, process.ContainerID)
-}
-
-func startupRuntimeIdentity(identity dockerruntime.RuntimeProcessIdentity) (store.AgentTurnRuntimeIdentity, bool) {
-	if identity.ExecutionEpoch > math.MaxInt64 {
-		return store.AgentTurnRuntimeIdentity{}, false
-	}
-	return store.AgentTurnRuntimeIdentity{
-		AssignmentID: identity.AssignmentID, AgentSessionID: identity.AgentSessionID,
-		AgentTurnID: identity.AgentTurnID, ExecutionEpoch: int64(identity.ExecutionEpoch),
-		RuntimeProfileName: identity.RuntimeProfile.Name, RuntimeProfileVersion: identity.RuntimeProfile.Version,
-	}, true
 }
 
 type protectedBindingChecker interface {

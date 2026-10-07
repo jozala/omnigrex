@@ -26,6 +26,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -80,8 +81,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	sessions := &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}}
 	launcherConfig := agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: clientFactory, Sessions: sessions,
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: workspaces, Gateway: gateway, Execution: engineFactory, ACP: clientFactory, Sessions: sessions,
 		MemoryBytes: 1024 << 20,
 		ACPOptions:  acp.ClientOptions{Logger: slog.New(slog.NewJSONHandler(&protocolLogs, nil))},
 	}
@@ -149,7 +149,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)
 	}
-	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "refresh", "mcp-register", "docker-new", "turn-fence", "docker-create", "process-start", "fence", "acp-new", "session-prepare"}
+	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "refresh", "mcp-register", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "acp-new", "session-prepare"}
 	if !reflect.DeepEqual(operations, wantPrefix) {
 		t.Fatalf("dependency operations = %v, want %v", operations, wantPrefix)
 	}
@@ -196,23 +196,17 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if spec.MemoryBytes != 1073741824 || engineFactory.options.RuntimePolicy.MemoryBytes != spec.MemoryBytes {
 		t.Errorf("Agent Turn policy/spec memory = %d/%d, want 1073741824", engineFactory.options.RuntimePolicy.MemoryBytes, spec.MemoryBytes)
 	}
-	for _, label := range []struct{ got, want string }{
-		{store.RuntimeLabelAssignmentID, "io.omnigrex.assignment"},
-		{store.RuntimeLabelSessionID, "io.omnigrex.agent-session"},
-		{store.RuntimeLabelTurnID, "io.omnigrex.agent-turn"},
-		{store.RuntimeLabelEpoch, "io.omnigrex.execution-epoch"},
-	} {
-		if label.got != label.want {
-			t.Errorf("cleanup label constant = %q, want %q", label.got, label.want)
-		}
-	}
 	wantLabels := map[string]string{
-		store.RuntimeLabelSessionID:    runtimeTestSession,
-		store.RuntimeLabelTurnID:       runtimeTestTurn,
-		store.RuntimeLabelAssignmentID: runtimeTestAssignment,
-		store.RuntimeLabelEpoch:        "7",
-		"io.omnigrex.runtime-profile":  "opencode-acp/v1",
-		"io.omnigrex.workflow":         runtimeTestWorkflow,
+		dockerruntime.RuntimeProcessSessionLabel:    runtimeTestSession,
+		dockerruntime.RuntimeProcessTurnLabel:       runtimeTestTurn,
+		dockerruntime.RuntimeProcessAssignmentLabel: runtimeTestAssignment,
+		dockerruntime.RuntimeProcessEpochLabel:      "7",
+		"io.omnigrex.runtime-profile":               "opencode-acp/v1",
+		"io.omnigrex.workflow":                      runtimeTestWorkflow,
+		"io.omnigrex.execution-specification":       spec.Labels["io.omnigrex.execution-specification"],
+	}
+	if len(spec.Labels["io.omnigrex.execution-specification"]) != 64 {
+		t.Fatal("execution specification digest is missing")
 	}
 	if !reflect.DeepEqual(spec.Labels, wantLabels) {
 		t.Errorf("Docker labels = %#v, want %#v", spec.Labels, wantLabels)
@@ -275,9 +269,9 @@ func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
-		Docker: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+		Execution: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+		Sessions:                 &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
+		MemoryBytes:              1024 << 20,
 		PathEnvironmentAllowlist: []string{"TMPDIR", "GOTMPDIR", "GOCACHE"},
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -322,10 +316,10 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store:     &runtimeStore{operations: &operations, execution: execution},
 		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: profile},
-		Workspace: workspaces, Gateway: gateway, Docker: &runtimeEngineFactory{operations: &operations},
-		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+		Workspace: workspaces, Gateway: gateway, Execution: &runtimeEngineFactory{operations: &operations},
+		ACP:         &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+		Sessions:    &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
+		MemoryBytes: 1024 << 20,
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
 		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
@@ -389,10 +383,9 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 				Store:     &runtimeStore{operations: &operations, execution: execution},
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-				Workspace: workspaces, Gateway: gateway, Docker: engineFactory,
+				Workspace: workspaces, Gateway: gateway, Execution: engineFactory,
 				ACP: clientFactory, Sessions: sessions,
 				OperatorInstructions: operator,
-				Network:              "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 			})
 
 			handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -467,10 +460,9 @@ func TestLauncherFenceFailureHasNoOtherDependencyAction(t *testing.T) {
 		Store:     &runtimeStore{operations: &operations, execution: execution, fenceErr: store.ErrAgentTurnFenceLost},
 		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 		Workspace: &runtimeWorkspace{operations: &operations}, Gateway: &runtimeGateway{operations: &operations},
-		Docker:   &runtimeEngineFactory{operations: &operations},
-		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Execution: &runtimeEngineFactory{operations: &operations},
+		ACP:       &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+		Sessions:  &runtimeSessionPreparer{operations: &operations},
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -497,9 +489,8 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
 		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: &runtimeEngineFactory{operations: &operations},
+		Gateway: &runtimeGateway{operations: &operations}, Execution: &runtimeEngineFactory{operations: &operations},
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -528,9 +519,8 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
 		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
+		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	database.turnFence.Lock()
@@ -561,8 +551,8 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if slices.Contains(operations, "docker-create") || slices.Contains(operations, "process-start") || slices.Contains(operations, "acp-new") {
-		t.Fatalf("dependency operations = %v, want no create, start, or ACP attach", operations)
+	if engineFactory.engine.process.started != 0 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "acp-new") {
+		t.Fatalf("dependency operations = %v, want created resources cleaned without start or ACP attach", operations)
 	}
 }
 
@@ -582,9 +572,8 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
 		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
+		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	launchResult := make(chan error, 1)
@@ -639,9 +628,8 @@ func TestLauncherCleansCreatedProcessWhenStartCannotCrossRecoveryFence(t *testin
 		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
 		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
+		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -669,9 +657,8 @@ func TestLauncherRevalidatesFenceImmediatelyAfterStartAndCleansBeforeReturn(t *t
 		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
 		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
+		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -717,10 +704,9 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 				Store:     &runtimeStore{operations: &operations, execution: execution},
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 				Workspace: &runtimeWorkspace{operations: &operations}, Gateway: &runtimeGateway{operations: &operations},
-				Docker:   &runtimeEngineFactory{operations: &operations},
-				ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-				Sessions: &runtimeSessionPreparer{operations: &operations},
-				Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+				Execution: &runtimeEngineFactory{operations: &operations},
+				ACP:       &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
+				Sessions:  &runtimeSessionPreparer{operations: &operations},
 			})
 
 			_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -755,10 +741,9 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA,
 			Environment: map[string]string{"MISE_DATA_DIR": miseDir, "OPENCODE_DISABLE_PROJECT_CONFIG": "false"},
 		}},
-		Gateway: gateway, Docker: &runtimeEngineFactory{operations: &operations},
+		Gateway: gateway, Execution: &runtimeEngineFactory{operations: &operations},
 		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
 		Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -1259,7 +1244,7 @@ func TestLauncherPreservesOOMBeforeRemovingProcessAfterSessionResumeFails(t *tes
 	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
-				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+				Exited: true, OOMKilled: true, ExitCode: 137, Resource: "container-oom",
 			}
 		})
 	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) {
@@ -1280,7 +1265,7 @@ func TestLauncherReportsOOMFirstConfirmedDuringCleanup(t *testing.T) {
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.observeResults = []dockerruntime.ExitObservation{
 				{Running: true},
-				{Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "late-oom"},
+				{Exited: true, OOMKilled: true, ExitCode: 137, Resource: "late-oom"},
 			}
 		})
 	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) || resources.store.oomContainerID != "late-oom" {
@@ -1296,7 +1281,7 @@ func TestLauncherDoesNotRemoveOOMContainerIfEvidenceCannotBePersisted(t *testing
 	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
-				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+				Exited: true, OOMKilled: true, ExitCode: 137, Resource: "container-oom",
 			}
 			resources.store.oomRecordErr = errors.New("database temporarily unavailable")
 		})
@@ -1355,9 +1340,8 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces,
-		Gateway:   gateway, Docker: engineFactory, ACP: &runtimeACPFactory{operations: operations, client: client},
+		Gateway:   gateway, Execution: engineFactory, ACP: &runtimeACPFactory{operations: operations, client: client},
 		Sessions: &runtimeSessionPreparer{operations: operations, err: sessionErr},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client}
 	if configure != nil {
@@ -1458,6 +1442,8 @@ type runtimeStore struct {
 	oomContainerID     string
 	oomExitCode        int
 }
+
+func (*runtimeStore) ExecutionLedger(store.AgentTurnLease) execution.Ledger { return nil }
 
 func (database *runtimeStore) RecordAgentTurnRuntimeOOM(_ context.Context, _ store.AgentTurnLease, id string, code int) error {
 	*database.operations = append(*database.operations, "oom-record")
@@ -1668,6 +1654,10 @@ func (gateway *runtimeGateway) CloseAndDrain(ctx context.Context, _ mcp.Registra
 	return gateway.drainErr
 }
 
+var testDockerFactory = dockerruntime.ExecutionFactory{
+	Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+}
+
 type runtimeEngineFactory struct {
 	operations *[]string
 	options    dockerruntime.EngineOptions
@@ -1675,15 +1665,21 @@ type runtimeEngineFactory struct {
 	err        error
 }
 
-func (factory *runtimeEngineFactory) New(options dockerruntime.EngineOptions) (agentturn.RuntimeEngine, error) {
+func (factory *runtimeEngineFactory) New(request execution.Request, _ execution.Ledger) (agentturn.RuntimeEngine, error) {
 	*factory.operations = append(*factory.operations, "docker-new")
-	factory.options = options
+	policy, _, err := testDockerFactory.Compile(request)
+	if err != nil {
+		return nil, err
+	}
+	factory.options = dockerruntime.EngineOptions{AgentNetwork: testDockerFactory.Network, RuntimePolicy: policy}
 	factory.engine.operations = factory.operations
 	if factory.engine.process.transport == nil {
 		factory.engine.process.transport = &runtimeTransport{}
 	}
 	return &factory.engine, factory.err
 }
+
+func (engine *runtimeEngine) EnsureAbsent(context.Context) error { return nil }
 
 type runtimeEngine struct {
 	operations *[]string
@@ -1694,8 +1690,12 @@ type runtimeEngine struct {
 	closeErr   error
 }
 
-func (engine *runtimeEngine) Create(_ context.Context, spec dockerruntime.Spec, _ io.Writer) (agentturn.RuntimeProcess, error) {
+func (engine *runtimeEngine) Create(_ context.Context, request execution.Request, _ io.Writer) (agentturn.RuntimeProcess, error) {
 	*engine.operations = append(*engine.operations, "docker-create")
+	_, spec, err := testDockerFactory.Compile(request)
+	if err != nil {
+		return nil, err
+	}
 	engine.spec = spec
 	engine.process.operations = engine.operations
 	return &engine.process, engine.createErr

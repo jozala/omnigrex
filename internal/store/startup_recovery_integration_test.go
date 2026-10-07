@@ -187,7 +187,7 @@ func TestStartupReconcilerFencesLiveDuplicateRuntimeProcessesBeforeCleanup(t *te
 	runtimes := &duplicateStartupRuntimes{
 		database: database,
 		duplicate: startup.DuplicateManagedRuntimeProcess{
-			Identity: identity, ContainerIDs: []string{"duplicate-live-a", "duplicate-live-b"},
+			Identity: identity, Resources: []string{"duplicate-live-a", "duplicate-live-b"},
 		},
 	}
 	reconciler, err := startup.NewReconciler(database, runtimes, runtimes, runtimes, startup.ReconcilerOptions{
@@ -641,6 +641,10 @@ func (runtimes *duplicateStartupRuntimes) List(context.Context) (startup.Runtime
 		return startup.RuntimeInventorySnapshot{}, nil
 	}
 	return startup.RuntimeInventorySnapshot{Duplicates: []startup.DuplicateManagedRuntimeProcess{runtimes.duplicate}}, nil
+}
+
+func (runtimes *duplicateStartupRuntimes) EnsureOrphansAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity, _ []string) error {
+	return runtimes.EnsureAbsent(ctx, identity)
 }
 
 func (runtimes *duplicateStartupRuntimes) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {

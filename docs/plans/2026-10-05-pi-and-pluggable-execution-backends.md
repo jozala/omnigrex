@@ -23,6 +23,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 01 | Linux execution topology proved | [Microsandbox feasibility evidence](../experiments/microsandbox.md) |
 | 02 | Required Pi RPC, MCP, session, and API-key gates passed on both backends | [Pi feasibility evidence](../experiments/pi.md) |
 | 03 | Contracts and migration ownership defined; production implementation follows | [Execution and agent boundary contracts](2026-10-07-runtime-boundary-contracts.md) |
+| 04 | Docker launch and recovery use neutral contracts; OpenCode remains operational | [Docker execution boundary implementation and evidence](2026-10-07-docker-execution-boundary.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -271,6 +272,8 @@ Walk through a hypothetical remote implementation without adding host filesystem
 Keep any unresolved choice explicitly proposed rather than claiming agreement.
 
 ### Step 04: Adapt Docker to the neutral execution and recovery contracts
+
+**Deliverable:** [Docker execution boundary implementation](2026-10-07-docker-execution-boundary.md), including creation reservations, diagnostic identities, conformance evidence, and transitional ownership.
 
 **Goal:** Obtain the first real implementation without changing agent behavior.
 

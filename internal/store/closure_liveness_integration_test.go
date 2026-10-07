@@ -208,7 +208,7 @@ type closureLivenessCleaner struct {
 	results []error
 }
 
-func (cleaner *closureLivenessCleaner) EnsureAbsent(context.Context, map[string]string) error {
+func (cleaner *closureLivenessCleaner) EnsureKeyAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
 	cleaner.mutex.Lock()
 	defer cleaner.mutex.Unlock()
 	if len(cleaner.results) == 0 {

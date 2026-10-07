@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	distribution "github.com/distribution/reference"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -33,7 +35,7 @@ const (
 )
 
 var (
-	ErrInvalidSpec           = errors.New("invalid Runtime Process specification")
+	ErrInvalidSpec           = execution.ErrInvalidSpec
 	ErrProcessAlreadyStarted = errors.New("Runtime Process start already attempted")
 )
 
@@ -54,6 +56,9 @@ type Spec struct {
 	ExtraHosts  []string
 	MemoryBytes int64
 	PIDsLimit   int64
+	// Reattachable keeps stdin open across a lost pre-launch attachment.
+	// Legacy OpenCode qualification fixtures retain EOF-driven shutdown until Step 17.
+	Reattachable bool
 }
 
 type VolumeMount struct {
@@ -104,6 +109,7 @@ type RuntimePolicy struct {
 	Network                       string
 	MemoryBytes                   int64
 	PIDsLimit                     int64
+	Reattachable                  bool
 	VolumeBindings                map[string]string
 	RequiredVolumeTargets         []string
 	RequiredWritableVolumeTargets []string
@@ -206,13 +212,7 @@ type Process struct {
 }
 
 // ExitObservation contains only Docker-owned exit facts, never container logs or configuration.
-type ExitObservation struct {
-	ContainerID string
-	ExitCode    int
-	Exited      bool
-	Running     bool
-	OOMKilled   bool
-}
+type ExitObservation = execution.ExitObservation
 
 // ObserveExit inspects the exact container before Stop or Remove can overwrite its exit state.
 // Missing containers and running containers provide no evidence of an OOM.
@@ -262,7 +262,10 @@ func observeExit(ctx context.Context, api exitInspector, id string, labels map[s
 	if actual.State.Running {
 		return ExitObservation{Running: true}, nil
 	}
-	return ExitObservation{ContainerID: id, ExitCode: actual.State.ExitCode, Exited: true, OOMKilled: actual.State.OOMKilled}, nil
+	if actual.State.Status != container.StateExited && actual.State.Status != container.StateDead {
+		return ExitObservation{}, nil
+	}
+	return ExitObservation{Resource: execution.Ref(id), ExitCode: actual.State.ExitCode, Exited: true, OOMKilled: actual.State.OOMKilled}, nil
 }
 
 func (process *Process) Transport() io.ReadWriteCloser {
@@ -281,7 +284,7 @@ func (process *Process) Start(ctx context.Context) error {
 		return errors.New("start Runtime Process: process was removed")
 	}
 	if _, err := process.api.ContainerStart(ctx, process.ID, mobyclient.ContainerStartOptions{}); err != nil && !errdefs.IsNotModified(err) {
-		return fmt.Errorf("start Runtime Process: %w", err)
+		return errors.Join(execution.ErrUnknownEffect, fmt.Errorf("start Runtime Process: %w", err))
 	}
 	process.started = true
 	return nil
@@ -324,7 +327,7 @@ func (process *Process) Wait(ctx context.Context) (int64, error) {
 func (process *Process) Stop(ctx context.Context, timeout time.Duration) error {
 	process.lifecycleLock.Lock()
 	defer process.lifecycleLock.Unlock()
-	if process.removed || !process.started {
+	if process.removed || !process.started && !process.startAttempted {
 		return nil
 	}
 	seconds := int(timeout.Round(time.Second) / time.Second)
@@ -333,7 +336,7 @@ func (process *Process) Stop(ctx context.Context, timeout time.Duration) error {
 	}
 	_, err := process.api.ContainerStop(ctx, process.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
 	if err != nil && !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
-		return fmt.Errorf("stop Runtime Process: %w", err)
+		return errors.Join(execution.ErrUnknownEffect, fmt.Errorf("stop Runtime Process: %w", err))
 	}
 	process.started = false
 	return nil
@@ -363,13 +366,63 @@ func create(ctx context.Context, api dockerAPI, spec Spec, stderr io.Writer) (*P
 	}
 	created, err := api.ContainerCreate(ctx, options)
 	if err != nil {
-		return nil, fmt.Errorf("create Runtime Process: %w", err)
+		failure := fmt.Errorf("create Runtime Process: %w", err)
+		if errdefs.IsNotFound(err) {
+			return nil, noExecutionEffectsError{cause: failure}
+		}
+		return nil, failure
 	}
 	process := &Process{
 		ID: created.ID, api: api, demuxDone: make(chan struct{}), labels: maps.Clone(options.Config.Labels),
 	}
+	return attach(ctx, api, process, stderr)
+}
 
-	attached, err := api.ContainerAttach(ctx, created.ID, mobyclient.ContainerAttachOptions{
+func attachReserved(ctx context.Context, api dockerAPI, spec Spec, id string, stderr io.Writer) (*Process, error) {
+	inspected, err := api.ContainerInspect(ctx, id, mobyclient.ContainerInspectOptions{})
+	if err != nil {
+		return nil, errors.Join(execution.ErrUnknownEffect, err)
+	}
+	actual := inspected.Container
+	if actual.ID != id || actual.Config == nil || actual.State == nil || actual.State.Status != container.StateCreated ||
+		actual.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue ||
+		actual.Config.Image != spec.Image || actual.Config.User != spec.User || !slices.Equal(actual.Config.Cmd, spec.Command) {
+		return nil, execution.ErrConflict
+	}
+	expected, err := buildCreateOptions(spec)
+	if err != nil {
+		return nil, err
+	}
+	if actual.HostConfig == nil || actual.HostConfig.Privileged || len(actual.HostConfig.Binds) != 0 || len(actual.HostConfig.Devices) != 0 ||
+		actual.HostConfig.NetworkMode != expected.HostConfig.NetworkMode || !actual.HostConfig.ReadonlyRootfs ||
+		actual.HostConfig.Memory != expected.HostConfig.Memory || !reflect.DeepEqual(actual.HostConfig.PidsLimit, expected.HostConfig.PidsLimit) ||
+		!maps.Equal(actual.HostConfig.Tmpfs, expected.HostConfig.Tmpfs) ||
+		!slices.Equal(actual.HostConfig.CapDrop, expected.HostConfig.CapDrop) || !slices.Equal(actual.HostConfig.SecurityOpt, expected.HostConfig.SecurityOpt) ||
+		len(actual.HostConfig.Mounts) != len(expected.HostConfig.Mounts) || len(actual.HostConfig.Mounts) != 0 && !reflect.DeepEqual(actual.HostConfig.Mounts, expected.HostConfig.Mounts) {
+		return nil, execution.ErrConflict
+	}
+	actualEnvironment := make(map[string]string)
+	for _, entry := range actual.Config.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		actualEnvironment[name] = value
+	}
+	for _, entry := range spec.Environment {
+		name, value, _ := strings.Cut(entry, "=")
+		if actualEnvironment[name] != value {
+			return nil, execution.ErrConflict
+		}
+	}
+	for name, value := range spec.Labels {
+		if actual.Config.Labels[name] != value {
+			return nil, execution.ErrConflict
+		}
+	}
+	process := &Process{ID: id, api: api, demuxDone: make(chan struct{}), labels: maps.Clone(actual.Config.Labels)}
+	return attach(ctx, api, process, stderr)
+}
+
+func attach(ctx context.Context, api dockerAPI, process *Process, stderr io.Writer) (*Process, error) {
+	attached, err := api.ContainerAttach(ctx, process.ID, mobyclient.ContainerAttachOptions{
 		Stream: true,
 		Stdin:  true,
 		Stdout: true,
@@ -437,6 +490,14 @@ for path do
   test "$(stat -c %u "$path")" = "$uid"
   test "$(stat -c %g "$path")" = "$gid"
 done`
+	labels := maps.Clone(spec.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels["io.omnigrex.assignment-subpath-initializer"] = "true"
+	if spec.Labels[RuntimeProcessTurnLabel] != "" {
+		labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
+	}
 	return mobyclient.ContainerCreateOptions{
 		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
 		Config: &container.Config{
@@ -444,7 +505,7 @@ done`
 			User:       spec.User,
 			Entrypoint: []string{"sh", "-c"},
 			Cmd:        append([]string{script, paths[0], uid, gid}, paths[1:]...),
-			Labels:     map[string]string{"io.omnigrex.assignment-subpath-initializer": "true"},
+			Labels:     labels,
 		},
 		HostConfig: &container.HostConfig{
 			NetworkMode:    "none",
@@ -481,7 +542,9 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 	if labels == nil {
 		labels = make(map[string]string, 1)
 	}
-	labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
+	if labels[diagnosticMarkerLabel] != "true" {
+		labels[RuntimeProcessMarkerLabel] = RuntimeProcessMarkerValue
+	}
 
 	mounts := make([]mount.Mount, 0, len(spec.Volumes))
 	for _, volume := range spec.Volumes {
@@ -524,7 +587,7 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 			AttachStderr: true,
 			Tty:          false,
 			OpenStdin:    true,
-			StdinOnce:    true,
+			StdinOnce:    !spec.Reattachable,
 			Env:          spec.Environment,
 			Cmd:          spec.Command,
 			Image:        spec.Image,
@@ -614,6 +677,9 @@ func validateSpec(spec Spec) (string, string, error) {
 
 func validateResources(options EngineOptions, spec Spec) error {
 	policy := options.RuntimePolicy
+	if spec.Reattachable != policy.Reattachable {
+		return fmt.Errorf("%w: transport policy does not match", ErrInvalidSpec)
+	}
 	if policy.Image != "" && spec.Image != policy.Image {
 		return fmt.Errorf("%w: image does not match the Runtime Policy", ErrInvalidSpec)
 	}
