@@ -1,8 +1,11 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # Use one provider credential bundle before proxy mediation
+
+Superseded by [decision 0007: Supply provider API keys through disposable files](../decisions/0007-supply-provider-api-keys-through-disposable-files.md).
+The replacement changes runtime-specific delivery; the guest-secret exposure described below still informs the initial Pi deployment.
 
 The current OpenCode runtime accepts one authentication object through `OPENCODE_AUTH_CONTENT`.
 Omnigrex therefore reads one deployment-wide bundle from `OMNIGREX_PROVIDER_CREDENTIALS_FILE` and injects it ephemerally into each Runtime Process.

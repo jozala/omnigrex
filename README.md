@@ -18,6 +18,9 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Domain language](./CONTEXT.md)
 - [Architecture decisions](./docs/adr/)
 - [Project decision log](./docs/decisions/README.md)
+- [Microsandbox feasibility experiment](./experiments/microsandbox/README.md)
+- [Pi RPC feasibility experiment](./experiments/pi/README.md)
+- [Execution and agent boundary contracts](./docs/plans/2026-10-07-runtime-boundary-contracts.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

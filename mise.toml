@@ -56,6 +56,21 @@ go test -race -tags=integration ./internal/deployment -run TestComposeFullStack 
 description = "Run the opt-in live GitHub App repository read and review gate"
 run = "go test -tags=live ./internal/github -run 'TestLive(DeveloperAppGetsRepositoryByID|ReviewerAppSubmitsApproveAndRequestChanges)' -count=1 -v"
 
+[tasks.test-microsandbox-feasibility]
+description = "Run the opt-in Linux/KVM Microsandbox development-environment experiment"
+run = "OMNIGREX_MICROSANDBOX_FEASIBILITY=1 go test -race -tags=integration -timeout 45m -count=1 -v ./experiments/microsandbox"
+
+[tasks.test-pi-feasibility]
+description = "Prove pinned Pi RPC and authenticated MCP on the selected execution backend"
+run = "OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run 'TestPiRPCFeasibility|TestRPCClientCorrelatesConcurrentResponses'"
+
+[tasks.test-pi-live]
+description = "Run bounded live OpenCode Go and OpenAI API-key checks using an explicitly supplied auth file"
+run = '''
+: "${OMNIGREX_PI_LIVE_AUTH_FILE:?set the local path to a Pi API-key auth file}"
+OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run '^TestPiLiveProviders$'
+'''
+
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
 run = '''

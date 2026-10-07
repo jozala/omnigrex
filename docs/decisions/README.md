@@ -12,6 +12,11 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0002: Use current-deployment agent instructions](0002-use-current-deployment-agent-instructions.md) | Accepted | 2026-10-04 |
 | [0003: Separate personality from platform and Workflow guidance](0003-separate-personality-from-platform-and-workflow-guidance.md) | Accepted | 2026-10-04 |
 | [0004: Publish handoff summaries before continuing](0004-publish-handoff-summaries-before-continuing.md) | Accepted | 2026-10-04 |
+| [0005: Separate execution backends from coordination](0005-separate-execution-backends-from-coordination.md) | Accepted | 2026-10-07 |
+| [0006: Use Pi through an agent-specific adapter](0006-use-pi-through-an-agent-specific-adapter.md) | Accepted | 2026-10-07 |
+| [0007: Supply provider API keys through disposable files](0007-supply-provider-api-keys-through-disposable-files.md) | Accepted | 2026-10-07 |
+| [0008: Keep workspace capture separate from publication policy](0008-keep-workspace-capture-separate-from-publication-policy.md) | Accepted | 2026-10-07 |
+| [0009: Pin Participant images and use working-revision tools](0009-pin-participant-images-and-use-working-revision-tools.md) | Accepted | 2026-10-07 |
 
 ## Existing architectural decisions
 
@@ -19,14 +24,14 @@ Existing ADR identifiers and paths remain valid; new decisions use this log.
 Do not copy an existing ADR into a second record.
 
 - [ADR 0001: Separate visible Workflow and execution state](../adr/0001-separate-visible-workflow-and-execution-state.md)
-- [ADR 0002: Use ACP as the agent runtime boundary](../adr/0002-use-acp-as-the-agent-runtime-boundary.md)
+- [ADR 0002: Use ACP as the agent runtime boundary](../adr/0002-use-acp-as-the-agent-runtime-boundary.md) - Superseded by [decision 0006](0006-use-pi-through-an-agent-specific-adapter.md).
 - [ADR 0003: Orchestrator owns session control](../adr/0003-orchestrator-owns-session-control.md)
 - [ADR 0004: Mediate agent capabilities through MCP](../adr/0004-mediate-agent-capabilities-through-mcp.md)
 - [ADR 0005: Use separate Developer and Reviewer GitHub Apps](../adr/0005-use-separate-developer-and-reviewer-github-apps.md)
-- [ADR 0006: Control Docker directly from the orchestrator](../adr/0006-control-docker-directly-from-the-orchestrator.md)
+- [ADR 0006: Control Docker directly from the orchestrator](../adr/0006-control-docker-directly-from-the-orchestrator.md) - Superseded by [decision 0005](0005-separate-execution-backends-from-coordination.md).
 - [ADR 0007: Use code-defined Workflow Definitions and durable Attempt Stages](../adr/0007-use-code-defined-workflow-definitions-and-durable-attempt-stages.md)
 - [ADR 0008: Separate Stage Assignments from Agent Participants](../adr/0008-separate-stage-assignments-from-agent-participants.md)
 - [ADR 0009: Select GitHub App credentials by operation](../adr/0009-select-github-app-credentials-by-operation.md)
-- [ADR 0010: Use one provider credential bundle before proxy mediation](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md)
+- [ADR 0010: Use one provider credential bundle before proxy mediation](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md) - Superseded by [decision 0007](0007-supply-provider-api-keys-through-disposable-files.md).
 - [ADR 0011: Discover repository Agent Profiles and select separately](../adr/0011-discover-repository-agent-profiles-and-select-separately.md)
 - [ADR 0012: Load repository skills from the current checkout](../adr/0012-load-repository-skills-from-the-current-checkout.md)

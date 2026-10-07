@@ -1,8 +1,11 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # Use ACP as the agent runtime boundary
+
+Superseded by [decision 0006: Use Pi through an agent-specific adapter](../decisions/0006-use-pi-through-an-agent-specific-adapter.md).
+The replacement is delivered through the combined runtime plan; this record preserves the rationale of the existing ACP implementation.
 
 The orchestrator communicates with coding-agent runtimes through Agent Client Protocol version 1 instead of runtime-specific CLI output or APIs.
 ACP is adopted in the first iteration because persistent sessions, streamed interaction, cancellation, future human participation, and runtime substitution are foundational requirements rather than optional integrations.
