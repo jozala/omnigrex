@@ -1376,22 +1376,28 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, 'PR_981', 'OPEN', TRUE,
 		t.Fatalf("redirect changed head = (processed %t, error %v, GitHub calls %d, credentials %d), want (true, nil, 1, 1)",
 			processed, err, api.reads, credential.calls)
 	}
-	var head, redirectHead, revalidationStatus, handoffReason, labelState string
+	var head, redirectHead, revalidationStatus, labelState string
+	var workflowReason, priorAttemptReason *string
 	var turns int
 	if err := pool.QueryRow(ctx, `
 SELECT (SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active),
        (SELECT result->>'redirected_to_head' FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'REVALIDATE_TERMINAL_INTENT'),
        (SELECT status FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'REVALIDATE_TERMINAL_INTENT'),
        (SELECT human_handoff_reason FROM workflows WHERE id = $1),
+       (SELECT human_handoff_reason FROM workflow_attempts WHERE id = $3),
        (SELECT count(*) FROM agent_turns WHERE workflow_attempt_id = $2),
-       (SELECT payload->>'state' FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'RECONCILE_GITHUB_LABELS')`, fixture.workflowID, newAttemptID).Scan(
-		&head, &redirectHead, &revalidationStatus, &handoffReason, &turns, &labelState); err != nil {
+       (SELECT payload->>'state' FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'RECONCILE_GITHUB_LABELS')`, fixture.workflowID, newAttemptID, fixture.attemptID).Scan(
+		&head, &redirectHead, &revalidationStatus, &workflowReason, &priorAttemptReason, &turns, &labelState); err != nil {
 		t.Fatal(err)
 	}
+	// The reactivation trigger clears the workflow-level handoff reason when it
+	// leaves NEEDS_HUMAN; the redirect itself writes no workflow row. History
+	// is retained on the superseded attempt.
 	if head != changedHead || redirectHead != changedHead || revalidationStatus != string(store.JobSucceeded) ||
-		handoffReason != string(workflow.ReasonTerminalCorroborationPrerequisite) || turns != 0 || labelState != string(workflow.StateDeveloping) {
-		t.Errorf("redirected state = (head %q, redirect %q, revalidation %s, reason %s, turns %d, labels %q), want head and redirect %q, SUCCEEDED, prerequisite, 0 turns, DEVELOPING labels",
-			head, redirectHead, revalidationStatus, handoffReason, turns, labelState, changedHead)
+		workflowReason != nil || priorAttemptReason == nil || *priorAttemptReason != string(workflow.ReasonTerminalCorroborationPrerequisite) ||
+		turns != 0 || labelState != string(workflow.StateDeveloping) {
+		t.Errorf("redirected state = (head %q, redirect %q, revalidation %s, workflow reason %v, prior attempt reason %v, turns %d, labels %q), want head and redirect %q, SUCCEEDED, cleared workflow reason, prerequisite on the prior attempt, 0 turns, DEVELOPING labels",
+			head, redirectHead, revalidationStatus, workflowReason, priorAttemptReason, turns, labelState, changedHead)
 	}
 	var preparedHead, preparedPurpose string
 	if err := pool.QueryRow(ctx, `SELECT payload->>'expected_head_sha', payload->>'purpose' FROM jobs WHERE workflow_attempt_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')`, newAttemptID).Scan(&preparedHead, &preparedPurpose); err != nil {
