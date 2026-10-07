@@ -1292,6 +1292,58 @@ func (api *backendGitHub) GetCheckRuns(_ context.Context, credential, owner, rep
 	return []githubapi.CheckRun{}, nil
 }
 
+func (api *backendGitHub) GetCheckRunDiagnostics(_ context.Context, _, _, _ string, checkID int64, _ string, _ int64, _ string) (githubapi.CheckDiagnostics, error) {
+	if api.readErr != nil {
+		return githubapi.CheckDiagnostics{}, api.readErr
+	}
+	return githubapi.CheckDiagnostics{CheckID: checkID, HeadSHA: productionHeadSHA}, nil
+}
+
+func (api *backendGitHub) ListWorkflowRunsForHead(_ context.Context, _, _, _, head, _ string, _ int64) (githubapi.CIRunList, error) {
+	if api.readErr != nil {
+		return githubapi.CIRunList{}, api.readErr
+	}
+	return githubapi.CIRunList{HeadSHA: head}, nil
+}
+
+func (api *backendGitHub) GetWorkflowRun(_ context.Context, _, _, _ string, runID int64) (githubapi.CIRun, error) {
+	if api.readErr != nil {
+		return githubapi.CIRun{}, api.readErr
+	}
+	return githubapi.CIRun{ID: runID, HeadSHA: productionHeadSHA}, nil
+}
+
+func (api *backendGitHub) GetWorkflowRunDetail(_ context.Context, _, _, _ string, runID int64, attempt int, _ string, _ int64, head string) (githubapi.CIRunDetail, error) {
+	if api.readErr != nil {
+		return githubapi.CIRunDetail{}, api.readErr
+	}
+	if head == "" {
+		head = productionHeadSHA
+	}
+	return githubapi.CIRunDetail{Run: githubapi.CIRun{ID: runID, HeadSHA: head, RunAttempt: attempt}}, nil
+}
+
+func (api *backendGitHub) GetCIJob(_ context.Context, _, _, _ string, jobID int64) (githubapi.CIJob, error) {
+	if api.readErr != nil {
+		return githubapi.CIJob{}, api.readErr
+	}
+	return githubapi.CIJob{ID: jobID, HeadSHA: productionHeadSHA}, nil
+}
+
+func (api *backendGitHub) GetCIJobLogExcerpt(_ context.Context, _, _, _ string, scope githubapi.JobScope, _ *int, _ string, _ int, _ int64) (githubapi.CILogExcerpt, error) {
+	if api.readErr != nil {
+		return githubapi.CILogExcerpt{}, api.readErr
+	}
+	return githubapi.CILogExcerpt{HeadSHA: productionHeadSHA, JobID: scope.ID}, nil
+}
+
+func (api *backendGitHub) SearchCIJobLogs(_ context.Context, _, _, _ string, scope githubapi.JobScope, query string, _ int, _ string, _ int64) (githubapi.CILogSearchResult, error) {
+	if api.readErr != nil {
+		return githubapi.CILogSearchResult{}, api.readErr
+	}
+	return githubapi.CILogSearchResult{HeadSHA: productionHeadSHA, JobID: scope.ID, Query: query}, nil
+}
+
 func (api *backendGitHub) OpenPullRequest(_ context.Context, credential, _, _ string, request githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error) {
 	api.openCredential, api.openRequest = credential, request
 	if api.mutationErr != nil {

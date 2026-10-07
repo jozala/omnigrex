@@ -14,6 +14,7 @@ func DeveloperAppPermissions() InstallationPermissions {
 	return InstallationPermissions{
 		"metadata":      "read",
 		"checks":        "read",
+		"actions":       "read",
 		"contents":      "write",
 		"issues":        "write",
 		"pull_requests": "write",
