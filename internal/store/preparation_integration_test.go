@@ -732,6 +732,105 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status = 'AVAILABLE'`
 	}
 }
 
+func TestDeferredTriggerLabelsFlipOnlyAfterVerifiedPreparation(t *testing.T) {
+	const verifiedHead = "dddddddddddddddddddddddddddddddddddddddd"
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	application := triggerPreparationWorkflow(t, database, ctx, "63000000-0000-4000-8000-0000000000a0", "64000000-0000-4000-8000-0000000000a0")
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows
+SET status = 'NEEDS_HUMAN', desired_assignment_status = 'WAITING_FOR_HUMAN',
+    resume_role = 'DEVELOPER', human_handoff_reason = 'agent_blocked'
+WHERE id = $1`, application.WorkflowID); err != nil {
+		t.Fatalf("seed Human Handoff: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha, head_ref, head_sha
+)
+VALUES ('65000000-0000-4000-8000-0000000000a0', $1, 9123, 'jozala', 'omnigrex', 10, 10, 'OPEN', 'main', 'base', 'feature', $2)`,
+		application.WorkflowID, verifiedHead); err != nil {
+		t.Fatalf("seed Change Proposal: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO agent_assignments (
+    id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
+)
+VALUES ('65000000-0000-4000-8000-0000000000a1', $1, 'DEVELOPER', 'ACTIVE',
+        'developer', 'opencode-acp', '1', repeat('a', 64), 'sha256:developer-runtime', 'deferred/developer')`, application.WorkflowID); err != nil {
+		t.Fatalf("seed Developer Assignment: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE jobs
+SET status = 'CANCELLED', lease_owner = NULL, lease_token = NULL, leased_at = NULL,
+    lease_expires_at = NULL, heartbeat_at = NULL,
+    completed_at = clock_timestamp(), updated_at = clock_timestamp(),
+    last_error = 'fixture retires superseded preparation'
+WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status = 'AVAILABLE'`, application.WorkflowID); err != nil {
+		t.Fatalf("retire superseded preparation: %v", err)
+	}
+
+	retriggerDelivery := workflowDelivery("63000000-0000-4000-8000-0000000000a2")
+	retriggerClaim := claimWorkflowDelivery(t, database, ctx, retriggerDelivery)
+	retriggered, err := database.CompleteWebhookTransition(ctx, retriggerClaim.DeliveryID, retriggerClaim.ClaimToken,
+		normalizedPayload(retriggerClaim.DeliveryID, "trigger"), workflowLocator(), func(context store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: context.Metadata,
+				AttemptID:     "64000000-0000-4000-8000-0000000000a2", AttemptNumber: context.Snapshot.LastAttemptNumber + 1,
+			}, nil
+		})
+	if err != nil {
+		t.Fatalf("CompleteWebhookTransition() trigger error = %v", err)
+	}
+	if retriggered.Disposition != workflow.DispositionApplied || retriggered.State != workflow.StateDeveloping {
+		t.Fatalf("retrigger = (%s, %s), want (APPLIED, DEVELOPING)", retriggered.Disposition, retriggered.State)
+	}
+	var triggerLabels int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RECONCILE_GITHUB_LABELS' AND normalized_event_id = $2`, application.WorkflowID, retriggerClaim.DeliveryID).Scan(&triggerLabels); err != nil {
+		t.Fatalf("count trigger label jobs: %v", err)
+	}
+	if triggerLabels != 0 {
+		t.Errorf("trigger label jobs = %d, want none while verification is pending", triggerLabels)
+	}
+
+	lease := claimPreparationJob(t, database, ctx)
+	if _, err := database.AcknowledgeAgentTurnPreparationFailure(ctx, lease, errors.New("GitHub temporarily unavailable"), true, 0); err != nil {
+		t.Fatalf("AcknowledgeAgentTurnPreparationFailure() error = %v", err)
+	}
+	var pendingLabels int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RECONCILE_GITHUB_LABELS' AND normalized_event_id IS NULL`, application.WorkflowID).Scan(&pendingLabels); err != nil {
+		t.Fatalf("count verification label jobs after failure: %v", err)
+	}
+	if pendingLabels != 0 {
+		t.Errorf("verification label jobs after failure = %d, want none until verification succeeds", pendingLabels)
+	}
+
+	retry := claimPreparationJob(t, database, ctx)
+	spec := preparationSpec("deferred-profile", "openai/gpt-5.2")
+	spec.VerifiedHeadSHA = verifiedHead
+	spec.VerifiedPRID = 10
+	spec.VerifiedPRNumber = 10
+	prepared, err := database.PrepareAgentTurn(ctx, retry, spec)
+	if err != nil {
+		t.Fatalf("verified PrepareAgentTurn() error = %v", err)
+	}
+	if prepared.Turn.ExpectedHeadSHA != verifiedHead {
+		t.Errorf("Turn head = %q, want %q", prepared.Turn.ExpectedHeadSHA, verifiedHead)
+	}
+	var labelState, consumeRun string
+	if err := pool.QueryRow(ctx, `SELECT payload->>'state', payload->>'consume_run' FROM jobs WHERE workflow_id = $1 AND kind = 'RECONCILE_GITHUB_LABELS' AND normalized_event_id IS NULL`, application.WorkflowID).Scan(&labelState, &consumeRun); err != nil {
+		t.Fatalf("read verification label job: %v", err)
+	}
+	if labelState != string(workflow.StateDeveloping) || consumeRun != "true" {
+		t.Errorf("verification label job = (state %q, consume_run %q), want (DEVELOPING, true)", labelState, consumeRun)
+	}
+}
+
 func TestPrepareAgentTurnRepairsVerifiedStaleHead(t *testing.T) {
 	const (
 		staleHeadA    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

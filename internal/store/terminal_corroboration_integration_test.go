@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1244,6 +1245,190 @@ WHERE workflow.id = $1`, fixture.workflowID, reviewID, newAttemptID).Scan(
 	if state != string(workflow.StateDeveloping) || acceptedReviews != 1 || reviewUsage != 1 || internalEvents != 1 || developerJobs != 1 {
 		t.Fatalf("Reviewer revalidation = Workflow %s, accepted reviews %d, cycles %d, events %d, Developer jobs %d",
 			state, acceptedReviews, reviewUsage, internalEvents, developerJobs)
+	}
+}
+
+func TestChangedHeadRevalidationRedirectsToFreshTurn(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const number = 981
+	const changedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const proposalID = "96000000-0000-4000-8000-000000000981"
+
+	fixture := seedAgentSessionForRole(t, pool, number, workflow.RoleDeveloper)
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET status = $2, state_revision = 1,
+    desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID, workflow.StateDeveloping); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
+	    current_stage = $2 WHERE id = $1`, fixture.attemptID, workflow.StageImplementation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, pull_request_node_id, status, active,
+    base_ref, base_sha, head_ref, head_sha
+)
+VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, 'PR_981', 'OPEN', TRUE,
+        'main', 'base-sha', 'feature', 'developer-head')`,
+		proposalID, fixture.workflowID, number, number*100, number); err != nil {
+		t.Fatalf("seed Change Proposal: %v", err)
+	}
+	spec := fixture.turnSpec()
+	spec.ChangeProposalID = proposalID
+	spec.ExpectedHeadSHA = "developer-head"
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
+	if err != nil {
+		t.Fatalf("PrepareAgentTurn() error = %v", err)
+	}
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "settlement-runtime", 20*time.Second, 100)
+	if err != nil {
+		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
+	}
+	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatalf("OpenMutationAdmission() error = %v", err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
+		OperationID: "prior-ready", ToolName: "request_review",
+		Request:         json.RawMessage(`{"operation_id":"prior-ready","summary":"Ready"}`),
+		ExternalService: "omnigrex", ExternalResourceID: fmt.Sprintf("%d:%s", number, "feature"),
+		ExpectedSHA: "developer-head",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	result := json.RawMessage(fmt.Sprintf(`{"outcome":"REVIEW_REQUESTED","pull_request_id":%d,"pull_request_number":%d,"head_sha":%q}`,
+		number*100, number, "developer-head"))
+	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
+		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "permission_denied"); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := database.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind, "verify-redirect-prerequisite", time.Minute)
+	if err != nil || verifier == nil {
+		t.Fatalf("claim verifier = (%#v, %v)", verifier, err)
+	}
+	if _, err := database.CompleteTerminalCorroborationHandoff(ctx, *verifier,
+		workflow.ReasonTerminalCorroborationPrerequisite, "permission_denied"); err != nil {
+		t.Fatal(err)
+	}
+
+	delivery := workflowDelivery("95000000-0000-4000-8000-000000000981")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = number, number, number
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, database, ctx, delivery)
+	const newAttemptID = "95000000-0000-4000-8000-000000000982"
+	if _, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken,
+		normalizedPayload(claim.DeliveryID, "labeled"),
+		store.WorkflowLocator{RepositoryID: number, IssueID: number, IssueNumber: number},
+		func(eventContext store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{
+				EventMetadata: eventContext.Metadata, AttemptID: newAttemptID,
+				AttemptNumber: eventContext.Snapshot.LastAttemptNumber + 1,
+			}, nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	var revalidations, preparations, triggerLabels int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE kind = 'REVALIDATE_TERMINAL_INTENT'), count(*) FILTER (WHERE kind = 'PREPARE_AGENT_TURN'), count(*) FILTER (WHERE kind = 'RECONCILE_GITHUB_LABELS') FROM jobs WHERE workflow_attempt_id = $1 AND status IN ('AVAILABLE', 'LEASED')`, newAttemptID).Scan(&revalidations, &preparations, &triggerLabels); err != nil {
+		t.Fatalf("count reactivation jobs: %v", err)
+	}
+	if revalidations != 1 || preparations != 0 || triggerLabels != 0 {
+		t.Fatalf("reactivation jobs = %d revalidations, %d preparations and %d label reconciliations, want 1, 0 and 0", revalidations, preparations, triggerLabels)
+	}
+
+	api := &corroborationReviewGitHub{pullRequest: githubapi.PullRequest{
+		ID: number * 100, Number: number, NodeID: "PR_981",
+		State: "open", Head: githubapi.PullRequestBranch{Ref: "feature", SHA: changedHead, Label: "owner:feature"},
+		Base: githubapi.PullRequestBranch{Ref: "main", SHA: "base-sha", Label: "owner:main"},
+	}}
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := &integrationCredentialProvider{credential: "installation-token"}
+	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
+		corroborationTestPaths{}, agentturn.TerminalCorroborationWorkerConfig{
+			ClaimOwner: "redirect-changed-head", Window: 30 * time.Minute,
+			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirectWorker := worker.WithChangeProposalVerifier(api)
+	processed, err := redirectWorker.ProcessOne(ctx)
+	if err != nil || !processed || api.reads != 1 || credential.calls != 1 {
+		t.Fatalf("redirect changed head = (processed %t, error %v, GitHub calls %d, credentials %d), want (true, nil, 1, 1)",
+			processed, err, api.reads, credential.calls)
+	}
+	var head, redirectHead, revalidationStatus, handoffReason, labelState string
+	var turns int
+	if err := pool.QueryRow(ctx, `
+SELECT (SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active),
+       (SELECT result->>'redirected_to_head' FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'REVALIDATE_TERMINAL_INTENT'),
+       (SELECT status FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'REVALIDATE_TERMINAL_INTENT'),
+       (SELECT human_handoff_reason FROM workflows WHERE id = $1),
+       (SELECT count(*) FROM agent_turns WHERE workflow_attempt_id = $2),
+       (SELECT payload->>'state' FROM jobs WHERE workflow_attempt_id = $2 AND kind = 'RECONCILE_GITHUB_LABELS')`, fixture.workflowID, newAttemptID).Scan(
+		&head, &redirectHead, &revalidationStatus, &handoffReason, &turns, &labelState); err != nil {
+		t.Fatal(err)
+	}
+	if head != changedHead || redirectHead != changedHead || revalidationStatus != string(store.JobSucceeded) ||
+		handoffReason != string(workflow.ReasonTerminalCorroborationPrerequisite) || turns != 0 || labelState != string(workflow.StateDeveloping) {
+		t.Errorf("redirected state = (head %q, redirect %q, revalidation %s, reason %s, turns %d, labels %q), want head and redirect %q, SUCCEEDED, prerequisite, 0 turns, DEVELOPING labels",
+			head, redirectHead, revalidationStatus, handoffReason, turns, labelState, changedHead)
+	}
+	var preparedHead, preparedPurpose string
+	if err := pool.QueryRow(ctx, `SELECT payload->>'expected_head_sha', payload->>'purpose' FROM jobs WHERE workflow_attempt_id = $1 AND kind = 'PREPARE_AGENT_TURN' AND status IN ('AVAILABLE', 'LEASED')`, newAttemptID).Scan(&preparedHead, &preparedPurpose); err != nil {
+		t.Fatalf("read redirected preparation: %v", err)
+	}
+	if preparedHead != changedHead || preparedPurpose != string(workflow.TurnPurposeReactivation) {
+		t.Errorf("redirected preparation = (head %q, purpose %q), want (%q, REACTIVATION)", preparedHead, preparedPurpose, changedHead)
+	}
+
+	prepareLease, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.PrepareAgentTurnJobKind, "redirect-preparation", time.Minute)
+	if err != nil || prepareLease == nil {
+		t.Fatalf("claim redirected preparation = (%#v, %v)", prepareLease, err)
+	}
+	redirectDeveloperHash := sha256.Sum256([]byte("redirect-profile"))
+	redirectSpec := store.AgentTurnPreparationSpec{
+		Stages: map[workflow.StageID]store.ParticipantPreparation{
+			workflow.StageImplementation: {
+				ProfilePath: ".omnigrex/team/developer.md",
+				Binding: store.ParticipantRuntimeBinding{
+					AgentProfileName: "developer", RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+					RuntimeProfileContentSHA256: strings.Repeat("a", 64), RuntimeImageDigest: "sha256:test",
+				},
+				Profile: store.AgentProfileSnapshot{
+					CommitSHA: "redirect-profile", ContentSHA256: redirectDeveloperHash[:],
+					Config: agentProfileConfig("developer", workflow.RoleDeveloper, "runtime/1", "provider/test", "", 10, "Develop redirect.", nil),
+				},
+			},
+		},
+		VerifiedHeadSHA: changedHead, VerifiedPRID: number * 100, VerifiedPRNumber: number,
+	}
+	prepared, err := database.PrepareAgentTurn(ctx, *prepareLease, redirectSpec)
+	if err != nil {
+		t.Fatalf("redirected PrepareAgentTurn() error = %v", err)
+	}
+	if prepared.Turn.ExpectedHeadSHA != changedHead || prepared.Turn.ChangeProposalID != proposalID {
+		t.Errorf("redirected Turn = (proposal %q, head %q), want (%q, %q)",
+			prepared.Turn.ChangeProposalID, prepared.Turn.ExpectedHeadSHA, proposalID, changedHead)
 	}
 }
 
