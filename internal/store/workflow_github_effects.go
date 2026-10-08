@@ -196,7 +196,7 @@ FOR SHARE`, job.WorkflowID, effect.RepositoryID).Scan(
 			return WorkflowGitHubEffectContext{}, fmt.Errorf("read active Workflow Attempt for GitHub effect: %w", err)
 		}
 		if attemptID != "" {
-			var pending, validated bool
+			var pending, validated, revalidating bool
 			if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM jobs
@@ -206,10 +206,18 @@ SELECT EXISTS (
     SELECT 1 FROM jobs
     WHERE workflow_id = $1 AND workflow_attempt_id = $2 AND kind = 'PREPARE_AGENT_TURN'
       AND status = 'SUCCEEDED'
-)`, job.WorkflowID, attemptID).Scan(&pending, &validated); err != nil {
+), EXISTS (
+    SELECT 1 FROM jobs
+    WHERE workflow_id = $1 AND workflow_attempt_id = $2 AND kind = 'REVALIDATE_TERMINAL_INTENT'
+      AND status IN ('AVAILABLE', 'LEASED')
+)`, job.WorkflowID, attemptID).Scan(&pending, &validated, &revalidating); err != nil {
 				return WorkflowGitHubEffectContext{}, fmt.Errorf("inspect preparation verification for GitHub effect: %w", err)
 			}
-			effect.VerificationPending = pending && !validated
+			// A settled revalidation without a following preparation counts as
+			// validated; only a live one keeps the barrier up. The redirected
+			// preparation then carries the barrier through its own pending
+			// job once the revalidation completes.
+			effect.VerificationPending = (pending && !validated) || revalidating
 		}
 	}
 

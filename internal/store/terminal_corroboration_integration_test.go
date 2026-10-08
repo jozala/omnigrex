@@ -1248,6 +1248,79 @@ WHERE workflow.id = $1`, fixture.workflowID, reviewID, newAttemptID).Scan(
 	}
 }
 
+type redirectLabelGitHub struct {
+	repositoryLabels []githubapi.Label
+	issueLabels      map[int][]githubapi.Label
+	mutations        []string
+	getPullRequests  int
+}
+
+func (api *redirectLabelGitHub) ListRepositoryLabels(context.Context, string, string, string) ([]githubapi.Label, error) {
+	return append([]githubapi.Label(nil), api.repositoryLabels...), nil
+}
+
+func (api *redirectLabelGitHub) CreateRepositoryLabel(_ context.Context, _, _, _ string, label githubapi.Label) (githubapi.Label, error) {
+	api.mutations = append(api.mutations, "create-repository:"+label.Name)
+	return label, nil
+}
+
+func (api *redirectLabelGitHub) ListIssueLabels(_ context.Context, _, _, _ string, number int) ([]githubapi.Label, error) {
+	return append([]githubapi.Label(nil), api.issueLabels[number]...), nil
+}
+
+func (api *redirectLabelGitHub) AddIssueLabels(_ context.Context, _, _, _ string, number int, names []string) ([]githubapi.Label, error) {
+	for _, name := range names {
+		api.mutations = append(api.mutations, fmt.Sprintf("add:%d:%s", number, name))
+		present := false
+		for _, existing := range api.issueLabels[number] {
+			if existing.Name == name {
+				present = true
+			}
+		}
+		if !present {
+			api.issueLabels[number] = append(api.issueLabels[number], githubapi.Label{Name: name})
+		}
+	}
+	return append([]githubapi.Label(nil), api.issueLabels[number]...), nil
+}
+
+func (api *redirectLabelGitHub) RemoveIssueLabel(_ context.Context, _, _, _ string, number int, name string) error {
+	api.mutations = append(api.mutations, fmt.Sprintf("remove:%d:%s", number, name))
+	kept := api.issueLabels[number][:0]
+	for _, existing := range api.issueLabels[number] {
+		if existing.Name != name {
+			kept = append(kept, existing)
+		}
+	}
+	api.issueLabels[number] = kept
+	return nil
+}
+
+func (api *redirectLabelGitHub) GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error) {
+	api.getPullRequests++
+	return githubapi.PullRequest{}, errors.New("unexpected Pull Request read")
+}
+
+func redirectLabelWorker(t *testing.T, database *store.Store, api *redirectLabelGitHub, owner string) *githubapi.LabelWorker {
+	t.Helper()
+	worker, err := githubapi.NewLabelWorker(database, &integrationCredentialProvider{credential: "installation-token"}, api, githubapi.VisibleEffectWorkerConfig{
+		ClaimOwner: owner, LeaseDuration: time.Minute,
+		HeartbeatInterval: time.Second, IdlePollInterval: time.Millisecond, RetryDelay: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewLabelWorker() error = %v", err)
+	}
+	return worker
+}
+
+func assertNoLabelMutations(t *testing.T, api *redirectLabelGitHub, stage string) {
+	t.Helper()
+	if len(api.mutations) != 0 || api.getPullRequests != 0 {
+		t.Errorf("%s label worker mutations = %v with %d Pull Request reads, want none", stage, api.mutations, api.getPullRequests)
+	}
+	api.mutations = nil
+}
+
 func TestChangedHeadRevalidationRedirectsToFreshTurn(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
@@ -1352,6 +1425,22 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, 'PR_981', 'OPEN', TRUE,
 		t.Fatalf("reactivation jobs = %d revalidations, %d preparations and %d label reconciliations, want 1, 0 and 0", revalidations, preparations, triggerLabels)
 	}
 
+	labelsAPI := &redirectLabelGitHub{
+		repositoryLabels: []githubapi.Label{
+			{Name: string(githubapi.StateRun)}, {Name: string(githubapi.StateDeveloping)},
+			{Name: string(githubapi.StateReviewing)}, {Name: string(githubapi.StatePRReady)},
+			{Name: string(githubapi.StateNeedsHuman)},
+		},
+		issueLabels: map[int][]githubapi.Label{
+			number: {{Name: string(githubapi.StateRun)}, {Name: string(githubapi.StateNeedsHuman)}},
+		},
+	}
+	handoffLabels, err := redirectLabelWorker(t, database, labelsAPI, "redirect-handoff-labels").ProcessNext(ctx)
+	if err != nil || !handoffLabels {
+		t.Fatalf("handoff label worker = (processed %t, error %v), want (true, nil)", handoffLabels, err)
+	}
+	assertNoLabelMutations(t, labelsAPI, "pending revalidation")
+
 	api := &corroborationReviewGitHub{pullRequest: githubapi.PullRequest{
 		ID: number * 100, Number: number, NodeID: "PR_981",
 		State: "open", Head: githubapi.PullRequestBranch{Ref: "feature", SHA: changedHead, Label: "owner:feature"},
@@ -1407,6 +1496,12 @@ SELECT (SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active)
 		t.Errorf("redirected preparation = (head %q, purpose %q), want (%q, REACTIVATION)", preparedHead, preparedPurpose, changedHead)
 	}
 
+	redirectLabels, err := redirectLabelWorker(t, database, labelsAPI, "redirect-pending-labels").ProcessNext(ctx)
+	if err != nil || !redirectLabels {
+		t.Fatalf("redirect label worker = (processed %t, error %v), want (true, nil)", redirectLabels, err)
+	}
+	assertNoLabelMutations(t, labelsAPI, "redirected preparation pending")
+
 	prepareLease, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.PrepareAgentTurnJobKind, "redirect-preparation", time.Minute)
 	if err != nil || prepareLease == nil {
 		t.Fatalf("claim redirected preparation = (%#v, %v)", prepareLease, err)
@@ -1435,6 +1530,28 @@ SELECT (SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active)
 	if prepared.Turn.ExpectedHeadSHA != changedHead || prepared.Turn.ChangeProposalID != proposalID {
 		t.Errorf("redirected Turn = (proposal %q, head %q), want (%q, %q)",
 			prepared.Turn.ChangeProposalID, prepared.Turn.ExpectedHeadSHA, proposalID, changedHead)
+	}
+
+	converged, err := redirectLabelWorker(t, database, labelsAPI, "redirect-converge-labels").ProcessNext(ctx)
+	if err != nil || !converged {
+		t.Fatalf("converging label worker = (processed %t, error %v), want (true, nil)", converged, err)
+	}
+	var addedDeveloping, removedNeedsHuman, removedRun bool
+	for _, mutation := range labelsAPI.mutations {
+		switch mutation {
+		case fmt.Sprintf("add:%d:%s", number, githubapi.StateDeveloping):
+			addedDeveloping = true
+		case fmt.Sprintf("remove:%d:%s", number, githubapi.StateNeedsHuman):
+			removedNeedsHuman = true
+		case fmt.Sprintf("remove:%d:%s", number, githubapi.StateRun):
+			removedRun = true
+		}
+	}
+	if !addedDeveloping || !removedNeedsHuman || !removedRun {
+		t.Errorf("converging label mutations = %v, want developing added and stale labels removed", labelsAPI.mutations)
+	}
+	if got := labelsAPI.issueLabels[number]; len(got) != 1 || got[0].Name != string(githubapi.StateDeveloping) {
+		t.Errorf("converged labels = %v, want only developing", got)
 	}
 }
 
