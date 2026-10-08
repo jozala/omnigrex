@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
@@ -33,6 +34,9 @@ type Options struct {
 	MiseRoot        string
 	GitExecutable   string
 	MiseExecutable  string
+	CaptureRoot     string
+	CaptureSource   execution.WorkspaceSource
+	CaptureLedger   execution.CaptureLedger
 }
 
 type Paths struct {
@@ -49,11 +53,14 @@ type Lifecycle struct {
 	miseExecutable   string
 	locksMu          sync.Mutex
 	publicationLocks map[string]*publicationLockEntry
+	captureRoot      string
+	captureSource    execution.WorkspaceSource
+	captureLedger    execution.CaptureLedger
 }
 
 type publicationLockEntry struct {
-	mutex sync.Mutex
-	refs  int
+	permit chan struct{}
+	refs   int
 }
 
 func New(options Options) (*Lifecycle, error) {
@@ -77,10 +84,19 @@ func New(options Options) (*Lifecycle, error) {
 	if miseExecutable == "" {
 		miseExecutable = "mise"
 	}
+	captureRoot := options.CaptureRoot
+	if captureRoot == "" {
+		captureRoot = filepath.Join(workspaceRoot, ".captures")
+	}
+	if _, err := normalizeRoot("capture", captureRoot); err != nil {
+		return nil, err
+	}
 	return &Lifecycle{
 		workspaceRoot: workspaceRoot, publicationRoot: publicationRoot, miseRoot: miseRoot,
 		gitExecutable: gitExecutable, miseExecutable: miseExecutable,
 		publicationLocks: make(map[string]*publicationLockEntry),
+		captureRoot:      captureRoot, captureSource: options.CaptureSource,
+		captureLedger: options.CaptureLedger,
 	}, nil
 }
 
@@ -111,6 +127,14 @@ func (lifecycle *Lifecycle) Paths(assignmentID string) (Paths, error) {
 // DiscardWorkspace removes an assignment workspace after validating every owned directory in its path.
 func (lifecycle *Lifecycle) DiscardWorkspace(assignmentID string) error {
 	return lifecycle.DiscardWorkspaceFenced(context.Background(), assignmentID, 0, nil)
+}
+
+// Discard detaches only the workspace authorized by the exact epoch's cleanup fence.
+func (lifecycle *Lifecycle) Discard(ctx context.Context, ref execution.WorkspaceRef, fence WorkspaceFence) error {
+	if !validWorkspaceKey(ref.Key) || fence == nil {
+		return execution.ErrConflict
+	}
+	return lifecycle.DiscardWorkspaceFenced(ctx, ref.Key.AssignmentID, ref.Key.ExecutionEpoch, fence)
 }
 
 // DiscardWorkspaceFenced detaches the live workspace under a short fence before cleaning the detached tree.
@@ -159,18 +183,25 @@ func (lifecycle *Lifecycle) DiscardWorkspaceFenced(ctx context.Context, assignme
 }
 
 func (lifecycle *Lifecycle) acquirePublicationLock(assignmentID string) func() {
+	release, _ := lifecycle.acquirePublicationLockContext(context.Background(), assignmentID)
+	return release
+}
+
+func (lifecycle *Lifecycle) acquirePublicationLockContext(ctx context.Context, assignmentID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	lifecycle.locksMu.Lock()
 	entry := lifecycle.publicationLocks[assignmentID]
 	if entry == nil {
-		entry = &publicationLockEntry{}
+		entry = &publicationLockEntry{permit: make(chan struct{}, 1)}
+		entry.permit <- struct{}{}
 		lifecycle.publicationLocks[assignmentID] = entry
 	}
 	entry.refs++
 	lifecycle.locksMu.Unlock()
 
-	entry.mutex.Lock()
-	return func() {
-		entry.mutex.Unlock()
+	dereference := func() {
 		lifecycle.locksMu.Lock()
 		entry.refs--
 		if entry.refs == 0 && lifecycle.publicationLocks[assignmentID] == entry {
@@ -178,6 +209,18 @@ func (lifecycle *Lifecycle) acquirePublicationLock(assignmentID string) func() {
 		}
 		lifecycle.locksMu.Unlock()
 	}
+	select {
+	case <-ctx.Done():
+		dereference()
+		return nil, ctx.Err()
+	case <-entry.permit:
+	}
+	release := func() { entry.permit <- struct{}{}; dereference() }
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 func normalizeRoot(name, value string) (string, error) {

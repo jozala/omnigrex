@@ -246,7 +246,7 @@ SELECT (SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1),
 	}
 
 	github := &replayOutcomeGitHub{}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: newIntegrationOutcomeWorkspace(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,14 +348,15 @@ func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *t
 		Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: head, Label: "owner:feature"},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:main"},
 	}}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), head, "developer-token")
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptError: agentturn.PromptErrorFailure,
 		PromptDiagnostic: "submit ACP prompt: EOF", RepositoryCredential: "developer-token",
-		Paths: committedPublicationPaths(t),
+		Capture: capture,
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != head || github.calls != 1 {

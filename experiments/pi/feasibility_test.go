@@ -23,16 +23,18 @@ import (
 const nodeImage = "docker.io/library/node@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c"
 
 type probe struct {
-	t         *testing.T
-	ctx       context.Context
-	image     string
-	network   string
-	server    string
-	serverURL string
-	backend   string
-	wrapper   string
-	state     string
-	secrets   []string
+	t                *testing.T
+	ctx              context.Context
+	image            string
+	network          string
+	server           string
+	serverURL        string
+	backend          string
+	wrapper          string
+	state            string
+	secrets          []string
+	captureWorkspace bool
+	workspaceVolume  string
 }
 
 func newProbe(t *testing.T) *probe {
@@ -170,6 +172,19 @@ func (p *probe) launch(sessionID, token, provider, model string, auth []byte) *t
 			"--tmpfs", "/tmp:rw,uid=10001,gid=10001,mode=0700",
 			"--tmpfs", "/workspace:rw,uid=10001,gid=10001,mode=0700",
 			"--tmpfs", "/run/pi-agent:rw,uid=10001,gid=10001,mode=0700", "-i"}
+		if p.captureWorkspace {
+			if p.workspaceVolume == "" {
+				p.workspaceVolume = p.state + "-workspace"
+				p.command(time.Minute, nil, "volume", "create", p.workspaceVolume)
+				p.t.Cleanup(func() { p.cleanup("volume", "rm", p.workspaceVolume) })
+			}
+			// A separately owned mount can be inspected without executing guest code.
+			for i, arg := range args {
+				if arg == "/workspace:rw,uid=10001,gid=10001,mode=0700" {
+					args[i-1], args[i] = "--mount", "type=volume,src="+p.workspaceVolume+",dst=/workspace"
+				}
+			}
+		}
 		for _, entry := range environment {
 			args = append(args, "--env", entry)
 		}
@@ -187,6 +202,14 @@ func (p *probe) launch(sessionID, token, provider, model string, auth []byte) *t
 			"--tmpfs", "/run/pi-agent:16M",
 			"--env", "HOME=/tmp", "--env", "PI_CODING_AGENT_DIR=/run/pi-agent", "--env", "PI_OFFLINE=1",
 			"--env", "PI_TELEMETRY=0", "--env", "PI_SKIP_VERSION_CHECK=1"}
+		if p.captureWorkspace {
+			p.command(time.Minute, nil, "exec", p.wrapper, "mkdir", "/tmp/workspace")
+			for i, arg := range args {
+				if arg == "/workspace:16M" {
+					args[i-1], args[i] = "--mount-dir", "/tmp/workspace:/workspace:rw"
+				}
+			}
+		}
 		for _, entry := range environment {
 			args = append(args, "--env", entry)
 		}

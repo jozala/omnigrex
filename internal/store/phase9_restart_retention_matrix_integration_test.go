@@ -163,6 +163,9 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 		"7b200000-0000-4000-8000-000000000001", "7b200000-0000-4000-8000-000000000002")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "mutation-profile", "openai/mutation")
 	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "mutation-session")
+	if err := phaseNineMainExecution(ctx, database, rootLease); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +191,7 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 	stopWorker, err := agentturn.NewStopWorker(database, &phaseNineExactCleaner{}, phaseNineWorkspaceDiscarder{}, agentturn.StopWorkerConfig{
 		ClaimOwner: "phase-nine-stop", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
 		IdlePollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
+		TerminalCaptureRequired: database.AgentTurnTerminalCaptureRequired,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -612,11 +616,32 @@ type phaseNineExecutionLauncher struct {
 }
 
 func (launcher *phaseNineExecutionLauncher) LaunchExecution(ctx context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
+	if err := phaseNineMainExecution(ctx, launcher.store, request.Lease); err != nil {
+		return nil, err
+	}
 	if _, err := launcher.store.BindAgentSessionACP(ctx, request.Lease, launcher.acpSessionID, json.RawMessage(`{"resume":true}`)); err != nil {
 		return nil, err
 	}
 	launcher.calls++
 	return &phaseNineExecutionRuntime{lease: request.Lease, client: &phaseNinePromptClient{}}, nil
+}
+
+func phaseNineMainExecution(ctx context.Context, database *store.Store, lease store.AgentTurnLease) error {
+	current, err := database.GetAgentTurnExecutionContext(ctx, lease)
+	if err != nil {
+		return err
+	}
+	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
+		RuntimeProfileName: current.Assignment.RuntimeProfileName, RuntimeProfileVersion: current.Assignment.RuntimeProfileVersion}
+	ledger := database.ExecutionLedger(lease)
+	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
+		return err
+	}
+	if err := ledger.BeginExecutionPhase(ctx, key, execution.Main); err != nil {
+		return err
+	}
+	return ledger.BindExecution(ctx, key, "phase-nine-"+lease.ID)
 }
 
 type phaseNineExecutionRuntime struct {
@@ -655,11 +680,13 @@ func (phaseNineDefaultBranch) ResolveDefaultBranch(context.Context, string, stri
 	return githubapi.DefaultBranch{Name: "main", CommitSHA: strings.Repeat("1", 40)}, nil
 }
 
-type phaseNineWorkspace struct {
-	paths workspace.Paths
-}
+type phaseNineWorkspace struct{}
 
-func (resolver phaseNineWorkspace) Paths(string) (workspace.Paths, error) { return resolver.paths, nil }
+func (phaseNineWorkspace) TerminalCapture(_ context.Context, key execution.Key) (execution.CaptureRef, error) {
+	return execution.CaptureRef{Request: execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture,
+	}, SHA256: strings.Repeat("a", 64)}, nil
+}
 
 type phaseNineOutcomeReconciler struct{}
 
@@ -677,7 +704,7 @@ func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWo
 	worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: workerStore, DeveloperCredentials: credential, ReviewerCredentials: credential,
 		DefaultBranch: phaseNineDefaultBranch{}, Launcher: launcher, Sessions: prompter,
-		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}},
+		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{},
 		PublicationRecovery: phaseNinePublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
 			return nil
 		}),
@@ -776,6 +803,8 @@ type phaseNineExactCleaner struct {
 	calls int
 }
 
+func (*phaseNineExactCleaner) EnsureKeyStopped(context.Context, execution.Key) error { return nil }
+
 func (*phaseNineExactCleaner) ObserveKeyExit(context.Context, execution.Key) (dockerruntime.ExitObservation, error) {
 	return dockerruntime.ExitObservation{}, nil
 }
@@ -785,11 +814,22 @@ func (cleaner *phaseNineExactCleaner) EnsureKeyAbsent(context.Context, execution
 	return nil
 }
 
-type phaseNineWorkspaceDiscarder struct{}
+type phaseNineWorkspaceDiscarder struct {
+	captureErr error
+	captures   *int
+}
 
-func (phaseNineWorkspaceDiscarder) DiscardWorkspace(string) error { return nil }
+func (workspace phaseNineWorkspaceDiscarder) Capture(_ context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	if workspace.captures != nil {
+		*workspace.captures++
+	}
+	if workspace.captureErr != nil {
+		return execution.CaptureRef{}, workspace.captureErr
+	}
+	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
+}
 
-func (phaseNineWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, _ string, _ int64, fence workspace.WorkspaceFence) error {
+func (phaseNineWorkspaceDiscarder) Discard(ctx context.Context, _ execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
 	return fence(ctx, func(context.Context) error { return nil })
 }
 

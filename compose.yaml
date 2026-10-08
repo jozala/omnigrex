@@ -121,6 +121,8 @@ services:
       OMNIGREX_RUNTIME_STATE_VOLUME: omnigrex-runtime-state
       OMNIGREX_MISE_VOLUME: omnigrex-mise
       OMNIGREX_WORKSPACE_ROOT: /var/lib/omnigrex/workspaces
+
+      OMNIGREX_WORKSPACE_CAPTURE_ROOT: /var/lib/omnigrex/runtime-state/workspace-captures
       OMNIGREX_MISE_ROOT: /var/lib/omnigrex/mise
       OMNIGREX_AGENT_IMAGE_REFERENCE: "${OMNIGREX_AGENT_IMAGE_REFERENCE:-omnigrex/opencode:1.18.29}"
       OMNIGREX_OPENCODE_ACP_V1_IMAGE: "${OMNIGREX_OPENCODE_ACP_V1_IMAGE:?set OMNIGREX_OPENCODE_ACP_V1_IMAGE to the exact registry digest}"
@@ -175,6 +177,9 @@ services:
       - type: volume
         source: workspaces
         target: /var/lib/omnigrex/workspaces
+      - type: volume
+        source: runtime-state
+        target: /var/lib/omnigrex/runtime-state
       - type: volume
         source: mise-data
         target: /var/lib/omnigrex/mise

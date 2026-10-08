@@ -14,9 +14,11 @@ import (
 	"unicode"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -70,6 +72,11 @@ type OutcomeReconcilerGitHub interface {
 	ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error)
 }
 
+// OutcomeWorkspaceInspector observes sealed terminal evidence through trusted publication policy.
+type OutcomeWorkspaceInspector interface {
+	CaptureTreesEqual(context.Context, execution.CaptureRef, workspace.PublicationObservation) (bool, error)
+}
+
 type outcomeReconcilerClock interface {
 	Now() time.Time
 }
@@ -82,9 +89,11 @@ func (realOutcomeReconcilerClock) Now() time.Time { return time.Now() }
 type OutcomeReconcilerConfig struct {
 	Store                  OutcomeReconcilerStore
 	GitHub                 OutcomeReconcilerGitHub
+	Workspace              OutcomeWorkspaceInspector
 	Clock                  interface{ Now() time.Time }
 	Logger                 *slog.Logger
 	ProviderCredentialJSON []json.RawMessage
+	GitRemoteBaseURL       string
 }
 
 func (OutcomeReconcilerConfig) String() string { return "Agent Turn outcome reconciler config" }
@@ -102,7 +111,7 @@ type OutcomeReconciliation struct {
 	PromptDiagnostic             string
 	RepositoryCredential         string
 	ReviewerRepositoryCredential string
-	Paths                        workspace.Paths
+	Capture                      execution.CaptureRef
 	PriorPublicationMutations    []store.MutationReservation
 	OnCorroborationFailure       func(TerminalCorroborationFailure)
 }
@@ -126,6 +135,8 @@ func (OutcomeReconciliation) GoString() string {
 type OutcomeReconciler struct {
 	store              OutcomeReconcilerStore
 	github             OutcomeReconcilerGitHub
+	workspace          OutcomeWorkspaceInspector
+	gitRemoteBase      gitremote.BaseURL
 	clock              outcomeReconcilerClock
 	logger             *slog.Logger
 	diagnosticRedactor *strings.Replacer
@@ -142,7 +153,11 @@ var (
 )
 
 func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, error) {
-	if nilInterface(config.Store) || nilInterface(config.GitHub) {
+	if nilInterface(config.Store) || nilInterface(config.GitHub) || nilInterface(config.Workspace) {
+		return nil, ErrInvalidOutcomeReconciler
+	}
+	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
+	if err != nil {
 		return nil, ErrInvalidOutcomeReconciler
 	}
 	clock := outcomeReconcilerClock(realOutcomeReconcilerClock{})
@@ -156,7 +171,7 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	if err != nil {
 		return nil, ErrInvalidOutcomeReconciler
 	}
-	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock, logger: config.Logger, diagnosticRedactor: redactor}, nil
+	return &OutcomeReconciler{store: config.Store, github: config.GitHub, workspace: config.Workspace, gitRemoteBase: remoteBase, clock: clock, logger: config.Logger, diagnosticRedactor: redactor}, nil
 }
 
 // Reconcile reads the closed terminal ledger and corroborates its sole successful terminal intent.
@@ -501,7 +516,21 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	if containsCredentialInProposal(proposal, request.RepositoryCredential) {
 		return failure("fresh Developer Pull Request contains unsafe credential material")
 	}
-	matching, err := workspace.CommittedTreesEqual(ctx, request.Paths)
+	// Evidence from another epoch, profile, operation, or publication cannot
+	// prove this Turn's terminal workspace, even if its trees happen to match.
+	if request.Capture.Request.Workspace.Key != runtimeKey(request.Execution) ||
+		request.Capture.Request.OperationID != request.Lease.ID ||
+		request.Capture.Request.Purpose != execution.TerminalCapture || request.Capture.SHA256 == "" {
+		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
+		return failure("Developer terminal workspace capture is unavailable")
+	}
+	repositoryURL, err := reconciler.gitRemoteBase.RepositoryURL(request.Execution.Repository.Owner, request.Execution.Repository.Name)
+	if err != nil {
+		return failure("Developer repository identity is invalid")
+	}
+	matching, err := reconciler.workspace.CaptureTreesEqual(ctx, request.Capture, workspace.PublicationObservation{
+		RepositoryURL: repositoryURL, Credential: request.RepositoryCredential, Revision: result.HeadSHA,
+	})
 	if err != nil {
 		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
 		return failure("Developer committed workspace observation failed")

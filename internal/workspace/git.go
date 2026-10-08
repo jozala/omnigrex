@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
 var (
@@ -28,6 +31,33 @@ type Checkout struct {
 	Revision       string
 	ExecutionEpoch int64
 	Fence          WorkspaceFence
+}
+
+// Preparation binds trusted checkout acquisition to an exact execution identity.
+// Checkout paths remain private to the workspace service.
+type Preparation struct {
+	Key      execution.Key
+	Checkout Checkout
+}
+
+func (lifecycle *Lifecycle) Prepare(ctx context.Context, request Preparation) (execution.WorkspaceRef, error) {
+	if !validWorkspaceKey(request.Key) || request.Checkout.AssignmentID != request.Key.AssignmentID ||
+		request.Checkout.ExecutionEpoch != request.Key.ExecutionEpoch {
+		return execution.WorkspaceRef{}, execution.ErrConflict
+	}
+	if _, err := lifecycle.PrepareWorkspace(ctx, request.Checkout); err != nil {
+		return execution.WorkspaceRef{}, err
+	}
+	seed, err := normalizeObjectID(request.Checkout.Revision)
+	if err != nil {
+		return execution.WorkspaceRef{}, err
+	}
+	return execution.WorkspaceRef{Key: request.Key, Seed: seed}, nil
+}
+
+func validWorkspaceKey(key execution.Key) bool {
+	return uuidtext.Valid(key.AssignmentID) && uuidtext.Valid(key.AgentSessionID) && uuidtext.Valid(key.AgentTurnID) &&
+		key.ExecutionEpoch > 0 && key.RuntimeProfileName != "" && key.RuntimeProfileVersion != ""
 }
 
 func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Checkout) (paths Paths, err error) {

@@ -159,6 +159,10 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if workspaces.checkout.AssignmentID != runtimeTestAssignment || workspaces.checkout.Credential != runtimeTestCredential {
 		t.Errorf("workspace checkout = %#v", workspaces.checkout)
 	}
+	if key := workspaces.preparationKey; key.AssignmentID != runtimeTestAssignment || key.AgentSessionID != runtimeTestSession ||
+		key.AgentTurnID != runtimeTestTurn || key.ExecutionEpoch != 7 || key.RuntimeProfileName != "opencode-acp" || key.RuntimeProfileVersion != "v1" {
+		t.Fatalf("workspace preparation lost full execution identity: %#v", key)
+	}
 	if gateway.scope.WorkflowID != runtimeTestWorkflow || gateway.scope.Role != workflow.RoleDeveloper ||
 		gateway.scope.Branch != "omnigrex/issue-17" || gateway.scope.DefaultBranch != "trunk" || gateway.scope.HeadSHA != runtimeTestDefaultSHA ||
 		gateway.scope.PullRequest != nil || gateway.scope.ExpiresAt != handle.CurrentLease().LeaseExpiresAt ||
@@ -551,8 +555,8 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if engineFactory.engine.process.started != 0 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "acp-new") {
-		t.Fatalf("dependency operations = %v, want created resources cleaned without start or ACP attach", operations)
+	if engineFactory.engine.process.started != 0 || engineFactory.engine.process.removed != 0 || slices.Contains(operations, "acp-new") {
+		t.Fatalf("dependency operations = %v, want stopped resources retained after proof fence loss", operations)
 	}
 }
 
@@ -775,7 +779,7 @@ func TestRuntimeHandleCleanupIsOrderedAndIdempotent(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() second error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -804,12 +808,248 @@ func TestRuntimeHandleCloseMCPIsIdempotentAcrossCleanup(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("close and cleanup operations = %v, want %v", operations, want)
 	}
 	if resources.gateway.drained != 1 {
 		t.Fatalf("CloseAndDrain calls = %d, want one", resources.gateway.drained)
+	}
+}
+
+func TestRuntimeHandleCaptureFailureRetainsEvidenceAndRetriesBeforeReviewerDiscard(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleReviewer, proposal, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.store.execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"scratch":"turn"},"environment":{"TMPDIR":"scratch"}}`)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("terminal capture unavailable")
+	resources.workspace.captureErr = failure
+	operations = operations[:0]
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("Cleanup() = %v, want capture failure", err)
+	}
+	process := &resources.engineFactory.engine.process
+	if process.removed != 0 || resources.engineFactory.engine.closed != 0 || resources.workspace.discardedAssignmentID != "" ||
+		resources.workspace.cleanedTurnID != "" {
+		t.Fatalf("capture failure destroyed retry evidence: %v", operations)
+	}
+	wantRequest := execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: execution.Key{
+			AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
+			ExecutionEpoch: 7, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		}}, OperationID: runtimeTestTurn, Purpose: execution.TerminalCapture,
+	}
+	if !slices.Equal(resources.workspace.captureRequests, []execution.CaptureRequest{wantRequest}) {
+		t.Fatalf("terminal capture identity = %#v, want %#v", resources.workspace.captureRequests, wantRequest)
+	}
+	resources.workspace.captureErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if process.stopped != 1 || process.removed != 1 || len(resources.workspace.captureRequests) != 2 ||
+		resources.workspace.captureRequests[1] != wantRequest || resources.workspace.cleanedTurnID != runtimeTestTurn ||
+		resources.workspace.discardedRef.Key != wantRequest.Workspace.Key {
+		t.Fatalf("capture retry did not finish exactly once: %v", operations)
+	}
+	if !containsInOrder(operations, "mcp-close-and-drain", "process-stop", "workspace-capture", "process-remove", "workspace-discard") {
+		t.Fatalf("invalid capture/remove/discard ordering: %v", operations)
+	}
+}
+
+func TestRuntimeHandleRejectsMismatchedTerminalCaptureWithoutRemoval(t *testing.T) {
+	operations := []string{}
+	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+	resources.workspace.captureRef = execution.CaptureRef{
+		Request: execution.CaptureRequest{Purpose: execution.PublicationCapture}, SHA256: strings.Repeat("a", 64),
+	}
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Cleanup() = %v, want invalid capture binding", err)
+	}
+	if resources.engineFactory.engine.process.removed != 0 || resources.engineFactory.engine.closed != 0 {
+		t.Fatal("mismatched terminal evidence authorized destruction")
+	}
+	resources.workspace.captureRef = execution.CaptureRef{}
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeHandleFencesCaptureAdmissionAndAdoptionOutsideTransfer(t *testing.T) {
+	for _, loseDuringCapture := range []bool{false, true} {
+		t.Run(fmt.Sprint(loseDuringCapture), func(t *testing.T) {
+			operations := []string{}
+			handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+			if loseDuringCapture {
+				resources.workspace.captureHook = func(context.Context) error {
+					if resources.store.inCleanupFence {
+						t.Fatal("capture transfer ran inside the cleanup transaction")
+					}
+					resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+					return nil
+				}
+			} else {
+				resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+			}
+			if err := handle.Cleanup(context.Background()); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+				t.Fatalf("Cleanup() = %v, want capture fence loss", err)
+			}
+			if resources.engineFactory.engine.process.removed != 0 || resources.engineFactory.engine.closed != 0 {
+				t.Fatal("stale capture admission or adoption destroyed recovery evidence")
+			}
+			wantCaptures := 0
+			if loseDuringCapture {
+				wantCaptures = 1
+			}
+			if len(resources.workspace.captureRequests) != wantCaptures {
+				t.Fatalf("capture calls = %d, want %d", len(resources.workspace.captureRequests), wantCaptures)
+			}
+			resources.store.withFenceErr = nil
+			resources.workspace.captureHook = nil
+			if err := handle.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(resources.workspace.captureRequests) != wantCaptures+1 {
+				t.Fatal("failed adoption retained an unfenced capture on the handle")
+			}
+		})
+	}
+}
+
+func TestLauncherPreparationOnlyFailureDoesNotRequireTerminalCapture(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	failure := errors.New("Agent Session was never prepared")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleReviewer, proposal, failure,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.captureErr = errors.New("no useful Turn exists to capture")
+		})
+	if handle != nil || !errors.Is(err, failure) || len(resources.workspace.captureRequests) != 0 ||
+		resources.engineFactory.engine.process.removed != 1 || resources.workspace.discardedAssignmentID != runtimeTestAssignment {
+		t.Fatalf("preparation-only cleanup = (%v, %v), operations %v", handle, err, operations)
+	}
+}
+
+func TestLauncherPreparationFailureAfterDurableBindingRetainsCaptureSource(t *testing.T) {
+	operations := []string{}
+	prepareErr := errors.New("configuration failed after binding the Session")
+	captureErr := errors.New("capture transport unavailable")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, prepareErr,
+		func(resources *runtimeLaunchResources) {
+			resources.sessions.prepareHook = func() {
+				resources.store.execution.Session.Status = store.AgentSessionActive
+				resources.store.execution.Session.ACPSessionID = "partially-prepared-session"
+			}
+			resources.workspace.captureErr = captureErr
+		})
+	if handle == nil || !errors.Is(err, prepareErr) || !errors.Is(err, captureErr) || resources.engineFactory.engine.process.removed != 0 {
+		t.Fatalf("partially bound preparation = (%v, %v), operations %v", handle, err, operations)
+	}
+	if len(resources.workspace.captureRequests) != 1 {
+		t.Fatal("partially bound Session was incorrectly exempted from terminal capture")
+	}
+	resources.workspace.captureErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if resources.engineFactory.engine.process.removed != 1 {
+		t.Fatal("capture retry did not release the partially prepared execution")
+	}
+}
+
+func TestLauncherExistingSessionRetainsEvidenceAfterCreateOrStartFailure(t *testing.T) {
+	for _, failCreate := range []bool{false, true} {
+		t.Run(fmt.Sprint(failCreate), func(t *testing.T) {
+			operations := []string{}
+			captureErr := errors.New("stopped workspace capture unavailable")
+			handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+				func(resources *runtimeLaunchResources) {
+					resources.store.execution.Session.Status = store.AgentSessionActive
+					resources.store.execution.Session.ACPSessionID = "existing-session"
+					resources.workspace.captureErr = captureErr
+					if failCreate {
+						resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+					} else {
+						resources.engineFactory.engine.process.startErr = execution.ErrUnknownEffect
+					}
+				})
+			if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || !errors.Is(err, captureErr) {
+				t.Fatalf("ambiguous existing-Session launch = (%v, %v)", handle, err)
+			}
+			process := &resources.engineFactory.engine.process
+			if process.removed != 0 || resources.engineFactory.engine.closed != 0 || len(resources.workspace.captureRequests) != 1 {
+				t.Fatalf("failed creation/start destroyed terminal evidence: %v", operations)
+			}
+			resources.workspace.captureErr = nil
+			if err := handle.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if process.stopped != 1 || process.removed != 1 || len(resources.workspace.captureRequests) != 2 {
+				t.Fatalf("capture retry repeated teardown or missed evidence: %v", operations)
+			}
+		})
+	}
+}
+
+func TestLauncherExistingSessionAmbiguousCreateWithoutHandleRequiresExactRecovery(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.store.execution.Session.Status = store.AgentSessionActive
+			resources.store.execution.Session.ACPSessionID = "existing-session"
+			resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+			resources.engineFactory.engine.createWithoutProcess = true
+		})
+	if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || resources.engineFactory.engine.absenceCalls != 0 || resources.engineFactory.engine.closed != 0 {
+		t.Fatalf("ambiguous creation without handle = (%v, %v), operations %v", handle, err, operations)
+	}
+	if err := handle.Cleanup(context.Background()); err == nil || resources.engineFactory.engine.absenceCalls != 0 {
+		t.Fatal("missing process handle authorized destruction without exact-key stop/capture")
+	}
+}
+
+func TestLauncherCreatingSessionRetainsResourceUntilCleanupProofCommits(t *testing.T) {
+	operations := []string{}
+	proofErr := errors.New("preparation-only proof could not be committed")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.startErr = execution.ErrUnknownEffect
+			resources.store.unpromptedCleanupErr = proofErr
+		})
+	if handle == nil || !errors.Is(err, proofErr) || resources.engineFactory.engine.process.removed != 0 || resources.store.unpromptedCleanupCalls != 1 {
+		t.Fatalf("unprompted cleanup without durable proof = (%v, %v), operations %v", handle, err, operations)
+	}
+	resources.store.unpromptedCleanupErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if resources.engineFactory.engine.process.removed != 1 || resources.store.unpromptedCleanupCalls != 2 || len(resources.workspace.captureRequests) != 0 {
+		t.Fatalf("preparation-only cleanup did not retry proof before removal: %v", operations)
+	}
+}
+
+func TestLauncherCreatingSessionAmbiguousCreateWithoutHandleCannotDeclareProof(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+			resources.engineFactory.engine.createWithoutProcess = true
+		})
+	if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || resources.engineFactory.engine.absenceCalls != 0 || resources.store.unpromptedCleanupCalls != 0 {
+		t.Fatalf("unknown first-Session creation declared absence/proof = (%v, %v), operations %v", handle, err, operations)
 	}
 }
 
@@ -829,7 +1069,7 @@ func TestRuntimeHandleUnresolvedMCPDrainIsNotRetriedDuringCleanup(t *testing.T) 
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -853,7 +1093,7 @@ func TestRuntimeHandleCleanupContinuesTeardownAndRetriesMCPDrain(t *testing.T) {
 	if !errors.Is(err, drainErr) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -862,13 +1102,13 @@ func TestRuntimeHandleCleanupContinuesTeardownAndRetriesMCPDrain(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want = []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "mcp-close-and-drain"}
+	want = []string{"mcp-close-and-drain", "acp-close", "process-stop", "mcp-close-and-drain", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
 }
 
-func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError(t *testing.T) {
+func TestRuntimeHandleCleanupRetainsReviewerEvidenceUntilMCPDrainCompletes(t *testing.T) {
 	operations := []string{}
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
@@ -889,7 +1129,7 @@ func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError
 	if err := handle.Cleanup(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
 	}
@@ -937,6 +1177,23 @@ func TestLauncherRefusesToPromoteWorkspaceAfterTurnFenceLoss(t *testing.T) {
 	}
 }
 
+func TestLauncherRejectsWorkspaceReferenceForAnotherExecutionBeforeStartingRuntime(t *testing.T) {
+	operations := []string{}
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.prepareRef = &execution.WorkspaceRef{Key: execution.Key{
+				AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
+				ExecutionEpoch: 8, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+			}, Seed: runtimeTestDefaultSHA}
+		})
+	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Launch() = (%v, %v), want wrong execution binding", handle, err)
+	}
+	if slices.Contains(operations, "mise") || slices.Contains(operations, "docker-new") {
+		t.Fatalf("mismatched workspace progressed to execution: %v", operations)
+	}
+}
+
 func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
 	operations := []string{}
 	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
@@ -967,7 +1224,7 @@ func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t
 	if err := handle.Cleanup(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -994,7 +1251,7 @@ func TestRuntimeHandleCleanupRetriesACPClosureWithoutRepeatingSuccessfulSteps(t 
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "acp-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close", "acp-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1013,8 +1270,11 @@ func TestRuntimeHandleCleanupRetriesProcessStopAndRemovalBeforeClosingEngine(t *
 	resources.engineFactory.engine.process.operations = &operations
 	resources.client.operations = &operations
 
-	if err := handle.Cleanup(context.Background()); !errors.Is(err, stopErr) || !errors.Is(err, removeErr) {
-		t.Fatalf("Cleanup() error = %v, want stop and removal failures", err)
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, stopErr) {
+		t.Fatalf("Cleanup() error = %v, want stop failure", err)
+	}
+	if resources.engineFactory.engine.process.removed != 0 || len(resources.workspace.captureRequests) != 0 {
+		t.Fatal("unconfirmed stop must retain the environment without taking a terminal capture")
 	}
 	if slices.Contains(operations, "docker-close") {
 		t.Fatalf("Docker Engine closed while process remains: %v", operations)
@@ -1024,7 +1284,7 @@ func TestRuntimeHandleCleanupRetriesProcessStopAndRemovalBeforeClosingEngine(t *
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1056,7 +1316,7 @@ func TestRuntimeHandleCleanupRetriesReviewerWorkspaceDiscard(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close", "turn-fence", "workspace-discard"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "turn-fence", "workspace-discard", "docker-close", "turn-fence", "workspace-discard"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1080,7 +1340,7 @@ func TestRuntimeHandleCleanupRetriesDockerEngineClosure(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1109,7 +1369,7 @@ func TestRuntimeHandleCleanupSerializesConcurrentCalls(t *testing.T) {
 			t.Errorf("concurrent Cleanup() error = %v", err)
 		}
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("concurrent cleanup operations = %v, want %v", operations, want)
 	}
@@ -1135,7 +1395,7 @@ func TestRuntimeHandleCleanupDiscardsReviewerWorkspaceAfterProcessRemoval(t *tes
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
 	}
@@ -1176,7 +1436,7 @@ func TestRuntimeHandleCleanupKeepsReviewerWorkspaceWhenProcessRemovalFails(t *te
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1197,7 +1457,7 @@ func TestLauncherFailureCleansResourcesAndRedactsEveryCredential(t *testing.T) {
 			t.Errorf("Launch() error exposes credential %q: %v", secret, err)
 		}
 	}
-	wantSuffix := []string{"session-prepare", "mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	wantSuffix := []string{"session-prepare", "execution", "mcp-close-and-drain", "acp-close", "process-stop", "turn-fence", "unprompted-cleanup", "process-remove", "docker-close"}
 	if len(operations) < len(wantSuffix) || !reflect.DeepEqual(operations[len(operations)-len(wantSuffix):], wantSuffix) {
 		t.Fatalf("failure operations = %v, want suffix %v", operations, wantSuffix)
 	}
@@ -1303,6 +1563,7 @@ type runtimeLaunchResources struct {
 	gateway       *runtimeGateway
 	engineFactory *runtimeEngineFactory
 	client        *runtimeACPClient
+	sessions      *runtimeSessionPreparer
 }
 
 func launchRuntimeForCleanupTest(t *testing.T, operations *[]string, sessionErr error) (*agentturn.RuntimeHandle, *runtimeLaunchResources) {
@@ -1337,13 +1598,15 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: operations}
 	client := &runtimeACPClient{operations: operations}
+	sessions := &runtimeSessionPreparer{operations: operations, err: sessionErr}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces,
 		Gateway:   gateway, Execution: engineFactory, ACP: &runtimeACPFactory{operations: operations, client: client},
-		Sessions: &runtimeSessionPreparer{operations: operations, err: sessionErr},
+		Sessions:                 sessions,
+		PathEnvironmentAllowlist: []string{"TMPDIR"},
 	})
-	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client}
+	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client, sessions: sessions}
 	if configure != nil {
 		configure(resources)
 	}
@@ -1429,18 +1692,30 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 }
 
 type runtimeStore struct {
-	operations         *[]string
-	execution          store.AgentTurnExecutionContext
-	fenceErr           error
-	fenceErrors        []error
-	fenceCalls         int
-	executionErr       error
-	turnFence          sync.Mutex
-	withFenceAttempted chan struct{}
-	withFenceErr       error
-	oomRecordErr       error
-	oomContainerID     string
-	oomExitCode        int
+	operations             *[]string
+	execution              store.AgentTurnExecutionContext
+	fenceErr               error
+	fenceErrors            []error
+	fenceCalls             int
+	executionErr           error
+	turnFence              sync.Mutex
+	withFenceAttempted     chan struct{}
+	withFenceAttemptOnce   sync.Once
+	withFenceErr           error
+	oomRecordErr           error
+	oomContainerID         string
+	oomExitCode            int
+	inCleanupFence         bool
+	unpromptedCleanupErr   error
+	unpromptedCleanupCalls int
+}
+
+func (database *runtimeStore) RecordAgentTurnUnpromptedCleanup(ctx context.Context, lease store.AgentTurnLease) error {
+	return database.WithAgentTurnCleanupFence(ctx, lease, func(context.Context) error {
+		*database.operations = append(*database.operations, "unprompted-cleanup")
+		database.unpromptedCleanupCalls++
+		return database.unpromptedCleanupErr
+	})
 }
 
 func (*runtimeStore) ExecutionLedger(store.AgentTurnLease) execution.Ledger { return nil }
@@ -1490,7 +1765,7 @@ func (database *runtimeStore) GetAgentTurnExecutionContext(context.Context, stor
 func (database *runtimeStore) WithAgentTurnFence(ctx context.Context, _ store.AgentTurnLease, operation func(context.Context) error) error {
 	*database.operations = append(*database.operations, "turn-fence")
 	if database.withFenceAttempted != nil {
-		close(database.withFenceAttempted)
+		database.withFenceAttemptOnce.Do(func() { close(database.withFenceAttempted) })
 	}
 	database.turnFence.Lock()
 	defer database.turnFence.Unlock()
@@ -1501,6 +1776,8 @@ func (database *runtimeStore) WithAgentTurnFence(ctx context.Context, _ store.Ag
 }
 
 func (database *runtimeStore) WithAgentTurnCleanupFence(ctx context.Context, lease store.AgentTurnLease, operation func(context.Context) error) error {
+	database.inCleanupFence = true
+	defer func() { database.inCleanupFence = false }()
 	return database.WithAgentTurnFence(ctx, lease, operation)
 }
 
@@ -1534,20 +1811,49 @@ type runtimeWorkspace struct {
 	miseErr               error
 	discardedAssignmentID string
 	discardErr            error
+	captureErr            error
+	captureRequests       []execution.CaptureRequest
+	captureRef            execution.CaptureRef
+	discardedRef          execution.WorkspaceRef
+	preparationKey        execution.Key
+	prepareRef            *execution.WorkspaceRef
+	captureHook           func(context.Context) error
 }
 
-func (lifecycle *runtimeWorkspace) PrepareWorkspace(ctx context.Context, checkout workspace.Checkout) (workspace.Paths, error) {
+func (lifecycle *runtimeWorkspace) Prepare(ctx context.Context, request workspace.Preparation) (execution.WorkspaceRef, error) {
+	checkout := request.Checkout
 	*lifecycle.operations = append(*lifecycle.operations, "workspace")
 	lifecycle.checkout = checkout
+	lifecycle.preparationKey = request.Key
 	if lifecycle.requirePromotionFence {
 		if checkout.Fence == nil {
-			return workspace.Paths{}, errors.New("workspace promotion is not fenced")
+			return execution.WorkspaceRef{}, errors.New("workspace promotion is not fenced")
 		}
 		if err := checkout.Fence(ctx, func(context.Context) error { return nil }); err != nil {
-			return workspace.Paths{}, err
+			return execution.WorkspaceRef{}, err
 		}
 	}
-	return workspace.Paths{Workspace: "/srv/workspace", Mise: lifecycle.activation.DataDir}, lifecycle.workspaceErr
+	if lifecycle.prepareRef != nil {
+		return *lifecycle.prepareRef, lifecycle.workspaceErr
+	}
+	return execution.WorkspaceRef{Key: request.Key, Seed: checkout.Revision}, lifecycle.workspaceErr
+}
+
+func (lifecycle *runtimeWorkspace) Capture(ctx context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	*lifecycle.operations = append(*lifecycle.operations, "workspace-capture")
+	lifecycle.captureRequests = append(lifecycle.captureRequests, request)
+	if lifecycle.captureHook != nil {
+		if err := lifecycle.captureHook(ctx); err != nil {
+			return execution.CaptureRef{}, err
+		}
+	}
+	if lifecycle.captureErr != nil {
+		return execution.CaptureRef{}, lifecycle.captureErr
+	}
+	if lifecycle.captureRef != (execution.CaptureRef{}) {
+		return lifecycle.captureRef, nil
+	}
+	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
 }
 
 func (lifecycle *runtimeWorkspace) ProvisionMise(ctx context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
@@ -1595,11 +1901,12 @@ func (lifecycle *runtimeWorkspace) DiscardWorkspace(assignmentID string) error {
 	return lifecycle.discardErr
 }
 
-func (lifecycle *runtimeWorkspace) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, _ int64, fence workspace.WorkspaceFence) error {
+func (lifecycle *runtimeWorkspace) Discard(ctx context.Context, ref execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
+	lifecycle.discardedRef = ref
 	if fence == nil {
-		return lifecycle.DiscardWorkspace(assignmentID)
+		return lifecycle.DiscardWorkspace(ref.Key.AssignmentID)
 	}
-	return fence(ctx, func(context.Context) error { return lifecycle.DiscardWorkspace(assignmentID) })
+	return fence(ctx, func(context.Context) error { return lifecycle.DiscardWorkspace(ref.Key.AssignmentID) })
 }
 
 type runtimeGateway struct {
@@ -1679,15 +1986,20 @@ func (factory *runtimeEngineFactory) New(request execution.Request, _ execution.
 	return &factory.engine, factory.err
 }
 
-func (engine *runtimeEngine) EnsureAbsent(context.Context) error { return nil }
+func (engine *runtimeEngine) EnsureAbsent(context.Context) error {
+	engine.absenceCalls++
+	return nil
+}
 
 type runtimeEngine struct {
-	operations *[]string
-	spec       dockerruntime.Spec
-	process    runtimeProcess
-	createErr  error
-	closed     int
-	closeErr   error
+	operations           *[]string
+	spec                 dockerruntime.Spec
+	process              runtimeProcess
+	createErr            error
+	closed               int
+	closeErr             error
+	createWithoutProcess bool
+	absenceCalls         int
 }
 
 func (engine *runtimeEngine) Create(_ context.Context, request execution.Request, _ io.Writer) (agentturn.RuntimeProcess, error) {
@@ -1698,6 +2010,9 @@ func (engine *runtimeEngine) Create(_ context.Context, request execution.Request
 	}
 	engine.spec = spec
 	engine.process.operations = engine.operations
+	if engine.createWithoutProcess {
+		return nil, engine.createErr
+	}
 	return &engine.process, engine.createErr
 }
 
@@ -1816,15 +2131,19 @@ func (client *runtimeACPClient) Close() error {
 }
 
 type runtimeSessionPreparer struct {
-	operations *[]string
-	request    session.PrepareRequest
-	result     session.Result
-	err        error
+	operations  *[]string
+	request     session.PrepareRequest
+	result      session.Result
+	err         error
+	prepareHook func()
 }
 
 func (preparer *runtimeSessionPreparer) Prepare(_ context.Context, request session.PrepareRequest) (session.Result, error) {
 	*preparer.operations = append(*preparer.operations, "session-prepare")
 	preparer.request = request
+	if preparer.prepareHook != nil {
+		preparer.prepareHook()
+	}
 	return preparer.result, preparer.err
 }
 

@@ -106,13 +106,14 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	}
 
 	paths := committedPublicationPaths(t)
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, retryLease, paths, finalHead, "developer-token")
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: retryLease, Execution: retryExecution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: paths,
+		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -462,14 +463,13 @@ func TestGatewaySignedReviewerReviewReconcilesToWorkflowOutcome(t *testing.T) {
 	if !strings.Contains(string(ledger[0].Request), "_By Omnigrex:") {
 		t.Fatalf("persisted signature footer is missing participant identity: %s", ledger[0].Request)
 	}
-	paths := workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: newIntegrationOutcomeWorkspace(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token", Paths: paths,
+		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token",
 	})
 	if err != nil {
 		t.Fatal(err)

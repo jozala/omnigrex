@@ -21,6 +21,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Microsandbox feasibility experiment](./experiments/microsandbox/README.md)
 - [Pi RPC feasibility experiment](./experiments/pi/README.md)
 - [Execution and agent boundary contracts](./docs/plans/2026-10-07-runtime-boundary-contracts.md)
+- [Location-independent workspace evidence](./docs/plans/2026-10-08-location-independent-workspaces.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

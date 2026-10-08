@@ -709,6 +709,11 @@ Keep every referenced digest available until the corresponding state is garbage-
 
 PostgreSQL and `omnigrex-runtime-state` form one coordinated recovery set.
 PostgreSQL is the authoritative execution ledger, while the runtime-state volume contains OpenCode session state needed for Session Continuation.
+The same volume now contains sealed Workspace Captures under `workspace-captures`, mounted only into the orchestrator at `/var/lib/omnigrex/runtime-state/workspace-captures`.
+These captures preserve original-Turn publication and terminal evidence through deferred corroboration and human revalidation, even after its Execution Environment and live workspace have been removed.
+They are protected retained data, collected with their Agent Participant rather than with Turn scratch or the workspace cache.
+The standard stopped-orchestrator runtime-state archive below includes them automatically; selective Session-only exports are not a complete recovery set.
+See [the workspace evidence contract](./plans/2026-10-08-location-independent-workspaces.md) for capture format and limits.
 Do not copy runtime state while an Agent Turn is active.
 
 Stop the orchestrator gracefully and verify that no managed Runtime Process remains:

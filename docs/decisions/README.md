@@ -17,6 +17,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0007: Supply provider API keys through disposable files](0007-supply-provider-api-keys-through-disposable-files.md) | Accepted | 2026-10-07 |
 | [0008: Keep workspace capture separate from publication policy](0008-keep-workspace-capture-separate-from-publication-policy.md) | Accepted | 2026-10-07 |
 | [0009: Pin Participant images and use working-revision tools](0009-pin-participant-images-and-use-working-revision-tools.md) | Accepted | 2026-10-07 |
+| [0010: Seal portable workspace evidence before publication](0010-seal-portable-workspace-evidence-before-publication.md) | Accepted | 2026-10-08 |
 
 ## Existing architectural decisions
 

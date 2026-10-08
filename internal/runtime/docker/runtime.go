@@ -211,7 +211,7 @@ type Process struct {
 	removed        bool
 }
 
-// ExitObservation contains only Docker-owned exit facts, never container logs or configuration.
+// ExitObservation contains only Docker-owned lifecycle facts, never container logs or configuration.
 type ExitObservation = execution.ExitObservation
 
 // ObserveExit inspects the exact container before Stop or Remove can overwrite its exit state.
@@ -261,6 +261,15 @@ func observeExit(ctx context.Context, api exitInspector, id string, labels map[s
 	}
 	if actual.State.Running {
 		return ExitObservation{Running: true}, nil
+	}
+	if actual.State.Status == container.StateCreated && !actual.State.Paused && !actual.State.Restarting && !actual.State.Dead && !actual.State.OOMKilled && actual.State.Pid == 0 {
+		started, err := time.Parse(time.RFC3339Nano, actual.State.StartedAt)
+		if err == nil && started.IsZero() {
+			// Created plus an explicit zero start timestamp is positive no-start
+			// evidence, not an exit. Missing timestamps remain unknown. Recovery
+			// must fence dispatch and remove this immutable ID before accepting it.
+			return ExitObservation{Resource: execution.Ref(id), NeverStarted: true}, nil
+		}
 	}
 	if actual.State.Status != container.StateExited && actual.State.Status != container.StateDead {
 		return ExitObservation{}, nil

@@ -10,6 +10,8 @@ const mcpCalls = [];
 const mcpMethods = [];
 let rejected = 0;
 const holds = new Set();
+const toolHolds = new Set();
+let holdTools = false;
 
 function json(response, status, value) {
   response.writeHead(status, { 'Content-Type': 'application/json' });
@@ -48,9 +50,15 @@ const server = http.createServer(async (request, response) => {
     if (request.url === '/configure') {
       actions = body.actions ?? [];
       revoked = body.revoked ?? false;
+      holdTools = body.holdTools ?? false;
       return json(response, 200, { configured: true });
     }
-    if (request.url === '/observations') return json(response, 200, { requests, mcpCalls, mcpMethods, rejected, held: holds.size });
+    if (request.url === '/observations') return json(response, 200, { requests, mcpCalls, mcpMethods, rejected, held: holds.size, heldTools: toolHolds.size });
+    if (request.url === '/release-tools') {
+      for (const release of toolHolds) release();
+      toolHolds.clear();
+      return json(response, 200, { released: true });
+    }
     if (request.url === '/release') {
       for (const held of holds) if (!held.destroyed) complete(held, { kind: 'text' });
       holds.clear();
@@ -81,6 +89,10 @@ const server = http.createServer(async (request, response) => {
         inputSchema: { value: z.string() },
       }, async ({ value }) => {
         mcpCalls.push({ value, turn: token.endsWith('one') ? 'one' : 'two' });
+        if (holdTools) await new Promise((resolve) => {
+          toolHolds.add(resolve);
+          response.on('close', () => { toolHolds.delete(resolve); resolve(); });
+        });
         return { content: [{ type: 'text', text: `gateway:${value}` }] };
       });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

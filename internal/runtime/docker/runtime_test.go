@@ -493,6 +493,40 @@ func TestLostStartAcknowledgementRequiresEnvironmentStop(t *testing.T) {
 	}
 }
 
+func TestProcessNeverStartedRequiresPositiveNativeEvidence(t *testing.T) {
+	zero := "0001-01-01T00:00:00Z"
+	for _, test := range []struct {
+		name  string
+		state container.State
+		want  bool
+	}{
+		{name: "created with explicit zero start", state: container.State{Status: container.StateCreated, StartedAt: zero}, want: true},
+		{name: "failed start with explicit zero start", state: container.State{Status: container.StateCreated, StartedAt: zero, Error: "exec unavailable"}, want: true},
+		{name: "missing start timestamp", state: container.State{Status: container.StateCreated}},
+		{name: "malformed start timestamp", state: container.State{Status: container.StateCreated, StartedAt: "unavailable"}},
+		{name: "prior start timestamp", state: container.State{Status: container.StateCreated, StartedAt: "2026-10-08T10:00:00Z"}},
+		{name: "running", state: container.State{Status: container.StateRunning, Running: true, StartedAt: zero}},
+		{name: "unexpected process", state: container.State{Status: container.StateCreated, StartedAt: zero, Pid: 100}},
+		{name: "paused", state: container.State{Status: container.StateCreated, StartedAt: zero, Paused: true}},
+		{name: "restarting", state: container.State{Status: container.StateCreated, StartedAt: zero, Restarting: true}},
+		{name: "dead", state: container.State{Status: container.StateCreated, StartedAt: zero, Dead: true}},
+		{name: "contradictory OOM", state: container.State{Status: container.StateCreated, StartedAt: zero, OOMKilled: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			labels := map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}
+			api := newRuntimeAPIFake()
+			api.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{ID: "exact-main", Config: &container.Config{Labels: labels}, State: &test.state}}
+			observation, err := observeExit(t.Context(), api, "exact-main", labels)
+			if err != nil || observation.NeverStarted != test.want || observation.Exited || observation.OOMKilled {
+				t.Fatalf("no-start evidence = (%#v,%v), want never-started %t without exit/OOM", observation, err, test.want)
+			}
+			if test.want && observation.Resource != "exact-main" {
+				t.Fatal("no-start evidence lost immutable resource identity")
+			}
+		})
+	}
+}
+
 func TestAsyncWriterDoesNotBlockRuntimeOutput(t *testing.T) {
 	target := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
 	writer := newAsyncWriter(target)

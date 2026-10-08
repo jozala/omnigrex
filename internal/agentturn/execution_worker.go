@@ -14,6 +14,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
@@ -70,9 +71,9 @@ type ExecutionOutcomeReconciler interface {
 	Reconcile(context.Context, OutcomeReconciliation) (store.AgentTurnSettlementObservation, error)
 }
 
-// ExecutionWorkspace resolves deterministic assignment paths for outcome observation.
+// ExecutionWorkspace resolves retained terminal evidence for one exact execution.
 type ExecutionWorkspace interface {
-	Paths(string) (workspace.Paths, error)
+	TerminalCapture(context.Context, execution.Key) (execution.CaptureRef, error)
 }
 
 var (
@@ -240,11 +241,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		return false, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
 	}
 	telemetry.AddAttributes(workCtx, executionAttributes(execution)...)
-	paths, pathsErr := worker.workspace.Paths(execution.Assignment.ID)
-	operationErr := pathsErr
-	if operationErr != nil {
-		operationErr = fmt.Errorf("resolve Agent Turn workspace paths: %w", operationErr)
-	}
+	var operationErr error
 
 	var repositoryCredential, reviewerOutcomeCredential string
 	providerCredential := worker.providerCredential
@@ -393,7 +390,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 		}
 	}
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
@@ -419,7 +416,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
@@ -473,7 +470,20 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 
 	reconciliation := OutcomeReconciliation{
 		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
-		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
+		ReviewerRepositoryCredential: reviewerOutcomeCredential,
+	}
+	// Cleanup confirms stop, seals terminal evidence, and removes execution
+	// resources. Never resolve evidence before that barrier has succeeded.
+	// A missing capture is relevant only to outcomes needing Developer evidence.
+	captureErr := worker.withFinalizationTimeout(leaseCtx, func(ctx context.Context) error {
+		capture, err := worker.workspace.TerminalCapture(ctx, runtimeKey(execution))
+		if err == nil {
+			reconciliation.Capture = capture
+		}
+		return err
+	})
+	if lostLease(leaseCtx, captureErr) {
+		return false, errors.Join(combinedErr, store.ErrAgentTurnFenceLost)
 	}
 	var corroborationFailure *TerminalCorroborationFailure
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {

@@ -226,8 +226,15 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
+	workspaceSource, err := dockerruntime.NewWorkspaceSource()
+	if err != nil {
+		return fmt.Errorf("configure consistent workspace access: %w", err)
+	}
+	defer func() { _ = workspaceSource.Close() }()
 	workspaces, err := workspace.New(workspace.Options{
 		WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: settings.WorkspaceRoot, MiseRoot: settings.MiseRoot,
+		CaptureRoot: settings.WorkspaceCaptureRoot, CaptureSource: workspaceSource,
+		CaptureLedger: database,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Assignment workspaces: %w", err)
@@ -351,12 +358,13 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure expired Agent Turn monitor: %w", err)
 	}
 	runtimeStopWorker, err := agentturn.NewStopWorker(database, runtimeCleaner, workspaces, agentturn.StopWorkerConfig{
-		ClaimOwner:           githubServices.claimOwner + ":stop-stale-runtime",
-		LeaseDuration:        settings.AgentTurnPreparationLeaseDuration,
-		HeartbeatInterval:    settings.AgentTurnPreparationHeartbeatInterval,
-		IdlePollInterval:     settings.AgentTurnPreparationPollInterval,
-		CleanupRetryInterval: settings.AgentTurnPreparationRetryDelay,
-		Policies:             rolePolicies,
+		ClaimOwner:              githubServices.claimOwner + ":stop-stale-runtime",
+		LeaseDuration:           settings.AgentTurnPreparationLeaseDuration,
+		HeartbeatInterval:       settings.AgentTurnPreparationHeartbeatInterval,
+		IdlePollInterval:        settings.AgentTurnPreparationPollInterval,
+		CleanupRetryInterval:    settings.AgentTurnPreparationRetryDelay,
+		Policies:                rolePolicies,
+		TerminalCaptureRequired: database.AgentTurnTerminalCaptureRequired,
 		OnError: func(err error) {
 			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "stop stale Runtime Process", "error", err)
 		},
@@ -387,6 +395,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: database, GitHub: githubServices.api, Logger: logger,
+		Workspace:              workspaces,
+		GitRemoteBaseURL:       settings.GitRemoteBaseURL,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {

@@ -192,8 +192,12 @@ func TestComposeTopology(t *testing.T) {
 		composeMount{Type: "bind", Source: dockerSocket, Target: dockerSocket, ReadOnly: true},
 		composeMount{Type: "bind", Source: "/dev/null", Target: "/run/omnigrex/runtime-profile-compatibility-results.json", ReadOnly: true},
 		composeMount{Type: "volume", Source: "workspaces", Target: "/var/lib/omnigrex/workspaces"},
+		composeMount{Type: "volume", Source: "runtime-state", Target: "/var/lib/omnigrex/runtime-state"},
 		composeMount{Type: "volume", Source: "mise-data", Target: "/var/lib/omnigrex/mise"},
 	)
+	if got := orchestrator.Environment["OMNIGREX_WORKSPACE_CAPTURE_ROOT"]; got != "/var/lib/omnigrex/runtime-state/workspace-captures" {
+		t.Errorf("protected capture root = %q, want retained runtime-state volume", got)
+	}
 	assertSecretSources(t, "orchestrator", orchestrator.Secrets, composeSecretNames...)
 	if !slices.Contains(orchestrator.GroupAdd, "123") || !slices.Contains(orchestrator.GroupAdd, "456") {
 		t.Errorf("orchestrator supplementary groups = %v, want Docker group 123 and secret-file group 456", orchestrator.GroupAdd)

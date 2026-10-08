@@ -18,7 +18,6 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestBeginTerminalCorroborationFencesStoppedTurnAndQueuesOneVerifier(t *testing.T) {
@@ -253,13 +252,14 @@ SELECT (SELECT count(*) FROM agent_turn_corroborations WHERE agent_turn_id = $1 
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{paths: cleanCorroborationPaths(t)}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-stopped-original", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -406,13 +406,14 @@ FROM agent_turns AS turn JOIN jobs AS execution ON execution.agent_turn_id = tur
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{paths: cleanCorroborationPaths(t)}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-expired-original", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -881,20 +882,21 @@ FROM jobs WHERE workflow_attempt_id = $1`, "95000000-0000-4000-8000-000000000972
 		}); err != nil {
 		t.Fatalf("third human reactivation: %v", err)
 	}
-	paths := cleanCorroborationPaths(t)
+	paths := committedPublicationPaths(t)
 	api := &replayOutcomeGitHub{pullRequest: &githubapi.PullRequest{
 		ID: proposal.PullRequestID, Number: int(proposal.PullRequestNumber), NodeID: proposal.PullRequestNodeID,
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, lease, paths, proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	trace := &corroborationTracingStore{Store: database}
 	worker, err := agentturn.NewTerminalCorroborationWorker(trace, outcomes, credential, credential,
-		corroborationTestPaths{paths: paths}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "revalidate-after-handoff", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -927,10 +929,6 @@ WHERE workflow.id = $1`, fixture.workflowID, thirdAttemptID, lease.ID).Scan(
 	}
 }
 
-type corroborationTestPaths struct{ paths workspace.Paths }
-
-func (paths corroborationTestPaths) Paths(string) (workspace.Paths, error) { return paths.paths, nil }
-
 type corroborationTracingStore struct {
 	*store.Store
 	settleErr error
@@ -939,11 +937,6 @@ type corroborationTracingStore struct {
 func (database *corroborationTracingStore) SettleTerminalRevalidation(ctx context.Context, lease store.JobLease, revision int64, observation store.AgentTurnSettlementObservation) error {
 	database.settleErr = database.Store.SettleTerminalRevalidation(ctx, lease, revision, observation)
 	return database.settleErr
-}
-
-func cleanCorroborationPaths(t *testing.T) workspace.Paths {
-	t.Helper()
-	return committedPublicationPaths(t)
 }
 
 type corroborationReviewGitHub struct {
@@ -1006,13 +999,14 @@ func TestTerminalCorroborationWorkerSettlesOriginalDeveloperWithoutAnotherPrompt
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}, getErr: &githubapi.RateLimitError{APIError: &githubapi.APIError{StatusCode: 403}, RetryAfter: time.Minute}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: databases[1], GitHub: github})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, lease, paths, proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: databases[1], GitHub: github, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(databases[1], outcomes, credential, credential,
-		corroborationTestPaths{paths: paths}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-original", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -1031,6 +1025,30 @@ SELECT available_at FROM jobs WHERE workflow_id = $1 AND kind = 'VERIFY_TERMINAL
 		t.Fatalf("rate-limit delay = %s, error %v", time.Until(scheduledAt), err)
 	}
 	github.getErr = nil
+	// A later execution occupies the live checkout before deferred observation.
+	// The restarted workspace service has only the original sealed capture.
+	if err := os.RemoveAll(paths.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Workspace, "replacement.txt"), []byte("later execution"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := workspaces.Paths(lease.AgentAssignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cache.Publication); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cache.Publication, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache.Publication, "replacement.txt"), []byte("unrelated publication cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE jobs SET available_at = clock_timestamp()
 WHERE workflow_id = $1 AND kind = 'VERIFY_TERMINAL_INTENT' AND status = 'AVAILABLE'`, fixture.workflowID); err != nil {
 		t.Fatal(err)
@@ -1107,13 +1125,14 @@ func TestTerminalCorroborationWorkerAcceptsExistingReviewerReviewOnce(t *testing
 		review: githubapi.Review{ID: reviewID, NodeID: "PRR_existing", State: "CHANGES_REQUESTED",
 			CommitID: proposal.HeadSHA, User: githubapi.User{ID: actorID}},
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces := newIntegrationOutcomeWorkspace(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "reviewer-installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-review", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -1211,13 +1230,14 @@ func TestTerminalReviewerRevalidationAfterHumanTriggerCountsOneCycle(t *testing.
 		review: githubapi.Review{ID: reviewID, NodeID: "PRR_revalidated", State: "CHANGES_REQUESTED",
 			CommitID: proposal.HeadSHA, User: githubapi.User{ID: actorID}},
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces := newIntegrationOutcomeWorkspace(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "reviewer-installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "revalidate-review", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -1343,13 +1363,14 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, retryLease, committedPublicationPaths(t), proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{paths: cleanCorroborationPaths(t)}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-confirmation", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -1437,13 +1458,14 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 		State: "open", Head: githubapi.PullRequestBranch{Ref: proposal.HeadRef, SHA: proposal.HeadSHA, Label: "owner:" + proposal.HeadRef},
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:" + proposal.BaseRef},
 	}}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, _ := integrationTerminalWorkspace(t, pool, retryLease, committedPublicationPaths(t), proposal.HeadSHA, "installation-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{paths: cleanCorroborationPaths(t)}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-replayed-intent", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -1534,13 +1556,14 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 		review: githubapi.Review{ID: 99401, NodeID: "PRR_replayed", State: "APPROVED", CommitID: proposal.HeadSHA,
 			User: githubapi.User{ID: 99402}},
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces := newIntegrationOutcomeWorkspace(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "reviewer-installation-token"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "verify-replayed-review", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})
@@ -2068,13 +2091,14 @@ func TestRevalidationIncompatibleDefinitionCreatesHumanHandoff(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage = 'removed-stage' WHERE id = $1`, newAttemptID); err != nil {
 		t.Fatal(err)
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}})
+	workspaces := newIntegrationOutcomeWorkspace(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	credential := &integrationCredentialProvider{credential: "unused"}
 	worker, err := agentturn.NewTerminalCorroborationWorker(database, outcomes, credential, credential,
-		corroborationTestPaths{}, agentturn.TerminalCorroborationWorkerConfig{
+		workspaces, agentturn.TerminalCorroborationWorkerConfig{
 			ClaimOwner: "incompatible-revalidation", Window: 30 * time.Minute,
 			PollInterval: time.Second, LeaseDuration: 30 * time.Second,
 		})

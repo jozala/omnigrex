@@ -18,6 +18,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/role"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -1135,6 +1136,11 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		Credential:    credential, BaseRevision: progress.head, ExpectedOldHead: expectedOldHead,
 		Branch: invocation.Scope.Branch, DefaultBranch: invocation.Scope.DefaultBranch,
 		RecordProposedTip: invocation.recordProposedTip,
+		Capture: execution.CaptureRequest{Workspace: execution.WorkspaceRef{Key: execution.Key{
+			RuntimeProfileName: invocation.Scope.RuntimeProfileName, RuntimeProfileVersion: invocation.Scope.RuntimeProfileVersion,
+			AssignmentID: invocation.Scope.AgentAssignmentID, AgentSessionID: invocation.Scope.AgentSessionID,
+			AgentTurnID: invocation.Scope.AgentTurnID, ExecutionEpoch: invocation.Scope.ExecutionEpoch,
+		}, Seed: invocation.Scope.HeadSHA}, OperationID: invocation.OperationID, Purpose: execution.PublicationCapture},
 	})
 	if err != nil {
 		if errors.Is(err, workspace.ErrPushRejected) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

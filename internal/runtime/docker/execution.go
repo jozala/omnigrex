@@ -55,6 +55,9 @@ func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolic
 		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: resource budgets must be positive", ErrInvalidSpec)
 	}
 	key := request.Key
+	if request.Workspace != (execution.WorkspaceRef{}) && request.Workspace.Key != key {
+		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: workspace ownership", ErrInvalidSpec)
+	}
 	if !validCanonicalRuntimeUUID(key.AssignmentID) || !validCanonicalRuntimeUUID(key.AgentSessionID) ||
 		!validCanonicalRuntimeUUID(key.AgentTurnID) || key.ExecutionEpoch <= 0 {
 		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: execution key", ErrInvalidSpec)
@@ -284,6 +287,83 @@ func (cleaner *ExactLabelCleaner) EnsureKeyAbsent(ctx context.Context, key execu
 	}
 	if found && reservation.Resource != "" {
 		return cleaner.confirmResourceAbsent(ctx, reservation.Resource)
+	}
+	return nil
+}
+
+// EnsureKeyStopped revokes further creation for the epoch and confirms that
+// every exact-key workload stopped while preserving its workspace for capture.
+func (cleaner *ExactLabelCleaner) EnsureKeyStopped(ctx context.Context, key execution.Key) error {
+	labels := keyLabels(key)
+	if err := validateExactRuntimeLabels(labels); err != nil {
+		return err
+	}
+	if cleaner.ledger != nil {
+		reservation, found, err := cleaner.ledger.RevokeExecution(ctx, key)
+		if err != nil {
+			return err
+		}
+		if found && !reservation.CreationSettled {
+			factKey := reservation.Key
+			name := "omnigrex-turn-" + key.AgentTurnID + "-epoch-" + strconv.FormatInt(key.ExecutionEpoch, 10)
+			switch reservation.Phase {
+			case execution.Setup:
+				if reservation.SetupResource == "" {
+					id, err := cleaner.resolveCreation(ctx, factKey, reservation.Digest, name+"-setup", true)
+					if err != nil {
+						return err
+					}
+					if err := cleaner.ledger.BindSetupResource(ctx, factKey, id); err != nil {
+						return err
+					}
+				}
+			case execution.Main:
+				if reservation.Resource == "" {
+					id, err := cleaner.resolveCreation(ctx, factKey, reservation.Digest, name, false)
+					if err != nil {
+						return err
+					}
+					if err := cleaner.ledger.BindExecution(ctx, factKey, id); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	filters := make(mobyclient.Filters)
+	for name, value := range labels {
+		filters = filters.Add("label", name+"="+value)
+	}
+	listed, err := cleaner.api.ContainerList(ctx, mobyclient.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return errors.Join(execution.ErrUnknownEffect, err)
+	}
+	for _, candidate := range listed.Items {
+		if candidate.ID == "" || !hasExactRuntimeLabels(candidate.Labels, labels) || !runtimeProcessCandidateLabels(candidate.Labels) {
+			return execution.ErrConflict
+		}
+		// Revalidate immutable identity before dispatch, not just the list filter.
+		actual, err := cleaner.api.ContainerInspect(ctx, candidate.ID, mobyclient.ContainerInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if actual.Container.Config == nil || !hasExactRuntimeLabels(actual.Container.Config.Labels, labels) || !runtimeProcessCandidateLabels(actual.Container.Config.Labels) {
+			return execution.ErrConflict
+		}
+		timeout := cleaner.stopTimeoutSeconds
+		if _, err := cleaner.api.ContainerStop(ctx, candidate.ID, mobyclient.ContainerStopOptions{Timeout: &timeout}); err != nil && !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
+			return errors.Join(execution.ErrUnknownEffect, err)
+		}
+		stopped, err := cleaner.api.ContainerInspect(ctx, candidate.ID, mobyclient.ContainerInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			continue
+		}
+		if err != nil || stopped.Container.State == nil || stopped.Container.State.Running {
+			return errors.Join(execution.ErrUnknownEffect, err)
+		}
 	}
 	return nil
 }

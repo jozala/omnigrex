@@ -12,7 +12,6 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 type terminalCorroborationStore interface {
@@ -41,23 +40,19 @@ type TerminalCorroborationWorker struct {
 	outcomes  *OutcomeReconciler
 	developer RepositoryCredentialProvider
 	reviewer  RepositoryCredentialProvider
-	workspace interface {
-		Paths(string) (workspace.Paths, error)
-	}
-	config TerminalCorroborationWorkerConfig
+	workspace ExecutionWorkspace
+	config    TerminalCorroborationWorkerConfig
 }
 
 func NewTerminalCorroborationWorker(database terminalCorroborationStore, outcomes *OutcomeReconciler,
-	developer, reviewer RepositoryCredentialProvider, paths interface {
-		Paths(string) (workspace.Paths, error)
-	},
+	developer, reviewer RepositoryCredentialProvider, captures ExecutionWorkspace,
 	config TerminalCorroborationWorkerConfig) (*TerminalCorroborationWorker, error) {
-	if database == nil || outcomes == nil || developer == nil || reviewer == nil || paths == nil ||
+	if database == nil || outcomes == nil || developer == nil || reviewer == nil || nilDependency(captures) ||
 		config.ClaimOwner == "" || config.Window <= 0 || config.PollInterval <= 0 || config.LeaseDuration < 3*time.Second {
 		return nil, errors.New("invalid terminal corroboration Worker configuration")
 	}
 	return &TerminalCorroborationWorker{store: database, outcomes: outcomes, developer: developer,
-		reviewer: reviewer, workspace: paths, config: config}, nil
+		reviewer: reviewer, workspace: captures, config: config}, nil
 }
 
 func (worker *TerminalCorroborationWorker) Run(ctx context.Context) error {
@@ -153,16 +148,16 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if credential == "" {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
-	paths, err := worker.workspace.Paths(pending.Execution.Assignment.ID)
-	if err != nil {
-		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
-			TerminalCorroborationFailure{Code: "workspace_observation_unavailable", Retryable: true})
-	}
 	turn := pending.Execution.Turn
 	request := OutcomeReconciliation{
-		Lease:     store.AgentTurnLease{AgentTurn: turn, JobLease: store.JobLease{Job: store.Job{WorkflowID: pending.Checkpoint.WorkflowID}}},
-		Execution: pending.Execution, Paths: paths,
+		Lease:                     store.AgentTurnLease{AgentTurn: turn, JobLease: store.JobLease{Job: store.Job{WorkflowID: pending.Checkpoint.WorkflowID}}},
+		Execution:                 pending.Execution,
 		PriorPublicationMutations: pending.PriorPublicationMutations,
+	}
+	// Resolve the original Turn/epoch's sealed evidence, never a replacement
+	// checkout. Missing evidence is classified only if the outcome needs it.
+	if capture, captureErr := worker.workspace.TerminalCapture(ctx, runtimeKey(pending.Execution)); captureErr == nil {
+		request.Capture = capture
 	}
 	if role == workflow.RoleReviewer {
 		request.ReviewerRepositoryCredential = credential

@@ -55,13 +55,14 @@ func TestHandoffPublicationRecoveryAndReadScope(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), head, "developer-token")
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	outcomeRequest := agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: committedPublicationPaths(t),
+		RepositoryCredential: "developer-token", Capture: capture,
 	}
 	before, err := outcomes.Reconcile(ctx, outcomeRequest)
 	if !errors.Is(err, store.ErrAgentTurnMutationsUnsettled) || before.Outcome == workflow.TurnOutcomeChangeProposalReady {

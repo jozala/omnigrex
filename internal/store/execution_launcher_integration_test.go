@@ -27,6 +27,27 @@ import (
 )
 
 func TestExecutionLauncherUsesSingleConnectionPool(t *testing.T) {
+	testExecutionLauncherSingleConnectionPool(t, false, false, false)
+}
+
+func TestExecutionLauncherCaptureDoesNotHoldSingleConnectionFence(t *testing.T) {
+	testExecutionLauncherSingleConnectionPool(t, true, false, false)
+}
+
+func TestCreatingSessionStartupCleanupProofSurvivesRestart(t *testing.T) {
+	for _, loseProofFence := range []bool{false, true} {
+		name := "admitted proof before removal"
+		if loseProofFence {
+			name = "lost lease denies proof and removal"
+		}
+		t.Run(name, func(t *testing.T) {
+			testExecutionLauncherSingleConnectionPool(t, false, true, loseProofFence)
+		})
+	}
+}
+
+func testExecutionLauncherSingleConnectionPool(t *testing.T, capture, preparationOnly, loseProofFence bool) {
+	t.Helper()
 	postgres := startPostgres(t)
 	password := filepath.Join(t.TempDir(), "database-password")
 	if err := os.WriteFile(password, []byte(postgresPassword), 0600); err != nil {
@@ -51,6 +72,11 @@ func TestExecutionLauncherUsesSingleConnectionPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if preparationOnly {
+		if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
+			t.Fatal(err)
+		}
+	}
 	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, "runtime", time.Minute, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -60,13 +86,102 @@ func TestExecutionLauncherUsesSingleConnectionPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	factory := &singleConnectionFactory{observer: pool, whileProvisioning: func(ctx context.Context) error { return database.ValidateTurnFence(ctx, lease) }}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: singleConnectionWorkspace{}, Gateway: singleConnectionGateway{}, Execution: factory, ACP: singleConnectionACP{}, Sessions: singleConnectionSessions{}, MemoryBytes: 512 << 20})
+	startupErr := errors.New("first Session startup failed after main resource binding")
+	if preparationOnly {
+		factory.engine.startErr = startupErr
+		if loseProofFence {
+			factory.engine.observe = func(ctx context.Context) error {
+				expireAgentTurnExecution(t, pool, ctx, lease.JobLease.ID, lease.ID)
+				return nil
+			}
+		}
+		factory.engine.beforeRemove = func(ctx context.Context) error {
+			var proof bool
+			if err := pool.QueryRow(ctx, `SELECT preparation_only_cleanup FROM execution_reservations
+WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch).Scan(&proof); err != nil {
+				return err
+			}
+			if !proof {
+				t.Fatal("main resource removed before cleanup proof committed")
+			}
+			return nil
+		}
+	}
+	workspaces := singleConnectionWorkspace{}
+	acpFactory := singleConnectionACP{}
+	captures := 0
+	if preparationOnly {
+		workspaces.capture = func(context.Context) error {
+			captures++
+			return errors.New("unprompted startup should use durable cleanup proof")
+		}
+	}
+	if capture {
+		acpFactory.client = &singleConnectionClient{}
+		workspaces.capture = func(ctx context.Context) error {
+			captures++
+			// Reentering the real Store needs the same sole pool connection. This
+			// deadlocks if capture is performed inside either cleanup fence.
+			_, err := database.GetAgentTurnExecutionContext(ctx, lease)
+			return err
+		}
+	}
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, ACP: acpFactory, Sessions: singleConnectionSessions{}, MemoryBytes: 512 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	launchCtx, stop := context.WithTimeout(ctx, 2*time.Second)
 	defer stop()
-	_, err = launcher.Launch(launchCtx, agentturn.LaunchRequest{Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/owner/repo.git", DefaultBranchName: "main", DefaultBranchSHA: "default-sha", InitialFeatureBranch: "feature", RepositoryCredential: "fixture-credential", ProviderCredentialJSON: json.RawMessage(`{}`)})
+	handle, err := launcher.Launch(launchCtx, agentturn.LaunchRequest{Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/owner/repo.git", DefaultBranchName: "main", DefaultBranchSHA: "default-sha", InitialFeatureBranch: "feature", RepositoryCredential: "fixture-credential", ProviderCredentialJSON: json.RawMessage(`{}`)})
+	if preparationOnly {
+		if !errors.Is(err, startupErr) || factory.engine.removed == loseProofFence || captures != 0 {
+			t.Fatalf("preparation-only launch = (%v, %v), removed %t, captures %d", handle, err, factory.engine.removed, captures)
+		}
+		if loseProofFence && (handle == nil || !errors.Is(err, store.ErrAgentTurnFenceLost)) || !loseProofFence && handle != nil {
+			t.Fatalf("startup cleanup handle/fence = (%v, %v)", handle, err)
+		}
+		var proof bool
+		var resource string
+		if err := pool.QueryRow(ctx, `SELECT preparation_only_cleanup, resource_ref FROM execution_reservations
+WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch).Scan(&proof, &resource); err != nil || proof == loseProofFence || resource != "fixture-main" {
+			t.Fatalf("durable startup proof/binding = (%t, %q, %v)", proof, resource, err)
+		}
+		if !loseProofFence {
+			if _, err := pool.Exec(ctx, `UPDATE execution_reservations SET preparation_only_cleanup = false
+WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpoch); err == nil {
+				t.Fatal("durable cleanup proof was mutable")
+			}
+			expireAgentTurnExecution(t, pool, ctx, lease.JobLease.ID, lease.ID)
+		}
+		// No settlement happened. Restart after cleanup lost its lease or response
+		// must resolve the retained proof instead of requiring a removed source.
+		database.Close()
+		database, err = store.Open(ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		if _, err := database.RecoverExpiredAgentTurn(ctx, lease.ID, lease.ExecutionEpoch); err != nil {
+			t.Fatal(err)
+		}
+		job, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "startup-recovery", time.Minute)
+		if err != nil || job == nil {
+			t.Fatalf("claim startup recovery = (%v, %v)", job, err)
+		}
+		if required, err := database.AgentTurnTerminalCaptureRequired(ctx, *job); err != nil || required != loseProofFence {
+			t.Fatalf("restarted startup capture requirement = (%t, %v), want %t", required, err, loseProofFence)
+		}
+		return
+	}
+	if capture {
+		if err != nil || handle == nil {
+			t.Fatalf("single-connection launch = (%v, %v)", handle, err)
+		}
+		if err := handle.Cleanup(launchCtx); err != nil || captures != 1 {
+			t.Fatalf("single-connection capture cleanup = %v, captures %d", err, captures)
+		}
+		return
+	}
 	// A deliberately unavailable ACP client ends the test after creation/start,
 	// avoiding a model prompt while exercising the actual Launcher/Store boundary.
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "attach ACP client") || !factory.engine.started {
@@ -93,6 +208,10 @@ type singleConnectionEngine struct {
 	started           bool
 	observer          *pgxpool.Pool
 	whileProvisioning func(context.Context) error
+	startErr          error
+	observe           func(context.Context) error
+	beforeRemove      func(context.Context) error
+	removed           bool
 }
 
 func (engine *singleConnectionEngine) Create(ctx context.Context, request execution.Request, _ io.Writer) (execution.Process, error) {
@@ -117,13 +236,30 @@ func (engine *singleConnectionEngine) Create(ctx context.Context, request execut
 	}
 	return engine, nil
 }
-func (engine *singleConnectionEngine) Start(context.Context) error { engine.started = true; return nil }
-func (*singleConnectionEngine) Transport() io.ReadWriteCloser      { return singleConnectionTransport{} }
-func (*singleConnectionEngine) ObserveExit(context.Context) (execution.ExitObservation, error) {
+func (engine *singleConnectionEngine) Start(context.Context) error {
+	engine.started = true
+	return engine.startErr
+}
+func (*singleConnectionEngine) Transport() io.ReadWriteCloser { return singleConnectionTransport{} }
+func (engine *singleConnectionEngine) ObserveExit(ctx context.Context) (execution.ExitObservation, error) {
+	if engine.observe != nil {
+		if err := engine.observe(ctx); err != nil {
+			return execution.ExitObservation{}, err
+		}
+		return execution.ExitObservation{Resource: "fixture-main", Exited: true, ExitCode: 1}, nil
+	}
 	return execution.ExitObservation{}, nil
 }
 func (*singleConnectionEngine) Stop(context.Context, time.Duration) error { return nil }
-func (*singleConnectionEngine) Remove(context.Context) error              { return nil }
+func (engine *singleConnectionEngine) Remove(ctx context.Context) error {
+	if engine.beforeRemove != nil {
+		if err := engine.beforeRemove(ctx); err != nil {
+			return err
+		}
+	}
+	engine.removed = true
+	return nil
+}
 func (engine *singleConnectionEngine) EnsureAbsent(ctx context.Context) error {
 	_, _, err := engine.ledger.RevokeExecution(ctx, engine.key)
 	return err
@@ -136,10 +272,20 @@ func (singleConnectionTransport) Read([]byte) (int, error)       { return 0, io.
 func (singleConnectionTransport) Write(data []byte) (int, error) { return len(data), nil }
 func (singleConnectionTransport) Close() error                   { return nil }
 
-type singleConnectionWorkspace struct{}
+type singleConnectionWorkspace struct {
+	capture func(context.Context) error
+}
 
-func (singleConnectionWorkspace) PrepareWorkspace(context.Context, workspace.Checkout) (workspace.Paths, error) {
-	return workspace.Paths{Workspace: "/fixture/workspace", Mise: "/fixture/mise"}, nil
+func (singleConnectionWorkspace) Prepare(_ context.Context, request workspace.Preparation) (execution.WorkspaceRef, error) {
+	return execution.WorkspaceRef{Key: request.Key, Seed: request.Checkout.Revision}, nil
+}
+func (workspaces singleConnectionWorkspace) Capture(ctx context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	if workspaces.capture != nil {
+		if err := workspaces.capture(ctx); err != nil {
+			return execution.CaptureRef{}, err
+		}
+	}
+	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
 }
 func (singleConnectionWorkspace) ProvisionMise(_ context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
 	return workspace.MiseActivation{DataDir: "/fixture/mise", SourceRevision: provision.Revision}, nil
@@ -150,8 +296,8 @@ func (singleConnectionWorkspace) PrepareTurnPaths(context.Context, string, strin
 func (singleConnectionWorkspace) CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error {
 	return nil
 }
-func (singleConnectionWorkspace) DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error {
-	return nil
+func (singleConnectionWorkspace) Discard(ctx context.Context, _ execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return nil })
 }
 
 type singleConnectionGateway struct{}
@@ -163,11 +309,18 @@ func (singleConnectionGateway) Renew(mcp.Registration, time.Time) bool          
 func (singleConnectionGateway) CloseAndDrain(context.Context, mcp.Registration) error { return nil }
 func (singleConnectionGateway) Revoke(mcp.Registration) bool                          { return true }
 
-type singleConnectionACP struct{}
-
-func (singleConnectionACP) New(io.ReadWriteCloser, acp.ClientOptions) agentturn.RuntimeACPClient {
-	return nil
+type singleConnectionACP struct {
+	client agentturn.RuntimeACPClient
 }
+
+func (factory singleConnectionACP) New(io.ReadWriteCloser, acp.ClientOptions) agentturn.RuntimeACPClient {
+	return factory.client
+}
+
+// Only Close is used: the test's Session preparer never calls the ACP protocol.
+type singleConnectionClient struct{ agentturn.RuntimeACPClient }
+
+func (*singleConnectionClient) Close() error { return nil }
 
 type singleConnectionSessions struct{}
 

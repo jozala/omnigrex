@@ -36,6 +36,7 @@ type TemporaryDirectory struct {
 // are resolved by the selected backend, never supplied by repository code.
 type Request struct {
 	Key                  Key
+	Workspace            WorkspaceRef
 	WorkflowID           string
 	Image                string
 	Platform             Platform
@@ -79,7 +80,7 @@ type Factory interface {
 	New(Request, Ledger) (Engine, error)
 }
 
-// ExitObservation contains positive backend-owned evidence only.
+// ExitObservation contains positive backend-owned lifecycle evidence only.
 // A zero value is unknown; EOF, exit 137 and NotFound do not establish a cause.
 type ExitObservation struct {
 	Resource  Ref
@@ -87,6 +88,10 @@ type ExitObservation struct {
 	Exited    bool
 	Running   bool
 	OOMKilled bool
+	// NeverStarted is positive backend evidence that this exact main resource
+	// had not executed. It is distinct from exit evidence and requires dispatch
+	// fencing before it can authorize preparation-only recovery cleanup.
+	NeverStarted bool
 }
 
 type ManagedProcess struct {

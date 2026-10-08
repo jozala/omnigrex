@@ -122,13 +122,6 @@ func (lifecycle *Lifecycle) verifyCommittedTree(ctx context.Context, workspaceDi
 	return nil
 }
 
-// CommittedTreesEqual corroborates the published commit and the clean agent
-// workspace without treating ignored local build artifacts as publications.
-func CommittedTreesEqual(ctx context.Context, paths Paths) (bool, error) {
-	lifecycle := &Lifecycle{gitExecutable: "git"}
-	return lifecycle.committedTreesEqual(ctx, paths.Workspace, paths.Publication)
-}
-
 // Workspace Git queries must not follow an agent-controlled core.worktree
 // setting into a different directory when inspecting the assigned workspace.
 func (lifecycle *Lifecycle) workspaceGitOutput(ctx context.Context, operation, directory string, arguments ...string) (string, error) {

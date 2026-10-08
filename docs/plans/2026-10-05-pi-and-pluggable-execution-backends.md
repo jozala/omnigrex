@@ -24,6 +24,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 02 | Required Pi RPC, MCP, session, and API-key gates passed on both backends | [Pi feasibility evidence](../experiments/pi.md) |
 | 03 | Contracts and migration ownership defined; production implementation follows | [Execution and agent boundary contracts](2026-10-07-runtime-boundary-contracts.md) |
 | 04 | Docker launch and recovery use neutral contracts; OpenCode remains operational | [Docker execution boundary implementation and evidence](2026-10-07-docker-execution-boundary.md) |
+| 05 | Logical workspace preparation, sealed publication evidence, and retained terminal corroboration | [Location-independent workspace implementation and evidence](2026-10-08-location-independent-workspaces.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -293,6 +294,8 @@ Test normal execution, creation ambiguity, restart discovery, exact-epoch cleanu
 Core coordination packages no longer import the Docker implementation or SDK.
 
 ### Step 05: Make workspace access and publication location-independent
+
+**Deliverable:** [Location-independent workspace evidence](2026-10-08-location-independent-workspaces.md), including both-backend mid-prompt capture proofs, the versioned artifact contract, and retained terminal observations.
 
 **Goal:** Remove the requirement that core code can directly inspect the live agent checkout.
 

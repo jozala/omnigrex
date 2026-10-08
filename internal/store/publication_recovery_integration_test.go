@@ -157,13 +157,14 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, nextLease); err != nil {
 		t.Fatal(err)
 	}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, nextLease, committedPublicationPaths(t), head, "developer-token")
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: nextLease, Execution: bound, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: committedPublicationPaths(t),
+		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {
 		t.Fatalf("recovered PR handoff = %#v, error %v", observation, err)

@@ -403,7 +403,7 @@ func TestLifecyclePublicationChecksAssignedWorktreeDespiteCoreWorktreeOverride(t
 	}
 }
 
-func TestCommittedTreesEqualChecksAssignedWorktreeDespiteCoreWorktreeOverride(t *testing.T) {
+func TestCaptureTreesEqualChecksAssignedWorktreeDespiteCoreWorktreeOverride(t *testing.T) {
 	fixture := newGitFixture(t)
 	lifecycle := newLifecycle(t)
 	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
@@ -416,17 +416,20 @@ func TestCommittedTreesEqualChecksAssignedWorktreeDespiteCoreWorktreeOverride(t 
 	gitRun(t, paths.Workspace, "config", "user.email", "developer@example.test")
 	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "published\n", 0o644)
 	gitRun(t, paths.Workspace, "commit", "-am", "Committed change")
-	if _, err := lifecycle.Publish(context.Background(), workspace.Publication{
+	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
 		Branch: "feature", RecordProposedTip: func(context.Context, string) error { return nil },
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	alternate := t.TempDir()
 	gitRun(t, paths.Workspace, "--work-tree="+alternate, "checkout", "--force", "HEAD", "--", ".")
 	gitRun(t, paths.Workspace, "config", "core.worktree", alternate)
 	writeFile(t, filepath.Join(paths.Workspace, "not-ignored.txt"), "unpublished\n", 0o644)
-	matching, err := workspace.CommittedTreesEqual(context.Background(), paths)
+	matching, err := lifecycle.CaptureCurrentTreesEqual(context.Background(), assignmentID, workspace.PublicationObservation{
+		RepositoryURL: fixture.remote, Revision: result.Head,
+	})
 	if err != nil || matching {
 		t.Fatalf("corroborate dirty assigned workspace = %t, %v", matching, err)
 	}
@@ -621,13 +624,10 @@ func TestLifecyclePublicationLeaseRejectsBranchChangeAfterFinalHeadCheck(t *test
 		"fi\n"+
 		"exec "+quoted(gitExecutable)+" \"$@\"\n")
 	root := t.TempDir()
-	lifecycle, err := workspace.New(workspace.Options{
+	lifecycle := newPublicationTestLifecycle(t, workspace.Options{
 		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"),
 		MiseRoot: filepath.Join(root, "mise"), GitExecutable: wrapper,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	paths, err := lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.second,
 	})
@@ -710,9 +710,6 @@ func TestLifecyclePublicationAllowsIgnoredFilesButDoesNotPublishThem(t *testing.
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(paths.Workspace, "build", "secret.log"), "never publish\n", 0o644)
-	if err := unix.Mkfifo(filepath.Join(paths.Workspace, "build", "ignored-pipe"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	want := gitOutput(t, paths.Workspace, "rev-parse", "HEAD")
 	result, err := lifecycle.Publish(context.Background(), workspace.Publication{
 		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: fixture.second,
@@ -724,13 +721,34 @@ func TestLifecyclePublicationAllowsIgnoredFilesButDoesNotPublishThem(t *testing.
 	if got := gitOutput(t, fixture.remote, "ls-tree", "-r", "--name-only", want); strings.Contains(got, "secret.log") {
 		t.Errorf("ignored local file was published: %s", got)
 	}
-	matching, err := workspace.CommittedTreesEqual(context.Background(), paths)
+	// Complete capture inventory rejects unsupported entries even when Git
+	// ignores them.
+	if err := unix.Mkfifo(filepath.Join(paths.Workspace, "build", "ignored-pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Publish(context.Background(), workspace.Publication{
+		AssignmentID: assignmentID, RepositoryURL: fixture.remote, BaseRevision: want,
+		ExpectedOldHead: want, Branch: "feature", RecordProposedTip: func(context.Context, string) error {
+			t.Error("unsupported inventory reached durable tip recording")
+			return nil
+		},
+	}); !errors.Is(err, workspace.ErrInvalidCapture) {
+		t.Fatalf("ignored unsupported capture entry = %v, want invalid capture", err)
+	}
+	if got := gitOutput(t, fixture.remote, "rev-parse", "refs/heads/feature"); got != want {
+		t.Errorf("unsupported capture changed publication: %s", got)
+	}
+	if err := os.Remove(filepath.Join(paths.Workspace, "build", "ignored-pipe")); err != nil {
+		t.Fatal(err)
+	}
+	observation := workspace.PublicationObservation{RepositoryURL: fixture.remote, Revision: result.Head}
+	matching, err := lifecycle.CaptureCurrentTreesEqual(context.Background(), assignmentID, observation)
 	if err != nil || !matching {
 		t.Fatalf("ignored local file should not invalidate published tree = %t, %v", matching, err)
 	}
 	gitRun(t, paths.Workspace, "update-index", "--assume-unchanged", "tracked.txt")
 	writeFile(t, filepath.Join(paths.Workspace, "tracked.txt"), "hidden tracked change\n", 0o644)
-	matching, err = workspace.CommittedTreesEqual(context.Background(), paths)
+	matching, err = lifecycle.CaptureCurrentTreesEqual(context.Background(), assignmentID, observation)
 	if err != nil || matching {
 		t.Fatalf("hidden tracked edit must invalidate published tree = %t, %v", matching, err)
 	}

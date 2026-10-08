@@ -131,3 +131,16 @@ Run the two backend suites sequentially on a shared qualification host.
 
 The regular `mise run check` remains required.
 The experiment is opt-in and does not change the deployed OpenCode runtime or the regular Docker integration suite.
+
+## Mid-prompt workspace capture
+
+Step 05 adds `TestPiMidPromptWorkspaceCapture`, which holds an authenticated MCP response while a background writer mutates the workspace.
+The controller suspends writers, transfers a stable representation, resumes them, and verifies that the same Pi prompt settles after the held response is released.
+Run it with the backend and approved-host environment described above:
+
+```sh
+OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run '^TestPiMidPromptWorkspaceCapture$'
+```
+
+The Microsandbox proof preserves versioned guest-stat xattrs because host modes and file-backed symlinks can differ from their guest-visible representation.
+See the [capture evidence record](../../docs/plans/2026-10-08-location-independent-workspaces.md) for the observed result and production adapter obligations.

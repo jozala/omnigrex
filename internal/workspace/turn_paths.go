@@ -174,6 +174,15 @@ func (lifecycle *Lifecycle) CleanupAssignmentToolPaths(ctx context.Context, assi
 	if err != nil {
 		return err
 	}
+	// The caller holds Participant collection authorization. Captures are not
+	// disposable tool data: they share that protected retention boundary.
+	if exists, err := inspectOwnedDirectory(lifecycle.captureRoot); err != nil {
+		return err
+	} else if exists {
+		if err := removeOwnedWorkspaceTree(ctx, filepath.Join(lifecycle.captureRoot, "assignment-"+assignmentID)); err != nil {
+			return err
+		}
+	}
 	for _, parent := range []string{lifecycle.miseRoot, filepath.Dir(root)} {
 		exists, err := inspectOwnedDirectory(parent)
 		if err != nil || !exists {

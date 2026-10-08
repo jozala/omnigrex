@@ -51,15 +51,17 @@ type LauncherStore interface {
 	WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 	WithAgentTurnCleanupFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 	RecordAgentTurnRuntimeOOM(context.Context, store.AgentTurnLease, string, int) error
+	RecordAgentTurnUnpromptedCleanup(context.Context, store.AgentTurnLease) error
 }
 
 // RuntimeWorkspace prepares assignment-isolated checkout and trusted tool state.
 type RuntimeWorkspace interface {
-	PrepareWorkspace(context.Context, workspace.Checkout) (workspace.Paths, error)
+	Prepare(context.Context, workspace.Preparation) (execution.WorkspaceRef, error)
+	Capture(context.Context, execution.CaptureRequest) (execution.CaptureRef, error)
 	ProvisionMise(context.Context, workspace.MiseProvision) (workspace.MiseActivation, error)
 	PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error)
 	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
-	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
+	Discard(context.Context, execution.WorkspaceRef, workspace.WorkspaceFence) error
 }
 
 // MCPRegistrar issues, drains, and revokes exact per-turn MCP authority.
@@ -171,31 +173,36 @@ type RuntimeHandle struct {
 	Session session.Result
 	lease   store.AgentTurnLease
 
-	gateway            MCPRegistrar
-	registration       mcp.Registration
-	registered         bool
-	workspace          RuntimeWorkspace
-	store              LauncherStore
-	assignmentID       string
-	engine             RuntimeEngine
-	process            RuntimeProcess
-	exitObservation    *execution.ExitObservation
-	oomRecorded        bool
-	observeExit        bool
-	stopTimeout        time.Duration
-	secrets            []string
-	mcpMutex           sync.Mutex
-	mcpClosed          bool
-	mcpDrained         bool
-	cleanupMutex       sync.Mutex
-	acpClosed          bool
-	processStopped     bool
-	processRemoved     bool
-	workspaceDiscarded bool
-	scratchCleaned     bool
-	scratchPrepared    bool
-	discardWorkspace   bool
-	engineClosed       bool
+	gateway                     MCPRegistrar
+	registration                mcp.Registration
+	registered                  bool
+	workspace                   RuntimeWorkspace
+	workspaceRef                execution.WorkspaceRef
+	sessionPrepared             bool
+	sessionPreparationAttempted bool
+	creationAttempted           bool
+	terminalCapture             *execution.CaptureRef
+	store                       LauncherStore
+	assignmentID                string
+	engine                      RuntimeEngine
+	process                     RuntimeProcess
+	exitObservation             *execution.ExitObservation
+	oomRecorded                 bool
+	observeExit                 bool
+	stopTimeout                 time.Duration
+	secrets                     []string
+	mcpMutex                    sync.Mutex
+	mcpClosed                   bool
+	mcpDrained                  bool
+	cleanupMutex                sync.Mutex
+	acpClosed                   bool
+	processStopped              bool
+	processRemoved              bool
+	workspaceDiscarded          bool
+	scratchCleaned              bool
+	scratchPrepared             bool
+	discardWorkspace            bool
+	engineClosed                bool
 }
 
 // NewLauncher validates deployment dependencies before any turn is launched.
@@ -283,13 +290,14 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, err
 	}
 
-	paths, err := launcher.workspace.PrepareWorkspace(ctx, workspace.Checkout{
+	key := runtimeKey(execution)
+	workspaceRef, err := launcher.workspace.Prepare(ctx, workspace.Preparation{Key: key, Checkout: workspace.Checkout{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
 		Credential: request.RepositoryCredential, Revision: revision, ExecutionEpoch: request.Lease.ExecutionEpoch,
 		Fence: func(ctx context.Context, operation func(context.Context) error) error {
 			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
 		},
-	})
+	}})
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated Agent workspace: %w", err)
 	}
@@ -299,15 +307,31 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		secrets: append([]string(nil), secrets...),
 	}
 	resources.workspace = launcher.workspace
+	resources.workspaceRef = workspaceRef
+	resources.workspaceRef.Key = key
 	resources.store = launcher.store
 	resources.assignmentID = execution.Assignment.ID
 	resources.discardWorkspace = rolePolicy.DiscardWorkspace
+	// A failed or ambiguously acknowledged create/start may still have dispatched
+	// the main environment for an existing Session. Establish its capture need
+	// before either operation can fail, not only after Start acknowledges success.
+	resources.sessionPrepared = execution.Session.Status != store.AgentSessionCreating || execution.Session.ACPSessionID != ""
 	defer func() {
 		if err == nil {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCleanupTimeout)
 		defer cancel()
+		if resources.process != nil && resources.sessionPreparationAttempted && !resources.sessionPrepared {
+			// ACP binding may have committed before continuation/configuration
+			// failed. Match recovery's durable requirement before removing its
+			// only source of terminal evidence; an unreadable binding is unknown.
+			current, bindingErr := launcher.store.GetAgentTurnExecutionContext(cleanupCtx, resources.lease)
+			resources.sessionPrepared = bindingErr != nil || current.Session.Status != store.AgentSessionCreating || current.Session.ACPSessionID != ""
+			if bindingErr != nil {
+				err = errors.Join(err, fmt.Errorf("inspect failed Agent Session preparation: %w", bindingErr))
+			}
+		}
 		if resources.process != nil {
 			_, observeErr := resources.ObserveOOM(cleanupCtx)
 			if observeErr != nil {
@@ -327,6 +351,9 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 			handle = nil
 		}
 	}()
+	if workspaceRef.Key != key || workspaceRef.Seed != strings.ToLower(revision) {
+		return nil, fmt.Errorf("%w: prepared workspace identity", ErrRuntimeBinding)
+	}
 	miseRevision := revision
 	if rolePolicy.TrustedToolsRevision == role.DefaultBranchTrustedTools {
 		miseRevision = request.DefaultBranchSHA
@@ -341,7 +368,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, fmt.Errorf("provision trusted repository tools: %w", err)
 	}
-	if paths.Workspace == "" || paths.Mise == "" || activation.DataDir != paths.Mise || activation.SourceRevision != miseRevision {
+	if activation.SourceRevision != miseRevision {
 		return nil, fmt.Errorf("%w: trusted mise source", ErrRuntimeBinding)
 	}
 	environment, err := runtimeMiseEnvironment(activation)
@@ -376,6 +403,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	resources.lease = refreshedLease
 
 	registration, err := launcher.gateway.Register(mcp.TokenScope{
+		RuntimeProfileName: execution.Assignment.RuntimeProfileName, RuntimeProfileVersion: execution.Assignment.RuntimeProfileVersion,
 		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number}, PullRequest: pullRequest,
@@ -409,6 +437,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
+	spec.Workspace = resources.workspaceRef
 	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine
@@ -422,6 +451,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	// The lease-bound ledger commits admission before dispatch. Provisioning must
 	// not run inside WithAgentTurnFence: its durable evidence operations need the
 	// same pool, and lease heartbeats must remain possible during external calls.
+	resources.creationAttempted = true
 	process, createErr := engine.Create(ctx, spec, request.Stderr)
 	if !nilInterface(process) {
 		resources.process = process
@@ -468,6 +498,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, errors.New("attach ACP client: factory returned nil")
 	}
 	resources.Client = client
+	resources.sessionPreparationAttempted = true
 	prepared, err := launcher.sessions.Prepare(ctx, session.PrepareRequest{
 		Lease: request.Lease, Session: execution.Session, Client: client, StatePath: statePath,
 		MCPServers: []acp.MCPServer{registration.Server}, Configuration: rendered.SessionConfiguration(),
@@ -476,6 +507,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("prepare Agent Session: %w", err)
 	}
 	resources.Session = prepared
+	resources.sessionPrepared = true
 	return resources, nil
 }
 
@@ -576,7 +608,7 @@ func (handle *RuntimeHandle) PromptClient() session.PromptClient {
 	return handle.Client
 }
 
-// Cleanup drains MCP authority, closes ACP, stops and removes execution, discards Reviewer changes, and closes backend resources.
+// Cleanup drains MCP authority, stops execution, seals terminal evidence, and then removes resources.
 func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	if handle == nil {
 		return nil
@@ -620,23 +652,59 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 				handle.processStopped = true
 			}
 		}
-		removeCtx, cancelRemove := handle.teardownContext(ctx)
-		err := handle.process.Remove(removeCtx)
-		cancelRemove()
-		if err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-		} else {
-			handle.processRemoved = true
+		// A drain timeout or an unconfirmed stop cannot authorize destruction of
+		// the environment needed to retry the terminal observation.
+		if handle.processStopped && (!handle.registered || handle.mcpDrained) {
+			captureReady := handle.terminalCapture != nil
+			if !handle.sessionPrepared {
+				proofCtx, cancelProof := handle.teardownContext(ctx)
+				proofErr := handle.store.RecordAgentTurnUnpromptedCleanup(proofCtx, handle.lease)
+				cancelProof()
+				if proofErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("record preparation-only Runtime Process cleanup: %w", proofErr))
+				} else {
+					captureReady = true
+				}
+			} else if !captureReady {
+				captureCtx, cancelCapture := handle.teardownContext(ctx)
+				fence := func(ctx context.Context, operation func(context.Context) error) error {
+					return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
+				}
+				ref, captureErr := captureTerminalWorkspace(captureCtx, handle.workspaceRef.Key, handle.workspace.Capture, fence)
+				cancelCapture()
+				if captureErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("capture stopped Agent Turn workspace: %w", captureErr))
+				} else {
+					handle.terminalCapture = &ref
+					captureReady = true
+				}
+			}
+			if captureReady {
+				removeCtx, cancelRemove := handle.teardownContext(ctx)
+				err := handle.process.Remove(removeCtx)
+				cancelRemove()
+				if err != nil {
+					cleanupErrors = append(cleanupErrors, err)
+				} else {
+					handle.processRemoved = true
+				}
+			}
 		}
 	}
 	if handle.process == nil && handle.engine != nil && !handle.processRemoved {
-		removeCtx, cancel := handle.teardownContext(ctx)
-		err := handle.engine.EnsureAbsent(removeCtx)
-		cancel()
-		if err != nil {
-			cleanupErrors = append(cleanupErrors, err)
+		if handle.creationAttempted {
+			// A missing process handle is not no-dispatch evidence. Exact-key
+			// recovery must stop and capture any ambiguously created environment.
+			cleanupErrors = append(cleanupErrors, errors.New("terminal capture unavailable after ambiguous Runtime Process creation; exact-key recovery required"))
 		} else {
-			handle.processRemoved = true
+			removeCtx, cancel := handle.teardownContext(ctx)
+			err := handle.engine.EnsureAbsent(removeCtx)
+			cancel()
+			if err != nil {
+				cleanupErrors = append(cleanupErrors, err)
+			} else {
+				handle.processRemoved = true
+			}
 		}
 	}
 	processRemoved := handle.processRemoved || handle.process == nil && handle.engine == nil
@@ -654,7 +722,7 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 		fence := func(ctx context.Context, operation func(context.Context) error) error {
 			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
 		}
-		if err := handle.workspace.DiscardWorkspaceFenced(ctx, handle.assignmentID, handle.lease.ExecutionEpoch, fence); err != nil {
+		if err := handle.workspace.Discard(ctx, handle.workspaceRef, fence); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("discard Reviewer workspace: %w", err))
 		} else {
 			handle.workspaceDiscarded = true
@@ -668,6 +736,35 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 		}
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func terminalCaptureRequest(key execution.Key) execution.CaptureRequest {
+	return execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture,
+	}
+}
+
+// Capture transfer and sealing run outside database transactions so heartbeats
+// and recovery can progress. Both admission and adoption require a short fence.
+func captureTerminalWorkspace(ctx context.Context, key execution.Key,
+	capture func(context.Context, execution.CaptureRequest) (execution.CaptureRef, error),
+	fence workspace.WorkspaceFence) (execution.CaptureRef, error) {
+	validate := func(context.Context) error { return nil }
+	if err := fence(ctx, validate); err != nil {
+		return execution.CaptureRef{}, fmt.Errorf("admit terminal workspace capture: %w", err)
+	}
+	request := terminalCaptureRequest(key)
+	ref, err := capture(ctx, request)
+	if err != nil {
+		return execution.CaptureRef{}, err
+	}
+	if ref.Request != request || len(ref.SHA256) != 64 {
+		return execution.CaptureRef{}, fmt.Errorf("%w: terminal capture identity", ErrRuntimeBinding)
+	}
+	if err := fence(ctx, validate); err != nil {
+		return execution.CaptureRef{}, fmt.Errorf("adopt sealed terminal workspace capture: %w", err)
+	}
+	return ref, nil
 }
 
 func (handle *RuntimeHandle) teardownContext(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -18,10 +18,10 @@ import (
 	rolepkg "github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 const (
@@ -40,9 +40,9 @@ func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.
 		t.Fatalf("ProcessNext() = (%t, %v), want processed success", processed, err)
 	}
 	want := []string{
-		"claim", "heartbeat", "execution", "paths", "developer-credential", "default-branch", "launch",
+		"claim", "heartbeat", "execution", "developer-credential", "default-branch", "launch",
 		"execution", "open-admission", "prompt", "close-admission", "mcp-drain",
-		"list-unsettled", "cleanup", "reconcile", "settle",
+		"list-unsettled", "cleanup", "terminal-capture", "reconcile", "settle",
 	}
 	if got := fixture.operations.values(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("operations = %v, want %v", got, want)
@@ -52,6 +52,11 @@ func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.
 	}
 	if fixture.outcomes.request.PromptResponse == nil || fixture.outcomes.request.PromptError != "" {
 		t.Fatal("outcome reconciliation did not receive the prompt response")
+	}
+	execution := fixture.store.execution
+	wantKey := executionKeyForTest(execution)
+	if fixture.workspace.key != wantKey || fixture.outcomes.request.Capture.Request.Workspace.Key != wantKey {
+		t.Fatalf("terminal evidence is not bound to the full execution key: %#v", fixture.outcomes.request.Capture)
 	}
 	content := fixture.prompter.request.Content
 	if len(content) != 1 || content[0].Type != "text" || !json.Valid([]byte(content[0].Text)) {
@@ -315,9 +320,95 @@ func TestExecutionWorkerCleanupFailureHandsZeroMutationTurnToStopRecovery(t *tes
 		!containsInOrder(operations, "list-unsettled", "cleanup", "cleanup", "recover", "recover") {
 		t.Fatalf("cleanup recovery operations = %v", operations)
 	}
-	if contains(operations, "reconcile") || contains(operations, "settle") {
+	if contains(operations, "reconcile") || contains(operations, "settle") || contains(operations, "terminal-capture") {
 		t.Fatalf("cleanup failure directly reconciled or settled: %v", operations)
 	}
+}
+
+func TestExecutionWorkerMissingCaptureStillReconcilesOutcomesWithoutWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		role    workflow.Role
+		outcome workflow.TurnOutcome
+	}{
+		{workflow.RoleDeveloper, workflow.TurnOutcomeBlocked}, {workflow.RoleReviewer, workflow.TurnOutcomeApproved},
+	} {
+		t.Run(string(test.role), func(t *testing.T) {
+			fixture := newExecutionWorkerFixture(t, test.role)
+			fixture.workspace.err = errors.New("capture unavailable " + executionDeveloperRepositoryCredential)
+			fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+				if request.Capture != (execution.CaptureRef{}) || request.PromptResponse == nil {
+					t.Fatalf("missing capture changed prompt evidence")
+				}
+				return executionObservation(test.outcome, store.AgentTurnSucceeded)
+			}
+			processed, err := fixture.worker(t).ProcessNext(context.Background())
+			if !processed || err != nil || fixture.store.settled.Outcome != test.outcome {
+				t.Fatalf("missing capture outcome = %t, %v, %#v", processed, err, fixture.store.settled)
+			}
+			if !containsInOrder(fixture.operations.values(), "cleanup", "terminal-capture", "reconcile", "settle") {
+				t.Fatalf("capture lookup before cleanup: %v", fixture.operations.values())
+			}
+		})
+	}
+}
+
+func TestExecutionWorkerMissingCaptureCanDeferTerminalCorroboration(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.workspace.err = errors.New("capture unavailable " + executionDeveloperRepositoryCredential)
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.Capture != (execution.CaptureRef{}) {
+			t.Fatal("failed lookup supplied capture evidence")
+		}
+		request.OnCorroborationFailure(agentturn.TerminalCorroborationFailure{SourceInvocationID: "request-review", Code: "workspace_observation_unavailable", Retryable: true})
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
+	}
+	checkpointStore := &executionCaptureCheckpointStore{executionStore: fixture.store}
+	dependencies := fixture.dependencies()
+	dependencies.Store = checkpointStore
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(context.Background())
+	if !processed || err != nil || checkpointStore.sourceID != "request-review" || checkpointStore.code != "workspace_observation_unavailable" || checkpointStore.promptError != "" ||
+		string(checkpointStore.promptOutcome) != `{"stop_reason":"end_turn"}` || !reflect.DeepEqual(checkpointStore.lease, fixture.store.lease) {
+		t.Fatalf("missing capture checkpoint = processed %t, error %v, source %q, code %q, prompt %s", processed, err, checkpointStore.sourceID, checkpointStore.code, checkpointStore.promptOutcome)
+	}
+	if contains(fixture.operations.values(), "settle") || contains(fixture.operations.values(), "recover") {
+		t.Fatalf("deferred capture directly settled: %v", fixture.operations.values())
+	}
+}
+
+func TestExecutionWorkerCaptureLookupFenceLossPreventsReconciliation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.workspace.err = store.ErrAgentTurnFenceLost
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("capture lookup fence loss = %t, %v", processed, err)
+	}
+	operations := fixture.operations.values()
+	if !containsInOrder(operations, "cleanup", "terminal-capture") || contains(operations, "reconcile") || contains(operations, "settle") || contains(operations, "recover") {
+		t.Fatalf("capture lookup ignored fence loss: %v", operations)
+	}
+}
+
+type executionCaptureCheckpointStore struct {
+	*executionStore
+	lease                       store.AgentTurnLease
+	sourceID, code, promptError string
+	promptOutcome               json.RawMessage
+}
+
+func (database *executionCaptureCheckpointStore) BeginTerminalCorroboration(_ context.Context, lease store.AgentTurnLease, sourceID string, promptOutcome json.RawMessage, promptError, code string) (store.TerminalCorroboration, error) {
+	database.lease, database.sourceID, database.code, database.promptError = lease, sourceID, code, promptError
+	database.promptOutcome = append(json.RawMessage(nil), promptOutcome...)
+	return store.TerminalCorroboration{VerificationJobID: "verification-job"}, nil
+}
+
+func executionKeyForTest(context store.AgentTurnExecutionContext) execution.Key {
+	return execution.Key{AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
+		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion}
 }
 
 func TestExecutionWorkerCleanupRetryCanProveAbsenceAndSettle(t *testing.T) {
@@ -1250,7 +1341,7 @@ func newExecutionWorkerFixture(t *testing.T, role workflow.Role) *executionWorke
 		runtime:              runtime,
 		prompter:             &executionPrompter{operations: operations, response: acp.PromptResponse{StopReason: acp.StopReasonEndTurn}},
 		outcomes:             &executionOutcomes{operations: operations, observation: executionObservation(workflow.TurnOutcomeBlocked, store.AgentTurnSucceeded)},
-		workspace:            &executionWorkspace{operations: operations, paths: workspace.Paths{Workspace: "/workspace", Publication: "/publication", Mise: "/mise"}},
+		workspace:            &executionWorkspace{operations: operations},
 		definition:           builtinDefinition(t),
 		policies:             rolepkg.BuiltinPolicyCatalog(),
 		config: agentturn.ExecutionWorkerConfig{
@@ -1959,13 +2050,18 @@ func (outcomes *executionOutcomes) Reconcile(ctx context.Context, request agentt
 }
 
 type executionWorkspace struct {
+	mutex      sync.Mutex
 	operations *executionOperations
-	paths      workspace.Paths
+	key        execution.Key
+	err        error
 }
 
-func (resolver *executionWorkspace) Paths(string) (workspace.Paths, error) {
-	resolver.operations.add("paths")
-	return resolver.paths, nil
+func (resolver *executionWorkspace) TerminalCapture(_ context.Context, key execution.Key) (execution.CaptureRef, error) {
+	resolver.mutex.Lock()
+	defer resolver.mutex.Unlock()
+	resolver.operations.add("terminal-capture")
+	resolver.key = key
+	return execution.CaptureRef{Request: execution.CaptureRequest{Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture}, SHA256: strings.Repeat("a", 64)}, resolver.err
 }
 
 func executionObservation(outcome workflow.TurnOutcome, status store.AgentTurnStatus) store.AgentTurnSettlementObservation {
