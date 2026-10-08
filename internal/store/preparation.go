@@ -22,6 +22,11 @@ import (
 var (
 	// ErrAgentTurnPreparationFenceLost means preparation ownership or immutable intent is stale.
 	ErrAgentTurnPreparationFenceLost = errors.New("agent turn preparation fence lost")
+	// ErrAgentTurnPreparationVerificationStale means authoritative GitHub
+	// verification observed a head that no longer matches durable state.
+	// The caller must fetch a fresh observation and retry within the existing
+	// preparation job budget; it must not create a Turn on the stale head.
+	ErrAgentTurnPreparationVerificationStale = errors.New("agent turn preparation verification is stale")
 	// ErrAssignmentConfigurationConflict means an existing Participant has a different immutable binding.
 	ErrAssignmentConfigurationConflict = errors.New("agent participant configuration conflict")
 	// ErrAgentParticipantNotFound means the requested Participant does not exist.
@@ -112,10 +117,35 @@ type RolePreparation = ParticipantPreparation
 
 // AgentTurnPreparationSpec supplies Stage-scoped preparations. Developer and Reviewer are
 // compatibility fields for the built-in two-Stage caller and are not persisted eagerly.
+//
+// VerifiedHeadSHA carries an authoritative GitHub Pull Request head observed
+// outside database locks for the durable current Change Proposal.
+// Empty means no verification was performed (initial development without a
+// Change Proposal or a caller without a GitHub verifier); the preparation
+// then requires the job's expected head to match the stored head.
+// A nonempty value repairs a stale stored head transactionally before Turn
+// creation and scopes the new Turn to the verified head.
 type AgentTurnPreparationSpec struct {
-	Stages    map[workflow.StageID]ParticipantPreparation
-	Developer RolePreparation
-	Reviewer  RolePreparation
+	Stages           map[workflow.StageID]ParticipantPreparation
+	Developer        RolePreparation
+	Reviewer         RolePreparation
+	VerifiedHeadSHA  string
+	VerifiedPRNumber int64
+	VerifiedPRID     int64
+}
+
+// ActiveChangeProposal is the durable current Change Proposal association used
+// for authoritative GitHub verification before Turn creation.
+type ActiveChangeProposal struct {
+	PullRequestID     int64
+	PullRequestNumber int64
+	RepositoryID      int64
+	RepositoryOwner   string
+	RepositoryName    string
+	HeadRef           string
+	HeadSHA           string
+	BaseRef           string
+	BaseSHA           string
 }
 
 // AgentParticipant is the durable profile identity participating in one Workflow generation.
@@ -278,9 +308,12 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 		return AgentTurnPreparationCommit{}, err
 	}
 	profile := participantPreparation.Profile
-	changeProposalID, err := store.lockPreparationWorkflow(ctx, tx, job, payload)
+	changeProposalID, verifiedHead, err := store.lockPreparationWorkflowVerified(ctx, tx, job, payload, spec)
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
+	}
+	if verifiedHead != "" {
+		payload.ExpectedHeadSHA = verifiedHead
 	}
 	participant, stageAssignment, err := ensurePreparationParticipant(ctx, tx, job.ID, job.WorkflowID, payload, participantPreparation)
 	if err != nil {
@@ -437,6 +470,11 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 	if err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("enqueue prepared Agent Turn: %w", err)
 	}
+	if spec.VerifiedHeadSHA != "" {
+		if err := store.enqueueVerifiedPreparationLabelsTx(ctx, tx, job, payload); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+	}
 	jobResult, err := json.Marshal(map[string]any{
 		"agent_participant_id": participant.ID, "agent_assignment_id": participant.ID, "agent_session_id": session.ID,
 		"agent_turn_id": turnID, "execution_job_id": executionJobID, "execution_epoch": executionEpoch,
@@ -564,8 +602,31 @@ func (store *Store) AcknowledgeAgentTurnPreparationFailure(ctx context.Context, 
 	if err != nil || !store.validAgentTurnPreparationPayload(payload, job) {
 		return AgentTurnPreparationFailureAcknowledgement{}, ErrAgentTurnPreparationFenceLost
 	}
+	eventRevision := payload.Revision
 	if _, err := store.lockPreparationWorkflow(ctx, tx, job, payload); err != nil {
-		return AgentTurnPreparationFailureAcknowledgement{}, err
+		if !errors.Is(err, ErrAgentTurnPreparationFenceLost) {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		// A synchronization (or another applied transition) may have superseded
+		// the observation while it was in flight. Re-stage superseded-but-valid
+		// observations against current state instead of stranding the job.
+		// Supersession is decided from the durable fences, not only the error
+		// sentinel: a retryable external failure (such as a transient GitHub
+		// verification error) racing with a committed transition must also be
+		// discarded and reconciled again through bounded recovery.
+		if !retryable && !isSupersededPreparationObservation(cause) {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		refreshed, currentRevision, ok, refreshErr := store.refreshSupersededPreparationTx(ctx, tx, job, payload)
+		if refreshErr != nil {
+			return AgentTurnPreparationFailureAcknowledgement{}, refreshErr
+		}
+		if !ok {
+			return AgentTurnPreparationFailureAcknowledgement{}, err
+		}
+		payload = refreshed
+		eventRevision = currentRevision
+		retryable = true
 	}
 	retryScheduled := retryable && job.AttemptCount < job.MaxAttempts
 	attemptResult, err := tx.Exec(ctx, `
@@ -610,7 +671,7 @@ SELECT EXISTS (
 		decision := store.reducer.Reduce(snapshot, workflow.AgentTurnPreparationFailedEvent{
 			EventMetadata: workflow.EventMetadata{
 				ID: job.ID, ObservedAt: job.CreatedAt, WorkItem: snapshot.WorkItem,
-				ExpectedRevision: uint64(payload.Revision),
+				ExpectedRevision: uint64(eventRevision),
 			},
 			Role: payload.Role, Diagnostic: cause.Error(), AssignmentsExist: assignmentsExist,
 		})
@@ -669,6 +730,31 @@ WHERE id = $1 AND status = 'CREATING' AND acp_session_id IS NULL`, session.ID, a
 		return err
 	})
 	return bound, err
+}
+
+// GetActiveChangeProposal returns the durable current Change Proposal for
+// authoritative GitHub verification, or nil when the Workflow has no Change
+// Proposal yet (initial development). It performs no locking; the caller must
+// re-verify association and head transactionally before Turn creation.
+func (store *Store) GetActiveChangeProposal(ctx context.Context, workflowID string) (*ActiveChangeProposal, error) {
+	if !validUUID(workflowID) {
+		return nil, ErrAgentTurnPreparationFenceLost
+	}
+	var proposal ActiveChangeProposal
+	err := store.pool.QueryRow(ctx, `
+SELECT pull_request_id, pull_request_number, repository_id, repository_owner,
+       repository_name, head_ref, head_sha, base_ref, base_sha
+FROM change_proposals WHERE workflow_id = $1 AND active`, workflowID).Scan(
+		&proposal.PullRequestID, &proposal.PullRequestNumber, &proposal.RepositoryID,
+		&proposal.RepositoryOwner, &proposal.RepositoryName, &proposal.HeadRef,
+		&proposal.HeadSHA, &proposal.BaseRef, &proposal.BaseSHA)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active Change Proposal: %w", err)
+	}
+	return &proposal, nil
 }
 
 // GetAgentParticipant returns one durable Participant record.
@@ -1144,6 +1230,193 @@ SELECT EXISTS (
 		return "", ErrAgentTurnPreparationFenceLost
 	}
 	return proposalID, nil
+}
+
+// lockPreparationWorkflowVerified applies authoritative GitHub verification
+// before Turn creation. Without verification it preserves the strict
+// expected-head fence. With verification it repairs a stale stored head
+// transactionally and scopes the Turn to the verified head, discards a stale
+// job payload when durable state already advanced to the verified head, and
+// requests a fresh observation (retryable) when the verification itself is
+// stale. Association changes remain fenced as permanent preparation loss,
+// which the worker escalates to a Human Handoff without creating a Turn.
+func (store *Store) lockPreparationWorkflowVerified(ctx context.Context, tx pgx.Tx, job Job, payload agentTurnPreparationPayload, spec AgentTurnPreparationSpec) (string, string, error) {
+	if spec.VerifiedHeadSHA == "" {
+		proposalID, err := store.lockPreparationWorkflow(ctx, tx, job, payload)
+		return proposalID, "", err
+	}
+	if !validVerifiedHeadSHA(spec.VerifiedHeadSHA) || spec.VerifiedPRID <= 0 || spec.VerifiedPRNumber <= 0 {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	var status, assignmentStatus, runtimeState string
+	var revision int64
+	if err := tx.QueryRow(ctx, `
+SELECT status, state_revision, desired_assignment_status, desired_runtime_state
+FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(&status, &revision, &assignmentStatus, &runtimeState); err != nil ||
+		revision != payload.Revision || !workflowAllowsTurns(status) || assignmentStatus != "ACTIVE" || runtimeState != "ACTIVE" {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(payload.Stage)
+	if !ok || string(stage.State) != status || stage.Role != payload.Role || !definition.AcceptsPurpose(payload.Stage, payload.Purpose) {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	var active bool
+	var currentStage workflow.StageID
+	if err := tx.QueryRow(ctx, `SELECT active, current_stage FROM workflow_attempts WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, job.WorkflowAttemptID, job.WorkflowID).Scan(&active, &currentStage); err != nil || !active || currentStage != payload.Stage {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM agent_turns WHERE workflow_id = $1 AND active
+)`, job.WorkflowID).Scan(&active); err != nil || active {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	var proposalID, storedHead string
+	var storedPRID, storedPRNumber int64
+	err := tx.QueryRow(ctx, `SELECT id::text, head_sha, pull_request_id, pull_request_number FROM change_proposals WHERE workflow_id = $1 AND active FOR UPDATE`, job.WorkflowID).Scan(&proposalID, &storedHead, &storedPRID, &storedPRNumber)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if storedPRID != spec.VerifiedPRID || storedPRNumber != spec.VerifiedPRNumber {
+		return "", "", ErrAgentTurnPreparationFenceLost
+	}
+	switch {
+	case storedHead == payload.ExpectedHeadSHA && storedHead == spec.VerifiedHeadSHA:
+		return proposalID, "", nil
+	case storedHead == payload.ExpectedHeadSHA && storedHead != spec.VerifiedHeadSHA:
+		if _, err := tx.Exec(ctx, `UPDATE change_proposals SET head_sha = $2, ready_for_sha = NULL, updated_at = clock_timestamp() WHERE id = $1`, proposalID, spec.VerifiedHeadSHA); err != nil {
+			return "", "", fmt.Errorf("repair verified Change Proposal head: %w", err)
+		}
+		return proposalID, spec.VerifiedHeadSHA, nil
+	case storedHead != payload.ExpectedHeadSHA && storedHead == spec.VerifiedHeadSHA:
+		return proposalID, spec.VerifiedHeadSHA, nil
+	default:
+		return "", "", ErrAgentTurnPreparationVerificationStale
+	}
+}
+
+// enqueueVerifiedPreparationLabelsTx publishes the visible active-state labels
+// once authoritative verification has succeeded and the Turn is allocated.
+// Activations with an existing Change Proposal defer their state labels at
+// trigger time (keeping the handoff/ready labels while verification is
+// pending, retrying, or about to fail), so this is the first moment the
+// orchestrator may advertise Developer/Reviewer activity. The job converges
+// current Workflow state like any label reconciliation and consumes the run
+// marker; handoff decisions carry their own label actions when verification
+// never succeeds. Only verified preparations enqueue it, so initial
+// development and existing unverified callers keep their trigger-time labels.
+func (store *Store) enqueueVerifiedPreparationLabelsTx(ctx context.Context, tx pgx.Tx, job Job, payload agentTurnPreparationPayload) error {
+	stage, ok := store.reducer.Definition().Stage(payload.Stage)
+	if !ok {
+		return ErrAgentTurnPreparationFenceLost
+	}
+	labelPayload, err := json.Marshal(map[string]any{
+		"state": string(stage.State), "ready_for_sha": "", "consume_run": true, "revision": payload.Revision,
+	})
+	if err != nil {
+		return fmt.Errorf("encode verified preparation labels: %w", err)
+	}
+	if _, err := insertJobTx(ctx, tx, jobInsert{
+		queue: WorkflowActionQueue, kind: ReconcileGitHubLabelsJobKind, payload: labelPayload,
+		maxAttempts: 3, idempotencyKey: "prepare-agent-turn:" + job.ID + ":reconcile-github-labels",
+		scope: jobInsertScope{workflowID: job.WorkflowID, workflowAttemptID: job.WorkflowAttemptID},
+	}); err != nil {
+		return fmt.Errorf("enqueue verified preparation labels: %w", err)
+	}
+	return nil
+}
+
+func validVerifiedHeadSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if character >= '0' && character <= '9' {
+			continue
+		}
+		lower := character | 0x20
+		if lower < 'a' || lower > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
+// isSupersededPreparationObservation reports whether a preparation failure
+// may reflect a committed transition (such as a tracking-only synchronization)
+// superseding the observation rather than a terminal fence such as closure,
+// cancellation, or a rejected Change Proposal identity.
+func isSupersededPreparationObservation(cause error) bool {
+	return errors.Is(cause, ErrAgentTurnPreparationFenceLost) ||
+		errors.Is(cause, ErrAgentTurnPreparationVerificationStale)
+}
+
+// refreshSupersededPreparationTx re-stages a superseded preparation job against
+// current durable state: the live revision and stored Change Proposal head.
+// It preserves closure, association, cancellation, and active-Turn restrictions
+// by only refreshing while the Workflow still allows Turns for the same active
+// attempt, Stage, and Role with no active Turn and an active Change Proposal.
+// Callers reschedule the refreshed job within its existing attempt budget, so
+// racing observations are discarded and reconciled again through bounded
+// recovery instead of stranding the job or launching a Turn on stale metadata.
+func (store *Store) refreshSupersededPreparationTx(ctx context.Context, tx pgx.Tx, job Job, payload agentTurnPreparationPayload) (agentTurnPreparationPayload, int64, bool, error) {
+	var status, assignmentStatus, runtimeState string
+	var revision int64
+	if err := tx.QueryRow(ctx, `
+SELECT status, state_revision, desired_assignment_status, desired_runtime_state
+FROM workflows WHERE id = $1`, job.WorkflowID).Scan(&status, &revision, &assignmentStatus, &runtimeState); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if revision == payload.Revision || !workflowAllowsTurns(status) || assignmentStatus != "ACTIVE" || runtimeState != "ACTIVE" {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	definition := store.reducer.Definition()
+	stage, ok := definition.Stage(payload.Stage)
+	if !ok || string(stage.State) != status || stage.Role != payload.Role || !definition.AcceptsPurpose(payload.Stage, payload.Purpose) {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	var active bool
+	var currentStage workflow.StageID
+	if err := tx.QueryRow(ctx, `SELECT active, current_stage FROM workflow_attempts WHERE id = $1 AND workflow_id = $2`, job.WorkflowAttemptID, job.WorkflowID).Scan(&active, &currentStage); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agentTurnPreparationPayload{}, 0, false, nil
+		}
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if !active || currentStage != payload.Stage {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM agent_turns WHERE workflow_id = $1 AND active
+)`, job.WorkflowID).Scan(&active); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	if active {
+		return agentTurnPreparationPayload{}, 0, false, nil
+	}
+	var headSHA string
+	if err := tx.QueryRow(ctx, `SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active`, job.WorkflowID).Scan(&headSHA); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agentTurnPreparationPayload{}, 0, false, nil
+		}
+		return agentTurnPreparationPayload{}, 0, false, err
+	}
+	refreshed := payload
+	refreshed.Revision = revision
+	refreshed.ExpectedHeadSHA = headSHA
+	refreshedPayload, err := json.Marshal(refreshed)
+	if err != nil {
+		return agentTurnPreparationPayload{}, 0, false, fmt.Errorf("encode refreshed preparation payload: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jobs SET payload = $2, updated_at = clock_timestamp() WHERE id = $1`, job.ID, refreshedPayload); err != nil {
+		return agentTurnPreparationPayload{}, 0, false, fmt.Errorf("re-stage superseded preparation payload: %w", err)
+	}
+	return refreshed, revision, true, nil
 }
 
 func lockAgentTurnPreparationWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) error {

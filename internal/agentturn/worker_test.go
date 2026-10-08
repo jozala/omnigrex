@@ -295,6 +295,10 @@ func TestWorkerClassifiesPreparationFailuresAndRedactsCredential(t *testing.T) {
 		{name: "request timeout", failure: &githubapi.APIError{StatusCode: 408, Message: "request timed out token-secret"}, wantRetryable: true, wantDelay: 2 * time.Second},
 		{name: "too many requests", failure: &githubapi.APIError{StatusCode: 429, Message: "rate limited token-secret"}, wantRetryable: true, wantDelay: 2 * time.Second},
 		{name: "transient", failure: transientWorkerError{message: "API unavailable token-secret"}, wantRetryable: true, wantDelay: 2 * time.Second},
+		{name: "stale verification observation", failure: store.ErrAgentTurnPreparationVerificationStale, wantRetryable: true, wantDelay: 2 * time.Second},
+		{name: "verification failed", failure: agentturn.ErrChangeProposalVerificationFailed, wantDelay: 2 * time.Second},
+		{name: "stale verification observation", failure: store.ErrAgentTurnPreparationVerificationStale, wantRetryable: true, wantDelay: 2 * time.Second},
+		{name: "verification failed", failure: agentturn.ErrChangeProposalVerificationFailed, wantDelay: 2 * time.Second},
 		{name: "rate limited", failure: &githubapi.RateLimitError{APIError: &githubapi.APIError{Message: "rate limited token-secret"}, RetryAfter: 7 * time.Second}, wantRetryable: true, wantDelay: 7 * time.Second},
 		{name: "unknown infrastructure", failure: errors.New("database unavailable token-secret"), wantRetryable: true, wantDelay: 2 * time.Second},
 	}

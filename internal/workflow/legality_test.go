@@ -27,7 +27,7 @@ func TestStateEventLegalityIsExhaustive(t *testing.T) {
 		)},
 		{name: "synchronization", make: matrixSynchronization, want: dispositions(
 			workflow.DispositionUnrelated, workflow.DispositionIllegal, workflow.DispositionDeferred, workflow.DispositionDeferred,
-			workflow.DispositionApplied, workflow.DispositionIllegal, workflow.DispositionIllegal, workflow.DispositionIllegal,
+			workflow.DispositionApplied, workflow.DispositionApplied, workflow.DispositionIllegal, workflow.DispositionIllegal,
 		)},
 		{name: "review observed", make: matrixReviewObserved, want: dispositions(
 			workflow.DispositionUnrelated, workflow.DispositionUnrelated, workflow.DispositionDeferred, workflow.DispositionDeferred,
@@ -265,6 +265,7 @@ func snapshotForState(state workflow.State) workflow.Snapshot {
 		snapshot := baseSnapshot(state, 1)
 		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
 		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-1")
 		return snapshot
 	case workflow.StateClosing:
 		snapshot := developingSnapshot(nil)

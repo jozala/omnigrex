@@ -695,6 +695,8 @@ The third accepted changes-requesting review creates a Human Handoff.
 Re-adding `omnigrex:run` to the Issue or to the current Change Proposal creates a new Workflow Attempt, resets both budgets, and reuses retained Agent Sessions when possible.
 Accepted Pull Request commands consume the trigger and reconcile state labels on both the Issue and the current Pull Request through the existing durable label worker.
 Rejected Pull Request commands leave labels unchanged.
+Pushes to the current Change Proposal during a Human Handoff only update its tracked head and preserve the handoff; they never resume automation on their own.
+Each reactivation then verifies the current GitHub Pull Request (identity, open status, head and base branches) before its first Turn and repairs a stale tracked head, so no new push is needed after a previously rejected synchronization. See [decision 0006](./decisions/0006-track-heads-without-resuming-work.md).
 The default Agent Turn timeout is two hours, and the default global Agent Turn concurrency is two.
 
 ## Session Retention

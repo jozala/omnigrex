@@ -71,6 +71,45 @@ func TestLabelWorkerClaimsExactKindAndReconcilesLatestStateOnIssueAndPullRequest
 	}
 }
 
+func TestLabelWorkerDefersActiveLabelsWhileVerificationPending(t *testing.T) {
+	effect := testEffect(workflow.StateDeveloping, 3)
+	effect.JobRevision = 2
+	effect.VerificationPending = true
+	workerStore := newFakeVisibleEffectStore(store.ReconcileGitHubLabelsJobKind, effect)
+	api := newFakeVisibleEffectAPI()
+	api.issueLabels[17] = []Label{{Name: string(StateRun)}, {Name: string(StateNeedsHuman)}, {Name: "priority:high"}}
+	worker := newTestLabelWorker(t, workerStore, api, testWorkerConfig())
+
+	processed, err := worker.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want processed", processed, err)
+	}
+	assertLabelNames(t, api.issueLabels[17], string(StateRun), string(StateNeedsHuman), "priority:high")
+	if !workerStore.acknowledged || workerStore.failure != nil || !strings.Contains(string(workerStore.ackResult), "deferred_pending_verification") {
+		t.Errorf("acknowledgement = acknowledged %t failure %v result %s, want deferred success",
+			workerStore.acknowledged, workerStore.failure, workerStore.ackResult)
+	}
+}
+
+func TestLabelWorkerAppliesActiveLabelsAfterVerificationSucceeds(t *testing.T) {
+	effect := testEffect(workflow.StateDeveloping, 3)
+	effect.JobRevision = 2
+	effect.VerificationPending = false
+	workerStore := newFakeVisibleEffectStore(store.ReconcileGitHubLabelsJobKind, effect)
+	api := newFakeVisibleEffectAPI()
+	api.issueLabels[17] = []Label{{Name: string(StateRun)}, {Name: string(StateNeedsHuman)}, {Name: "priority:high"}}
+	worker := newTestLabelWorker(t, workerStore, api, testWorkerConfig())
+
+	processed, err := worker.ProcessNext(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext() = (%t, %v), want processed", processed, err)
+	}
+	assertLabelNames(t, api.issueLabels[17], "priority:high", string(StateDeveloping))
+	if !workerStore.acknowledged || workerStore.failure != nil {
+		t.Errorf("acknowledgement = acknowledged %t failure %v, want success", workerStore.acknowledged, workerStore.failure)
+	}
+}
+
 func TestLabelWorkerPRReadyHeadRaceClearsManagedStateAndRetries(t *testing.T) {
 	effect := testEffect(workflow.StatePRReady, 4)
 	effect.ReadyForSHA = testReadySHA

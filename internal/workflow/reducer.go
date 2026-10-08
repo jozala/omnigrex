@@ -412,14 +412,25 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	next.ResumeRole = ""
 	next.State = stage.State
 	next.Revision++
-	actions = append(actions,
-		CreateAttemptAction{Attempt: attempt},
-		ConsumeRunLabelAction{},
-		ReconcileLabelsAction{State: next.State},
-	)
+	actions = append(actions, CreateAttemptAction{Attempt: attempt})
+	// Authoritative GitHub verification runs in preparation before the first
+	// Turn. While it is pending, keep the handoff/ready labels: the label
+	// worker converges current Workflow state, so enqueueing active-state
+	// labels here would advertise Developer/Reviewer activity before
+	// verification succeeds. The successful preparation enqueues the
+	// active-state labels; any later state reconciliation (including handoff
+	// decisions) converges current state and drops the run marker.
+	deferLabels := next.ChangeProposal != nil && (snapshot.State == StateNeedsHuman || snapshot.State == StatePRReady)
+	if !deferLabels {
+		actions = append(actions,
+			ConsumeRunLabelAction{},
+			ReconcileLabelsAction{State: next.State},
+		)
+	}
 	if event.PriorTerminalTurnID != "" && snapshot.State == StateNeedsHuman &&
 		event.PriorTerminalStage == stage.ID && event.PriorTerminalRole == stage.Role &&
-		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew {
+		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew &&
+		event.PriorTerminalExpectedHeadSHA == head {
 		actions = append(actions, EnqueueTerminalRevalidationAction{SourceTurnID: event.PriorTerminalTurnID})
 	} else {
 		actions = append(actions, EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: purpose, ExpectedHeadSHA: head})
@@ -764,6 +775,15 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 	next.ChangeProposal.HeadSHA = event.HeadSHA
 	next.ChangeProposal.ReadyForSHA = ""
 	next.ActiveTurn = nil
+	if snapshot.State == StateNeedsHuman {
+		if _, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage); !stageExists {
+			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+		}
+		next.Revision++
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
+			ReconcileLabelsAction{State: StateNeedsHuman},
+		}}
+	}
 	stage, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 	if !stageExists {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
