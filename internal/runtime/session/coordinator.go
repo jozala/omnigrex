@@ -11,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	"github.com/jozala/omnigrex/internal/store"
 )
@@ -74,12 +75,14 @@ const (
 )
 
 // PrepareRequest carries an acquired Agent Turn and its corresponding durable Session.
-// StatePath must identify the caller-owned assignment-isolated Runtime Process mount.
+// Production supplies State. StatePath is retained only for direct OpenCode
+// qualification fixtures until the Step 17 removal of the legacy runtime.
 type PrepareRequest struct {
 	Lease                 store.AgentTurnLease
 	Session               store.AgentSession
 	Client                AgentClient
 	StatePath             string
+	State                 execution.StateRef
 	MCPServers            []acp.MCPServer
 	AdditionalDirectories []string
 	Configuration         opencode.SessionConfiguration
@@ -380,7 +383,12 @@ func agentEventContext(lease store.AgentTurnLease, durable store.AgentSession) a
 }
 
 func validateRequest(request PrepareRequest) error {
-	if request.StatePath == "" || request.StatePath != request.Session.RuntimeStatePath {
+	if request.State != (execution.StateRef{}) {
+		if request.State.Validate() != nil || request.State.ParticipantID != request.Session.AgentAssignmentID || request.State.SessionID != request.Session.ID ||
+			request.State.RuntimeProfileSHA256 != request.Session.RuntimeProfileContentSHA256 || request.State.Image != request.Session.RuntimeImageDigest {
+			return ErrStatePathMismatch
+		}
+	} else if request.StatePath == "" || request.StatePath != request.Session.RuntimeStatePath {
 		return ErrStatePathMismatch
 	}
 	if len(request.AdditionalDirectories) != 0 {

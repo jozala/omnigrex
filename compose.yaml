@@ -119,6 +119,7 @@ services:
       OMNIGREX_DOCKER_AGENT_NETWORK: omnigrex-agent
       OMNIGREX_WORKSPACE_VOLUME: omnigrex-workspaces
       OMNIGREX_RUNTIME_STATE_VOLUME: omnigrex-runtime-state
+      OMNIGREX_RUNTIME_STATE_ROOT: /var/lib/omnigrex/runtime-state
       OMNIGREX_MISE_VOLUME: omnigrex-mise
       OMNIGREX_WORKSPACE_ROOT: /var/lib/omnigrex/workspaces
 

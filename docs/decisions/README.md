@@ -18,6 +18,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0008: Keep workspace capture separate from publication policy](0008-keep-workspace-capture-separate-from-publication-policy.md) | Accepted | 2026-10-07 |
 | [0009: Pin Participant images and use working-revision tools](0009-pin-participant-images-and-use-working-revision-tools.md) | Accepted | 2026-10-07 |
 | [0010: Seal portable workspace evidence before publication](0010-seal-portable-workspace-evidence-before-publication.md) | Accepted | 2026-10-08 |
+| [0011: Bind retained state and validate offline Session archives](0011-bind-retained-state-and-validate-offline-session-archives.md) | Accepted | 2026-10-08 |
 
 ## Existing architectural decisions
 

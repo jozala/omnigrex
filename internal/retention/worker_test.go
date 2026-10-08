@@ -343,7 +343,8 @@ type recordingCleaner struct {
 	canceled           bool
 }
 
-func (cleaner *recordingCleaner) EnsureAbsent(ctx context.Context, assignmentID, path string) error {
+func (cleaner *recordingCleaner) CollectParticipant(ctx context.Context, assignmentID string) error {
+	path := assignmentPath(assignmentID)
 	cleaner.mutex.Lock()
 	cleaner.calls = append(cleaner.calls, cleanupCall{assignmentID: assignmentID, path: path})
 	if cleaner.store != nil {

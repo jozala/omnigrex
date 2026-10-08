@@ -23,6 +23,7 @@ const (
 	defaultMiseVolume                  = "omnigrex-mise"
 	defaultWorkspaceRoot               = "/var/lib/omnigrex/workspaces"
 	defaultWorkspaceCaptureRoot        = "/var/lib/omnigrex/runtime-state/workspace-captures"
+	defaultRuntimeStateRoot            = "/var/lib/omnigrex/runtime-state"
 	defaultMiseRoot                    = "/var/lib/omnigrex/mise"
 	defaultMCPAddr                     = "omnigrex-mcp:8081"
 	defaultMCPEndpointURL              = "http://omnigrex-mcp:8081/mcp"
@@ -67,6 +68,7 @@ type Config struct {
 	MiseVolume                  string
 	WorkspaceRoot               string
 	WorkspaceCaptureRoot        string
+	RuntimeStateRoot            string
 	MiseRoot                    string
 	MCPAddr                     string
 	MCPEndpointURL              string
@@ -147,6 +149,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MiseVolume:                             valueOrDefault(getenv("OMNIGREX_MISE_VOLUME"), defaultMiseVolume),
 		WorkspaceRoot:                          valueOrDefault(getenv("OMNIGREX_WORKSPACE_ROOT"), defaultWorkspaceRoot),
 		WorkspaceCaptureRoot:                   valueOrDefault(getenv("OMNIGREX_WORKSPACE_CAPTURE_ROOT"), defaultWorkspaceCaptureRoot),
+		RuntimeStateRoot:                       valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_ROOT"), defaultRuntimeStateRoot),
 		MiseRoot:                               valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
 		MCPAddr:                                valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
 		MCPEndpointURL:                         valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
@@ -203,6 +206,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{name: "OMNIGREX_WORKSPACE_ROOT", value: config.WorkspaceRoot},
 		{name: "OMNIGREX_WORKSPACE_CAPTURE_ROOT", value: config.WorkspaceCaptureRoot},
+		{name: "OMNIGREX_RUNTIME_STATE_ROOT", value: config.RuntimeStateRoot},
 		{name: "OMNIGREX_MISE_ROOT", value: config.MiseRoot},
 	} {
 		if !filepath.IsAbs(root.value) || filepath.Clean(root.value) != root.value {

@@ -369,7 +369,7 @@ func TestAssignmentRetentionFinalAttemptCrashAfterDeletionContinuesToFinalize(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cleaner.EnsureAbsent(ctx, fixture.assignmentID, canonicalRuntimePath(fixture.assignmentID)); err != nil {
+	if err := cleaner.CollectParticipant(ctx, fixture.assignmentID); err != nil {
 		t.Fatalf("simulate final-attempt physical deletion: %v", err)
 	}
 	if len(authorization.Targets) == 0 {
@@ -473,7 +473,8 @@ type integrationRetentionCleaner struct {
 
 const irrevocableRetryWait = 1100 * time.Millisecond
 
-func (cleaner *integrationRetentionCleaner) EnsureAbsent(_ context.Context, assignmentID, path string) error {
+func (cleaner *integrationRetentionCleaner) CollectParticipant(_ context.Context, assignmentID string) error {
+	path := "assignment-" + assignmentID + "/runtime-state"
 	cleaner.mutex.Lock()
 	defer cleaner.mutex.Unlock()
 	cleaner.calls = append(cleaner.calls, integrationCleanupCall{assignmentID: assignmentID, path: path})

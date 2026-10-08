@@ -1720,6 +1720,13 @@ func (database *runtimeStore) RecordAgentTurnUnpromptedCleanup(ctx context.Conte
 
 func (*runtimeStore) ExecutionLedger(store.AgentTurnLease) execution.Ledger { return nil }
 
+func (*runtimeStore) AgentTurnState(context.Context, store.AgentTurnLease) (execution.StateRef, error) {
+	return execution.StateRef{}, nil
+}
+func (*runtimeStore) MarkAgentTurnStateInitialized(context.Context, store.AgentTurnLease, execution.StateRef) error {
+	return nil
+}
+
 func (database *runtimeStore) RecordAgentTurnRuntimeOOM(_ context.Context, _ store.AgentTurnLease, id string, code int) error {
 	*database.operations = append(*database.operations, "oom-record")
 	if database.oomRecordErr == nil {

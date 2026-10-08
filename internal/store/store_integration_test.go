@@ -2222,8 +2222,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 31 {
-		t.Errorf("schema_migrations rows = %d, want 31", count)
+	if count != 32 {
+		t.Errorf("schema_migrations rows = %d, want 32", count)
 	}
 	for version, filename := range map[int]string{
 		1:  "000001_bootstrap.sql",
@@ -2257,6 +2257,7 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		29: "000029_deferred_webhook_retry.sql",
 		30: "000030_execution_reservations.sql",
 		31: "000031_workspace_captures.sql",
+		32: "000032_retained_state_bindings.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2337,8 +2338,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 31 {
-		t.Errorf("migrations applied by Open() = %d, want 31", migrationCount)
+	if migrationCount != 32 {
+		t.Errorf("migrations applied by Open() = %d, want 32", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

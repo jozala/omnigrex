@@ -37,6 +37,7 @@ type TemporaryDirectory struct {
 type Request struct {
 	Key                  Key
 	Workspace            WorkspaceRef
+	State                StateRef
 	WorkflowID           string
 	Image                string
 	Platform             Platform

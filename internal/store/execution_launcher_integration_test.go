@@ -17,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -126,7 +127,14 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 			return err
 		}
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, ACP: acpFactory, Sessions: singleConnectionSessions{}, MemoryBytes: 512 << 20})
+	states, err := docker.NewRetainedState(t.TempDir(), "single-connection-state", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.BindExecutionBackend(ctx, states.Binding()); err != nil {
+		t.Fatal(err)
+	}
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, ACP: acpFactory, Sessions: singleConnectionSessions{}, States: states, MemoryBytes: 512 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

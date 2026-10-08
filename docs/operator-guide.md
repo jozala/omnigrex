@@ -704,6 +704,10 @@ After collection, a new trigger creates a new Assignment Generation whose Stage 
 
 Every active or retained Agent Session stays pinned to its original Runtime Profile image digest.
 Keep every referenced digest available until the corresponding state is garbage-collected.
+Retained Runtime State also has an immutable Backend family, contract version, and storage namespace binding.
+The existing Docker deployment claims its configured runtime-state volume namespace once after migration 000032; changing that configuration later fails instead of attaching different data.
+An initialized Participant state directory that disappears fails availability and launch checks instead of starting an empty conversation store.
+Restore the matching state before resuming work.
 
 ## Backup
 
@@ -770,6 +774,7 @@ Create a unique private recovery-set directory, then write each artifact atomica
 ```
 
 The archive preserves numeric ownership, including Runtime Process UID and GID 10001.
+Migration 000032's Backend and versioned state metadata are part of the PostgreSQL dump and must be restored with the matching state volume.
 The workspace and mise volumes are reproducible caches and are not required for disaster recovery when no Agent Turn is active.
 Archive them separately if local policy requires a complete host checkpoint.
 
@@ -781,6 +786,50 @@ Restart the unchanged deployment after the backup:
 ```sh
 docker compose up -d --wait orchestrator
 ```
+
+### Supplemental Session Exports
+
+Use `omnigrex state export --participant UUID` for a checksummed, ownership-bound archive of one Agent Participant's retained OpenCode Session data.
+Use the exact Participant UUID from the operational ledger, not a Role, Agent Profile name, or ACP Session ID.
+This export is supplemental: it does not replace the coordinated recovery set above because it excludes PostgreSQL and protected Workspace Captures.
+Stop the orchestrator and confirm managed Runtime Processes are stopped as described above before running it.
+The command also rejects active Turns, human prompt leases, irreversible collection, unresolved execution creation, and managed environments without confirmed stop evidence.
+Each command has a ten-minute deadline, and cancellation interrupts blocked archive pipes as well as database operations.
+
+Run the offline command using the same Compose file set and mounted runtime-state volume as the deployment, and publish its output only after successful completion:
+
+```sh
+(
+  set -eu
+  umask 077
+  PARTICIPANT='<canonical-Agent-Participant-UUID>'
+  ARCHIVE="session-${PARTICIPANT}.tar"
+  trap 'rm -f -- "$ARCHIVE.tmp"' EXIT HUP INT TERM
+  docker compose run --rm --no-deps -T --entrypoint /usr/local/bin/omnigrex \
+    orchestrator state export --participant "$PARTICIPANT" > "$ARCHIVE.tmp"
+  mv "$ARCHIVE.tmp" "$ARCHIVE"
+  trap - EXIT HUP INT TERM
+)
+```
+
+The archive carries a versioned manifest, exact Backend and Runtime Profile bindings, file inventory and permissions, and per-file SHA-256 checksums.
+It rejects links, special files, known credential files, partial data, and unsupported formats rather than silently omitting them.
+Maximum file content is 256 MiB, maximum encoded archive is 384 MiB, and maximum inventory is 100,000 entries.
+Keep exports private as with the recovery set.
+
+After restoring the matching PostgreSQL ledger and Backend namespace on a compatible host, restore a supplemental archive only into an absent Participant state resource:
+
+```sh
+PARTICIPANT='<canonical-Agent-Participant-UUID>'
+docker compose run --rm --no-deps -T --entrypoint /usr/local/bin/omnigrex \
+  orchestrator state restore --participant "$PARTICIPANT" < "session-${PARTICIPANT}.tar"
+```
+
+Restore validates the complete artifact in private staging before atomic publication.
+It rejects a different Participant, Backend, namespace, state format, Runtime Profile, or image binding.
+Retrying the same completed restore succeeds; different existing state is never overwritten or merged.
+These commands do not convert conversations, remap storage namespaces, or authorize cross-backend migration.
+Restart the unchanged deployment and run preflight as in the coordinated restore procedure below.
 
 ## Restore
 

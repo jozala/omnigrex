@@ -19,13 +19,14 @@ import (
 	mobyclient "github.com/moby/moby/client"
 )
 
-// ExecutionFactory resolves the transitional Participant-local storage layout.
-// It is constructed only by composition; Steps 05-06 replace these bindings.
+// ExecutionFactory resolves validated retained state and prepared workspace
+// attachments. Tool-storage layout remains transitional until Step 07.
 type ExecutionFactory struct {
 	Network            string
 	WorkspaceVolume    string
 	RuntimeStateVolume string
 	MiseVolume         string
+	States             *RetainedState
 }
 
 func (factory ExecutionFactory) New(request execution.Request, ledger execution.Ledger) (execution.Engine, error) {
@@ -41,7 +42,7 @@ func (factory ExecutionFactory) New(request execution.Request, ledger execution.
 		_ = engine.Close()
 		return nil, errors.New("execution ledger is required")
 	}
-	return &executionEngine{engine: engine, spec: spec, ledger: ledger, key: request.Key}, nil
+	return &executionEngine{engine: engine, spec: spec, ledger: ledger, key: request.Key, states: factory.States}, nil
 }
 
 // Compile translates trusted logical attachments and identity into Docker policy.
@@ -71,9 +72,15 @@ func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolic
 	}
 	labels[executionDigestLabel] = requestDigest(request)
 	root := "assignment-" + key.AssignmentID
+	stateSubpath := root + "/runtime-state"
+	if factory.States != nil {
+		if request.State.Validate() != nil || request.State.Backend != factory.States.Binding() || factory.RuntimeStateVolume != request.State.Backend.Namespace || request.State.ParticipantID != key.AssignmentID || request.State.SessionID != key.AgentSessionID || request.State.Image != request.Image {
+			return RuntimePolicy{}, Spec{}, execution.ErrBindingMismatch
+		}
+	}
 	sources := map[string]VolumeMount{
 		"workspace": {Name: factory.WorkspaceVolume, Subpath: root + "/workspace"},
-		"state":     {Name: factory.RuntimeStateVolume, Subpath: root + "/runtime-state"},
+		"state":     {Name: factory.RuntimeStateVolume, Subpath: stateSubpath},
 		"mise":      {Name: factory.MiseVolume, Subpath: root + "/mise"},
 		"tool-data": {Name: factory.MiseVolume, Subpath: root + "/tool-data"},
 	}
@@ -131,11 +138,17 @@ type executionEngine struct {
 	spec   Spec
 	ledger execution.Ledger
 	key    execution.Key
+	states *RetainedState
 }
 
 func (engine *executionEngine) Create(ctx context.Context, request execution.Request, stderr io.Writer) (execution.Process, error) {
 	if requestDigest(request) != engine.spec.Labels[executionDigestLabel] {
 		return nil, execution.ErrConflict
+	}
+	if engine.states != nil {
+		if err := engine.states.Inspect(ctx, request.State); err != nil {
+			return nil, err
+		}
 	}
 	// Read-only validation must not create an unresolved external-effect record.
 	if err := engine.engine.validateAPI(ctx); err != nil {

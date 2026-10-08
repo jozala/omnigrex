@@ -920,7 +920,7 @@ func newPhaseNineBlockingRetentionCleaner() *phaseNineBlockingRetentionCleaner {
 	return &phaseNineBlockingRetentionCleaner{deleted: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (cleaner *phaseNineBlockingRetentionCleaner) EnsureAbsent(ctx context.Context, _, _ string) error {
+func (cleaner *phaseNineBlockingRetentionCleaner) CollectParticipant(ctx context.Context, _ string) error {
 	cleaner.once.Do(func() { close(cleaner.deleted) })
 	select {
 	case <-cleaner.release:

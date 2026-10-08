@@ -44,6 +44,8 @@ const (
 
 // LauncherStore supplies launch context only under an already-acquired Agent Turn fence.
 type LauncherStore interface {
+	AgentTurnState(context.Context, store.AgentTurnLease) (execution.StateRef, error)
+	MarkAgentTurnStateInitialized(context.Context, store.AgentTurnLease, execution.StateRef) error
 	ExecutionLedger(store.AgentTurnLease) execution.Ledger
 	ValidateTurnFence(context.Context, store.AgentTurnLease) error
 	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
@@ -118,6 +120,7 @@ type LauncherConfig struct {
 	Workspace                RuntimeWorkspace
 	Gateway                  MCPRegistrar
 	Execution                RuntimeEngineFactory
+	States                   execution.RetainedState
 	ACP                      RuntimeACPFactory
 	Sessions                 RuntimeSessionPreparer
 	MemoryBytes              int64
@@ -156,6 +159,7 @@ type Launcher struct {
 	workspace                RuntimeWorkspace
 	gateway                  MCPRegistrar
 	execution                RuntimeEngineFactory
+	states                   execution.RetainedState
 	acp                      RuntimeACPFactory
 	sessions                 RuntimeSessionPreparer
 	memoryBytes              int64
@@ -233,6 +237,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
 		gateway: config.Gateway, execution: config.Execution, acp: config.ACP, sessions: config.Sessions,
+		states:      config.States,
 		memoryBytes: config.MemoryBytes,
 		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
@@ -258,6 +263,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := launcher.store.ValidateTurnFence(ctx, request.Lease); err != nil {
 		return nil, fmt.Errorf("validate Agent Turn fence before launch: %w", err)
 	}
+	var stateRef execution.StateRef
 	execution, err := launcher.store.GetAgentTurnExecutionContext(ctx, request.Lease)
 	if err != nil {
 		return nil, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
@@ -423,10 +429,27 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		request.PublishMCPRenewal(resources.renewMCP)
 	}
 
-	assignmentRoot := "assignment-" + execution.Assignment.ID
-	statePath := assignmentRoot + "/runtime-state"
-	if execution.Assignment.RuntimeStatePath != statePath || execution.Session.RuntimeStatePath != statePath {
-		return nil, fmt.Errorf("%w: runtime state path", ErrRuntimeBinding)
+	if launcher.states != nil {
+		stateRef, err = launcher.store.AgentTurnState(ctx, request.Lease)
+		if err != nil {
+			return nil, err
+		}
+		if stateRef.ParticipantID != key.AssignmentID || stateRef.SessionID != key.AgentSessionID {
+			return nil, ErrRuntimeBinding
+		}
+		if err := launcher.states.Ensure(ctx, stateRef); err != nil {
+			return nil, err
+		}
+		if err := launcher.store.MarkAgentTurnStateInitialized(ctx, request.Lease, stateRef); err != nil {
+			return nil, err
+		}
+	} else {
+		// Direct OpenCode qualification fixtures use the pre-boundary layout.
+		// Production supplies States; remove this compatibility route in Step 17.
+		statePath := "assignment-" + execution.Assignment.ID + "/runtime-state"
+		if execution.Assignment.RuntimeStatePath != statePath || execution.Session.RuntimeStatePath != statePath {
+			return nil, ErrRuntimeBinding
+		}
 	}
 	spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
 		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
@@ -438,6 +461,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
 	spec.Workspace = resources.workspaceRef
+	spec.State = stateRef
 	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine
@@ -499,8 +523,12 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	resources.Client = client
 	resources.sessionPreparationAttempted = true
+	statePath := ""
+	if launcher.states == nil {
+		statePath = execution.Session.RuntimeStatePath
+	}
 	prepared, err := launcher.sessions.Prepare(ctx, session.PrepareRequest{
-		Lease: request.Lease, Session: execution.Session, Client: client, StatePath: statePath,
+		Lease: request.Lease, Session: execution.Session, Client: client, State: stateRef, StatePath: statePath,
 		MCPServers: []acp.MCPServer{registration.Server}, Configuration: rendered.SessionConfiguration(),
 	})
 	if err != nil {

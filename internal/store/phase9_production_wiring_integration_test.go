@@ -222,7 +222,8 @@ type wiringRetentionCleaner struct {
 	path         string
 }
 
-func (cleaner *wiringRetentionCleaner) EnsureAbsent(_ context.Context, assignmentID, path string) error {
+func (cleaner *wiringRetentionCleaner) CollectParticipant(_ context.Context, assignmentID string) error {
+	path := "assignment-" + assignmentID + "/runtime-state"
 	cleaner.assignmentID = assignmentID
 	cleaner.path = path
 	return nil

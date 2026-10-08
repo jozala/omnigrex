@@ -58,6 +58,10 @@ func main() {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction))
+		case "state":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 		default:
 			_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 			os.Exit(2)
@@ -311,24 +315,26 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			logger.Error("close Runtime Process inventory", "error", err)
 		}
 	}()
-	profileContract := openCodeV1.Contract()
-	runtimeStateCleaner, err := dockerruntime.NewAssignmentRuntimeStateCleaner(dockerruntime.AssignmentRuntimeStateCleanerOptions{
-		Image: profileContract.Image,
-		Platform: dockerruntime.Platform{
-			OS: profileContract.Platform.OS, Architecture: profileContract.Platform.Arch,
-		},
-		User: strconv.FormatUint(uint64(profileContract.User.UID), 10) + ":" +
-			strconv.FormatUint(uint64(profileContract.User.GID), 10),
-		RuntimeStateVolume: settings.RuntimeStateVolume,
+	retainedState, err := dockerruntime.NewRetainedState(settings.RuntimeStateRoot, settings.RuntimeStateVolume, database)
+	if err != nil {
+		return fmt.Errorf("configure retained state: %w", err)
+	}
+	contract := openCodeV1.Contract()
+	retainedState, err = retainedState.WithCollector(dockerruntime.AssignmentRuntimeStateCleanerOptions{
+		Image: contract.Image, Platform: dockerruntime.Platform{OS: contract.Platform.OS, Architecture: contract.Platform.Arch},
+		User: strconv.FormatUint(uint64(contract.User.UID), 10) + ":" + strconv.FormatUint(uint64(contract.User.GID), 10), RuntimeStateVolume: settings.RuntimeStateVolume,
 	})
 	if err != nil {
-		return fmt.Errorf("configure Assignment runtime-state cleanup: %w", err)
+		return err
 	}
 	defer func() {
-		if err := runtimeStateCleaner.Close(); err != nil {
-			logger.Error("close Assignment runtime-state cleanup", "error", err)
+		if err := retainedState.Close(); err != nil {
+			logger.Error("close retained state collector", "error", err)
 		}
 	}()
+	if err := database.BindExecutionBackend(ctx, retainedState.Binding()); err != nil {
+		return fmt.Errorf("bind execution backend: %w", err)
+	}
 	exactImages, err := dockerruntime.NewExactImageAvailability()
 	if err != nil {
 		return fmt.Errorf("configure exact Runtime Profile image availability: %w", err)
@@ -374,10 +380,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
-		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
+		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway, States: retainedState,
 		Execution: dockerruntime.ExecutionFactory{
 			Network: settings.DockerAgentNetwork, WorkspaceVolume: settings.WorkspaceVolume,
-			RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume,
+			RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume, States: retainedState,
 		}, ACP: agentturn.ProductionACPFactory{}, Sessions: sessions,
 		MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			Logger:         logger,
@@ -512,7 +518,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
 	}
-	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(runtimeStateCleaner, workspaces), retention.WorkerConfig{
+	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: retainedState}, workspaces), retention.WorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
 		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,
@@ -559,7 +565,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}()
 
 	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, dockerProbe.Check,
-		profileAvailability.Check, func(ctx context.Context) error {
+		profileAvailability.Check, retainedState.Check, func(ctx context.Context) error {
 			return database.CheckPendingRuntimeProfileCompatibility(ctx, openCodeV1)
 		})
 	return runServices(ctx,
