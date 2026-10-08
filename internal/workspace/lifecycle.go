@@ -33,7 +33,6 @@ type Options struct {
 	PublicationRoot string
 	MiseRoot        string
 	GitExecutable   string
-	MiseExecutable  string
 	CaptureRoot     string
 	CaptureSource   execution.WorkspaceSource
 	CaptureLedger   execution.CaptureLedger
@@ -50,7 +49,6 @@ type Lifecycle struct {
 	publicationRoot  string
 	miseRoot         string
 	gitExecutable    string
-	miseExecutable   string
 	locksMu          sync.Mutex
 	publicationLocks map[string]*publicationLockEntry
 	captureRoot      string
@@ -80,10 +78,6 @@ func New(options Options) (*Lifecycle, error) {
 	if gitExecutable == "" {
 		gitExecutable = "git"
 	}
-	miseExecutable := options.MiseExecutable
-	if miseExecutable == "" {
-		miseExecutable = "mise"
-	}
 	captureRoot := options.CaptureRoot
 	if captureRoot == "" {
 		captureRoot = filepath.Join(workspaceRoot, ".captures")
@@ -93,7 +87,7 @@ func New(options Options) (*Lifecycle, error) {
 	}
 	return &Lifecycle{
 		workspaceRoot: workspaceRoot, publicationRoot: publicationRoot, miseRoot: miseRoot,
-		gitExecutable: gitExecutable, miseExecutable: miseExecutable,
+		gitExecutable:    gitExecutable,
 		publicationLocks: make(map[string]*publicationLockEntry),
 		captureRoot:      captureRoot, captureSource: options.CaptureSource,
 		captureLedger: options.CaptureLedger,

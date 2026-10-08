@@ -127,6 +127,11 @@ func (store *ReadOnlyStore) CheckPendingRuntimeProfileCompatibility(ctx context.
 
 func checkPendingRuntimeProfileCompatibility(ctx context.Context, pool *pgxpool.Pool, target runtimeprofile.Profile) error {
 	contract := target.Contract()
+	if contract.RepositoryEnvironment != nil {
+		// Fresh repository environments do not migrate historical Sessions.
+		// Protected binding/image/state readiness checks remain authoritative.
+		return nil
+	}
 	requirement := RuntimeCompatibilityRequirement{
 		Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
 		WorkspacePath: runtimeprofile.StableWorkspacePath,

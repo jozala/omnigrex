@@ -80,8 +80,9 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
 			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
 		},
-		Workspace: "/workspace",
-		PIDsLimit: 128,
+		Workspace:             "/workspace",
+		PIDsLimit:             128,
+		RepositoryEnvironment: &profile.RepositoryEnvironment{Version: 1},
 	}
 	if contract := got.Contract(); !reflect.DeepEqual(contract, want) {
 		t.Fatalf("Contract() = %#v, want %#v", contract, want)

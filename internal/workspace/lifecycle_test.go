@@ -48,8 +48,6 @@ func TestLifecycleOperationsRejectSymlinkedAssignmentMountPaths(t *testing.T) {
 	}{
 		{name: "workspace assignment", operation: "workspace", path: func(paths workspace.Paths) string { return filepath.Dir(paths.Workspace) }},
 		{name: "workspace", operation: "workspace", path: func(paths workspace.Paths) string { return paths.Workspace }},
-		{name: "mise assignment", operation: "mise", path: func(paths workspace.Paths) string { return filepath.Dir(paths.Mise) }},
-		{name: "mise", operation: "mise", path: func(paths workspace.Paths) string { return paths.Mise }},
 		{name: "publication assignment", operation: "publication", path: func(paths workspace.Paths) string { return filepath.Dir(paths.Publication) }},
 		{name: "publication", operation: "publication", path: func(paths workspace.Paths) string { return paths.Publication }},
 	} {
@@ -57,7 +55,7 @@ func TestLifecycleOperationsRejectSymlinkedAssignmentMountPaths(t *testing.T) {
 			root := t.TempDir()
 			lifecycle, err := workspace.New(workspace.Options{
 				WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"),
-				MiseRoot: filepath.Join(root, "mise"), MiseExecutable: "false",
+				MiseRoot: filepath.Join(root, "mise"),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -85,10 +83,6 @@ func TestLifecycleOperationsRejectSymlinkedAssignmentMountPaths(t *testing.T) {
 			switch testCase.operation {
 			case "workspace":
 				_, err = lifecycle.PrepareWorkspace(context.Background(), workspace.Checkout{
-					AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
-				})
-			case "mise":
-				_, err = lifecycle.ProvisionMise(context.Background(), workspace.MiseProvision{
 					AssignmentID: assignmentID, RepositoryURL: fixture.remote, Revision: fixture.first,
 				})
 			case "publication":

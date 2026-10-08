@@ -119,10 +119,10 @@ Install the following software on the deployment host:
 Git and `mise` are not required on a no-clone deployment host.
 Use a separate source checkout with Git and `mise` only when qualifying a Runtime Profile upgrade.
 
-The orchestrator installs repository tools inside its own container before launching Agent Turns, including compiling Go tools declared in `mise.toml`.
-Its Compose memory limit is 2 GiB; allocate enough Docker host memory for that limit plus PostgreSQL and the Runtime Processes.
-Tool installation uses a per-assignment directory in the shared mise volume for scratch space rather than the orchestrator's 16 MiB `/tmp` tmpfs, so the volume also needs room for Go compilation.
-The scratch directory is removed before the Runtime Process starts.
+Repository tools are installed inside the Agent Turn's execution environment from its working checkout, including compiling Go tools declared in `mise.toml`.
+Allocate enough Docker host memory for the orchestrator, PostgreSQL, and the configured Agent Turn limits, including tool compilation.
+Installation uses Participant-local disk-backed mise scratch, which is removed before the agent protocol starts.
+The orchestrator does not contain mise or execute repository installation scripts.
 
 Create the local configuration in the deployment directory:
 
@@ -482,7 +482,7 @@ environment-paths:
 
 Set `OMNIGREX_AGENT_PATH_ENV_ALLOWLIST` to a comma-separated list of approved variable names in the deployment configuration, such as `TMPDIR,GOTMPDIR,GOCACHE,GOPATH`.
 The operator allowlist is shared across Roles; the repository may request only approved names and cannot supply path values.
-Omnigrex always rejects runtime-control and credential-related names such as `OPENCODE_*`, `OMNIGREX_*`, `HOME`, and `PATH` even if listed by the operator.
+Omnigrex always rejects runtime-control and credential-related names such as `PI_*`, `OPENCODE_*`, `OMNIGREX_*`, `NODE_OPTIONS`, `HOME`, and `PATH` even if listed by the operator.
 Without the optional file, `TMPDIR` continues to use the 64 MiB `/tmp/opencode` tmpfs.
 Requested paths are created on the disk-backed mise volume under an isolated Assignment subpath, outside the repository workspace and Change Proposal tree.
 Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-lifecycle caches remain across turns and are removed during Assignment collection.
@@ -520,6 +520,58 @@ The exact digest must already be available to the deployment host's Docker Engin
 Pull it explicitly before startup (see [Deploy](#deploy)).
 Keep every digest referenced by active or retained Agent Sessions available until the corresponding state is garbage-collected.
 The same requirement applies when restoring a backup on another host: restore `.env`, secrets, compatibility artifacts, the deployed commit, and every referenced image digest before changing current data.
+
+### Repository Environments
+
+Optionally publish `.omnigrex/environment.yaml` on the repository's default branch:
+
+```yaml
+version: 1
+image: registry.example/team/development@sha256:<64-lowercase-hex-digest>
+platform: linux/amd64
+requirements:
+  - process-isolation
+  - tool-installation
+```
+
+Replace the example digest with the resolved registry digest of a prebuilt image derived from the current Omnigrex golden image.
+Without this file, new Participants select the deployment's configured OpenCode golden image.
+Each Participant retains its selected exact image, platform, and full versioned contract; later Participants can select newer images even in the same Assignment Generation.
+Retained Participants do not rebind when this file or deployment configuration changes.
+Pre-Step07 Participants continue inside their original images using a bootstrap staged from the configured deployment golden image into read-only-mounted Turn scratch.
+Keep a Step07-capable deployment golden image available for their platform as well as every retained Participant image; an unavailable bootstrap source fails rather than skipping repository tool setup.
+Keep their images available until Session collection, and include PostgreSQL's immutable contract records in the coordinated recovery set.
+
+Build repository images outside Omnigrex using the [example Dockerfile](../agent/environments/example/Dockerfile):
+
+```sh
+docker build --file agent/environments/example/Dockerfile \
+  --build-arg OMNIGREX_GOLDEN_IMAGE=ghcr.io/jozala/omnigrex/opencode@sha256:<golden-digest> \
+  --build-arg EXTRA_APK_PACKAGE='jq=<approved-exact-Alpine-version>' \
+  --tag registry.example/team/development:qualified .
+docker push registry.example/team/development:qualified
+docker image inspect registry.example/team/development:qualified --format '{{index .RepoDigests 0}}'
+```
+
+Use real approved digests and package versions instead of the placeholders, then put the resulting untagged `registry.example/team/development@sha256:...` reference in the environment file.
+Preserve the golden runtime, mise, bootstrap, distribution archive, Git/shell resources, and numeric non-root identity.
+Place additional image-provided tools under `/usr/local/bin` or activate them explicitly through working-revision mise configuration.
+Image labels and ancestry do not replace executable/resource qualification.
+Omnigrex does not build or pull this image automatically; pull its exact digest/platform into the deployment Docker Engine before accepting work.
+Run the existing repository `doctor` command to exercise golden-resource qualification and capability validation before adding the trigger label.
+
+Docker accepts `process-isolation` and `tool-installation` requirements and explicitly rejects `hardware-isolation` and `nested-containers`.
+The latter capabilities are reserved for the later qualified Microsandbox implementation; Omnigrex never mounts the host Docker socket as a fallback.
+Unknown requirements, mutable image tags, unsupported platforms, and unknown YAML fields fail configuration.
+
+Image selection and Agent Profiles use the same trusted default-branch snapshot.
+Tool installation uses the actual working revision for both Developer and Reviewer, including the Change Proposal's mise hooks and scripts.
+This keeps default-branch Profile authority while allowing the Reviewer to test the toolchain declared by the code it reviews.
+Installation occurs in the managed non-root environment before ACP initialization, using disk-backed installation scratch and a separate tool-data attachment for requested caches.
+Repository activation cannot replace protected runtime settings, provider configuration, or loader injection variables, and the agent executable is launched by its absolute qualified path.
+Approved control-plane directory bindings such as `GOCACHE` and `GOPATH` take precedence over conflicting mise activation and retain their configured storage and cleanup lifecycle.
+The existing trusted-repository credential model still applies to repository scripts and development images.
+See the [implementation and qualification evidence](./plans/2026-10-08-repository-environments.md).
 
 ### Agent Turn Memory
 

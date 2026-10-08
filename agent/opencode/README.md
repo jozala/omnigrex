@@ -8,7 +8,8 @@ The process runs as UID and GID `10001` and starts `opencode acp` in `/workspace
 ## Repository Build Tools
 
 The image includes GCC, binutils, musl development headers, and their dependencies so Go tools installed through mise can use cgo and run `go test -race`.
-The orchestrator uses the same APK manifest because it provisions repository tools before launching Runtime Processes.
+Repository tool installation runs inside the managed environment from the working revision for both Roles.
+The orchestrator retains the shared APK manifest for its trusted Git and filesystem helpers, but contains no mise executable and runs no repository installation scripts.
 Go enables cgo automatically when the compiler is available; no image-level `CGO_ENABLED` override is required.
 Repository-specific Go versions remain pinned by the repository tool configuration and installed through mise.
 Use the disk-backed tool directories requested in the repository's Turn configuration for compilation scratch space, build caches, and module caches.
@@ -27,7 +28,7 @@ The writable paths are:
 | --- | --- | --- |
 | Assignment workspace | `/workspace` | Disposable between Agent Turns |
 | OpenCode database and sidecars | `/home/opencode/.local/share/opencode` | Persistent per Agent Assignment |
-| Repository tools installed by mise | `/home/opencode/.local/share/mise` | Persistent per Agent Assignment |
+| Repository tools installed by mise | `/home/opencode/.local/share/mise` | Participant-local attachment; replaced each Agent Turn |
 | Requested tool scratch and caches | `/home/opencode/.local/share/omnigrex-tool-data` | Turn scratch or Assignment cache |
 | Runtime-owned OpenCode configuration | `/home/opencode/.config` | Disposable or read-only injected configuration |
 | OpenCode cache | `/home/opencode/.cache` | Disposable |
@@ -41,6 +42,16 @@ Automatic updates and session sharing are disabled through both environment guar
 The orchestrator composes current platform, Stage, operator, and repository instructions before rendering the custom OpenCode agent prompt on each launch.
 Retained Agent Sessions receive the new deployment guidance when a fresh Runtime Process continues them; composed prompts are not restored from a historical instruction snapshot.
 See [Instruction Ownership and Operator Guidance](../../docs/operator-guide.md#instruction-ownership-and-operator-guidance).
+
+## Golden Repository Environment
+
+The image also supplies `/usr/local/bin/omnigrex-environment` and the pinned OpenCode distribution archive used to verify the installed executable.
+Production launches the absolute bootstrap, which installs and activates working-checkout mise tools before replacing itself with the absolute OpenCode executable.
+The bootstrap protects runtime configuration from image and tool-activation overrides and keeps installation output separate from protocol stdout.
+Admitted control-plane cache and scratch paths remain authoritative when the bootstrap merges mise activation.
+For retained images predating this executable, the backend stages the deployment bootstrap in read-only-mounted Turn scratch while provisioning and Session Continuation remain inside the original image.
+Repository-derived images must preserve these resources and the numeric identity; ancestry and image labels do not prove conformance.
+See [Repository Environments](../../docs/operator-guide.md#repository-environments) for the authoritative construction, selection, qualification, and retained-image procedures.
 
 ## Reviewer Isolation
 

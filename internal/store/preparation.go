@@ -102,6 +102,7 @@ type AgentProfileSnapshot struct {
 type ParticipantPreparation struct {
 	Binding              ParticipantRuntimeBinding
 	RuntimeCompatibility RuntimeCompatibilityRequirement
+	RuntimeContract      json.RawMessage
 	Profile              AgentProfileSnapshot
 	ProfilePath          string
 	TurnConfiguration    json.RawMessage
@@ -276,6 +277,15 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	}
 	if err := validateParticipantPreparation(payload.Role, participantPreparation); err != nil {
 		return AgentTurnPreparationCommit{}, err
+	}
+	if len(participantPreparation.RuntimeContract) != 0 {
+		binding := runtimeBinding(participantPreparation.Binding)
+		if _, err := runtimeprofile.DecodeContract(participantPreparation.RuntimeContract, binding); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO runtime_profile_contracts (content_sha256, contract) VALUES ($1, $2) ON CONFLICT (content_sha256) DO NOTHING`, binding.ContentSHA256, participantPreparation.RuntimeContract); err != nil {
+			return AgentTurnPreparationCommit{}, fmt.Errorf("persist Runtime Profile contract: %w", err)
+		}
 	}
 	profile := participantPreparation.Profile
 	changeProposalID, err := store.lockPreparationWorkflow(ctx, tx, job, payload)

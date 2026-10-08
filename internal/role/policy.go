@@ -17,14 +17,6 @@ const (
 	ReviewerAuthority     CredentialAuthority = "REVIEWER"
 )
 
-// TrustedToolsRevisionPolicy selects which repository revision may supply executable tool configuration.
-type TrustedToolsRevisionPolicy string
-
-const (
-	TurnRevisionTrustedTools  TrustedToolsRevisionPolicy = "TURN_REVISION"
-	DefaultBranchTrustedTools TrustedToolsRevisionPolicy = "DEFAULT_BRANCH"
-)
-
 // OpenCodePolicy owns Role-specific adapter hardening independently from mutable Agent Profile permissions.
 type OpenCodePolicy struct {
 	HardenProjectConfiguration bool
@@ -38,7 +30,6 @@ type Policy struct {
 	RequiresChangeProposal        bool
 	RepositoryCredentialAuthority CredentialAuthority
 	ToolCredentialAuthorities     map[string]CredentialAuthority
-	TrustedToolsRevision          TrustedToolsRevisionPolicy
 	OpenCode                      OpenCodePolicy
 	DiscardWorkspace              bool
 	AllowHumanSessionControl      bool
@@ -108,7 +99,6 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 				"publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
-			TrustedToolsRevision:          TurnRevisionTrustedTools,
 			OpenCode:                      OpenCodePolicy{AllowFileEdits: true},
 			AllowHumanSessionControl:      true,
 		},
@@ -120,7 +110,6 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			},
 			RequiresChangeProposal: true, RepositoryCredentialAuthority: OrchestratorAuthority,
 			ToolCredentialAuthorities: map[string]CredentialAuthority{"submit_review": ReviewerAuthority, "confirm_prior_terminal_intent": ReviewerAuthority},
-			TrustedToolsRevision:      DefaultBranchTrustedTools,
 			OpenCode:                  OpenCodePolicy{HardenProjectConfiguration: true},
 			DiscardWorkspace:          true, AllowHumanSessionControl: true,
 		},
@@ -171,9 +160,8 @@ func validatePolicy(policy Policy) error {
 	if !ValidID(policy.Role) {
 		return errors.New("invalid Role")
 	}
-	if len(policy.MCPTools) == 0 || policy.RepositoryCredentialAuthority != OrchestratorAuthority ||
-		(policy.TrustedToolsRevision != TurnRevisionTrustedTools && policy.TrustedToolsRevision != DefaultBranchTrustedTools) {
-		return errors.New("missing capabilities, credential authority, or trusted-tools revision policy")
+	if len(policy.MCPTools) == 0 || policy.RepositoryCredentialAuthority != OrchestratorAuthority {
+		return errors.New("missing capabilities or credential authority")
 	}
 	seen := make(map[string]struct{}, len(policy.MCPTools))
 	for _, tool := range policy.MCPTools {

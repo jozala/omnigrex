@@ -261,7 +261,6 @@ func TestPrepareSupportsPolicyDefinedRole(t *testing.T) {
 	const architecture workflow.StageID = "architecture"
 	policies, err := role.NewPolicyCatalog([]role.ID{architect}, []role.Policy{{
 		Role: architect, MCPTools: []string{"get_issue"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
-		TrustedToolsRevision: role.TurnRevisionTrustedTools,
 	}})
 	if err != nil {
 		t.Fatal(err)

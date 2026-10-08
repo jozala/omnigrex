@@ -60,6 +60,11 @@ func TestExecutionDigestExcludesCredentialsAndDetectsNonsecretChanges(t *testing
 	if requestDigest(request) != first {
 		t.Fatal("credential bytes entered durable digest")
 	}
+	request.BootstrapImage = "registry.example/bootstrap@sha256:" + strings.Repeat("b", 64)
+	if requestDigest(request) == first {
+		t.Fatal("retained bootstrap source was not bound to the execution specification")
+	}
+	request.BootstrapImage = ""
 	request.Command = []string{"different"}
 	if requestDigest(request) == first {
 		t.Fatal("changed execution content reused digest")
@@ -84,6 +89,17 @@ func TestExecutionCompileRejectsUnsupportedRequirementsAndUnpinnedImages(t *test
 	request.MemoryBytes = 0
 	if _, _, err := factory.Compile(request); !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("missing budget accepted: %v", err)
+	}
+	request = executionTestRequest()
+	request.GoldenResources = true
+	request.Requirements = []execution.Requirement{execution.ToolInstallation}
+	if _, _, err := factory.Compile(request); !errors.Is(err, execution.ErrInvalidSpec) {
+		t.Fatalf("unattached repository tool installation accepted: %v", err)
+	}
+	request.GoldenResources = false
+	request.BootstrapImage = "registry.example/bootstrap:latest"
+	if _, _, err := factory.Compile(request); !errors.Is(err, execution.ErrInvalidSpec) {
+		t.Fatalf("mutable retained bootstrap image accepted: %v", err)
 	}
 }
 
@@ -233,7 +249,7 @@ func TestExecutionRecoversLostSetupDeletionAcknowledgement(t *testing.T) {
 	spec.Labels[executionDigestLabel] = digest
 	spec.Volumes = []VolumeMount{{Name: "state", Subpath: "assignment-" + key.AssignmentID + "/runtime-state", Target: "/state"}}
 	api := &lostSetupDeletionAPI{runtimeAPIFake: newRuntimeAPIFake()}
-	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key)
+	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key, false, "")
 	if failure == nil || api.removeCalls != 1 {
 		t.Fatalf("lost setup deletion = %v, removes %d", failure, api.removeCalls)
 	}

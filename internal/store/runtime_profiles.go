@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -251,6 +252,24 @@ ORDER BY workflow_id, generation, role, id`)
 }
 
 func runtimeProfileCompatibilityMissingForParticipant(ctx context.Context, querier runtimeProfileCompatibilityQuerier, role workflow.Role, target runtimeprofile.Binding, requirement RuntimeCompatibilityRequirement) (bool, error) {
+	// A versioned repository environment creates an independent Participant and
+	// Session. It never consumes another image's state. Resource qualification is
+	// enforced at environment preparation; Session upgrade evidence cannot grant
+	// rebinding of a retained Participant. Keep the old OpenCode admission guard
+	// only for pre-environment callers until their removal in Step 17.
+	var content json.RawMessage
+	err := querier.QueryRow(ctx, `SELECT contract FROM runtime_profile_contracts WHERE content_sha256 = $1`, target.ContentSHA256).Scan(&content)
+	if err == nil {
+		resolved, err := runtimeprofile.DecodeContract(content, target)
+		if err != nil {
+			return false, err
+		}
+		if resolved.Contract().RepositoryEnvironment != nil {
+			return false, nil
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
 	rows, err := querier.Query(ctx, `
 SELECT runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest

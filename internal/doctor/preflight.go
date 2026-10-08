@@ -197,7 +197,7 @@ func (state *productionState) checkProtectedRuntimeProfiles(ctx context.Context)
 		return err
 	}
 	defer availability.Close()
-	checker, err := runtimeprofile.NewAvailabilityChecker(state.database, state.registry.Catalog, availability)
+	checker, err := runtimeprofile.NewAvailabilityChecker(state.database, runtimeprofile.Resolver{Catalog: state.registry.Catalog, Source: state.database}, availability)
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,23 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	state.profiles = snapshot
 	state.profileSelection = selection
 	state.profilesLoaded = true
-	return nil
+	base := state.runtimeProfile.Contract()
+	selected := state.runtimeProfile
+	if definition := snapshot.Environment(); definition != nil {
+		os, arch, _ := strings.Cut(definition.Platform, "/")
+		var requirements []string
+		for _, requirement := range definition.Requirements {
+			requirements = append(requirements, string(requirement))
+		}
+		selected, err = state.runtimeProfile.WithEnvironment(definition.Image, runtimeprofile.Platform{OS: os, Arch: arch}, requirements)
+		if err != nil {
+			return err
+		}
+	}
+	if base.Name == "" {
+		return errors.New("Runtime Profile contract check did not pass")
+	}
+	return composition.CheckRepositoryEnvironment(ctx, selected)
 }
 
 func (state *productionState) checkEffectiveProfiles(context.Context) error {

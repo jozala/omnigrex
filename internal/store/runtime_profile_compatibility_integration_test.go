@@ -383,7 +383,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
        (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'runtime_profile_compatibility_results')`).Scan(&version, &tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 || tables != 1 {
+	if version != 33 || tables != 1 {
 		t.Fatalf("migrated current schema = version %d, compatibility tables %d", version, tables)
 	}
 }
@@ -473,7 +473,16 @@ func compatibilityProfile(t *testing.T, digestDigit, architecture string) runtim
 	if err != nil {
 		t.Fatal(err)
 	}
-	return profile
+	// These scenarios exercise the temporary legacy OpenCode candidate guard.
+	// Fresh repository-environment Participants are qualified independently and
+	// never use candidate qualification to replace another Participant's image.
+	contract := profile.Contract()
+	contract.RepositoryEnvironment = nil
+	legacy, err := runtimeprofile.New(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return legacy
 }
 
 func newRuntimeProfileCompatibilityResult(source, target runtimeprofile.Binding, platform runtimeprofile.Platform, qualifiedAt time.Time) runtimeprofile.CompatibilityResult {

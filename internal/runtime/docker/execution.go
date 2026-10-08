@@ -15,18 +15,28 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	mobyclient "github.com/moby/moby/client"
 )
 
 // ExecutionFactory resolves validated retained state and prepared workspace
-// attachments. Tool-storage layout remains transitional until Step 07.
+// attachments, including separate installation data and Participant tool caches.
 type ExecutionFactory struct {
 	Network            string
 	WorkspaceVolume    string
 	RuntimeStateVolume string
 	MiseVolume         string
 	States             *RetainedState
+}
+
+func (ExecutionFactory) CheckRequirements(requirements []execution.Requirement) error {
+	for _, requirement := range requirements {
+		if requirement != execution.ProcessIsolation && requirement != execution.ToolInstallation {
+			return fmt.Errorf("%w: Docker cannot satisfy %s", execution.ErrUnsupportedRequirement, requirement)
+		}
+	}
+	return nil
 }
 
 func (factory ExecutionFactory) New(request execution.Request, ledger execution.Ledger) (execution.Engine, error) {
@@ -47,10 +57,16 @@ func (factory ExecutionFactory) New(request execution.Request, ledger execution.
 
 // Compile translates trusted logical attachments and identity into Docker policy.
 func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolicy, Spec, error) {
+	if err := factory.CheckRequirements(request.Requirements); err != nil {
+		return RuntimePolicy{}, Spec{}, err
+	}
 	for _, requirement := range request.Requirements {
-		if requirement != execution.ProcessIsolation {
-			return RuntimePolicy{}, Spec{}, execution.ErrUnsupportedRequirement
+		if requirement == execution.ToolInstallation && !request.GoldenResources && request.BootstrapImage == "" {
+			return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: tool installation requires golden resources", execution.ErrInvalidSpec)
 		}
+	}
+	if request.BootstrapImage != "" && (request.GoldenResources || !validImageDigest(request.BootstrapImage)) {
+		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: retained bootstrap artifact image", execution.ErrInvalidSpec)
 	}
 	if request.MemoryBytes <= 0 || request.PIDsLimit <= 0 {
 		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: resource budgets must be positive", ErrInvalidSpec)
@@ -94,6 +110,14 @@ func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolic
 		seen[attachment.Resource] = true
 		volume.Target = attachment.Target
 		volumes = append(volumes, volume)
+	}
+	if (request.GoldenResources || request.BootstrapImage != "") && (!seen["workspace"] || !seen["mise"] || !seen["state"] || !seen["tool-data"]) {
+		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: repository environment requires isolated workspace, state, installation, and cache attachments", execution.ErrInvalidSpec)
+	}
+	if request.BootstrapImage != "" {
+		volumes = append(volumes, VolumeMount{Name: factory.MiseVolume,
+			Subpath: root + "/tool-data/turn/" + key.AgentTurnID + "/" + environment.BootstrapDirectory(key.AgentTurnID),
+			Target:  environment.RetainedBootstrapMount, ReadOnly: true})
 	}
 	var temporary []TmpfsMount
 	for _, directory := range request.TemporaryDirectories {
@@ -173,7 +197,7 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	}
 	// Keep setup termination evidence separate from the main create. A known
 	// setup failure must not leave a fictitious unresolved main creation.
-	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key); err != nil {
+	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key, request.GoldenResources, request.BootstrapImage); err != nil {
 		return nil, engine.recordCreationFailure(ctx, err)
 	}
 	if err := engine.ledger.BeginExecutionPhase(ctx, engine.key, execution.Main); err != nil {
@@ -190,16 +214,41 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	return wrapped, err
 }
 
-func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key) error {
+func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, bootstrapImage string) error {
 	options, err := buildSubpathCreateOptions(spec)
 	if err != nil || options.Config == nil {
 		return err
+	}
+	if golden || bootstrapImage != "" {
+		script, err := environment.QualificationScript(spec.Platform.Architecture)
+		if err != nil {
+			return noExecutionEffectsError{cause: err}
+		}
+		options.Config.Cmd[0] += script
+	}
+	if bootstrapImage != "" {
+		// Only the trusted initializer uses the deployment image. Repository tools
+		// and the retained agent run in spec.Image with their original bindings.
+		// Compile appends the artifact mount last, making the last validated path
+		// argument its destination. No repository command runs with volume roots.
+		options.Config.Image = bootstrapImage
+		options.Config.Cmd[0] += `
+for destination do :; done
+test ! -L "$destination"
+cp /usr/local/bin/omnigrex-environment "$destination/omnigrex-environment"
+chmod 0555 "$destination/omnigrex-environment"
+test "$(sha256sum /usr/local/bin/omnigrex-environment | cut -d ' ' -f 1)" = "$(sha256sum "$destination/omnigrex-environment" | cut -d ' ' -f 1)"
+`
 	}
 	options.Name = spec.Name + "-setup"
 	if err := ledger.BeginExecutionPhase(ctx, key, execution.Setup); err != nil {
 		return err
 	}
-	return runManagedOneShotContainer(ctx, api, options, "assignment subpath initializer",
+	operation := "assignment subpath initializer"
+	if golden || bootstrapImage != "" {
+		operation = "repository golden-resource qualification and storage initializer"
+	}
+	return runManagedOneShotContainer(ctx, api, options, operation,
 		func(ctx context.Context, id string) error { return ledger.BindSetupResource(ctx, key, id) },
 		func(ctx context.Context, id string) error { return ledger.RecordSetupStopped(ctx, key, id) })
 }

@@ -199,10 +199,11 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return err
 	}
-	runtimeRegistry, err := runtimeprofile.NewRegistry(openCodeV1)
+	registry, err := runtimeprofile.NewRegistry(openCodeV1)
 	if err != nil {
 		return fmt.Errorf("configure Runtime Profile Registry: %w", err)
 	}
+	runtimeRegistry := runtimeprofile.Resolver{Catalog: registry.Catalog, Source: database}
 	developerRepositoryCredentials, err := githubapi.NewRepositoryInstallationCredentialProvider(
 		githubServices.developerSigner, githubServices.api, githubapi.DeveloperAppPermissions(), nil,
 	)
@@ -344,7 +345,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			logger.Error("close exact Runtime Profile image availability", "error", err)
 		}
 	}()
-	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry.Catalog, exactImages)
+	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry, exactImages)
 	if err != nil {
 		return fmt.Errorf("configure protected Runtime Profile availability: %w", err)
 	}
@@ -391,6 +392,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		},
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
+		LegacyBootstrapImage: settings.OpenCodeACPV1Image,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)

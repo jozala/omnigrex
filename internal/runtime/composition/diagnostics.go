@@ -32,6 +32,9 @@ func NewResourceProbe(options Resources) (ResourceProbe, error) {
 	})
 }
 func NewImageAvailability() (ImageAvailability, error) { return docker.NewExactImageAvailability() }
+func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) error {
+	return docker.CheckRepositoryEnvironment(ctx, profile)
+}
 func StartDiagnostic(ctx context.Context, profile profile.Profile, image string, options ProbeOptions, stderr io.Writer) (execution.Process, io.Closer, error) {
 	return docker.StartDiagnostic(ctx, profile, image, docker.DiagnosticOptions{Network: options.Network, ExtraHosts: options.ExtraHosts, MemoryBytes: options.MemoryBytes}, stderr)
 }

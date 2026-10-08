@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -37,7 +37,6 @@ var (
 )
 
 const (
-	runtimeMisePath       = "/home/opencode/.local/share/mise"
 	defaultCleanupTimeout = 10 * time.Second
 	defaultStopTimeout    = 10 * time.Second
 )
@@ -60,7 +59,6 @@ type LauncherStore interface {
 type RuntimeWorkspace interface {
 	Prepare(context.Context, workspace.Preparation) (execution.WorkspaceRef, error)
 	Capture(context.Context, execution.CaptureRequest) (execution.CaptureRef, error)
-	ProvisionMise(context.Context, workspace.MiseProvision) (workspace.MiseActivation, error)
 	PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error)
 	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
 	Discard(context.Context, execution.WorkspaceRef, workspace.WorkspaceFence) error
@@ -130,6 +128,7 @@ type LauncherConfig struct {
 	PathEnvironmentAllowlist []string
 	Definition               workflow.Definition
 	OperatorInstructions     agentinstructions.Operator
+	LegacyBootstrapImage     string
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -169,6 +168,7 @@ type Launcher struct {
 	pathEnvironmentAllowlist []string
 	definition               workflow.Definition
 	operatorInstructions     agentinstructions.Operator
+	legacyBootstrapImage     string
 }
 
 // RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
@@ -218,6 +218,9 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if config.MemoryBytes <= 0 {
 		return nil, fmt.Errorf("%w: Agent Turn memory must be positive", ErrInvalidLauncher)
 	}
+	if config.LegacyBootstrapImage != "" && !runtimeprofile.IsExactRegistryImage(config.LegacyBootstrapImage) {
+		return nil, fmt.Errorf("%w: legacy bootstrap image must be digest-pinned", ErrInvalidLauncher)
+	}
 	if config.StopTimeout < 0 {
 		return nil, fmt.Errorf("%w: stop timeout", ErrInvalidLauncher)
 	}
@@ -242,6 +245,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
+		legacyBootstrapImage: config.LegacyBootstrapImage,
 	}, nil
 }
 
@@ -286,6 +290,13 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	if err := validateRuntimeProfileBinding(runtimeProfile, execution); err != nil {
 		return nil, err
+	}
+	legacyEnvironment := runtimeProfile.Contract().RepositoryEnvironment == nil
+	if legacyEnvironment && launcher.legacyBootstrapImage == "" {
+		return nil, fmt.Errorf("%w: retained Runtime Profile requires a deployment bootstrap image", ErrRuntimeBinding)
+	}
+	if err := launcher.execution.CheckRequirements(runtimeRequirements(runtimeProfile)); err != nil {
+		return nil, fmt.Errorf("validate repository environment capabilities: %w", err)
 	}
 	rendered, roleID, err := launcher.renderTurnProfile(execution, rolePolicy)
 	if err != nil {
@@ -360,27 +371,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if workspaceRef.Key != key || workspaceRef.Seed != strings.ToLower(revision) {
 		return nil, fmt.Errorf("%w: prepared workspace identity", ErrRuntimeBinding)
 	}
-	miseRevision := revision
-	if rolePolicy.TrustedToolsRevision == role.DefaultBranchTrustedTools {
-		miseRevision = request.DefaultBranchSHA
-	}
-	activation, err := launcher.workspace.ProvisionMise(ctx, workspace.MiseProvision{
-		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
-		Credential: request.RepositoryCredential, Revision: miseRevision, ExecutionEpoch: request.Lease.ExecutionEpoch,
-		Fence: func(ctx context.Context, operation func(context.Context) error) error {
-			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("provision trusted repository tools: %w", err)
-	}
-	if activation.SourceRevision != miseRevision {
-		return nil, fmt.Errorf("%w: trusted mise source", ErrRuntimeBinding)
-	}
-	environment, err := runtimeMiseEnvironment(activation)
-	if err != nil {
-		return nil, err
-	}
+	toolEnvironment := make(map[string]string)
 	var turnConfiguration turnconfig.Configuration
 	if len(execution.Turn.TurnConfiguration) > 0 {
 		if err := json.Unmarshal(execution.Turn.TurnConfiguration, &turnConfiguration); err != nil {
@@ -389,6 +380,16 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	if err := turnConfiguration.Validate(launcher.pathEnvironmentAllowlist); err != nil {
 		return nil, fmt.Errorf("%w: turn configuration snapshot: %v", ErrRuntimeBinding, err)
+	}
+	if legacyEnvironment {
+		if turnConfiguration.Directories == nil {
+			turnConfiguration.Directories = make(map[string]turnconfig.Lifecycle)
+		}
+		name := environment.BootstrapDirectory(execution.Turn.ID)
+		if _, exists := turnConfiguration.Directories[name]; exists {
+			return nil, fmt.Errorf("%w: reserved bootstrap scratch directory", ErrRuntimeBinding)
+		}
+		turnConfiguration.Directories[name] = turnconfig.Turn
 	}
 	resources.scratchPrepared = len(turnConfiguration.Directories) != 0
 	pathEnvironment, err := launcher.workspace.PrepareTurnPaths(ctx, execution.Assignment.ID, execution.Turn.ID, turnConfiguration,
@@ -399,7 +400,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("prepare Agent Turn paths: %w", err)
 	}
 	for name, value := range pathEnvironment {
-		environment[name] = value
+		toolEnvironment[name] = value
 	}
 	refreshedLease, err := launcher.store.RefreshAgentTurnLease(ctx, request.Lease, request.LeaseDuration)
 	if err != nil {
@@ -455,13 +456,22 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
 	}, opencode.ProcessOptions{
 		MemoryBytes: launcher.memoryBytes,
-		Key:         runtimeKey(execution), WorkflowID: execution.WorkflowID, Environment: environment,
+		Key:         runtimeKey(execution), WorkflowID: execution.WorkflowID, Environment: toolEnvironment,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
 	spec.Workspace = resources.workspaceRef
 	spec.State = stateRef
+	if contract := runtimeProfile.Contract(); contract.RepositoryEnvironment != nil {
+		spec.Command = append([]string{environment.Executable, "run"}, contract.Command...)
+		spec.GoldenResources = true
+	} else {
+		spec.Command = append([]string{environment.RetainedBootstrapExecutable, "run"}, contract.Command...)
+		spec.BootstrapImage = launcher.legacyBootstrapImage
+	}
+	spec.Environment = environment.BindEnvironment(spec.Environment)
+	spec.Requirements = runtimeRequirements(runtimeProfile)
 	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine
@@ -927,18 +937,16 @@ func checkoutSelection(execution store.AgentTurnExecutionContext, request Launch
 		&mcp.PullRequestScope{ID: proposal.PullRequestID, Number: proposal.PullRequestNumber}, nil
 }
 
-func runtimeMiseEnvironment(activation workspace.MiseActivation) (map[string]string, error) {
-	if activation.DataDir == "" || !filepath.IsAbs(activation.DataDir) || filepath.Clean(activation.DataDir) != activation.DataDir {
-		return nil, fmt.Errorf("%w: mise data directory", ErrRuntimeBinding)
-	}
-	environment := make(map[string]string, len(activation.Environment))
-	for name, value := range activation.Environment {
-		if name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return nil, fmt.Errorf("%w: mise environment", ErrRuntimeBinding)
+func runtimeRequirements(profile runtimeprofile.Profile) []execution.Requirement {
+	requirements := []execution.Requirement{execution.ToolInstallation}
+	if environment := profile.Contract().RepositoryEnvironment; environment != nil {
+		for _, requirement := range environment.Requirements {
+			if requirement != string(execution.ToolInstallation) {
+				requirements = append(requirements, execution.Requirement(requirement))
+			}
 		}
-		environment[name] = strings.ReplaceAll(value, activation.DataDir, runtimeMisePath)
 	}
-	return environment, nil
+	return requirements
 }
 
 func requiredACPCapabilities(runtimeProfile runtimeprofile.Profile) acp.RequiredCapabilities {

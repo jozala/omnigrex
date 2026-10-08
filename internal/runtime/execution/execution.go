@@ -50,6 +50,10 @@ type Request struct {
 	MemoryBytes          int64
 	PIDsLimit            int64
 	Requirements         []Requirement
+	GoldenResources      bool
+	// BootstrapImage supplies only the platform bootstrap for a retained image
+	// predating that resource. It never replaces the environment's bound Image.
+	BootstrapImage string
 }
 
 type Requirement string
@@ -58,6 +62,7 @@ const (
 	ProcessIsolation  Requirement = "process-isolation"
 	HardwareIsolation Requirement = "hardware-isolation"
 	NestedContainers  Requirement = "nested-containers"
+	ToolInstallation  Requirement = "tool-installation"
 )
 
 func (Request) String() string   { return "execution request (<ephemeral configuration redacted>)" }
@@ -78,6 +83,7 @@ type Engine interface {
 	Close() error
 }
 type Factory interface {
+	CheckRequirements([]Requirement) error
 	New(Request, Ledger) (Engine, error)
 }
 

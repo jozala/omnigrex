@@ -320,7 +320,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		Role:     architect,
 		MCPTools: []string{"get_issue", "request_review", "submit_review", "comment_on_issue", "report_blocked"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
 		ToolCredentialAuthorities: map[string]role.CredentialAuthority{"submit_review": role.ReviewerAuthority},
-		TrustedToolsRevision:      role.TurnRevisionTrustedTools, AllowHumanSessionControl: true,
+		AllowHumanSessionControl:  true,
 	}})
 	if err != nil {
 		t.Fatal(err)

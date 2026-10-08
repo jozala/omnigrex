@@ -54,18 +54,32 @@ type Tmpfs struct {
 
 // Contract is the complete versioned Runtime Profile content.
 type Contract struct {
-	Name         string                `json:"name"`
-	Version      string                `json:"version"`
-	Image        string                `json:"image"`
-	Platform     Platform              `json:"platform"`
-	User         User                  `json:"user"`
-	Command      []string              `json:"command"`
-	Environment  []EnvironmentVariable `json:"environment"`
-	Mounts       []Mount               `json:"mounts"`
-	Capabilities []string              `json:"capabilities"`
-	Tmpfs        []Tmpfs               `json:"tmpfs"`
-	Workspace    string                `json:"workspace"`
-	PIDsLimit    int64                 `json:"pids_limit"`
+	Name                  string                 `json:"name"`
+	Version               string                 `json:"version"`
+	Image                 string                 `json:"image"`
+	Platform              Platform               `json:"platform"`
+	User                  User                   `json:"user"`
+	Command               []string               `json:"command"`
+	Environment           []EnvironmentVariable  `json:"environment"`
+	Mounts                []Mount                `json:"mounts"`
+	Capabilities          []string               `json:"capabilities"`
+	Tmpfs                 []Tmpfs                `json:"tmpfs"`
+	Workspace             string                 `json:"workspace"`
+	PIDsLimit             int64                  `json:"pids_limit"`
+	RepositoryEnvironment *RepositoryEnvironment `json:"repository_environment,omitempty"`
+}
+
+// RepositoryEnvironment binds the golden resource contract and backend guarantees.
+type RepositoryEnvironment struct {
+	Version      int      `json:"version"`
+	Requirements []string `json:"requirements"`
+}
+
+func (profile Profile) WithEnvironment(image string, platform Platform, requirements []string) (Profile, error) {
+	contract := profile.Contract()
+	contract.Image, contract.Platform = image, platform
+	contract.RepositoryEnvironment = &RepositoryEnvironment{Version: 1, Requirements: slices.Clone(requirements)}
+	return New(contract)
 }
 
 // Profile is an immutable validated Runtime Profile.
@@ -143,8 +157,9 @@ func NewOpenCodeV1(image string, platform Platform) (Profile, error) {
 			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
 			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
 		},
-		Workspace: "/workspace",
-		PIDsLimit: 128,
+		Workspace:             "/workspace",
+		PIDsLimit:             128,
+		RepositoryEnvironment: &RepositoryEnvironment{Version: 1},
 	}
 	return New(contract)
 }
@@ -158,6 +173,9 @@ func New(contract Contract) (Profile, error) {
 	sort.Slice(contract.Environment, func(i, j int) bool { return contract.Environment[i].Name < contract.Environment[j].Name })
 	sort.Slice(contract.Mounts, func(i, j int) bool { return contract.Mounts[i].Name < contract.Mounts[j].Name })
 	slices.Sort(contract.Capabilities)
+	if contract.RepositoryEnvironment != nil {
+		slices.Sort(contract.RepositoryEnvironment.Requirements)
+	}
 	sort.Slice(contract.Tmpfs, func(i, j int) bool { return contract.Tmpfs[i].Path < contract.Tmpfs[j].Path })
 	return newProfile(contract)
 }
@@ -250,6 +268,14 @@ func (catalog Catalog) ResolveBinding(binding Binding) (Profile, error) {
 			if err == nil && candidate.Binding() == binding {
 				return candidate, nil
 			}
+			if err == nil {
+				legacy := candidate.Contract()
+				legacy.RepositoryEnvironment = nil
+				candidate, err = New(legacy)
+				if err == nil && candidate.Binding() == binding {
+					return candidate, nil
+				}
+			}
 		}
 		return Profile{}, fmt.Errorf("%w: immutable %s/%s", ErrNotFound, binding.Name, binding.Version)
 	}
@@ -313,10 +339,27 @@ func cloneContract(contract Contract) Contract {
 	contract.Mounts = slices.Clone(contract.Mounts)
 	contract.Capabilities = slices.Clone(contract.Capabilities)
 	contract.Tmpfs = slices.Clone(contract.Tmpfs)
+	if contract.RepositoryEnvironment != nil {
+		environment := *contract.RepositoryEnvironment
+		environment.Requirements = slices.Clone(environment.Requirements)
+		contract.RepositoryEnvironment = &environment
+	}
 	return contract
 }
 
 func validate(contract Contract) error {
+	if environment := contract.RepositoryEnvironment; environment != nil {
+		if environment.Version != 1 {
+			return invalid("unsupported repository environment version")
+		}
+		seen := map[string]bool{}
+		for _, requirement := range environment.Requirements {
+			if seen[requirement] || !slices.Contains([]string{"process-isolation", "hardware-isolation", "nested-containers", "tool-installation"}, requirement) {
+				return invalid("invalid environment requirement %q", requirement)
+			}
+			seen[requirement] = true
+		}
+	}
 	if contract.Name != "opencode-acp" || contract.Version != "v1" {
 		return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)
 	}

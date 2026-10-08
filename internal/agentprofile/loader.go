@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/jozala/omnigrex/internal/repoenvironment"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/turnconfig"
 )
@@ -39,6 +41,7 @@ type Snapshot struct {
 	policies          role.PolicyCatalog
 	profiles          map[Name]Profile
 	turnConfiguration turnconfig.Configuration
+	environment       *repoenvironment.Definition
 }
 
 func (loader *Loader) Load(ctx context.Context, credential, owner, repository string) (Snapshot, error) {
@@ -53,11 +56,23 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 		return Snapshot{}, ErrInvalidCommitSHA
 	}
 	var turnConfiguration turnconfig.Configuration
+	var environment *repoenvironment.Definition
 	rootFiles, err := loader.source.ListRepositoryDirectoryFiles(ctx, credential, owner, repository, ".omnigrex", commitSHA)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("list turn configuration directory: %w", err)
 	}
 	for _, file := range rootFiles {
+		if file == repoenvironment.Path {
+			content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, file, commitSHA)
+			if err != nil {
+				return Snapshot{}, fmt.Errorf("fetch repository environment: %w", err)
+			}
+			definition, err := repoenvironment.Parse(content)
+			if err != nil {
+				return Snapshot{}, err
+			}
+			environment = &definition
+		}
 		if file == turnconfig.Path {
 			content, err := loader.source.FetchRepositoryFile(ctx, credential, owner, repository, turnconfig.Path, commitSHA)
 			if err != nil {
@@ -99,7 +114,16 @@ func (loader *Loader) Load(ctx context.Context, credential, owner, repository st
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{commitSHA: commitSHA, catalog: catalog, policies: loader.policies, profiles: profiles, turnConfiguration: turnConfiguration}, nil
+	return Snapshot{commitSHA: commitSHA, catalog: catalog, policies: loader.policies, profiles: profiles, turnConfiguration: turnConfiguration, environment: environment}, nil
+}
+
+func (snapshot Snapshot) Environment() *repoenvironment.Definition {
+	if snapshot.environment == nil {
+		return nil
+	}
+	definition := *snapshot.environment
+	definition.Requirements = slices.Clone(definition.Requirements)
+	return &definition
 }
 
 func (snapshot Snapshot) CommitSHA() string { return snapshot.commitSHA }

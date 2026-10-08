@@ -27,7 +27,6 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -62,15 +61,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	profileConfig["path"] = ".omnigrex/team/arbitrary profile filename.md"
 	execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 	database := &runtimeStore{operations: &operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir:        "/srv/mise/assignment-" + runtimeTestAssignment + "/mise",
-		SourceRevision: runtimeTestDefaultSHA,
-		Environment: map[string]string{
-			"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise",
-			"PATH":          "/srv/mise/assignment-" + runtimeTestAssignment + "/mise/shims:/usr/bin",
-			"PROJECT_MODE":  "development",
-		},
-	}}
+	workspaces := &runtimeWorkspace{operations: &operations}
 	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
 		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
 		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
@@ -149,12 +140,12 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)
 	}
-	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "refresh", "mcp-register", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "acp-new", "session-prepare"}
+	wantPrefix := []string{"fence", "execution", "profile", "workspace", "refresh", "mcp-register", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "acp-new", "session-prepare"}
 	if !reflect.DeepEqual(operations, wantPrefix) {
 		t.Fatalf("dependency operations = %v, want %v", operations, wantPrefix)
 	}
-	if workspaces.checkout.Revision != runtimeTestDefaultSHA || workspaces.mise.Revision != runtimeTestDefaultSHA {
-		t.Errorf("workspace revision = %q and mise revision = %q, want default SHA", workspaces.checkout.Revision, workspaces.mise.Revision)
+	if workspaces.checkout.Revision != runtimeTestDefaultSHA {
+		t.Errorf("workspace revision = %q, want default SHA", workspaces.checkout.Revision)
 	}
 	if workspaces.checkout.AssignmentID != runtimeTestAssignment || workspaces.checkout.Credential != runtimeTestCredential {
 		t.Errorf("workspace checkout = %#v", workspaces.checkout)
@@ -226,9 +217,10 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 	assertRuntimeEnvironment(t, spec.Environment, map[string]string{
 		"MISE_DATA_DIR": "/home/opencode/.local/share/mise",
-		"PATH":          "/home/opencode/.local/share/mise/shims:/usr/bin",
-		"PROJECT_MODE":  "development",
 	})
+	if !slices.Equal(spec.Command, []string{"/usr/local/bin/omnigrex-environment", "run", "acp"}) {
+		t.Fatalf("runtime did not bootstrap in-environment: %v", spec.Command)
+	}
 	assertRuntimeMCPPermissions(t, spec.Environment, workflow.RoleDeveloper)
 	for _, secret := range []string{runtimeTestCredential, "mcp-secret"} {
 		if strings.Contains(strings.Join(spec.Environment, "\n"), secret) || strings.Contains(stringMap(spec.Labels), secret) {
@@ -265,10 +257,7 @@ func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
 	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn","go-cache":"assignment"},"environment":{"TMPDIR":"build","GOTMPDIR":"build","GOCACHE":"go-cache"}}`)
 	database := &runtimeStore{operations: &operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestDefaultSHA,
-		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
-	}}
+	workspaces := &runtimeWorkspace{operations: &operations}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
@@ -309,10 +298,7 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 		SourcePublishMutationID: "10000000-0000-4000-8000-000000000001",
 		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000002",
 	}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestPRHeadSHA,
-		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
-	}}
+	workspaces := &runtimeWorkspace{operations: &operations}
 	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
 		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
 		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
@@ -336,23 +322,22 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
 	if workspaces.checkout.Revision != runtimeTestPRHeadSHA || gateway.scope.HeadSHA != runtimeTestPRHeadSHA ||
 		gateway.scope.PullRequest == nil || gateway.scope.PullRequest.Number != 18 || !gateway.scope.BranchExists || !gateway.scope.RecoveredPublication ||
-		gateway.scope.Branch != "omnigrex/issue-17" || workspaces.mise.Revision != runtimeTestPRHeadSHA {
-		t.Fatalf("recovered checkout %#v, scope %#v, mise %#v", workspaces.checkout, gateway.scope, workspaces.mise)
+		gateway.scope.Branch != "omnigrex/issue-17" {
+		t.Fatalf("recovered checkout %#v, scope %#v", workspaces.checkout, gateway.scope)
 	}
 }
 
-func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *testing.T) {
+func TestLauncherUsesWorkingRevisionForBothRolesAndInEnvironmentTooling(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
 		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
 	}
 	for _, testCase := range []struct {
-		name             string
-		role             workflow.Role
-		wantMiseRevision string
+		name string
+		role workflow.Role
 	}{
-		{name: "returning Developer", role: workflow.RoleDeveloper, wantMiseRevision: runtimeTestPRHeadSHA},
-		{name: "Reviewer", role: workflow.RoleReviewer, wantMiseRevision: runtimeTestDefaultSHA},
+		{name: "returning Developer", role: workflow.RoleDeveloper},
+		{name: "Reviewer", role: workflow.RoleReviewer},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			operations := []string{}
@@ -372,11 +357,7 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
-			workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-				DataDir: miseDir, SourceRevision: testCase.wantMiseRevision,
-				Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-			}}
+			workspaces := &runtimeWorkspace{operations: &operations}
 			gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
 				Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
 			}}}
@@ -404,8 +385,8 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			if workspaces.checkout.Revision != runtimeTestPRHeadSHA {
 				t.Errorf("workspace revision = %q, want Pull Request head", workspaces.checkout.Revision)
 			}
-			if workspaces.mise.Revision != testCase.wantMiseRevision {
-				t.Errorf("mise revision = %q, want %q", workspaces.mise.Revision, testCase.wantMiseRevision)
+			if !slices.Equal(engineFactory.engine.spec.Command, []string{"/usr/local/bin/omnigrex-environment", "run", "acp"}) {
+				t.Fatal("tool setup was not delegated to the working checkout's environment")
 			}
 			if gateway.scope.PullRequest == nil || gateway.scope.PullRequest.ID != 61 || gateway.scope.PullRequest.Number != 23 ||
 				gateway.scope.Branch != proposal.HeadRef || gateway.scope.HeadSHA != proposal.HeadSHA {
@@ -486,14 +467,11 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, fenceErrors: []error{nil, store.ErrAgentTurnFenceLost}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Execution: &runtimeEngineFactory{operations: &operations},
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: &runtimeEngineFactory{operations: &operations},
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
 
@@ -505,7 +483,7 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	want := []string{"fence", "execution", "profile", "workspace", "mise", "refresh"}
+	want := []string{"fence", "execution", "profile", "workspace", "refresh"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("dependency operations = %v, want %v", operations, want)
 	}
@@ -515,15 +493,12 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, withFenceAttempted: make(chan struct{})}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
 
@@ -564,7 +539,6 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	startEntered := make(chan struct{})
@@ -573,10 +547,8 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 	engineFactory.engine.process.releaseStart = releaseStart
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
 
@@ -623,16 +595,13 @@ func TestLauncherCleansCreatedProcessWhenStartCannotCrossRecoveryFence(t *testin
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	engineFactory.engine.process.startErr = store.ErrAgentTurnFenceLost
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
 
@@ -653,15 +622,12 @@ func TestLauncherRevalidatesFenceImmediatelyAfterStartAndCleansBeforeReturn(t *t
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, fenceErrors: []error{nil, nil, store.ErrAgentTurnFenceLost}}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Execution: engineFactory,
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
 
@@ -728,7 +694,7 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 	}
 }
 
-func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *testing.T) {
+func TestLauncherRejectsReviewerControlPathOverrideBeforeStartingDocker(t *testing.T) {
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	proposal := &store.AgentTurnChangeProposal{
@@ -736,16 +702,13 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 		BaseRef: "trunk", HeadRef: "feature", HeadSHA: runtimeTestPRHeadSHA,
 	}
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleReviewer, proposal)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
+	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"cache":"turn"},"environment":{"OPENCODE_DISABLE_PROJECT_CONFIG":"cache"}}`)
 	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp/mcp"}}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
-		Store:    &runtimeStore{operations: &operations, execution: execution},
-		Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA,
-			Environment: map[string]string{"MISE_DATA_DIR": miseDir, "OPENCODE_DISABLE_PROJECT_CONFIG": "false"},
-		}},
-		Gateway: gateway, Execution: &runtimeEngineFactory{operations: &operations},
+		Store:     &runtimeStore{operations: &operations, execution: execution},
+		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   gateway, Execution: &runtimeEngineFactory{operations: &operations},
 		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
 		Sessions: &runtimeSessionPreparer{operations: &operations},
 	})
@@ -755,10 +718,10 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "unused",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
-	if !errors.Is(err, opencode.ErrInvalidProcess) {
-		t.Fatalf("Launch() error = %v, want ErrInvalidProcess", err)
+	if !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Launch() error = %v, want ErrRuntimeBinding", err)
 	}
-	if gateway.drained != 1 || slices.Contains(operations, "docker-new") {
+	if gateway.drained != 0 || slices.Contains(operations, "docker-new") {
 		t.Fatalf("dependency operations = %v and drains = %d", operations, gateway.drained)
 	}
 }
@@ -1194,15 +1157,15 @@ func TestLauncherRejectsWorkspaceReferenceForAnotherExecutionBeforeStartingRunti
 	}
 }
 
-func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
+func TestLauncherRefusesToStartRepositorySetupAfterTurnFenceLoss(t *testing.T) {
 	operations := []string{}
 	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
 		func(resources *runtimeLaunchResources) {
-			resources.workspace.requireProvisionFence = true
+			resources.workspace.requirePromotionFence = true
 			resources.store.withFenceErr = store.ErrAgentTurnFenceLost
 		})
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) || handle != nil {
-		t.Fatalf("Launch() = (%v, %v), want lost fence before mise provisioning", handle, err)
+		t.Fatalf("Launch() = (%v, %v), want lost fence before repository setup", handle, err)
 	}
 	if slices.Contains(operations, "refresh") || slices.Contains(operations, "docker-new") {
 		t.Fatalf("stale mise provisioning progressed to Runtime Process: %v", operations)
@@ -1587,11 +1550,8 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	t.Helper()
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, role, proposal)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: operations, activation: workspace.MiseActivation{
-		DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-	}}
+	workspaces := &runtimeWorkspace{operations: operations}
 	gateway := &runtimeGateway{operations: operations, registration: mcp.Registration{Server: acp.MCPServer{
 		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
 		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
@@ -1810,12 +1770,8 @@ type runtimeWorkspace struct {
 	operations            *[]string
 	checkout              workspace.Checkout
 	requirePromotionFence bool
-	requireProvisionFence bool
-	mise                  workspace.MiseProvision
-	activation            workspace.MiseActivation
 	cleanedTurnID         string
 	workspaceErr          error
-	miseErr               error
 	discardedAssignmentID string
 	discardErr            error
 	captureErr            error
@@ -1861,20 +1817,6 @@ func (lifecycle *runtimeWorkspace) Capture(ctx context.Context, request executio
 		return lifecycle.captureRef, nil
 	}
 	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
-}
-
-func (lifecycle *runtimeWorkspace) ProvisionMise(ctx context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
-	*lifecycle.operations = append(*lifecycle.operations, "mise")
-	lifecycle.mise = provision
-	if lifecycle.requireProvisionFence {
-		if provision.Fence == nil {
-			return workspace.MiseActivation{}, errors.New("mise provisioning is not fenced")
-		}
-		if err := provision.Fence(ctx, func(context.Context) error { return nil }); err != nil {
-			return workspace.MiseActivation{}, err
-		}
-	}
-	return lifecycle.activation, lifecycle.miseErr
 }
 
 func (lifecycle *runtimeWorkspace) PrepareTurnPaths(ctx context.Context, _, turnID string, configuration turnconfig.Configuration, fence workspace.WorkspaceFence) (map[string]string, error) {
@@ -1973,13 +1915,19 @@ var testDockerFactory = dockerruntime.ExecutionFactory{
 }
 
 type runtimeEngineFactory struct {
+	request    execution.Request
 	operations *[]string
 	options    dockerruntime.EngineOptions
 	engine     runtimeEngine
 	err        error
 }
 
+func (factory *runtimeEngineFactory) CheckRequirements(requirements []execution.Requirement) error {
+	return testDockerFactory.CheckRequirements(requirements)
+}
+
 func (factory *runtimeEngineFactory) New(request execution.Request, _ execution.Ledger) (agentturn.RuntimeEngine, error) {
+	factory.request = request
 	*factory.operations = append(*factory.operations, "docker-new")
 	policy, _, err := testDockerFactory.Compile(request)
 	if err != nil {

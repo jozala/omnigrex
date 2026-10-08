@@ -203,6 +203,8 @@ type singleConnectionFactory struct {
 	whileProvisioning func(context.Context) error
 }
 
+func (*singleConnectionFactory) CheckRequirements([]execution.Requirement) error { return nil }
+
 func (factory *singleConnectionFactory) New(request execution.Request, ledger execution.Ledger) (execution.Engine, error) {
 	factory.engine.ledger, factory.engine.key = ledger, request.Key
 	factory.engine.observer = factory.observer
@@ -294,9 +296,6 @@ func (workspaces singleConnectionWorkspace) Capture(ctx context.Context, request
 		}
 	}
 	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
-}
-func (singleConnectionWorkspace) ProvisionMise(_ context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
-	return workspace.MiseActivation{DataDir: "/fixture/mise", SourceRevision: provision.Revision}, nil
 }
 func (singleConnectionWorkspace) PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error) {
 	return nil, nil

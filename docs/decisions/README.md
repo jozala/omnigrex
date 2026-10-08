@@ -19,6 +19,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0009: Pin Participant images and use working-revision tools](0009-pin-participant-images-and-use-working-revision-tools.md) | Accepted | 2026-10-07 |
 | [0010: Seal portable workspace evidence before publication](0010-seal-portable-workspace-evidence-before-publication.md) | Accepted | 2026-10-08 |
 | [0011: Bind retained state and validate offline Session archives](0011-bind-retained-state-and-validate-offline-session-archives.md) | Accepted | 2026-10-08 |
+| [0012: Qualify repository environments without rebinding Sessions](0012-qualify-repository-environments-without-rebinding-sessions.md) | Accepted | 2026-10-08 |
 
 ## Existing architectural decisions
 

@@ -395,12 +395,15 @@ func attachReserved(ctx context.Context, api dockerAPI, spec Spec, id string, st
 	actual := inspected.Container
 	if actual.ID != id || actual.Config == nil || actual.State == nil || actual.State.Status != container.StateCreated ||
 		actual.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue ||
-		actual.Config.Image != spec.Image || actual.Config.User != spec.User || !slices.Equal(actual.Config.Cmd, spec.Command) {
+		actual.Config.Image != spec.Image || actual.Config.User != spec.User {
 		return nil, execution.ErrConflict
 	}
 	expected, err := buildCreateOptions(spec)
 	if err != nil {
 		return nil, err
+	}
+	if !slices.Equal(actual.Config.Cmd, expected.Config.Cmd) || expected.Config.Entrypoint != nil && !slices.Equal(actual.Config.Entrypoint, expected.Config.Entrypoint) {
+		return nil, execution.ErrConflict
 	}
 	if actual.HostConfig == nil || actual.HostConfig.Privileged || len(actual.HostConfig.Binds) != 0 || len(actual.HostConfig.Devices) != 0 ||
 		actual.HostConfig.NetworkMode != expected.HostConfig.NetworkMode || !actual.HostConfig.ReadonlyRootfs ||
@@ -586,6 +589,12 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 		tmpfs[temporary.Target] = strings.Join(options, ",")
 	}
 
+	command := spec.Command
+	var entrypoint []string
+	if len(command) > 0 && filepath.IsAbs(command[0]) {
+		entrypoint = []string{command[0]}
+		command = command[1:]
+	}
 	return mobyclient.ContainerCreateOptions{
 		Name:     spec.Name,
 		Platform: &ocispec.Platform{OS: spec.Platform.OS, Architecture: spec.Platform.Architecture},
@@ -598,7 +607,8 @@ func buildCreateOptions(spec Spec) (mobyclient.ContainerCreateOptions, error) {
 			OpenStdin:    true,
 			StdinOnce:    !spec.Reattachable,
 			Env:          spec.Environment,
-			Cmd:          spec.Command,
+			Cmd:          command,
+			Entrypoint:   entrypoint,
 			Image:        spec.Image,
 			WorkingDir:   spec.WorkingDir,
 			Labels:       labels,

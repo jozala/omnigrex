@@ -24,14 +24,19 @@ type ImageAvailability interface {
 	Available(context.Context, string, Platform) error
 }
 
+// BindingResolver recovers a complete immutable contract by its exact identity.
+type BindingResolver interface {
+	ResolveBinding(Binding) (Profile, error)
+}
+
 // AvailabilityChecker is a readiness-compatible check for every protected Runtime Profile image.
 type AvailabilityChecker struct {
 	source  ProtectedBindingSource
-	catalog Catalog
+	catalog BindingResolver
 	images  ImageAvailability
 }
 
-func NewAvailabilityChecker(source ProtectedBindingSource, catalog Catalog, images ImageAvailability) (*AvailabilityChecker, error) {
+func NewAvailabilityChecker(source ProtectedBindingSource, catalog BindingResolver, images ImageAvailability) (*AvailabilityChecker, error) {
 	if source == nil || images == nil {
 		return nil, errors.New("Runtime Profile availability dependency is nil")
 	}

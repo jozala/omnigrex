@@ -26,6 +26,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 04 | Docker launch and recovery use neutral contracts; OpenCode remains operational | [Docker execution boundary implementation and evidence](2026-10-07-docker-execution-boundary.md) |
 | 05 | Logical workspace preparation, sealed publication evidence, and retained terminal corroboration | [Location-independent workspace implementation and evidence](2026-10-08-location-independent-workspaces.md) |
 | 06 | Logical retained-state bindings, protected collection, and validated offline Session archives | [Retained-state implementation and evidence](2026-10-08-retained-state-bindings.md) |
+| 07 | Digest-pinned repository environments, persisted contracts, and working-revision guest tooling | [Repository environment implementation and evidence](2026-10-08-repository-environments.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -339,6 +340,8 @@ Destroy and recreate an execution environment while preserving only intended ret
 Prove cross-Participant isolation, idempotent cleanup, protected-state retention, and explicit rejection of backend mismatch.
 
 ### Step 07: Introduce the repository environment contract and in-environment tooling
+
+**Deliverable:** [Repository environment implementation and evidence](2026-10-08-repository-environments.md), including strict image selection, immutable contract persistence, golden-resource qualification, and working-revision tool installation for both Roles.
 
 **Goal:** Support reproducible repository environments without orchestrator-side tool installation.
 

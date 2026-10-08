@@ -49,7 +49,6 @@ func TestPolicyCatalogRejectsInvalidPolicyDetails(t *testing.T) {
 		{name: "submit review without Reviewer authority", mutate: func(policy *role.Policy) {
 			policy.MCPTools = append(policy.MCPTools, "submit_review")
 		}},
-		{name: "trusted tools revision", mutate: func(policy *role.Policy) { policy.TrustedToolsRevision = "FEATURE_BRANCH" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -123,6 +122,5 @@ func testPolicy(id role.ID) role.Policy {
 		Role:                          id,
 		MCPTools:                      []string{"get_issue"},
 		RepositoryCredentialAuthority: role.OrchestratorAuthority,
-		TrustedToolsRevision:          role.TurnRevisionTrustedTools,
 	}
 }
