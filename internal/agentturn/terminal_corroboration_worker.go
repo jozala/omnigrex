@@ -244,11 +244,15 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	}
 }
 
-// redirectChangedHeadRevalidation reports whether a revalidation was redirected
-// to a fresh Turn. It fetches the current GitHub Pull Request outside database
-// locks; when its head moved beyond the source Turn's expected head, the
-// obsolete intent is never adopted. A matching head returns false so the
-// caller proceeds with no-new-prompt recovery as usual.
+// redirectChangedHeadRevalidation reports whether revalidation is complete for
+// this iteration: true after a redirect, an acknowledged retry, or an
+// acknowledged handoff, and false only when an explicitly successful
+// matching-head verification lets ordinary revalidation continue. It fetches
+// the current GitHub Pull Request outside database locks; when its head moved
+// beyond the source Turn's expected head, the obsolete intent is never
+// adopted. Acknowledged outcomes release job authority, so the iteration must
+// stop instead of falling through into workspace inspection and outcome
+// reconciliation.
 func (worker *TerminalCorroborationWorker) redirectChangedHeadRevalidation(ctx context.Context, lease store.JobLease, pending store.TerminalCorroborationContext, credential string, remaining time.Duration) (bool, error) {
 	durable := pending.Execution.ChangeProposal
 	live, err := worker.pullRequests.GetPullRequest(ctx, credential, pending.Execution.Repository.Owner, pending.Execution.Repository.Name, int(durable.PullRequestNumber))
@@ -259,13 +263,13 @@ func (worker *TerminalCorroborationWorker) redirectChangedHeadRevalidation(ctx c
 		if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
 			retryAfter = untilReset
 		}
-		return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+		return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
 			TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
 				Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
 	}
 	head, err := VerifyObservedChangeProposal(durable.PullRequestID, durable.PullRequestNumber, durable.HeadRef, durable.BaseRef, live)
 	if err != nil {
-		return false, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+		return true, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
 	}
 	if head == pending.Execution.Turn.ExpectedHeadSHA {
 		return false, nil
@@ -276,15 +280,15 @@ func (worker *TerminalCorroborationWorker) redirectChangedHeadRevalidation(ctx c
 			return true, nil
 		}
 		if errors.Is(err, store.ErrTerminalCorroborationHeadMoved) {
-			return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+			return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
 				TerminalCorroborationFailure{Code: "head_changed_during_corroboration", Retryable: true})
 		}
 		if errors.Is(err, store.ErrTerminalCorroborationConflict) || errors.Is(err, store.ErrAgentTurnSettlementRejected) ||
 			errors.Is(err, store.ErrAgentTurnChangeProposalConflict) || errors.Is(err, store.ErrReviewerActorConflict) ||
 			errors.Is(err, store.ErrAgentTurnSettlementInvalid) {
-			return false, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+			return true, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
 		}
-		return false, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+		return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
 			TerminalCorroborationFailure{Code: "database_observation_unavailable", Retryable: true})
 	}
 	return true, nil

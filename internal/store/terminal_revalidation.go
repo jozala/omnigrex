@@ -324,8 +324,11 @@ func (store *Store) RedirectRevalidationToFreshTurn(ctx context.Context, lease J
 	}
 	var jobLive bool
 	if err := tx.QueryRow(ctx, `SELECT lease_expires_at > clock_timestamp() FROM jobs WHERE id = $1`,
-		lease.ID).Scan(&jobLive); err != nil || !jobLive {
+		lease.ID).Scan(&jobLive); err != nil {
 		return corroborationReadError(err)
+	}
+	if !jobLive {
+		return ErrJobLeaseLost
 	}
 	var payload struct {
 		SourceTurnID string `json:"source_turn_id"`

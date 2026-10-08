@@ -45,6 +45,11 @@ type WorkflowGitHubEffectContext struct {
 	CleanupRequired          bool
 	CleanupIssueNumber       int64
 	CleanupPullRequestNumber int64
+	// VerificationPending reports that an active-state Workflow still has a
+	// preparation in flight for its current attempt that no successful
+	// preparation has yet validated. Visible-state reconciliation must not
+	// advertise Developer/Reviewer activity until that verification succeeds.
+	VerificationPending bool
 }
 
 // WorkflowGitHubEffectAcknowledgement records whether an effect still represented current Workflow state.
@@ -184,6 +189,28 @@ FOR SHARE`, job.WorkflowID, effect.RepositoryID).Scan(
 		effect.ReadyForSHA = proposal.ReadyForSHA
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return WorkflowGitHubEffectContext{}, fmt.Errorf("read active Change Proposal for GitHub effect: %w", err)
+	}
+	if effect.ChangeProposal != nil && (effect.State == workflow.StateDeveloping || effect.State == workflow.StateReviewing || effect.State == workflow.StatePRReady) {
+		var attemptID string
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM workflow_attempts WHERE workflow_id = $1 AND active`, job.WorkflowID).Scan(&attemptID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return WorkflowGitHubEffectContext{}, fmt.Errorf("read active Workflow Attempt for GitHub effect: %w", err)
+		}
+		if attemptID != "" {
+			var pending, validated bool
+			if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE workflow_id = $1 AND workflow_attempt_id = $2 AND kind = 'PREPARE_AGENT_TURN'
+      AND status IN ('AVAILABLE', 'LEASED')
+), EXISTS (
+    SELECT 1 FROM jobs
+    WHERE workflow_id = $1 AND workflow_attempt_id = $2 AND kind = 'PREPARE_AGENT_TURN'
+      AND status = 'SUCCEEDED'
+)`, job.WorkflowID, attemptID).Scan(&pending, &validated); err != nil {
+				return WorkflowGitHubEffectContext{}, fmt.Errorf("inspect preparation verification for GitHub effect: %w", err)
+			}
+			effect.VerificationPending = pending && !validated
+		}
 	}
 
 	if payload.SafetyDiagnostic {
