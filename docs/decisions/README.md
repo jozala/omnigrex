@@ -13,7 +13,8 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0003: Separate personality from platform and Workflow guidance](0003-separate-personality-from-platform-and-workflow-guidance.md) | Accepted | 2026-10-04 |
 | [0004: Publish handoff summaries before continuing](0004-publish-handoff-summaries-before-continuing.md) | Accepted | 2026-10-04 |
 | [0005: Activate from the current Change Proposal](0005-activate-from-current-change-proposal.md) | Accepted | 2026-10-04 |
-| [0006: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0006-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
+| [0006: Track heads without resuming work](0006-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
+| [0007: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0007-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
 
 ## Existing architectural decisions
 

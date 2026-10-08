@@ -233,6 +233,11 @@ type TriggerEvent struct {
 	PriorTerminalStage          StageID
 	PriorTerminalRole           Role
 	PriorTerminalControlBlocked bool
+	// PriorTerminalExpectedHeadSHA is the durable head the prior terminal Turn
+	// was scoped to. No-new-prompt recovery is only eligible when it still
+	// matches the current Change Proposal head; a changed head uses normal
+	// reactivation with a fresh Turn instead of adopting the old intent.
+	PriorTerminalExpectedHeadSHA string
 }
 
 func (TriggerEvent) isWorkflowEvent() {}

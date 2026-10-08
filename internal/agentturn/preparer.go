@@ -24,6 +24,11 @@ var (
 	ErrInvalidRuntimeProfileReference  = errors.New("invalid Runtime Profile reference")
 	ErrRuntimeProfileReferenceMismatch = errors.New("resolved Runtime Profile reference does not match Agent Profile")
 	ErrAssignmentConfigurationConflict = errors.New("Agent Assignment configuration conflict")
+	// ErrChangeProposalVerificationFailed marks a permanent authoritative
+	// verification failure (closed PR, identity change, branch/base change).
+	// The worker must not retry the GitHub observation; it must create an
+	// actionable Human Handoff without launching a Turn on stale metadata.
+	ErrChangeProposalVerificationFailed = errors.New("Change Proposal verification failed")
 )
 
 // AssignmentConfigurationConflictError carries the credential-free preparation used to detect binding drift.
@@ -54,9 +59,17 @@ type runtimeBindingResolver interface {
 	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
 }
 
+// ChangeProposalVerifier fetches the current GitHub Pull Request for
+// authoritative verification before Turn creation. Network reads occur
+// outside database locks; the observed head is committed transactionally.
+type ChangeProposalVerifier interface {
+	GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error)
+}
+
 // PreparationStore commits one Stage-scoped preparation under a job fence.
 type PreparationStore interface {
 	GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error)
+	GetActiveChangeProposal(context.Context, string) (*store.ActiveChangeProposal, error)
 	PrepareAgentTurn(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error)
 }
 
@@ -86,10 +99,20 @@ type Preparer struct {
 	selector agentprofile.Selector
 	registry RuntimeRegistry
 	store    PreparationStore
+	verifier ChangeProposalVerifier
 }
 
 func NewPreparer(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
 	return &Preparer{loader: loader, selector: selector, registry: registry, store: preparationStore}
+}
+
+// NewPreparerWithChangeProposalVerifier adds authoritative GitHub verification
+// for activations with an existing Change Proposal. A nil verifier preserves
+// the unverified behavior for initial development and tests without a client.
+func NewPreparerWithChangeProposalVerifier(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore, verifier ChangeProposalVerifier) *Preparer {
+	preparer := NewPreparer(loader, selector, registry, preparationStore)
+	preparer.verifier = verifier
+	return preparer
 }
 
 // Prepare resolves the current Stage's Role configuration and commits one fenced Agent Turn preparation.
@@ -152,6 +175,13 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	case workflow.RoleReviewer:
 		spec.Reviewer = preparation
 	}
+	if head, prID, prNumber, verifyErr := preparer.verifyChangeProposal(ctx, request); verifyErr != nil {
+		return Result{}, verifyErr
+	} else if head != "" {
+		spec.VerifiedHeadSHA = head
+		spec.VerifiedPRID = prID
+		spec.VerifiedPRNumber = prNumber
+	}
 
 	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
 	if err != nil {
@@ -164,6 +194,39 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		return Result{}, fmt.Errorf("commit Agent Turn preparation: %w", err)
 	}
 	return Result{Commit: commit, RuntimeProfile: selectedRuntime}, nil
+}
+
+// verifyChangeProposal returns the authoritative GitHub head for the durable
+// current Change Proposal, or empty when no verification applies (initial
+// development without a Change Proposal or a caller without a verifier).
+// Verification uses the durable active association, never an arbitrary PR
+// from a marker or label payload, and accepts a changed commit head while
+// rejecting closed PRs, identity changes, and branch/base changes with an
+// actionable permanent failure.
+func (preparer *Preparer) verifyChangeProposal(ctx context.Context, request Request) (string, int64, int64, error) {
+	if preparer.verifier == nil {
+		return "", 0, 0, nil
+	}
+	durable, err := preparer.store.GetActiveChangeProposal(ctx, request.Lease.WorkflowID)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("read active Change Proposal for verification: %w", err)
+	}
+	if durable == nil {
+		return "", 0, 0, nil
+	}
+	if durable.RepositoryOwner != request.RepositoryOwner || durable.RepositoryName != request.RepositoryName {
+		return "", 0, 0, fmt.Errorf("%w: Change Proposal repository %s/%s does not match Workflow repository %s/%s",
+			ErrChangeProposalVerificationFailed, durable.RepositoryOwner, durable.RepositoryName, request.RepositoryOwner, request.RepositoryName)
+	}
+	observed, err := preparer.verifier.GetPullRequest(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName, int(durable.PullRequestNumber))
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("fetch current Change Proposal for verification: %w", err)
+	}
+	head, err := VerifyObservedChangeProposal(durable.PullRequestID, durable.PullRequestNumber, durable.HeadRef, durable.BaseRef, observed)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return head, observed.ID, int64(observed.Number), nil
 }
 
 func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding) (store.RolePreparation, runtimeprofile.Profile, error) {
@@ -232,7 +295,27 @@ func sanitizePreparationError(err error, credential string) error {
 			Cause:       ErrAssignmentConfigurationConflict,
 		}
 	}
+	if errors.Is(err, ErrChangeProposalVerificationFailed) {
+		if credential == "" || !strings.Contains(err.Error(), credential) {
+			return err
+		}
+		message := strings.ReplaceAll(err.Error(), credential, "[REDACTED]")
+		return &verificationFailedError{message: message, cause: err}
+	}
 	return redactCredential(err, credential)
+}
+
+type verificationFailedError struct {
+	message string
+	cause   error
+}
+
+func (err *verificationFailedError) Error() string { return err.message }
+func (err *verificationFailedError) Unwrap() error { return err.cause }
+func (err *verificationFailedError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
+	metadata := githubapi.ExtractSafeErrorMetadata(err.cause)
+	metadata.Permanent = true
+	return metadata
 }
 
 func redactCredential(err error, credential string) error {
