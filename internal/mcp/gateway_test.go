@@ -59,6 +59,7 @@ func TestDeveloperListsOnlyItsFixedConcreteToolSetAfterInitialization(t *testing
 	}
 	want := []string{
 		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
+		"get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs",
 		"publish_changes", "open_pr", "request_review", "comment_on_issue", "comment_on_pull_request", "report_blocked", "confirm_prior_terminal_intent",
 	}
 	got := make([]string, len(payload.Result.Tools))

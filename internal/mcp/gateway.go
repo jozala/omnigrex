@@ -824,6 +824,10 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		}
 	}
 	if !succeeded {
+		if diagnostic := ciToolError(invocation.Name, err); diagnostic != "" {
+			writeToolError(response, rpc.ID, diagnostic)
+			return
+		}
 		writeToolError(response, rpc.ID, "tool call failed")
 		return
 	}

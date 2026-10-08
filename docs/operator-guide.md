@@ -187,6 +187,7 @@ Configure the Developer App with these exact repository permissions:
 | --- | --- |
 | Metadata | Read-only |
 | Checks | Read-only |
+| Actions | Read-only |
 | Contents | Read and write |
 | Issues | Read and write |
 | Pull requests | Read and write |
@@ -226,6 +227,8 @@ Configure the Reviewer App with these exact repository permissions:
 
 Select no webhook events and disable the webhook.
 The Reviewer App must not reuse the Developer App identity or private key.
+The Reviewer App permission contract is unchanged; CI diagnostics reads use the Developer App.
+After upgrading to a release that includes scoped CI diagnostics, approve the added Actions read-only permission on the Developer App installation, then run preflight for each managed repository before agents receive the new capabilities.
 
 ### Agent Participant Signatures
 

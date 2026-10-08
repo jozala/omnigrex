@@ -36,6 +36,16 @@ func safeReadFailure(err error) readFailure {
 	if errors.As(err, &githubRead) {
 		return githubRead.failure
 	}
+	var diagnostic *CIDiagnosticError
+	if errors.As(err, &diagnostic) {
+		code := diagnostic.Code
+		if _, ok := validCIDiagnosticCodes[code]; !ok {
+			code = "unclassified"
+		} else {
+			code = "diagnostic_" + code
+		}
+		return readFailure{code: code, stage: "ci_diagnostics_read", reason: sanitizeCIDiagnosticReason(diagnostic.Reason), httpStatus: diagnostic.HTTPStatus, requestID: diagnostic.RequestID}
+	}
 	if reason := githubapi.CancellationReason(err); reason != "" {
 		return readFailure{code: reason, stage: "backend_execution", reason: reason}
 	}
@@ -247,6 +257,28 @@ func safeMutationFailure(err error) mutationFailure {
 		return mutationFailure{code: "tool_dependency_failed", message: "tool dependency failed"}
 	default:
 		return mutationFailure{code: "backend_failure_unclassified", message: "mutation failed"}
+	}
+}
+
+func sanitizeCIDiagnosticReason(reason string) string {
+	switch reason {
+	case "pending", "missing", "expired", "unavailable", "unauthorized", "insufficient_permissions",
+		"rate_limited", "transient", "scope_rejected", "invalid_continuation",
+		"invalid_arguments", "canceled", "deadline_exceeded", "resource_exhausted",
+		"step_filter_unsupported":
+		return reason
+	default:
+		if len(reason) == 0 || len(reason) > 64 {
+			return "unclassified"
+		}
+		for _, character := range reason {
+			if character < 'a' || character > 'z' {
+				if character != '_' {
+					return "unclassified"
+				}
+			}
+		}
+		return reason
 	}
 }
 

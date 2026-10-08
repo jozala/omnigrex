@@ -161,6 +161,78 @@ func TestOpenCodeSessionSurvivesFreshContainers(t *testing.T) {
 	assertRuntimeStateExcludes(t, runtimeStateVolume, "not-a-real-secret")
 }
 
+// waitForPersistedDiffSummary polls the exported session summary until it
+// contains wantFile or the timeout elapses. OpenCode schedules summary
+// generation asynchronously, so turn completion plus the marker text does
+// not guarantee the summary has been persisted yet; stopping OpenCode first
+// can freeze an empty summary. A fixed sleep would only mask the race, so
+// this waits for the persisted state itself with a bounded timeout.
+func waitForPersistedDiffSummary(t *testing.T, image, workspaceVolume, stateVolume, sessionID, wantFile string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		files, err := exportSessionDiffFiles(t, image, workspaceVolume, stateVolume, sessionID)
+		if err == nil && slices.Contains(files, wantFile) {
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("persisted diff summary missing %q: last export error: %v", wantFile, err)
+			}
+			t.Fatalf("persisted diff summary missing %q: %q", wantFile, files)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// exportSessionDiffFiles exports one OpenCode session summary and returns
+// the user-role diff file list it contains.
+func exportSessionDiffFiles(t *testing.T, image, workspaceVolume, stateVolume, sessionID string) ([]string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "docker", "run", "--rm", "--user", "10001:10001", "--read-only", "--network", "none",
+		"--mount", "type=volume,src="+workspaceVolume+",dst=/workspace,volume-subpath=assignment",
+		"--mount", "type=volume,src="+stateVolume+",dst=/home/opencode/.local/share/opencode,volume-subpath=assignment",
+		"--tmpfs", "/home/opencode/.cache:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.config:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.local/state:rw,uid=10001,gid=10001",
+		"--tmpfs", "/home/opencode/.opencode:rw,uid=10001,gid=10001",
+		"--tmpfs", "/tmp/opencode:rw,uid=10001,gid=10001",
+		"--env", "OPENCODE_AUTH_CONTENT={}", "--entrypoint", "opencode", image, "export", sessionID)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return nil, fmt.Errorf("export OpenCode session summary: %v\n%s", err, stderr.String())
+	}
+	var exported struct {
+		Messages []struct {
+			Info struct {
+				Role    string `json:"role"`
+				Summary struct {
+					Diffs []struct {
+						File string `json:"file"`
+					} `json:"diffs"`
+				} `json:"summary"`
+			} `json:"info"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &exported); err != nil {
+		return nil, fmt.Errorf("decode OpenCode session export: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	var files []string
+	for _, message := range exported.Messages {
+		if message.Info.Role != "user" {
+			continue
+		}
+		for _, diff := range message.Info.Summary.Diffs {
+			files = append(files, diff.File)
+		}
+	}
+	return files, nil
+}
+
 func TestOpenCodeDiffSummaryExcludesDiskBackedToolCaches(t *testing.T) {
 	image := localOpenCodeImage(t)
 	providerConfig := startFakeProvider(t)
@@ -211,6 +283,7 @@ func TestOpenCodeDiffSummaryExcludesDiskBackedToolCaches(t *testing.T) {
 	}
 	prompt(t, process, session.ID, cacheDiffPrompt)
 	waitForAgentText(t, updates, cacheDiffMarker)
+	waitForPersistedDiffSummary(t, image, workspaceVolume, stateVolume, session.ID, "actual-change.txt")
 	process.stop(t)
 	assertVolumePathContent(t, miseVolume, "tool-data/assignment/.gocache/cache-sentinel", "cache")
 	assertVolumePathContent(t, miseVolume, "tool-data/assignment/.gopath/module-sentinel", "module")
@@ -218,46 +291,9 @@ func TestOpenCodeDiffSummaryExcludesDiskBackedToolCaches(t *testing.T) {
 	assertVolumePathAbsent(t, workspaceVolume, ".gopath/module-sentinel")
 	assertVolumePathContent(t, workspaceVolume, "actual-change.txt", "real change")
 
-	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "docker", "run", "--rm", "--user", "10001:10001", "--read-only", "--network", "none",
-		"--mount", "type=volume,src="+workspaceVolume+",dst=/workspace,volume-subpath=assignment",
-		"--mount", "type=volume,src="+stateVolume+",dst=/home/opencode/.local/share/opencode,volume-subpath=assignment",
-		"--tmpfs", "/home/opencode/.cache:rw,uid=10001,gid=10001",
-		"--tmpfs", "/home/opencode/.config:rw,uid=10001,gid=10001",
-		"--tmpfs", "/home/opencode/.local/state:rw,uid=10001,gid=10001",
-		"--tmpfs", "/home/opencode/.opencode:rw,uid=10001,gid=10001",
-		"--tmpfs", "/tmp/opencode:rw,uid=10001,gid=10001",
-		"--env", "OPENCODE_AUTH_CONTENT={}", "--entrypoint", "opencode", image, "export", session.ID)
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("export OpenCode session summary: %v\n%s", err, stderr.String())
-	}
-	var exported struct {
-		Messages []struct {
-			Info struct {
-				Role    string `json:"role"`
-				Summary struct {
-					Diffs []struct {
-						File string `json:"file"`
-					} `json:"diffs"`
-				} `json:"summary"`
-			} `json:"info"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &exported); err != nil {
-		t.Fatalf("decode OpenCode session export: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-	}
-	var files []string
-	for _, message := range exported.Messages {
-		if message.Info.Role != "user" {
-			continue
-		}
-		for _, diff := range message.Info.Summary.Diffs {
-			files = append(files, diff.File)
-		}
+	files, err := exportSessionDiffFiles(t, image, workspaceVolume, stateVolume, session.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !slices.Contains(files, "actual-change.txt") {
 		t.Fatalf("OpenCode diff summary has no workspace change: %q", files)

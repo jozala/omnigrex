@@ -41,6 +41,13 @@ type GitHubAPI interface {
 	ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error)
 	ListReviewThreads(context.Context, string, string, string, int) ([]githubapi.ReviewThread, error)
 	GetCheckRuns(context.Context, string, string, string, string) ([]githubapi.CheckRun, error)
+	GetCheckRunDiagnostics(context.Context, string, string, string, int64, string, int64, string) (githubapi.CheckDiagnostics, error)
+	ListWorkflowRunsForHead(context.Context, string, string, string, string, string, int64) (githubapi.CIRunList, error)
+	GetWorkflowRun(context.Context, string, string, string, int64) (githubapi.CIRun, error)
+	GetWorkflowRunDetail(context.Context, string, string, string, int64, int, string, int64, string) (githubapi.CIRunDetail, error)
+	GetCIJob(context.Context, string, string, string, int64) (githubapi.CIJob, error)
+	GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, string, int, int64) (githubapi.CILogExcerpt, error)
+	SearchCIJobLogs(context.Context, string, string, string, githubapi.JobScope, string, int, string, int64) (githubapi.CILogSearchResult, error)
 	OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error)
 	CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error)
 	CreatePullRequestComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error)
@@ -215,6 +222,16 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 			return nil, ErrToolDependency
 		}
 		return json.Marshal(handoff)
+	case ToolGetCheckRunDiagnostics:
+		return backend.getCheckRunDiagnostics(ctx, invocation)
+	case ToolListCIRuns:
+		return backend.listCIRuns(ctx, invocation)
+	case ToolGetCIRun:
+		return backend.getCIRun(ctx, invocation)
+	case ToolGetCIJobLogs:
+		return backend.getCIJobLogs(ctx, invocation)
+	case ToolSearchCIJobLogs:
+		return backend.searchCIJobLogs(ctx, invocation)
 	case ToolRequestReview:
 		return backend.requestReview(ctx, invocation)
 	case ToolReportBlocked:
