@@ -273,10 +273,11 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 	} else if messageOffset != 0 {
 		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 	}
-	if annotationOffset == int64(len(annotations)) && summaryOffset >= int64(len(output.Summary)) && textOffset >= int64(len(output.Text)) {
+	if cursor != "" && annotationOffset == int64(len(annotations)) && summaryOffset >= int64(len(output.Summary)) && textOffset >= int64(len(output.Text)) {
 		// Past every annotation with no output remainder: no honest
 		// cursor advances to this state, since issuance requires more
-		// content to remain.
+		// content to remain. A first request without a cursor carrying
+		// empty content is valid and returns an empty result below.
 		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 	}
 	page, nextAnnIdx, nextMsgOff, err := pageCheckAnnotations(check, title, summaryChunk, textChunk, annotations, annotationOffset, messageOffset)

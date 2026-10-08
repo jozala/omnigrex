@@ -562,8 +562,9 @@ func windowQueryLine(line, query string) (string, bool) {
 // serialized response budget. It returns the kept prefix and, when items
 // were cut, the absolute query-line offset to resume from; otherwise -1.
 // A single oversized match is shrunk by dropping its trailing context
-// lines (whole lines, offsets recomputed) instead of being dropped, so no
-// available match is ever replaced by a rejection.
+// lines first, then its leading context lines (whole lines, offsets
+// recomputed), instead of being dropped, so no available match is ever
+// replaced by a rejection.
 func fitSearchPage(text string, offset int64, headSHA string, jobID int64, query string, matches []CILogMatch, searchedBytes int64) ([]CILogMatch, int64) {
 	kept := make([]CILogMatch, 0, len(matches))
 	for i, match := range matches {
@@ -613,9 +614,10 @@ func searchPageFits(headSHA string, jobID int64, query string, kept []CILogMatch
 	return ensureCISerializedBound(probe) == nil
 }
 
-// shrinkSearchMatch drops trailing context lines from one oversized match
-// until it fits, preserving the query line and exact line offsets. The
-// query line alone always fits, so this terminates with a reportable match.
+// shrinkSearchMatch drops context lines from one oversized match until it
+// fits, preserving the query line and exact line offsets: trailing lines
+// first, then leading lines. The query line alone always fits, so this
+// terminates with a reportable match.
 func shrinkSearchMatch(text string, offset int64, query string, match CILogMatch, fits func(CILogMatch) bool) CILogMatch {
 	lines := strings.SplitAfter(text, "\n")
 	queryIdx := match.LineNumber - 1
@@ -634,6 +636,19 @@ func shrinkSearchMatch(text string, offset int64, query string, match CILogMatch
 		candidate.Text = excerpt
 		candidate.EndLine = end + 1
 		candidate.EndOffset = queryLineByteOffset(text, offset, end+2)
+		candidate.TruncatedLine = true
+		if fits(candidate) {
+			return candidate
+		}
+		match = candidate
+	}
+	for start < queryIdx {
+		start++
+		excerpt, _ := buildMatchExcerpt(lines, query, queryIdx, start, end)
+		candidate := match
+		candidate.Text = excerpt
+		candidate.StartLine = start + 1
+		candidate.StartOffset = queryLineByteOffset(text, offset, start+1)
 		candidate.TruncatedLine = true
 		if fits(candidate) {
 			return candidate

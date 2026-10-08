@@ -348,6 +348,42 @@ func TestSearchLongLineExcerptIncludesMatch(t *testing.T) {
 	}
 }
 
+func TestSearchLargeLeadingContextShrinksWithinBudget(t *testing.T) {
+	// A single match with oversized leading context must shrink from both
+	// sides until it fits instead of failing wholesale: trailing lines
+	// first, then leading lines, always preserving the query line.
+	var builder strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&builder, "pad-%02d-%s\n", i, strings.Repeat("p", 9180))
+	}
+	builder.WriteString("QUERY-MARKER unique assertion text\n")
+	builder.WriteString("after one\nafter two\n")
+	client, done := ciLogServer(t, builder.String(), false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	result, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "QUERY-MARKER", 20, "", 9123)
+	if err != nil {
+		t.Fatalf("oversized-context search error = %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %d, want the single query hit", len(result.Matches))
+	}
+	match := result.Matches[0]
+	if !strings.Contains(match.Text, "QUERY-MARKER unique assertion text") {
+		t.Fatalf("shrunk excerpt omits the query line")
+	}
+	if match.StartLine <= 1 || !match.TruncatedLine {
+		t.Fatalf("leading context must shrink with truncation flagged: %+v", match)
+	}
+	if result.HasMore || !result.ReachedEnd {
+		t.Fatalf("single complete match must finish: has_more=%v reached_end=%v", result.HasMore, result.ReachedEnd)
+	}
+	encoded, _ := json.Marshal(result)
+	if len(encoded) > 64<<10 {
+		t.Fatalf("shrunk response exceeds 64KiB: %d", len(encoded))
+	}
+}
+
 func TestSearchLiteralAcrossScanBoundary(t *testing.T) {
 	// The literal straddles the 8 MiB scan boundary inside one long
 	// newline-free region: neither window alone contains it unless the
@@ -458,6 +494,34 @@ func TestCheckAnnotationMessageTailRetrievable(t *testing.T) {
 	}
 	if second.HasMore {
 		t.Fatalf("message tail must complete: has_more=%v", second.HasMore)
+	}
+}
+
+func TestCheckEmptyOutputReturnsEmptyResult(t *testing.T) {
+	// A valid check with empty output and no annotations must succeed on
+	// the first request, not be rejected as a stale continuation.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets/check-runs/704" {
+			fmt.Fprintf(w, `{"id":704,"node_id":"CR_704","name":"CI","head_sha":%q,"status":"completed","conclusion":"success","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{}}`, ciHeadSHA)
+			return
+		}
+		if r.URL.Path == "/repos/acme/widgets/check-runs/704/annotations" {
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	client, done := ciClient(t, handler)
+	defer done()
+	diagnostics, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 704, "", 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("empty diagnostics error = %v", err)
+	}
+	if diagnostics.CheckID != 704 || diagnostics.Output.Summary != "" || diagnostics.Output.Text != "" || len(diagnostics.Annotations) != 0 {
+		t.Fatalf("empty diagnostics = %#v", diagnostics)
+	}
+	if diagnostics.HasMore || diagnostics.NextCursor != "" || diagnostics.Truncated {
+		t.Fatalf("empty diagnostics must complete plainly: has_more=%v cursor=%q truncated=%v", diagnostics.HasMore, diagnostics.NextCursor, diagnostics.Truncated)
 	}
 }
 
