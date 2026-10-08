@@ -115,9 +115,17 @@ func validateLogDownloadURL(rawLocation, apiBaseURL string) (string, error) {
 	if isLoopbackHost(host) || isPrivateHost(host) {
 		return "", fmt.Errorf("log download location is not an approved destination")
 	}
+	// Only these explicitly permitted destination families are accepted,
+	// as exact hosts or subdomains. A bare parent such as
+	// "githubusercontent.com" is deliberately not listed: any subdomain of
+	// it (for example "evilobjects.githubusercontent.com") would otherwise
+	// pass, and those names need not belong to GitHub log storage.
 	lowerHost := strings.ToLower(host)
-	for _, suffix := range []string{".blob.core.windows.net", ".actions.githubusercontent.com", "actions.githubusercontent.com", "objects.githubusercontent.com", "githubusercontent.com"} {
-		if strings.HasSuffix(lowerHost, suffix) || lowerHost == strings.TrimPrefix(suffix, ".") {
+	for _, domain := range []string{"blob.core.windows.net", "actions.githubusercontent.com", "objects.githubusercontent.com"} {
+		// Require a DNS-label boundary: a bare suffix match would also
+		// accept unrelated lookalike domains such as
+		// "evilgithubusercontent.com".
+		if lowerHost == domain || strings.HasSuffix(lowerHost, "."+domain) {
 			return parsed.String(), nil
 		}
 	}
@@ -257,7 +265,7 @@ func readBoundedLog(body io.Reader, maxBytes int64) ([]byte, bool, error) {
 	return content, true, nil
 }
 
-func (client *APIClient) GetCIJobLogExcerpt(ctx context.Context, installationToken, owner, repository string, job JobScope, stepNumber *int, cursor string, maxBytes int, repoID int64) (CILogExcerpt, error) {
+func (client *APIClient) GetCIJobLogExcerpt(ctx context.Context, installationToken, owner, repository string, job JobScope, cursor string, maxBytes int, repoID int64) (CILogExcerpt, error) {
 	if err := validateRepository(owner, repository); err != nil {
 		return CILogExcerpt{}, err
 	}
@@ -276,17 +284,10 @@ func (client *APIClient) GetCIJobLogExcerpt(ctx context.Context, installationTok
 		if err != nil {
 			return CILogExcerpt{}, &ConfigurationError{Cause: err}
 		}
-		wantExtra := ""
-		if stepNumber != nil {
-			wantExtra = fmt.Sprintf("step=%d", *stepNumber)
-		}
-		if decoded.Kind != "job_logs" || decoded.ID != job.ID || decoded.RepoID != repoID || decoded.Head != job.HeadSHA || decoded.Extra != wantExtra {
+		if decoded.Kind != "job_logs" || decoded.ID != job.ID || decoded.RepoID != repoID || decoded.Head != job.HeadSHA || decoded.Extra != "" {
 			return CILogExcerpt{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 		}
 		offset = decoded.Offset
-	}
-	if stepNumber != nil && (*stepNumber <= 0 || *stepNumber > 1000) {
-		return CILogExcerpt{}, &ConfigurationError{Cause: fmt.Errorf("invalid step selector")}
 	}
 	location, metadata, err := client.jobLogsLocation(ctx, installationToken, owner, repository, job.ID)
 	if err != nil {
@@ -321,15 +322,10 @@ func (client *APIClient) GetCIJobLogExcerpt(ctx context.Context, installationTok
 		JobID: job.ID, Text: text, StartOffset: offset, EndOffset: endOffset,
 		HasMore: hasMore, Truncated: hasMore, Empty: len(window) == 0 && !hasMore,
 	}
-	if stepNumber != nil {
-		excerpt.StepNumber = stepNumber
-	}
+	// Excerpts are always whole-job scoped: there is no supported step
+	// attribution for log text, so no step number is echoed here.
 	if hasMore {
-		extra := ""
-		if stepNumber != nil {
-			extra = fmt.Sprintf("step=%d", *stepNumber)
-		}
-		excerpt.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "job_logs", RepoID: repoID, Head: job.HeadSHA, ID: job.ID, Offset: endOffset, Extra: extra})
+		excerpt.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "job_logs", RepoID: repoID, Head: job.HeadSHA, ID: job.ID, Offset: endOffset})
 	}
 	if err := ensureCISerializedBound(excerpt); err != nil {
 		for len(excerpt.Text) > MinCILogExcerptBytes && err != nil {
@@ -343,11 +339,7 @@ func (client *APIClient) GetCIJobLogExcerpt(ctx context.Context, installationTok
 			}
 			excerpt.EndOffset = excerpt.StartOffset + int64(len(excerpt.Text))
 			excerpt.HasMore, excerpt.Truncated = true, true
-			extra := ""
-			if stepNumber != nil {
-				extra = fmt.Sprintf("step=%d", *stepNumber)
-			}
-			excerpt.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "job_logs", RepoID: repoID, Head: job.HeadSHA, ID: job.ID, Offset: excerpt.EndOffset, Extra: extra})
+			excerpt.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "job_logs", RepoID: repoID, Head: job.HeadSHA, ID: job.ID, Offset: excerpt.EndOffset})
 			err = ensureCISerializedBound(excerpt)
 		}
 		if err != nil {
@@ -417,6 +409,21 @@ func (client *APIClient) SearchCIJobLogs(ctx context.Context, installationToken,
 				}
 			}
 			matches = kept
+		} else {
+			// No newline in the scan window: a literal may straddle the
+			// window end, matching neither window. Defer matches whose
+			// query line starts in the trailing overlap (one query length
+			// minus one byte) so the next window re-finds them exactly
+			// once instead of losing them or reporting them twice.
+			boundary := offset + int64(len(window)) - int64(MaxCIQueryLength-1)
+			kept := matches[:0]
+			for _, match := range matches {
+				if queryLineByteOffset(text, offset, match.LineNumber) < boundary {
+					kept = append(kept, match)
+				}
+			}
+			matches = kept
+			nextOffset = boundary
 		}
 	}
 	// searchLogText retains one sentinel match beyond the cap. Evaluate it
@@ -437,7 +444,14 @@ func (client *APIClient) SearchCIJobLogs(ctx context.Context, installationToken,
 			nextOffset = offset + int64(len(window))
 		}
 	}
-	hasMore := searchedTruncated || overflow
+	// Page matches within the serialized response budget instead of
+	// rejecting valid results wholesale: keep the leading prefix that fits,
+	// and resume the remainder through continuation.
+	matches, budgetNext := fitSearchPage(text, offset, job.HeadSHA, job.ID, query, matches, int64(len(window)))
+	if budgetNext >= 0 {
+		nextOffset = budgetNext
+	}
+	hasMore := searchedTruncated || overflow || budgetNext >= 0
 	result := CILogSearchResult{
 		HeadSHA: job.HeadSHA, JobID: job.ID, Query: query, Matches: matches,
 		HasMore: hasMore || searchedTruncated, ReachedEnd: reachedEnd && !searchedTruncated,
@@ -478,19 +492,7 @@ func searchLogText(text, query string, contextLines int, baseOffset int64) []CIL
 		if end >= len(lines) {
 			end = len(lines) - 1
 		}
-		var builder strings.Builder
-		for current := start; current <= end; current++ {
-			segment := strings.TrimSuffix(strings.TrimSuffix(lines[current], "\n"), "\r")
-			if len(segment) > 8<<10 {
-				segment = segment[:8<<10]
-			}
-			builder.WriteString(segment)
-			if current < end {
-				builder.WriteString("\n")
-			}
-		}
-		excerpt := builder.String()
-		truncatedLine := len(clean) > 8<<10
+		excerpt, truncatedLine := buildMatchExcerpt(lines, query, index, start, end)
 		if len(excerpt) > (2*MaxCISearchContext+1)*(8<<10) {
 			excerpt = excerpt[:(2*MaxCISearchContext+1)*(8<<10)]
 			truncatedLine = true
@@ -505,6 +507,127 @@ func searchLogText(text, query string, contextLines int, baseOffset int64) []CIL
 		}
 	}
 	return matches
+}
+
+// buildMatchExcerpt assembles the excerpt for one query match from window
+// lines. Lines are capped at 8 KiB each; the query line itself is windowed
+// around its first occurrence so a match beyond an 8 KiB prefix is still
+// included rather than silently omitted.
+func buildMatchExcerpt(lines []string, query string, queryIdx, start, end int) (string, bool) {
+	var builder strings.Builder
+	truncated := false
+	for current := start; current <= end; current++ {
+		segment := strings.TrimSuffix(strings.TrimSuffix(lines[current], "\n"), "\r")
+		if current == queryIdx {
+			segment, truncated = windowQueryLine(segment, query)
+		} else if len(segment) > 8<<10 {
+			segment = segment[:8<<10]
+			truncated = true
+		}
+		builder.WriteString(segment)
+		if current < end {
+			builder.WriteString("\n")
+		}
+	}
+	return builder.String(), truncated
+}
+
+// windowQueryLine bounds one query-containing line to 8 KiB centered on its
+// first query occurrence, keeping the matched text in the excerpt.
+func windowQueryLine(line, query string) (string, bool) {
+	occurrence := strings.Index(line, query)
+	if occurrence < 0 || len(line) <= 8<<10 {
+		return line, false
+	}
+	lower := occurrence - (4 << 10)
+	if lower < 0 {
+		lower = 0
+	}
+	upper := occurrence + (4 << 10)
+	if upper > len(line) {
+		upper = len(line)
+	}
+	for lower > 0 && !utf8.ValidString(line[lower:]) {
+		lower--
+	}
+	window := line[lower:upper]
+	for !utf8.ValidString(window) && len(window) > 0 {
+		window = window[:len(window)-1]
+	}
+	return window, true
+}
+
+// fitSearchPage keeps the leading prefix of matches that fits the
+// serialized response budget. It returns the kept prefix and, when items
+// were cut, the absolute query-line offset to resume from; otherwise -1.
+// A single oversized match is shrunk by dropping its trailing context
+// lines (whole lines, offsets recomputed) instead of being dropped, so no
+// available match is ever replaced by a rejection.
+func fitSearchPage(text string, offset int64, headSHA string, jobID int64, query string, matches []CILogMatch, searchedBytes int64) ([]CILogMatch, int64) {
+	kept := make([]CILogMatch, 0, len(matches))
+	for i, match := range matches {
+		kept = append(kept, match)
+		if searchPageFits(headSHA, jobID, query, kept, searchedBytes) {
+			continue
+		}
+		kept = kept[:len(kept)-1]
+		if len(kept) == 0 {
+			shrunk := shrinkSearchMatch(text, offset, query, match, func(candidate CILogMatch) bool {
+				return searchPageFits(headSHA, jobID, query, []CILogMatch{candidate}, searchedBytes)
+			})
+			kept = append(kept, shrunk)
+			// The shrunk match is reported now; resume after it when more
+			// matches remain.
+			if i+1 < len(matches) {
+				return kept, queryLineByteOffset(text, offset, matches[i+1].LineNumber)
+			}
+			return kept, -1
+		}
+		return kept, queryLineByteOffset(text, offset, match.LineNumber)
+	}
+	return matches, -1
+}
+
+// searchPageFits probes whether a match page fits the serialized response
+// budget. It assumes a continuation follows (with room for its cursor), so
+// a page accepted here always fits once finalized.
+func searchPageFits(headSHA string, jobID int64, query string, kept []CILogMatch, searchedBytes int64) bool {
+	probe := CILogSearchResult{
+		HeadSHA: headSHA, JobID: jobID, Query: query, Matches: kept,
+		HasMore: true, NextCursor: strings.Repeat("x", 256), ReachedEnd: false,
+		SearchedBytes: searchedBytes,
+	}
+	return ensureCISerializedBound(probe) == nil
+}
+
+// shrinkSearchMatch drops trailing context lines from one oversized match
+// until it fits, preserving the query line and exact line offsets. The
+// query line alone always fits, so this terminates with a reportable match.
+func shrinkSearchMatch(text string, offset int64, query string, match CILogMatch, fits func(CILogMatch) bool) CILogMatch {
+	lines := strings.SplitAfter(text, "\n")
+	queryIdx := match.LineNumber - 1
+	start := match.StartLine - 1
+	if queryIdx < 0 || queryIdx >= len(lines) || start < 0 || start > queryIdx {
+		return match
+	}
+	end := match.EndLine - 1
+	if end >= len(lines) {
+		end = len(lines) - 1
+	}
+	for end > queryIdx {
+		end--
+		excerpt, _ := buildMatchExcerpt(lines, query, queryIdx, start, end)
+		candidate := match
+		candidate.Text = excerpt
+		candidate.EndLine = end + 1
+		candidate.EndOffset = queryLineByteOffset(text, offset, end+2)
+		candidate.TruncatedLine = true
+		if fits(candidate) {
+			return candidate
+		}
+		match = candidate
+	}
+	return match
 }
 
 // queryLineByteOffset returns the absolute byte offset where the given

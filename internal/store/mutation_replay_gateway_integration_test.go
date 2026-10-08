@@ -390,7 +390,7 @@ func (*replayGatewayGitHub) GetWorkflowRunDetail(context.Context, string, string
 func (*replayGatewayGitHub) GetCIJob(context.Context, string, string, string, int64) (githubapi.CIJob, error) {
 	return githubapi.CIJob{}, errors.New("unexpected call")
 }
-func (*replayGatewayGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, *int, string, int, int64) (githubapi.CILogExcerpt, error) {
+func (*replayGatewayGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, string, int, int64) (githubapi.CILogExcerpt, error) {
 	return githubapi.CILogExcerpt{}, errors.New("unexpected call")
 }
 func (*replayGatewayGitHub) SearchCIJobLogs(context.Context, string, string, string, githubapi.JobScope, string, int, string, int64) (githubapi.CILogSearchResult, error) {
@@ -624,7 +624,7 @@ func (*signedReviewerGitHub) GetCIJob(context.Context, string, string, string, i
 	return githubapi.CIJob{}, errors.New("unexpected call")
 }
 
-func (*signedReviewerGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, *int, string, int, int64) (githubapi.CILogExcerpt, error) {
+func (*signedReviewerGitHub) GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, string, int, int64) (githubapi.CILogExcerpt, error) {
 	return githubapi.CILogExcerpt{}, errors.New("unexpected call")
 }
 

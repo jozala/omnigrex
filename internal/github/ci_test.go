@@ -211,7 +211,7 @@ func TestJobLogExcerptBoundedContinuationAndLateRetrieval(t *testing.T) {
 	client, done := ciLogServer(t, logContent, true)
 	defer done()
 	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
-	first, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, nil, "", 4096, 9123)
+	first, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, "", 4096, 9123)
 	if err != nil {
 		t.Fatalf("first excerpt error = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestJobLogExcerptBoundedContinuationAndLateRetrieval(t *testing.T) {
 	cursor := first.NextCursor
 	found := false
 	for i := 0; i < 20 && cursor != ""; i++ {
-		excerpt, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, nil, cursor, 16384, 9123)
+		excerpt, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, cursor, 16384, 9123)
 		if err != nil {
 			t.Fatalf("continuation %d error = %v", i, err)
 		}
@@ -244,7 +244,7 @@ func TestJobLogExcerptBoundedContinuationAndLateRetrieval(t *testing.T) {
 	if !found {
 		t.Fatal("assertion not reachable through continuation")
 	}
-	if _, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, nil, "bad", 4096, 9123); err == nil {
+	if _, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, "bad", 4096, 9123); err == nil {
 		t.Fatal("invalid cursor accepted")
 	}
 }
@@ -324,6 +324,255 @@ func TestSearchBeyondMatchCapPaginatesWithoutLoss(t *testing.T) {
 	}
 }
 
+func TestSearchLongLineExcerptIncludesMatch(t *testing.T) {
+	logContent := strings.Repeat("f", 20<<10) + "NEEDLE\nsecond line without the query\n"
+	client, done := ciLogServer(t, logContent, false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	result, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 0, "", 9123)
+	if err != nil {
+		t.Fatalf("search error = %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %d, want exactly the long-line hit", len(result.Matches))
+	}
+	match := result.Matches[0]
+	if !strings.Contains(match.Text, "NEEDLE") {
+		t.Fatalf("excerpt omits the matched text: %q...", match.Text[:min(64, len(match.Text))])
+	}
+	if !match.TruncatedLine {
+		t.Fatal("long-line excerpt must signal truncation")
+	}
+	if match.StartOffset != 0 || match.EndOffset != int64(20<<10+len("NEEDLE\n")) {
+		t.Fatalf("offsets do not locate the source line: %+v", match)
+	}
+}
+
+func TestSearchLiteralAcrossScanBoundary(t *testing.T) {
+	// The literal straddles the 8 MiB scan boundary inside one long
+	// newline-free region: neither window alone contains it unless the
+	// continuation overlaps, and the search must not report completion.
+	logContent := strings.Repeat("x", githubapi.MaxCILogScanBytes-3) + "NEEDLE\n" + strings.Repeat("tail line\n", 10)
+	client, done := ciLogServer(t, logContent, false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 0, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	if len(first.Matches) != 0 || !first.HasMore || first.NextCursor == "" || first.ReachedEnd {
+		t.Fatalf("first page = %d matches has_more=%v reached_end=%v cursor=%q", len(first.Matches), first.HasMore, first.ReachedEnd, first.NextCursor)
+	}
+	second, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 0, first.NextCursor, 9123)
+	if err != nil {
+		t.Fatalf("second search error = %v", err)
+	}
+	if len(second.Matches) != 1 || second.HasMore || !second.ReachedEnd {
+		t.Fatalf("second page = %d matches has_more=%v reached_end=%v", len(second.Matches), second.HasMore, second.ReachedEnd)
+	}
+	match := second.Matches[0]
+	if !strings.Contains(match.Text, "NEEDLE") {
+		t.Fatalf("straddling literal not found: %q", match.Text)
+	}
+	const boundary = int64(githubapi.MaxCILogScanBytes - (githubapi.MaxCIQueryLength - 1))
+	if match.StartOffset != boundary {
+		t.Fatalf("resumed match starts at offset %d, want scan overlap at %d", match.StartOffset, boundary)
+	}
+}
+
+func TestCheckOutputContinuationRetrievesTails(t *testing.T) {
+	summary := strings.Repeat("s", 10<<10)
+	text := strings.Repeat("t", 20<<10)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets/check-runs/701" {
+			encodedSummary, _ := json.Marshal(summary)
+			encodedText, _ := json.Marshal(text)
+			fmt.Fprintf(w, `{"id":701,"node_id":"CR_701","name":"CI","head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{"title":"T","summary":%s,"text":%s}}`, ciHeadSHA, encodedSummary, encodedText)
+			return
+		}
+		if r.URL.Path == "/repos/acme/widgets/check-runs/701/annotations" {
+			fmt.Fprint(w, `[{"path":"a.go","start_line":1,"end_line":1,"annotation_level":"failure","message":"first"},{"path":"b.go","start_line":2,"end_line":2,"annotation_level":"warning","message":"second"}]`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	client, done := ciClient(t, handler)
+	defer done()
+	first, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 701, "", 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if first.Output.Summary != summary[:8<<10] || first.Output.Text != text[:16<<10] || len(first.Annotations) != 2 {
+		t.Fatalf("first page chunks wrong: summary %d text %d annotations %d", len(first.Output.Summary), len(first.Output.Text), len(first.Annotations))
+	}
+	if !first.HasMore || first.NextCursor == "" || !first.Truncated {
+		t.Fatalf("oversized output must paginate: has_more=%v cursor=%q", first.HasMore, first.NextCursor)
+	}
+	second, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 701, first.NextCursor, 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("second page error = %v", err)
+	}
+	if second.Output.Summary != summary[8<<10:] || second.Output.Text != text[16<<10:] {
+		t.Fatalf("second page tails wrong: summary %d text %d", len(second.Output.Summary), len(second.Output.Text))
+	}
+	if second.HasMore || second.NextCursor != "" {
+		t.Fatalf("output tails must complete: has_more=%v cursor=%q", second.HasMore, second.NextCursor)
+	}
+}
+
+func TestCheckAnnotationMessageTailRetrievable(t *testing.T) {
+	message := strings.Repeat("m", 4500) + "ASSERTION-AFTER-4K" + strings.Repeat("n", 500)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets/check-runs/702" {
+			fmt.Fprintf(w, `{"id":702,"node_id":"CR_702","name":"CI","head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{"title":"T","summary":"S","text":"X"}}`, ciHeadSHA)
+			return
+		}
+		if r.URL.Path == "/repos/acme/widgets/check-runs/702/annotations" {
+			encoded, _ := json.Marshal(message)
+			fmt.Fprintf(w, `[{"path":"a.go","start_line":1,"end_line":1,"annotation_level":"failure","message":%s}]`, encoded)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	client, done := ciClient(t, handler)
+	defer done()
+	first, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 702, "", 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if len(first.Annotations) != 1 || len(first.Annotations[0].Message) != 4<<10 || !first.Annotations[0].Truncated {
+		t.Fatalf("first annotation page wrong: %+v", first.Annotations)
+	}
+	if strings.Contains(first.Annotations[0].Message, "ASSERTION-AFTER-4K") {
+		t.Fatal("assertion should sit beyond the first message chunk")
+	}
+	if !first.HasMore || first.NextCursor == "" || !first.Truncated {
+		t.Fatalf("clipped message must paginate with truncation flagged")
+	}
+	second, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 702, first.NextCursor, 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("second page error = %v", err)
+	}
+	if len(second.Annotations) != 1 || !strings.Contains(second.Annotations[0].Message, "ASSERTION-AFTER-4K") {
+		t.Fatalf("message tail lost: %+v", second.Annotations)
+	}
+	if second.HasMore {
+		t.Fatalf("message tail must complete: has_more=%v", second.HasMore)
+	}
+}
+
+func TestCheckAnnotationsPaginateWithinBudget(t *testing.T) {
+	var annotations []string
+	for i := 1; i <= 20; i++ {
+		body := fmt.Sprintf("annotation-%02d:", i) + strings.Repeat("m", 4000)
+		encoded, _ := json.Marshal(body)
+		annotations = append(annotations, fmt.Sprintf(`{"path":"a.go","start_line":%d,"end_line":%d,"annotation_level":"failure","message":%s}`, i, i, encoded))
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets/check-runs/703" {
+			fmt.Fprintf(w, `{"id":703,"node_id":"CR_703","name":"CI","head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{"title":"T","summary":"S","text":"X"}}`, ciHeadSHA)
+			return
+		}
+		if r.URL.Path == "/repos/acme/widgets/check-runs/703/annotations" {
+			fmt.Fprintf(w, `[%s]`, strings.Join(annotations, ","))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	client, done := ciClient(t, handler)
+	defer done()
+	first, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 703, "", 9123, ciHeadSHA)
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if len(first.Annotations) == 0 || len(first.Annotations) >= 20 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("oversized annotations must paginate, got %d annotations has_more=%v", len(first.Annotations), first.HasMore)
+	}
+	seen := make(map[string]bool)
+	for _, annotation := range first.Annotations {
+		seen[annotation.Message] = true
+	}
+	cursor := first.NextCursor
+	for cursor != "" {
+		page, err := client.GetCheckRunDiagnostics(context.Background(), "token", "acme", "widgets", 703, cursor, 9123, ciHeadSHA)
+		if err != nil {
+			t.Fatalf("continuation error = %v", err)
+		}
+		for _, annotation := range page.Annotations {
+			if seen[annotation.Message] {
+				t.Fatalf("duplicate annotation across pages: %q", annotation.Message[:32])
+			}
+			seen[annotation.Message] = true
+		}
+		cursor = page.NextCursor
+		if !page.HasMore {
+			break
+		}
+	}
+	if len(seen) != 20 {
+		t.Fatalf("annotation coverage = %d/20", len(seen))
+	}
+}
+
+func TestSearchResultsPaginateWithinBudget(t *testing.T) {
+	var builder strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&builder, "match-%02d-%s\n", i, strings.Repeat("x", 590))
+	}
+	client, done := ciLogServer(t, builder.String(), false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "match-", 5, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	if len(first.Matches) == 0 || len(first.Matches) >= 20 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("oversized results must paginate, got %d matches has_more=%v", len(first.Matches), first.HasMore)
+	}
+	// Account exact query lines, not excerpt text: context neighbors also
+	// contain the query, so only the match's own line (identified by its
+	// position within the excerpt) proves no loss and no duplication.
+	queryLine := func(match githubapi.CILogMatch) string {
+		segments := strings.Split(match.Text, "\n")
+		position := match.LineNumber - match.StartLine
+		if position < 0 || position >= len(segments) {
+			return ""
+		}
+		return segments[position]
+	}
+	seen := make(map[string]bool)
+	for _, match := range first.Matches {
+		seen[queryLine(match)] = true
+	}
+	cursor := first.NextCursor
+	for cursor != "" {
+		page, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "match-", 5, cursor, 9123)
+		if err != nil {
+			t.Fatalf("continuation error = %v", err)
+		}
+		for _, match := range page.Matches {
+			line := queryLine(match)
+			if seen[line] {
+				t.Fatalf("duplicate query line across pages: %q", line[:32])
+			}
+			seen[line] = true
+		}
+		cursor = page.NextCursor
+		if !page.HasMore {
+			break
+		}
+	}
+	if len(seen) != 20 {
+		t.Fatalf("query-line coverage = %d/20", len(seen))
+	}
+	for i := 1; i <= 20; i++ {
+		want := fmt.Sprintf("match-%02d-%s", i, strings.Repeat("x", 590))
+		if !seen[want] {
+			t.Fatalf("query line %d lost across pagination", i)
+		}
+	}
+}
+
 func TestLogDownloadRejectsUnsafeDestinations(t *testing.T) {
 	for _, location := range []string{
 		"http://169.254.169.254/latest",
@@ -331,6 +580,9 @@ func TestLogDownloadRejectsUnsafeDestinations(t *testing.T) {
 		"https://example.blob.core.windows.net:8443/logs",
 		"https://evil.example/logs",
 		"http://example.blob.core.windows.net/logs",
+		"https://evilgithubusercontent.com/logs",
+		"https://evilobjects.githubusercontent.com/logs",
+		"https://evilactions.githubusercontent.com/logs",
 	} {
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Location", location)
@@ -338,10 +590,13 @@ func TestLogDownloadRejectsUnsafeDestinations(t *testing.T) {
 		})
 		client, done := ciClient(t, handler)
 		scope := githubapi.JobScope{ID: 1, RunID: 1, HeadSHA: ciHeadSHA}
-		_, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, nil, "", 4096, 9123)
+		_, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, "", 4096, 9123)
 		done()
 		if err == nil {
 			t.Fatalf("unsafe location accepted: %s", location)
+		}
+		if detail := githubapi.SafeFailureDiagnostics(err); detail.Stage != "ci_logs_download" || detail.Reason != "invalid_url" {
+			t.Fatalf("unsafe location %s rejected at wrong stage: %+v", location, detail)
 		}
 		if strings.Contains(err.Error(), location) {
 			t.Fatalf("signed URL leaked into error for %s", location)
@@ -387,7 +642,7 @@ func TestLogStatesAreDistinguishable(t *testing.T) {
 		{jobID: 429, status: 429},
 	} {
 		scope := githubapi.JobScope{ID: test.jobID, RunID: 1, HeadSHA: ciHeadSHA}
-		_, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, nil, "", 4096, 9123)
+		_, err := client.GetCIJobLogExcerpt(context.Background(), "token", "acme", "widgets", scope, "", 4096, 9123)
 		if err == nil {
 			t.Fatalf("job %d error = nil", test.jobID)
 		}
@@ -411,7 +666,7 @@ func TestLogCancellationIsDistinguishable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	scope := githubapi.JobScope{ID: 777, RunID: 1, HeadSHA: ciHeadSHA}
-	_, err := client.GetCIJobLogExcerpt(ctx, "token", "acme", "widgets", scope, nil, "", 4096, 9123)
+	_, err := client.GetCIJobLogExcerpt(ctx, "token", "acme", "widgets", scope, "", 4096, 9123)
 	if err == nil || githubapi.CancellationReason(err) == "" {
 		t.Fatalf("cancellation not preserved: %v", err)
 	}

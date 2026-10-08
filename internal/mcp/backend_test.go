@@ -1330,7 +1330,7 @@ func (api *backendGitHub) GetCIJob(_ context.Context, _, _, _ string, jobID int6
 	return githubapi.CIJob{ID: jobID, HeadSHA: productionHeadSHA}, nil
 }
 
-func (api *backendGitHub) GetCIJobLogExcerpt(_ context.Context, _, _, _ string, scope githubapi.JobScope, _ *int, _ string, _ int, _ int64) (githubapi.CILogExcerpt, error) {
+func (api *backendGitHub) GetCIJobLogExcerpt(_ context.Context, _, _, _ string, scope githubapi.JobScope, _ string, _ int, _ int64) (githubapi.CILogExcerpt, error) {
 	if api.readErr != nil {
 		return githubapi.CILogExcerpt{}, api.readErr
 	}

@@ -291,6 +291,200 @@ func TestCIScopeRejectionForgedAndCrossHead(t *testing.T) {
 	}
 }
 
+func TestCIStepSelectorReturnsExplicitUnsupported(t *testing.T) {
+	// The provider exposes only whole-job logs, so a valid step selector
+	// must yield an explicit unsupported diagnostic instead of whole-job
+	// text labeled with the requested step number.
+	var logBytesRequested int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
+			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run Docker-backed integration tests","number":13,"status":"completed","conclusion":"failure"}]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			// Must stay unreachable: step-scoped retrieval short-circuits
+			// before any log download.
+			logBytesRequested++
+			http.Error(w, "must not download logs for step selectors", http.StatusInternalServerError)
+		case r.URL.Path == "/log-bytes":
+			logBytesRequested++
+			http.Error(w, "must not download logs for step selectors", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
+		t.Run(string(role), func(t *testing.T) {
+			backend, scope := ciBackend(t, client, role)
+			_, err := backend.Execute(context.Background(), mcp.Invocation{
+				Name:      mcp.ToolGetCIJobLogs,
+				Arguments: json.RawMessage(fmt.Sprintf(`{"job_id":%d,"step_number":13}`, ciRegressionJob)),
+				Scope:     scope, Class: mcp.ReadTool,
+			})
+			if err == nil || !strings.Contains(err.Error(), "step_filter_unsupported") {
+				t.Fatalf("step selector error = %v, want explicit unsupported", err)
+			}
+		})
+	}
+	if logBytesRequested != 0 {
+		t.Fatalf("step selector triggered %d log download(s)", logBytesRequested)
+	}
+}
+
+func TestCISearchBudgetPaginatesThroughMCP(t *testing.T) {
+	// Mirrors the reported failure shape through the production backend:
+	// twenty matching 600-character lines with default context must
+	// paginate instead of failing wholesale with an unavailable error.
+	var builder strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&builder, "match-%02d-%s\n", i, strings.Repeat("x", 590))
+	}
+	logContent := builder.String()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/log-bytes" && r.Header.Get("Authorization") != "Bearer developer-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
+			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			w.Header().Set("Location", "http://"+r.Host+"/log-bytes")
+			w.WriteHeader(http.StatusFound)
+		case r.URL.Path == "/log-bytes":
+			if rng := r.Header.Get("Range"); rng != "" {
+				var start int64
+				if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err == nil && start < int64(len(logContent)) {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(logContent)-1, len(logContent)))
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = io.WriteString(w, logContent[start:])
+					return
+				}
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			_, _ = io.WriteString(w, logContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, scope := ciBackend(t, client, workflow.RoleDeveloper)
+	firstRaw := ciExecute(t, backend, scope, mcp.ToolSearchCIJobLogs, fmt.Sprintf(`{"job_id":%d,"query":"match-","context_lines":5}`, ciRegressionJob))
+	var first struct {
+		Matches    []json.RawMessage `json:"matches"`
+		HasMore    bool              `json:"has_more"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(firstRaw, &first); err != nil || len(first.Matches) == 0 || len(first.Matches) >= 20 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("budgeted search must paginate: %s, %v", firstRaw, err)
+	}
+	total := len(first.Matches)
+	cursor := first.NextCursor
+	for cursor != "" {
+		nextRaw := ciExecute(t, backend, scope, mcp.ToolSearchCIJobLogs, fmt.Sprintf(`{"job_id":%d,"query":"match-","context_lines":5,"cursor":%q}`, ciRegressionJob, cursor))
+		var next struct {
+			Matches    []json.RawMessage `json:"matches"`
+			HasMore    bool              `json:"has_more"`
+			NextCursor string            `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(nextRaw, &next); err != nil {
+			t.Fatalf("continuation decode error: %v", err)
+		}
+		total += len(next.Matches)
+		cursor = next.NextCursor
+		if !next.HasMore {
+			break
+		}
+	}
+	if total != 20 {
+		t.Fatalf("paginated match coverage = %d/20", total)
+	}
+}
+
+func TestCICheckAnnotationsBudgetPaginatesThroughMCP(t *testing.T) {
+	// Twenty annotations with 4,000-character messages exceed one 64 KiB
+	// response and must paginate instead of failing wholesale.
+	var annotations []string
+	for i := 1; i <= 20; i++ {
+		body, _ := json.Marshal(fmt.Sprintf("annotation-%02d:", i) + strings.Repeat("m", 4000))
+		annotations = append(annotations, fmt.Sprintf(`{"path":"a.go","start_line":%d,"end_line":%d,"annotation_level":"failure","message":%s}`, i, i, body))
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer developer-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == "/repos/acme/widgets/check-runs/701":
+			fmt.Fprintf(w, `{"id":701,"node_id":"CR_701","name":"CI","head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{"title":"T","summary":"S","text":"X"}}`, ciRegressionHead)
+		case r.URL.Path == "/repos/acme/widgets/check-runs/701/annotations":
+			fmt.Fprintf(w, `[%s]`, strings.Join(annotations, ","))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, scope := ciBackend(t, client, workflow.RoleDeveloper)
+	firstRaw := ciExecute(t, backend, scope, mcp.ToolGetCheckRunDiagnostics, `{"check_run_id":701}`)
+	var first struct {
+		Annotations []struct {
+			Message string `json:"message"`
+		} `json:"annotations"`
+		HasMore    bool   `json:"has_more"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(firstRaw, &first); err != nil || len(first.Annotations) == 0 || len(first.Annotations) >= 20 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("budgeted diagnostics must paginate: %s, %v", firstRaw, err)
+	}
+	seen := make(map[string]bool)
+	for _, annotation := range first.Annotations {
+		seen[annotation.Message] = true
+	}
+	cursor := first.NextCursor
+	for cursor != "" {
+		nextRaw := ciExecute(t, backend, scope, mcp.ToolGetCheckRunDiagnostics, fmt.Sprintf(`{"check_run_id":701,"cursor":%q}`, cursor))
+		var next struct {
+			Annotations []struct {
+				Message string `json:"message"`
+			} `json:"annotations"`
+			HasMore    bool   `json:"has_more"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(nextRaw, &next); err != nil {
+			t.Fatalf("continuation decode error: %v", err)
+		}
+		for _, annotation := range next.Annotations {
+			if seen[annotation.Message] {
+				t.Fatalf("duplicate annotation across pages")
+			}
+			seen[annotation.Message] = true
+		}
+		cursor = next.NextCursor
+		if !next.HasMore {
+			break
+		}
+	}
+	if len(seen) != 20 {
+		t.Fatalf("annotation coverage = %d/20", len(seen))
+	}
+}
+
 func TestCIDiagnosticStatesAndPermissionsAreDistinguishable(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-GitHub-Request-Id", "A41A:2AF0FB:6AAAD0:6A71D9:6ABC2962")

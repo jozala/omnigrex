@@ -264,7 +264,8 @@ func sanitizeCIDiagnosticReason(reason string) string {
 	switch reason {
 	case "pending", "missing", "expired", "unavailable", "unauthorized", "insufficient_permissions",
 		"rate_limited", "transient", "scope_rejected", "invalid_continuation",
-		"invalid_arguments", "canceled", "deadline_exceeded", "resource_exhausted":
+		"invalid_arguments", "canceled", "deadline_exceeded", "resource_exhausted",
+		"step_filter_unsupported":
 		return reason
 	default:
 		if len(reason) == 0 || len(reason) > 64 {

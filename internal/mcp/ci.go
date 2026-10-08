@@ -11,17 +11,18 @@ import (
 )
 
 const (
-	CIDiagnosticPending             = "pending"
-	CIDiagnosticMissing             = "missing"
-	CIDiagnosticExpired             = "expired"
-	CIDiagnosticUnavailable         = "unavailable"
-	CIDiagnosticUnauthorized        = "unauthorized"
-	CIDiagnosticRateLimited         = "rate_limited"
-	CIDiagnosticTransient           = "transient"
-	CIDiagnosticScopeRejected       = "scope_rejected"
-	CIDiagnosticInvalidContinuation = "invalid_continuation"
-	CIDiagnosticDeadlineExceeded    = "deadline_exceeded"
-	CIDiagnosticResourceExhausted   = "resource_exhausted"
+	CIDiagnosticPending               = "pending"
+	CIDiagnosticMissing               = "missing"
+	CIDiagnosticExpired               = "expired"
+	CIDiagnosticUnavailable           = "unavailable"
+	CIDiagnosticUnauthorized          = "unauthorized"
+	CIDiagnosticRateLimited           = "rate_limited"
+	CIDiagnosticTransient             = "transient"
+	CIDiagnosticScopeRejected         = "scope_rejected"
+	CIDiagnosticInvalidContinuation   = "invalid_continuation"
+	CIDiagnosticDeadlineExceeded      = "deadline_exceeded"
+	CIDiagnosticResourceExhausted     = "resource_exhausted"
+	CIDiagnosticStepFilterUnsupported = "step_filter_unsupported"
 )
 
 var validCIDiagnosticCodes = map[string]struct{}{
@@ -29,6 +30,7 @@ var validCIDiagnosticCodes = map[string]struct{}{
 	CIDiagnosticUnavailable: {}, CIDiagnosticUnauthorized: {}, CIDiagnosticRateLimited: {},
 	CIDiagnosticTransient: {}, CIDiagnosticScopeRejected: {}, CIDiagnosticInvalidContinuation: {},
 	CIDiagnosticDeadlineExceeded: {}, CIDiagnosticResourceExhausted: {},
+	CIDiagnosticStepFilterUnsupported: {},
 }
 
 type CIDiagnosticError struct {
@@ -356,9 +358,15 @@ func (backend *ProductionBackend) getCIJobLogs(ctx context.Context, invocation I
 		if !found {
 			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 		}
+		// Step-scoped log retrieval is not supported: the provider exposes
+		// only whole-job logs, and no log format observed here delimits
+		// steps reliably. Report that explicitly instead of labeling
+		// whole-job text with the requested step number. Identify steps
+		// through get_ci_run metadata and fetch whole-job excerpts.
+		return nil, newCIDiagnosticError(CIDiagnosticStepFilterUnsupported, "step_filter_unsupported", 0, "")
 	}
 	scope := githubapi.JobScope{ID: job.ID, RunID: job.RunID, RunAttempt: job.RunAttempt, HeadSHA: invocation.Scope.HeadSHA}
-	excerpt, err := backend.github.GetCIJobLogExcerpt(ctx, credential, owner, repository, scope, arguments.StepNumber, arguments.Cursor, maxBytes, invocation.Scope.Repository.ID)
+	excerpt, err := backend.github.GetCIJobLogExcerpt(ctx, credential, owner, repository, scope, arguments.Cursor, maxBytes, invocation.Scope.Repository.ID)
 	if err != nil {
 		mapped := mapCIError(err)
 		if job.Status != "completed" {

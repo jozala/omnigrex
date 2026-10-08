@@ -46,7 +46,7 @@ type GitHubAPI interface {
 	GetWorkflowRun(context.Context, string, string, string, int64) (githubapi.CIRun, error)
 	GetWorkflowRunDetail(context.Context, string, string, string, int64, int, string, int64, string) (githubapi.CIRunDetail, error)
 	GetCIJob(context.Context, string, string, string, int64) (githubapi.CIJob, error)
-	GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, *int, string, int, int64) (githubapi.CILogExcerpt, error)
+	GetCIJobLogExcerpt(context.Context, string, string, string, githubapi.JobScope, string, int, int64) (githubapi.CILogExcerpt, error)
 	SearchCIJobLogs(context.Context, string, string, string, githubapi.JobScope, string, int, string, int64) (githubapi.CILogSearchResult, error)
 	OpenPullRequest(context.Context, string, string, string, githubapi.OpenPullRequestRequest) (githubapi.PullRequest, error)
 	CreateIssueComment(context.Context, string, string, string, int, githubapi.CommentRequest) (githubapi.IssueComment, error)

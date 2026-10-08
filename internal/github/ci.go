@@ -13,10 +13,14 @@ import (
 )
 
 const (
-	MaxCIDiagnosticTextBytes     = 16 << 10
-	MaxCIDiagnosticSummaryBytes  = 8 << 10
-	MaxCIAnnotationsPerResponse  = 20
-	MaxCIAnnotationMessageBytes  = 4 << 10
+	MaxCIDiagnosticTextBytes    = 16 << 10
+	MaxCIDiagnosticSummaryBytes = 8 << 10
+	MaxCIAnnotationsPerResponse = 20
+	MaxCIAnnotationMessageBytes = 4 << 10
+	// MaxCIAnnotationFetchBytes bounds a single fetched annotation message.
+	// Pages show 4 KiB chunks with continuation; only absurdly large
+	// messages end at this documented fetch bound.
+	MaxCIAnnotationFetchBytes    = 64 << 10
 	MaxCIRunsPerResponse         = 20
 	MaxCIJobsPerResponse         = 20
 	MaxCILogExcerptBytes         = 32 << 10
@@ -43,6 +47,9 @@ type CheckAnnotation struct {
 	AnnotationLevel string `json:"annotation_level"`
 	Message         string `json:"message"`
 	Title           string `json:"title,omitempty"`
+	// Truncated reports that the message or title was clipped to its bound
+	// and the remainder is not retained by the provider response.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type CheckDiagnostics struct {
@@ -115,7 +122,6 @@ type CILogExcerpt struct {
 	RunID       int64  `json:"run_id,omitempty"`
 	RunAttempt  int    `json:"run_attempt,omitempty"`
 	JobID       int64  `json:"job_id"`
-	StepNumber  *int   `json:"step_number,omitempty"`
 	Text        string `json:"text"`
 	StartOffset int64  `json:"start_offset"`
 	EndOffset   int64  `json:"end_offset"`
@@ -216,7 +222,7 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 	if !validCommitSHA(headSHA) {
 		return CheckDiagnostics{}, &ConfigurationError{Cause: ErrInvalidCommitSHA}
 	}
-	var offset int64
+	var annotationOffset, summaryOffset, textOffset, messageOffset int64
 	if cursor != "" {
 		decoded, err := decodeCICursor(cursor)
 		if err != nil {
@@ -225,7 +231,12 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 		if decoded.Kind != "check_annotations" || decoded.ID != checkID || decoded.RepoID != repoID || decoded.Head != headSHA {
 			return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 		}
-		offset = decoded.Offset
+		var perr error
+		summaryOffset, textOffset, messageOffset, perr = parseOutputOffsets(decoded.Extra)
+		if perr != nil {
+			return CheckDiagnostics{}, &ConfigurationError{Cause: perr}
+		}
+		annotationOffset = decoded.Offset
 	}
 	check, output, err := client.getCheckRun(ctx, installationToken, owner, repository, checkID)
 	if err != nil {
@@ -234,26 +245,174 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 	if check.HeadSHA != headSHA {
 		return CheckDiagnostics{}, responseFailure(responseMetadata{}, "ci_scope_validation", "identity_mismatch", fmt.Errorf("%w: check run head does not match scoped head", ErrInvalidAPIResponse))
 	}
-	summary, summaryTruncated := boundDiagnosticText(output.Summary, MaxCIDiagnosticSummaryBytes)
-	text, textTruncated := boundDiagnosticText(output.Text, MaxCIDiagnosticTextBytes)
+	if !validTextOffset(output.Summary, summaryOffset) || !validTextOffset(output.Text, textOffset) {
+		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+	}
+	summaryChunk, summaryNext, summaryMore := chunkDiagnosticText(output.Summary, summaryOffset, MaxCIDiagnosticSummaryBytes)
+	textChunk, textNext, textMore := chunkDiagnosticText(output.Text, textOffset, MaxCIDiagnosticTextBytes)
 	title, _ := boundDiagnosticText(output.Title, 1024)
-	annotations, hasMore, nextOffset, err := client.listCheckRunAnnotationsPage(ctx, installationToken, owner, repository, checkID, offset)
+	annotations, err := client.ListCheckRunAnnotations(ctx, installationToken, owner, repository, checkID)
 	if err != nil {
 		return CheckDiagnostics{}, err
 	}
+	if annotationOffset > int64(len(annotations)) {
+		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+	}
+	if annotationOffset < int64(len(annotations)) {
+		first := annotations[annotationOffset]
+		if messageOffset < 0 || messageOffset > int64(len(first.Message)) || !validTextOffset(first.Message, messageOffset) {
+			return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+		}
+		if messageOffset == int64(len(first.Message)) && len(first.Message) > 0 {
+			// Fully consumed remainder: advance past it. Honest cursors
+			// always advance past exhausted messages, so this only absorbs
+			// a stale position without looping.
+			annotationOffset++
+			messageOffset = 0
+		}
+	} else if messageOffset != 0 {
+		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+	}
+	if annotationOffset == int64(len(annotations)) && summaryOffset >= int64(len(output.Summary)) && textOffset >= int64(len(output.Text)) {
+		// Past every annotation with no output remainder: no honest
+		// cursor advances to this state, since issuance requires more
+		// content to remain.
+		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+	}
+	page, nextAnnIdx, nextMsgOff, err := pageCheckAnnotations(check, title, summaryChunk, textChunk, annotations, annotationOffset, messageOffset)
+	if err != nil {
+		return CheckDiagnostics{}, err
+	}
+	moreAnn := nextAnnIdx < int64(len(annotations))
+	hasMore := moreAnn || summaryMore || textMore
 	result := CheckDiagnostics{
 		CheckID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA,
 		Status: check.Status, Conclusion: check.Conclusion, HTMLURL: check.HTMLURL,
-		Output:      CheckOutput{Title: title, Summary: summary, Text: text},
-		Annotations: annotations, HasMore: hasMore, Truncated: summaryTruncated || textTruncated || hasMore,
+		Output:      CheckOutput{Title: title, Summary: summaryChunk, Text: textChunk},
+		Annotations: page, HasMore: hasMore,
+		Truncated: summaryMore || textMore || moreAnn || anyAnnotationTruncated(page),
 	}
 	if hasMore {
-		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "check_annotations", RepoID: repoID, Head: headSHA, ID: checkID, Offset: nextOffset})
+		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "check_annotations", RepoID: repoID, Head: headSHA, ID: checkID, Offset: nextAnnIdx, Extra: formatOutputOffsets(summaryNext, textNext, nextMsgOff)})
 	}
 	if err := ensureCISerializedBound(result); err != nil {
 		return CheckDiagnostics{}, err
 	}
 	return result, nil
+}
+
+// chunkDiagnosticText returns the bounded chunk of value starting at the
+// given byte offset, the offset where the next chunk resumes, and whether
+// content remains. Offsets always land on UTF-8 boundaries.
+func chunkDiagnosticText(value string, offset int64, limit int) (chunk string, next int64, more bool) {
+	if offset < 0 || offset > int64(len(value)) {
+		return "", offset, true
+	}
+	rest := value[offset:]
+	if len(rest) <= limit {
+		if !utf8.ValidString(rest) {
+			return strings.ToValidUTF8(rest, "�"), int64(len(value)), false
+		}
+		return rest, int64(len(value)), false
+	}
+	cut := rest[:limit]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut, offset + int64(len(cut)), true
+}
+
+// validTextOffset reports whether offset splits value only at UTF-8
+// boundaries, so continuation never hides or duplicates bytes.
+func validTextOffset(value string, offset int64) bool {
+	if offset < 0 || offset > int64(len(value)) {
+		return false
+	}
+	return utf8.ValidString(value[:offset]) && utf8.ValidString(value[offset:])
+}
+
+// parseOutputOffsets decodes the check-diagnostics cursor suffix carrying
+// summary, text, and message resume offsets. An empty suffix is the first
+// page; anything else must match the canonical encoding exactly.
+func parseOutputOffsets(extra string) (summaryOff, textOff, msgOff int64, err error) {
+	if extra == "" {
+		return 0, 0, 0, nil
+	}
+	var s, t, m int64
+	n, scanErr := fmt.Sscanf(extra, "s%d/t%d/m%d", &s, &t, &m)
+	if scanErr != nil || n != 3 || s < 0 || t < 0 || m < 0 || extra != formatOutputOffsets(s, t, m) {
+		return 0, 0, 0, fmt.Errorf("%w: stale continuation", ErrInvalidAPIResponse)
+	}
+	return s, t, m, nil
+}
+
+func formatOutputOffsets(summaryOff, textOff, msgOff int64) string {
+	return fmt.Sprintf("s%d/t%d/m%d", summaryOff, textOff, msgOff)
+}
+
+// pageCheckAnnotations fits annotation chunks into one response page within
+// both the item-count cap and the serialized budget. The first annotation
+// resumes at its message offset; every annotation shows a bounded message
+// chunk. It returns the page and the cursor position for the remainder.
+func pageCheckAnnotations(check CheckRun, title, summaryChunk, textChunk string, annotations []CheckAnnotation, annotationOffset, messageOffset int64) (page []CheckAnnotation, nextAnnIdx, nextMsgOff int64, err error) {
+	page = make([]CheckAnnotation, 0, MaxCIAnnotationsPerResponse)
+	nextAnnIdx = annotationOffset
+	if annotationOffset >= int64(len(annotations)) {
+		return page, nextAnnIdx, 0, nil
+	}
+	for idx := annotationOffset; idx < int64(len(annotations)) && int64(len(page)) < MaxCIAnnotationsPerResponse; idx++ {
+		item := annotations[idx]
+		var off int64
+		if idx == annotationOffset {
+			off = messageOffset
+		}
+		chunk, chunkNext, chunkMore := chunkDiagnosticText(item.Message, off, MaxCIAnnotationMessageBytes)
+		trial := item
+		trial.Message = chunk
+		trial.Truncated = item.Truncated || chunkMore
+		if !checkDiagnosticsPageFits(check, title, summaryChunk, textChunk, append(page, trial)) {
+			if len(page) == 0 {
+				// A single annotation with its output chunks exceeds the
+				// budget even at one message chunk: report resource
+				// exhaustion explicitly rather than looping on an empty
+				// page or emitting an oversized response. Output chunks
+				// and one message chunk always fit in practice.
+				return nil, 0, 0, &ConfigurationError{Cause: fmt.Errorf("%w: single annotation exceeds size limit", ErrInvalidAPIResponse)}
+			}
+			// Doesn't fit: resume here (or within this message).
+			return page, idx, off, nil
+		}
+		page = append(page, trial)
+		if chunkMore {
+			// Message continues: the page ends here so the remainder is
+			// continued exactly once on the next page.
+			return page, idx, chunkNext, nil
+		}
+		nextAnnIdx = idx + 1
+	}
+	return page, nextAnnIdx, 0, nil
+}
+
+// checkDiagnosticsPageFits probes whether a diagnostics page fits the
+// serialized response budget. It assumes a continuation follows (with room
+// for its cursor), so an accepted page always fits once finalized.
+func checkDiagnosticsPageFits(check CheckRun, title, summaryChunk, textChunk string, page []CheckAnnotation) bool {
+	probe := CheckDiagnostics{
+		CheckID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA,
+		Status: check.Status, Conclusion: check.Conclusion, HTMLURL: check.HTMLURL,
+		Output:      CheckOutput{Title: title, Summary: summaryChunk, Text: textChunk},
+		Annotations: page, HasMore: true, NextCursor: strings.Repeat("x", 256), Truncated: true,
+	}
+	return ensureCISerializedBound(probe) == nil
+}
+
+func anyAnnotationTruncated(page []CheckAnnotation) bool {
+	for _, annotation := range page {
+		if annotation.Truncated {
+			return true
+		}
+	}
+	return false
 }
 
 type rawCheckRun struct {
@@ -307,21 +466,6 @@ func (client *APIClient) getCheckRun(ctx context.Context, installationToken, own
 	return check, output, nil
 }
 
-func (client *APIClient) listCheckRunAnnotationsPage(ctx context.Context, installationToken, owner, repository string, checkID, offset int64) ([]CheckAnnotation, bool, int64, error) {
-	annotations, err := client.ListCheckRunAnnotations(ctx, installationToken, owner, repository, checkID)
-	if err != nil {
-		return nil, false, 0, err
-	}
-	if offset > int64(len(annotations)) {
-		return nil, false, 0, fmt.Errorf("%w: stale continuation", ErrInvalidAPIResponse)
-	}
-	end := offset + MaxCIAnnotationsPerResponse
-	if end < int64(len(annotations)) {
-		return annotations[offset:end], true, end, nil
-	}
-	return annotations[offset:], false, 0, nil
-}
-
 func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installationToken, owner, repository string, checkID int64) ([]CheckAnnotation, error) {
 	if err := validateRepository(owner, repository); err != nil {
 		return nil, err
@@ -354,12 +498,16 @@ func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installati
 			default:
 				return nil, fmt.Errorf("%w: check annotation level is invalid", ErrInvalidAPIResponse)
 			}
-			message, _ := boundDiagnosticText(*raw.Message, MaxCIAnnotationMessageBytes)
-			title := ""
+			// Fetch messages up to a bound far above the 4 KiB page
+			// chunk so tails remain retrievable through continuation.
+			// The flag records clipping; page assembly reports it.
+			message, messageClipped := boundDiagnosticText(*raw.Message, MaxCIAnnotationFetchBytes)
+			var title string
+			var titleClipped bool
 			if raw.Title != nil {
-				title, _ = boundDiagnosticText(*raw.Title, 1024)
+				title, titleClipped = boundDiagnosticText(*raw.Title, 1024)
 			}
-			key := fmt.Sprintf("%s:%d:%d:%s:%s", raw.Path, *raw.StartLine, *raw.EndLine, raw.AnnotationLevel, message)
+			key := fmt.Sprintf("%s:%d:%d:%s:%s", raw.Path, *raw.StartLine, *raw.EndLine, raw.AnnotationLevel, *raw.Message)
 			if _, exists := seen[key]; exists {
 				return nil, fmt.Errorf("%w: duplicate check annotation", ErrInvalidAPIResponse)
 			}
@@ -367,6 +515,7 @@ func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installati
 			annotations = append(annotations, CheckAnnotation{
 				Path: raw.Path, StartLine: *raw.StartLine, EndLine: *raw.EndLine,
 				AnnotationLevel: raw.AnnotationLevel, Message: message, Title: title,
+				Truncated: messageClipped || titleClipped,
 			})
 			if len(annotations) > 1000 {
 				return nil, fmt.Errorf("%w: too many check annotations", ErrInvalidAPIResponse)
@@ -800,7 +949,10 @@ func ensureCISerializedBound(value any) error {
 		return fmt.Errorf("%w: diagnostics encoding failed", ErrInvalidAPIResponse)
 	}
 	if len(encoded) > MaxCISerializedResponseBytes {
-		return fmt.Errorf("%w: diagnostics response exceeds size limit", ErrInvalidAPIResponse)
+		// A defensive guard: page builders above keep every response
+		// within budget, so reaching here maps to resource exhaustion
+		// rather than an unavailable diagnostic.
+		return &ConfigurationError{Cause: fmt.Errorf("%w: diagnostics response exceeds size limit", ErrInvalidAPIResponse)}
 	}
 	return nil
 }
