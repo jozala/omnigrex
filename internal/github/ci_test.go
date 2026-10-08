@@ -573,6 +573,122 @@ func TestSearchResultsPaginateWithinBudget(t *testing.T) {
 	}
 }
 
+func TestSearchOverlapReportsMatchExactlyOnce(t *testing.T) {
+	// A giant newline-free line carries one occurrence fully inside the
+	// prior window but within its trailing overlap zone, and the line
+	// extends past the window end: the occurrence must be deferred, then
+	// reported exactly once on the next page.
+	logContent := strings.Repeat("y", githubapi.MaxCILogScanBytes-200) + "NEEDLE" + strings.Repeat("y", 10000) + "\n" + strings.Repeat("tail line\n", 10)
+	client, done := ciLogServer(t, logContent, false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	if len(first.Matches) != 0 || !first.HasMore || first.NextCursor == "" || first.ReachedEnd {
+		t.Fatalf("overlapped match must defer: %d matches has_more=%v reached_end=%v cursor=%q", len(first.Matches), first.HasMore, first.ReachedEnd, first.NextCursor)
+	}
+	second, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, first.NextCursor, 9123)
+	if err != nil {
+		t.Fatalf("second search error = %v", err)
+	}
+	if len(second.Matches) != 1 || second.HasMore || !second.ReachedEnd {
+		t.Fatalf("second page = %d matches has_more=%v reached_end=%v", len(second.Matches), second.HasMore, second.ReachedEnd)
+	}
+	if !strings.Contains(second.Matches[0].Text, "NEEDLE") {
+		t.Fatalf("deferred occurrence lost: %q", second.Matches[0].Text)
+	}
+}
+
+func TestSearchAcrossNewlineBoundaryWithoutDuplicates(t *testing.T) {
+	// A query line cut by the 8 MiB window end must be reported exactly
+	// once: matching on context reaching back across the newline-anchored
+	// resume boundary would duplicate it on the next page.
+	// Layout (all lines 4 bytes except the query line): the query line
+	// starts just inside window 1 with its occurrence fully scanned, so
+	// the old context-based filter keeps it on page 1 and finds it again
+	// on page 2.
+	const padLines = (8<<20)/4 - 10
+	logContent := strings.Repeat("pad\n", padLines) + "NEEDLE" + strings.Repeat("z", 200) + "\n" + strings.Repeat("end\n", 5)
+	client, done := ciLogServer(t, logContent, false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	// The only occurrence reaches past the resume boundary, so page 1 must
+	// defer it rather than report it twice.
+	if len(first.Matches) != 0 || !first.HasMore || first.NextCursor == "" || first.ReachedEnd {
+		t.Fatalf("first page = %d matches has_more=%v reached_end=%v cursor=%q", len(first.Matches), first.HasMore, first.ReachedEnd, first.NextCursor)
+	}
+	second, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, "NEEDLE", 2, first.NextCursor, 9123)
+	if err != nil {
+		t.Fatalf("second search error = %v", err)
+	}
+	if len(second.Matches) != 1 || second.HasMore || !second.ReachedEnd {
+		t.Fatalf("second page = %d matches has_more=%v reached_end=%v", len(second.Matches), second.HasMore, second.ReachedEnd)
+	}
+	if !strings.Contains(second.Matches[0].Text, "NEEDLE") {
+		t.Fatalf("deferred occurrence lost: %q", second.Matches[0].Text)
+	}
+}
+
+func TestSearchOverflowBandPaginatesWithinBudget(t *testing.T) {
+	// Overflow-band configuration: a maximal query with match sizes where
+	// the old 256-byte-cursor probe accepted a full page but the finalized
+	// result with the real cursor exceeded 64 KiB and was rejected
+	// wholesale. The conservative probe must paginate instead.
+	query := strings.Repeat("q", githubapi.MaxCIQueryLength)
+	var builder strings.Builder
+	var want []string
+	for i := 1; i <= 21; i++ {
+		line := fmt.Sprintf("L%02d:", i) + query + strings.Repeat("y", 2876+(i%9))
+		want = append(want, line)
+		builder.WriteString(line + "\n")
+	}
+	client, done := ciLogServer(t, builder.String(), false)
+	defer done()
+	scope := githubapi.JobScope{ID: 777, RunID: 37244848238, RunAttempt: 1, HeadSHA: ciHeadSHA}
+	first, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, query, 0, "", 9123)
+	if err != nil {
+		t.Fatalf("first search error = %v", err)
+	}
+	if !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("overflow band must paginate: has_more=%v cursor=%q matches=%d", first.HasMore, first.NextCursor, len(first.Matches))
+	}
+	seen := make(map[string]int)
+	for _, match := range first.Matches {
+		seen[match.Text]++
+	}
+	cursor := first.NextCursor
+	for cursor != "" {
+		page, err := client.SearchCIJobLogs(context.Background(), "token", "acme", "widgets", scope, query, 0, cursor, 9123)
+		if err != nil {
+			t.Fatalf("continuation error = %v", err)
+		}
+		for _, match := range page.Matches {
+			seen[match.Text]++
+		}
+		cursor = page.NextCursor
+		if !page.HasMore {
+			if page.ReachedEnd != true {
+				t.Fatalf("final page must report reached_end")
+			}
+			break
+		}
+	}
+	if len(seen) != 21 {
+		t.Fatalf("query-line coverage = %d/21", len(seen))
+	}
+	for _, line := range want {
+		if seen[line] != 1 {
+			t.Fatalf("query line reported %d times, want exactly once", seen[line])
+		}
+	}
+}
+
 func TestLogDownloadRejectsUnsafeDestinations(t *testing.T) {
 	for _, location := range []string{
 		"http://169.254.169.254/latest",

@@ -400,31 +400,32 @@ func (client *APIClient) SearchCIJobLogs(ctx context.Context, installationToken,
 	matches := searchLogText(text, query, contextLines, offset)
 	nextOffset := offset + int64(len(window))
 	if searchedTruncated {
+		boundary := offset + int64(len(window))
 		if lastNewline := bytes.LastIndexByte(window, '\n'); lastNewline >= 0 {
-			nextOffset = offset + int64(lastNewline) + 1
-			kept := matches[:0]
-			for _, match := range matches {
-				if match.StartOffset < nextOffset {
-					kept = append(kept, match)
-				}
-			}
-			matches = kept
+			boundary = offset + int64(lastNewline) + 1
 		} else {
 			// No newline in the scan window: a literal may straddle the
-			// window end, matching neither window. Defer matches whose
-			// query line starts in the trailing overlap (one query length
-			// minus one byte) so the next window re-finds them exactly
-			// once instead of losing them or reporting them twice.
-			boundary := offset + int64(len(window)) - int64(MaxCIQueryLength-1)
-			kept := matches[:0]
-			for _, match := range matches {
-				if queryLineByteOffset(text, offset, match.LineNumber) < boundary {
-					kept = append(kept, match)
-				}
+			// window end, matching neither window. Back the boundary up
+			// by one query length so the overlap fully contains any
+			// literal reaching past it.
+			boundary -= int64(MaxCIQueryLength - 1)
+			if boundary <= offset {
+				boundary = offset + 1
 			}
-			matches = kept
-			nextOffset = boundary
 		}
+		nextOffset = boundary
+		// Report only matches fully decided before the resume boundary:
+		// a match whose occurrence extends past it is re-found exactly
+		// once on the next page. Keying on context or line starts instead
+		// duplicates rows whenever a query line falls inside the previous
+		// match's context window or the trailing overlap zone.
+		kept := matches[:0]
+		for _, match := range matches {
+			if end := lastOccurrenceEnd(text, offset, query, match); end < 0 || end <= boundary {
+				kept = append(kept, match)
+			}
+		}
+		matches = kept
 	}
 	// searchLogText retains one sentinel match beyond the cap. Evaluate it
 	// before truncating: otherwise an incomplete search reports complete
@@ -588,13 +589,25 @@ func fitSearchPage(text string, offset int64, headSHA string, jobID int64, query
 	return matches, -1
 }
 
+// maxEncodedCursorLength bounds every cursor this implementation can
+// emit: the largest field values with a maximally escaping query. Probes
+// reserve this so an accepted page always fits once finalized with its
+// real (shorter) cursor, instead of failing the final bound with no
+// results and no cursor.
+var maxEncodedCursorLength = len(encodeCICursor(ciCursor{
+	Version: 1, Kind: "check_annotations",
+	RepoID: 9223372036854775807, Head: strings.Repeat("a", 64),
+	ID: 9223372036854775807, Offset: 9223372036854775807,
+	Extra: strings.Repeat("\x01", MaxCIQueryLength),
+}))
+
 // searchPageFits probes whether a match page fits the serialized response
 // budget. It assumes a continuation follows (with room for its cursor), so
 // a page accepted here always fits once finalized.
 func searchPageFits(headSHA string, jobID int64, query string, kept []CILogMatch, searchedBytes int64) bool {
 	probe := CILogSearchResult{
 		HeadSHA: headSHA, JobID: jobID, Query: query, Matches: kept,
-		HasMore: true, NextCursor: strings.Repeat("x", 256), ReachedEnd: false,
+		HasMore: true, NextCursor: strings.Repeat("x", maxEncodedCursorLength), ReachedEnd: false,
 		SearchedBytes: searchedBytes,
 	}
 	return ensureCISerializedBound(probe) == nil
@@ -628,6 +641,27 @@ func shrinkSearchMatch(text string, offset int64, query string, match CILogMatch
 		match = candidate
 	}
 	return match
+}
+
+// lastOccurrenceEnd returns the absolute end offset of the last query
+// occurrence on the match's line, for exact-once pagination across scan
+// windows. It returns -1 when unavailable; callers then keep the match,
+// preferring a possible duplicate over silent data loss.
+func lastOccurrenceEnd(text string, offset int64, query string, match CILogMatch) int64 {
+	lines := strings.SplitAfter(text, "\n")
+	idx := match.LineNumber - 1
+	if idx < 0 || idx >= len(lines) {
+		return -1
+	}
+	lineStart := queryLineByteOffset(text, offset, match.LineNumber)
+	// Search the same trimmed line the matcher used, so the end position
+	// is consistent with what was actually matched.
+	clean := strings.TrimSuffix(strings.TrimSuffix(lines[idx], "\n"), "\r")
+	last := strings.LastIndex(clean, query)
+	if last < 0 {
+		return -1
+	}
+	return lineStart + int64(last) + int64(len(query))
 }
 
 // queryLineByteOffset returns the absolute byte offset where the given

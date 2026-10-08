@@ -401,7 +401,7 @@ func checkDiagnosticsPageFits(check CheckRun, title, summaryChunk, textChunk str
 		CheckID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA,
 		Status: check.Status, Conclusion: check.Conclusion, HTMLURL: check.HTMLURL,
 		Output:      CheckOutput{Title: title, Summary: summaryChunk, Text: textChunk},
-		Annotations: page, HasMore: true, NextCursor: strings.Repeat("x", 256), Truncated: true,
+		Annotations: page, HasMore: true, NextCursor: strings.Repeat("x", maxEncodedCursorLength), Truncated: true,
 	}
 	return ensureCISerializedBound(probe) == nil
 }
