@@ -83,13 +83,13 @@ func NewBackend(ctx context.Context, settings config.Config, runtime profile.Pro
 		}
 		result.Workspaces = workspaces
 		result.close = append(result.close, workspaces.Close)
-		cleaner, err := docker.NewExactLabelCleaner(docker.ExactLabelCleanerOptions{StopTimeout: settings.ShutdownTimeout, Ledger: ledger})
+		cleaner, err := docker.NewExactLabelCleaner(docker.ExactLabelCleanerOptions{StopTimeout: settings.ShutdownTimeout, Ledger: ledger, DiagnosticNamespace: settings.RuntimeStateVolume})
 		if err != nil {
 			return result, err
 		}
 		result.Cleaner = cleaner
 		result.close = append(result.close, cleaner.Close)
-		inventory, err := docker.NewRuntimeProcessInventory()
+		inventory, err := docker.NewRuntimeProcessInventory(settings.RuntimeStateVolume)
 		if err != nil {
 			return result, err
 		}

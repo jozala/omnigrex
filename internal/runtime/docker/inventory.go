@@ -86,17 +86,22 @@ type runtimeProcessInventoryAPI interface {
 
 // RuntimeProcessInventory lists current marked Runtime Processes and legacy processes carrying established identity labels.
 type RuntimeProcessInventory struct {
-	api   runtimeProcessInventoryAPI
-	close func() error
+	api                 runtimeProcessInventoryAPI
+	close               func() error
+	diagnosticNamespace string
 }
 
 // NewRuntimeProcessInventory creates an inventory client from the Docker environment.
-func NewRuntimeProcessInventory() (*RuntimeProcessInventory, error) {
+func NewRuntimeProcessInventory(namespace ...string) (*RuntimeProcessInventory, error) {
 	client, err := mobyclient.New(mobyclient.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("create Runtime Process inventory Docker client: %w", err)
 	}
-	return newRuntimeProcessInventory(client, client.Close), nil
+	inventory := newRuntimeProcessInventory(client, client.Close)
+	if len(namespace) > 0 {
+		inventory.diagnosticNamespace = namespace[0]
+	}
+	return inventory, nil
 }
 
 func newRuntimeProcessInventory(api runtimeProcessInventoryAPI, close func() error) *RuntimeProcessInventory {
@@ -141,7 +146,7 @@ func (inventory *RuntimeProcessInventory) List(ctx context.Context) (RuntimeProc
 			}
 			seen[candidate.ID] = struct{}{}
 			if candidate.Labels[diagnosticMarkerLabel] == "true" {
-				if diagnosticCleanupEligible(candidate.Labels, time.Now()) {
+				if diagnosticOwned(candidate.Labels, inventory.diagnosticNamespace) && diagnosticCleanupEligible(candidate.Labels, time.Now()) {
 					snapshot.Malformed = append(snapshot.Malformed, MalformedManagedRuntimeProcess{ContainerID: candidate.ID, Reason: MalformedDiagnosticExpired})
 				}
 				continue

@@ -101,6 +101,50 @@ For a remote host, set an existing authorized `DOCKER_HOST=ssh://USER@HOST` conn
 The gate transfers fixture images over stdin and uses a disposable non-root wrapper rather than client-side host mounts.
 It removes that wrapper and the VMs it owns, while fixture images remain in the daemon's image cache.
 
+## Pi protocol diagnostic
+
+Step 09 introduces a disposable Pi 1.0.4 protocol diagnostic while OpenCode remains the default runtime.
+Its [implementation evidence](./plans/2026-10-09-pi-protocol-adapter.md) describes the supported boundary and subsequent integration steps.
+The diagnostic accepts no real provider credentials and uses a controlled HTTP provider inside its disposable environment.
+It has no GitHub or business MCP authority, does not create a Workflow, and stores its temporary Session in tmpfs.
+
+Build the pinned diagnostic image and resolve its content-addressed local identity:
+
+```sh
+mise run pi-diagnostic-image
+docker image inspect omnigrex/pi-diagnostic:step09 --format '{{.Id}} {{.Architecture}}'
+```
+
+Pass that exact image ID and architecture to the source-built command for Docker:
+
+```sh
+mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256:<image-id> --arch arm64
+```
+
+Use `--arch amd64` for Linux/amd64 images.
+An exact registry digest is also accepted when that artifact is already available to the selected backend.
+The command never selects a mutable image tag or submits work to a live model.
+It reports success only after Pi admits and settles the controlled prompt and the disposable environment is stopped and removed.
+`--namespace` identifies the owning installation, defaulting to `omnigrex-runtime-state` on Docker and `omnigrex` on Microsandbox.
+Set it to the deployment's runtime-state volume name on Docker or configured Microsandbox namespace when using different installation names.
+Startup inventory and exact-identity cleanup cannot collect another installation's namespaced protocol probe.
+
+For Microsandbox, build the native binary using the [existing backend procedure](#microsandbox-execution-backend) and provision the exact diagnostic image in a separate native image cache.
+Run that binary with `pi-diagnostic --backend microsandbox --image REGISTRY/IMAGE@sha256:DIGEST --arch amd64`.
+The default private diagnostic cache is `/tmp/msb-pi`; override it with `--microsandbox-home` when required.
+`--microsandbox-executable` and `--microsandbox-firmware` select the installed pinned runtime pair.
+The same Linux/KVM and non-root identity requirements apply.
+
+The automated backend gate builds and transfers its own fixture image archive without host mounts:
+
+```sh
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-integration
+```
+
+Use the existing approved `DOCKER_HOST` connection for a remote Linux/KVM host.
+The wrapper is disposable and receives KVM access without granting its guest access to the host Docker socket.
+Fixture images remain cached on the build daemon.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

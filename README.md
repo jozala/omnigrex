@@ -25,6 +25,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Retained-state bindings and recovery evidence](./docs/plans/2026-10-08-retained-state-bindings.md)
 - [Repository environment contract and tooling evidence](./docs/plans/2026-10-08-repository-environments.md)
 - [Microsandbox backend implementation and qualification](./docs/plans/2026-10-09-microsandbox-backend.md)
+- [Pi protocol adapter and both-backend qualification](./docs/plans/2026-10-09-pi-protocol-adapter.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 
@@ -128,6 +129,16 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox-integr
 
 Use an approved Linux Docker host through `DOCKER_HOST` when developing on macOS.
 See the [operator guide](./docs/operator-guide.md#microsandbox-execution-backend) for native build, backend selection, storage, and resource guarantees.
+
+Run the preparatory Pi protocol adapter gates with:
+
+```sh
+mise run test-pi-integration
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-integration
+```
+
+Both use a disposable pinned Pi image and a controlled provider with fixture credentials.
+See the [operator guide](./docs/operator-guide.md#pi-protocol-diagnostic) for the standalone diagnostic command.
 
 The live GitHub gate checks the Developer App's repository-ID read and uses a pre-existing Developer App-authored Pull Request to submit both Reviewer App outcomes.
 Set the `OMNIGREX_LIVE_GITHUB_*` variables listed by the skipped test, then run:

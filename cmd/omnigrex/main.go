@@ -61,6 +61,10 @@ func main() {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+		case "pi-diagnostic":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runPiDiagnostic(ctx, os.Args[2:], os.Stdout, os.Stderr))
 		default:
 			_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 			os.Exit(2)

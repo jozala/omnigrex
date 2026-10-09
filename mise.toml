@@ -80,6 +80,30 @@ docker image save omnigrex/microsandbox-golden-fixture:step08 | docker run --rm 
 description = "Prove pinned Pi RPC and authenticated MCP on the selected execution backend"
 run = "OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run 'TestPiRPCFeasibility|TestRPCClientCorrelatesConcurrentResponses'"
 
+[tasks.pi-diagnostic-image]
+description = "Build the pinned disposable Pi protocol diagnostic image"
+run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
+
+[tasks.test-pi-integration]
+description = "Qualify the Pi adapter with a controlled provider on Docker"
+depends = ["pi-diagnostic-image"]
+run = "OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 -v ./internal/runtime/pi"
+
+[tasks.test-pi-microsandbox-integration]
+description = "Run the same Pi adapter scenarios through the Linux/KVM SDK backend"
+depends = ["pi-diagnostic-image"]
+run = '''
+: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the Docker host's /dev/kvm group}"
+docker build --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-qualification:step09 .
+set -o pipefail
+docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
+  --label io.omnigrex.qualification=pi-step09 \
+  --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
+  --memory 4g --memory-swap 4g --cpus 2 --pids-limit 1024 \
+  --entrypoint /bin/sh omnigrex/pi-qualification:step09 \
+  -ec 'cat > /tmp/pi-image.tar; exec /usr/local/bin/pi.test -test.v -test.timeout 15m'
+'''
+
 [tasks.test-pi-live]
 description = "Run bounded live OpenCode Go and OpenAI API-key checks using an explicitly supplied auth file"
 run = '''

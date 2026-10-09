@@ -26,16 +26,18 @@ type exactLabelCleanupAPI interface {
 
 // ExactLabelCleanerOptions controls graceful Runtime Process termination.
 type ExactLabelCleanerOptions struct {
-	StopTimeout time.Duration
-	Ledger      execution.Ledger
+	StopTimeout         time.Duration
+	Ledger              execution.Ledger
+	DiagnosticNamespace string
 }
 
 // ExactLabelCleaner removes containers carrying one complete, exact Runtime Process identity.
 type ExactLabelCleaner struct {
-	api                exactLabelCleanupAPI
-	stopTimeoutSeconds int
-	close              func() error
-	ledger             execution.Ledger
+	api                 exactLabelCleanupAPI
+	stopTimeoutSeconds  int
+	close               func() error
+	ledger              execution.Ledger
+	diagnosticNamespace string
 }
 
 // NewExactLabelCleaner creates a cleanup client from the Docker environment.
@@ -52,7 +54,7 @@ func NewExactLabelCleaner(options ExactLabelCleanerOptions) (*ExactLabelCleaner,
 
 func newExactLabelCleaner(api exactLabelCleanupAPI, close func() error, options ExactLabelCleanerOptions) *ExactLabelCleaner {
 	seconds := int((options.StopTimeout + time.Second - 1) / time.Second)
-	return &ExactLabelCleaner{api: api, stopTimeoutSeconds: seconds, close: close, ledger: options.Ledger}
+	return &ExactLabelCleaner{api: api, stopTimeoutSeconds: seconds, close: close, ledger: options.Ledger, diagnosticNamespace: options.DiagnosticNamespace}
 }
 
 func validateExactLabelCleanerOptions(options ExactLabelCleanerOptions) error {
@@ -201,6 +203,9 @@ func (cleaner *ExactLabelCleaner) EnsureManagedContainerAbsent(ctx context.Conte
 		}
 		if inspected.Container.ID != containerID {
 			return fmt.Errorf("%w: inspected container ID does not match", ErrInvalidExactLabelCleanup)
+		}
+		if inspected.Container.Config != nil && !diagnosticOwned(inspected.Container.Config.Labels, cleaner.diagnosticNamespace) {
+			return fmt.Errorf("%w: diagnostic belongs to another installation", ErrInvalidExactLabelCleanup)
 		}
 		if inspected.Container.Config == nil || inspected.Container.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue &&
 			!diagnosticCleanupEligible(inspected.Container.Config.Labels, time.Now()) {

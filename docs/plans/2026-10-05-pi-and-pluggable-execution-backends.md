@@ -28,6 +28,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 06 | Logical retained-state bindings, protected collection, and validated offline Session archives | [Retained-state implementation and evidence](2026-10-08-retained-state-bindings.md) |
 | 07 | Digest-pinned repository environments, persisted contracts, and working-revision guest tooling | [Repository environment implementation and evidence](2026-10-08-repository-environments.md) |
 | 08 | SDK-backed Linux/KVM execution, shared protocol conformance, capture/state bindings, and nested-container qualification | [Microsandbox backend implementation and evidence](2026-10-09-microsandbox-backend.md) |
+| 09 | Correlated Pi RPC, admission/settlement outcomes, bounded cancellation, and disposable both-backend diagnostics | [Pi protocol adapter implementation and evidence](2026-10-09-pi-protocol-adapter.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -390,6 +391,8 @@ Microsandbox additionally passes Docker/Compose/Testcontainers qualification.
 Adding this implementation requires no backend branches in Workflow or Agent Turn policy.
 
 ### Step 09: Implement the Pi protocol adapter
+
+**Deliverable:** [Pi protocol adapter implementation and evidence](2026-10-09-pi-protocol-adapter.md), including credential-safe operational events and the shared controlled-provider diagnostic suite.
 
 **Goal:** Replace protocol coupling with tested Pi-specific mechanics.
 

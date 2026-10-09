@@ -63,3 +63,25 @@ func StartDiagnostic(ctx context.Context, profile profile.Profile, image string,
 	}
 	return docker.StartDiagnostic(ctx, profile, image, docker.DiagnosticOptions{Network: options.Network, ExtraHosts: options.ExtraHosts, MemoryBytes: options.MemoryBytes}, stderr)
 }
+
+func StartProtocolDiagnostic(ctx context.Context, spec execution.DiagnosticSpec, options ProbeOptions, stderr io.Writer, settings config.Config) (execution.Process, io.Closer, error) {
+	if settings.ExecutionBackend == "microsandbox" {
+		backend, err := microsandbox.New(MicrosandboxOptions(settings), nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		process, err := backend.StartProtocolDiagnostic(ctx, spec, stderr)
+		if err != nil {
+			_ = backend.Close()
+			return nil, nil, err
+		}
+		return process, backend, nil
+	}
+	if settings.ExecutionBackend != "" && settings.ExecutionBackend != "docker" {
+		return nil, nil, execution.ErrUnsupportedRequirement
+	}
+	if settings.RuntimeStateVolume != "" && spec.Namespace != settings.RuntimeStateVolume {
+		return nil, nil, execution.ErrBindingMismatch
+	}
+	return docker.StartProtocolDiagnostic(ctx, spec, docker.DiagnosticOptions{Network: options.Network, ExtraHosts: options.ExtraHosts}, stderr)
+}

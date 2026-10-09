@@ -125,6 +125,55 @@ func (backend *Backend) StartDiagnostic(ctx context.Context, runtime profile.Pro
 	}
 	return process, nil
 }
+
+// StartProtocolDiagnostic gives the agent adapter the same isolated non-TTY
+// streams as a Turn, using only disposable files and diagnostic ownership.
+func (backend *Backend) StartProtocolDiagnostic(ctx context.Context, spec execution.DiagnosticSpec, stderr io.Writer) (process execution.Process, err error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if spec.Namespace != backend.options.Namespace {
+		return nil, execution.ErrBindingMismatch
+	}
+	if err := backend.Available(ctx, spec.Image, profile.Platform{OS: spec.Platform.OS, Arch: spec.Platform.Architecture}); err != nil {
+		return nil, err
+	}
+	name := "omnigrex-protocol-" + strings.ToLower(rand.Text())
+	p := &diagnosticProcess{backend: backend, meta: metadata{Name: name}, transport: newTransport()}
+	defer func() {
+		if err != nil {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			err = errors.Join(err, p.Remove(cleanup))
+		}
+	}()
+	request := execution.Request{Image: spec.Image, Platform: spec.Platform, User: "10001:10001", WorkingDir: "/workspace", MemoryBytes: spec.MemoryBytes, PIDsLimit: 128, TemporaryDirectories: spec.TemporaryDirectories}
+	meta, err := backend.platform.Create(ctx, creation{Name: name, Request: request, Diagnostic: true, DiagnosticNetwork: true, Labels: map[string]string{namespaceLabel: backend.options.Namespace, diagnosticLabel: "true", expiryLabel: strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10)}})
+	if err != nil {
+		return nil, errors.Join(execution.ErrUnknownEffect, err)
+	}
+	p.meta = meta
+	setup := "set -eu\n"
+	for _, directory := range spec.TemporaryDirectories {
+		setup += "chown 10001:10001 " + quote(directory.Target) + "\n"
+	}
+	if err = backend.platform.Execute(ctx, meta, []string{"/bin/sh", "-ec", setup}, "0:0", nil); err != nil {
+		return nil, err
+	}
+	command := append([]string{"/usr/bin/env", "-i"}, spec.Environment...)
+	command = append(command, spec.Command...)
+	session, err := backend.platform.Stream(ctx, meta, command, "10001:10001")
+	if err != nil {
+		return nil, err
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if err = p.transport.attach(session, stderr, nil); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
 func (*diagnosticProcess) Start(context.Context) error           { return nil }
 func (process *diagnosticProcess) Transport() io.ReadWriteCloser { return process.transport }
 func (*diagnosticProcess) ObserveExit(context.Context) (execution.ExitObservation, error) {
