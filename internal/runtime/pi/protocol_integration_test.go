@@ -4,6 +4,7 @@ package pi_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,12 +35,18 @@ func TestPiControlledProviderProtocol(t *testing.T) {
 		{"success", agent.Completed, nil}, {"retry", agent.Completed, nil}, {"provider-error", agent.Failed, nil},
 		{"lost-terminal", agent.Unknown, context.DeadlineExceeded}, {"hold", agent.Unknown, context.DeadlineExceeded},
 		{"cancel", agent.Aborted, nil}, {"process-exit", agent.Unknown, agent.ErrTransport}, {"malformed", agent.Unknown, agent.ErrProtocol},
+		{"retry-cancel", agent.Aborted, nil},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 			defer cancel()
 			stderr := &diagnosticOutput{}
 			spec := pi.DiagnosticSpec(image, platform)
+			if tc.mode == "retry-cancel" {
+				// Hold Pi's real retry backoff longer than the prompt budget. Abort
+				// only after its retry-start event, before another attempt can begin.
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_DIAGNOSTIC_RETRY_DELAY_MS=30000")
+			}
 			if settings.ExecutionBackend == "microsandbox" {
 				spec.Namespace = settings.MicrosandboxNamespace
 			} else {
@@ -74,12 +81,16 @@ func TestPiControlledProviderProtocol(t *testing.T) {
 				promptCtx, stopPrompt = context.WithTimeout(ctx, 500*time.Millisecond)
 			}
 			defer stopPrompt()
-			sink := &diagnosticSink{admitted: make(chan struct{}), activity: make(chan struct{})}
+			sink := &diagnosticSink{admitted: make(chan struct{}), activity: make(chan struct{}), retry: make(chan struct{})}
 			cancelDone := make(chan error, 1)
-			if tc.mode == "cancel" {
+			if tc.mode == "cancel" || tc.mode == "retry-cancel" {
+				cancelAt := sink.activity
+				if tc.mode == "retry-cancel" {
+					cancelAt = sink.retry
+				}
 				go func() {
 					select {
-					case <-sink.activity:
+					case <-cancelAt:
 						cancelDone <- c.Cancel(ctx)
 					case <-ctx.Done():
 						cancelDone <- ctx.Err()
@@ -87,13 +98,33 @@ func TestPiControlledProviderProtocol(t *testing.T) {
 				}()
 			}
 			got, err := c.Prompt(promptCtx, "protocol-"+tc.mode, sink)
-			if tc.mode == "cancel" {
+			if tc.mode == "cancel" || tc.mode == "retry-cancel" {
 				if err := <-cancelDone; err != nil {
 					t.Fatalf("cancel: %v", err)
 				}
 			}
 			if !errors.Is(err, tc.failure) || got.Status != tc.status || !got.Admitted {
 				t.Fatalf("outcome = %+v, %v", got, err)
+			}
+			if tc.mode == "retry-cancel" && got.FailureClass != "" {
+				t.Fatalf("abort retained provider failure: %+v", got)
+			}
+			if tc.mode == "retry-cancel" {
+				var terminal struct {
+					Event          string `json:"event"`
+					Reason         string `json:"assistant_stop_reason"`
+					RetryCancelled bool   `json:"retry_cancelled"`
+				}
+				for _, event := range sink.events {
+					if event.Kind == "prompt_settled" {
+						if err := json.Unmarshal(event.Metadata.Runtime, &terminal); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if terminal.Event != "agent_settled" || terminal.Reason != "error" || !terminal.RetryCancelled {
+					t.Fatalf("missing settled retry cancellation evidence: %+v", terminal)
+				}
 			}
 			if strings.Contains(sink.String()+fmt.Sprintf("%+v %#v", got, err), "diagnostic-only-key") {
 				t.Fatal("provider credential entered observations")
@@ -143,10 +174,10 @@ func (o *diagnosticOutput) String() string {
 }
 
 type diagnosticSink struct {
-	mu                         sync.Mutex
-	events                     []agentevent.AgentEvent
-	admitted, activity         chan struct{}
-	onceAdmitted, onceActivity sync.Once
+	mu                                    sync.Mutex
+	events                                []agentevent.AgentEvent
+	admitted, activity, retry             chan struct{}
+	onceAdmitted, onceActivity, onceRetry sync.Once
 }
 
 func (s *diagnosticSink) Emit(_ context.Context, event agentevent.AgentEvent) error {
@@ -158,6 +189,12 @@ func (s *diagnosticSink) Emit(_ context.Context, event agentevent.AgentEvent) er
 	}
 	if event.Kind == "activity" {
 		s.onceActivity.Do(func() { close(s.activity) })
+	}
+	var diagnostic struct {
+		Event string `json:"event"`
+	}
+	if json.Unmarshal(event.Metadata.Runtime, &diagnostic) == nil && diagnostic.Event == "auto_retry_start" {
+		s.onceRetry.Do(func() { close(s.retry) })
 	}
 	return nil
 }

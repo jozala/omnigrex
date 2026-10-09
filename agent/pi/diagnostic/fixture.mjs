@@ -30,8 +30,9 @@ const server = http.createServer(async (request, response) => {
   }
   requests++;
   if (mode === 'protocol-hold' || mode === 'protocol-cancel' || mode === 'protocol-process-exit') return;
-  if (mode === 'protocol-provider-error' || (mode === 'protocol-retry' && requests === 1)) {
-    response.writeHead(mode === 'protocol-retry' ? 503 : 400, { 'Content-Type': 'application/json' });
+  const retry = mode === 'protocol-retry' || mode === 'protocol-retry-cancel';
+  if (mode === 'protocol-provider-error' || (retry && requests === 1)) {
+    response.writeHead(retry ? 503 : 400, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ error: { message: 'controlled failure diagnostic-only-key', type: 'invalid_request_error' } }));
     return;
   }
@@ -48,7 +49,9 @@ const server = http.createServer(async (request, response) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const agentDir = '/run/pi-agent';
 await writeFile(`${agentDir}/auth.json`, JSON.stringify({ diagnostic: { type: 'api_key', key: 'diagnostic-only-key' } }), { mode: 0o600 });
-await writeFile(`${agentDir}/settings.json`, JSON.stringify({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 10 }, compaction: { enabled: false } }), { mode: 0o600 });
+const retryDelayMs = Number(process.env.OMNIGREX_PI_DIAGNOSTIC_RETRY_DELAY_MS ?? 10);
+if (!Number.isInteger(retryDelayMs) || retryDelayMs < 10 || retryDelayMs > 30000) throw new Error('invalid diagnostic retry delay');
+await writeFile(`${agentDir}/settings.json`, JSON.stringify({ retry: { enabled: true, maxRetries: 1, baseDelayMs: retryDelayMs }, compaction: { enabled: false } }), { mode: 0o600 });
 await writeFile(`${agentDir}/models.json`, JSON.stringify({ providers: { diagnostic: {
   baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
   models: [{ id: 'controlled', name: 'Controlled diagnostic', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 1024,

@@ -59,11 +59,14 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
-	events     chan agentevent.AgentEvent
-	settled    chan struct{}
-	settledOK  bool
-	lastReason string
-	outcome    agent.Outcome
+	events          chan agentevent.AgentEvent
+	settled         chan struct{}
+	settledOK       bool
+	lastReason      string
+	outcome         agent.Outcome
+	retryBackoff    bool
+	cancelRequested bool
+	retryCancelled  bool
 }
 
 // Connect starts reading immediately, including events emitted before a waiter.
@@ -267,6 +270,7 @@ func (c *connection) Cancel(ctx context.Context) error {
 		return nil
 	}
 	c.cancelling++
+	active.cancelRequested = true
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); c.cancelling--; c.mu.Unlock() }()
 	_, err := c.request(ctx, "abort", nil)
@@ -417,12 +421,13 @@ func (c *connection) read() {
 
 func (c *connection) record(content []byte) error {
 	var record struct {
-		Type    string          `json:"type"`
-		ID      string          `json:"id"`
-		Command string          `json:"command"`
-		Success *bool           `json:"success"`
-		Data    json.RawMessage `json:"data"`
-		Message json.RawMessage `json:"message"`
+		Type       string          `json:"type"`
+		ID         string          `json:"id"`
+		Command    string          `json:"command"`
+		Success    *bool           `json:"success"`
+		Data       json.RawMessage `json:"data"`
+		Message    json.RawMessage `json:"message"`
+		FinalError string          `json:"finalError"`
 	}
 	if json.Unmarshal(content, &record) != nil || record.Type == "" {
 		return agent.ErrProtocol
@@ -466,6 +471,7 @@ func (c *connection) record(content []byte) error {
 		}
 		if message.Role == "assistant" {
 			t.lastReason = ""
+			t.retryBackoff, t.retryCancelled = false, false
 		}
 	case "message_end":
 		var message struct {
@@ -483,33 +489,48 @@ func (c *connection) record(content []byte) error {
 			}
 			t.lastReason = message.StopReason
 		}
+	case "auto_retry_start":
+		t.retryBackoff, t.retryCancelled = true, false
+	case "auto_retry_end":
+		if record.Success == nil {
+			return agent.ErrProtocol
+		}
+		// Pi 1.0.4 aborts its backoff without appending an aborted assistant
+		// message. Recognize its exact cancellation marker only for a requested
+		// abort in that backoff; arbitrary provider error text is not evidence.
+		t.retryCancelled = t.retryBackoff && t.lastReason == "error" && t.cancelRequested && !*record.Success && record.FinalError == "Retry cancelled"
+		t.retryBackoff = false
 	case "agent_settled":
 		outcome := agent.Outcome{Admitted: true}
-		switch t.lastReason {
-		case "stop", "length":
-			outcome.Status = agent.Completed
-		case "error":
-			outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
-		case "aborted":
+		if t.retryCancelled {
 			outcome.Status = agent.Aborted
-		default:
-			return agent.ErrProtocol
+		} else {
+			switch t.lastReason {
+			case "stop", "length":
+				outcome.Status = agent.Completed
+			case "error":
+				outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
+			case "aborted":
+				outcome.Status = agent.Aborted
+			default:
+				return agent.ErrProtocol
+			}
 		}
 		t.outcome, t.settledOK = outcome, true
 		status = string(outcome.Status)
 		select {
-		case t.events <- c.runtimeEvent("prompt_settled", status, outcome.FailureClass, record.Type, t.lastReason):
+		case t.events <- c.runtimeEvent("prompt_settled", status, outcome.FailureClass, record.Type, t.lastReason, t.retryCancelled):
 		default:
 			return agent.ErrBackpressure
 		}
 		close(t.settled)
 		return nil
-	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end", "auto_retry_start", "auto_retry_end", "auto_compaction_start", "auto_compaction_end":
+	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end", "auto_compaction_start", "auto_compaction_end":
 	default:
 		return nil
 	}
 	select {
-	case t.events <- c.runtimeEvent("activity", status, "", record.Type, ""):
+	case t.events <- c.runtimeEvent("activity", status, "", record.Type, "", t.retryCancelled):
 	default:
 		return agent.ErrBackpressure
 	}
@@ -518,13 +539,14 @@ func (c *connection) record(content []byte) error {
 
 // Runtime diagnostics are reconstructed from closed-vocabulary observations,
 // never copied from source JSON, provider messages, tool arguments, or stderr.
-func (c *connection) runtimeEvent(kind, status, failure, source, reason string) agentevent.AgentEvent {
+func (c *connection) runtimeEvent(kind, status, failure, source, reason string, retryCancelled bool) agentevent.AgentEvent {
 	event := c.event(kind, status, failure)
 	event.Metadata.Runtime, _ = json.Marshal(struct {
-		Runtime string `json:"runtime"`
-		Event   string `json:"event"`
-		Reason  string `json:"assistant_stop_reason,omitempty"`
-	}{"pi-rpc/1.0.4", source, reason})
+		Runtime        string `json:"runtime"`
+		Event          string `json:"event"`
+		Reason         string `json:"assistant_stop_reason,omitempty"`
+		RetryCancelled bool   `json:"retry_cancelled,omitempty"`
+	}{"pi-rpc/1.0.4", source, reason, retryCancelled})
 	return event
 }
 

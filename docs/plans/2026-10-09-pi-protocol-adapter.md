@@ -22,7 +22,7 @@ Preparation verifies an idle runtime and, when supplied, the exact expected runt
 This is a protocol readiness check rather than the durable fenced Session preparation required by Step 11.
 A successful `prompt` response with `disposition=started` establishes admission and emits a neutral admission observation.
 Intermediate `agent_end`, retry events, and assistant failures do not settle the Agent Turn.
-Only `agent_settled` together with the final assistant stop reason establishes completed, failed, or aborted outcomes.
+Only `agent_settled` together with the final assistant stop reason and verified retry-cancellation evidence establishes completed, failed, or aborted outcomes.
 A terminal record delivered immediately before EOF remains valid.
 Missing terminal evidence, malformed responses, transport loss, and deadlines return unknown outcomes rather than fabricated completion or environment-stop evidence.
 
@@ -33,6 +33,7 @@ Closing the connection is bounded transport detachment; the execution owner rema
 
 Agent Events retain their supplied domain correlation fields and contain bounded operational metadata.
 Pi-specific diagnostics are reconstructed from allowlisted event names and assistant stop reasons.
+Retry-backoff cancellation additionally records a normalized boolean while preserving the failed attempt's actual assistant stop reason.
 Source provider errors, assistant content, tool arguments/results, raw JSON, and stderr are never retained in public errors or emitted diagnostic events.
 Provider failures therefore remain distinguishable without copying secret-bearing source objects.
 
@@ -91,6 +92,18 @@ The implementation completed three independent Standards and Spec/correctness re
 The final Standards review reported zero actionable violations or smell findings, and the final Spec/correctness review approved Step 09 with no remaining actionable findings.
 The correctness reviewer independently ran six race-enabled Pi suite repetitions, covering 120,000 terminal-event checks and 600 abort/EOF attempts, plus the original outside-repository reproductions.
 Destructive stable-stack Compose recreation and live provider/GitHub gates were not run for this protocol milestone.
+
+### Retry-backoff cancellation follow-up
+
+Review of `9ba8e96` identified that Pi 1.0.4 can abort its retry backoff without appending another assistant message, leaving the preceding attempt's `error` stop reason in place.
+The shared controlled-provider regression first reproduced that incorrect provider-failure classification on the production adapter.
+It configures a 30-second Pi retry delay, waits for `auto_retry_start`, and requests cancellation before another attempt can begin.
+The adapter now recognizes Pi's exact failed-retry cancellation marker only when Omnigrex requested an abort during that failed attempt's backoff, and reports `Aborted` only after `agent_settled`.
+The terminal diagnostic retains the original assistant `error` reason and a safe `retry_cancelled` boolean rather than copying `finalError` text.
+Public-boundary regressions preserve provider-failure classification when cancellation evidence is absent or merely resembles the marker, and preserve unknown outcomes when settlement is missing.
+The corrected controlled-provider suite passed on Docker and the native Linux/KVM Microsandbox backend, including the held-backoff regression and both diagnostic subprocess checks.
+`mise run check` and ten race-enabled repetitions of the focused marker/settlement regressions passed for the follow-up.
+Independent Standards and Spec/correctness reviews approved the correction with no actionable findings; the correctness reviewer additionally reran the actual Docker held-backoff regression three times.
 
 ## Temporary compatibility and next step
 

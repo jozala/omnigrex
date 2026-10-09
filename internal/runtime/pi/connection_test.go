@@ -432,3 +432,113 @@ func TestConfirmedAbortSettlementSurvivesEOF(t *testing.T) {
 		_ = c.Close()
 	}
 }
+
+func TestRetryCancellationMarkerDoesNotMisclassifyProviderFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, finalError string
+		cancel           bool
+	}{
+		{"provider marker without cancellation", "Retry cancelled", false},
+		{"abort racing retry failure", "controlled provider error credential-sentinel", true},
+		{"provider text resembling marker", "Retry cancelled: credential-sentinel", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			retrying := make(chan struct{})
+			end := func(runtime net.Conn) {
+				writeRecord(runtime, map[string]any{"type": "auto_retry_end", "success": false, "attempt": 1, "finalError": tc.finalError})
+				writeRecord(runtime, map[string]any{"type": "agent_settled"})
+			}
+			c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "error"}})
+				writeRecord(runtime, map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 1, "delayMs": 30000, "errorMessage": "credential-sentinel"})
+				if !tc.cancel {
+					end(runtime)
+				}
+			}, func(runtime net.Conn, id string) {
+				end(runtime)
+				writeRecord(runtime, map[string]any{"type": "response", "id": id, "command": "abort", "success": true})
+			})
+			var observations strings.Builder
+			done := make(chan struct {
+				outcome agent.Outcome
+				err     error
+			}, 1)
+			go func() {
+				got, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+					encoded, _ := json.Marshal(event)
+					observations.Write(encoded)
+					var metadata struct {
+						Event string `json:"event"`
+					}
+					if json.Unmarshal(event.Metadata.Runtime, &metadata) == nil && metadata.Event == "auto_retry_start" {
+						close(retrying)
+					}
+				}))
+				done <- struct {
+					outcome agent.Outcome
+					err     error
+				}{got, err}
+			}()
+			if tc.cancel {
+				select {
+				case <-retrying:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				if err := c.Cancel(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := <-done
+			if got.err != nil || got.outcome.Status != agent.Failed || got.outcome.FailureClass != "provider_failure" {
+				t.Fatalf("provider outcome = %+v, %v", got.outcome, got.err)
+			}
+			if strings.Contains(observations.String()+fmt.Sprint(got), "credential-sentinel") {
+				t.Fatal("retry error text leaked")
+			}
+		})
+	}
+}
+
+func TestRetryBackoffCancellationStillRequiresSettlement(t *testing.T) {
+	retrying := make(chan struct{})
+	c, ctx := fixture(t, pi.Options{PromptTimeout: 150 * time.Millisecond, CancellationTimeout: 40 * time.Millisecond}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "error"}})
+		writeRecord(runtime, map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 1, "delayMs": 30000})
+	}, func(runtime net.Conn, id string) {
+		writeRecord(runtime, map[string]any{"type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled"})
+		writeRecord(runtime, map[string]any{"type": "response", "id": id, "command": "abort", "success": true})
+	})
+	done := make(chan struct {
+		outcome agent.Outcome
+		err     error
+	}, 1)
+	go func() {
+		got, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+			var metadata struct {
+				Event string `json:"event"`
+			}
+			if json.Unmarshal(event.Metadata.Runtime, &metadata) == nil && metadata.Event == "auto_retry_start" {
+				close(retrying)
+			}
+		}))
+		done <- struct {
+			outcome agent.Outcome
+			err     error
+		}{got, err}
+	}()
+	select {
+	case <-retrying:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := c.Cancel(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancel without settlement: %v", err)
+	}
+	got := <-done
+	if !errors.Is(got.err, context.DeadlineExceeded) || got.outcome.Status != agent.Unknown {
+		t.Fatalf("unsettled cancellation = %+v, %v", got.outcome, got.err)
+	}
+}
