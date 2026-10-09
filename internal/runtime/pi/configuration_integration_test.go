@@ -42,6 +42,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 		{"Reviewer provider failure retention", role.Reviewer, "configuration-provider-error", ""},
 		{"failed partial response retention", role.Developer, "configuration-provider-stream-error", ""},
 		{"failure record sanitation boundaries", role.Developer, "configuration-audit", "failure-boundary"},
+		{"durable file safety boundaries", role.Developer, "configuration-audit", "session-boundary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -78,6 +79,8 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_MCP_BOUNDARY_FIXTURE=1")
 			case "failure-boundary":
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE=1")
+			case "session-boundary":
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE=1")
 			}
 			stderr := &diagnosticOutput{}
 			process, owner, err := composition.StartProtocolDiagnostic(ctx, spec, composition.ProbeOptions{}, stderr, settings)
@@ -103,7 +106,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = c.Close() }()
-			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" {
+			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" {
 				if _, err := c.Prepare(ctx); !errors.Is(err, pi.ErrConfiguration) {
 					t.Fatalf("invalid preparation did not report a configuration failure: %v", err)
 				}

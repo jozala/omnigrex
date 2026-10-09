@@ -1,4 +1,4 @@
-// Package session coordinates ACP Agent Session lifecycle preparation.
+// Package session coordinates durable Agent Session control and fenced preparation.
 package session
 
 import (
@@ -285,7 +285,7 @@ func (coordinator *Coordinator) HumanPrompt(ctx context.Context, request HumanPr
 	heartbeatCtx, stopHeartbeat := context.WithCancel(workCtx)
 	heartbeatDone := make(chan error, 1)
 	go func() {
-		heartbeatErr := coordinator.heartbeatHumanPromptLease(heartbeatCtx, lease, leaseDuration, heartbeatInterval)
+		heartbeatErr := heartbeatHumanPromptLease(heartbeatCtx, coordinator.store, lease, leaseDuration, heartbeatInterval)
 		if heartbeatErr != nil {
 			cancelWork(heartbeatErr)
 		}
@@ -351,24 +351,6 @@ func humanPromptTiming(request HumanPromptRequest) (time.Duration, time.Duration
 		return 0, 0, errors.New("human prompt heartbeat must be positive and shorter than its lease")
 	}
 	return leaseDuration, heartbeatInterval, nil
-}
-
-func (coordinator *Coordinator) heartbeatHumanPromptLease(ctx context.Context, lease store.HumanPromptLease, extension, interval time.Duration) error {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if err := coordinator.store.HeartbeatHumanPromptLease(ctx, lease, extension); err != nil {
-				if ctx.Err() != nil {
-					return nil
-				}
-				return err
-			}
-		}
-	}
 }
 
 func agentEventContext(lease store.AgentTurnLease, durable store.AgentSession) agentevent.Context {

@@ -66,7 +66,7 @@ func (state *RetainedState) location(ctx context.Context, ref execution.StateRef
 	if err := ref.Validate(); err != nil {
 		return "", false, err
 	}
-	if ref.Backend != state.binding || ref.Format != "opencode-data/v1" {
+	if ref.Backend != state.binding || ref.Format != "opencode-data/v1" && ref.Format != "pi-session/v3" {
 		return "", false, execution.ErrBindingMismatch
 	}
 	content, initialized, err := state.source.StateMetadata(ctx, ref)

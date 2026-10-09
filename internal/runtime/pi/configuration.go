@@ -22,13 +22,14 @@ var ErrConfiguration = errors.New("Pi configuration is unavailable or unsupporte
 // Configuration contains ephemeral launch inputs, never a durable Profile binding.
 // Credentials travel over the process transport, not backend environment metadata.
 type Configuration struct {
-	Selection        agent.ModelSelection `json:"selection"`
-	Tools            []string             `json:"tools"`
-	RepositorySkills bool                 `json:"repositorySkills"`
-	Instructions     string               `json:"instructions"`
-	MCP              agent.MCPEndpoint    `json:"mcp"`
-	MCPTools         []string             `json:"mcpTools"`
-	Auth             json.RawMessage      `json:"auth"`
+	Selection        agent.ModelSelection   `json:"selection"`
+	Tools            []string               `json:"tools"`
+	RepositorySkills bool                   `json:"repositorySkills"`
+	Instructions     string                 `json:"instructions"`
+	MCP              agent.MCPEndpoint      `json:"mcp"`
+	MCPTools         []string               `json:"mcpTools"`
+	Auth             json.RawMessage        `json:"auth"`
+	Session          *agent.SessionIdentity `json:"session,omitempty"`
 }
 
 func (Configuration) String() string   { return "Pi launch configuration (<redacted>)" }
@@ -132,6 +133,13 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 	}
 	options.Selection = &configuration.Selection
 	options.RequireMCP = true
+	if configuration.Session != nil {
+		if configuration.Session.RuntimeSessionID != configuration.Session.AgentSessionID || configuration.Session.AgentSessionID == "" {
+			return nil, agent.ErrSession
+		}
+		options.ExpectedSessionID = configuration.Session.RuntimeSessionID
+		options.RequirePersistence = true
+	}
 	c := Connect(transport, options).(*connection)
 	job := writeJob{content: append(content, '\n'), done: make(chan error, 1)}
 	bounded, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)

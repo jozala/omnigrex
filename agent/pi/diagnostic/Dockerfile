@@ -29,11 +29,12 @@ WORKDIR /opt/omnigrex/pi
 COPY experiments/pi/package.json experiments/pi/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY agent/pi/diagnostic/fixture.mjs ./fixture.mjs
-COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs ./
+COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs ./
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs
 COPY agent/pi/diagnostic/failure-boundary.test.mjs ./failure-boundary.test.mjs
+COPY agent/pi/diagnostic/session-state.test.mjs ./session-state.test.mjs
 COPY --from=fixture-build /out/pi-mcp-fixture /usr/local/bin/pi-mcp-fixture
 COPY --from=search-tools /out/search/rg/rg /out/search/fd/fd /usr/local/bin/
 RUN printf '#!/bin/sh\nexec /usr/local/bin/node /opt/omnigrex/pi/fixture.mjs\n' > /usr/local/bin/omnigrex-pi-diagnostic && chmod 0755 /usr/local/bin/omnigrex-pi-diagnostic && \

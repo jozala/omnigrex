@@ -30,6 +30,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 08 | SDK-backed Linux/KVM execution, shared protocol conformance, capture/state bindings, and nested-container qualification | [Microsandbox backend implementation and evidence](2026-10-09-microsandbox-backend.md) |
 | 09 | Correlated Pi RPC, admission/settlement outcomes, bounded cancellation, and disposable both-backend diagnostics | [Pi protocol adapter implementation and evidence](2026-10-09-pi-protocol-adapter.md) |
 | 10 | Checked Pi configuration, owned authenticated MCP, current instructions, authorized checkout-local skills, and ephemeral API keys | [Pi configuration and MCP implementation and evidence](2026-10-09-pi-configuration-and-mcp.md) |
+| 11 | Reserved exact Pi identity, fenced durable preparation, fresh-environment continuation, and bounded append-order History Replay | [Durable Pi Session implementation and evidence](2026-10-09-durable-pi-sessions.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -441,6 +442,8 @@ Retained sessions receive updated deployment instructions on the next Turn.
 Unsupported models or thinking values fail without fallback.
 
 ### Step 11: Implement durable Pi Agent Sessions and History Replay
+
+**Deliverable:** [Durable Pi Session implementation and evidence](2026-10-09-durable-pi-sessions.md), including exact pre-prompt identity, runtime-specific schema fields, fenced coordination, and both-backend continuation/replay qualification.
 
 **Goal:** Integrate Pi persistence with Omnigrex's durable ownership model.
 

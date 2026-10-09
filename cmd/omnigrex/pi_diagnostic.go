@@ -14,6 +14,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
+	"github.com/jozala/omnigrex/internal/runtime/session"
 )
 
 func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -23,6 +24,7 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 	backend := flags.String("backend", "docker", "execution backend: docker or microsandbox")
 	arch := flags.String("arch", "amd64", "Linux image architecture: amd64 or arm64")
 	configuration := flags.Bool("configuration", false, "qualify owned Pi configuration and authenticated fixture MCP")
+	sessions := flags.Bool("sessions", false, "qualify candidate Session coordination with disposable fixture state")
 	reviewer := flags.Bool("reviewer", false, "qualify Reviewer tool restrictions (requires --configuration)")
 	namespace := flags.String("namespace", "", "installation diagnostic namespace (defaults to the backend's installation namespace)")
 	home := flags.String("microsandbox-home", "/tmp/msb-pi", "private Microsandbox diagnostic inventory/cache")
@@ -35,8 +37,11 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 		return 2
 	}
 	spec := pi.DiagnosticSpec(*image, execution.Platform{OS: "linux", Architecture: *arch})
-	if *configuration {
+	if *configuration || *sessions {
 		spec = pi.ConfigurationDiagnosticSpec(*image, execution.Platform{OS: "linux", Architecture: *arch})
+	}
+	if *sessions {
+		spec.TemporaryDirectories = append(spec.TemporaryDirectories, execution.TemporaryDirectory{Target: "/state", SizeBytes: 16 << 20})
 	}
 	if *namespace == "" {
 		if *backend == "microsandbox" {
@@ -59,7 +64,19 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 	var connection agent.Connection
-	if *configuration {
+	if *sessions {
+		inputs, inputErr := pi.ConfigurationDiagnostic(role.Developer)
+		if inputErr != nil {
+			err = inputErr
+		} else {
+			err = session.CheckDiagnostic(ctx, func(ctx context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
+				inputs.Session = &identity
+				var startErr error
+				connection, startErr = pi.Start(ctx, process.Transport(), inputs, pi.Options{})
+				return connection, startErr
+			})
+		}
+	} else if *configuration {
 		roleID := role.Developer
 		if *reviewer {
 			roleID = role.Reviewer

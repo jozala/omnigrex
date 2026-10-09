@@ -1,8 +1,10 @@
 import { mkdir, writeFile, realpath, readdir } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
-import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, runRpcMode } from '@earendil-works/pi-coding-agent';
+import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, SettingsManager, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
+import { openDurableSession } from './session-state.mjs';
+import { historyInput } from './history-rpc.mjs';
 
 const agentDir = '/run/pi-agent';
 const cwd = '/workspace';
@@ -98,18 +100,29 @@ export async function prepareRuntime(configuration, sessionManager, models) {
 }
 
 export async function run(configuration, sessionManager, models) {
+  const source = process.stdin;
+  const write = process.stdout.write.bind(process.stdout);
   const runtime = await prepareRuntime(configuration, sessionManager, models);
+  if (configuration.session) {
+    // Pi's public RPC runner reads process.stdin. Install the owned readable
+    // boundary before it attaches; all ordinary RPC commands go through intact.
+    const input = historyInput(runtime, source, write);
+    input.on('error', () => process.exit(1));
+    Object.defineProperty(process, 'stdin', { value: input });
+  }
   const rpc = runRpcMode(runtime);
-  process.stdin.resume();
+  source.resume();
   await rpc;
 }
 
 if (process.argv[1]?.endsWith('/runner.mjs')) {
   try {
     const configuration = await readBootstrap();
-    // Durable Session identity and reopening are supplied by Step 11. This
-    // reachable preparatory path keeps its Session entirely disposable.
-    await run(configuration, SessionManager.inMemory(cwd, { id: 'omnigrex-pi-configuration' }));
+    if (!configuration.session) throw new Error('durable Session identity required');
+    const { manager, disposition } = await openDurableSession(configuration.session);
+    process.stdout.write(JSON.stringify({ type: 'omnigrex_session_ready', sessionId: manager.getSessionId(), disposition,
+      capabilities: { history_replay: true, session_continuation: true, state_format: 'pi-session/v3' } }) + '\n');
+    await run(configuration, manager);
   } catch {
     process.stderr.write('Pi controlled runtime preparation failed\n');
     process.stdout.write('{"type":"omnigrex_configuration_error"}\n', () => process.exit(1));

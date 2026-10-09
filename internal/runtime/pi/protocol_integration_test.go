@@ -153,7 +153,7 @@ func TestPiDiagnosticCommand(t *testing.T) {
 		name  string
 		flags []string
 	}{
-		{"protocol", nil}, {"Developer configuration", []string{"--configuration"}}, {"Reviewer configuration", []string{"--configuration", "--reviewer"}},
+		{"protocol", nil}, {"Developer configuration", []string{"--configuration"}}, {"Reviewer configuration", []string{"--configuration", "--reviewer"}}, {"Session coordination", []string{"--sessions"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var command *exec.Cmd

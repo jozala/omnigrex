@@ -161,6 +161,19 @@ mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256
 For Microsandbox, use the native binary and exact provisioned image with the previously described backend arguments, adding `--configuration` and optionally `--reviewer`.
 These preparatory diagnostics accept only fixture credentials; production Pi credential configuration and cutover follow the later deployment steps.
 
+Step 11 adds a disposable Session-coordination diagnostic with exact file-backed identity and History Replay:
+
+```sh
+mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256:<image-id> --arch arm64 --sessions
+```
+
+For Microsandbox, use the native binary and exact provisioned image with the previously described backend arguments, adding `--sessions`.
+This option exercises preparation, fenced prompt sequencing, and replay-before-human-prompt with an in-memory diagnostic admission ledger and temporary `/state` tmpfs.
+It does not attach protected Participant state or create durable Workflow records.
+The shared automated backend gates additionally qualify actual continuation across removed and recreated Execution Environments with independent retained-state attachments.
+PostgreSQL integration tests verify durable identity reservation and admission fencing separately.
+See the [Step 11 evidence](./plans/2026-10-09-durable-pi-sessions.md) for the precise delivery boundary and acceptance coverage.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

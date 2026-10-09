@@ -157,6 +157,8 @@ type AgentSession struct {
 	AgentAssignmentID           string
 	SessionNumber               int
 	ACPSessionID                string
+	RuntimeSessionID            string
+	RuntimeCapabilities         json.RawMessage
 	RuntimeProfileName          string
 	RuntimeProfileVersion       string
 	RuntimeProfileContentSHA256 string
@@ -183,12 +185,13 @@ type AgentSession struct {
 
 // HumanPromptLease is the durable fence authorizing one human ACP prompt lifecycle.
 type HumanPromptLease struct {
-	AgentSessionID  string
-	ControlRevision int64
-	ACPSessionID    string
-	Token           string
-	LeasedAt        time.Time
-	LeaseExpiresAt  time.Time
+	AgentSessionID   string
+	ControlRevision  int64
+	ACPSessionID     string
+	RuntimeSessionID string
+	Token            string
+	LeasedAt         time.Time
+	LeaseExpiresAt   time.Time
 }
 
 // AgentTurnPreparation is the fenced identity returned while a preparation job is live.
@@ -303,13 +306,13 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if session.Status == AgentSessionRetained {
 		if _, err := tx.Exec(ctx, `
 UPDATE agent_sessions
-SET status = CASE WHEN acp_session_id IS NULL THEN 'CREATING' ELSE 'ACTIVE' END,
+SET status = CASE WHEN acp_session_id IS NULL AND runtime_capabilities IS NULL THEN 'CREATING' ELSE 'ACTIVE' END,
     retained_at = NULL, updated_at = clock_timestamp()
 WHERE id = $1 AND status = 'RETAINED'`, session.ID); err != nil {
 			return AgentTurnPreparationCommit{}, fmt.Errorf("reactivate retained agent session: %w", err)
 		}
 		session.Status = AgentSessionCreating
-		if session.ACPSessionID != "" {
+		if session.ACPSessionID != "" || len(session.RuntimeCapabilities) != 0 {
 			session.Status = AgentSessionActive
 		}
 		session.RetainedAt = nil
@@ -900,8 +903,8 @@ WHERE id = $1 AND control_revision = $2`, sessionID, expectedRevision, owner, co
 }
 
 // AcquireHumanPromptLease atomically admits one human prompt under the exact durable Session fence.
-func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID string, expectedRevision int64, acpSessionID string, duration time.Duration) (HumanPromptLease, error) {
-	if !validUUID(sessionID) || expectedRevision <= 0 || strings.TrimSpace(acpSessionID) == "" {
+func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID string, expectedRevision int64, runtimeSessionID string, duration time.Duration) (HumanPromptLease, error) {
+	if !validUUID(sessionID) || expectedRevision <= 0 || strings.TrimSpace(runtimeSessionID) == "" {
 		return HumanPromptLease{}, ErrAgentSessionControlFenceLost
 	}
 	if err := validatePositiveDuration("human prompt lease", duration); err != nil {
@@ -921,7 +924,11 @@ func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID strin
 		session.Status != AgentSessionActive && session.Status != AgentSessionRetained {
 		return HumanPromptLease{}, ErrAgentSessionControlFenceLost
 	}
-	if session.ACPSessionID != acpSessionID {
+	if session.RuntimeSessionID != "" {
+		if session.RuntimeSessionID != runtimeSessionID {
+			return HumanPromptLease{}, ErrAgentSessionRuntimeConflict
+		}
+	} else if session.ACPSessionID != runtimeSessionID {
 		return HumanPromptLease{}, ErrAgentSessionACPConflict
 	}
 	var active bool
@@ -934,7 +941,10 @@ func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID strin
 	if session.HumanPromptToken != "" {
 		return HumanPromptLease{}, existingHumanPromptAdmissionError(ctx, tx, sessionID)
 	}
-	lease := HumanPromptLease{AgentSessionID: sessionID, ControlRevision: expectedRevision, ACPSessionID: acpSessionID, Token: token}
+	lease := HumanPromptLease{AgentSessionID: sessionID, ControlRevision: expectedRevision, ACPSessionID: runtimeSessionID, Token: token}
+	if session.RuntimeSessionID != "" {
+		lease.RuntimeSessionID, lease.ACPSessionID = runtimeSessionID, ""
+	}
 	err = tx.QueryRow(ctx, `
 WITH lease_time AS (SELECT clock_timestamp() AS now)
 UPDATE agent_sessions AS session
@@ -956,7 +966,7 @@ RETURNING session.human_prompt_leased_at, session.human_prompt_lease_expires_at`
 
 // HeartbeatHumanPromptLease extends a live lease while revalidating its complete durable fence.
 func (store *Store) HeartbeatHumanPromptLease(ctx context.Context, lease HumanPromptLease, extension time.Duration) error {
-	if !validUUID(lease.AgentSessionID) || !validUUID(lease.Token) || lease.ControlRevision <= 0 || strings.TrimSpace(lease.ACPSessionID) == "" {
+	if !validUUID(lease.AgentSessionID) || !validUUID(lease.Token) || lease.ControlRevision <= 0 || strings.TrimSpace(lease.ACPSessionID) == "" && strings.TrimSpace(lease.RuntimeSessionID) == "" {
 		return ErrHumanPromptLeaseLost
 	}
 	if err := validatePositiveDuration("human prompt lease heartbeat", extension); err != nil {
@@ -969,7 +979,7 @@ func (store *Store) HeartbeatHumanPromptLease(ctx context.Context, lease HumanPr
 	defer func() { _ = tx.Rollback(ctx) }()
 	workflowID, _, session, err := lockHumanPromptSession(ctx, tx, lease.AgentSessionID)
 	if err != nil || session.ControlOwner != SessionControlHuman || session.ControlRevision != lease.ControlRevision ||
-		session.ACPSessionID != lease.ACPSessionID || session.HumanPromptToken != lease.Token ||
+		session.ACPSessionID != lease.ACPSessionID || session.RuntimeSessionID != lease.RuntimeSessionID || session.HumanPromptToken != lease.Token ||
 		session.Status != AgentSessionActive && session.Status != AgentSessionRetained {
 		return ErrHumanPromptLeaseLost
 	}
@@ -1174,6 +1184,7 @@ type agentProfileConfig struct {
 	Runtime      string                                   `json:"runtime"`
 	Model        string                                   `json:"model"`
 	Variant      json.RawMessage                          `json:"variant,omitempty"`
+	Thinking     string                                   `json:"thinking,omitempty"`
 	Steps        int                                      `json:"steps"`
 	Permissions  map[string]agentprofile.PermissionAction `json:"permissions"`
 	Instructions string                                   `json:"instructions"`
@@ -1217,7 +1228,20 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 	if !validProfileReference(snapshot.Model) {
 		return nil, errors.New("prepare Agent Turn: Agent Profile model must use provider/model syntax")
 	}
-	if err := agentprofile.ValidateRolePolicy(policy, snapshot.Steps, snapshot.Permissions); err != nil {
+	if snapshot.Runtime == "pi-rpc/v1" {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(config, &fields)
+		_, hasSteps := fields["steps"]
+		_, hasVariant := fields["variant"]
+		if hasSteps || hasVariant || snapshot.Thinking != "" && !agentprofile.ValidThinking(snapshot.Thinking) {
+			return nil, errors.New("prepare Agent Turn: unsupported Pi Profile configuration")
+		}
+		if err := agentprofile.ValidatePiPermissions(policy, snapshot.Permissions); err != nil {
+			return nil, err
+		}
+	} else if snapshot.Thinking != "" {
+		return nil, errors.New("prepare Agent Turn: thinking is only supported by Pi Profiles")
+	} else if err := agentprofile.ValidateRolePolicy(policy, snapshot.Steps, snapshot.Permissions); err != nil {
 		return nil, fmt.Errorf("prepare Agent Turn: Agent Profile policy: %w", err)
 	}
 	if strings.TrimSpace(snapshot.Instructions) == "" {
@@ -1630,12 +1654,13 @@ SELECT id::text, agent_assignment_id::text, session_number, COALESCE(acp_session
 	       control_acquired_at, COALESCE(human_prompt_token::text, ''), human_prompt_leased_at,
 	       human_prompt_lease_expires_at, human_prompt_heartbeat_at,
 	       next_turn_number, next_execution_epoch, created_at, updated_at,
-       activated_at, retained_at, state_deleted_at
+        activated_at, retained_at, state_deleted_at, COALESCE(runtime_session_id, ''), runtime_capabilities
 FROM agent_sessions`
 
 func scanAgentSession(row rowScanner) (AgentSession, error) {
 	var session AgentSession
 	var capabilities []byte
+	var runtimeCapabilities []byte
 	err := row.Scan(&session.ID, &session.AgentAssignmentID, &session.SessionNumber,
 		&session.ACPSessionID, &session.RuntimeProfileName, &session.RuntimeProfileVersion,
 		&session.RuntimeProfileContentSHA256, &session.RuntimeImageDigest,
@@ -1645,12 +1670,15 @@ func scanAgentSession(row rowScanner) (AgentSession, error) {
 		&session.HumanPromptLeaseExpiresAt, &session.HumanPromptHeartbeatAt,
 		&session.NextTurnNumber, &session.NextExecutionEpoch,
 		&session.CreatedAt, &session.UpdatedAt, &session.ActivatedAt, &session.RetainedAt,
-		&session.StateDeletedAt)
+		&session.StateDeletedAt, &session.RuntimeSessionID, &runtimeCapabilities)
 	if err != nil {
 		return AgentSession{}, err
 	}
 	session.AgentParticipantID = session.AgentAssignmentID
 	session.Capabilities, err = canonicalJSON(capabilities)
+	if err == nil && runtimeCapabilities != nil {
+		session.RuntimeCapabilities, err = canonicalJSON(runtimeCapabilities)
+	}
 	return session, err
 }
 

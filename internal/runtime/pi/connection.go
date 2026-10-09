@@ -28,23 +28,27 @@ type Options struct {
 	CloseTimeout        time.Duration
 	Selection           *agent.ModelSelection
 	RequireMCP          bool
+	RequirePersistence  bool
 }
 
 type connection struct {
-	transport  io.ReadWriteCloser
-	options    Options
-	mu         sync.Mutex
-	nextID     uint64
-	pending    map[string]*pendingRequest
-	active     *turn
-	cancelling int
-	ready      bool
-	failure    error
-	done       chan struct{}
-	writes     chan writeJob
-	closeOnce  sync.Once
-	closed     chan struct{}
-	closeErr   error
+	transport      io.ReadWriteCloser
+	options        Options
+	mu             sync.Mutex
+	nextID         uint64
+	pending        map[string]*pendingRequest
+	active         *turn
+	cancelling     int
+	ready          bool
+	sessionID      string
+	persistedReady *agent.Ready
+	replaying      bool
+	failure        error
+	done           chan struct{}
+	writes         chan writeJob
+	closeOnce      sync.Once
+	closed         chan struct{}
+	closeErr       error
 }
 
 type pendingRequest struct {
@@ -98,7 +102,7 @@ func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
 
 func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
 	c.mu.Lock()
-	if c.active != nil || c.cancelling != 0 && (c.options.Selection != nil || c.options.RequireMCP) {
+	if c.active != nil || c.replaying || c.cancelling != 0 && (c.options.Selection != nil || c.options.RequireMCP) {
 		c.mu.Unlock()
 		return agent.Ready{}, agent.ErrBusy
 	}
@@ -135,8 +139,30 @@ func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
 	if c.failure != nil {
 		return agent.Ready{}, c.failure
 	}
+	if c.options.RequirePersistence && (c.persistedReady == nil || c.persistedReady.RuntimeSessionID != state.SessionID) {
+		return agent.Ready{}, agent.ErrSession
+	}
 	c.ready = true
+	c.sessionID = state.SessionID
+	if c.persistedReady != nil {
+		return *c.persistedReady, nil
+	}
 	return agent.Ready{RuntimeSessionID: state.SessionID}, nil
+}
+
+func (c *connection) SetAgentEventContext(owner agentevent.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.options.EventContext = owner
+}
+
+func (c *connection) PreparedSessionID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ready || c.failure != nil {
+		return ""
+	}
+	return c.sessionID
 }
 
 func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Sink) (outcome agent.Outcome, err error) {
@@ -439,13 +465,16 @@ func (c *connection) read() {
 
 func (c *connection) record(content []byte) error {
 	var record struct {
-		Type       string          `json:"type"`
-		ID         string          `json:"id"`
-		Command    string          `json:"command"`
-		Success    *bool           `json:"success"`
-		Data       json.RawMessage `json:"data"`
-		Message    json.RawMessage `json:"message"`
-		FinalError string          `json:"finalError"`
+		Type         string          `json:"type"`
+		ID           string          `json:"id"`
+		Command      string          `json:"command"`
+		Success      *bool           `json:"success"`
+		Data         json.RawMessage `json:"data"`
+		Message      json.RawMessage `json:"message"`
+		FinalError   string          `json:"finalError"`
+		SessionID    string          `json:"sessionId"`
+		Disposition  string          `json:"disposition"`
+		Capabilities json.RawMessage `json:"capabilities"`
 	}
 	if json.Unmarshal(content, &record) != nil || record.Type == "" {
 		return agent.ErrProtocol
@@ -455,6 +484,13 @@ func (c *connection) record(content []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if record.Type == "omnigrex_session_ready" {
+		if c.persistedReady != nil || record.SessionID != c.options.ExpectedSessionID || record.Disposition != "created" && record.Disposition != "recovered" && record.Disposition != "continued" {
+			return agent.ErrSession
+		}
+		c.persistedReady = &agent.Ready{RuntimeSessionID: record.SessionID, Capabilities: record.Capabilities, Disposition: record.Disposition}
+		return nil
+	}
 	if record.Type == "response" {
 		if record.ID == "" || record.Success == nil {
 			return agent.ErrProtocol
@@ -561,7 +597,7 @@ func (c *connection) record(content []byte) error {
 // Runtime diagnostics are reconstructed from closed-vocabulary observations,
 // never copied from source JSON, provider messages, tool arguments, or stderr.
 func (c *connection) runtimeEvent(kind, status, failure, source, reason string, retryCancelled bool) agentevent.AgentEvent {
-	event := c.event(kind, status, failure)
+	event := c.eventLocked(kind, status, failure)
 	event.Metadata.Runtime, _ = json.Marshal(struct {
 		Runtime        string `json:"runtime"`
 		Event          string `json:"event"`
@@ -572,6 +608,12 @@ func (c *connection) runtimeEvent(kind, status, failure, source, reason string, 
 }
 
 func (c *connection) event(kind, status, failure string) agentevent.AgentEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.eventLocked(kind, status, failure)
+}
+
+func (c *connection) eventLocked(kind, status, failure string) agentevent.AgentEvent {
 	owner := c.options.EventContext
 	return agentevent.AgentEvent{AssignmentID: owner.AssignmentID, AgentSessionID: owner.AgentSessionID, TurnID: owner.TurnID, ExecutionEpoch: owner.ExecutionEpoch, ControlRevision: owner.ControlRevision, Kind: agentevent.Kind(kind), ObservedAt: time.Now().UTC(), Metadata: agentevent.OperationalMetadata{Status: status, FailureClass: failure}}
 }

@@ -67,9 +67,25 @@ func (ledger *Ledger) RecordNoExecution(_ context.Context, key execution.Key) er
 	ledger.records[key] = record
 	return nil
 }
-func (*Ledger) BindSetupResource(context.Context, execution.Key, execution.Ref) error {
-	return execution.ErrInvalidSpec
+func (ledger *Ledger) BindSetupResource(_ context.Context, key execution.Key, ref execution.Ref) error {
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	record := ledger.records[key]
+	if record.Revoked || record.SetupResource != "" && record.SetupResource != ref {
+		return execution.ErrConflict
+	}
+	record.SetupResource = ref
+	ledger.records[key] = record
+	return nil
 }
-func (*Ledger) RecordSetupStopped(context.Context, execution.Key, execution.Ref) error {
-	return execution.ErrInvalidSpec
+func (ledger *Ledger) RecordSetupStopped(_ context.Context, key execution.Key, ref execution.Ref) error {
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	record := ledger.records[key]
+	if record.SetupResource != ref {
+		return execution.ErrConflict
+	}
+	record.SetupSettled = true
+	ledger.records[key] = record
+	return nil
 }

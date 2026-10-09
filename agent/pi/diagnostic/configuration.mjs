@@ -4,13 +4,14 @@ import { spawn } from 'node:child_process';
 import { mkdir, writeFile, readFile, readdir, symlink, stat } from 'node:fs/promises';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { run, readBootstrap } from './runner.mjs';
+import { openDurableSession } from './session-state.mjs';
 
 const gateway = spawn('/usr/local/bin/pi-mcp-fixture', [], { stdio: ['ignore', 'ignore', 'inherit'] });
 const fixturePrompts = new Set(['PRIOR_TURN_CONTEXT', 'configuration-audit', 'configuration-mcp',
   'configuration-revoked', 'configuration-publish', 'configuration-invalid-arguments',
   'configuration-developer-only', 'configuration-write', 'configuration-edit', 'configuration-skill',
   'configuration-grep', 'configuration-find', 'configuration-ls', 'configuration-bash',
-  'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit']);
+  'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit', 'configuration-continuation']);
 function contentText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.filter(block => block.type === 'text').map(block => block.text).join('');
@@ -25,6 +26,7 @@ async function runFixture(command, args) {
 }
 try {
   const configuration = await readBootstrap();
+  if (process.env.OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/session-state.test.mjs']);
   if (process.env.OMNIGREX_PI_MCP_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/mcp-boundary.test.mjs']);
   if (process.env.OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/failure-boundary.test.mjs']);
   for (let attempt = 0;; attempt++) {
@@ -48,6 +50,7 @@ try {
   if (process.env.OMNIGREX_PI_SKILL_ESCAPE === '1') await symlink('/run/pi-agent', '/workspace/.agents/skills/escape');
   const retained = process.env.OMNIGREX_PI_RETAINED_FIXTURE === '1';
   let requests = 0;
+  let providerRequests = 0;
   const server = http.createServer(async (request, response) => {
     let body = '';
     for await (const part of request) body += part;
@@ -57,6 +60,12 @@ try {
     if (request.headers.authorization !== 'Bearer configuration-only-key-$$-$!-$9') { response.writeHead(401); response.end(); return; }
     const prompt = contentText(data.messages.findLast(m => m.role === 'user')?.content);
     if (!fixturePrompts.has(prompt)) throw new Error('unknown controlled-provider scenario');
+    if (prompt === 'configuration-continuation') {
+      if (providerRequests !== 0) throw new Error('History Replay contacted the provider');
+      if (!data.messages.some(m => m.role === 'user' && contentText(m.content) === 'configuration-audit')) throw new Error('prior Session context was lost');
+      if (JSON.stringify(data.messages).includes('ABANDONED_HISTORY')) throw new Error('abandoned branch became current context');
+    }
+    providerRequests++;
     if (prompt === 'configuration-provider-error') {
       response.writeHead(400, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: { message: `Invalid API key: ${request.headers.authorization.slice('Bearer '.length)}; ${configuration.mcp.headers[0].value}` } }));
@@ -116,10 +125,11 @@ try {
       if (!files.includes('auth.json')) throw new Error('Pi auth file missing');
       const auth = JSON.parse(await readFile('/run/pi-agent/auth.json', 'utf8'));
       if (Object.keys(auth).join(',') !== 'diagnostic' || ((await stat('/run/pi-agent/auth.json')).mode & 0o777) !== 0o600) throw new Error('credential selection or file mode failed');
-      const sessionFiles = await readdir('/run/pi-agent/sessions');
+      const sessionDirectory = configuration.session ? `/state/sessions/${configuration.session.runtimeSessionId}` : '/run/pi-agent/sessions';
+      const sessionFiles = (await readdir(sessionDirectory)).filter(file => file.endsWith('.jsonl'));
       let hasProviderFailure = false;
       for (const file of sessionFiles) {
-        const history = await readFile(`/run/pi-agent/sessions/${file}`, 'utf8');
+        const history = await readFile(`${sessionDirectory}/${file}`, 'utf8');
         const token = configuration.mcp.headers[0].value.slice('Bearer '.length);
         if (history.includes('configuration-only-key') || history.includes(token) || history.includes('must-not-be-delivered')) throw new Error('credential entered retained Session');
         if (prompt === 'configuration-provider-error-audit') {
@@ -155,7 +165,24 @@ try {
     if (!history.includes('OLD_OPERATOR_GUIDANCE') || !history.includes('OLD_STAGE_OBJECTIVE') || !history.includes('"role":"system"')) throw new Error('prior structured system state was not retained');
   }
   const previous = retained ? SessionManager.findById('/workspace', 'omnigrex-pi-configuration', '/run/pi-agent/sessions') : undefined;
-  const session = previous ? SessionManager.open(previous, '/run/pi-agent/sessions', '/workspace')
+  let session;
+  if (configuration.session) {
+    const opened = await openDurableSession(configuration.session);
+    session = opened.manager;
+    if (process.env.OMNIGREX_PI_HISTORY_TREE_FIXTURE === '1') {
+      const originalLeaf = session.getLeafId();
+      const firstUser = session.getEntries().find(entry => entry.type === 'message' && entry.message.role === 'user');
+      if (!originalLeaf || !firstUser) throw new Error('history tree fixture needs prior context');
+      session.appendMessage({ role: 'user', content: 'ABANDONED_HISTORY', timestamp: Date.now() });
+      // Whole-transcript RPC would exceed the adapter's 1 MiB record limit.
+      // These abandoned messages must still replay through bounded metadata pages.
+      for (let i = 0; i < 260; i++) session.appendMessage({ role: 'user', content: 'ABANDONED_HISTORY'.repeat(256), timestamp: Date.now() });
+      session.branchWithSummary(originalLeaf, 'CONTROLLED_BRANCH_SUMMARY');
+      session.appendCompaction('CONTROLLED_COMPACTION', firstUser.id, 1);
+    }
+    process.stdout.write(JSON.stringify({ type: 'omnigrex_session_ready', sessionId: session.getSessionId(), disposition: opened.disposition,
+      capabilities: { history_replay: true, session_continuation: true, state_format: 'pi-session/v3' } }) + '\n');
+  } else session = previous ? SessionManager.open(previous, '/run/pi-agent/sessions', '/workspace')
     : SessionManager.create('/workspace', '/run/pi-agent/sessions', { id: 'omnigrex-pi-configuration' });
   await run(configuration, session, models);
 } catch {
