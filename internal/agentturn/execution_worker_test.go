@@ -914,10 +914,9 @@ func TestExecutionWorkerUsesPolicyCredentialsAndDeterministicRepositoryInputs(t 
 		wantRepository     string
 		wantProviderSecret string
 		wantCurrentHead    string
-		wantReviewerCalls  int
 	}{
 		{name: "Developer", role: workflow.RoleDeveloper, wantRepository: executionDeveloperRepositoryCredential, wantProviderSecret: executionDeveloperProviderSecret, wantCurrentHead: runtimeTestDefaultSHA},
-		{name: "Reviewer", role: workflow.RoleReviewer, wantRepository: executionDeveloperRepositoryCredential, wantProviderSecret: executionDeveloperProviderSecret, wantCurrentHead: runtimeTestPRHeadSHA, wantReviewerCalls: 1},
+		{name: "Reviewer", role: workflow.RoleReviewer, wantRepository: executionDeveloperRepositoryCredential, wantProviderSecret: executionDeveloperProviderSecret, wantCurrentHead: runtimeTestPRHeadSHA},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -939,11 +938,17 @@ func TestExecutionWorkerUsesPolicyCredentialsAndDeterministicRepositoryInputs(t 
 			if err := json.Unmarshal([]byte(fixture.prompter.request.Content[0].Text), &envelope); err != nil || envelope.CurrentHeadSHA != test.wantCurrentHead {
 				t.Fatalf("event envelope current head = %q, error = %v", envelope.CurrentHeadSHA, err)
 			}
-			if fixture.developerCredentials.calls != 1 || fixture.reviewerCredentials.calls != test.wantReviewerCalls {
-				t.Fatalf("policy credential calls = Orchestrator %d, Reviewer %d", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
+			// Launch-time credential acquisition remains operation-scoped to
+			// launch. Final reconciliation acquires current credentials
+			// itself, so no pre-prompt Reviewer token is retained.
+			if fixture.developerCredentials.calls != 1 || fixture.reviewerCredentials.calls != 0 {
+				t.Fatalf("policy credential calls = Orchestrator %d, Reviewer %d, want 1 and 0", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
 			}
-			if test.role == workflow.RoleReviewer && fixture.outcomes.request.ReviewerRepositoryCredential != executionReviewerRepositoryCredential {
-				t.Fatalf("review reconciliation credential = %q", fixture.outcomes.request.ReviewerRepositoryCredential)
+			if fixture.outcomes.request.RepositoryCredential != executionDeveloperRepositoryCredential {
+				t.Fatalf("reconciliation diagnostic credential = %q, want launch-time credential", fixture.outcomes.request.RepositoryCredential)
+			}
+			if fixture.outcomes.request.ReviewerRepositoryCredential != "" {
+				t.Fatalf("reconciliation must not retain a pre-prompt Reviewer token: %q", fixture.outcomes.request.ReviewerRepositoryCredential)
 			}
 			if fixture.defaultBranch.credential != test.wantRepository {
 				t.Fatal("default branch resolver did not receive the selected Role credential")

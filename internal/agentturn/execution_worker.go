@@ -246,7 +246,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		operationErr = fmt.Errorf("resolve Agent Turn workspace paths: %w", operationErr)
 	}
 
-	var repositoryCredential, reviewerOutcomeCredential string
+	var repositoryCredential string
 	providerCredential := worker.providerCredential
 	if operationErr == nil {
 		policy, ok := worker.policies.Lookup(execution.Assignment.Role)
@@ -270,17 +270,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		} else if strings.TrimSpace(repositoryCredential) == "" {
 			operationErr = errors.New("Role repository credential is empty")
 		}
-		if operationErr == nil {
-			if authority, granted := policy.CredentialAuthorityForTool(mcp.ToolSubmitReview); granted && authority == role.ReviewerAuthority {
-				reviewerOutcomeCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-				if strings.TrimSpace(reviewerOutcomeCredential) == "" && operationErr == nil {
-					operationErr = errors.New("Reviewer repository credential is empty")
-				}
-				if reviewerOutcomeCredential != "" {
-					*secrets = append(*secrets, reviewerOutcomeCredential)
-				}
-			}
-		}
+		// Outcome reconciliation acquires current operation-scoped credentials
+		// itself immediately before each GitHub observation. No pre-prompt
+		// Reviewer token is retained for finalization.
 	}
 
 	var defaultBranch githubapi.DefaultBranch
@@ -393,7 +385,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 		}
 	}
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, runtime, promptResponse, promptClassification, operationErr)
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
@@ -419,7 +411,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
@@ -471,9 +463,12 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		return false, combinedErr
 	}
 
+	// The launch-time repository credential is retained only as
+	// diagnostic-only redaction material. Final GitHub observations acquire
+	// current operation-scoped credentials inside the outcome reconciler.
 	reconciliation := OutcomeReconciliation{
 		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
-		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
+		Paths: paths,
 	}
 	var corroborationFailure *TerminalCorroborationFailure
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
@@ -491,7 +486,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		}
 		reconciliation.PromptError = classification
 		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
-		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential, reviewerOutcomeCredential)
+		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential)
 		if errors.Is(operationErr, ErrRuntimeOOMKilled) {
 			reconciliation.PromptDiagnostic = store.RuntimeOOMDiagnostic
 		} else {

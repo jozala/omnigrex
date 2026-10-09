@@ -386,7 +386,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api, Logger: logger,
+		Store: database, GitHub: githubServices.api,
+		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
+		Logger:                 logger,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
