@@ -760,23 +760,6 @@ func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context,
 	return reviews, err
 }
 
-func retryTransientObservation(ctx context.Context, observe func() error) error {
-	for attempt := 0; attempt < 3; attempt++ {
-		err := observe()
-		if err == nil || attempt == 2 || !shortRetryableGitHubObservation(err) || ctx.Err() != nil {
-			return err
-		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil
-}
-
 func retryTransientObservationWithCredential(ctx context.Context, acquire func(context.Context) (string, error), fresh *[]string, observe func(string) error) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		credential, err := acquire(ctx)
