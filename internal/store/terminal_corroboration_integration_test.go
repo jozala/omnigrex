@@ -1122,7 +1122,10 @@ func TestTerminalCorroborationWorkerAcceptsExistingReviewerReviewOnce(t *testing
 		t.Fatal(err)
 	}
 	processed, err := worker.ProcessOne(ctx)
-	if err != nil || !processed || api.reads != 2 || credential.calls != 1 {
+	// A submit_review corroboration performs two GitHub observations
+	// (get_pull_request, then list_pull_request_reviews), each acquiring a
+	// current credential; the VERIFY job's worker itself acquires nothing.
+	if err != nil || !processed || api.reads != 2 || credential.calls != 2 {
 		t.Fatalf("corroborate Reviewer review = processed %t, error %v, GitHub reads %d, credentials %d",
 			processed, err, api.reads, credential.calls)
 	}
