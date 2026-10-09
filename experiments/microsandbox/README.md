@@ -4,6 +4,9 @@ This is the reproducible Step 01 probe for the [Pi and execution-backend plan](.
 It is an opt-in integration test, not a production execution backend.
 See the [evidence and remaining qualification boundaries](../../docs/experiments/microsandbox.md).
 
+The later production adapter uses the pinned Go SDK and has its own [Step 08 qualification](../../docs/plans/2026-10-09-microsandbox-backend.md).
+Run `mise run test-microsandbox-integration` for that adapter's gate; this feasibility entry point continues to describe the historical CLI topology proof.
+
 ## Requirements
 
 - The repository's pinned Go toolchain and a Docker CLI on the machine running the test.

@@ -9,7 +9,7 @@ import (
 )
 
 func TestCoreDependencyGraphDoesNotReachExecutionImplementations(t *testing.T) {
-	for _, tags := range []string{"", "integration"} {
+	for _, tags := range []string{"", "integration", "microsandbox", "integration,microsandbox"} {
 		command := exec.Command("go", "list", "-deps", "-json", "-tags="+tags,
 			"github.com/jozala/omnigrex/internal/agentturn", "github.com/jozala/omnigrex/internal/startup",
 			"github.com/jozala/omnigrex/internal/workflow", "github.com/jozala/omnigrex/internal/workflowaction",
@@ -27,7 +27,7 @@ func TestCoreDependencyGraphDoesNotReachExecutionImplementations(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			for _, forbidden := range []string{"github.com/moby/", "github.com/docker/", "github.com/jozala/omnigrex/internal/runtime/docker", "github.com/jozala/omnigrex/internal/runtime/microsandbox"} {
+			for _, forbidden := range []string{"github.com/moby/", "github.com/docker/", "github.com/superradcompany/microsandbox/", "github.com/jozala/omnigrex/internal/runtime/docker", "github.com/jozala/omnigrex/internal/runtime/microsandbox"} {
 				if strings.HasPrefix(pkg.ImportPath, forbidden) {
 					t.Errorf("core graph reaches %s (tags %q)", pkg.ImportPath, tags)
 				}

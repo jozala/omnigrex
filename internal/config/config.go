@@ -60,6 +60,13 @@ const (
 )
 
 type Config struct {
+	ExecutionBackend            string
+	MicrosandboxExecutable      string
+	MicrosandboxFirmware        string
+	MicrosandboxHome            string
+	MicrosandboxNamespace       string
+	MicrosandboxCPUs            int
+	MicrosandboxRootDiskMiB     int64
 	DatabaseURL                 string
 	DatabasePasswordSecretFile  string
 	DockerAgentNetwork          string
@@ -140,6 +147,13 @@ func (err *ValidationError) Problems() []error {
 
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
+		ExecutionBackend:                       valueOrDefault(getenv("OMNIGREX_EXECUTION_BACKEND"), "docker"),
+		MicrosandboxExecutable:                 valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_EXECUTABLE"), "/usr/local/bin/msb"),
+		MicrosandboxFirmware:                   valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_FIRMWARE"), "/usr/local/lib/libkrunfw.so.5.6.1"),
+		MicrosandboxHome:                       valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_HOME"), "/var/lib/omnigrex/msb"),
+		MicrosandboxNamespace:                  valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_NAMESPACE"), "omnigrex"),
+		MicrosandboxCPUs:                       2,
+		MicrosandboxRootDiskMiB:                20480,
 		AgentInstructionsDir:                   getenv("OMNIGREX_AGENT_INSTRUCTIONS_DIR"),
 		DatabaseURL:                            valueOrDefault(getenv("OMNIGREX_DATABASE_URL"), defaultDatabaseURL),
 		DatabasePasswordSecretFile:             valueOrDefault(getenv("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE"), defaultDatabasePasswordSecretFile),
@@ -190,6 +204,42 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var problems []error
+	if config.ExecutionBackend != "docker" && config.ExecutionBackend != "microsandbox" {
+		problems = append(problems, fmt.Errorf("OMNIGREX_EXECUTION_BACKEND must be docker or microsandbox"))
+	}
+	if config.ExecutionBackend == "microsandbox" {
+		for _, setting := range []struct{ name, value string }{
+			{"OMNIGREX_MICROSANDBOX_EXECUTABLE", config.MicrosandboxExecutable},
+			{"OMNIGREX_MICROSANDBOX_FIRMWARE", config.MicrosandboxFirmware},
+			{"OMNIGREX_MICROSANDBOX_HOME", config.MicrosandboxHome},
+		} {
+			if !filepath.IsAbs(setting.value) || filepath.Clean(setting.value) != setting.value || strings.ContainsAny(setting.value, ":\x00\n") {
+				problems = append(problems, fmt.Errorf("%s must be a clean absolute path", setting.name))
+			}
+		}
+		if len(config.MicrosandboxHome) > 40 {
+			problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_HOME must not exceed 40 bytes (Unix socket path budget)"))
+		}
+		if strings.TrimSpace(config.MicrosandboxNamespace) == "" || strings.ContainsAny(config.MicrosandboxNamespace, "\x00\n=") {
+			problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_NAMESPACE must be a nonempty label value"))
+		}
+		if value := getenv("OMNIGREX_MICROSANDBOX_CPUS"); value != "" {
+			number, err := positiveInt64(value)
+			if err != nil || number > 64 {
+				problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_CPUS must be between 1 and 64"))
+			} else {
+				config.MicrosandboxCPUs = int(number)
+			}
+		}
+		if value := getenv("OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB"); value != "" {
+			number, err := positiveInt64(value)
+			if err != nil || number < 1024 || number > 1<<20 {
+				problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB must be between 1024 and 1048576"))
+			} else {
+				config.MicrosandboxRootDiskMiB = number
+			}
+		}
+	}
 	if config.AgentInstructionsDir != "" && (!filepath.IsAbs(config.AgentInstructionsDir) || filepath.Clean(config.AgentInstructionsDir) != config.AgentInstructionsDir) {
 		problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_INSTRUCTIONS_DIR must be a clean absolute path"))
 	}

@@ -39,7 +39,8 @@ Backend-native environment snapshots would include unrelated execution or creden
 Publication inspects a private, verified materialization with executable configuration and history indirection neutralized before trusted Git runs.
 Finalization and recovery preserve the stopped environment when a required capture cannot be sealed.
 Backups must include protected captures with retained Agent Sessions; the operator guide remains authoritative.
-Microsandbox's production adapter must translate its versioned guest-stat metadata before supplying the common archive.
+Microsandbox's strict guest-stat virtualization requires translation of its versioned metadata before supplying the common archive.
+[Decision 0013](0013-use-the-microsandbox-go-sdk-and-posix-bindings.md) refines this mechanism by qualifying literal POSIX bindings with guest-stat virtualization disabled.
 More selective inventory encoding or different limits require a versioned refinement rather than silent omission.
 
 ## Links

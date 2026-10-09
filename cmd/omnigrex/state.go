@@ -10,7 +10,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
@@ -77,19 +77,15 @@ func runStateCommand(ctx context.Context, args []string, getenv func(string) str
 	}
 	defer database.Close()
 	// This also rejects a backend/namespace change before any physical operation.
-	if err := database.BindExecutionBackend(ctx, execution.BackendBinding{Family: "docker", Version: 1, Namespace: settings.RuntimeStateVolume}); err != nil {
+	if err := database.BindExecutionBackend(ctx, composition.StateBinding(settings)); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	err = database.WithStateRecovery(ctx, *participant, func(ref execution.StateRef, source execution.StateMetadataSource) error {
-		if err := docker.CheckStateRecoveryBoundary(ctx, settings.RuntimeStateVolume); err != nil {
-			return err
-		}
-		states, err := docker.NewRetainedState(settings.RuntimeStateRoot, settings.RuntimeStateVolume, source)
+		recovery, err := composition.StateRecovery(ctx, settings, source)
 		if err != nil {
 			return err
 		}
-		var recovery execution.StateRecovery = states
 		if args[0] == "export" {
 			return recovery.Export(ctx, ref, stdout)
 		}

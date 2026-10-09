@@ -60,7 +60,7 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		{Name: "github-app-role-separation", Run: state.checkRoleSeparation},
 		{Name: "postgres-connectivity", Run: state.checkDatabase},
 		{Name: "postgres-schema", Run: state.checkDatabaseSchema},
-		{Name: "docker-resources", Run: state.checkDockerResources},
+		{Name: backendResourcesName(settings), Run: state.checkDockerResources},
 		{Name: "runtime-profile-image", Run: state.checkRuntimeImage},
 		{Name: "acp-runtime", Run: state.checkACPRuntime},
 		{Name: "protected-runtime-profiles", Run: state.checkProtectedRuntimeProfiles},
@@ -76,6 +76,13 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		return nil, err
 	}
 	return runner.Run(ctx), nil
+}
+
+func backendResourcesName(settings config.Config) string {
+	if settings.ExecutionBackend == "microsandbox" {
+		return "microsandbox-kvm-resources"
+	}
+	return "docker-resources"
 }
 
 func (state *productionState) close() {
@@ -152,7 +159,7 @@ func (state *productionState) checkDockerResources(ctx context.Context) error {
 		AgentNetwork: state.settings.DockerAgentNetwork, WorkspaceVolume: state.settings.WorkspaceVolume,
 		RuntimeStateVolume: state.settings.RuntimeStateVolume, MiseVolume: state.settings.MiseVolume,
 		AgentImage: state.settings.AgentImageReference,
-	})
+	}, state.settings)
 	if err != nil {
 		return err
 	}
@@ -164,7 +171,7 @@ func (state *productionState) checkRuntimeImage(ctx context.Context) error {
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := composition.NewImageAvailability()
+	availability, err := composition.NewImageAvailability(state.settings)
 	if err != nil {
 		return err
 	}
@@ -179,6 +186,7 @@ func (state *productionState) checkACPRuntime(ctx context.Context) error {
 		return errors.New("configured MCP endpoint does not have a host")
 	}
 	return checkACP(ctx, state.runtimeProfile, acpProbeOptions{
+		Settings:    state.settings,
 		Network:     state.settings.DockerAgentNetwork,
 		MCPHost:     endpoint.Hostname(),
 		MemoryBytes: state.settings.AgentTurnMemoryBytes,
@@ -192,7 +200,7 @@ func (state *productionState) checkProtectedRuntimeProfiles(ctx context.Context)
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := composition.NewImageAvailability()
+	availability, err := composition.NewImageAvailability(state.settings)
 	if err != nil {
 		return err
 	}
@@ -412,7 +420,7 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	if base.Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	return composition.CheckRepositoryEnvironment(ctx, selected)
+	return composition.CheckRepositoryEnvironment(ctx, selected, state.settings)
 }
 
 func (state *productionState) checkEffectiveProfiles(context.Context) error {

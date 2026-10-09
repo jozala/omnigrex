@@ -7,12 +7,14 @@ import (
 	"io"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 type acpProbeOptions struct {
+	Settings    config.Config
 	Network     string
 	MCPHost     string
 	ExtraHosts  []string
@@ -36,7 +38,7 @@ func checkACPImage(ctx context.Context, profile runtimeprofile.Profile, image st
 	}()
 	process, engine, err := composition.StartDiagnostic(ctx, profile, image, composition.ProbeOptions{
 		Network: options.Network, ExtraHosts: options.ExtraHosts, MemoryBytes: options.MemoryBytes,
-	}, io.Discard)
+	}, io.Discard, options.Settings)
 	if err != nil {
 		return err
 	}

@@ -90,11 +90,15 @@ type Factory interface {
 // ExitObservation contains positive backend-owned lifecycle evidence only.
 // A zero value is unknown; EOF, exit 137 and NotFound do not establish a cause.
 type ExitObservation struct {
-	Resource  Ref
-	ExitCode  int
-	Exited    bool
-	Running   bool
-	OOMKilled bool
+	Resource Ref
+	ExitCode int
+	// ExitCodeKnown distinguishes an observed code from an unknown zero value.
+	ExitCodeKnown bool
+	Scope         string
+	ObservedAt    time.Time
+	Exited        bool
+	Running       bool
+	OOMKilled     bool
 	// NeverStarted is positive backend evidence that this exact main resource
 	// had not executed. It is distinct from exit evidence and requires dispatch
 	// fencing before it can authorize preparation-only recovery cleanup.
@@ -138,6 +142,7 @@ var ErrUnknownEffect = errors.New("execution operation has unknown effect")
 var ErrInvalidSpec = errors.New("invalid Runtime Process specification")
 var ErrConflict = errors.New("execution request conflicts with its immutable identity")
 var ErrUnsupportedRequirement = errors.New("unsupported execution requirement")
+var ErrNotFound = errors.New("execution resource not found")
 
 // Reservation records intent before external creation. Revocation denies further
 // dispatch; an unsettled reservation remains ambiguous until its exact resource

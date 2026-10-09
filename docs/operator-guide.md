@@ -21,6 +21,86 @@ Narrow provider privileges, configure spending limits, and rotate the complete b
 Omnigrex does not enforce required GitHub checks before `omnigrex:pr-ready`.
 Use GitHub branch protection when checks must be mandatory.
 
+## Microsandbox execution backend
+
+The Step 08 adapter is a preparatory Linux/amd64 KVM implementation using Microsandbox and Go SDK 0.7.6.
+Its implementation and qualification boundaries are recorded in the [Step 08 evidence](./plans/2026-10-09-microsandbox-backend.md).
+Published native deployment bundles, persistent KVM CI, and Pi cutover follow later plan steps.
+
+Build the native orchestrator from a source checkout on a Linux/amd64 builder:
+
+```sh
+docker build --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
+```
+
+This image includes the pinned native runtime, firmware, SDK shared library, and CGO-enabled orchestrator.
+It also includes checksum-locked Git, its HTTPS helper, and the required Ubuntu dependency closure for trusted repository preparation.
+The normal `Dockerfile` remains the static Docker backend build.
+Selecting Microsandbox in a binary without its SDK support fails explicitly.
+
+Select one backend with `OMNIGREX_EXECUTION_BACKEND=docker` or `microsandbox`.
+Existing PostgreSQL backend ownership and namespace bindings are immutable; changing this setting does not migrate or reinterpret retained Participants.
+Use a fresh installation or an explicitly designed disposal/migration procedure for a backend change.
+
+Native execution requires the control-plane process to run as UID/GID 10001 with read/write KVM device access.
+Grant its supplementary group the numeric ownership of `/dev/kvm`; do not expose the host Docker socket to the microVM.
+Provide enough host capacity for all admitted VMs and their VMM overhead.
+Docker/Compose/Testcontainers inside an Agent Turn use the guest's private daemon, whose socket does not grant host Docker authority.
+Guest-root code can modify guest controls and access real provider credentials supplied to that environment.
+Continue using the credential scope and rotation procedures in [Supported Deployment](#supported-deployment) and [Prerequisites](#prerequisites).
+
+Native configuration includes:
+
+| Variable | Meaning |
+| --- | --- |
+| `OMNIGREX_MICROSANDBOX_EXECUTABLE` | Installed pinned `msb` executable; image default `/usr/local/bin/msb` |
+| `OMNIGREX_MICROSANDBOX_FIRMWARE` | Installed firmware library; image default `/usr/local/lib/libkrunfw.so.5.6.1` |
+| `OMNIGREX_MICROSANDBOX_HOME` | Backend inventory, image cache, disposable VM resources, and private dispatch journal; default `/var/lib/omnigrex/msb` |
+| `OMNIGREX_MICROSANDBOX_NAMESPACE` | Immutable installation inventory/state namespace; default `omnigrex` |
+| `OMNIGREX_MICROSANDBOX_CPUS` | VM virtual CPUs, 1-64; default 2 |
+| `OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB` | Disposable root capacity, 1,024-1,048,576 MiB; default 20,480 |
+
+Keep the native home path at most 40 bytes to preserve the pinned runtime's Unix-socket path budget.
+Its directory must be private to the control plane and disjoint from workspace, state, and tool roots.
+The existing logical workspace, retained-state, capture, and tool-root configuration remains applicable.
+Use separately retained storage for Session data and captures, with matching directory ownership.
+Do not bind the native home or entire storage roots into a guest.
+
+Provision exact repository images into the selected native image cache before accepting work, using the installed `msb image pull` or image archive import commands.
+Admission verifies actual manifest/config content and platform linkage; an imported digest-shaped alias is not sufficient proof of image identity.
+Index-pinned images and SDK-reserialized registry manifests require bounded HTTPS access to their exact registry artifacts for verification.
+Ordinary execution and golden-resource diagnostics use cached layered artifacts without pulling.
+Repositories requesting nested containers require flat ext4 materialization; the SDK may fetch the same declared registry digest within the bounded preparation operation to create that flat artifact.
+Keep those exact registry artifacts available as described in [Repository Environments](#repository-environments).
+No repository image build or mutable-tag fallback occurs inside Omnigrex.
+
+The native preflight checks the installed runtime version, local SDK selection, KVM access, selected images, isolated golden resources, and the real authenticated diagnostic MCP path.
+Use the existing `doctor` command and check every reported prerequisite.
+VM CPU/memory allocations and workload PID limits have guest scope; they are not host VMM-thread limits.
+Transport loss, cancellation, an exit code of 137, and unknown guest exits do not establish OOM or successful cleanup.
+After an unflushed VM crash, required terminal workspace evidence may remain unavailable, and settlement preserves that uncertainty.
+An unresponsive guest that cannot complete writeback is still force-terminated by exact identity under a finite cleanup budget.
+Such termination does not authorize discarding started execution data or claiming successful terminal capture.
+The SDK's crashed state is terminal for writer exclusion and preparation-only cleanup, but it supplies no missing writeback or OOM evidence.
+
+Apply the coordinated [backup](#backup) and [restore](#restore) procedures to PostgreSQL, retained Session data, and protected Workspace Captures.
+Also preserve the native `omnigrex-operations` journal under its home directory, keeping the original host fenced off during compatible-host restore.
+Exclude disposable VM root disks, memory snapshots, and guest tmpfs credentials from ordinary runtime-state archives.
+The `state export` and `state restore` commands select the same backend and retain the existing offline writer/collection barrier.
+Cross-backend archives are rejected.
+Retained dispatch journals permit recovery cleanup, but a restarted control plane cannot adopt a prepared environment's prior ephemeral registration inputs.
+
+Run the backend gate against an approved Linux Docker host with usable KVM:
+
+```sh
+export OMNIGREX_MICROSANDBOX_KVM_GID="$(stat -c '%g' /dev/kvm)"
+mise run test-microsandbox-integration
+```
+
+For a remote host, set an existing authorized `DOCKER_HOST=ssh://USER@HOST` connection and obtain that host's KVM group.
+The gate transfers fixture images over stdin and uses a disposable non-root wrapper rather than client-side host mounts.
+It removes that wrapper and the VMs it owns, while fixture images remain in the daemon's image cache.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

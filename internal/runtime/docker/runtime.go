@@ -274,7 +274,7 @@ func observeExit(ctx context.Context, api exitInspector, id string, labels map[s
 	if actual.State.Status != container.StateExited && actual.State.Status != container.StateDead {
 		return ExitObservation{}, nil
 	}
-	return ExitObservation{Resource: execution.Ref(id), ExitCode: actual.State.ExitCode, Exited: true, OOMKilled: actual.State.OOMKilled}, nil
+	return ExitObservation{Resource: execution.Ref(id), ExitCode: actual.State.ExitCode, ExitCodeKnown: true, Scope: "execution-environment", ObservedAt: time.Now(), Exited: true, OOMKilled: actual.State.OOMKilled}, nil
 }
 
 func (process *Process) Transport() io.ReadWriteCloser {

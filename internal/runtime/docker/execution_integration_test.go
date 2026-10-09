@@ -3,7 +3,6 @@
 package docker
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/conformance"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/opencode"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -38,7 +38,7 @@ func TestExecutionConformanceDocker(t *testing.T) {
 	request.TemporaryDirectories = []execution.TemporaryDirectory{{Target: "/tmp", SizeBytes: 4 << 20}}
 	request.Command = []string{"/bin/sh", "-c", `printf '{"ready":true}\n'; printf 'stderr-marker\n' >&2; sleep 300 & while IFS= read -r line; do printf '%s\n' "$line"; done; wait`}
 	factory := ExecutionFactory{Network: "none"}
-	runExecutionTransportConformance(t, ctx, factory, request, newExecutionTestLedger())
+	conformance.Transport(t, ctx, factory, request, newExecutionTestLedger())
 }
 
 func TestExecutionOpenCodeUsesNeutralFactoryAndTransport(t *testing.T) {
@@ -124,118 +124,6 @@ func TestExecutionKnownMissingImageHasNoUnresolvedCreation(t *testing.T) {
 	}
 	if !ledger.records[request.Key].CreationSettled || ledger.records[request.Key].Resource != "" {
 		t.Fatal("missing image was recorded as an ambiguous resource")
-	}
-}
-
-// The scenarios use only neutral contracts so a second backend can run the same
-// assertions, independently of the Docker-specific factory and image acquisition.
-func runExecutionTransportConformance(t *testing.T, ctx context.Context, factory execution.Factory, request execution.Request, ledger execution.Ledger) {
-	t.Helper()
-	engine, err := factory.New(request, ledger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Close()
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := engine.EnsureAbsent(cleanupCtx); err != nil {
-			t.Errorf("cleanup: %v", err)
-		}
-	})
-	stderr := &executionTestOutput{}
-	process, err := engine.Create(ctx, request, stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if observed, err := process.ObserveExit(ctx); err != nil || observed.Exited || observed.Running {
-		t.Fatalf("unstarted exit evidence: %#v, %v", observed, err)
-	}
-	_ = process.Transport().Close()
-	// Retry the same provision operation before launch, as after a lost attach response.
-	retryEngine, err := factory.New(request, ledger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer retryEngine.Close()
-	retry, err := retryEngine.Create(ctx, request, stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed := request
-	changed.Command = []string{"/bin/sh", "-c", "exit 0"}
-	conflicting, err := factory.New(changed, ledger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = conflicting.Create(ctx, changed, io.Discard)
-	_ = conflicting.Close()
-	if !errors.Is(err, execution.ErrConflict) {
-		t.Fatalf("changed operation = %v", err)
-	}
-	if err := retry.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	reader := bufio.NewReader(retry.Transport())
-	readLine := func(phase string) string {
-		t.Helper()
-		type result struct {
-			line string
-			err  error
-		}
-		done := make(chan result, 1)
-		go func() { line, err := reader.ReadString('\n'); done <- result{line, err} }()
-		select {
-		case got := <-done:
-			if got.err != nil {
-				t.Fatal(got.err)
-			}
-			return got.line
-		case <-ctx.Done():
-			_ = retry.Transport().Close()
-			t.Fatalf("%s transport did not complete within deadline", phase)
-			return ""
-		}
-	}
-	if got := readLine("startup"); got != "{\"ready\":true}\n" {
-		t.Fatalf("startup stdout = %q", got)
-	}
-	if _, err := retry.Transport().Write([]byte("{\"id\":7}\n")); err != nil {
-		t.Fatal(err)
-	}
-	if got := readLine("round trip"); got != "{\"id\":7}\n" {
-		t.Fatalf("round trip = %q", got)
-	}
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(stderr.String(), "stderr-marker") && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !strings.Contains(stderr.String(), "stderr-marker") {
-		t.Fatal("stderr was not delivered separately")
-	}
-	_ = retry.Transport().Close()
-	if observed, err := retry.ObserveExit(ctx); err != nil || !observed.Running || observed.OOMKilled {
-		t.Fatalf("detachment implied stop: %#v, %v", observed, err)
-	}
-	if err := retry.Stop(ctx, time.Second); err != nil {
-		t.Fatal(err)
-	}
-	observed, err := retry.ObserveExit(ctx)
-	if err != nil || !observed.Exited || observed.Running || observed.OOMKilled || observed.Resource == "" {
-		t.Fatalf("confirmed environment stop = %#v, %v", observed, err)
-	}
-	if err := retry.Remove(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.EnsureAbsent(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := retry.ObserveExit(ctx); err != nil || got.Exited || got.OOMKilled {
-		t.Fatalf("missing exit evidence = %#v, %v", got, err)
-	}
-	// All handles refer to the same resource and none may recreate this revoked epoch.
-	if _, err := engine.Create(ctx, request, io.Discard); !errors.Is(err, execution.ErrConflict) {
-		t.Fatalf("revoked epoch creation = %v", err)
 	}
 }
 

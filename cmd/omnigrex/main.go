@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,7 +27,7 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/composition"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
@@ -231,14 +230,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
-	workspaceSource, err := dockerruntime.NewWorkspaceSource()
+	backend, err := composition.NewBackend(ctx, settings, openCodeV1, database, database)
 	if err != nil {
-		return fmt.Errorf("configure consistent workspace access: %w", err)
+		return fmt.Errorf("configure execution backend: %w", err)
 	}
-	defer func() { _ = workspaceSource.Close() }()
+	defer func() { _ = backend.Close() }()
 	workspaces, err := workspace.New(workspace.Options{
 		WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: settings.WorkspaceRoot, MiseRoot: settings.MiseRoot,
-		CaptureRoot: settings.WorkspaceCaptureRoot, CaptureSource: workspaceSource,
+		CaptureRoot: settings.WorkspaceCaptureRoot, CaptureSource: backend.Workspaces,
 		CaptureLedger: database,
 	})
 	if err != nil {
@@ -296,61 +295,16 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn mutation recovery Worker: %w", err)
 	}
-	runtimeCleaner, err := dockerruntime.NewExactLabelCleaner(dockerruntime.ExactLabelCleanerOptions{
-		StopTimeout: settings.ShutdownTimeout, Ledger: database,
-	})
-	if err != nil {
-		return fmt.Errorf("configure stale Runtime Process cleanup: %w", err)
-	}
-	defer func() {
-		if err := runtimeCleaner.Close(); err != nil {
-			logger.Error("close stale Runtime Process cleanup", "error", err)
-		}
-	}()
-	runtimeInventory, err := dockerruntime.NewRuntimeProcessInventory()
-	if err != nil {
-		return fmt.Errorf("configure Runtime Process inventory: %w", err)
-	}
-	defer func() {
-		if err := runtimeInventory.Close(); err != nil {
-			logger.Error("close Runtime Process inventory", "error", err)
-		}
-	}()
-	retainedState, err := dockerruntime.NewRetainedState(settings.RuntimeStateRoot, settings.RuntimeStateVolume, database)
-	if err != nil {
-		return fmt.Errorf("configure retained state: %w", err)
-	}
-	contract := openCodeV1.Contract()
-	retainedState, err = retainedState.WithCollector(dockerruntime.AssignmentRuntimeStateCleanerOptions{
-		Image: contract.Image, Platform: dockerruntime.Platform{OS: contract.Platform.OS, Architecture: contract.Platform.Arch},
-		User: strconv.FormatUint(uint64(contract.User.UID), 10) + ":" + strconv.FormatUint(uint64(contract.User.GID), 10), RuntimeStateVolume: settings.RuntimeStateVolume,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := retainedState.Close(); err != nil {
-			logger.Error("close retained state collector", "error", err)
-		}
-	}()
+	runtimeCleaner := backend.Cleaner
+	retainedState := backend.States
 	if err := database.BindExecutionBackend(ctx, retainedState.Binding()); err != nil {
 		return fmt.Errorf("bind execution backend: %w", err)
 	}
-	exactImages, err := dockerruntime.NewExactImageAvailability()
-	if err != nil {
-		return fmt.Errorf("configure exact Runtime Profile image availability: %w", err)
-	}
-	defer func() {
-		if err := exactImages.Close(); err != nil {
-			logger.Error("close exact Runtime Profile image availability", "error", err)
-		}
-	}()
-	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry, exactImages)
+	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry, backend.Images)
 	if err != nil {
 		return fmt.Errorf("configure protected Runtime Profile availability: %w", err)
 	}
-	startupDocker := dockerruntime.NewRecovery(runtimeInventory, runtimeCleaner)
-	startupReconciler, err := startup.NewReconciler(database, startupDocker, startupDocker, startupDocker, startup.ReconcilerOptions{
+	startupReconciler, err := startup.NewReconciler(database, backend.Recovery, backend.Recovery, backend.Recovery, startup.ReconcilerOptions{
 		MaxPasses: startupMaximumPasses, MaxRuntimeProcesses: startupMaximumRuntimeProcesses,
 		MaxRecoveries: startupMaximumRecoveries,
 	})
@@ -382,10 +336,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway, States: retainedState,
-		Execution: dockerruntime.ExecutionFactory{
-			Network: settings.DockerAgentNetwork, WorkspaceVolume: settings.WorkspaceVolume,
-			RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume, States: retainedState,
-		}, ACP: agentturn.ProductionACPFactory{}, Sessions: sessions,
+		Execution: backend.Factory, ACP: agentturn.ProductionACPFactory{}, Sessions: sessions,
 		MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			Logger:         logger,
 			AgentEventSink: loggingAgentEventSink{logger: logger},
@@ -550,23 +501,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		"removed_malformed_processes", reconciliation.RemovedMalformedProcesses,
 	)
 
-	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
-		AgentNetwork:       settings.DockerAgentNetwork,
-		WorkspaceVolume:    settings.WorkspaceVolume,
-		RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume:         settings.MiseVolume,
-		AgentImage:         settings.AgentImageReference,
-	})
-	if err != nil {
-		return fmt.Errorf("initialize Docker readiness: %w", err)
-	}
-	defer func() {
-		if err := dockerProbe.Close(); err != nil {
-			logger.Error("close Docker readiness", "error", err)
-		}
-	}()
-
-	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, dockerProbe.Check,
+	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, backend.Check,
 		profileAvailability.Check, retainedState.Check, func(ctx context.Context) error {
 			return database.CheckPendingRuntimeProfileCompatibility(ctx, openCodeV1)
 		})

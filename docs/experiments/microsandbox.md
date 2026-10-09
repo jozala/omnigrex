@@ -49,3 +49,6 @@ It has not been registered as a persistent CI runner; CI integration remains a l
 - No Pi provider requests, persistent Pi sessions, credential-handling guarantees, or production backend substitution have been proved yet.
 
 The subsequent [Pi protocol, MCP, and session feasibility evidence](pi.md) builds on this execution environment.
+
+The [Step 08 SDK-backed implementation](../plans/2026-10-09-microsandbox-backend.md) supplies the later production adapter and conformance evidence.
+Its literal POSIX binding mode and Go SDK transport are qualified separately from this original CLI experiment.

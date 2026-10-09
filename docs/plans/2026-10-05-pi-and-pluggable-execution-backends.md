@@ -27,6 +27,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 05 | Logical workspace preparation, sealed publication evidence, and retained terminal corroboration | [Location-independent workspace implementation and evidence](2026-10-08-location-independent-workspaces.md) |
 | 06 | Logical retained-state bindings, protected collection, and validated offline Session archives | [Retained-state implementation and evidence](2026-10-08-retained-state-bindings.md) |
 | 07 | Digest-pinned repository environments, persisted contracts, and working-revision guest tooling | [Repository environment implementation and evidence](2026-10-08-repository-environments.md) |
+| 08 | SDK-backed Linux/KVM execution, shared protocol conformance, capture/state bindings, and nested-container qualification | [Microsandbox backend implementation and evidence](2026-10-09-microsandbox-backend.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -365,6 +366,8 @@ A repository installation script executes inside the environment rather than the
 A request for unsupported capabilities fails clearly on Docker.
 
 ### Step 08: Implement the Microsandbox backend
+
+**Deliverable:** [Microsandbox backend implementation and qualification](2026-10-09-microsandbox-backend.md), including the pinned Go SDK, selected-backend composition, durable dispatch barriers, POSIX-faithful capture/state bindings, and Linux/KVM evidence.
 
 **Goal:** Add the second implementation without changing core coordination.
 
