@@ -88,6 +88,10 @@ type OutcomeReconcilerConfig struct {
 	Clock                  interface{ Now() time.Time }
 	Logger                 *slog.Logger
 	ProviderCredentialJSON []json.RawMessage
+	// RetryWait pauses between transient GitHub observation retries.
+	// It defaults to a real timer-based wait when nil; tests inject a
+	// controlled hook so no real-time waiting simulates retry timing.
+	RetryWait func(context.Context, time.Duration) error
 }
 
 func (OutcomeReconcilerConfig) String() string { return "Agent Turn outcome reconciler config" }
@@ -140,6 +144,7 @@ type OutcomeReconciler struct {
 	clock                outcomeReconcilerClock
 	logger               *slog.Logger
 	diagnosticRedactor   *strings.Replacer
+	retryWait            func(context.Context, time.Duration) error
 }
 
 func (*OutcomeReconciler) String() string { return "Agent Turn outcome reconciler" }
@@ -173,7 +178,7 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	return &OutcomeReconciler{
 		store: config.Store, github: config.GitHub,
 		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
-		clock: clock, logger: config.Logger, diagnosticRedactor: redactor,
+		clock: clock, logger: config.Logger, diagnosticRedactor: redactor, retryWait: config.RetryWait,
 	}, nil
 }
 
@@ -217,11 +222,13 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 	}
 	var freshCredentials []string
 	defer func() {
-		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
-		observation = reconciler.sanitizeObservation(observation, request.ReviewerRepositoryCredential)
-		for _, secret := range freshCredentials {
-			observation = reconciler.sanitizeObservation(observation, secret)
-		}
+		// Redact the complete set of startup and fresh credentials before
+		// normalization and truncation so no credential fragment survives a
+		// truncation boundary.
+		secrets := make([]string, 0, len(freshCredentials)+2)
+		secrets = append(secrets, request.RepositoryCredential, request.ReviewerRepositoryCredential)
+		secrets = append(secrets, freshCredentials...)
+		observation = reconciler.sanitizeObservation(observation, secrets)
 	}()
 	observedAt := reconciler.clock.Now().UTC()
 	if observedAt.IsZero() {
@@ -723,10 +730,15 @@ func reportGitHubCorroborationFailure(request OutcomeReconciliation, sourceID st
 		SourceInvocationID: sourceID, Code: failure.code,
 		Retryable: failure.retryable, Prerequisite: failure.prerequisite,
 	}
-	var rateLimit *githubapi.RateLimitError
-	if errors.As(err, &rateLimit) {
-		report.RetryAfter = rateLimit.RetryAfter
-		if untilReset := time.Until(rateLimit.ResetAt); untilReset > report.RetryAfter {
+	// The production credential provider redacts acquisition errors into a
+	// credential-free wrapper that preserves SafeErrorMetadata but not the
+	// typed error, so retry advice must come from the metadata surface rather
+	// than a typed assertion. This also covers direct RateLimitError values,
+	// whose metadata carries the same fields.
+	metadata := githubapi.ExtractSafeErrorMetadata(err)
+	if metadata.RetryAfter > 0 || !metadata.ResetAt.IsZero() {
+		report.RetryAfter = metadata.RetryAfter
+		if untilReset := time.Until(metadata.ResetAt); untilReset > report.RetryAfter {
 			report.RetryAfter = untilReset
 		}
 	}
@@ -742,7 +754,7 @@ func reportGitHubCorroborationFailure(request OutcomeReconciliation, sourceID st
 // fresh for diagnostic redaction and unsafe-material checks.
 func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, acquire func(context.Context) (string, error), owner, repository string, number int, fresh *[]string) (githubapi.PullRequest, error) {
 	var pullRequest githubapi.PullRequest
-	err := retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
+	err := reconciler.retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
 		var err error
 		pullRequest, err = reconciler.github.GetPullRequest(ctx, credential, owner, repository, number)
 		return err
@@ -752,7 +764,7 @@ func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, acquire
 
 func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context, acquire func(context.Context) (string, error), owner, repository string, number int, fresh *[]string) ([]githubapi.Review, error) {
 	var reviews []githubapi.Review
-	err := retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
+	err := reconciler.retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
 		var err error
 		reviews, err = reconciler.github.ListPullRequestReviews(ctx, credential, owner, repository, number)
 		return err
@@ -760,7 +772,7 @@ func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context,
 	return reviews, err
 }
 
-func retryTransientObservationWithCredential(ctx context.Context, acquire func(context.Context) (string, error), fresh *[]string, observe func(string) error) error {
+func (reconciler *OutcomeReconciler) retryTransientObservationWithCredential(ctx context.Context, acquire func(context.Context) (string, error), fresh *[]string, observe func(string) error) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		credential, err := acquire(ctx)
 		if err != nil {
@@ -776,15 +788,29 @@ func retryTransientObservationWithCredential(ctx context.Context, acquire func(c
 		if err == nil || attempt == 2 || !shortRetryableGitHubObservation(err) || ctx.Err() != nil {
 			return err
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := reconciler.waitForObservationRetry(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// waitForObservationRetry pauses between transient observation retries. Tests
+// inject OutcomeReconcilerConfig.RetryWait so retry timing stays deterministic
+// without real-time waiting.
+func (reconciler *OutcomeReconciler) waitForObservationRetry(ctx context.Context, delay time.Duration) error {
+	wait := reconciler.retryWait
+	if wait == nil {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	return wait(ctx, delay)
 }
 
 // A short retry cannot honor a GitHub rate-limit delay. A future durable
@@ -1019,9 +1045,9 @@ func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatu
 	}
 }
 
-func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, credential string) store.AgentTurnSettlementObservation {
-	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, credential)
-	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, credential)
+func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, secrets []string) store.AgentTurnSettlementObservation {
+	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, secrets)
+	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, secrets)
 	if observation.Outcome == workflow.TurnOutcomeBlocked && observation.Diagnostic == "" {
 		observation.Outcome = workflow.TurnOutcomeInfrastructureFailed
 		observation.Completion.Status = store.AgentTurnFailed
@@ -1035,10 +1061,12 @@ func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.Agent
 	return observation
 }
 
-func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value, credential string) string {
+func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
 	value = reconciler.redactProviderDiagnostic(value)
-	if credential != "" {
-		value = strings.ReplaceAll(value, credential, "[REDACTED]")
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
 	}
 	value = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {

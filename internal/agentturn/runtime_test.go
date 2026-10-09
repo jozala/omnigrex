@@ -967,6 +967,29 @@ func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
 	}
 }
 
+// TestLauncherFailsSafeWhenMiseProvisioningLosesCredentialAfterCheckout covers
+// the delayed reuse of the launch credential between PrepareWorkspace and
+// ProvisionMise: provisioning fails with an authentication error after a
+// successful checkout. Launch must surface the provisioning failure without a
+// handle, never a partially provisioned Runtime Process.
+func TestLauncherFailsSafeWhenMiseProvisioningLosesCredentialAfterCheckout(t *testing.T) {
+	operations := []string{}
+	authErr := errors.New("git: authentication failed: credentials expired")
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.miseErr = authErr
+		})
+	if err == nil || !strings.Contains(err.Error(), "provision trusted repository tools") || handle != nil {
+		t.Fatalf("Launch() = (%v, %v), want provisioning failure without a handle", handle, err)
+	}
+	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "refresh") {
+		t.Fatalf("expired provisioning progressed to Runtime Process: %v", operations)
+	}
+	if !slices.Contains(operations, "workspace") || !slices.Contains(operations, "mise") {
+		t.Fatalf("launch operations = %v, want checkout followed by failed provisioning", operations)
+	}
+}
+
 func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t *testing.T) {
 	operations := []string{}
 	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)

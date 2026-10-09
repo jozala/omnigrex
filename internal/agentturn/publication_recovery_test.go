@@ -3,6 +3,8 @@ package agentturn_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
@@ -61,6 +63,50 @@ func TestPublicationRecoveryBindsPriorParticipantPRWithoutRequestingReview(t *te
 	remote.preparedHead = ""
 	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" || remote.preparedHead != "" {
 		t.Fatalf("edited PR marker recovery = %v, binding %#v", err, ledger.binding)
+	}
+}
+
+// TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification covers
+// the delayed reuse of the retained launch credential inside recovery: the
+// final branch re-observation after PrepareRecoveredPublication fails with an
+// authentication error. Recovery must surface an unavailable-observation error
+// without binding the publication, never a false success or conflict.
+func TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification(t *testing.T) {
+	const publicationID = "10000000-0000-4000-8000-000000000001"
+	const prID = "10000000-0000-4000-8000-000000000002"
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID:        "40000000-0000-4000-8000-000000000001",
+		AgentAssignmentID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := &publicationRecoveryStore{mutations: []store.MutationReservation{
+		{ID: publicationID, State: store.MutationSucceeded, ToolName: mcp.ToolPublishChanges,
+			ExternalService: "git", ExternalResourceID: "41:omnigrex/issue-18", ExpectedSHA: recoveryBase,
+			Result: json.RawMessage(`{"head":"` + recoveryHead + `","branch":"omnigrex/issue-18","changed":true}`)},
+		{ID: prID, OperationID: "open-18", State: store.MutationSucceeded, ToolName: mcp.ToolOpenPR,
+			ExternalService: "github", ExternalResourceID: "41:omnigrex/issue-18:main", ExpectedSHA: recoveryHead,
+			Request: json.RawMessage(`{"operation_id":"open-18","title":"Fix it","body":"Ready"}`),
+			Result:  json.RawMessage(`{"pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
+	}}
+	// The initial observation succeeds; the re-observation after the recovered
+	// publication is prepared fails as an expired credential would.
+	remote := &publicationRecoveryRemote{head: recoveryHead, observeErrs: []error{nil, errors.New("git: authentication failed: credentials expired")}}
+	github := &publicationRecoveryGitHub{pullRequests: []githubapi.PullRequest{{
+		ID: 901, NodeID: "PR_901", Number: 19, State: "open", Title: "Fix it", HTMLURL: "https://github.com/jozala/omnigrex/pull/19",
+		Body: githubapi.JoinBodyParts("Ready", "Closes #18", marker),
+		Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-18", SHA: recoveryHead},
+		Base: githubapi.PullRequestBranch{Ref: "main"},
+	}}}
+	lease, execution := recoveryTurn()
+	err = agentturn.NewPublicationRecovery(ledger, remote, github).Recover(context.Background(), lease, execution,
+		"https://github.com/jozala/omnigrex.git", "expired-installation-token", "main")
+	if err == nil || errors.Is(err, agentturn.ErrPublicationConflict) || ledger.binding.HeadSHA != "" {
+		t.Fatalf("mid-recovery expiry = error %v, binding %#v; want an unavailable-observation error with no binding", err, ledger.binding)
+	}
+	if !strings.Contains(err.Error(), "verify publication branch unavailable") {
+		t.Fatalf("mid-recovery expiry error = %v, want branch-observation unavailability", err)
 	}
 }
 
@@ -228,11 +274,15 @@ type publicationRecoveryRemote struct {
 	head, preparedHead string
 	heads              []string
 	observeCalls       int
+	observeErrs        []error
 	request            workspace.PublicationReconciliation
 }
 
 func (remote *publicationRecoveryRemote) ObserveRemoteBranch(context.Context, string, string, string) (string, error) {
 	remote.observeCalls++
+	if len(remote.observeErrs) >= remote.observeCalls && remote.observeErrs[remote.observeCalls-1] != nil {
+		return "", remote.observeErrs[remote.observeCalls-1]
+	}
 	if len(remote.heads) != 0 {
 		index := min(remote.observeCalls-1, len(remote.heads)-1)
 		return remote.heads[index], nil
