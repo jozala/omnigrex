@@ -174,6 +174,41 @@ The shared automated backend gates additionally qualify actual continuation acro
 PostgreSQL integration tests verify durable identity reservation and admission fencing separately.
 See the [Step 11 evidence](./plans/2026-10-09-durable-pi-sessions.md) for the precise delivery boundary and acceptance coverage.
 
+## Candidate Pi Agent Turn qualification
+
+Step 12 exposes explicit `pi-rpc/v1` Agent Turns for qualification before the clean cutover.
+The [implementation evidence](./plans/2026-10-09-complete-pi-agent-turns.md) describes the precise delivery boundary.
+Use a disposable deployment and fresh database/storage for this qualification; existing retained Participants keep their original runtime/image bindings.
+
+Build the production candidate environment:
+
+```sh
+mise run pi-image
+```
+
+Build/publish repository environments outside Omnigrex and configure their actual registry digest using the existing [image and deployment procedures](#deploy).
+Set both `OMNIGREX_PI_RPC_V1_IMAGE=REGISTRY/IMAGE@sha256:DIGEST` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64` or `linux/arm64` in the disposable deployment configuration.
+Both settings are optional together and required together; mutable tags, incomplete bindings, and unsupported platforms are rejected.
+Explicit repository Profiles use `runtime: pi-rpc/v1`, an exact `provider/model`, optional supported thinking, and Pi permissions described in the [configuration evidence](./plans/2026-10-09-pi-configuration-and-mcp.md#candidate-agent-profile-schema).
+The candidate credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
+Follow the existing secret placement and recovery procedures in this guide; keep provider keys and deployment metadata out of source control and retained-state backups.
+Backend selection uses the existing `OMNIGREX_EXECUTION_BACKEND` setting and the applicable backend prerequisites.
+Final Pi-selected doctor, published releases, upgrade qualification, and operational cutover remain later milestones.
+
+Run the controlled complete Workflow gates without deployment secrets or external GitHub mutations:
+
+```sh
+mise run test-pi-workflow
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-workflow
+```
+
+Use the approved `DOCKER_HOST` connection for a remote Linux/KVM host.
+Each gate creates independent temporary PostgreSQL, network, and volume resources and removes only its own resources afterward.
+These gates do not recreate the stable development Compose stack.
+The Docker gate's outer control plane accesses the daemon socket to manage scoped environments; the Pi environment never receives it.
+The Microsandbox wrapper receives KVM access and imports the fixture image without a host Docker socket.
+Fixture images remain cached on the selected build daemon.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

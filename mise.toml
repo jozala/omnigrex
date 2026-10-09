@@ -84,10 +84,22 @@ run = "OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -c
 description = "Build the pinned disposable Pi protocol diagnostic image"
 run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
 
+[tasks.pi-image]
+description = "Build the pinned candidate Pi repository environment"
+run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
+
 [tasks.test-pi-integration]
 description = "Qualify the Pi adapter with a controlled provider on Docker"
 depends = ["pi-diagnostic-image"]
 run = "OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 -v ./internal/runtime/pi"
+
+[tasks.test-pi-workflow]
+description = "Qualify complete Pi Developer-to-Reviewer Agent Turns on Docker"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-microsandbox-workflow]
+description = "Run the same controlled Pi Workflow on the Linux/KVM SDK backend"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-workflow.sh"
 
 [tasks.test-pi-microsandbox-integration]
 description = "Run the same Pi adapter scenarios through the Linux/KVM SDK backend"

@@ -14,6 +14,8 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -98,6 +100,7 @@ type ExecutionWorkerDependencies struct {
 	PublicationRecovery  ExecutionPublicationRecovery
 	Policies             role.PolicyCatalog
 	Definition           workflow.Definition
+	AgentEventSink       agentevent.Sink
 }
 
 // ExecutionWorkerConfig controls execution ownership, deadlines, capacity, and in-memory provider credentials.
@@ -142,6 +145,7 @@ type ExecutionWorker struct {
 	providerCredential   json.RawMessage
 	gitRemoteBase        gitremote.BaseURL
 	onError              func(error)
+	agentEventSink       agentevent.Sink
 }
 
 func (*ExecutionWorker) String() string   { return "Agent Turn execution Worker" }
@@ -195,6 +199,7 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 		turnTimeout: config.TurnTimeout, cleanupTimeout: config.CleanupTimeout,
 		concurrencyLimit: config.ConcurrencyLimit, providerCredential: providerCredential,
 		gitRemoteBase: remoteBase, onError: config.OnError,
+		agentEventSink: dependencies.AgentEventSink,
 	}, nil
 }
 
@@ -326,7 +331,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		}
 		if err != nil {
 			operationErr = errors.Join(operationErr, fmt.Errorf("launch Agent Turn Runtime Process: %w", err))
-		} else if nilDependency(runtime) || nilDependency(runtime.PromptClient()) {
+		} else if nilDependency(runtime) || nilDependency(runtime.PromptClient()) && nilDependency(runtimeAgentConnection(runtime)) {
 			operationErr = errors.Join(operationErr, errors.New("launch Agent Turn Runtime Process: launcher returned an invalid runtime"))
 		}
 		launchOperation.Finish(&operationErr)
@@ -358,9 +363,20 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
 			promptCtx, cancelPrompt := context.WithTimeout(workCtx, worker.turnTimeout)
-			response, promptErr := worker.sessions.Prompt(promptCtx, session.PromptRequest{
-				Lease: *lease, Session: execution.Session, Client: runtime.PromptClient(), Content: content,
-			})
+			var response acp.PromptResponse
+			var promptErr error
+			if connection := runtimeAgentConnection(runtime); connection != nil {
+				if len(content) != 1 || content[0].Type != "text" {
+					promptErr = agent.ErrProtocol
+				} else {
+					outcome, err := connection.Prompt(promptCtx, *lease, execution.Session, content[0].Text, worker.agentEventSink)
+					response, promptErr = legacyPromptEvidence(outcome, err)
+				}
+			} else {
+				response, promptErr = worker.sessions.Prompt(promptCtx, session.PromptRequest{
+					Lease: *lease, Session: execution.Session, Client: runtime.PromptClient(), Content: content,
+				})
+			}
 			if promptErr == nil && response.StopReason == acp.StopReasonCancelled && promptCtx.Err() == context.DeadlineExceeded {
 				promptErr = context.DeadlineExceeded
 			}

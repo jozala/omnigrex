@@ -28,6 +28,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
@@ -202,7 +203,15 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return err
 	}
-	registry, err := runtimeprofile.NewRegistry(openCodeV1)
+	profiles := []runtimeprofile.Profile{openCodeV1}
+	if settings.PiRPCV1Image != "" {
+		candidate, err := runtimeprofile.NewPiV1(settings.PiRPCV1Image, settings.PiRPCV1Platform)
+		if err != nil {
+			return fmt.Errorf("configure candidate Pi Runtime Profile: %w", err)
+		}
+		profiles = append(profiles, candidate)
+	}
+	registry, err := runtimeprofile.NewRegistry(profiles...)
 	if err != nil {
 		return fmt.Errorf("configure Runtime Profile Registry: %w", err)
 	}
@@ -348,6 +357,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
 		LegacyBootstrapImage: settings.OpenCodeACPV1Image,
+		AgentAdapters:        map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -375,6 +385,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
 		Policies:            rolePolicies,
 		Definition:          definition,
+		AgentEventSink:      loggingAgentEventSink{logger: logger},
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
@@ -541,7 +552,15 @@ type loggingAgentEventSink struct {
 }
 
 func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.AgentEvent) error {
-	if sink.logger == nil || event.Metadata.ToolCallID == "" {
+	if sink.logger == nil {
+		return nil
+	}
+	if event.Metadata.ToolCallID == "" {
+		level := slog.LevelDebug
+		if event.Metadata.FailureClass != "" {
+			level = slog.LevelWarn
+		}
+		sink.logger.Log(ctx, level, "Agent Session observation", "agent_participant_id", event.AssignmentID, "agent_session_id", event.AgentSessionID, "agent_turn_id", event.TurnID, "execution_epoch", event.ExecutionEpoch, "control_revision", event.ControlRevision, "kind", event.Kind, "status", event.Metadata.Status, "failure_class", event.Metadata.FailureClass, "runtime", string(event.Metadata.Runtime))
 		return nil
 	}
 	level := slog.LevelDebug

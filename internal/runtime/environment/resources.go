@@ -1,10 +1,13 @@
 package environment
 
-import "fmt"
+import (
+	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
+)
 
 // QualificationScript is platform policy, not image-provided ancestry metadata.
 // Run it in a bounded, non-networked helper before any repository scripts.
-func QualificationScript(architecture string) (string, error) {
+func QualificationScript(architecture string, runtime ...string) (string, error) {
 	var opencode, mise string
 	switch architecture {
 	case "amd64":
@@ -15,6 +18,14 @@ func QualificationScript(architecture string) (string, error) {
 		mise = "a2f1321f1189f2e1e62b1bd0d20fc59ba3c6a0b38b2c64fcfd29296ca44d2905"
 	default:
 		return "", fmt.Errorf("unsupported golden-image architecture %q", architecture)
+	}
+	if len(runtime) > 0 && runtime[0] == "pi-rpc" {
+		return fmt.Sprintf(`
+test -x /usr/local/bin/omnigrex-environment
+test "$(/usr/local/bin/omnigrex-environment contract-version)" = omnigrex-environment/v1
+printf '%%s  %%s\n' '%s' /usr/local/bin/mise | sha256sum -c -
+test -x /usr/bin/git
+`, mise) + piresources.QualificationScript(), nil
 	}
 	// The release checksum for OpenCode covers its compressed distribution.
 	// The image retains that archive read-only so verification can reconstruct

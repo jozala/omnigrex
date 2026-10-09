@@ -85,6 +85,8 @@ type Config struct {
 	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
 	OpenCodeACPV1Image                     string
 	OpenCodeACPV1Platform                  profile.Platform
+	PiRPCV1Image                           string
+	PiRPCV1Platform                        profile.Platform
 	RuntimeProfileCompatibilityResultsFile string
 	GitHubAPIURL                           string
 	GitRemoteBaseURL                       string
@@ -170,6 +172,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MCPMutationOperationTimeout:            defaultMCPMutationOperationTimeout,
 		AgentImageReference:                    valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
 		OpenCodeACPV1Image:                     getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
+		PiRPCV1Image:                           getenv("OMNIGREX_PI_RPC_V1_IMAGE"),
 		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
 		GitHubAPIURL:                           valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
 		GitRemoteBaseURL:                       valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
@@ -284,6 +287,13 @@ func Load(getenv func(string) string) (Config, error) {
 	if imageValid && platformValid {
 		if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
 			problems = append(problems, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err))
+		}
+	}
+	if config.PiRPCV1Image != "" || getenv("OMNIGREX_PI_RPC_V1_PLATFORM") != "" {
+		os, arch, found := strings.Cut(getenv("OMNIGREX_PI_RPC_V1_PLATFORM"), "/")
+		config.PiRPCV1Platform = profile.Platform{OS: os, Arch: arch}
+		if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) || !profile.IsExactRegistryImage(config.PiRPCV1Image) {
+			problems = append(problems, fmt.Errorf("candidate Pi requires OMNIGREX_PI_RPC_V1_IMAGE as an exact registry digest and OMNIGREX_PI_RPC_V1_PLATFORM as a supported linux platform"))
 		}
 	}
 	if config.RuntimeProfileCompatibilityResultsFile != "" &&

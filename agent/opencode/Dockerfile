@@ -5,6 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/omnigrex-environment ./cmd/omnigrex-environment
 COPY internal/runtime/environment ./internal/runtime/environment
+COPY agent/pi ./agent/pi
 COPY internal/turnconfig ./internal/turnconfig
 ARG TARGETOS
 ARG TARGETARCH

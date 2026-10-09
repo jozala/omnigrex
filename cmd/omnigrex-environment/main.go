@@ -27,7 +27,12 @@ func main() {
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = syscall.Exec(environment.RuntimeExecutable, append([]string{environment.RuntimeExecutable}, os.Args[2:]...), values)
+		executable, args := environment.RuntimeExecutable, os.Args[2:]
+		if len(args) == 2 && args[0] == "/usr/local/bin/node" {
+			executable = args[0]
+			args = args[1:]
+		}
+		err = syscall.Exec(executable, append([]string{executable}, args...), values)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

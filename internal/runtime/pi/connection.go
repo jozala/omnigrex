@@ -565,6 +565,7 @@ func (c *connection) record(content []byte) error {
 			switch t.lastReason {
 			case "stop", "length":
 				outcome.Status = agent.Completed
+				outcome.LimitReached = t.lastReason == "length"
 			case "error":
 				outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
 			case "aborted":

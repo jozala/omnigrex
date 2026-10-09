@@ -169,6 +169,11 @@ func New(contract Contract) (Profile, error) {
 	if err := validate(contract); err != nil {
 		return Profile{}, err
 	}
+	contract = normalizeContract(contract)
+	return newProfile(contract)
+}
+
+func normalizeContract(contract Contract) Contract {
 	contract = cloneContract(contract)
 	sort.Slice(contract.Environment, func(i, j int) bool { return contract.Environment[i].Name < contract.Environment[j].Name })
 	sort.Slice(contract.Mounts, func(i, j int) bool { return contract.Mounts[i].Name < contract.Mounts[j].Name })
@@ -177,7 +182,7 @@ func New(contract Contract) (Profile, error) {
 		slices.Sort(contract.RepositoryEnvironment.Requirements)
 	}
 	sort.Slice(contract.Tmpfs, func(i, j int) bool { return contract.Tmpfs[i].Path < contract.Tmpfs[j].Path })
-	return newProfile(contract)
+	return contract
 }
 
 func newProfile(contract Contract) (Profile, error) {
@@ -359,6 +364,9 @@ func validate(contract Contract) error {
 			}
 			seen[requirement] = true
 		}
+	}
+	if contract.Name == "pi-rpc" && contract.Version == "v1" {
+		return validatePi(contract)
 	}
 	if contract.Name != "opencode-acp" || contract.Version != "v1" {
 		return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)

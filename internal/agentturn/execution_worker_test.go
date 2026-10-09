@@ -1906,6 +1906,7 @@ type executionRuntime struct {
 	operations      *executionOperations
 	lease           store.AgentTurnLease
 	client          session.PromptClient
+	agent           session.TurnConnection
 	drainResults    []error
 	drainWaits      int
 	cleanupResults  []error
@@ -1928,8 +1929,9 @@ func (runtime *executionRuntime) ObserveOOM(context.Context) (bool, error) {
 
 func (runtime *executionRuntime) ConfirmedOOM() bool { return runtime.oomKilled }
 
-func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
-func (runtime *executionRuntime) PromptClient() session.PromptClient { return runtime.client }
+func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease      { return runtime.lease }
+func (runtime *executionRuntime) PromptClient() session.PromptClient      { return runtime.client }
+func (runtime *executionRuntime) AgentConnection() session.TurnConnection { return runtime.agent }
 func (runtime *executionRuntime) RenewMCP(expiresAt time.Time) bool {
 	runtime.mutex.Lock()
 	defer runtime.mutex.Unlock()

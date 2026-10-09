@@ -18,6 +18,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -47,7 +48,7 @@ func ClassifyPromptError(err error) PromptErrorClassification {
 	if errors.Is(err, ErrRuntimeOOMKilled) {
 		return PromptErrorFailure
 	}
-	if errors.Is(err, acp.ErrUnknownStopReason) {
+	if errors.Is(err, acp.ErrUnknownStopReason) || errors.Is(err, agent.ErrProtocol) {
 		return PromptErrorInvalidResponse
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

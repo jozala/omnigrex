@@ -220,7 +220,7 @@ func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, led
 		return err
 	}
 	if golden || bootstrapImage != "" {
-		script, err := environment.QualificationScript(spec.Platform.Architecture)
+		script, err := environment.QualificationScript(spec.Platform.Architecture, key.RuntimeProfileName)
 		if err != nil {
 			return noExecutionEffectsError{cause: err}
 		}

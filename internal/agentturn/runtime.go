@@ -18,6 +18,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -129,6 +130,7 @@ type LauncherConfig struct {
 	Definition               workflow.Definition
 	OperatorInstructions     agentinstructions.Operator
 	LegacyBootstrapImage     string
+	AgentAdapters            map[string]session.TurnAdapter
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -169,12 +171,14 @@ type Launcher struct {
 	definition               workflow.Definition
 	operatorInstructions     agentinstructions.Operator
 	legacyBootstrapImage     string
+	agentAdapters            map[string]session.TurnAdapter
 }
 
 // RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
 type RuntimeHandle struct {
 	Client  RuntimeACPClient
 	Session session.Result
+	agent   session.TurnConnection
 	lease   store.AgentTurnLease
 
 	gateway                     MCPRegistrar
@@ -218,6 +222,11 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if config.MemoryBytes <= 0 {
 		return nil, fmt.Errorf("%w: Agent Turn memory must be positive", ErrInvalidLauncher)
 	}
+	for reference, adapter := range config.AgentAdapters {
+		if strings.TrimSpace(reference) == "" || nilInterface(adapter) {
+			return nil, fmt.Errorf("%w: invalid agent adapter", ErrInvalidLauncher)
+		}
+	}
 	if config.LegacyBootstrapImage != "" && !runtimeprofile.IsExactRegistryImage(config.LegacyBootstrapImage) {
 		return nil, fmt.Errorf("%w: legacy bootstrap image must be digest-pinned", ErrInvalidLauncher)
 	}
@@ -246,6 +255,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
 		legacyBootstrapImage: config.LegacyBootstrapImage,
+		agentAdapters:        cloneAdapters(config.AgentAdapters),
 	}, nil
 }
 
@@ -268,6 +278,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("validate Agent Turn fence before launch: %w", err)
 	}
 	var stateRef execution.StateRef
+	var spec execution.Request
 	execution, err := launcher.store.GetAgentTurnExecutionContext(ctx, request.Lease)
 	if err != nil {
 		return nil, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
@@ -298,9 +309,17 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := launcher.execution.CheckRequirements(runtimeRequirements(runtimeProfile)); err != nil {
 		return nil, fmt.Errorf("validate repository environment capabilities: %w", err)
 	}
-	rendered, roleID, err := launcher.renderTurnProfile(execution, rolePolicy)
-	if err != nil {
-		return nil, err
+	adapter := launcher.agentAdapters[runtimeProfile.Contract().Name+"/"+runtimeProfile.Contract().Version]
+	if adapter == nil && runtimeProfile.Contract().Name != "opencode-acp" {
+		return nil, fmt.Errorf("%w: agent adapter is unavailable", ErrRuntimeBinding)
+	}
+	var rendered *opencode.RenderedProfile
+	var roleID opencode.Role
+	if adapter == nil {
+		rendered, roleID, err = launcher.renderTurnProfile(execution, rolePolicy)
+		if err != nil {
+			return nil, err
+		}
 	}
 	revision, branch, headSHA, pullRequest, err := checkoutSelection(execution, request, rolePolicy)
 	if err != nil {
@@ -332,7 +351,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	// A failed or ambiguously acknowledged create/start may still have dispatched
 	// the main environment for an existing Session. Establish its capture need
 	// before either operation can fail, not only after Start acknowledges success.
-	resources.sessionPrepared = execution.Session.Status != store.AgentSessionCreating || execution.Session.ACPSessionID != ""
+	resources.sessionPrepared = execution.Session.Status != store.AgentSessionCreating || execution.Session.ACPSessionID != "" || len(execution.Session.RuntimeCapabilities) != 0
 	defer func() {
 		if err == nil {
 			return
@@ -344,7 +363,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 			// failed. Match recovery's durable requirement before removing its
 			// only source of terminal evidence; an unreadable binding is unknown.
 			current, bindingErr := launcher.store.GetAgentTurnExecutionContext(cleanupCtx, resources.lease)
-			resources.sessionPrepared = bindingErr != nil || current.Session.Status != store.AgentSessionCreating || current.Session.ACPSessionID != ""
+			resources.sessionPrepared = bindingErr != nil || current.Session.Status != store.AgentSessionCreating || current.Session.ACPSessionID != "" || len(current.Session.RuntimeCapabilities) != 0
 			if bindingErr != nil {
 				err = errors.Join(err, fmt.Errorf("inspect failed Agent Session preparation: %w", bindingErr))
 			}
@@ -452,12 +471,19 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 			return nil, ErrRuntimeBinding
 		}
 	}
-	spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
-		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
-	}, opencode.ProcessOptions{
-		MemoryBytes: launcher.memoryBytes,
-		Key:         runtimeKey(execution), WorkflowID: execution.WorkflowID, Environment: toolEnvironment,
-	})
+	if adapter != nil {
+		if launcher.states == nil {
+			return nil, ErrRuntimeBinding
+		}
+		spec, err = adapter.BuildProcess(runtimeProfile, runtimeKey(execution), execution.WorkflowID, launcher.memoryBytes, toolEnvironment)
+	} else {
+		spec, err = opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
+			Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
+		}, opencode.ProcessOptions{
+			MemoryBytes: launcher.memoryBytes,
+			Key:         runtimeKey(execution), WorkflowID: execution.WorkflowID, Environment: toolEnvironment,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
@@ -511,6 +537,23 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	transport := process.Transport()
 	if transport == nil {
 		return nil, errors.New("start restricted Runtime Process: engine returned no transport")
+	}
+	if adapter != nil {
+		stage, ok := launcher.definition.Stage(execution.Turn.Stage)
+		if !ok || stage.Role != rolePolicy.Role || !launcher.definition.AcceptsPurpose(stage.ID, execution.Turn.Purpose) {
+			return nil, ErrRuntimeBinding
+		}
+		resources.sessionPreparationAttempted = true
+		prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Assignment.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
+		resources.agent = prepared
+		if prepareErr != nil {
+			return nil, fmt.Errorf("prepare Agent Session: %w", prepareErr)
+		}
+		if prepared == nil {
+			return nil, agent.ErrNotReady
+		}
+		resources.sessionPrepared = true
+		return resources, nil
 	}
 	clientOptions := launcher.acpOptions
 	if clientOptions.Logger == nil {
@@ -646,6 +689,21 @@ func (handle *RuntimeHandle) PromptClient() session.PromptClient {
 	return handle.Client
 }
 
+func (handle *RuntimeHandle) AgentConnection() session.TurnConnection {
+	if handle == nil {
+		return nil
+	}
+	return handle.agent
+}
+
+func cloneAdapters(adapters map[string]session.TurnAdapter) map[string]session.TurnAdapter {
+	result := make(map[string]session.TurnAdapter, len(adapters))
+	for key, value := range adapters {
+		result[key] = value
+	}
+	return result
+}
+
 // Cleanup drains MCP authority, stops execution, seals terminal evidence, and then removes resources.
 func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	if handle == nil {
@@ -677,6 +735,13 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 		} else {
 			handle.acpClosed = true
 			handle.Client = nil
+		}
+	}
+	if handle.agent != nil {
+		if err := handle.agent.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("close agent transport: %w", err))
+		} else {
+			handle.agent = nil
 		}
 	}
 	if handle.process != nil && !handle.processRemoved {

@@ -26,6 +26,7 @@ type Outcome struct {
 	Admitted     bool
 	Status       Status
 	FailureClass string
+	LimitReached bool
 }
 
 type Ready struct {

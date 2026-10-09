@@ -3,6 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY internal ./internal
+COPY agent/pi ./agent/pi
 RUN CGO_ENABLED=0 go build -o /out/pi-mcp-fixture ./internal/runtime/pi/fixture
 
 FROM fixture-build AS search-tools
