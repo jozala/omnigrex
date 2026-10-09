@@ -493,9 +493,10 @@ func TestOutcomeReconcilerRedactsFreshCredentialAcrossTruncationBoundary(t *test
 	request.PromptResponse = nil
 	request.PromptError = agentturn.PromptErrorFailure
 	fresh := "reviewer-fresh-token-0123456789abcdef"
-	// The token straddles the 4,096-rune truncation boundary so a
+	// The token straddles the 4,096-rune truncation boundary (starting at
+	// offset 4,079, well inside the 4,060-4,095 pinning range) so a
 	// truncate-then-redact order would leave an unredacted prefix behind.
-	request.PromptDiagnostic = strings.Repeat("x", 4050) + fresh + strings.Repeat("y", 100)
+	request.PromptDiagnostic = strings.Repeat("x", 4060) + fresh + strings.Repeat("y", 100)
 	mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
 	github := &expiringGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{

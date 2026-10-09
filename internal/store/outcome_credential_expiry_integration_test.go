@@ -401,6 +401,13 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			if err := prioritizeFixtureJob(pool, ctx, job.ID, store.AgentTurnQueue, store.RunAgentTurnJobKind); err != nil {
 				t.Fatal(err)
 			}
+			// The seed leaves the session ACTIVE with a seeded ACP binding,
+			// which would conflict with the launcher's bind. Reset it to
+			// unbound CREATING so launch binds exactly once, following the
+			// established phase-nine fixture pattern.
+			if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
+				t.Fatal(err)
+			}
 
 			clock := &integrationExpiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
 			requester := &integrationExpiringRequester{clock: clock, prefix: "reviewer", first: 5 * time.Minute, rest: time.Hour}
