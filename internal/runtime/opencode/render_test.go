@@ -156,8 +156,8 @@ func TestRenderWithPolicyUsesOpenCodePolicyInsteadOfRoleName(t *testing.T) {
 		Role: "SECURITY_REVIEWER",
 		OpenCode: role.OpenCodePolicy{
 			HardenProjectConfiguration: true,
-			AllowFileEdits:             true,
 		},
+		AllowFileEdits: true,
 	}
 	rendered, err := opencode.RenderWithPolicy(policy, opencode.Profile{
 		Instructions: "Inspect and fix security defects.", Model: "provider/model", Steps: 1,

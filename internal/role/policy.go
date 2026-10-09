@@ -20,7 +20,6 @@ const (
 // OpenCodePolicy owns Role-specific adapter hardening independently from mutable Agent Profile permissions.
 type OpenCodePolicy struct {
 	HardenProjectConfiguration bool
-	AllowFileEdits             bool
 }
 
 // Policy owns capability and isolation decisions for one canonical Role.
@@ -31,6 +30,7 @@ type Policy struct {
 	RepositoryCredentialAuthority CredentialAuthority
 	ToolCredentialAuthorities     map[string]CredentialAuthority
 	OpenCode                      OpenCodePolicy
+	AllowFileEdits                bool
 	DiscardWorkspace              bool
 	AllowHumanSessionControl      bool
 }
@@ -99,7 +99,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 				"publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
-			OpenCode:                      OpenCodePolicy{AllowFileEdits: true},
+			AllowFileEdits:                true,
 			AllowHumanSessionControl:      true,
 		},
 		Reviewer: {

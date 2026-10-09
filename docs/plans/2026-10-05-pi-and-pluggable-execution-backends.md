@@ -29,6 +29,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 07 | Digest-pinned repository environments, persisted contracts, and working-revision guest tooling | [Repository environment implementation and evidence](2026-10-08-repository-environments.md) |
 | 08 | SDK-backed Linux/KVM execution, shared protocol conformance, capture/state bindings, and nested-container qualification | [Microsandbox backend implementation and evidence](2026-10-09-microsandbox-backend.md) |
 | 09 | Correlated Pi RPC, admission/settlement outcomes, bounded cancellation, and disposable both-backend diagnostics | [Pi protocol adapter implementation and evidence](2026-10-09-pi-protocol-adapter.md) |
+| 10 | Checked Pi configuration, owned authenticated MCP, current instructions, authorized checkout-local skills, and ephemeral API keys | [Pi configuration and MCP implementation and evidence](2026-10-09-pi-configuration-and-mcp.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -412,6 +413,8 @@ Controlled-provider tests cover success, failure after admission, lost terminal 
 No core Workflow code consumes Pi RPC structures.
 
 ### Step 10: Implement Pi configuration, MCP integration, and instruction handling
+
+**Deliverable:** [Pi configuration and MCP implementation and evidence](2026-10-09-pi-configuration-and-mcp.md), including the candidate Profile schema, explicit resource ownership, and shared both-backend authority tests.
 
 **Goal:** Preserve the platform's capabilities and instruction contracts with Pi.
 

@@ -539,7 +539,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	}
 	prepared, err := launcher.sessions.Prepare(ctx, session.PrepareRequest{
 		Lease: request.Lease, Session: execution.Session, Client: client, State: stateRef, StatePath: statePath,
-		MCPServers: []acp.MCPServer{registration.Server}, Configuration: rendered.SessionConfiguration(),
+		MCPServers: []acp.MCPServer{acp.HTTPServer(registration.Server)}, Configuration: rendered.SessionConfiguration(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prepare Agent Session: %w", err)

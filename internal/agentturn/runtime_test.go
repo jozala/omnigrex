@@ -24,6 +24,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -62,9 +63,9 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 	database := &runtimeStore{operations: &operations, execution: execution}
 	workspaces := &runtimeWorkspace{operations: &operations}
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	client := &runtimeACPClient{operations: &operations}
@@ -239,7 +240,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "allow")
 	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "reject")
 	assertRuntimePermissionDecision(t, clientFactory.options, "write file", "edit", "allow")
-	if len(sessions.request.MCPServers) != 1 || !reflect.DeepEqual(sessions.request.MCPServers[0], gateway.registration.Server) {
+	if len(sessions.request.MCPServers) != 1 || !reflect.DeepEqual(sessions.request.MCPServers[0], acp.HTTPServer(gateway.registration.Server)) {
 		t.Errorf("Session MCP servers = %#v, want registered descriptor", sessions.request.MCPServers)
 	}
 	if sessions.request.Lease.ExecutionEpoch != 7 || sessions.request.Session.ID != runtimeTestSession ||
@@ -261,7 +262,7 @@ func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
+		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
 		Execution: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
 		Sessions:                 &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
 		MemoryBytes:              1024 << 20,
@@ -299,9 +300,9 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000002",
 	}
 	workspaces := &runtimeWorkspace{operations: &operations}
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store:     &runtimeStore{operations: &operations, execution: execution},
@@ -358,8 +359,8 @@ func TestLauncherUsesWorkingRevisionForBothRolesAndInEnvironmentTooling(t *testi
 				t.Fatal(err)
 			}
 			workspaces := &runtimeWorkspace{operations: &operations}
-			gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-				Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
+			gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+				Name: "omnigrex", URL: "http://mcp:8080/mcp",
 			}}}
 			engineFactory := &runtimeEngineFactory{operations: &operations}
 			client := &runtimeACPClient{operations: &operations}
@@ -703,7 +704,7 @@ func TestLauncherRejectsReviewerControlPathOverrideBeforeStartingDocker(t *testi
 	}
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleReviewer, proposal)
 	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"cache":"turn"},"environment":{"OPENCODE_DISABLE_PROJECT_CONFIG":"cache"}}`)
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp/mcp"}}}
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{Name: "omnigrex", URL: "http://mcp/mcp"}}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store:     &runtimeStore{operations: &operations, execution: execution},
 		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
@@ -1552,9 +1553,9 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, role, proposal)
 	database := &runtimeStore{operations: operations, execution: execution}
 	workspaces := &runtimeWorkspace{operations: operations}
-	gateway := &runtimeGateway{operations: operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	gateway := &runtimeGateway{operations: operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: operations}
 	client := &runtimeACPClient{operations: operations}

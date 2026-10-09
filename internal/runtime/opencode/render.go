@@ -67,7 +67,7 @@ func RenderWithPolicy(policy role.Policy, profile Profile) (*RenderedProfile, er
 		profile.Steps == 0 || profile.Steps > agentprofile.MaxSteps {
 		return nil, ErrInvalidProfile
 	}
-	if !policy.OpenCode.AllowFileEdits && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {
+	if !policy.AllowFileEdits && (profile.Permissions["edit"] == PermissionAllow || profile.Permissions["patch"] == PermissionAllow) {
 		return nil, ErrInvalidProfile
 	}
 	if edit, hasEdit := profile.Permissions["edit"]; hasEdit {

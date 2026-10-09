@@ -119,7 +119,7 @@ func (operator Operator) Compose(policy role.Policy, stage workflow.StageDefinit
 			sections = append(sections, "## "+title+"\n\n"+strings.TrimSpace(content))
 		}
 	}
-	if !policy.OpenCode.AllowFileEdits {
+	if !policy.AllowFileEdits {
 		appendSection("Role workspace constraints", "Inspect and verify without intentionally modifying tracked repository files.")
 	}
 	if policy.DiscardWorkspace {

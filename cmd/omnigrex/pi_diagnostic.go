@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/config"
+	"github.com/jozala/omnigrex/internal/role"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
@@ -20,6 +22,8 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 	image := flags.String("image", "", "digest-pinned disposable Pi diagnostic image")
 	backend := flags.String("backend", "docker", "execution backend: docker or microsandbox")
 	arch := flags.String("arch", "amd64", "Linux image architecture: amd64 or arm64")
+	configuration := flags.Bool("configuration", false, "qualify owned Pi configuration and authenticated fixture MCP")
+	reviewer := flags.Bool("reviewer", false, "qualify Reviewer tool restrictions (requires --configuration)")
 	namespace := flags.String("namespace", "", "installation diagnostic namespace (defaults to the backend's installation namespace)")
 	home := flags.String("microsandbox-home", "/tmp/msb-pi", "private Microsandbox diagnostic inventory/cache")
 	executable := flags.String("microsandbox-executable", "/usr/local/bin/msb", "pinned Microsandbox executable")
@@ -31,6 +35,9 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 		return 2
 	}
 	spec := pi.DiagnosticSpec(*image, execution.Platform{OS: "linux", Architecture: *arch})
+	if *configuration {
+		spec = pi.ConfigurationDiagnosticSpec(*image, execution.Platform{OS: "linux", Architecture: *arch})
+	}
 	if *namespace == "" {
 		if *backend == "microsandbox" {
 			*namespace = "omnigrex"
@@ -39,7 +46,7 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 	}
 	spec.Namespace = *namespace
-	if flags.NArg() != 0 || spec.Validate() != nil || (*backend != "docker" && *backend != "microsandbox") {
+	if flags.NArg() != 0 || *reviewer && !*configuration || spec.Validate() != nil || (*backend != "docker" && *backend != "microsandbox") {
 		_, _ = fmt.Fprintln(stderr, "invalid Pi diagnostic arguments; require an exact image and supported backend/platform")
 		return 2
 	}
@@ -51,9 +58,29 @@ func runPiDiagnostic(ctx context.Context, args []string, stdout, stderr io.Write
 		_, _ = fmt.Fprintln(stdout, "FAIL Pi diagnostic launch")
 		return 1
 	}
-	connection := pi.Connect(process.Transport(), pi.Options{ExpectedSessionID: "omnigrex-pi-diagnostic"})
-	err = pi.CheckDiagnostic(ctx, connection)
-	closeErr := connection.Close()
+	var connection agent.Connection
+	if *configuration {
+		roleID := role.Developer
+		if *reviewer {
+			roleID = role.Reviewer
+		}
+		inputs, inputErr := pi.ConfigurationDiagnostic(roleID)
+		if inputErr != nil {
+			err = inputErr
+		} else {
+			connection, err = pi.Start(ctx, process.Transport(), inputs, pi.Options{ExpectedSessionID: "omnigrex-pi-configuration"})
+		}
+		if err == nil {
+			err = pi.CheckConfigurationDiagnostic(ctx, connection)
+		}
+	} else {
+		connection = pi.Connect(process.Transport(), pi.Options{ExpectedSessionID: "omnigrex-pi-diagnostic"})
+		err = pi.CheckDiagnostic(ctx, connection)
+	}
+	var closeErr error
+	if connection != nil {
+		closeErr = connection.Close()
+	}
 	cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer stop()
 	stopErr := process.Stop(cleanup, 5*time.Second)

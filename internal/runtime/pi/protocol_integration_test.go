@@ -143,17 +143,30 @@ func TestPiDiagnosticCommand(t *testing.T) {
 	image, platform, settings := diagnosticFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	var command *exec.Cmd
 	args := []string{"pi-diagnostic", "--image", image, "--arch", platform.Architecture, "--backend", settings.ExecutionBackend}
 	if settings.ExecutionBackend == "microsandbox" {
 		args = append(args, "--namespace", settings.MicrosandboxNamespace, "--microsandbox-home", settings.MicrosandboxHome, "--microsandbox-executable", settings.MicrosandboxExecutable, "--microsandbox-firmware", settings.MicrosandboxFirmware)
-		command = exec.CommandContext(ctx, "/usr/local/bin/omnigrex", args...)
 	} else {
 		args = append(args, "--namespace", settings.RuntimeStateVolume)
-		command = exec.CommandContext(ctx, "go", append([]string{"run", "../../../cmd/omnigrex"}, args...)...)
 	}
-	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "PASS Pi") {
-		t.Fatalf("diagnostic command: %v\n%s", err, output)
+	for _, tc := range []struct {
+		name  string
+		flags []string
+	}{
+		{"protocol", nil}, {"Developer configuration", []string{"--configuration"}}, {"Reviewer configuration", []string{"--configuration", "--reviewer"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var command *exec.Cmd
+			arguments := append(append([]string(nil), args...), tc.flags...)
+			if settings.ExecutionBackend == "microsandbox" {
+				command = exec.CommandContext(ctx, "/usr/local/bin/omnigrex", arguments...)
+			} else {
+				command = exec.CommandContext(ctx, "go", append([]string{"run", "../../../cmd/omnigrex"}, arguments...)...)
+			}
+			if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "PASS Pi") {
+				t.Fatalf("diagnostic command: %v\n%s", err, output)
+			}
+		})
 	}
 }
 

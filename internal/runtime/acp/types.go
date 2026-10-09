@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 )
 
 const (
@@ -133,6 +135,15 @@ type MCPServer struct {
 	Env     []EnvironmentEntry
 	URL     string
 	Headers []EnvironmentEntry
+}
+
+// HTTPServer is the transitional translation owned by the ACP adapter.
+func HTTPServer(endpoint agent.MCPEndpoint) MCPServer {
+	server := MCPServer{Type: "http", Name: endpoint.Name, URL: endpoint.URL}
+	for _, header := range endpoint.Headers {
+		server.Headers = append(server.Headers, EnvironmentEntry{Name: header.Name, Value: header.Value})
+	}
+	return server
 }
 
 func (server MCPServer) MarshalJSON() ([]byte, error) {

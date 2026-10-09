@@ -145,6 +145,22 @@ Use the existing approved `DOCKER_HOST` connection for a remote Linux/KVM host.
 The wrapper is disposable and receives KVM access without granting its guest access to the host Docker socket.
 Fixture images remain cached on the build daemon.
 
+Step 10 adds the owned runner's checked configuration and authenticated MCP qualification to the same two backend gates.
+The [configuration evidence](./plans/2026-10-09-pi-configuration-and-mcp.md) describes the candidate Profile schema and instruction/resource contracts.
+The configuration diagnostic uses the real gateway with disposable fixture authority and an in-memory backend; it has no GitHub credentials or external mutations.
+Provider configuration and MCP authority enter over the process transport rather than container or VM environment metadata.
+Only the selected provider entry is written to a private Pi-native `auth.json` file in disposable `/run/pi-agent` tmpfs.
+
+Run the owned configuration diagnostic against the exact image identity obtained above:
+
+```sh
+mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256:<image-id> --arch arm64 --configuration
+mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256:<image-id> --arch arm64 --configuration --reviewer
+```
+
+For Microsandbox, use the native binary and exact provisioned image with the previously described backend arguments, adding `--configuration` and optionally `--reviewer`.
+These preparatory diagnostics accept only fixture credentials; production Pi credential configuration and cutover follow the later deployment steps.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

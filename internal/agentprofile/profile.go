@@ -51,6 +51,7 @@ type Profile struct {
 	runtime      string
 	model        string
 	variant      string
+	thinking     string
 	steps        int
 	permissions  map[string]PermissionAction
 	instructions string
@@ -64,6 +65,7 @@ type frontMatter struct {
 	Runtime     string                      `yaml:"runtime"`
 	Model       string                      `yaml:"model"`
 	Variant     string                      `yaml:"variant,omitempty"`
+	Thinking    string                      `yaml:"thinking,omitempty"`
 	Steps       int                         `yaml:"steps"`
 	Permissions map[string]PermissionAction `yaml:"permissions"`
 }
@@ -104,6 +106,7 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
 		variant:      configuration.Variant,
+		thinking:     configuration.Thinking,
 		steps:        configuration.Steps,
 		permissions:  clonePermissions(configuration.Permissions),
 		instructions: string(instructions),
@@ -117,8 +120,9 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		Permissions  map[string]PermissionAction `json:"permissions"`
 		Role         Role                        `json:"role"`
 		Runtime      string                      `json:"runtime"`
-		Steps        int                         `json:"steps"`
+		Steps        int                         `json:"steps,omitempty"`
 		Variant      string                      `json:"variant,omitempty"`
+		Thinking     string                      `json:"thinking,omitempty"`
 	}{
 		Instructions: profile.instructions,
 		Model:        profile.model,
@@ -129,6 +133,7 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		Runtime:      profile.runtime,
 		Steps:        profile.steps,
 		Variant:      profile.variant,
+		Thinking:     profile.thinking,
 	})
 	if err != nil {
 		return Profile{}, fmt.Errorf("encode Agent Profile snapshot: %w", err)
@@ -142,6 +147,7 @@ func (profile Profile) Path() string                     { return profile.path }
 func (profile Profile) Runtime() string                  { return profile.runtime }
 func (profile Profile) Model() string                    { return profile.model }
 func (profile Profile) Variant() string                  { return profile.variant }
+func (profile Profile) Thinking() string                 { return profile.thinking }
 func (profile Profile) Steps() int                       { return profile.steps }
 func (profile Profile) Instructions() string             { return profile.instructions }
 func (profile Profile) ContentSHA256() [sha256.Size]byte { return profile.contentHash }
@@ -209,6 +215,14 @@ func decodeFrontMatter(content []byte) (frontMatter, error) {
 	if err := ensureSingleYAMLDocument(strict); err != nil {
 		return frontMatter{}, err
 	}
+	if configuration.Runtime == "pi-rpc/v1" {
+		mapping := document.Content[0]
+		for i := 0; i < len(mapping.Content); i += 2 {
+			if mapping.Content[i].Value == "steps" || mapping.Content[i].Value == "variant" {
+				return frontMatter{}, fmt.Errorf("%w: OpenCode fields are not part of the Pi schema", ErrInvalidProfile)
+			}
+		}
+	}
 	return configuration, nil
 }
 
@@ -242,14 +256,34 @@ func validateConfiguration(policy role.Policy, configuration frontMatter, instru
 	if !validReference(configuration.Runtime) {
 		return fmt.Errorf("%w: runtime must use name/version syntax without whitespace or control characters", ErrInvalidProfile)
 	}
-	if !validReference(configuration.Model) {
+	validModel := validReference(configuration.Model)
+	if configuration.Runtime == "pi-rpc/v1" {
+		provider, model, found := strings.Cut(configuration.Model, "/")
+		validModel = found && provider != "" && model != "" && !containsWhitespaceOrControl(configuration.Model)
+	}
+	if !validModel {
 		return fmt.Errorf("%w: model must use provider/model syntax without whitespace or control characters", ErrInvalidProfile)
 	}
 	if configuration.Variant != "" && containsWhitespaceOrControl(configuration.Variant) {
 		return fmt.Errorf("%w: variant contains whitespace or control characters", ErrInvalidProfile)
 	}
-	if err := ValidateRolePolicy(policy, configuration.Steps, configuration.Permissions); err != nil {
-		return err
+	if configuration.Runtime == "pi-rpc/v1" {
+		if configuration.Steps != 0 || configuration.Variant != "" {
+			return fmt.Errorf("%w: Pi does not support steps or variant", ErrInvalidProfile)
+		}
+		if configuration.Thinking != "" && !ValidThinking(configuration.Thinking) {
+			return fmt.Errorf("%w: invalid Pi thinking level", ErrInvalidProfile)
+		}
+		if err := ValidatePiPermissions(policy, configuration.Permissions); err != nil {
+			return err
+		}
+	} else {
+		if configuration.Thinking != "" {
+			return fmt.Errorf("%w: thinking requires Pi", ErrInvalidProfile)
+		}
+		if err := ValidateRolePolicy(policy, configuration.Steps, configuration.Permissions); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(string(instructions)) == "" {
 		return fmt.Errorf("%w: Role instructions must not be blank", ErrInvalidProfile)
@@ -278,8 +312,36 @@ func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]Pe
 		if action != Allow && action != Deny {
 			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
 		}
-		if !policy.OpenCode.AllowFileEdits && action == Allow && (tool == "edit" || tool == "patch") {
+		if !policy.AllowFileEdits && action == Allow && (tool == "edit" || tool == "patch") {
 			return fmt.Errorf("%w: Role permission for %q must be deny", ErrInvalidProfile, tool)
+		}
+	}
+	return nil
+}
+
+// ValidThinking checks vocabulary only; the adapter verifies model support.
+func ValidThinking(value string) bool {
+	switch value {
+	case "off", "minimal", "low", "medium", "high", "xhigh":
+		return true
+	}
+	return false
+}
+
+// ValidatePiPermissions applies immutable Role constraints to Pi's local tools.
+// Skill authorization adds checkout-local guidance, not another tool authority.
+func ValidatePiPermissions(policy role.Policy, permissions map[string]PermissionAction) error {
+	if !role.ValidID(policy.Role) || len(permissions) == 0 {
+		return ErrInvalidProfile
+	}
+	for tool, action := range permissions {
+		switch tool {
+		case "read", "edit", "write", "bash", "grep", "find", "ls", "skill":
+		default:
+			return fmt.Errorf("%w: unsupported Pi local tool", ErrInvalidProfile)
+		}
+		if action != Allow && action != Deny || !policy.AllowFileEdits && action == Allow && (tool == "edit" || tool == "write") {
+			return fmt.Errorf("%w: invalid Pi Role permission", ErrInvalidProfile)
 		}
 	}
 	return nil

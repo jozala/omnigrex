@@ -21,6 +21,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0011: Bind retained state and validate offline Session archives](0011-bind-retained-state-and-validate-offline-session-archives.md) | Accepted | 2026-10-08 |
 | [0012: Qualify repository environments without rebinding Sessions](0012-qualify-repository-environments-without-rebinding-sessions.md) | Accepted | 2026-10-08 |
 | [0013: Use the Microsandbox Go SDK and POSIX-faithful local bindings](0013-use-the-microsandbox-go-sdk-and-posix-bindings.md) | Accepted | 2026-10-09 |
+| [0014: Own Pi resource loading with a pinned runner](0014-own-pi-resource-loading-with-a-pinned-runner.md) | Accepted | 2026-10-09 |
 
 ## Existing architectural decisions
 

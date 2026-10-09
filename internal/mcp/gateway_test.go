@@ -1940,7 +1940,7 @@ func TestRegistrationProvidesAuthenticatedOpenCodeCompatibleInitialization(t *te
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if registration.Server.Type != "http" || registration.Server.Name != "omnigrex" || registration.Server.URL != "https://gateway.internal/mcp" {
+	if registration.Server.Name != "omnigrex" || registration.Server.URL != "https://gateway.internal/mcp" {
 		t.Fatalf("MCP server descriptor = %#v", registration.Server)
 	}
 	if len(registration.Server.Headers) != 1 || registration.Server.Headers[0].Name != "Authorization" || registration.Server.Headers[0].Value == "" {

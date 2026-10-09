@@ -26,6 +26,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Repository environment contract and tooling evidence](./docs/plans/2026-10-08-repository-environments.md)
 - [Microsandbox backend implementation and qualification](./docs/plans/2026-10-09-microsandbox-backend.md)
 - [Pi protocol adapter and both-backend qualification](./docs/plans/2026-10-09-pi-protocol-adapter.md)
+- [Pi configuration, authenticated MCP, and instruction qualification](./docs/plans/2026-10-09-pi-configuration-and-mcp.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

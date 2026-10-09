@@ -21,7 +21,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -209,10 +209,10 @@ type ReadRecord struct {
 	Succeeded  bool
 }
 
-// Registration is a revocable handle plus the remote MCP descriptor passed through ACP.
+// Registration is a revocable handle plus an agent-neutral authenticated endpoint.
 // Its internal identity is deliberately not the bearer credential.
 type Registration struct {
-	Server  acp.MCPServer
+	Server  agent.MCPEndpoint
 	id      uint64
 	gateway *Gateway
 	grant   *grant
@@ -402,9 +402,9 @@ func (gateway *Gateway) Register(scope TokenScope) (Registration, error) {
 
 	return Registration{
 		id: id, gateway: gateway, grant: registeredGrant,
-		Server: acp.MCPServer{
-			Type: "http", Name: ServerName, URL: gateway.endpointURL,
-			Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer " + token}},
+		Server: agent.MCPEndpoint{
+			Name: ServerName, URL: gateway.endpointURL,
+			Headers: []agent.Header{{Name: "Authorization", Value: "Bearer " + token}},
 		},
 	}, nil
 }

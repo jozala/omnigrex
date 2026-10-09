@@ -26,6 +26,8 @@ type Options struct {
 	PromptTimeout       time.Duration
 	CancellationTimeout time.Duration
 	CloseTimeout        time.Duration
+	Selection           *agent.ModelSelection
+	RequireMCP          bool
 }
 
 type connection struct {
@@ -72,6 +74,10 @@ type turn struct {
 // Connect starts reading immediately, including events emitted before a waiter.
 // No raw protocol objects, messages, provider errors, or stderr escape the adapter.
 func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
+	if options.Selection != nil {
+		selection := *options.Selection
+		options.Selection = &selection
+	}
 	if options.RequestTimeout <= 0 {
 		options.RequestTimeout = 30 * time.Second
 	}
@@ -91,6 +97,15 @@ func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
 }
 
 func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
+	c.mu.Lock()
+	if c.active != nil || c.cancelling != 0 && (c.options.Selection != nil || c.options.RequireMCP) {
+		c.mu.Unlock()
+		return agent.Ready{}, agent.ErrBusy
+	}
+	c.ready = false
+	c.cancelling++ // Hold the prompt barrier through checked preparation.
+	c.mu.Unlock()
+	defer func() { c.mu.Lock(); c.cancelling--; c.mu.Unlock() }()
 	result, err := c.request(ctx, "get_state", nil)
 	if err != nil {
 		return agent.Ready{}, err
@@ -111,6 +126,9 @@ func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
 	}
 	if *state.Streaming || state.Compacting || state.Pending != 0 {
 		return agent.Ready{}, agent.ErrBusy
+	}
+	if err := c.configure(ctx); err != nil {
+		return agent.Ready{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -431,6 +449,9 @@ func (c *connection) record(content []byte) error {
 	}
 	if json.Unmarshal(content, &record) != nil || record.Type == "" {
 		return agent.ErrProtocol
+	}
+	if record.Type == "omnigrex_configuration_error" {
+		return ErrConfiguration
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
