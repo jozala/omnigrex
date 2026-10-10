@@ -8,6 +8,7 @@ import { openDurableSession } from '../session-state.mjs';
 const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.filter(b => b.type === 'text').map(b => b.text).join('') : '';
 try {
   const configuration = await readBootstrap();
+  const fault = process.env.OMNIGREX_PI_WORKFLOW_FAULT ?? '';
   let requestCount = 0;
   const server = http.createServer(async (request, response) => {
     let body = '';
@@ -23,13 +24,31 @@ try {
       if (process.env[name] !== path || !(await stat(path)).isDirectory()) throw new Error('admitted disk-backed path was not preserved');
     }
     const role = envelope.triggering_event.role;
+    if (['restart-during-prompt', 'lost-transport', 'lease-expiry', 'cleanup-failure'].includes(fault)) return;
+    if (fault === 'runtime-exit-137') { process.exit(137); }
+    if (fault === 'resource-exhaustion') {
+      // Touch and retain real allocations beyond the bounded environment's
+      // memory budget. A signal/code alone is never asserted to be OOM proof.
+      const allocations = [];
+      setInterval(() => allocations.push(Buffer.alloc(16 * 1024 * 1024, 1)), 10);
+      return;
+    }
     const results = data.messages.slice(userIndex + 1).filter(m => m.role === 'tool');
     const step = results.length;
     const names = data.tools.map(t => t.function.name);
     if (role === 'REVIEWER' && (names.includes('write') || names.includes('edit') || names.includes('omnigrex_publish_changes'))) throw new Error('Reviewer authority expanded');
     const result = index => JSON.parse(text(results[index].content));
     let name, args;
-    if (role === 'DEVELOPER') {
+    if (fault === 'concurrent-turns') {
+      const notify = phase => fetch(`${process.env.OMNIGREX_PI_WORKFLOW_CONTROL_URL}?turn=${envelope.agent_turn_id}&phase=${phase}&issue=${envelope.issue_number}`);
+      if (step > 0) {
+        if (result(step - 1).number !== envelope.issue_number) throw new Error('cross-Turn MCP authority');
+        await notify(step === 1 ? 'first' : 'second');
+      }
+      if (step > 1) return;
+      if (step === 1) await notify('continue');
+      name = 'omnigrex_get_issue'; args = {};
+    } else if (role === 'DEVELOPER') {
       if (step === 0) { name = 'bash'; args = { command: "printf 'one\\n' > feature.txt; git add feature.txt; git commit -m 'Add first change'; printf 'two\\n' >> feature.txt; git add feature.txt; git commit -m 'Complete change'" }; }
       if (step === 1) { name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }
       if (step === 2) { name = 'omnigrex_open_pr'; args = { operation_id: 'controlled-open', title: 'Controlled Pi Change Proposal', body: 'Ready for review.' }; }
@@ -38,7 +57,10 @@ try {
       if (step === 0) { name = 'omnigrex_get_pull_request'; args = {}; }
       if (step === 1) { name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'The controlled changes are correct.', comments: [] }; }
     } else throw new Error('unexpected Workflow Role');
-    if (results.some(m => text(m.content).includes('"isError":true') || text(m.content).includes('operation was rejected'))) throw new Error('controlled capability failed');
+    if (results.some(m => text(m.content).includes('"isError":true') || text(m.content).includes('Omnigrex MCP operation failed or was rejected'))) {
+      if (!fault) throw new Error('controlled capability failed');
+      name = undefined; args = undefined;
+    }
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const tool = name ? { id: `controlled-${++requestCount}`, type: 'function', function: { name, arguments: JSON.stringify(args) } } : null;
     const chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id: 'controlled-workflow', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);

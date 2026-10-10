@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 backend="${OMNIGREX_PI_BACKEND:-docker}"
+pattern="${OMNIGREX_PI_WORKFLOW_TEST_PATTERN:-^TestPiControlledWorkflow$}"
 namespace="pi-workflow-$(date +%s)-$$"
 network="$namespace-network"
 database="$namespace-database"
@@ -41,12 +42,13 @@ if [ "$backend" = docker ]; then
     --env "OMNIGREX_PI_WORKFLOW_NETWORK=$network" --env "OMNIGREX_PI_WORKFLOW_IMAGE=$image" --env "OMNIGREX_PI_WORKFLOW_ARCH=$arch" \
     --env "OMNIGREX_PI_WORKFLOW_LOCAL_IMAGE=$local_image" \
     --env "OMNIGREX_PI_WORKFLOW_WORKSPACES=$workspaces" --env "OMNIGREX_PI_WORKFLOW_STATES=$states" --env "OMNIGREX_PI_WORKFLOW_TOOLS=$tools" \
-    omnigrex/pi-workflow-qualification:step12 -test.v -test.run '^TestPiControlledWorkflow$' -test.timeout 10m
+    omnigrex/pi-workflow-qualification:step12 -test.v -test.run "$pattern" -test.timeout 30m
 else
   docker image save omnigrex/pi-workflow:step12 | docker run --rm -i --network "$network" --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
     --memory 6g --memory-swap 6g --cpus 2 --pids-limit 2048 \
     --mount "type=volume,src=$workspaces,dst=/data/workspaces" --mount "type=volume,src=$states,dst=/data/state" --mount "type=volume,src=$tools,dst=/data/tools" --mount "type=volume,src=$publication,dst=/data/publication" \
     --env OMNIGREX_PI_WORKFLOW_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=microsandbox --env OMNIGREX_PI_WORKFLOW_ROOT=/data \
     --env "OMNIGREX_PI_WORKFLOW_DATABASE_URL=postgres://postgres@$database:5432/qualification?sslmode=disable" \
-    --entrypoint /bin/sh omnigrex/pi-workflow-qualification:step12 -ec 'cat > /tmp/pi-workflow-image.tar; exec /usr/local/bin/workflow.test -test.v -test.run "^TestPiControlledWorkflow$" -test.timeout 10m'
+    --env "OMNIGREX_PI_WORKFLOW_TEST_PATTERN=$pattern" \
+    --entrypoint /bin/sh omnigrex/pi-workflow-qualification:step12 -ec 'cat > /tmp/pi-workflow-image.tar; exec /usr/local/bin/workflow.test -test.v -test.run "$OMNIGREX_PI_WORKFLOW_TEST_PATTERN" -test.timeout 30m'
 fi

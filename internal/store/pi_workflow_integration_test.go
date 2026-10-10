@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
@@ -37,16 +39,75 @@ import (
 )
 
 func TestPiControlledWorkflow(t *testing.T) {
+	f := newPiWorkflowFixture(t, "")
+	ctx, database, settings := f.ctx, f.database, f.settings
+	worker, workspaces, github, authority := f.worker, f.workspaces, f.github, f.authority
+	for _, wanted := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
+		prepared := f.prepare(t)
+		processed, err := worker.ProcessNext(ctx)
+		if err != nil || !processed {
+			t.Fatalf("real Pi execution: %t %v", processed, err)
+		}
+		toolRoot := filepath.Join(settings.MiseRoot, "assignment-"+prepared.Commit.Participant.ID, "tool-data")
+		if _, err := os.Lstat(filepath.Join(toolRoot, "turn", prepared.Commit.Turn.ID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Turn scratch was not cleaned: %v", err)
+		}
+		for _, name := range []string{"go-build-cache", "go-modules"} {
+			info, err := os.Stat(filepath.Join(toolRoot, "assignment", name))
+			if err != nil || !info.IsDir() {
+				t.Fatalf("assignment cache lost: %s %v", name, err)
+			}
+		}
+		f.assertState(t, wanted)
+	}
+	participants, err := database.ListAgentParticipants(ctx, f.workflowID)
+	if err != nil || len(participants) != 2 {
+		t.Fatalf("Participants: %+v %v", participants, err)
+	}
+	for _, participant := range participants {
+		durable, err := database.GetAgentSessionForParticipant(ctx, participant.ID)
+		if err != nil || durable.RuntimeSessionID != durable.ID || durable.ACPSessionID != "" {
+			t.Fatalf("durable Pi binding: %+v %v", durable, err)
+		}
+		bytes, err := os.ReadFile(filepath.Join(settings.RuntimeStateRoot, "assignment-"+participant.ID, "runtime-state", "sessions", durable.ID, "session.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"workflow-only-provider-key", "developer-token", "reviewer-token"} {
+			if strings.Contains(string(bytes), secret) {
+				t.Fatal("credentials retained in Session")
+			}
+		}
+		for _, token := range authority.tokens {
+			if strings.Contains(string(bytes), token) {
+				t.Fatal("MCP authority entered retained Session")
+			}
+		}
+		if participant.Role == workflow.RoleReviewer {
+			paths, _ := workspaces.Paths(participant.ID)
+			if _, err := os.Lstat(paths.Workspace); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("Reviewer workspace was not discarded")
+			}
+		}
+	}
+	if github.openCalls != 1 || github.reviewCalls != 1 || github.review.ID == 0 || github.review.State != "APPROVED" {
+		t.Fatalf("publication/review counts: opened=%d submitted=%d %+v", github.openCalls, github.reviewCalls, github.review)
+	}
+	t.Log("PASS: production Pi launch, fenced MCP publication, native Reviewer review and durable human-review transition")
+}
+
+func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
+	t.Helper()
 	if os.Getenv("OMNIGREX_PI_WORKFLOW_INTEGRATION") != "1" {
 		t.Skip("explicit disposable Workflow qualification gate required")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	root := os.Getenv("OMNIGREX_PI_WORKFLOW_ROOT")
 	if root == "" {
 		t.Fatal("qualification requires mounted isolated storage roots")
 	}
-	url := os.Getenv("OMNIGREX_PI_WORKFLOW_DATABASE_URL")
+	url := isolatedPiWorkflowDatabase(t, ctx)
 	secret := filepath.Join(t.TempDir(), "database-password")
 	if err := os.WriteFile(secret, []byte("qualification-only-password"), 0600); err != nil {
 		t.Fatal(err)
@@ -57,13 +118,17 @@ func TestPiControlledWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(database.Close)
+	fault := &piWorkflowFault{mode: mode}
+	fault.continueReads = make(chan struct{})
+	fault.reads = make(chan piReadObservation, 4)
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ip := qualificationAddress(t)
 	endpoint := "http://" + net.JoinHostPort(ip, fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)) + "/mcp"
+	fault.controlURL = strings.TrimSuffix(endpoint, "/mcp") + "/qualification"
 	settings := config.Config{ExecutionBackend: os.Getenv("OMNIGREX_PI_BACKEND"), DockerAgentNetwork: os.Getenv("OMNIGREX_PI_WORKFLOW_NETWORK"), WorkspaceVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_WORKSPACES"), RuntimeStateVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_STATES"), MiseVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_TOOLS"), WorkspaceRoot: filepath.Join(root, "workspaces"), RuntimeStateRoot: filepath.Join(root, "state"), MiseRoot: filepath.Join(root, "tools"), MicrosandboxExecutable: "/usr/local/bin/msb", MicrosandboxFirmware: "/usr/local/lib/libkrunfw.so.5.6.1", MicrosandboxHome: "/tmp/msb-workflow", MicrosandboxNamespace: uuid.NewString(), MicrosandboxCPUs: 1, MicrosandboxRootDiskMiB: 4096, MCPEndpointURL: endpoint, AgentTurnExecutionTurnTimeout: 3 * time.Minute}
 	image, platform := workflowQualificationImage(t)
 	settings.ShutdownTimeout = 10 * time.Second
@@ -80,7 +145,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = backend.Close() }()
+	t.Cleanup(func() { _ = backend.Close() })
 	localImage := os.Getenv("OMNIGREX_PI_WORKFLOW_LOCAL_IMAGE")
 	if localImage != "" {
 		states, err := docker.NewRetainedState(settings.RuntimeStateRoot, settings.RuntimeStateVolume, workflowFixtureStateSource{source: database, image: image, local: localImage})
@@ -117,24 +182,31 @@ func TestPiControlledWorkflow(t *testing.T) {
 	if err := os.WriteFile(git, []byte("#!/bin/sh\nexec /usr/bin/git -c 'url.file://"+bare+".insteadOf=https://github.com/owner/repo.git' \"$@\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	workspaces, err := workspace.New(workspace.Options{WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: filepath.Join(root, "publication"), MiseRoot: settings.MiseRoot, CaptureRoot: filepath.Join(root, "state", "captures"), CaptureSource: backend.Workspaces, CaptureLedger: database, GitExecutable: git})
+	workspaces, err := workspace.New(workspace.Options{WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: filepath.Join(root, "publication"), MiseRoot: settings.MiseRoot, CaptureRoot: filepath.Join(root, "state", "captures"), CaptureSource: piFaultCaptureSource{WorkspaceSource: backend.Workspaces, fault: fault}, CaptureLedger: database, GitExecutable: git})
 	if err != nil {
 		t.Fatal(err)
 	}
-	github := &workflowQualificationGitHub{replayGatewayGitHub: &replayGatewayGitHub{branch: "omnigrex/issue-123", base: "main"}, bare: bare, base: head}
+	github := &workflowQualificationGitHub{replayGatewayGitHub: &replayGatewayGitHub{branch: "omnigrex/issue-123", base: "main"}, bare: bare, base: head, loseReviewResponse: mode == "lost-terminal-mutation-response"}
 	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: workspaces, Workflow: mcp.LedgerWorkflowMutations{}, PriorIntents: database, Handoffs: database, Policies: configuration.Policies})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gateway, err := mcp.New(mcp.Config{EndpointURL: endpoint, Store: database, Backend: toolBackend, Policies: configuration.Policies, LifecycleContext: ctx, MutationFinalizationTimeout: 30 * time.Second})
+	gateway, err := mcp.New(mcp.Config{EndpointURL: endpoint, Store: database, Backend: toolBackend, Policies: configuration.Policies, LifecycleContext: ctx, MutationFinalizationTimeout: 30 * time.Second, Now: fault.now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: gateway, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if mode == "concurrent-turns" && request.URL.Path == "/qualification" {
+			fault.serveReadBarrier(response, request)
+			return
+		}
+		gateway.ServeHTTP(response, request)
+	}), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = server.Serve(listener) }()
-	defer func() { _ = server.Close() }()
+	t.Cleanup(func() { _ = server.Close() })
 	authority := &workflowAuthorityAudit{Gateway: gateway}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: workflowFixtureFactory{Factory: backend.Factory, localImage: localImage}, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
+	factory := &workflowFixtureFactory{Factory: backend.Factory, localImage: localImage, fault: fault}
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,78 +230,27 @@ func TestPiControlledWorkflow(t *testing.T) {
 	github.branch = fmt.Sprintf("omnigrex/issue-%d", workflowLocator().IssueNumber)
 	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies, allowedPaths...)
 	preparer := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database)
-	for _, wanted := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
-		prepared, err := preparer.Prepare(ctx, agentturn.Request{Lease: claimPreparationJob(t, database, ctx), InstallationCredential: "developer-token", RepositoryOwner: "owner", RepositoryName: "repo"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		processed, err := worker.ProcessNext(ctx)
-		if err != nil || !processed {
-			t.Fatalf("real Pi execution: %t %v", processed, err)
-		}
-		toolRoot := filepath.Join(settings.MiseRoot, "assignment-"+prepared.Commit.Participant.ID, "tool-data")
-		if _, err := os.Lstat(filepath.Join(toolRoot, "turn", prepared.Commit.Turn.ID)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Turn scratch was not cleaned: %v", err)
-		}
-		for _, name := range []string{"go-build-cache", "go-modules"} {
-			info, err := os.Stat(filepath.Join(toolRoot, "assignment", name))
-			if err != nil || !info.IsDir() {
-				t.Fatalf("assignment cache lost: %s %v", name, err)
-			}
-		}
-		// Observe the human-facing Workflow state through its durable query surface.
-		pool := openPool(t, url+"&password=qualification-only-password")
-		var state workflow.State
-		if err := pool.QueryRow(ctx, `SELECT status FROM workflows WHERE id=$1`, application.WorkflowID).Scan(&state); err != nil || state != wanted {
-			t.Fatalf("Workflow: %s %v; want %s", state, err, wanted)
-		}
-	}
-	participants, err := database.ListAgentParticipants(ctx, application.WorkflowID)
-	if err != nil || len(participants) != 2 {
-		t.Fatalf("Participants: %+v %v", participants, err)
-	}
-	for _, participant := range participants {
-		durable, err := database.GetAgentSessionForParticipant(ctx, participant.ID)
-		if err != nil || durable.RuntimeSessionID != durable.ID || durable.ACPSessionID != "" {
-			t.Fatalf("durable Pi binding: %+v %v", durable, err)
-		}
-		bytes, err := os.ReadFile(filepath.Join(settings.RuntimeStateRoot, "assignment-"+participant.ID, "runtime-state", "sessions", durable.ID, "session.jsonl"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, secret := range []string{"workflow-only-provider-key", "developer-token", "reviewer-token"} {
-			if strings.Contains(string(bytes), secret) {
-				t.Fatal("credentials retained in Session")
-			}
-		}
-		for _, token := range authority.tokens {
-			if strings.Contains(string(bytes), token) {
-				t.Fatal("MCP authority entered retained Session")
-			}
-		}
-		if participant.Role == workflow.RoleReviewer {
-			paths, _ := workspaces.Paths(participant.ID)
-			if _, err := os.Lstat(paths.Workspace); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("Reviewer workspace was not discarded")
-			}
-		}
-	}
-	if github.openCalls != 1 || github.reviewCalls != 1 || github.review.ID == 0 || github.review.State != "APPROVED" {
-		t.Fatalf("publication/review counts: opened=%d submitted=%d %+v", github.openCalls, github.reviewCalls, github.review)
-	}
-	t.Log("PASS: production Pi launch, fenced MCP publication, native Reviewer review and durable human-review transition")
+	f := &piWorkflowFixture{ctx: ctx, database: database, databaseURL: url, password: secret, settings: settings, runtime: p, backend: backend, fault: fault, launcher: launcher, preparer: preparer, worker: worker, workspaces: workspaces, github: github, authority: authority, workflowID: application.WorkflowID, head: head, git: git}
+	t.Cleanup(func() {
+		f.cleanup(t)
+		_ = f.backend.Close()
+		f.database.Close()
+	})
+	return f
 }
 
 type workflowAuthorityAudit struct {
 	*mcp.Gateway
-	mu     sync.Mutex
-	tokens []string
+	mu            sync.Mutex
+	tokens        []string
+	registrations []mcp.Registration
 }
 
 func (g *workflowAuthorityAudit) Register(scope mcp.TokenScope) (mcp.Registration, error) {
 	registration, err := g.Gateway.Register(scope)
 	if err == nil {
 		g.mu.Lock()
+		g.registrations = append(g.registrations, registration)
 		for _, header := range registration.Server.Headers {
 			if token, ok := strings.CutPrefix(header.Value, "Bearer "); ok {
 				g.tokens = append(g.tokens, token)
@@ -238,6 +259,14 @@ func (g *workflowAuthorityAudit) Register(scope mcp.TokenScope) (mcp.Registratio
 		g.mu.Unlock()
 	}
 	return registration, err
+}
+
+func (g *workflowAuthorityAudit) revokeAll() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, registration := range g.registrations {
+		g.Revoke(registration)
+	}
 }
 
 func qualificationAddress(t *testing.T) string {
@@ -259,6 +288,7 @@ func qualificationAddress(t *testing.T) string {
 type workflowFixtureFactory struct {
 	execution.Factory
 	localImage string
+	fault      *piWorkflowFault
 }
 
 func (f workflowFixtureFactory) New(request execution.Request, ledger execution.Ledger) (execution.Engine, error) {
@@ -266,6 +296,15 @@ func (f workflowFixtureFactory) New(request execution.Request, ledger execution.
 	// and all launch/state/MCP/capture/settlement boundaries stay in use.
 	request.Command = append([]string(nil), request.Command...)
 	request.Command[len(request.Command)-1] = "/opt/omnigrex/pi/qualification/turn.mjs"
+	if f.fault != nil && f.fault.mode != "" {
+		values := make([]string, 0, len(request.Environment))
+		for _, value := range request.Environment {
+			if !strings.HasPrefix(value, "OMNIGREX_RUNTIME_ENV_KEYS=") {
+				values = append(values, value)
+			}
+		}
+		request.Environment = environment.BindEnvironment(append(values, "OMNIGREX_PI_WORKFLOW_FAULT="+f.fault.mode, "OMNIGREX_PI_WORKFLOW_CONTROL_URL="+f.fault.controlURL))
+	}
 	if f.localImage != "" {
 		request.Image = f.localImage
 		request.State.Image = f.localImage
@@ -274,7 +313,7 @@ func (f workflowFixtureFactory) New(request execution.Request, ledger execution.
 	if err != nil {
 		return nil, err
 	}
-	return workflowFixtureEngine{Engine: engine, request: request}, nil
+	return workflowFixtureEngine{Engine: engine, request: request, fault: f.fault}, nil
 }
 
 type workflowFixtureStateSource struct {
@@ -293,10 +332,23 @@ func (s workflowFixtureStateSource) StateMetadata(ctx context.Context, ref execu
 type workflowFixtureEngine struct {
 	execution.Engine
 	request execution.Request
+	fault   *piWorkflowFault
 }
 
 func (e workflowFixtureEngine) Create(ctx context.Context, _ execution.Request, stderr io.Writer) (execution.Process, error) {
-	return e.Engine.Create(ctx, e.request, stderr)
+	process, err := e.Engine.Create(ctx, e.request, stderr)
+	if process != nil && e.fault != nil {
+		e.fault.executions = append(e.fault.executions, piFixtureExecution{process: process, key: e.request.Key})
+		if e.fault.mode == "restart-during-creation" {
+			// Creation has completed externally, but its response is lost.
+			_ = process.Transport().Close()
+			return nil, execution.ErrUnknownEffect
+		}
+		if e.fault.mode == "cleanup-failure" {
+			process = piFaultProcess{Process: process}
+		}
+	}
+	return process, err
 }
 
 type workflowQualificationProfiles struct{ head string }
@@ -353,9 +405,10 @@ func (b workflowQualificationBranch) ResolveDefaultBranch(context.Context, strin
 
 type workflowQualificationGitHub struct {
 	*replayGatewayGitHub
-	bare, base  string
-	review      githubapi.Review
-	reviewCalls int
+	bare, base         string
+	review             githubapi.Review
+	reviewCalls        int
+	loseReviewResponse bool
 }
 
 func (g *workflowQualificationGitHub) pull() githubapi.PullRequest {
@@ -370,6 +423,13 @@ func (g *workflowQualificationGitHub) GetPullRequest(context.Context, string, st
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	return g.pull(), nil
+}
+
+func (*workflowQualificationGitHub) GetIssue(_ context.Context, credential, _, _ string, number int) (githubapi.Issue, error) {
+	if credential != "developer-token" {
+		return githubapi.Issue{}, errors.New("wrong read authority")
+	}
+	return githubapi.Issue{ID: workflowLocator().IssueID + int64(number) - workflowLocator().IssueNumber, Number: number, Title: "Scoped controlled Work Item", State: "open"}, nil
 }
 func (g *workflowQualificationGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
 	g.mutex.Lock()
@@ -398,6 +458,9 @@ func (g *workflowQualificationGitHub) SubmitReview(_ context.Context, credential
 	defer g.mutex.Unlock()
 	g.reviewCalls++
 	g.review = githubapi.Review{ID: 801, NodeID: "PRR_controlled", State: "APPROVED", CommitID: request.CommitID, Body: request.Body, User: githubapi.User{ID: 9702}, HTMLURL: "https://github.com/owner/repo/pull/23#review-801"}
+	if g.loseReviewResponse {
+		return githubapi.Review{}, &url.Error{Op: "Post", URL: "https://api.github.invalid/reviews", Err: io.ErrUnexpectedEOF}
+	}
 	return g.review, nil
 }
 func (g *workflowQualificationGitHub) ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error) {

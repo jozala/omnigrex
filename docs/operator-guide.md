@@ -209,6 +209,16 @@ The Docker gate's outer control plane accesses the daemon socket to manage scope
 The Microsandbox wrapper receives KVM access and imports the fixture image without a host Docker socket.
 Fixture images remain cached on the selected build daemon.
 
+Step 13 runs the shared failure-recovery matrix against the same isolated qualification topology:
+
+```sh
+mise run test-pi-recovery
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-recovery
+```
+
+Use the same approved Linux/KVM `DOCKER_HOST` connection for the native gate.
+The [recovery evidence](./plans/2026-10-10-pi-failure-recovery.md) records the fault scenarios, conservative uncertainty handling, and dependency enforcement.
+
 ## Tracing
 
 The orchestrator exports OpenTelemetry traces over OTLP/HTTP with protobuf encoding when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is configured.

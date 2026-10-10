@@ -101,6 +101,14 @@ run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-workflow.sh"
 description = "Run the same controlled Pi Workflow on the Linux/KVM SDK backend"
 run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-workflow.sh"
 
+[tasks.test-pi-recovery]
+description = "Qualify the shared Pi failure/recovery matrix on Docker"
+run = "OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-microsandbox-recovery]
+description = "Qualify the same Pi failure/recovery matrix on Linux/KVM"
+run = "OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"
+
 [tasks.test-pi-microsandbox-integration]
 description = "Run the same Pi adapter scenarios through the Linux/KVM SDK backend"
 depends = ["pi-diagnostic-image"]

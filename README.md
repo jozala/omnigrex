@@ -29,6 +29,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Pi configuration, authenticated MCP, and instruction qualification](./docs/plans/2026-10-09-pi-configuration-and-mcp.md)
 - [Durable Pi Agent Sessions and History Replay](./docs/plans/2026-10-09-durable-pi-sessions.md)
 - [Complete Pi Agent Turns and both-backend Workflow qualification](./docs/plans/2026-10-09-complete-pi-agent-turns.md)
+- [Pi failure recovery and boundary independence](./docs/plans/2026-10-10-pi-failure-recovery.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

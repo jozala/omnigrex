@@ -32,6 +32,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 10 | Checked Pi configuration, owned authenticated MCP, current instructions, authorized checkout-local skills, and ephemeral API keys | [Pi configuration and MCP implementation and evidence](2026-10-09-pi-configuration-and-mcp.md) |
 | 11 | Reserved exact Pi identity, fenced durable preparation, fresh-environment continuation, and bounded append-order History Replay | [Durable Pi Session implementation and evidence](2026-10-09-durable-pi-sessions.md) |
 | 12 | Candidate Pi Runtime Profile, common complete Agent Turns, and controlled Developer-to-Reviewer Workflows on both backends | [Complete Pi Agent Turn implementation and evidence](2026-10-09-complete-pi-agent-turns.md) |
+| 13 | Shared eleven-scenario Pi recovery qualification and cross-target production dependency enforcement | [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -488,6 +489,8 @@ The same controlled Work Item reaches human review using Pi on Docker and Pi on 
 Backend selection changes execution infrastructure, not Workflow decisions.
 
 ### Step 13: Qualify failure recovery and boundary independence
+
+**Deliverable:** [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md), including the shared fault matrix, durable replacement barriers, mutation reconciliation, and dependency checks.
 
 **Goal:** Prove the architecture beyond happy-path execution.
 
