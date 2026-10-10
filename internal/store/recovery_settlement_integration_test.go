@@ -676,7 +676,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	if err := database.CloseMutationAdmission(ctx, retryLease); err != nil {
 		t.Fatal(err)
 	}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

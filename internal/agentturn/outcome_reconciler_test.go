@@ -412,7 +412,7 @@ func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *t
 	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)}, existing: existing}
 	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
 
-	observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+	observation, err := newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, "reviewer-repository-secret").Reconcile(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
@@ -524,7 +524,7 @@ func TestOutcomeReconcilerAcceptsGatewaySignedReviewerReviews(t *testing.T) {
 			review.State = test.state
 			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
-			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			observation, err := newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, "reviewer-repository-secret").Reconcile(context.Background(), request)
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
@@ -914,7 +914,9 @@ func TestOutcomeReconcilerLogsSafeGitHubObservationFailure(t *testing.T) {
 			}
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
-				Clock: outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
+				DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+				ReviewerCredentials:  &outcomeCredentialProvider{credential: "reviewer-repository-secret"},
+				Clock:                outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1127,14 +1129,43 @@ type outcomeClock struct{}
 
 func (outcomeClock) Now() time.Time { return outcomeObservedAt }
 
+type outcomeCredentialProvider struct {
+	credential string
+	err        error
+	calls      int
+}
+
+func (provider *outcomeCredentialProvider) RepositoryCredential(context.Context, string, string) (string, error) {
+	provider.calls++
+	if provider.err != nil {
+		return "", provider.err
+	}
+	return provider.credential, nil
+}
+
 func newOutcomeReconciler(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub) *agentturn.OutcomeReconciler {
-	return newOutcomeReconcilerWithProviders(t, storeAPI, github)
+	return newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, outcomeCredential)
 }
 
 func newOutcomeReconcilerWithProviders(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub, providers ...json.RawMessage) *agentturn.OutcomeReconciler {
 	t.Helper()
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: storeAPI, GitHub: github, Clock: outcomeClock{}, ProviderCredentialJSON: providers,
+		DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
+	})
+	if err != nil {
+		t.Fatalf("NewOutcomeReconciler() error = %v", err)
+	}
+	return reconciler
+}
+
+func newOutcomeReconcilerWithCredentials(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub, developerCredential, reviewerCredential string) *agentturn.OutcomeReconciler {
+	t.Helper()
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: storeAPI, GitHub: github, Clock: outcomeClock{},
+		DeveloperCredentials: &outcomeCredentialProvider{credential: developerCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: reviewerCredential},
 	})
 	if err != nil {
 		t.Fatalf("NewOutcomeReconciler() error = %v", err)

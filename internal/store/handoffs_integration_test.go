@@ -55,7 +55,7 @@ func TestHandoffPublicationRecoveryAndReadScope(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api})
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

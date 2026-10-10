@@ -141,31 +141,37 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if remaining <= 0 {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationExhausted, pending.Checkpoint.LastFailureCode)
 	}
-	var credential string
 	role := pending.Execution.Assignment.Role
 	switch role {
-	case workflow.RoleDeveloper:
-		credential, err = worker.developer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
-	case workflow.RoleReviewer:
-		credential, err = worker.reviewer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
+	case workflow.RoleDeveloper, workflow.RoleReviewer:
 	default:
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
-	if err != nil {
-		classification := classifyGitHubCorroborationFailure(err)
-		metadata := githubapi.ExtractSafeErrorMetadata(err)
-		retryAfter := metadata.RetryAfter
-		if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
-			retryAfter = untilReset
-		}
-		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
-			TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
-				Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
-	}
-	if credential == "" {
-		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
-	}
+	// Changed-head revalidation verification keeps its own current credential;
+	// final outcome observations acquire operation-scoped credentials inside
+	// the reconciler immediately before each GitHub read.
 	if lease.Kind == store.RevalidateTerminalIntentJobKind && worker.pullRequests != nil && pending.Execution.ChangeProposal != nil {
+		var credential string
+		switch role {
+		case workflow.RoleDeveloper:
+			credential, err = worker.developer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
+		case workflow.RoleReviewer:
+			credential, err = worker.reviewer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
+		}
+		if err != nil {
+			classification := classifyGitHubCorroborationFailure(err)
+			metadata := githubapi.ExtractSafeErrorMetadata(err)
+			retryAfter := metadata.RetryAfter
+			if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
+				retryAfter = untilReset
+			}
+			return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
+				TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
+					Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
+		}
+		if credential == "" {
+			return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
+		}
 		redirected, redirectErr := worker.redirectChangedHeadRevalidation(ctx, *lease, pending, credential, remaining)
 		if redirectErr != nil {
 			return true, redirectErr
@@ -184,11 +190,6 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		Lease:     store.AgentTurnLease{AgentTurn: turn, JobLease: store.JobLease{Job: store.Job{WorkflowID: pending.Checkpoint.WorkflowID}}},
 		Execution: pending.Execution, Paths: paths,
 		PriorPublicationMutations: pending.PriorPublicationMutations,
-	}
-	if role == workflow.RoleReviewer {
-		request.ReviewerRepositoryCredential = credential
-	} else {
-		request.RepositoryCredential = credential
 	}
 	if pending.Checkpoint.PromptError != "" {
 		request.PromptError = PromptErrorClassification(pending.Checkpoint.PromptError)

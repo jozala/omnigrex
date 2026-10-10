@@ -78,13 +78,20 @@ type realOutcomeReconcilerClock struct{}
 
 func (realOutcomeReconcilerClock) Now() time.Time { return time.Now() }
 
-// OutcomeReconcilerConfig supplies only read dependencies and a testable observation clock.
+// OutcomeReconcilerConfig supplies read dependencies, operation-scoped
+// credential providers, and a testable observation clock.
 type OutcomeReconcilerConfig struct {
 	Store                  OutcomeReconcilerStore
 	GitHub                 OutcomeReconcilerGitHub
+	DeveloperCredentials   RepositoryCredentialProvider
+	ReviewerCredentials    RepositoryCredentialProvider
 	Clock                  interface{ Now() time.Time }
 	Logger                 *slog.Logger
 	ProviderCredentialJSON []json.RawMessage
+	// RetryWait pauses between transient GitHub observation retries.
+	// It defaults to a real timer-based wait when nil; tests inject a
+	// controlled hook so no real-time waiting simulates retry timing.
+	RetryWait func(context.Context, time.Duration) error
 }
 
 func (OutcomeReconcilerConfig) String() string { return "Agent Turn outcome reconciler config" }
@@ -92,8 +99,14 @@ func (OutcomeReconcilerConfig) GoString() string {
 	return "agentturn.OutcomeReconcilerConfig{<credentials redacted>}"
 }
 
-// OutcomeReconciliation contains the exact acquired turn context and ephemeral operation credentials.
+// OutcomeReconciliation contains the exact acquired turn context.
 // Exactly one of PromptResponse and PromptError must be supplied.
+//
+// RepositoryCredential and ReviewerRepositoryCredential are explicitly
+// diagnostic-only redaction material retained from Turn start. They are never
+// used for authorization; the reconciler acquires current operation-scoped
+// credentials via its configured providers immediately before each GitHub
+// observation.
 type OutcomeReconciliation struct {
 	Lease                        store.AgentTurnLease
 	Execution                    store.AgentTurnExecutionContext
@@ -124,11 +137,14 @@ func (OutcomeReconciliation) GoString() string {
 
 // OutcomeReconciler derives settlement observations without consulting ACP output text.
 type OutcomeReconciler struct {
-	store              OutcomeReconcilerStore
-	github             OutcomeReconcilerGitHub
-	clock              outcomeReconcilerClock
-	logger             *slog.Logger
-	diagnosticRedactor *strings.Replacer
+	store                OutcomeReconcilerStore
+	github               OutcomeReconcilerGitHub
+	developerCredentials RepositoryCredentialProvider
+	reviewerCredentials  RepositoryCredentialProvider
+	clock                outcomeReconcilerClock
+	logger               *slog.Logger
+	diagnosticRedactor   *strings.Replacer
+	retryWait            func(context.Context, time.Duration) error
 }
 
 func (*OutcomeReconciler) String() string { return "Agent Turn outcome reconciler" }
@@ -145,6 +161,9 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	if nilInterface(config.Store) || nilInterface(config.GitHub) {
 		return nil, ErrInvalidOutcomeReconciler
 	}
+	if nilInterface(config.DeveloperCredentials) || nilInterface(config.ReviewerCredentials) {
+		return nil, ErrInvalidOutcomeReconciler
+	}
 	clock := outcomeReconcilerClock(realOutcomeReconcilerClock{})
 	if config.Clock != nil {
 		clock = config.Clock
@@ -156,7 +175,11 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	if err != nil {
 		return nil, ErrInvalidOutcomeReconciler
 	}
-	return &OutcomeReconciler{store: config.Store, github: config.GitHub, clock: clock, logger: config.Logger, diagnosticRedactor: redactor}, nil
+	return &OutcomeReconciler{
+		store: config.Store, github: config.GitHub,
+		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
+		clock: clock, logger: config.Logger, diagnosticRedactor: redactor, retryWait: config.RetryWait,
+	}, nil
 }
 
 // Reconcile reads the closed terminal ledger and corroborates its sole successful terminal intent.
@@ -185,15 +208,27 @@ func (reconciler *OutcomeReconciler) Reconcile(ctx context.Context, request Outc
 // ReconcileRecorded uses a verifier-owned snapshot of an already closed,
 // settled mutation ledger. It does not obtain or confer a live Agent Turn
 // lease; the Store must fence its source before providing these records.
+//
+// GitHub observations always use current operation-scoped credentials acquired
+// from the configured providers immediately before each observation. The
+// diagnostic-only snapshots in the request are never used for authorization;
+// they are only redacted from persisted diagnostics alongside the fresh
+// credentials acquired during this call.
 func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, request OutcomeReconciliation, mutations []store.MutationReservation) (observation store.AgentTurnSettlementObservation, err error) {
 	ctx, finish := startReconciliation(ctx, request)
 	defer func() { finish(observation, &err) }()
 	if reconciler == nil || !validOutcomeBinding(request.Lease, request.Execution) || !validPromptInput(request) {
 		return store.AgentTurnSettlementObservation{}, ErrInvalidOutcomeReconciliation
 	}
+	var freshCredentials []string
 	defer func() {
-		observation = reconciler.sanitizeObservation(observation, request.RepositoryCredential)
-		observation = reconciler.sanitizeObservation(observation, request.ReviewerRepositoryCredential)
+		// Redact the complete set of startup and fresh credentials before
+		// normalization and truncation so no credential fragment survives a
+		// truncation boundary.
+		secrets := make([]string, 0, len(freshCredentials)+2)
+		secrets = append(secrets, request.RepositoryCredential, request.ReviewerRepositoryCredential)
+		secrets = append(secrets, freshCredentials...)
+		observation = reconciler.sanitizeObservation(observation, secrets)
 	}()
 	observedAt := reconciler.clock.Now().UTC()
 	if observedAt.IsZero() {
@@ -243,10 +278,9 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 	} else {
 		switch intent.ToolName {
 		case mcp.ToolRequestReview:
-			result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent)
+			result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, intent, &freshCredentials)
 		case mcp.ToolSubmitReview:
-			request.RepositoryCredential = request.ReviewerRepositoryCredential
-			result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent)
+			result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, intent, &freshCredentials)
 		case mcp.ToolConfirmPriorTerminalIntent:
 			var source struct {
 				SourceInvocationID string          `json:"source_invocation_id"`
@@ -286,13 +320,12 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 				if request.Execution.Assignment.Role != workflow.RoleDeveloper {
 					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
 				}
-				result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, prior)
+				result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, prior, &freshCredentials)
 			case mcp.ToolSubmitReview:
 				if request.Execution.Assignment.Role != workflow.RoleReviewer {
 					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
 				}
-				request.RepositoryCredential = request.ReviewerRepositoryCredential
-				result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, prior)
+				result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, prior, &freshCredentials)
 			default:
 				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal source kind is invalid"), nil
 			}
@@ -376,12 +409,37 @@ func (reconciler *OutcomeReconciler) redactProviderDiagnostic(value string) stri
 	return reconciler.diagnosticRedactor.Replace(value)
 }
 
-func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, mutations []store.MutationReservation, intent store.MutationReservation) store.AgentTurnSettlementObservation {
+func (reconciler *OutcomeReconciler) acquireDeveloperCredential(ctx context.Context, owner, repository string) (string, error) {
+	if reconciler == nil || nilInterface(reconciler.developerCredentials) {
+		return "", &githubapi.ConfigurationError{Cause: errors.New("Developer repository credential provider is not configured")}
+	}
+	credential, err := reconciler.developerCredentials.RepositoryCredential(ctx, owner, repository)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(credential) == "" {
+		return "", &githubapi.ConfigurationError{Cause: errors.New("Developer repository credential is empty")}
+	}
+	return credential, nil
+}
+
+func (reconciler *OutcomeReconciler) acquireReviewerCredential(ctx context.Context, owner, repository string) (string, error) {
+	if reconciler == nil || nilInterface(reconciler.reviewerCredentials) {
+		return "", &githubapi.ConfigurationError{Cause: errors.New("Reviewer repository credential provider is not configured")}
+	}
+	credential, err := reconciler.reviewerCredentials.RepositoryCredential(ctx, owner, repository)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(credential) == "" {
+		return "", &githubapi.ConfigurationError{Cause: errors.New("Reviewer repository credential is empty")}
+	}
+	return credential, nil
+}
+
+func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, mutations []store.MutationReservation, intent store.MutationReservation, fresh *[]string) store.AgentTurnSettlementObservation {
 	failure := func(diagnostic string) store.AgentTurnSettlementObservation {
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic)
-	}
-	if strings.TrimSpace(request.RepositoryCredential) == "" {
-		return failure("Developer repository credential is unavailable")
 	}
 	var arguments struct {
 		OperationID string `json:"operation_id"`
@@ -468,8 +526,12 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 		}
 	}
 
-	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
-		request.Execution.Repository.Name, int(result.PullRequestNumber))
+	owner := request.Execution.Repository.Owner
+	repository := request.Execution.Repository.Name
+	acquireDeveloper := func(ctx context.Context) (string, error) {
+		return reconciler.acquireDeveloperCredential(ctx, owner, repository)
+	}
+	pullRequest, err := reconciler.getPullRequest(ctx, acquireDeveloper, owner, repository, int(result.PullRequestNumber), fresh)
 	if err != nil {
 		reconciler.logGitHubObservationFailure(ctx, request, "get_pull_request", result.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
@@ -498,7 +560,9 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 		return failure("fresh Developer Pull Request conflicts with open_pr identity")
 	}
 	proposal := settlementChangeProposal(request.Execution, pullRequest)
-	if containsCredentialInProposal(proposal, request.RepositoryCredential) {
+	if containsCredentialInProposal(proposal, request.RepositoryCredential) ||
+		containsCredentialInProposal(proposal, request.ReviewerRepositoryCredential) ||
+		containsAnyCredentialInProposal(proposal, fresh) {
 		return failure("fresh Developer Pull Request contains unsafe credential material")
 	}
 	matching, err := workspace.CommittedTreesEqual(ctx, request.Paths)
@@ -526,12 +590,12 @@ func publicationConflictObservation(observedAt time.Time, promptOutcome json.Raw
 	}
 }
 
-func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, intent store.MutationReservation) store.AgentTurnSettlementObservation {
+func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, request OutcomeReconciliation, observedAt time.Time, promptOutcome json.RawMessage, intent store.MutationReservation, fresh *[]string) store.AgentTurnSettlementObservation {
 	failure := func(diagnostic string) store.AgentTurnSettlementObservation {
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, diagnostic)
 	}
 	proposalScope := request.Execution.ChangeProposal
-	if strings.TrimSpace(request.RepositoryCredential) == "" || proposalScope == nil {
+	if proposalScope == nil {
 		return failure("Reviewer repository credential or Change Proposal is unavailable")
 	}
 	var arguments struct {
@@ -575,8 +639,12 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		return failure("submit_review terminal evidence is malformed or incoherent")
 	}
 
-	pullRequest, err := reconciler.getPullRequest(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
-		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
+	owner := request.Execution.Repository.Owner
+	repository := request.Execution.Repository.Name
+	acquireReviewer := func(ctx context.Context) (string, error) {
+		return reconciler.acquireReviewerCredential(ctx, owner, repository)
+	}
+	pullRequest, err := reconciler.getPullRequest(ctx, acquireReviewer, owner, repository, int(proposalScope.PullRequestNumber), fresh)
 	if err != nil {
 		reconciler.logGitHubObservationFailure(ctx, request, "get_pull_request", proposalScope.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
@@ -585,8 +653,7 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 	if !matchesReviewerPullRequest(pullRequest, request.Execution.Repository, *proposalScope) {
 		return failure("fresh Reviewer Pull Request does not match the durable Change Proposal")
 	}
-	reviews, err := reconciler.listPullRequestReviews(ctx, request.RepositoryCredential, request.Execution.Repository.Owner,
-		request.Execution.Repository.Name, int(proposalScope.PullRequestNumber))
+	reviews, err := reconciler.listPullRequestReviews(ctx, acquireReviewer, owner, repository, int(proposalScope.PullRequestNumber), fresh)
 	if err != nil {
 		reconciler.logGitHubObservationFailure(ctx, request, "list_pull_request_reviews", proposalScope.PullRequestNumber, err)
 		reportGitHubCorroborationFailure(request, intent.ID, err)
@@ -614,7 +681,9 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		ID: result.ReviewID, NodeID: result.NodeID, ChangeProposalID: proposalScope.PullRequestID,
 		ActorID: result.ActorID, HeadSHA: result.CommitID,
 	}
-	if containsCredentialInReview(reviewIdentity, request.RepositoryCredential) {
+	if containsCredentialInReview(reviewIdentity, request.RepositoryCredential) ||
+		containsCredentialInReview(reviewIdentity, request.ReviewerRepositoryCredential) ||
+		containsAnyCredentialInReview(reviewIdentity, fresh) {
 		return failure("submitted review identity contains unsafe credential material")
 	}
 	existing, err := reconciler.store.GetChangeProposalReview(ctx, request.Execution.Repository.ID, result.ReviewID)
@@ -624,7 +693,12 @@ func (reconciler *OutcomeReconciler) reconcileReviewer(ctx context.Context, requ
 		return failure("durable submitted review lookup failed")
 	}
 	proposal := settlementChangeProposal(request.Execution, pullRequest)
-	if containsCredentialInProposal(proposal, request.RepositoryCredential) || containsCredentialInReview(existing, request.RepositoryCredential) {
+	if containsCredentialInProposal(proposal, request.RepositoryCredential) ||
+		containsCredentialInProposal(proposal, request.ReviewerRepositoryCredential) ||
+		containsAnyCredentialInProposal(proposal, fresh) ||
+		containsCredentialInReview(existing, request.RepositoryCredential) ||
+		containsCredentialInReview(existing, request.ReviewerRepositoryCredential) ||
+		containsAnyCredentialInReview(existing, fresh) {
 		return failure("review reconciliation contains unsafe credential material")
 	}
 	outcome := workflow.TurnOutcomeApproved
@@ -656,10 +730,15 @@ func reportGitHubCorroborationFailure(request OutcomeReconciliation, sourceID st
 		SourceInvocationID: sourceID, Code: failure.code,
 		Retryable: failure.retryable, Prerequisite: failure.prerequisite,
 	}
-	var rateLimit *githubapi.RateLimitError
-	if errors.As(err, &rateLimit) {
-		report.RetryAfter = rateLimit.RetryAfter
-		if untilReset := time.Until(rateLimit.ResetAt); untilReset > report.RetryAfter {
+	// The production credential provider redacts acquisition errors into a
+	// credential-free wrapper that preserves SafeErrorMetadata but not the
+	// typed error, so retry advice must come from the metadata surface rather
+	// than a typed assertion. This also covers direct RateLimitError values,
+	// whose metadata carries the same fields.
+	metadata := githubapi.ExtractSafeErrorMetadata(err)
+	if metadata.RetryAfter > 0 || !metadata.ResetAt.IsZero() {
+		report.RetryAfter = metadata.RetryAfter
+		if untilReset := time.Until(metadata.ResetAt); untilReset > report.RetryAfter {
 			report.RetryAfter = untilReset
 		}
 	}
@@ -668,9 +747,14 @@ func reportGitHubCorroborationFailure(request OutcomeReconciliation, sourceID st
 
 // Short-lived read failures are retried while the original Turn still owns its
 // settlement fence. This does not replace durable corroboration across restarts.
-func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
+//
+// Each logical observation and each transient-read retry acquires a current
+// operation-scoped credential immediately before the GitHub call, so a Turn
+// can outlive the token cached at Turn start. Acquired tokens are recorded in
+// fresh for diagnostic redaction and unsafe-material checks.
+func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, acquire func(context.Context) (string, error), owner, repository string, number int, fresh *[]string) (githubapi.PullRequest, error) {
 	var pullRequest githubapi.PullRequest
-	err := retryTransientObservation(ctx, func() error {
+	err := reconciler.retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
 		var err error
 		pullRequest, err = reconciler.github.GetPullRequest(ctx, credential, owner, repository, number)
 		return err
@@ -678,9 +762,9 @@ func (reconciler *OutcomeReconciler) getPullRequest(ctx context.Context, credent
 	return pullRequest, err
 }
 
-func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context, credential, owner, repository string, number int) ([]githubapi.Review, error) {
+func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context, acquire func(context.Context) (string, error), owner, repository string, number int, fresh *[]string) ([]githubapi.Review, error) {
 	var reviews []githubapi.Review
-	err := retryTransientObservation(ctx, func() error {
+	err := reconciler.retryTransientObservationWithCredential(ctx, acquire, fresh, func(credential string) error {
 		var err error
 		reviews, err = reconciler.github.ListPullRequestReviews(ctx, credential, owner, repository, number)
 		return err
@@ -688,21 +772,45 @@ func (reconciler *OutcomeReconciler) listPullRequestReviews(ctx context.Context,
 	return reviews, err
 }
 
-func retryTransientObservation(ctx context.Context, observe func() error) error {
+func (reconciler *OutcomeReconciler) retryTransientObservationWithCredential(ctx context.Context, acquire func(context.Context) (string, error), fresh *[]string, observe func(string) error) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		err := observe()
+		credential, err := acquire(ctx)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(credential) == "" {
+			return &githubapi.ConfigurationError{Cause: errors.New("repository credential is empty")}
+		}
+		if fresh != nil {
+			*fresh = append(*fresh, credential)
+		}
+		err = observe(credential)
 		if err == nil || attempt == 2 || !shortRetryableGitHubObservation(err) || ctx.Err() != nil {
 			return err
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := reconciler.waitForObservationRetry(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// waitForObservationRetry pauses between transient observation retries. Tests
+// inject OutcomeReconcilerConfig.RetryWait so retry timing stays deterministic
+// without real-time waiting.
+func (reconciler *OutcomeReconciler) waitForObservationRetry(ctx context.Context, delay time.Duration) error {
+	wait := reconciler.retryWait
+	if wait == nil {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	return wait(ctx, delay)
 }
 
 // A short retry cannot honor a GitHub rate-limit delay. A future durable
@@ -937,9 +1045,9 @@ func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatu
 	}
 }
 
-func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, credential string) store.AgentTurnSettlementObservation {
-	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, credential)
-	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, credential)
+func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, secrets []string) store.AgentTurnSettlementObservation {
+	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, secrets)
+	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, secrets)
 	if observation.Outcome == workflow.TurnOutcomeBlocked && observation.Diagnostic == "" {
 		observation.Outcome = workflow.TurnOutcomeInfrastructureFailed
 		observation.Completion.Status = store.AgentTurnFailed
@@ -953,10 +1061,12 @@ func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.Agent
 	return observation
 }
 
-func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value, credential string) string {
+func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
 	value = reconciler.redactProviderDiagnostic(value)
-	if credential != "" {
-		value = strings.ReplaceAll(value, credential, "[REDACTED]")
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
 	}
 	value = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {
@@ -1061,6 +1171,30 @@ func containsCredentialInProposal(proposal *store.AgentTurnSettlementChangePropo
 
 func containsCredentialInReview(review *workflow.ReviewIdentity, credential string) bool {
 	return review != nil && (containsCredential(review.NodeID, credential) || containsCredential(review.HeadSHA, credential))
+}
+
+func containsAnyCredentialInProposal(proposal *store.AgentTurnSettlementChangeProposal, fresh *[]string) bool {
+	if proposal == nil || fresh == nil {
+		return false
+	}
+	for _, credential := range *fresh {
+		if containsCredentialInProposal(proposal, credential) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyCredentialInReview(review *workflow.ReviewIdentity, fresh *[]string) bool {
+	if review == nil || fresh == nil {
+		return false
+	}
+	for _, credential := range *fresh {
+		if containsCredentialInReview(review, credential) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsCredential(value, credential string) bool {

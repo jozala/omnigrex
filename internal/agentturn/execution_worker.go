@@ -246,38 +246,59 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		operationErr = fmt.Errorf("resolve Agent Turn workspace paths: %w", operationErr)
 	}
 
-	var repositoryCredential, reviewerOutcomeCredential string
+	var repositoryCredential string
 	providerCredential := worker.providerCredential
-	if operationErr == nil {
+	// acquireLaunchCredential fetches a current launch credential for one
+	// phase at a time. Launch spans default-branch resolution, publication
+	// recovery, and Runtime Process launch with unbounded Git I/O between
+	// them, so each phase re-acquires instead of retaining a single snapshot:
+	// a cached token may have only minutes of lifetime left when the Turn
+	// starts. Outcome reconciliation acquires its own operation-scoped
+	// credentials later, so launch credentials are never retained for
+	// finalization.
+	acquireLaunchCredential := func() error {
 		policy, ok := worker.policies.Lookup(execution.Assignment.Role)
 		if !ok {
-			operationErr = errors.New("Agent Turn has no Role policy")
-		} else {
-			switch policy.RepositoryCredentialAuthority {
-			case role.OrchestratorAuthority:
-				repositoryCredential, operationErr = worker.developerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-			case role.ReviewerAuthority:
-				repositoryCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-			default:
-				operationErr = errors.New("Agent Turn has an invalid repository credential authority")
-			}
+			return errors.New("Agent Turn has no Role policy")
+		}
+		var err error
+		switch policy.RepositoryCredentialAuthority {
+		case role.OrchestratorAuthority:
+			repositoryCredential, err = worker.developerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+		case role.ReviewerAuthority:
+			repositoryCredential, err = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+		default:
+			return errors.New("Agent Turn has an invalid repository credential authority")
 		}
 		if repositoryCredential != "" {
 			*secrets = append(*secrets, repositoryCredential)
 		}
-		if operationErr != nil {
-			operationErr = fmt.Errorf("obtain Role repository credential: %w", operationErr)
-		} else if strings.TrimSpace(repositoryCredential) == "" {
-			operationErr = errors.New("Role repository credential is empty")
+		if err != nil {
+			return fmt.Errorf("obtain Role repository credential: %w", err)
 		}
+		if strings.TrimSpace(repositoryCredential) == "" {
+			return errors.New("Role repository credential is empty")
+		}
+		return nil
+	}
+	if operationErr == nil {
+		operationErr = acquireLaunchCredential()
+		// The pre-prompt acquisition below is a validation-only prerequisite
+		// check: it preserves the existing early Reviewer-App availability
+		// gate before launch without keeping the token for later
+		// authorization.
 		if operationErr == nil {
-			if authority, granted := policy.CredentialAuthorityForTool(mcp.ToolSubmitReview); granted && authority == role.ReviewerAuthority {
-				reviewerOutcomeCredential, operationErr = worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
-				if strings.TrimSpace(reviewerOutcomeCredential) == "" && operationErr == nil {
+			policy, ok := worker.policies.Lookup(execution.Assignment.Role)
+			if !ok {
+				operationErr = errors.New("Agent Turn has no Role policy")
+			} else if authority, granted := policy.CredentialAuthorityForTool(mcp.ToolSubmitReview); granted && authority == role.ReviewerAuthority {
+				reviewerValidationCredential, validationErr := worker.reviewerCredentials.RepositoryCredential(workCtx, execution.Repository.Owner, execution.Repository.Name)
+				if validationErr != nil {
+					operationErr = validationErr
+				} else if strings.TrimSpace(reviewerValidationCredential) == "" {
 					operationErr = errors.New("Reviewer repository credential is empty")
-				}
-				if reviewerOutcomeCredential != "" {
-					*secrets = append(*secrets, reviewerOutcomeCredential)
+				} else {
+					*secrets = append(*secrets, reviewerValidationCredential)
 				}
 			}
 		}
@@ -300,6 +321,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 
 	var runtime ExecutionRuntime
 	if operationErr == nil {
+		operationErr = acquireLaunchCredential()
+	}
+	if operationErr == nil {
 		recoveryErr := worker.publicationRecovery.Recover(workCtx, *lease, execution, repositoryURL, repositoryCredential, defaultBranch.Name)
 		if errors.Is(recoveryErr, ErrPublicationConflict) {
 			return worker.finalizePublicationConflict(leaseCtx, *lease)
@@ -307,6 +331,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		if recoveryErr != nil {
 			operationErr = fmt.Errorf("verify in-progress Developer publication: %w", recoveryErr)
 		}
+	}
+	if operationErr == nil {
+		operationErr = acquireLaunchCredential()
 	}
 	if operationErr == nil {
 		launchProviderCredential := append(json.RawMessage(nil), providerCredential...)
@@ -393,7 +420,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			}
 		}
 	}
-	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, reviewerOutcomeCredential, runtime, promptResponse, promptClassification, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, paths, repositoryCredential, runtime, promptResponse, promptClassification, operationErr)
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
@@ -419,7 +446,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, paths workspace.Paths, repositoryCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
@@ -471,9 +498,12 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		return false, combinedErr
 	}
 
+	// The launch-time repository credential is retained only as
+	// diagnostic-only redaction material. Final GitHub observations acquire
+	// current operation-scoped credentials inside the outcome reconciler.
 	reconciliation := OutcomeReconciliation{
 		Lease: lease, Execution: execution, RepositoryCredential: repositoryCredential,
-		ReviewerRepositoryCredential: reviewerOutcomeCredential, Paths: paths,
+		Paths: paths,
 	}
 	var corroborationFailure *TerminalCorroborationFailure
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
@@ -491,7 +521,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 		}
 		reconciliation.PromptError = classification
 		diagnosticSecrets := providerCredentialSecrets(worker.providerCredential)
-		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential, reviewerOutcomeCredential)
+		diagnosticSecrets = append(diagnosticSecrets, repositoryCredential)
 		if errors.Is(operationErr, ErrRuntimeOOMKilled) {
 			reconciliation.PromptDiagnostic = store.RuntimeOOMDiagnostic
 		} else {

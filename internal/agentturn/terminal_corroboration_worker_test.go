@@ -147,11 +147,11 @@ func redirectTestLease() *store.JobLease {
 
 func redirectTestWorker(t *testing.T, database *redirectTestStore, api *redirectTestGitHub) (*TerminalCorroborationWorker, *redirectTestCredentials, *redirectTestWorkspace) {
 	t.Helper()
-	outcomes, err := NewOutcomeReconciler(OutcomeReconcilerConfig{Store: redirectTestOutcomeStore{}, GitHub: api})
+	credentials := &redirectTestCredentials{}
+	outcomes, err := NewOutcomeReconciler(OutcomeReconcilerConfig{Store: redirectTestOutcomeStore{}, GitHub: api, DeveloperCredentials: credentials, ReviewerCredentials: credentials})
 	if err != nil {
 		t.Fatalf("NewOutcomeReconciler() error = %v", err)
 	}
-	credentials := &redirectTestCredentials{}
 	paths := &redirectTestWorkspace{}
 	worker, err := NewTerminalCorroborationWorker(database, outcomes, credentials, credentials, paths, TerminalCorroborationWorkerConfig{
 		ClaimOwner: "redirect-test", Window: time.Hour, PollInterval: time.Second, LeaseDuration: 3 * time.Second,

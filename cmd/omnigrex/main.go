@@ -369,7 +369,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
 		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
-		Sessions: sessions, Network: settings.DockerAgentNetwork,
+		Sessions: sessions, DeveloperCredentials: developerRepositoryCredentials,
+		ReviewerCredentials: reviewerRepositoryCredentials, Network: settings.DockerAgentNetwork,
 		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
 		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
 			Logger:         logger,
@@ -386,7 +387,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api, Logger: logger,
+		Store: database, GitHub: githubServices.api,
+		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
+		Logger:                 logger,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
@@ -399,7 +402,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Launcher: runtimeLauncher, Sessions: sessions,
 		Outcomes:            outcomeReconciler,
 		Workspace:           workspaces,
-		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
+		PublicationRecovery: agentturn.NewPublicationRecoveryWithCredentials(database, workspaces, githubServices.api, developerRepositoryCredentials),
 		Policies:            rolePolicies,
 		Definition:          definition,
 	}, agentturn.ExecutionWorkerConfig{

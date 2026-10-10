@@ -130,6 +130,8 @@ type LauncherConfig struct {
 	Docker                   RuntimeEngineFactory
 	ACP                      RuntimeACPFactory
 	Sessions                 RuntimeSessionPreparer
+	DeveloperCredentials     RepositoryCredentialProvider
+	ReviewerCredentials      RepositoryCredentialProvider
 	Network                  string
 	WorkspaceVolume          string
 	RuntimeStateVolume       string
@@ -172,6 +174,8 @@ type Launcher struct {
 	docker                   RuntimeEngineFactory
 	acp                      RuntimeACPFactory
 	sessions                 RuntimeSessionPreparer
+	developerCredentials     RepositoryCredentialProvider
+	reviewerCredentials      RepositoryCredentialProvider
 	network                  string
 	workspaceVolume          string
 	runtimeStateVolume       string
@@ -256,6 +260,7 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
 		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
+		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
 		network: config.Network, workspaceVolume: config.WorkspaceVolume,
 		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
 		memoryBytes: config.MemoryBytes,
@@ -263,6 +268,21 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
 	}, nil
+}
+
+// provisionCredential selects the launch credential authority for trusted-tool
+// provisioning, mirroring execution-time authority selection. It reports false
+// when no provider is configured, preserving the legacy request-credential
+// path for callers without providers.
+func (launcher *Launcher) provisionCredential(policy role.Policy) (RepositoryCredentialProvider, bool) {
+	switch policy.RepositoryCredentialAuthority {
+	case role.OrchestratorAuthority:
+		return launcher.developerCredentials, !nilInterface(launcher.developerCredentials)
+	case role.ReviewerAuthority:
+		return launcher.reviewerCredentials, !nilInterface(launcher.reviewerCredentials)
+	default:
+		return nil, false
+	}
 }
 
 // Launch starts and attaches one Runtime Process without submitting an ACP prompt.
@@ -363,9 +383,25 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if rolePolicy.TrustedToolsRevision == role.DefaultBranchTrustedTools {
 		miseRevision = request.DefaultBranchSHA
 	}
+	// The checkout above performs unbounded Git I/O; re-acquire a current
+	// credential for provisioning instead of reusing a token that may have
+	// expired during preparation. Callers without configured providers keep
+	// the legacy request credential.
+	miseCredential := request.RepositoryCredential
+	if provider, ok := launcher.provisionCredential(rolePolicy); ok {
+		fresh, err := provider.RepositoryCredential(ctx, execution.Repository.Owner, execution.Repository.Name)
+		if err != nil {
+			return nil, fmt.Errorf("provision trusted repository tools: %w", err)
+		}
+		if strings.TrimSpace(fresh) == "" {
+			return nil, fmt.Errorf("provision trusted repository tools: %w", errors.New("repository credential is empty"))
+		}
+		miseCredential = fresh
+		secrets = append(secrets, fresh)
+	}
 	activation, err := launcher.workspace.ProvisionMise(ctx, workspace.MiseProvision{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
-		Credential: request.RepositoryCredential, Revision: miseRevision, ExecutionEpoch: request.Lease.ExecutionEpoch,
+		Credential: miseCredential, Revision: miseRevision, ExecutionEpoch: request.Lease.ExecutionEpoch,
 		Fence: func(ctx context.Context, operation func(context.Context) error) error {
 			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
 		},
