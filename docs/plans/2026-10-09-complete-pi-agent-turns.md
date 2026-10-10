@@ -41,7 +41,8 @@ The ACP-named surfaces remain only for preparation-stage compatibility and are r
 
 `agent/pi/Dockerfile` defines a non-root candidate environment with Pi 1.0.4, Node 24.14.1, locked npm dependencies, digest-pinned Debian toolchain/base content, checksum-locked mise/ripgrep/fd, Git, and the owned runner resources.
 It retains the integrity-locked Pi distribution for offline resource validation.
-The trusted environment qualification checks the distribution SHA-512, compares installed SDK JavaScript with that distribution, verifies the Node version and mise checksum, and verifies the owned JavaScript files against checksums embedded in the control plane.
+The trusted environment qualification checks the locked package archives' SHA-512, compares each installed package's complete file inventory with those archives, verifies the Node version and mise checksum, and verifies owned JavaScript and canonical npm manifests against checksums embedded in the control plane.
+Package metadata and added executable files are covered, required dependencies cannot disappear, and unqualified dependency shadows or symlink aliases are rejected.
 Docker preparation and native Microsandbox image qualification invoke the same resource contract before repository scripts.
 The production `golden` target excludes the controlled provider entry point; the separate `workflow-fixture` target adds it for qualification.
 
@@ -92,6 +93,27 @@ A manual Standards and Spec review inspected the complete forty-six-file diff ag
 The review strengthened the Workflow gate's native review assertion to count actual submission calls explicitly and pinned the disposable PostgreSQL fixture by digest.
 Both complete Workflow gates and the normal repository check passed again after those final changes.
 The existing Docker integration suite, both preparatory Pi suites, and full native backend conformance evidence apply to the final production implementation; subsequent changes were confined to qualification assertions, the disposable database image pin, and documentation.
+
+### Independent review corrections
+
+A subsequent independent review of `d7af8dd` reported two validated P2 defects: SDK export redirection passing resource qualification, and valid repository Profiles being rejected after JSON snapshot expansion.
+Both were reproduced with permanent failing tests before correction.
+The canonical npm manifests now belong to `agent/pi/`, and the golden image retains integrity-locked archives for every installed runtime dependency.
+A builtin-only offline validator checks package metadata and complete file inventories without importing the packages under qualification or npm's own parser.
+Regressions cover SDK and dependency export redirection, added modules, missing required dependencies, and nested dependency shadows.
+Snapshots now have an encoding-aware bound and share semantic Profile validation with repository parsing instead of reconstructing YAML.
+Round-trip tests preserve escaped instructions near the source-size bound; decoded content remains bounded and Pi's presence-sensitive schema exclusions remain enforced.
+The bootstrap encoder avoids unnecessary HTML escaping so these valid instructions also fit the existing JSONL record budget.
+The two non-blocking Standards findings were addressed by an explicit runtime qualification parameter and a caller-deadline-only prompt policy, replacing the one-year duration sentinel.
+Verification also reproduced an IPv4/IPv6 mismatch in the diagnostic MCP test fixture; that fixture now targets the IPv4 address family its listener actually binds.
+The first correction review confirmed both original P2 findings resolved and found one additional P2: a byte-identical runner symlink could change Node's physical dependency-resolution directory while passing checksums.
+A permanent runner-alias regression reproduced the bypass before the correction.
+Qualification now requires physical, non-symlink resource ancestor directories and regular non-symlink owned files before hashing or executing the offline validator.
+The final independent Standards review reported zero documented breaches or actionable heuristics, and the final independent Spec/correctness review reported zero new or unresolved worthwhile findings.
+The correctness reviewer independently rejected aliases for the runner, validator, package-integrity module, both npm manifests, and each resource ancestor, while unchanged and restored positive controls passed.
+The final public resource gate contains one positive control and seven negative scenarios, and both complete controlled Workflow gates passed with the final path guards.
+The normal repository check, focused race suites, both preparatory Pi backend suites, and experiment image build also passed during this correction milestone.
+An initial legacy Docker integration run failed because Docker Desktop's disk was full; explicitly approved unused build-cache cleanup preserved images, containers, and volumes, and the complete integration gate then passed on the final code.
 
 ## Next milestone
 

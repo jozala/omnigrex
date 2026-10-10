@@ -7,7 +7,7 @@ import (
 
 // QualificationScript is platform policy, not image-provided ancestry metadata.
 // Run it in a bounded, non-networked helper before any repository scripts.
-func QualificationScript(architecture string, runtime ...string) (string, error) {
+func QualificationScript(architecture, runtime string) (string, error) {
 	var opencode, mise string
 	switch architecture {
 	case "amd64":
@@ -19,13 +19,16 @@ func QualificationScript(architecture string, runtime ...string) (string, error)
 	default:
 		return "", fmt.Errorf("unsupported golden-image architecture %q", architecture)
 	}
-	if len(runtime) > 0 && runtime[0] == "pi-rpc" {
+	if runtime == "pi-rpc" {
 		return fmt.Sprintf(`
 test -x /usr/local/bin/omnigrex-environment
 test "$(/usr/local/bin/omnigrex-environment contract-version)" = omnigrex-environment/v1
 printf '%%s  %%s\n' '%s' /usr/local/bin/mise | sha256sum -c -
 test -x /usr/bin/git
 `, mise) + piresources.QualificationScript(), nil
+	}
+	if runtime != "opencode-acp" {
+		return "", fmt.Errorf("unsupported golden-image runtime %q", runtime)
 	}
 	// The release checksum for OpenCode covers its compressed distribution.
 	// The image retains that archive read-only so verification can reconstruct

@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -127,7 +128,11 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 	if configuration.validate() != nil {
 		return nil, ErrConfiguration
 	}
-	content, err := json.Marshal(configuration)
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(configuration)
+	content := buffer.Bytes()
 	if err != nil || len(content) > maxRecordBytes {
 		return nil, ErrConfiguration
 	}
@@ -141,7 +146,7 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 		options.RequirePersistence = true
 	}
 	c := Connect(transport, options).(*connection)
-	job := writeJob{content: append(content, '\n'), done: make(chan error, 1)}
+	job := writeJob{content: content, done: make(chan error, 1)}
 	bounded, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)
 	defer cancel()
 	select {

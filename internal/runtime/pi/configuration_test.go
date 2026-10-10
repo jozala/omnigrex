@@ -126,6 +126,43 @@ func TestBootstrapWriteIsBounded(t *testing.T) {
 	}
 }
 
+func TestBootstrapPreservesLargeEscapedInstructionsWithinRecordBudget(t *testing.T) {
+	configuration, err := pi.ConfigurationDiagnostic(role.Developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration.Instructions = strings.Repeat("<>&", 80000)
+	client, runtime := net.Pipe()
+	defer func() { _ = runtime.Close() }()
+	delivered := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(runtime)
+		scanner.Buffer(make([]byte, 4096), 1<<20)
+		if scanner.Scan() {
+			var received struct {
+				Instructions string `json:"instructions"`
+			}
+			_ = json.Unmarshal(scanner.Bytes(), &received)
+			delivered <- received.Instructions
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	c, err := pi.Start(ctx, client, configuration, pi.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	select {
+	case got := <-delivered:
+		if got != configuration.Instructions {
+			t.Fatal("bootstrap changed instructions")
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
 func TestOwnedRunnerReportsSafeConfigurationFailure(t *testing.T) {
 	client, runtime := net.Pipe()
 	connection := pi.Connect(client, pi.Options{})

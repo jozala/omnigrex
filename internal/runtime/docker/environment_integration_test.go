@@ -50,7 +50,7 @@ USER 10001:10001
 		t.Fatal(err)
 	}
 	// Local image IDs are allowed only by this disposable integration fixture.
-	qualify, err := environment.QualificationScript(fields[1])
+	qualify, err := environment.QualificationScript(fields[1], "opencode-acp")
 	if err != nil {
 		t.Fatal(err)
 	}

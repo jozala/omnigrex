@@ -27,7 +27,7 @@ RUN case "$TARGETARCH" in \
 
 FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c
 WORKDIR /opt/omnigrex/pi
-COPY experiments/pi/package.json experiments/pi/package-lock.json ./
+COPY agent/pi/package.json agent/pi/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY agent/pi/diagnostic/fixture.mjs ./fixture.mjs
 COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs ./

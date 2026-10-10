@@ -53,7 +53,7 @@ func newProbe(t *testing.T) *probe {
 	t.Cleanup(cancel)
 	prefix := "omnigrex-pi-probe-" + strings.ToLower(rand.Text())
 	p := &probe{t: t, ctx: ctx, image: prefix + ":test", network: prefix, server: prefix + "-server", backend: backend, state: prefix + "-state"}
-	p.command(10*time.Minute, nil, "build", "--tag", p.image, ".")
+	p.command(10*time.Minute, nil, "build", "--file", "Dockerfile", "--tag", p.image, "../..")
 	t.Cleanup(func() { p.cleanup("image", "rm", p.image) })
 	version := p.command(time.Minute, nil, "run", "--rm", "--network", "none", "--entrypoint", "node", p.image, "--version")
 	if version != "v24.14.1" {

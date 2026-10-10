@@ -14,7 +14,7 @@ See the [evidence and integration findings](../../docs/experiments/pi.md).
 
 The maintained Pi package has moved from the `@mariozechner` namespace to `@earendil-works`.
 The experiment verifies the installed Node and Pi versions rather than trusting mutable image tags.
-Its build context includes only the Dockerfile, package manifests, and explicitly listed fixtures.
+The Dockerfile uses the repository-root build context and copies only the canonical package manifests from `agent/pi/` and explicitly listed experiment fixtures.
 
 ## Controlled-provider checks
 

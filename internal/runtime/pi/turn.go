@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
@@ -75,7 +74,7 @@ func (adapter TurnAdapter) Prepare(ctx context.Context, request session.TurnPrep
 	coordinator := session.NewRuntimeCoordinator(adapter.Store)
 	result, err := coordinator.Prepare(ctx, session.RuntimePrepareRequest{Lease: request.Lease, Session: request.Session, State: request.State, Connect: func(ctx context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
 		configuration.Session = &identity
-		return Start(ctx, request.Transport, configuration, Options{PromptTimeout: 365 * 24 * time.Hour})
+		return Start(ctx, request.Transport, configuration, Options{CallerDeadlineOnly: true})
 	}})
 	if err != nil {
 		return nil, err

@@ -20,10 +20,13 @@ const queueCapacity = 128
 const maxRequests = 32
 
 type Options struct {
-	EventContext        agentevent.Context
-	ExpectedSessionID   string
-	RequestTimeout      time.Duration
-	PromptTimeout       time.Duration
+	EventContext      agentevent.Context
+	ExpectedSessionID string
+	RequestTimeout    time.Duration
+	PromptTimeout     time.Duration
+	// CallerDeadlineOnly requires a finite caller budget instead of imposing
+	// the standalone protocol probe's adapter timeout.
+	CallerDeadlineOnly  bool
 	CancellationTimeout time.Duration
 	CloseTimeout        time.Duration
 	Selection           *agent.ModelSelection
@@ -166,8 +169,15 @@ func (c *connection) PreparedSessionID() string {
 }
 
 func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Sink) (outcome agent.Outcome, err error) {
-	ctx, cancel := context.WithTimeout(ctx, c.options.PromptTimeout)
-	defer cancel()
+	if c.options.CallerDeadlineOnly {
+		if _, bounded := ctx.Deadline(); !bounded {
+			return agent.Outcome{Status: agent.Rejected}, agent.ErrDeadlineRequired
+		}
+	} else {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.options.PromptTimeout)
+		defer cancel()
+	}
 	if err := ctx.Err(); err != nil {
 		return agent.Outcome{Status: agent.Rejected}, err
 	}

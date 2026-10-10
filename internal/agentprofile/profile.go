@@ -88,6 +88,18 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 	if err != nil {
 		return Profile{}, err
 	}
+	return profileFromConfiguration(path, configuration, instructions, sha256.Sum256(content), policies)
+}
+
+func profileFromConfiguration(path string, configuration frontMatter, instructions []byte, contentHash [sha256.Size]byte, policies role.PolicyCatalog) (Profile, error) {
+	if !validPath(path) {
+		return Profile{}, ErrInvalidProfile
+	}
+	for _, value := range []string{string(configuration.Name), string(configuration.Role), configuration.Runtime, configuration.Model, configuration.Variant, configuration.Thinking, string(instructions)} {
+		if strings.ContainsRune(value, '\ufeff') {
+			return Profile{}, ErrInvalidProfile
+		}
+	}
 	if !validName(configuration.Name) {
 		return Profile{}, fmt.Errorf("%w: name must use safe lowercase syntax", ErrInvalidProfile)
 	}
@@ -110,8 +122,9 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		steps:        configuration.Steps,
 		permissions:  clonePermissions(configuration.Permissions),
 		instructions: string(instructions),
-		contentHash:  sha256.Sum256(content),
+		contentHash:  contentHash,
 	}
+	var err error
 	profile.canonical, err = json.Marshal(struct {
 		Instructions string                      `json:"instructions"`
 		Model        string                      `json:"model"`

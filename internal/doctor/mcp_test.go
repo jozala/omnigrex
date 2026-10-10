@@ -83,7 +83,9 @@ func TestDiagnosticMCPRejectsIncompatibleProtocol(t *testing.T) {
 
 func startTestDiagnosticMCP(t *testing.T) *diagnosticMCPServer {
 	t.Helper()
-	server, err := startDiagnosticMCP("localhost")
+	// The diagnostic listener binds IPv4. Use that same address family so a
+	// localhost IPv6 listener cannot receive this fixture's authenticated calls.
+	server, err := startDiagnosticMCP("127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}

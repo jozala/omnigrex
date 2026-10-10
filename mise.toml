@@ -40,7 +40,7 @@ run = "go test -race ./..."
 
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
-depends = ["agent-images"]
+depends = ["agent-images", "pi-image"]
 run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment"
 
 [tasks.test-compose]

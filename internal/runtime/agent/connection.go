@@ -63,12 +63,13 @@ type Connection interface {
 }
 
 var (
-	ErrProtocol     = errors.New("agent protocol failure")
-	ErrTransport    = errors.New("agent transport lost")
-	ErrRuntime      = errors.New("agent runtime rejected operation")
-	ErrBusy         = errors.New("agent prompt already active")
-	ErrNotReady     = errors.New("agent connection is not prepared")
-	ErrBackpressure = errors.New("agent event consumer exceeded bounded capacity")
-	ErrSession      = errors.New("agent session identity mismatch")
-	ErrCleanup      = errors.New("agent transport cleanup did not complete")
+	ErrProtocol         = errors.New("agent protocol failure")
+	ErrTransport        = errors.New("agent transport lost")
+	ErrRuntime          = errors.New("agent runtime rejected operation")
+	ErrBusy             = errors.New("agent prompt already active")
+	ErrNotReady         = errors.New("agent connection is not prepared")
+	ErrBackpressure     = errors.New("agent event consumer exceeded bounded capacity")
+	ErrSession          = errors.New("agent session identity mismatch")
+	ErrCleanup          = errors.New("agent transport cleanup did not complete")
+	ErrDeadlineRequired = errors.New("agent prompt requires a caller deadline")
 )

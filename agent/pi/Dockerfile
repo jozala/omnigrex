@@ -11,10 +11,10 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/omnigrex-environment ./cmd/omnigrex
 FROM node:24.14.1-bookworm@sha256:80fc934952c8f1b2b4d39907af7211f8a9fff1a4c2cf673fb49099292c251cec AS golden
 ARG TARGETARCH
 WORKDIR /opt/omnigrex/pi
-COPY experiments/pi/package.json experiments/pi/package-lock.json ./
+COPY agent/pi/package.json agent/pi/package-lock.json ./
+COPY agent/pi/package-integrity.mjs agent/pi/retain-packages.mjs ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && \
-    npm pack --loglevel=error --ignore-scripts --pack-destination /opt/omnigrex @earendil-works/pi-coding-agent@1.0.4 >/dev/null && \
-    mv /opt/omnigrex/earendil-works-pi-coding-agent-1.0.4.tgz /opt/omnigrex/pi-runtime.tgz && npm cache clean --force
+    node retain-packages.mjs && npm cache clean --force
 COPY agent/pi/*.mjs ./
 COPY --from=bootstrap /out/omnigrex-environment /usr/local/bin/omnigrex-environment
 RUN case "$TARGETARCH" in \

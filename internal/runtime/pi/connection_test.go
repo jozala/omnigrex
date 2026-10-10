@@ -111,6 +111,20 @@ func settle(runtime net.Conn, reason string) {
 	writeRecord(runtime, map[string]any{"type": "agent_settled"})
 }
 
+func TestCallerDeadlinePolicyRejectsUnboundedPromptAndUsesCallerBudget(t *testing.T) {
+	c, ctx := fixture(t, pi.Options{CallerDeadlineOnly: true, PromptTimeout: time.Millisecond}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		time.Sleep(20 * time.Millisecond)
+		settle(runtime, "stop")
+	})
+	if outcome, err := c.Prompt(context.Background(), "unbounded", nil); !errors.Is(err, agent.ErrDeadlineRequired) || outcome.Status != agent.Rejected || outcome.Admitted {
+		t.Fatalf("unbounded prompt: %+v %v", outcome, err)
+	}
+	if outcome, err := c.Prompt(ctx, "bounded", nil); err != nil || outcome.Status != agent.Completed {
+		t.Fatalf("caller budget was shortened: %+v %v", outcome, err)
+	}
+}
+
 func TestTerminalOutcomesAndEOF(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
