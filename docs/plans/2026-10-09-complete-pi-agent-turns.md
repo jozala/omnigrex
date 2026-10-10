@@ -115,6 +115,17 @@ The final public resource gate contains one positive control and seven negative 
 The normal repository check, focused race suites, both preparatory Pi backend suites, and experiment image build also passed during this correction milestone.
 An initial legacy Docker integration run failed because Docker Desktop's disk was full; explicitly approved unused build-cache cleanup preserved images, containers, and volumes, and the complete integration gate then passed on the final code.
 
+### Approved disk-backed scratch regression
+
+A subsequent human review reproduced an approved `TMPDIR` path conflicting with Pi's immutable Profile default `/tmp` before environment creation.
+The public adapter regression and the controlled Docker Workflow both reproduced that launch failure before correction.
+Pi now treats the Profile's `TMPDIR` value as an unconfigured fallback and preserves an admitted control-plane binding, while other fixed runtime settings remain protected and the immutable Profile binding stays unchanged.
+The complete Workflow fixture now discovers the same `TMPDIR`, `GOTMPDIR`, `GOCACHE`, and `GOPATH` directory/lifecycle requests as this repository's Turn configuration under an explicit operator allowlist.
+Both Developer and Reviewer processes verify exact guest path values and prepared directories through the production bootstrap, and the gate verifies Turn scratch removal while assignment caches remain available.
+The focused race suites, normal repository check, complete Docker integration suite, and both controlled Workflow gates passed after the correction.
+Independent Standards and Spec/correctness reviews both reported zero worthwhile findings and confirmed the P2 resolved.
+The correctness reviewer independently exercised the repository's actual Turn configuration through admission, fenced path preparation, Pi compilation, conflicting mise activation, and cleanup, confirming invalid admission and unsafe values fail while approved bindings and cache lifetimes are preserved.
+
 ## Next milestone
 
 Step 13 expands qualification to the full restart, transport-loss, stale-lease, mutation-ambiguity, and cleanup fault matrix.

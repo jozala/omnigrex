@@ -31,6 +31,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
@@ -51,6 +52,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration := builtinStoreConfig(t)
+	allowedPaths := []string{"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"}
 	database, err := store.Open(ctx, url, secret, configuration)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +134,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	defer func() { _ = server.Close() }()
 	authority := &workflowAuthorityAudit{Gateway: gateway}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: workflowFixtureFactory{Factory: backend.Factory, localImage: localImage}, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition()})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: workflowFixtureFactory{Factory: backend.Factory, localImage: localImage}, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,15 +156,26 @@ func TestPiControlledWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	github.branch = fmt.Sprintf("omnigrex/issue-%d", workflowLocator().IssueNumber)
-	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies)
+	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies, allowedPaths...)
 	preparer := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database)
 	for _, wanted := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
-		if _, err := preparer.Prepare(ctx, agentturn.Request{Lease: claimPreparationJob(t, database, ctx), InstallationCredential: "developer-token", RepositoryOwner: "owner", RepositoryName: "repo"}); err != nil {
+		prepared, err := preparer.Prepare(ctx, agentturn.Request{Lease: claimPreparationJob(t, database, ctx), InstallationCredential: "developer-token", RepositoryOwner: "owner", RepositoryName: "repo"})
+		if err != nil {
 			t.Fatal(err)
 		}
 		processed, err := worker.ProcessNext(ctx)
 		if err != nil || !processed {
 			t.Fatalf("real Pi execution: %t %v", processed, err)
+		}
+		toolRoot := filepath.Join(settings.MiseRoot, "assignment-"+prepared.Commit.Participant.ID, "tool-data")
+		if _, err := os.Lstat(filepath.Join(toolRoot, "turn", prepared.Commit.Turn.ID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Turn scratch was not cleaned: %v", err)
+		}
+		for _, name := range []string{"go-build-cache", "go-modules"} {
+			info, err := os.Stat(filepath.Join(toolRoot, "assignment", name))
+			if err != nil || !info.IsDir() {
+				t.Fatalf("assignment cache lost: %s %v", name, err)
+			}
 		}
 		// Observe the human-facing Workflow state through its durable query surface.
 		pool := openPool(t, url+"&password=qualification-only-password")
@@ -295,15 +308,42 @@ func (p workflowQualificationProfiles) ListRepositoryDirectoryFiles(_ context.Co
 	if directory == ".omnigrex/team" {
 		return []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md"}, nil
 	}
+	if directory == ".omnigrex" {
+		return []string{turnconfig.Path}, nil
+	}
 	return nil, nil
 }
 func (p workflowQualificationProfiles) FetchRepositoryFile(_ context.Context, _, _, _, path, _ string) ([]byte, error) {
+	if path == turnconfig.Path {
+		return []byte(workflowQualificationTurnConfiguration), nil
+	}
 	role := "DEVELOPER"
 	if strings.Contains(path, "reviewer") {
 		role = "REVIEWER"
 	}
 	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v1\nmodel: controlled/workflow\npermissions:\n  read: allow\n  bash: allow\n---\nPerform the controlled Work Item.\n", strings.ToLower(role), role)), nil
 }
+
+// Match this repository's approved Turn scratch and assignment cache requests.
+const workflowQualificationTurnConfiguration = `version: 1
+environment-paths:
+  directories:
+    build-tmp:
+      lifecycle: turn
+    go-build-cache:
+      lifecycle: assignment
+    go-modules:
+      lifecycle: assignment
+  environment:
+    - name: TMPDIR
+      directory: build-tmp
+    - name: GOTMPDIR
+      directory: build-tmp
+    - name: GOCACHE
+      directory: go-build-cache
+    - name: GOPATH
+      directory: go-modules
+`
 
 type workflowQualificationBranch struct{ head string }
 

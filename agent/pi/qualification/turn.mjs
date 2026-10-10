@@ -1,6 +1,7 @@
 // Qualification only: replace the HTTP model catalog, retaining production
 // bootstrap, durable preparation, resources, RPC, permissions and MCP bridge.
 import http from 'node:http';
+import { stat } from 'node:fs/promises';
 import { readBootstrap, run } from '../runner.mjs';
 import { openDurableSession } from '../session-state.mjs';
 
@@ -16,6 +17,11 @@ try {
     const userIndex = data.messages.findLastIndex(m => m.role === 'user');
     const envelope = JSON.parse(text(data.messages[userIndex].content));
     if (!envelope.agent_turn_id || !envelope.agent_session_id) throw new Error('missing production envelope');
+    const tools = '/home/opencode/.local/share/omnigrex-tool-data';
+    const expectedPaths = { TMPDIR: `${tools}/turn/${envelope.agent_turn_id}/build-tmp`, GOTMPDIR: `${tools}/turn/${envelope.agent_turn_id}/build-tmp`, GOCACHE: `${tools}/assignment/go-build-cache`, GOPATH: `${tools}/assignment/go-modules` };
+    for (const [name, path] of Object.entries(expectedPaths)) {
+      if (process.env[name] !== path || !(await stat(path)).isDirectory()) throw new Error('admitted disk-backed path was not preserved');
+    }
     const role = envelope.triggering_event.role;
     const results = data.messages.slice(userIndex + 1).filter(m => m.role === 'tool');
     const step = results.length;

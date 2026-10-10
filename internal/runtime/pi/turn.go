@@ -26,6 +26,13 @@ func (TurnAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID
 	}
 	values := map[string]string{}
 	for _, entry := range c.Environment {
+		// TMPDIR is the unconfigured fallback. Approved control-plane path
+		// bindings take precedence while all other fixed values remain protected.
+		if entry.Name == "TMPDIR" {
+			if _, admitted := tools[entry.Name]; admitted {
+				continue
+			}
+		}
 		values[entry.Name] = entry.Value
 	}
 	for name, value := range tools {
