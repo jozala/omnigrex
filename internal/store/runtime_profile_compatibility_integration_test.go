@@ -64,6 +64,43 @@ func TestRuntimeProfileCompatibilityResultRecordIsIdempotentAndConflictDetecting
 	}
 }
 
+func TestPiCompatibilityResultsAreBackendScopedAndImmutable(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database, ctx := databases[0], t.Context()
+	platform := runtimeprofile.Platform{OS: "linux", Arch: "amd64"}
+	source, err := runtimeprofile.NewPiV1(compatibilityImage("a"), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := runtimeprofile.NewPiV1(compatibilityImage("b"), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runtimeprofile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: runtimeprofile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: runtimeprofile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z", Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	other := result
+	other.BackendFamily = "microsandbox"
+	file := runtimeprofile.CompatibilityResultsFile{SchemaVersion: runtimeprofile.PiCompatibilityResultsSchemaVersion, Results: []runtimeprofile.CompatibilityResult{result, other}}
+	for range 2 {
+		if err := database.ImportRuntimeProfileCompatibilityResults(ctx, file); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflict := result
+	conflict.QualifiedAt = "2026-10-10T12:00:01Z"
+	if err := database.RecordRuntimeProfileCompatibilityResult(ctx, conflict); !errors.Is(err, store.ErrRuntimeProfileCompatibilityResultConflict) {
+		t.Fatalf("changed qualification overwritten: %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pi_runtime_profile_compatibility_results`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("backend qualification count: %d %v", count, err)
+	}
+	for _, statement := range []string{`UPDATE pi_runtime_profile_compatibility_results SET result = '{}'`, `DELETE FROM pi_runtime_profile_compatibility_results`} {
+		if _, err := pool.Exec(ctx, statement); err == nil {
+			t.Fatal("immutable Pi evidence mutation succeeded")
+		}
+	}
+}
+
 func TestRuntimeProfileCompatibilityQualificationRequiresEveryExactAxis(t *testing.T) {
 	mutations := []struct {
 		name   string
@@ -383,7 +420,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
        (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'runtime_profile_compatibility_results')`).Scan(&version, &tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 34 || tables != 1 {
+	if version != 35 || tables != 1 {
 		t.Fatalf("migrated current schema = version %d, compatibility tables %d", version, tables)
 	}
 }

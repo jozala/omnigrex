@@ -114,6 +114,7 @@ func (backend *Backend) New(request execution.Request, ledger execution.Ledger) 
 	request.Command = slices.Clone(request.Command)
 	request.Environment = slices.Clone(request.Environment)
 	request.Attachments = slices.Clone(request.Attachments)
+	request.GoldenResourceContract = slices.Clone(request.GoldenResourceContract)
 	request.TemporaryDirectories = slices.Clone(request.TemporaryDirectories)
 	request.Requirements = slices.Clone(request.Requirements)
 	bound, err := backend.inputs.bind(request)
@@ -404,6 +405,14 @@ func (engine *engine) Create(ctx context.Context, request execution.Request, std
 				qualified, err := profile.NewBuiltinV1(request.Key.RuntimeProfileName, request.Image, profile.Platform{OS: request.Platform.OS, Arch: request.Platform.Architecture})
 				if err != nil {
 					return err
+				}
+				if len(request.GoldenResourceContract) > 0 {
+					contract := qualified.Contract()
+					contract.GoldenResourceContract = request.GoldenResourceContract
+					qualified, err = profile.New(contract)
+					if err != nil {
+						return err
+					}
 				}
 				if err := engine.backend.CheckRepositoryEnvironment(ctx, qualified); err != nil {
 					return err

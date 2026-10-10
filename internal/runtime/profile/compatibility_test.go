@@ -99,6 +99,60 @@ func TestDecodeCompatibilityResultsFileIsStrict(t *testing.T) {
 	}
 }
 
+func TestPiCompatibilityResultsBindExactRuntimePlatformAndBackend(t *testing.T) {
+	platform := profile.Platform{OS: "linux", Arch: "amd64"}
+	source, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := profile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: profile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: profile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z", Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	file := profile.CompatibilityResultsFile{SchemaVersion: profile.PiCompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
+	encoded, _ := json.Marshal(file)
+	if _, err := profile.DecodeCompatibilityResultsFile(bytes.NewReader(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.ValidateDeployment("docker", 1, target); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		family  string
+		version int
+		target  profile.Profile
+	}{{"microsandbox", 1, target}, {"docker", 2, target}, {"docker", 1, source}} {
+		if err := file.ValidateDeployment(tc.family, tc.version, tc.target); err == nil {
+			t.Fatal("unqualified deployment accepted")
+		}
+	}
+	for _, mutate := range []func(*profile.CompatibilityResult){
+		func(r *profile.CompatibilityResult) { r.StateContractVersion = profile.StateContractVersion },
+		func(r *profile.CompatibilityResult) { r.Source.Name = "opencode-acp" },
+		func(r *profile.CompatibilityResult) { r.BackendFamily = "" },
+		func(r *profile.CompatibilityResult) { r.BackendContractVersion = 2 },
+		func(r *profile.CompatibilityResult) { r.QualificationSuite = profile.CompatibilityQualificationSuite },
+	} {
+		bad := result
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Fatal("unsupported Pi state qualification accepted")
+		}
+	}
+	other := result
+	other.BackendFamily = "microsandbox"
+	a, _ := result.QualificationKey()
+	b, _ := other.QualificationKey()
+	if a == b {
+		t.Fatal("backend qualifications share identity")
+	}
+	file.SchemaVersion = profile.CompatibilityResultsSchemaVersion
+	if err := file.Validate(); err == nil {
+		t.Fatal("legacy schema accepted Pi qualification")
+	}
+}
+
 func compatibilityResult(t *testing.T) profile.CompatibilityResult {
 	t.Helper()
 	source, err := profile.NewOpenCodeV1(

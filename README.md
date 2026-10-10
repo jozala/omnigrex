@@ -30,6 +30,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Durable Pi Agent Sessions and History Replay](./docs/plans/2026-10-09-durable-pi-sessions.md)
 - [Complete Pi Agent Turns and both-backend Workflow qualification](./docs/plans/2026-10-09-complete-pi-agent-turns.md)
 - [Pi failure recovery and boundary independence](./docs/plans/2026-10-10-pi-failure-recovery.md)
+- [Pi upgrades and state recovery](./docs/plans/2026-10-10-pi-upgrades-and-state-recovery.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 

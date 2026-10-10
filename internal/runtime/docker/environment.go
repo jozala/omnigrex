@@ -27,7 +27,7 @@ func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) er
 	if err := (ExecutionFactory{}).CheckRequirements(requirements); err != nil {
 		return err
 	}
-	script, err := environment.QualificationScript(contract.Platform.Arch, contract.Name)
+	script, err := environment.QualificationScript(contract.Platform.Arch, contract.Name, contract.GoldenResourceContract)
 	if err != nil {
 		return err
 	}

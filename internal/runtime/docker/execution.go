@@ -197,7 +197,7 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	}
 	// Keep setup termination evidence separate from the main create. A known
 	// setup failure must not leave a fictitious unresolved main creation.
-	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key, request.GoldenResources, request.BootstrapImage); err != nil {
+	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key, request.GoldenResources, request.BootstrapImage, request.GoldenResourceContract); err != nil {
 		return nil, engine.recordCreationFailure(ctx, err)
 	}
 	if err := engine.ledger.BeginExecutionPhase(ctx, engine.key, execution.Main); err != nil {
@@ -214,13 +214,13 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	return wrapped, err
 }
 
-func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, bootstrapImage string) error {
+func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, bootstrapImage string, resources json.RawMessage) error {
 	options, err := buildSubpathCreateOptions(spec)
 	if err != nil || options.Config == nil {
 		return err
 	}
 	if golden || bootstrapImage != "" {
-		script, err := environment.QualificationScript(spec.Platform.Architecture, key.RuntimeProfileName)
+		script, err := environment.QualificationScript(spec.Platform.Architecture, key.RuntimeProfileName, resources)
 		if err != nil {
 			return noExecutionEffectsError{cause: err}
 		}

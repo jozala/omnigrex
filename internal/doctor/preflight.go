@@ -216,7 +216,15 @@ func (state *productionState) checkCompatibilityArtifact(context.Context) error 
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	return validateCompatibilityFile(state.settings.RuntimeProfileCompatibilityResultsFile, state.runtimeProfile)
+	targets := []runtimeprofile.Profile{state.runtimeProfile}
+	if state.settings.PiRPCV1Image != "" {
+		candidate, err := runtimeprofile.NewPiV1(state.settings.PiRPCV1Image, state.settings.PiRPCV1Platform)
+		if err != nil {
+			return err
+		}
+		targets = append(targets, candidate)
+	}
+	return validateCompatibilityFile(state.settings.RuntimeProfileCompatibilityResultsFile, composition.StateBinding(state.settings).Family, targets...)
 }
 
 func (state *productionState) checkPendingRuntimeCompatibility(ctx context.Context) error {
@@ -504,7 +512,7 @@ func validateJSONObjectFile(path string) error {
 	return nil
 }
 
-func validateCompatibilityFile(path string, target runtimeprofile.Profile) error {
+func validateCompatibilityFile(path, backend string, targets ...runtimeprofile.Profile) error {
 	if path == "" {
 		return nil
 	}
@@ -517,7 +525,7 @@ func validateCompatibilityFile(path string, target runtimeprofile.Profile) error
 	if err != nil {
 		return err
 	}
-	return results.ValidateTarget(target)
+	return results.ValidateDeployment(backend, 1, targets...)
 }
 
 func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.Role, profile agentprofile.Profile, operator agentinstructions.Operator, definition workflow.Definition) error {

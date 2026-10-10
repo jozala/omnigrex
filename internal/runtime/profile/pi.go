@@ -3,6 +3,7 @@ package profile
 import (
 	"bytes"
 	"encoding/json"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 )
 
 func NewPiV1(image string, platform Platform) (Profile, error) {
@@ -25,7 +26,7 @@ func piContract(image string, platform Platform) Contract {
 		Environment:  []EnvironmentVariable{{Name: "HOME", Value: "/tmp"}, {Name: "PATH", Value: "/usr/local/bin:/usr/bin:/bin"}, {Name: "PI_CODING_AGENT_DIR", Value: "/run/pi-agent"}, {Name: "PI_OFFLINE", Value: "1"}, {Name: "PI_TELEMETRY", Value: "0"}, {Name: "PI_SKIP_VERSION_CHECK", Value: "1"}, {Name: "TMPDIR", Value: "/tmp"}},
 		Mounts:       []Mount{{Name: "workspace", Path: "/workspace"}, {Name: "state", Path: "/state"}, {Name: "mise", Path: "/home/opencode/.local/share/mise"}, {Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"}},
 		Tmpfs:        []Tmpfs{{Path: "/tmp", SizeBytes: 64 << 20, Executable: true}, {Path: "/run/pi-agent", SizeBytes: 16 << 20}},
-		Capabilities: []string{"exact-session", "history-replay", "checked-configuration", "authenticated-mcp"}, RepositoryEnvironment: &RepositoryEnvironment{Version: 1}}
+		Capabilities: []string{"exact-session", "history-replay", "checked-configuration", "authenticated-mcp"}, RepositoryEnvironment: &RepositoryEnvironment{Version: 1}, GoldenResourceContract: piresources.CurrentContract(platform.Arch)}
 }
 
 func validatePi(contract Contract) error {
@@ -34,6 +35,12 @@ func validatePi(contract Contract) error {
 	}
 	expected := piContract(contract.Image, contract.Platform)
 	expected.RepositoryEnvironment = contract.RepositoryEnvironment
+	if len(contract.GoldenResourceContract) > 0 {
+		if _, err := piresources.NormalizeContract(contract.GoldenResourceContract); err != nil {
+			return invalid("Pi golden resource contract is invalid")
+		}
+	}
+	expected.GoldenResourceContract = contract.GoldenResourceContract
 	actual, _ := json.Marshal(normalizeContract(contract))
 	want, _ := json.Marshal(normalizeContract(expected))
 	if !bytes.Equal(actual, want) {

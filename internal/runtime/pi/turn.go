@@ -49,7 +49,7 @@ func (TurnAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	request := execution.Request{Key: key, WorkflowID: workflowID, Image: c.Image, Platform: execution.Platform{OS: c.Platform.OS, Architecture: c.Platform.Arch}, User: strconv.Itoa(int(c.User.UID)) + ":" + strconv.Itoa(int(c.User.GID)), WorkingDir: c.Workspace, Command: c.Command, MemoryBytes: memory, PIDsLimit: c.PIDsLimit}
+	request := execution.Request{Key: key, WorkflowID: workflowID, Image: c.Image, Platform: execution.Platform{OS: c.Platform.OS, Architecture: c.Platform.Arch}, User: strconv.Itoa(int(c.User.UID)) + ":" + strconv.Itoa(int(c.User.GID)), WorkingDir: c.Workspace, Command: c.Command, MemoryBytes: memory, PIDsLimit: c.PIDsLimit, GoldenResourceContract: c.GoldenResourceContract}
 	for _, name := range names {
 		request.Environment = append(request.Environment, name+"="+values[name])
 	}

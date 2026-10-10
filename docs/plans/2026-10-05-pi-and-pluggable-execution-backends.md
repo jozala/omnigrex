@@ -33,6 +33,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 11 | Reserved exact Pi identity, fenced durable preparation, fresh-environment continuation, and bounded append-order History Replay | [Durable Pi Session implementation and evidence](2026-10-09-durable-pi-sessions.md) |
 | 12 | Candidate Pi Runtime Profile, common complete Agent Turns, and controlled Developer-to-Reviewer Workflows on both backends | [Complete Pi Agent Turn implementation and evidence](2026-10-09-complete-pi-agent-turns.md) |
 | 13 | Shared eleven-scenario Pi recovery qualification and cross-target production dependency enforcement | [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md) |
+| 14 | Backend-scoped Pi qualification artifacts, isolated source-to-candidate continuation/replay, and protected-state recovery | [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -518,6 +519,8 @@ A prior execution cannot overlap a replacement that assumes exclusive access.
 External mutations remain reconciled rather than blindly repeated.
 
 ### Step 14: Qualify Pi upgrades and state recovery
+
+**Deliverable:** [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md), including backend-scoped exact qualification artifacts, copy-based upgrade tests, portable Session archives, and retained-binding protection.
 
 **Goal:** Preserve retained Agent Sessions after the initial clean cutover.
 

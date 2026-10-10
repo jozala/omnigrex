@@ -219,7 +219,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 	if err := os.WriteFile(malformed, []byte(`{"schema_version":"wrong","results":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, malformed, target); err == nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, malformed, "docker", target); err == nil {
 		t.Fatal("malformed compatibility result startup import error = nil")
 	}
 	if importer.calls != 0 {
@@ -240,7 +240,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 	if err := os.WriteFile(mismatched, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, mismatched, target); err == nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, mismatched, "docker", target); err == nil {
 		t.Fatal("mismatched compatibility result startup import error = nil")
 	}
 	if importer.calls != 0 {
@@ -251,7 +251,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional(t *testing.T) {
 	target := mainTestRuntimeProfile(t, "b")
 	importer := &compatibilityImporterFake{}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, "", target); err != nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, "", "docker", target); err != nil {
 		t.Fatalf("optional compatibility result import error = %v", err)
 	}
 	if importer.calls != 0 {
@@ -271,7 +271,7 @@ func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, path, target); err != nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, path, "docker", target); err != nil {
 		t.Fatalf("exact compatibility result import error = %v", err)
 	}
 	if importer.calls != 1 || len(importer.file.Results) != 1 || importer.file.Results[0] != result {
@@ -285,6 +285,45 @@ func mainTestCompatibilityResult(source, target runtimeprofile.Binding, platform
 		StateContractVersion: runtimeprofile.StateContractVersion, WorkspacePath: runtimeprofile.StableWorkspacePath,
 		QualificationSuite: runtimeprofile.CompatibilityQualificationSuite, QualificationVersion: runtimeprofile.CompatibilityQualificationVersion,
 		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+	}
+}
+
+func TestImportPiCompatibilityResultsRequiresConfiguredTargetAndBackend(t *testing.T) {
+	platform := runtimeprofile.Platform{OS: "linux", Arch: "amd64"}
+	source, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runtimeprofile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: runtimeprofile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: runtimeprofile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z", Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	encoded, err := json.Marshal(runtimeprofile.CompatibilityResultsFile{SchemaVersion: runtimeprofile.PiCompatibilityResultsSchemaVersion, Results: []runtimeprofile.CompatibilityResult{result}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "compatibility.json")
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	importer := &compatibilityImporterFake{}
+	for _, tc := range []struct {
+		backend string
+		target  runtimeprofile.Profile
+	}{{"microsandbox", target}, {"docker", source}} {
+		if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, tc.backend, tc.target); err == nil {
+			t.Fatal("unqualified Pi configuration accepted")
+		}
+	}
+	if importer.calls != 0 {
+		t.Fatal("mismatched Pi evidence imported")
+	}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, "docker", target); err != nil {
+		t.Fatal(err)
+	}
+	if importer.calls != 1 {
+		t.Fatal("Pi evidence was not imported")
 	}
 }
 

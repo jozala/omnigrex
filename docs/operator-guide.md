@@ -193,7 +193,7 @@ Explicit repository Profiles use `runtime: pi-rpc/v1`, an exact `provider/model`
 The candidate credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
 Follow the existing secret placement and recovery procedures in this guide; keep provider keys and deployment metadata out of source control and retained-state backups.
 Backend selection uses the existing `OMNIGREX_EXECUTION_BACKEND` setting and the applicable backend prerequisites.
-Final Pi-selected doctor, published releases, upgrade qualification, and operational cutover remain later milestones.
+Final Pi-selected doctor, published releases, and operational cutover remain later milestones.
 
 Run the controlled complete Workflow gates without deployment secrets or external GitHub mutations:
 
@@ -218,6 +218,65 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-rec
 
 Use the same approved Linux/KVM `DOCKER_HOST` connection for the native gate.
 The [recovery evidence](./plans/2026-10-10-pi-failure-recovery.md) records the fault scenarios, conservative uncertainty handling, and dependency enforcement.
+
+## Pi upgrade and state recovery qualification
+
+Step 14 adds exact Pi-to-Pi qualification before the clean cutover.
+Read the [implementation evidence](./plans/2026-10-10-pi-upgrades-and-state-recovery.md) and [qualification decision](./decisions/0017-bind-pi-qualification-to-backend-contracts.md).
+Retained Participants continue using their original image and immutable contract; qualification tests isolated Session copies.
+
+Run the reproducible Pi 1.0.3-to-1.0.4 fixture gates:
+
+```sh
+mise run test-pi-upgrade
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-upgrade
+```
+
+Use the approved `DOCKER_HOST` connection for Linux/KVM qualification.
+The gates use fixture credentials and controlled model/MCP servers, create private storage volumes, and collect their own disposable environments.
+Their synthetic image aliases are executable test evidence and cannot emit deployment artifacts.
+
+For release qualification, provision both actual exact registry images on the qualification Docker host and select an absent absolute output path:
+
+```sh
+OMNIGREX_PI_UPGRADE_SOURCE_IMAGE='REGISTRY/PI@sha256:SOURCE_DIGEST' \
+OMNIGREX_PI_UPGRADE_TARGET_IMAGE='REGISTRY/PI@sha256:CANDIDATE_DIGEST' \
+OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.3 \
+OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.0.4 \
+OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE='/private/absolute/pi-compatibility.json' \
+mise run test-pi-upgrade
+```
+
+Use the actual package versions and select `test-pi-microsandbox-upgrade` with its KVM prerequisites for native qualification.
+The candidate must satisfy the deployment's owned Pi v1 resource contract; a different resource/Node contract needs an explicit implementation and qualification change.
+For a historical source whose bundle differs from the included Pi 1.0.3 fixture, set `OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE` to its trusted canonical Runtime Profile contract from the source release or recovery set.
+That definition must bind the supplied source image/platform and include its approved golden-resource inventory.
+Source, candidate, and restored-source launches undergo production resource validation against their respective immutable inventories before prompting.
+The test injects only its controlled-provider fixture over the execution request, so the artifact identifies the actual source and candidate images rather than fixture-overlay images.
+It does not pull images automatically or use real provider credentials.
+Artifact publication requires a successful complete test and refuses to overwrite an existing file.
+The source-checkout gate checks Docker copy completion, validates the staged compatibility JSON or checksummed Session archive, and publishes a mode-0600 file atomically on the destination filesystem.
+Failed transfers or validation do not leave a partial final output path.
+
+Transfer the private artifact and configure `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` through the existing [upgrade procedure](#runtime-profile-image-change), together with the matching candidate Pi digest/platform.
+Startup and doctor validate every result against a configured exact Runtime Profile and the selected backend family/contract version before accepting it.
+Keep the full canonical Runtime Profile definitions in the coordinated PostgreSQL recovery set; they preserve historical Node, mise, and owned-file checks across deployment upgrades.
+Version-2 Pi results and version-1 OpenCode results use separate immutable ledger tables during preparation.
+Qualification direction is significant and does not establish rollback compatibility.
+Fresh Participants have independent Session state and retain the image-selection policy described in [Repository Environments](#repository-environments).
+
+### Compatible-host Pi restore drills
+
+Use the coordinated [backup](#backup) and [restore](#restore) procedures for a deployment recovery set.
+The [supplemental Session export](#supplemental-session-exports) procedure also supports Pi's `pi-session/v3` state, through the selected backend and its offline writer barrier.
+Restore the matching ledger, installation namespace, and exact source images on the replacement host before restoring protected Participant archives.
+Keep the original host fenced off and preserve Microsandbox's protected journal as described in [Microsandbox execution backend](#microsandbox-execution-backend).
+
+For a fixture-only two-host drill, set `OMNIGREX_PI_UPGRADE_EXPORT_ARCHIVE` to an absent private client-side file while running an upgrade gate on the source host.
+Transfer the exact fixture images with Docker image save/load to the compatible replacement host.
+Run the same gate there with `OMNIGREX_PI_UPGRADE_USE_CACHED_FIXTURES=1` and `OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE` pointing to the exported archive.
+The replacement must support the archive's guest platform and the same backend contract; a platform change, foreign Participant, changed source image/contract, namespace remapping, and cross-backend restore are rejected.
+Fixture export/import does not substitute for the production PostgreSQL and protected Workspace Capture recovery set.
 
 ## Tracing
 
@@ -1039,7 +1098,7 @@ docker compose up -d --wait orchestrator
 
 ### Supplemental Session Exports
 
-Use `omnigrex state export --participant UUID` for a checksummed, ownership-bound archive of one Agent Participant's retained OpenCode Session data.
+Use `omnigrex state export --participant UUID` for a checksummed, ownership-bound archive of one Agent Participant's retained Session data, including preparatory Pi Participants.
 Use the exact Participant UUID from the operational ledger, not a Role, Agent Profile name, or ACP Session ID.
 This export is supplemental: it does not replace the coordinated recovery set above because it excludes PostgreSQL and protected Workspace Captures.
 Stop the orchestrator and confirm managed Runtime Processes are stopped as described above before running it.

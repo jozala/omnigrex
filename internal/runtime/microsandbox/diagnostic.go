@@ -57,7 +57,7 @@ func (backend *Backend) diagnostic(ctx context.Context, runtime profile.Profile,
 		return process, errors.Join(execution.ErrUnknownEffect, err)
 	}
 	process.meta = meta
-	qualification, err := environment.QualificationScript("amd64", contract.Name)
+	qualification, err := environment.QualificationScript("amd64", contract.Name, contract.GoldenResourceContract)
 	if err != nil {
 		return process, err
 	}

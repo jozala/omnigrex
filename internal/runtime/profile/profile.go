@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"path"
 	"slices"
 	"sort"
@@ -54,19 +55,20 @@ type Tmpfs struct {
 
 // Contract is the complete versioned Runtime Profile content.
 type Contract struct {
-	Name                  string                 `json:"name"`
-	Version               string                 `json:"version"`
-	Image                 string                 `json:"image"`
-	Platform              Platform               `json:"platform"`
-	User                  User                   `json:"user"`
-	Command               []string               `json:"command"`
-	Environment           []EnvironmentVariable  `json:"environment"`
-	Mounts                []Mount                `json:"mounts"`
-	Capabilities          []string               `json:"capabilities"`
-	Tmpfs                 []Tmpfs                `json:"tmpfs"`
-	Workspace             string                 `json:"workspace"`
-	PIDsLimit             int64                  `json:"pids_limit"`
-	RepositoryEnvironment *RepositoryEnvironment `json:"repository_environment,omitempty"`
+	Name                   string                 `json:"name"`
+	Version                string                 `json:"version"`
+	Image                  string                 `json:"image"`
+	Platform               Platform               `json:"platform"`
+	User                   User                   `json:"user"`
+	Command                []string               `json:"command"`
+	Environment            []EnvironmentVariable  `json:"environment"`
+	Mounts                 []Mount                `json:"mounts"`
+	Capabilities           []string               `json:"capabilities"`
+	Tmpfs                  []Tmpfs                `json:"tmpfs"`
+	Workspace              string                 `json:"workspace"`
+	PIDsLimit              int64                  `json:"pids_limit"`
+	RepositoryEnvironment  *RepositoryEnvironment `json:"repository_environment,omitempty"`
+	GoldenResourceContract json.RawMessage        `json:"golden_resource_contract,omitempty"`
 }
 
 // RepositoryEnvironment binds the golden resource contract and backend guarantees.
@@ -77,6 +79,11 @@ type RepositoryEnvironment struct {
 
 func (profile Profile) WithEnvironment(image string, platform Platform, requirements []string) (Profile, error) {
 	contract := profile.Contract()
+	if contract.Name == "pi-rpc" && platform != contract.Platform {
+		// This selects a fresh Participant, not a retained binding. Capture the
+		// deployment's approved bundle for the newly selected guest platform.
+		contract.GoldenResourceContract = piresources.CurrentContract(platform.Arch)
+	}
 	contract.Image, contract.Platform = image, platform
 	contract.RepositoryEnvironment = &RepositoryEnvironment{Version: 1, Requirements: slices.Clone(requirements)}
 	return New(contract)
@@ -175,6 +182,9 @@ func New(contract Contract) (Profile, error) {
 
 func normalizeContract(contract Contract) Contract {
 	contract = cloneContract(contract)
+	if len(contract.GoldenResourceContract) > 0 {
+		contract.GoldenResourceContract, _ = piresources.NormalizeContract(contract.GoldenResourceContract)
+	}
 	sort.Slice(contract.Environment, func(i, j int) bool { return contract.Environment[i].Name < contract.Environment[j].Name })
 	sort.Slice(contract.Mounts, func(i, j int) bool { return contract.Mounts[i].Name < contract.Mounts[j].Name })
 	slices.Sort(contract.Capabilities)
@@ -339,6 +349,7 @@ func cloneProfile(profile Profile) Profile {
 }
 
 func cloneContract(contract Contract) Contract {
+	contract.GoldenResourceContract = slices.Clone(contract.GoldenResourceContract)
 	contract.Command = slices.Clone(contract.Command)
 	contract.Environment = slices.Clone(contract.Environment)
 	contract.Mounts = slices.Clone(contract.Mounts)
@@ -370,6 +381,9 @@ func validate(contract Contract) error {
 	}
 	if contract.Name != "opencode-acp" || contract.Version != "v1" {
 		return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)
+	}
+	if len(contract.GoldenResourceContract) > 0 {
+		return invalid("OpenCode cannot use a Pi resource contract")
 	}
 	if !IsExactRegistryImage(contract.Image) {
 		return invalid("image must be a registry name with an exact sha256 digest")

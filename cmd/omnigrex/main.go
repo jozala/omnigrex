@@ -196,9 +196,6 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, openCodeV1); err != nil {
-		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
-	}
 	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
@@ -210,6 +207,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			return fmt.Errorf("configure candidate Pi Runtime Profile: %w", err)
 		}
 		profiles = append(profiles, candidate)
+	}
+	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, composition.StateBinding(settings).Family, profiles...); err != nil {
+		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
 	}
 	registry, err := runtimeprofile.NewRegistry(profiles...)
 	if err != nil {
@@ -752,7 +752,7 @@ type runtimeProfileCompatibilityImporter interface {
 	ImportRuntimeProfileCompatibilityResults(context.Context, runtimeprofile.CompatibilityResultsFile) error
 }
 
-func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runtimeProfileCompatibilityImporter, filePath string, target runtimeprofile.Profile) error {
+func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runtimeProfileCompatibilityImporter, filePath, backend string, targets ...runtimeprofile.Profile) error {
 	if filePath == "" {
 		return nil
 	}
@@ -765,7 +765,7 @@ func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runt
 	if err != nil {
 		return err
 	}
-	if err := results.ValidateTarget(target); err != nil {
+	if err := results.ValidateDeployment(backend, 1, targets...); err != nil {
 		return err
 	}
 	if err := importer.ImportRuntimeProfileCompatibilityResults(ctx, results); err != nil {

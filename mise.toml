@@ -105,6 +105,14 @@ run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-workflow.sh"
 description = "Qualify the shared Pi failure/recovery matrix on Docker"
 run = "OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"
 
+[tasks.test-pi-upgrade]
+description = "Qualify isolated Pi source-to-candidate continuation, replay, and portable state restore on Docker"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh"
+
+[tasks.test-pi-microsandbox-upgrade]
+description = "Qualify the same Pi upgrade and state recovery contract on Linux/KVM"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-upgrade.sh"
+
 [tasks.test-pi-microsandbox-recovery]
 description = "Qualify the same Pi failure/recovery matrix on Linux/KVM"
 run = "OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"

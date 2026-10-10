@@ -249,7 +249,7 @@ func TestExecutionRecoversLostSetupDeletionAcknowledgement(t *testing.T) {
 	spec.Labels[executionDigestLabel] = digest
 	spec.Volumes = []VolumeMount{{Name: "state", Subpath: "assignment-" + key.AssignmentID + "/runtime-state", Target: "/state"}}
 	api := &lostSetupDeletionAPI{runtimeAPIFake: newRuntimeAPIFake()}
-	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key, false, "")
+	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key, false, "", nil)
 	if failure == nil || api.removeCalls != 1 {
 		t.Fatalf("lost setup deletion = %v, removes %d", failure, api.removeCalls)
 	}

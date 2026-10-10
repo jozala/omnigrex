@@ -3,6 +3,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"time"
@@ -51,6 +52,9 @@ type Request struct {
 	PIDsLimit            int64
 	Requirements         []Requirement
 	GoldenResources      bool
+	// GoldenResourceContract is the immutable, owner-validated resource inventory,
+	// not an executable script or current-deployment resource override.
+	GoldenResourceContract json.RawMessage
 	// BootstrapImage supplies only the platform bootstrap for a retained image
 	// predating that resource. It never replaces the environment's bound Image.
 	BootstrapImage string

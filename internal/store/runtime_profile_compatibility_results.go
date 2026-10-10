@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -66,6 +67,9 @@ func (store *Store) ImportRuntimeProfileCompatibilityResults(ctx context.Context
 }
 
 func recordRuntimeProfileCompatibilityResult(ctx context.Context, tx pgx.Tx, result runtimeprofile.CompatibilityResult) error {
+	if result.Source.Name == "pi-rpc" {
+		return recordPiCompatibilityResult(ctx, tx, result)
+	}
 	digest, err := result.ContentSHA256()
 	if err != nil {
 		return err
@@ -110,6 +114,34 @@ WHERE source_runtime_profile_name = $1 AND source_runtime_profile_version = $2
 		return fmt.Errorf("read existing Runtime Profile compatibility result: %w", err)
 	}
 	if !qualifiedAt.Equal(result.QualifiedTime()) || !bytes.Equal(recordedDigest, digest[:]) {
+		return ErrRuntimeProfileCompatibilityResultConflict
+	}
+	return nil
+}
+
+func recordPiCompatibilityResult(ctx context.Context, tx pgx.Tx, result runtimeprofile.CompatibilityResult) error {
+	key, err := result.QualificationKey()
+	if err != nil {
+		return err
+	}
+	digest, err := result.ContentSHA256()
+	if err != nil {
+		return err
+	}
+	content, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO pi_runtime_profile_compatibility_results (qualification_key, result, result_sha256)
+VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, key, content, digest[:])
+	if err != nil {
+		return err
+	}
+	var existing []byte
+	if err := tx.QueryRow(ctx, `SELECT result_sha256 FROM pi_runtime_profile_compatibility_results WHERE qualification_key = $1`, key).Scan(&existing); err != nil {
+		return err
+	}
+	if !bytes.Equal(existing, digest[:]) {
 		return ErrRuntimeProfileCompatibilityResultConflict
 	}
 	return nil

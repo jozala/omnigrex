@@ -36,3 +36,11 @@ ENTRYPOINT ["/usr/local/bin/omnigrex-environment", "run", "/usr/local/bin/node",
 
 FROM golden AS workflow-fixture
 COPY agent/pi/qualification/turn.mjs /opt/omnigrex/pi/qualification/turn.mjs
+
+FROM golden AS upgrade-source
+USER 0:0
+WORKDIR /opt/omnigrex/pi
+COPY agent/pi/upgrade-source/package.json agent/pi/upgrade-source/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund && node retain-packages.mjs && npm cache clean --force
+USER 10001:10001
+WORKDIR /workspace
