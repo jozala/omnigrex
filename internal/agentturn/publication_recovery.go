@@ -40,13 +40,19 @@ type ExecutionPublicationRecovery interface {
 // PublicationRecovery binds the exact publications of a prior turn by the same
 // Participant, without turning an open Pull Request into a review request.
 type PublicationRecovery struct {
-	store  PublicationRecoveryStore
-	remote PublicationRecoveryRemote
-	github PublicationRecoveryGitHub
+	store       PublicationRecoveryStore
+	remote      PublicationRecoveryRemote
+	github      PublicationRecoveryGitHub
+	credentials RepositoryCredentialProvider
 }
 
-func NewPublicationRecovery(database PublicationRecoveryStore, remote PublicationRecoveryRemote, github PublicationRecoveryGitHub) *PublicationRecovery {
-	return &PublicationRecovery{store: database, remote: remote, github: github}
+// NewPublicationRecoveryWithCredentials refreshes the repository credential
+// after the recovered publication is prepared: the post-clone PR and branch
+// observations that follow unbounded Git I/O must not reuse a token that
+// expired during the clone. A nil provider preserves the legacy behavior of
+// reusing the passed credential throughout.
+func NewPublicationRecoveryWithCredentials(database PublicationRecoveryStore, remote PublicationRecoveryRemote, github PublicationRecoveryGitHub, credentials RepositoryCredentialProvider) *PublicationRecovery {
+	return &PublicationRecovery{store: database, remote: remote, github: github, credentials: credentials}
 }
 
 func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryURL, credential, defaultBranch string) error {
@@ -143,6 +149,16 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 	}
 	if err := recovery.remote.PrepareRecoveredPublication(ctx, execution.Assignment.ID, repositoryURL, credential, publication.HeadSHA); err != nil {
 		return errors.New("prepare recovered publication unavailable")
+	}
+	if !nilDependency(recovery.credentials) {
+		// The clone above performs unbounded Git I/O; re-acquire a current
+		// credential for the observations that follow instead of reusing a
+		// token that may have expired during preparation.
+		fresh, err := recovery.credentials.RepositoryCredential(ctx, execution.Repository.Owner, execution.Repository.Name)
+		if err != nil || strings.TrimSpace(fresh) == "" {
+			return errors.New("verify publication Pull Requests unavailable")
+		}
+		credential = fresh
 	}
 	// Git's publication reconciliation can find an older operation in the
 	// current head's ancestry. Reobserve the exact ref after every clone and PR

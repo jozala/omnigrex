@@ -967,6 +967,60 @@ func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
 	}
 }
 
+// TestLauncherReacquiresCredentialForMiseProvisioningAfterCheckout covers the
+// delayed reuse of the launch credential between PrepareWorkspace and
+// ProvisionMise with fake time and the real installation-token cache: the
+// checkout observes the primed token, the clock advances past its expiry
+// during preparation, and provisioning must use the refreshed credential while
+// the launch still succeeds.
+func TestLauncherReacquiresCredentialForMiseProvisioningAfterCheckout(t *testing.T) {
+	operations := []string{}
+	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
+	cache, _ := newExpiryCache(t, clock, "launch", 5*time.Minute, time.Hour)
+	provider := &cacheProvider{cache: cache, id: 78}
+	primed, err := provider.RepositoryCredential(context.Background(), "acme", "widgets")
+	if err != nil || primed != "launch-token-A" {
+		t.Fatalf("prime launch token = %q, %v", primed, err)
+	}
+	runtimeProfile := runtimeLauncherProfile(t)
+	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
+	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
+	database := &runtimeStore{operations: &operations, execution: execution}
+	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
+		DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
+	}}
+	// The checkout performs unbounded I/O; expire the primed token there.
+	workspaces.afterPrepare = func() { clock.Advance(6 * time.Minute) }
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
+		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	}}}
+	engineFactory := &runtimeEngineFactory{operations: &operations}
+	client := &runtimeACPClient{operations: &operations}
+	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
+		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
+		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: client},
+		Sessions:             &runtimeSessionPreparer{operations: &operations, result: session.Result{}},
+		DeveloperCredentials: provider, ReviewerCredentials: provider,
+		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+	})
+	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
+		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
+		RepositoryCredential: primed, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
+	if workspaces.checkout.Credential != "launch-token-A" {
+		t.Fatalf("workspace checkout credential = %q, want primed token A", workspaces.checkout.Credential)
+	}
+	if workspaces.mise.Credential != "launch-token-B" {
+		t.Fatalf("mise provisioning credential = %q, want refreshed token B", workspaces.mise.Credential)
+	}
+}
+
 // TestLauncherFailsSafeWhenMiseProvisioningLosesCredentialAfterCheckout covers
 // the delayed reuse of the launch credential between PrepareWorkspace and
 // ProvisionMise: provisioning fails with an authentication error after a
@@ -1571,11 +1625,15 @@ type runtimeWorkspace struct {
 	miseErr               error
 	discardedAssignmentID string
 	discardErr            error
+	afterPrepare          func()
 }
 
 func (lifecycle *runtimeWorkspace) PrepareWorkspace(ctx context.Context, checkout workspace.Checkout) (workspace.Paths, error) {
 	*lifecycle.operations = append(*lifecycle.operations, "workspace")
 	lifecycle.checkout = checkout
+	if lifecycle.afterPrepare != nil {
+		lifecycle.afterPrepare()
+	}
 	if lifecycle.requirePromotionFence {
 		if checkout.Fence == nil {
 			return workspace.Paths{}, errors.New("workspace promotion is not fenced")

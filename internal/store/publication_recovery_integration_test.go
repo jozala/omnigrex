@@ -137,7 +137,7 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	}
 	_, nextLease, nextExecution := acquireReplayGatewayTurn(t, database, pool, fixture, root, "publication-retry")
 	remote := &recoveredPRRemote{head: head}
-	if err := agentturn.NewPublicationRecovery(database, remote, github).Recover(ctx, nextLease, nextExecution,
+	if err := agentturn.NewPublicationRecoveryWithCredentials(database, remote, github, nil).Recover(ctx, nextLease, nextExecution,
 		"https://github.com/owner/repo.git", "developer-token", "main"); err != nil {
 		t.Fatal(err)
 	}

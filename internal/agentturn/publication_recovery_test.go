@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -49,7 +50,7 @@ func TestPublicationRecoveryBindsPriorParticipantPRWithoutRequestingReview(t *te
 		Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-18", SHA: recoveryHead},
 		Base: githubapi.PullRequestBranch{Ref: "main"},
 	}}}
-	recovery := agentturn.NewPublicationRecovery(ledger, remote, github)
+	recovery := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, github, nil)
 	lease, execution := recoveryTurn()
 	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != nil {
 		t.Fatal(err)
@@ -63,6 +64,60 @@ func TestPublicationRecoveryBindsPriorParticipantPRWithoutRequestingReview(t *te
 	remote.preparedHead = ""
 	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" || remote.preparedHead != "" {
 		t.Fatalf("edited PR marker recovery = %v, binding %#v", err, ledger.binding)
+	}
+}
+
+// TestPublicationRecoveryReacquiresCredentialAfterPreparingCheckout covers the
+// delayed reuse of the launch credential inside recovery with fake time and
+// the real installation-token cache: recovery starts with a token valid for
+// five minutes, preparation advances the clock past its expiry, and the
+// post-clone PR observations must use the refreshed credential while recovery
+// still binds the publication.
+func TestPublicationRecoveryReacquiresCredentialAfterPreparingCheckout(t *testing.T) {
+	const publicationID = "10000000-0000-4000-8000-000000000001"
+	const prID = "10000000-0000-4000-8000-000000000002"
+	marker, err := githubapi.RenderMarker(githubapi.Marker{
+		WorkflowID:        "40000000-0000-4000-8000-000000000001",
+		AgentAssignmentID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := &publicationRecoveryStore{mutations: []store.MutationReservation{
+		{ID: publicationID, State: store.MutationSucceeded, ToolName: mcp.ToolPublishChanges,
+			ExternalService: "git", ExternalResourceID: "41:omnigrex/issue-18", ExpectedSHA: recoveryBase,
+			Result: json.RawMessage(`{"head":"` + recoveryHead + `","branch":"omnigrex/issue-18","changed":true}`)},
+		{ID: prID, OperationID: "open-18", State: store.MutationSucceeded, ToolName: mcp.ToolOpenPR,
+			ExternalService: "github", ExternalResourceID: "41:omnigrex/issue-18:main", ExpectedSHA: recoveryHead,
+			Request: json.RawMessage(`{"operation_id":"open-18","title":"Fix it","body":"Ready"}`),
+			Result:  json.RawMessage(`{"pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
+	}}
+	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
+	cache, _ := newExpiryCache(t, clock, "recovery", 5*time.Minute, time.Hour)
+	provider := &cacheProvider{cache: cache, id: 81}
+	primed, err := provider.RepositoryCredential(context.Background(), "jozala", "omnigrex")
+	if err != nil || primed != "recovery-token-A" {
+		t.Fatalf("prime recovery token = %q, %v", primed, err)
+	}
+	// Preparation performs unbounded I/O; expire the primed token there.
+	remote := &publicationRecoveryRemote{head: recoveryHead, onPrepare: func() { clock.Advance(6 * time.Minute) }}
+	github := &publicationRecoveryGitHub{pullRequests: []githubapi.PullRequest{{
+		ID: 901, NodeID: "PR_901", Number: 19, State: "open", Title: "Fix it", HTMLURL: "https://github.com/jozala/omnigrex/pull/19",
+		Body: githubapi.JoinBodyParts("Ready", "Closes #18", marker),
+		Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-18", SHA: recoveryHead},
+		Base: githubapi.PullRequestBranch{Ref: "main"},
+	}}}
+	lease, execution := recoveryTurn()
+	recovery := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, github, provider)
+	if err := recovery.Recover(context.Background(), lease, execution,
+		"https://github.com/jozala/omnigrex.git", primed, "main"); err != nil {
+		t.Fatalf("Recover() across expiry error = %v", err)
+	}
+	if ledger.binding.HeadSHA != recoveryHead || ledger.binding.PullRequestID != 901 {
+		t.Fatalf("recovered publication = %#v, want bound head", ledger.binding)
+	}
+	if len(github.seen) != 2 || github.seen[0] != primed || github.seen[1] != "recovery-token-B" {
+		t.Fatalf("PR observations = %q, want pre-clone primed token then refreshed token B", github.seen)
 	}
 }
 
@@ -100,7 +155,7 @@ func TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification(t *tes
 		Base: githubapi.PullRequestBranch{Ref: "main"},
 	}}}
 	lease, execution := recoveryTurn()
-	err = agentturn.NewPublicationRecovery(ledger, remote, github).Recover(context.Background(), lease, execution,
+	err = agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, github, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "expired-installation-token", "main")
 	if err == nil || errors.Is(err, agentturn.ErrPublicationConflict) || ledger.binding.HeadSHA != "" {
 		t.Fatalf("mid-recovery expiry = error %v, binding %#v; want an unavailable-observation error with no binding", err, ledger.binding)
@@ -113,7 +168,7 @@ func TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification(t *tes
 func TestPublicationRecoveryRejectsUnprovenBranchBeforeBinding(t *testing.T) {
 	ledger := &publicationRecoveryStore{}
 	remote := &publicationRecoveryRemote{head: recoveryHead}
-	recovery := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{})
+	recovery := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil)
 	lease, execution := recoveryTurn()
 	err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main")
 	if err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" || remote.preparedHead != "" {
@@ -132,7 +187,7 @@ func TestPublicationRecoveryRejectsHumanPRForRecordedBranch(t *testing.T) {
 		ID: 999, Number: 99, State: "open", Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-18", SHA: recoveryHead},
 	}}}
 	lease, execution := recoveryTurn()
-	err := agentturn.NewPublicationRecovery(ledger, remote, github).Recover(context.Background(), lease, execution,
+	err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, github, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main")
 	if err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" || remote.preparedHead != "" {
 		t.Fatalf("human PR recovery = %v, binding %#v", err, ledger.binding)
@@ -147,7 +202,7 @@ func TestPublicationRecoveryRejectsUnrecordedDescendantCommit(t *testing.T) {
 	}}}
 	remote := &publicationRecoveryRemote{head: "2123456789abcdef0123456789abcdef01234567"}
 	lease, execution := recoveryTurn()
-	err := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{}).Recover(context.Background(), lease, execution,
+	err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main")
 	if err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" {
 		t.Fatalf("unproven descendant recovery = %v, binding %#v", err, ledger.binding)
@@ -162,7 +217,7 @@ func TestPublicationRecoveryRejectsBranchAdvancedDuringVerification(t *testing.T
 	}}}
 	remote := &publicationRecoveryRemote{heads: []string{recoveryHead, "2123456789abcdef0123456789abcdef01234567"}}
 	lease, execution := recoveryTurn()
-	err := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{}).Recover(context.Background(), lease, execution,
+	err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main")
 	if err != agentturn.ErrPublicationConflict || ledger.binding.HeadSHA != "" || remote.observeCalls != 2 {
 		t.Fatalf("branch advanced during verification = %v, binding %#v, observations %d", err, ledger.binding, remote.observeCalls)
@@ -178,7 +233,7 @@ func TestPublicationRecoveryResumesPublishedBranchBeforePRCreation(t *testing.T)
 	}}}
 	remote := &publicationRecoveryRemote{head: recoveryHead}
 	lease, execution := recoveryTurn()
-	if err := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{}).Recover(context.Background(), lease, execution,
+	if err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +253,7 @@ func TestPublicationRecoveryBindsRecordedMultiCommitTipAfterWorkspaceReplacement
 	}}}
 	remote := &publicationRecoveryRemote{head: recoveryHead}
 	lease, execution := recoveryTurn()
-	recovery := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{})
+	recovery := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil)
 	if err := recovery.Recover(context.Background(), lease, execution, "https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +277,7 @@ func TestPublicationRecoveryAcceptsSHA256CommitIdentity(t *testing.T) {
 	}}}
 	remote := &publicationRecoveryRemote{head: head}
 	lease, execution := recoveryTurn()
-	err := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{}).Recover(context.Background(), lease, execution,
+	err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main")
 	if err != nil || ledger.binding.HeadSHA != head {
 		t.Fatalf("SHA-256 publication = %#v, error %v", ledger.binding, err)
@@ -237,7 +292,7 @@ func TestPublicationRecoveryIgnoresNoChangePublishWhenBranchNeverExisted(t *test
 	}}}
 	remote := &publicationRecoveryRemote{}
 	lease, execution := recoveryTurn()
-	if err := agentturn.NewPublicationRecovery(ledger, remote, &publicationRecoveryGitHub{}).Recover(context.Background(), lease, execution,
+	if err := agentturn.NewPublicationRecoveryWithCredentials(ledger, remote, &publicationRecoveryGitHub{}, nil).Recover(context.Background(), lease, execution,
 		"https://github.com/jozala/omnigrex.git", "installation-token", "main"); err != nil || ledger.binding.HeadSHA != "" {
 		t.Fatalf("prior no-change publication = %v, binding %#v", err, ledger.binding)
 	}
@@ -275,6 +330,7 @@ type publicationRecoveryRemote struct {
 	heads              []string
 	observeCalls       int
 	observeErrs        []error
+	onPrepare          func()
 	request            workspace.PublicationReconciliation
 }
 
@@ -301,11 +357,22 @@ func (remote *publicationRecoveryRemote) ReconcilePublication(_ context.Context,
 
 func (remote *publicationRecoveryRemote) PrepareRecoveredPublication(_ context.Context, _, _, _, head string) error {
 	remote.preparedHead = head
+	if remote.onPrepare != nil {
+		remote.onPrepare()
+	}
 	return nil
 }
 
-type publicationRecoveryGitHub struct{ pullRequests []githubapi.PullRequest }
+type publicationRecoveryGitHub struct {
+	pullRequests []githubapi.PullRequest
+	seen         []string
+	expired      map[string]bool
+}
 
-func (api *publicationRecoveryGitHub) ListPullRequests(context.Context, string, string, string, githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
+func (api *publicationRecoveryGitHub) ListPullRequests(_ context.Context, credential, _, _ string, _ githubapi.ListPullRequestsRequest) ([]githubapi.PullRequest, error) {
+	api.seen = append(api.seen, credential)
+	if api.expired[credential] {
+		return nil, errors.New("GitHub: bad credentials")
+	}
 	return api.pullRequests, nil
 }
