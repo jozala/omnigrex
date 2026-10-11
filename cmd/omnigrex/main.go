@@ -192,21 +192,13 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		unregisterObservations = func() {}
 		return errors.New("register durable telemetry observations")
 	}
-	openCodeV1, err := runtimeprofile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
+	profiles, err := settings.RuntimeProfiles()
 	if err != nil {
-		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
+		return fmt.Errorf("configure Runtime Profiles: %w", err)
 	}
 	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
-	}
-	profiles := []runtimeprofile.Profile{openCodeV1}
-	if settings.PiRPCV1Image != "" {
-		candidate, err := runtimeprofile.NewPiV1(settings.PiRPCV1Image, settings.PiRPCV1Platform)
-		if err != nil {
-			return fmt.Errorf("configure candidate Pi Runtime Profile: %w", err)
-		}
-		profiles = append(profiles, candidate)
 	}
 	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, composition.StateBinding(settings).Family, profiles...); err != nil {
 		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
@@ -243,7 +235,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
-	backend, err := composition.NewBackend(ctx, settings, openCodeV1, database, database)
+	backend, err := composition.NewBackend(ctx, settings, profiles[0], database, database)
 	if err != nil {
 		return fmt.Errorf("configure execution backend: %w", err)
 	}
@@ -505,6 +497,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Agent Participant tool cache monitor: %w", err)
 	}
 
+	qualificationCtx, qualificationCancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
+	for _, profile := range profiles {
+		if err := composition.CheckRepositoryEnvironment(qualificationCtx, profile, settings); err != nil {
+			qualificationCancel()
+			return fmt.Errorf("qualify configured Runtime Profile: %w", err)
+		}
+	}
+	qualificationCancel()
 	reconciliation, err := prepareStartup(ctx, settings.ReadinessTimeout, profileAvailability, startupReconciler)
 	if err != nil {
 		return err
@@ -518,7 +518,16 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 
 	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, backend.Check,
 		profileAvailability.Check, retainedState.Check, func(ctx context.Context) error {
-			return database.CheckPendingRuntimeProfileCompatibility(ctx, openCodeV1)
+			for _, profile := range profiles {
+				contract := profile.Contract()
+				if err := backend.Images.Available(ctx, contract.Image, contract.Platform); err != nil {
+					return err
+				}
+				if err := database.CheckPendingRuntimeProfileCompatibility(ctx, profile); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	return runServices(ctx,
 		func(ctx context.Context) error {
@@ -810,7 +819,12 @@ func healthcheck() int {
 		url = "http://127.0.0.1:8080/healthz"
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	readinessTimeout, err := config.LoadReadinessTimeout(os.Getenv("OMNIGREX_READINESS_TIMEOUT"))
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: readinessTimeout + config.HealthcheckResponseAllowance}
 	response, err := client.Get(url)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

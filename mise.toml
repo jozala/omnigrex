@@ -139,6 +139,36 @@ run = '''
 OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run '^TestPiLiveProviders$'
 '''
 
+[tasks.test-docker-integration]
+description = "Run shared conformance, Pi lifecycle/recovery/upgrade, and image-only deployment gates on Docker"
+run = '''
+mise run test-integration
+mise run test-pi-integration
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$' mise run test-pi-workflow
+mise run test-pi-recovery
+mise run test-pi-upgrade
+mise run test-pi-deployment
+'''
+
+[tasks.test-microsandbox]
+description = "Run the same release gates plus nested-container qualification on Linux/KVM"
+run = '''
+mise run test-microsandbox-integration
+mise run test-pi-microsandbox-integration
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$' mise run test-pi-microsandbox-workflow
+mise run test-pi-microsandbox-recovery
+mise run test-pi-microsandbox-upgrade
+mise run test-pi-microsandbox-deployment
+'''
+
+[tasks.test-pi-deployment]
+description = "Smoke-test the Pi image-only Docker bundle on the daemon host, using disposable fixture secrets"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
+
+[tasks.test-pi-microsandbox-deployment]
+description = "Smoke-test the Pi image-only Linux/KVM bundle on the daemon host"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
+
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
 run = '''
@@ -168,6 +198,22 @@ OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
 docker compose --file deploy/compose.yaml config --quiet
+OMNIGREX_SECRET_GID=1 OMNIGREX_DOCKER_GID=0 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
+OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
+docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-docker.yaml config --quiet
+OMNIGREX_SECRET_GID=1 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
+OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
+docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml config --quiet
 '''
 
 [tasks.image]

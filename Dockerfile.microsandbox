@@ -45,7 +45,7 @@ RUN --network=none --mount=type=bind,from=git-download,source=/debs,target=/tmp/
 
 FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
-RUN mkdir -p /var/lib/omnigrex/msb /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise && chown -R 10001:10001 /var/lib/omnigrex
+RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise && chown -R 10001:10001 /var/lib/omnigrex
 ENV OMNIGREX_EXECUTION_BACKEND=microsandbox
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/omnigrex"]

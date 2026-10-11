@@ -113,7 +113,7 @@ func NewBackend(ctx context.Context, settings config.Config, runtime profile.Pro
 		}
 		result.Images = images
 		result.close = append(result.close, images.Close)
-		probe, err := docker.NewReadinessProbe(docker.ReadinessProbeOptions{AgentNetwork: settings.DockerAgentNetwork, WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume, AgentImage: settings.AgentImageReference})
+		probe, err := docker.NewReadinessProbe(docker.ReadinessProbeOptions{AgentNetwork: settings.DockerAgentNetwork, WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume, MiseVolume: settings.MiseVolume, AgentImage: contract.Image, RuntimeProfile: runtime})
 		if err != nil {
 			return result, err
 		}

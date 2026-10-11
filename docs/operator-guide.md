@@ -25,7 +25,7 @@ Use GitHub branch protection when checks must be mandatory.
 
 The Step 08 adapter is a preparatory Linux/amd64 KVM implementation using Microsandbox and Go SDK 0.7.6.
 Its implementation and qualification boundaries are recorded in the [Step 08 evidence](./plans/2026-10-09-microsandbox-backend.md).
-Published native deployment bundles, persistent KVM CI, and Pi cutover follow later plan steps.
+The [Pi operational deployment](#pi-operational-deployment) section describes the backend-selected image-only bundles and KVM CI gates introduced in Step 15.
 
 Build the native orchestrator from a source checkout on a Linux/amd64 builder:
 
@@ -193,7 +193,7 @@ Explicit repository Profiles use `runtime: pi-rpc/v1`, an exact `provider/model`
 The candidate credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
 Follow the existing secret placement and recovery procedures in this guide; keep provider keys and deployment metadata out of source control and retained-state backups.
 Backend selection uses the existing `OMNIGREX_EXECUTION_BACKEND` setting and the applicable backend prerequisites.
-Final Pi-selected doctor, published releases, and operational cutover remain later milestones.
+Step 15 adds Pi-selected operational diagnostics and release publication; the operator-controlled cutover remains a later milestone.
 
 Run the controlled complete Workflow gates without deployment secrets or external GitHub mutations:
 
@@ -218,6 +218,99 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-rec
 
 Use the same approved Linux/KVM `DOCKER_HOST` connection for the native gate.
 The [recovery evidence](./plans/2026-10-10-pi-failure-recovery.md) records the fault scenarios, conservative uncertainty handling, and dependency enforcement.
+
+## Pi operational deployment
+
+Step 15 provides image-only Pi bundles for a fresh installation or isolated qualification deployment.
+Read the [Step 15 evidence](./plans/2026-10-11-pi-operational-integration.md) for verification and release status.
+Do not apply these bundles to populated OpenCode state; the clean-cutover rehearsal remains Step 16.
+The existing OpenCode bundle remains available through the preparatory period.
+
+The release workflow publishes `linux/amd64` Pi 1.0.4 / Node 24.14.1 golden environments at `ghcr.io/jozala/omnigrex/pi:sha-<commit>` and the SDK-enabled control plane at `ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-<commit>`.
+Docker uses the existing `ghcr.io/jozala/omnigrex/orchestrator:sha-<commit>` image.
+Publication depends on both the Docker gate and the required Linux/amd64 KVM gate, and the workflow summary records every resolved registry digest.
+No Pull Request run publishes images.
+A package administrator must make new packages public and confirm unauthenticated pulls before advertising no-login deployment support.
+
+Download the following files from one successfully published commit using the [commit-pinned distribution procedure](#published-images-and-deployment-files):
+
+- `deploy/compose.pi.yaml`, the common PostgreSQL, Pi image validator, and orchestrator services.
+- Exactly one of `deploy/compose.pi-docker.yaml` and `deploy/compose.pi-microsandbox.yaml`.
+- `deploy/.env.pi.example`, copied to the private deployment `.env`.
+
+There are no build contexts or source-checkout dependencies in these files.
+Resolve the matching published tags to registry digests as described in [Published Images And Deployment Files](#published-images-and-deployment-files), set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend's control-plane digest, and set `OMNIGREX_PI_RPC_V1_IMAGE` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64`.
+Keep all exact retained Participant images available according to [Repository Environments](#repository-environments).
+
+Use the existing [GitHub Apps](#github-apps), [secret-file placement](#secrets), and [HTTPS ingress](#supported-deployment) procedures.
+For Pi, the provider file must use literal Pi-native API keys, for example `{"openai":{"type":"api_key","key":"REPLACE_WITH_SECRET"}}`, rather than OpenCode's `type: api` shape.
+Only API keys are supported; executable key references, environment references, OAuth entries, and missing selected providers fail preflight.
+Pi Profiles use `runtime: pi-rpc/v1`, `provider/model`, optional thinking, and the permissions described in the [candidate Profile schema](./plans/2026-10-09-pi-configuration-and-mcp.md#candidate-agent-profile-schema).
+
+### Docker bundle
+
+Set the Docker socket and secret-file groups using [Secret File Group](#secret-file-group), then start with:
+
+```sh
+docker compose -f compose.pi.yaml -f compose.pi-docker.yaml up -d --no-build --wait
+docker compose -f compose.pi.yaml -f compose.pi-docker.yaml exec orchestrator /usr/local/bin/omnigrex doctor --repository OWNER/REPOSITORY
+```
+
+The bundle requires Docker Engine API 1.45 or newer and no KVM device or native SDK libraries.
+Docker-backed development on macOS remains supported with locally built arm64 images and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/arm64`; the release images are initially amd64.
+The host Docker socket is exposed only to the control plane, never to Pi Execution Environments.
+
+### Microsandbox bundle
+
+Use a Linux/amd64 host with usable `/dev/kvm` and the [Microsandbox resource and trust constraints](#microsandbox-execution-backend).
+Set `OMNIGREX_MICROSANDBOX_KVM_GID` to the numeric ownership of that device and use a different dedicated secret-file group.
+The control-plane memory limit must cover admitted VM memory plus VMM overhead, PostgreSQL, and preparation costs; the example uses 6 GiB for two 1 GiB Agent Turns.
+The bundle grants KVM access without mounting the host Docker socket, enabling privileged mode, or granting extra Linux capabilities.
+
+Provision the exact image into the native cache before starting the orchestrator:
+
+```sh
+docker compose -f compose.pi.yaml -f compose.pi-microsandbox.yaml run --rm --no-deps -T --entrypoint /usr/local/bin/msb orchestrator image pull 'REGISTRY/PI@sha256:DIGEST'
+docker compose -f compose.pi.yaml -f compose.pi-microsandbox.yaml up -d --no-build --wait
+docker compose -f compose.pi.yaml -f compose.pi-microsandbox.yaml exec orchestrator /usr/local/bin/omnigrex doctor --repository OWNER/REPOSITORY
+```
+
+Use the same exact declared digest, not a replacement tag or an imported digest-shaped alias.
+The protected native-home volume contains cache artifacts and the dispatch journal; disk-backed `TMPDIR` under that home supports image import and materialization without overflowing control-plane tmpfs.
+Preserve only the protected journal from this volume in the coordinated recovery set, following [Microsandbox backup requirements](#microsandbox-execution-backend), while retaining Session data and Workspace Captures through the existing backup procedure.
+The native backend fails startup without usable KVM or exact image/resource compatibility before serving webhooks or admitting Agent Turns.
+Requested unsupported execution capabilities fail explicitly without another-backend fallback.
+
+### Diagnostics and backend gates
+
+Startup verifies every configured Runtime Profile's golden resources before starting Workflow workers.
+Readiness continuously checks the selected backend, PostgreSQL, configured and protected exact images, retained-state availability, and pending compatibility evidence.
+Docker writable-path probes use the selected immutable Runtime Profile rather than OpenCode paths.
+The healthcheck HTTP client uses the same `OMNIGREX_READINESS_TIMEOUT` as the readiness handler, plus a five-second response allowance, instead of a fixed twenty-second timeout.
+The Pi bundle defaults to a 60-second readiness budget, a 65-second client deadline, and a 70-second Compose healthcheck deadline.
+When changing the readiness budget, also set `OMNIGREX_HEALTHCHECK_TIMEOUT` at least ten seconds longer so Compose can receive the bounded client's result before terminating the probe.
+The legacy Docker bundles retain the corresponding 15/20/25-second defaults and support the same outer-timeout override.
+
+Doctor resolves the same configured registry as startup, checks repository environments for each Role's selected runtime, validates Pi credentials and effective instructions/permissions, and verifies selected Pi models and thinking values without fallback.
+Its `pi-runtime` check starts the production owned runner with a random exact Session identity in temporary `/state`, fixture-only provider auth, and isolated authenticated diagnostic MCP authority.
+It prepares but submits no model prompt, does not invoke business capabilities, and removes the disposable environment before reporting success.
+Diagnostic Session files and authority never attach to retained Participant state.
+For mixed preparatory runtime configuration, doctor checks every configured runtime and reports `agent-runtime`; an OpenCode-only deployment retains `acp-runtime`.
+
+The complete source-checkout backend gates are:
+
+```sh
+mise run test-docker-integration
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
+```
+
+The component conformance, Pi protocol, Workflow, recovery, and upgrade gates remain separately runnable as documented above, and can use an approved remote `DOCKER_HOST`.
+The image-only smoke entry points, `test-pi-deployment` and `test-pi-microsandbox-deployment`, must run on the daemon host because Compose secrets are host-side files.
+They stage only deployment files and disposable fixture secrets into a separate no-clone directory, use unique resource names, verify liveness/readiness and operational doctor checks, and remove only their own resources.
+External GitHub installation checks intentionally fail for fixture App identities; no live repository is mutated.
+The Microsandbox smoke additionally proves that removing KVM access rejects normal startup.
+Set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to actual registry digests to run the same smoke against published images without local builds.
+CI runs the shared suites on Docker and on an ephemeral `ubuntu-24.04` KVM runner, fails if the device is absent or unusable, and repeats image-only smoke against the published digests after publication.
 
 ## Pi upgrade and state recovery qualification
 
@@ -392,17 +485,19 @@ See [Published Images And Deployment Files](#published-images-and-deployment-fil
 
 ## Published Images And Deployment Files
 
-Every push to `main` that passes the `check` job publishes two `linux/amd64` images for discovery:
+Every push to `main` that passes the Docker and Linux/KVM jobs publishes four `linux/amd64` images for discovery:
 
 - `ghcr.io/jozala/omnigrex/orchestrator:sha-<full-commit-SHA>` from `Dockerfile`.
 - `ghcr.io/jozala/omnigrex/opencode:sha-<full-commit-SHA>` from `agent/opencode/Dockerfile`.
+- `ghcr.io/jozala/omnigrex/pi:sha-<full-commit-SHA>` from the golden target of `agent/pi/Dockerfile`.
+- `ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-<full-commit-SHA>` from the runtime target of `Dockerfile.microsandbox`.
 
 No `latest` tag is published, and Pull Request runs publish neither image.
-After the first publication, a repository/package administrator must make both GHCR packages public and confirm that a host can pull them without `docker login`.
+After the first publication, a repository/package administrator must make all GHCR packages public and confirm that a host can pull them without `docker login`.
 Do not add registry credentials to the deployment bundle.
 
-Select a commit whose `main` CI run successfully published both images.
-Open that run and read its `Published Omnigrex images` workflow summary, which records the commit SHA, both `sha-<commit>` tags, and both resolved `sha256` digests.
+Select a commit whose `main` CI run successfully published the matching images and passed both post-publication smoke jobs.
+Open that run and read its `Published Omnigrex images` workflow summary, which records the commit SHA, `sha-<commit>` tags, and resolved `sha256` digests.
 
 Download the deployment files pinned to that exact commit into one empty host directory:
 

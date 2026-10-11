@@ -1,0 +1,177 @@
+name: omnigrex
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545
+    user: "70:70"
+    group_add:
+      - "${OMNIGREX_SECRET_GID:?set the secret-file group}"
+    environment:
+      POSTGRES_DB: omnigrex
+      POSTGRES_USER: omnigrex
+      POSTGRES_PASSWORD_FILE: /run/secrets/omnigrex-database-password
+    secrets: [omnigrex-database-password]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U omnigrex -d omnigrex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0700
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0750
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 512m
+    init: true
+    restart: unless-stopped
+
+  pi-image:
+    image: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi golden image digest}"
+    platform: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+    user: "10001:10001"
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        test "$$(id -u):$$(id -g)" = 10001:10001
+        test "$$(node --version)" = v24.14.1
+        test "$$(node -p 'JSON.parse(require("fs").readFileSync("/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json")).version')" = 1.0.4
+        for path in /workspace /state /home/opencode/.local/share/mise; do
+          touch "$$path/.omnigrex-volume-root"
+          rm "$$path/.omnigrex-volume-root"
+        done
+    volumes:
+      - workspaces:/workspace
+      - runtime-state:/state
+      - mise-data:/home/opencode/.local/share/mise
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 128m
+    restart: "no"
+
+  orchestrator:
+    image: "${OMNIGREX_ORCHESTRATOR_IMAGE:?set the exact backend-specific orchestrator digest}"
+    user: "10001:10001"
+    group_add:
+      - "${OMNIGREX_SECRET_GID:?set the secret-file group}"
+    environment:
+      OMNIGREX_HTTP_ADDR: ":8080"
+      OMNIGREX_HEALTHCHECK_URL: http://127.0.0.1:8080/readyz
+      OMNIGREX_MCP_ADDR: ":8081"
+      OMNIGREX_MCP_ENDPOINT_URL: http://omnigrex-mcp:8081/mcp
+      OMNIGREX_DATABASE_URL: postgres://omnigrex@postgres:5432/omnigrex?sslmode=disable
+      OMNIGREX_DATABASE_PASSWORD_SECRET_FILE: /run/secrets/omnigrex-database-password
+      OMNIGREX_PI_RPC_V1_IMAGE: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi digest}"
+      OMNIGREX_PI_RPC_V1_PLATFORM: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+      OMNIGREX_AGENT_IMAGE_REFERENCE: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi digest}"
+      OMNIGREX_GITHUB_DEVELOPER_APP_ID: "${OMNIGREX_GITHUB_DEVELOPER_APP_ID:?set the Developer App ID}"
+      OMNIGREX_GITHUB_REVIEWER_APP_ID: "${OMNIGREX_GITHUB_REVIEWER_APP_ID:?set the Reviewer App ID}"
+      OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-developer-private-key
+      OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-reviewer-private-key
+      OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/omnigrex-github-webhook-secret
+      OMNIGREX_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-provider-credentials
+      OMNIGREX_WORKSPACE_ROOT: /var/lib/omnigrex/workspaces
+      OMNIGREX_RUNTIME_STATE_ROOT: /var/lib/omnigrex/runtime-state
+      OMNIGREX_WORKSPACE_CAPTURE_ROOT: /var/lib/omnigrex/runtime-state/workspace-captures
+      OMNIGREX_MISE_ROOT: /var/lib/omnigrex/mise
+      OMNIGREX_READINESS_TIMEOUT: "${OMNIGREX_READINESS_TIMEOUT:-60s}"
+      OMNIGREX_SHUTDOWN_TIMEOUT: "${OMNIGREX_SHUTDOWN_TIMEOUT:-10s}"
+      OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT: "${OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT:-2}"
+      OMNIGREX_AGENT_TURN_MEMORY_MIB: "${OMNIGREX_AGENT_TURN_MEMORY_MIB:-1024}"
+      OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT: "${OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT:-2h}"
+      OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT: "${OMNIGREX_AGENT_TURN_EXECUTION_CLEANUP_TIMEOUT:-10s}"
+      OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT: "${OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT:-2h}"
+      OMNIGREX_AGENT_PATH_ENV_ALLOWLIST: "${OMNIGREX_AGENT_PATH_ENV_ALLOWLIST:-TMPDIR,GOTMPDIR,GOCACHE,GOPATH}"
+      OMNIGREX_AGENT_INSTRUCTIONS_DIR: "${OMNIGREX_AGENT_INSTRUCTIONS_DIR:-}"
+      OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:+/run/omnigrex/compatibility.json}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_HEADERS: "${OTEL_EXPORTER_OTLP_HEADERS:-}"
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: "${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}"
+      OTEL_EXPORTER_OTLP_METRICS_HEADERS: "${OTEL_EXPORTER_OTLP_METRICS_HEADERS:-}"
+      OTEL_METRICS_EXPORTER: "${OTEL_METRICS_EXPORTER:-}"
+      OTEL_METRIC_EXPORT_INTERVAL: "${OTEL_METRIC_EXPORT_INTERVAL:-60000}"
+      OTEL_METRIC_EXPORT_TIMEOUT: "${OTEL_METRIC_EXPORT_TIMEOUT:-30000}"
+      OTEL_EXPORTER_OTLP_METRICS_TIMEOUT: "${OTEL_EXPORTER_OTLP_METRICS_TIMEOUT:-10000}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-omnigrex}"
+      OTEL_RESOURCE_ATTRIBUTES: "${OTEL_RESOURCE_ATTRIBUTES:-}"
+      OTEL_TRACES_SAMPLER: "${OTEL_TRACES_SAMPLER:-parentbased_always_on}"
+      OTEL_TRACES_SAMPLER_ARG: "${OTEL_TRACES_SAMPLER_ARG:-}"
+      OTEL_SDK_DISABLED: "${OTEL_SDK_DISABLED:-false}"
+    secrets:
+      - omnigrex-database-password
+      - omnigrex-github-developer-private-key
+      - omnigrex-github-reviewer-private-key
+      - omnigrex-github-webhook-secret
+      - omnigrex-provider-credentials
+    volumes:
+      - workspaces:/var/lib/omnigrex/workspaces
+      - runtime-state:/var/lib/omnigrex/runtime-state
+      - mise-data:/var/lib/omnigrex/mise
+      - type: bind
+        source: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:-/dev/null}"
+        target: /run/omnigrex/compatibility.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      backend:
+      agent:
+        aliases: [omnigrex-mcp]
+    ports: ["${OMNIGREX_HTTP_PORT:-8080}:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pi-image:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /usr/local/bin/omnigrex, healthcheck]
+      interval: 15s
+      timeout: "${OMNIGREX_HEALTHCHECK_TIMEOUT:-70s}"
+      retries: 5
+      start_period: 60s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 2048
+    mem_limit: "${OMNIGREX_CONTROL_PLANE_MEMORY:-6g}"
+    init: true
+    stop_grace_period: "${OMNIGREX_STOP_GRACE_PERIOD:-1m}"
+    restart: unless-stopped
+
+networks:
+  backend:
+    name: omnigrex-backend
+    internal: true
+  agent:
+    name: omnigrex-agent
+volumes:
+  postgres-data:
+    name: omnigrex-postgres
+  workspaces:
+    name: omnigrex-workspaces
+  runtime-state:
+    name: omnigrex-runtime-state
+  mise-data:
+    name: omnigrex-mise
+secrets:
+  omnigrex-database-password:
+    file: "${OMNIGREX_DATABASE_PASSWORD_FILE:?set database secret file}"
+  omnigrex-github-developer-private-key:
+    file: "${OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE:?set Developer key file}"
+  omnigrex-github-reviewer-private-key:
+    file: "${OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE:?set Reviewer key file}"
+  omnigrex-github-webhook-secret:
+    file: "${OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE:?set webhook secret file}"
+  omnigrex-provider-credentials:
+    file: "${OMNIGREX_PROVIDER_CREDENTIALS_FILE:?set Pi-native API-key file}"

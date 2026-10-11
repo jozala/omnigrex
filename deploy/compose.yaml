@@ -196,7 +196,7 @@ services:
     healthcheck:
       test: ["CMD", "/usr/local/bin/omnigrex", "healthcheck"]
       interval: 15s
-      timeout: 25s
+      timeout: "${OMNIGREX_HEALTHCHECK_TIMEOUT:-25s}"
       retries: 5
       start_period: 10s
     read_only: true

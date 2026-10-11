@@ -80,7 +80,7 @@ type Config struct {
 	MCPAddr                     string
 	MCPEndpointURL              string
 	MCPMutationOperationTimeout time.Duration
-	// AgentImageReference is the mutable local image used by deployment readiness checks.
+	// AgentImageReference is a legacy resource-probe hint retained during preparation.
 	AgentImageReference string
 	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
 	OpenCodeACPV1Image                     string
@@ -274,19 +274,21 @@ func Load(getenv func(string) string) (Config, error) {
 	if strings.TrimSpace(config.MCPAddr) == "" {
 		problems = append(problems, fmt.Errorf("OMNIGREX_MCP_ADDR must not be blank"))
 	}
-	imageValid := profile.IsExactRegistryImage(config.OpenCodeACPV1Image)
-	if !imageValid {
-		problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_IMAGE must be a registry name with an exact sha256 digest"))
-	}
-	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM"), "/")
-	config.OpenCodeACPV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
-	platformValid := found && !strings.Contains(platformArch, "/") && profile.IsSupportedPlatform(config.OpenCodeACPV1Platform)
-	if !platformValid {
-		problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_PLATFORM must be a supported linux platform"))
-	}
-	if imageValid && platformValid {
-		if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
-			problems = append(problems, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err))
+	if config.OpenCodeACPV1Image != "" || getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM") != "" || config.PiRPCV1Image == "" {
+		imageValid := profile.IsExactRegistryImage(config.OpenCodeACPV1Image)
+		if !imageValid {
+			problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_IMAGE must be a registry name with an exact sha256 digest"))
+		}
+		platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM"), "/")
+		config.OpenCodeACPV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
+		platformValid := found && !strings.Contains(platformArch, "/") && profile.IsSupportedPlatform(config.OpenCodeACPV1Platform)
+		if !platformValid {
+			problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_PLATFORM must be a supported linux platform"))
+		}
+		if imageValid && platformValid {
+			if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
+				problems = append(problems, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err))
+			}
 		}
 	}
 	if config.PiRPCV1Image != "" || getenv("OMNIGREX_PI_RPC_V1_PLATFORM") != "" {
@@ -353,15 +355,10 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	if value := getenv("OMNIGREX_READINESS_TIMEOUT"); value != "" {
-		timeout, err := time.ParseDuration(value)
-		if err != nil {
-			problems = append(problems, fmt.Errorf("OMNIGREX_READINESS_TIMEOUT must be a valid duration"))
-		} else if timeout <= 0 {
-			problems = append(problems, fmt.Errorf("OMNIGREX_READINESS_TIMEOUT must be positive"))
-		} else {
-			config.ReadinessTimeout = timeout
-		}
+	if timeout, err := LoadReadinessTimeout(getenv("OMNIGREX_READINESS_TIMEOUT")); err != nil {
+		problems = append(problems, err)
+	} else {
+		config.ReadinessTimeout = timeout
 	}
 
 	if value := getenv("OMNIGREX_SHUTDOWN_TIMEOUT"); value != "" {

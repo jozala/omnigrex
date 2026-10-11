@@ -59,7 +59,11 @@ func StartDiagnostic(ctx context.Context, profile profile.Profile, image string,
 			return nil, nil, err
 		}
 		process, err := backend.StartDiagnostic(ctx, profile, image, options.MemoryBytes, options.ExtraHosts, stderr)
-		return process, backend, err
+		if err != nil {
+			_ = backend.Close()
+			return nil, nil, err
+		}
+		return process, backend, nil
 	}
 	return docker.StartDiagnostic(ctx, profile, image, docker.DiagnosticOptions{Network: options.Network, ExtraHosts: options.ExtraHosts, MemoryBytes: options.MemoryBytes}, stderr)
 }

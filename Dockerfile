@@ -29,7 +29,7 @@ RUN --mount=type=bind,source=agent/opencode/apk-packages.sha256,target=/tmp/apk-
     installed=0 && \
     while read -r architecture checksum repository package; do \
       [ "$architecture" = "$TARGETARCH" ] || continue; \
-      wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.24/${repository}/${apk_arch}/${package}.apk" -O "/tmp/apks/${package}.apk" || exit 1; \
+      wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.24/${repository}/${apk_arch}/${package}.apk" -O "/tmp/apks/${package}.apk" || { echo "failed locked package download: ${package}" >&2; exit 1; }; \
       echo "${checksum}  /tmp/apks/${package}.apk" | sha256sum -c - || exit 1; \
       installed=$((installed + 1)); \
     done < /tmp/apk-packages.sha256 && \

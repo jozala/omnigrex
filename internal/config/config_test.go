@@ -15,6 +15,27 @@ import (
 
 const deploymentImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestReadinessBudgetRejectsHealthcheckOverflow(t *testing.T) {
+	_, err := config.Load(environment(map[string]string{"OMNIGREX_READINESS_TIMEOUT": "2562047h47m16s"}))
+	if err == nil || !strings.Contains(err.Error(), "healthcheck response allowance") {
+		t.Fatalf("overflowing healthcheck deadline was accepted: %v", err)
+	}
+}
+
+func TestPiOnlyDeployment(t *testing.T) {
+	settings, err := config.Load(environment(map[string]string{
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE": "", "OMNIGREX_OPENCODE_ACP_V1_PLATFORM": "",
+		"OMNIGREX_PI_RPC_V1_IMAGE": deploymentImage, "OMNIGREX_PI_RPC_V1_PLATFORM": "linux/amd64",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := settings.RuntimeProfiles()
+	if err != nil || len(profiles) != 1 || profiles[0].Contract().Name != "pi-rpc" {
+		t.Fatalf("Pi-only profiles: %v %v", profiles, err)
+	}
+}
+
 func TestLoadOperatorInstructionsDirectory(t *testing.T) {
 	for _, test := range []struct {
 		path  string

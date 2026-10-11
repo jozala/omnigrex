@@ -79,7 +79,15 @@ jobs:
             -c 'test "$(id -u)" = 10001 && test "$(id -g)" = 10001 && opencode --version && mise --version && git --version'
 
       - name: Run Docker-backed integration tests
-        run: go test -race -tags=integration -timeout 30m ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+        run: |
+          docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+          docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
+          go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment
+          OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 ./internal/runtime/pi
+          OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$' sh scripts/test-pi-workflow.sh
+          OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh
+          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh
+          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh
 
       - name: Compile live GitHub App gate
         run: go test -tags=live ./internal/github -run '^$'
@@ -91,8 +99,33 @@ jobs:
           OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
           go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
 
+  microsandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Linux amd64 KVM
+        run: |
+          test "$(uname -m)" = x86_64
+          test -c /dev/kvm
+          sudo chgrp "$(id -g)" /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+      - name: Install checksum-pinned mise
+        run: |
+          curl -fsSL https://github.com/jdx/mise/releases/download/v2026.8.10/mise-v2026.8.10-linux-x64-musl -o /tmp/mise
+          echo '2af841603ad2981529f230add15c601c64e3a81a79f4f41e9860eb38b7672771  /tmp/mise' | sha256sum -c -
+          chmod 0755 /tmp/mise
+          echo /tmp >> "$GITHUB_PATH"
+      - name: Qualify shared conformance and Pi lifecycle on microVMs
+        run: |
+          mise install
+          mise run test-microsandbox
+
   publish:
-    needs: check
+    needs: [check, microsandbox]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -159,6 +192,11 @@ jobs:
           docker image inspect "$ORCHESTRATOR_TAG" > /dev/null
           docker image inspect "$OPENCODE_TAG" > /dev/null
 
+      - name: Publish pinned Pi golden and native orchestrator images
+        env:
+          OMNIGREX_RELEASE_COMMIT: "${{ github.sha }}"
+        run: sh scripts/publish-pi-images.sh
+
   deploy-smoke:
     needs: publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -193,3 +231,39 @@ jobs:
             OMNIGREX_DEPLOY_SMOKE_OPENCODE_IMAGE="$OPENCODE_DIGEST" \
             OMNIGREX_DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)" \
             go test -race -tags=integration ./internal/deployment -run TestDeployImageOnlyStartupSmoke -count=1 -v
+
+      - name: Smoke-test the published Pi Docker deployment
+        run: |
+          docker pull "ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
+          docker pull "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}"
+          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
+          OMNIGREX_PI_DEPLOY_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
+          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh
+
+  deploy-smoke-microsandbox:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require KVM
+        run: |
+          test -c /dev/kvm
+          sudo chgrp "$(id -g)" /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Smoke-test the published Pi Microsandbox deployment
+        run: |
+          docker pull "ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-${{ github.sha }}"
+          docker pull "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}"
+          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
+          OMNIGREX_PI_DEPLOY_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
+          OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh

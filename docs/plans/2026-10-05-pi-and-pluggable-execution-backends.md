@@ -34,6 +34,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 12 | Candidate Pi Runtime Profile, common complete Agent Turns, and controlled Developer-to-Reviewer Workflows on both backends | [Complete Pi Agent Turn implementation and evidence](2026-10-09-complete-pi-agent-turns.md) |
 | 13 | Shared eleven-scenario Pi recovery qualification and cross-target production dependency enforcement | [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md) |
 | 14 | Backend-scoped Pi qualification artifacts, isolated source-to-candidate continuation/replay, and protected-state recovery | [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md) |
+| 15 | Backend-selected Pi diagnostics/readiness, qualified image-only bundles, and required KVM CI/publication wiring; release execution pending | [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -541,6 +542,8 @@ An unqualified change is rejected.
 Restored state remains bound to the correct Participant and backend.
 
 ### Step 15: Complete operational integration and CI
+
+**Deliverable:** [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md), including backend-selected diagnostics, image-only deployment qualification, required KVM gates, and the remaining merged-release publication boundary.
 
 **Goal:** Make both supported backends deployable and diagnosable.
 

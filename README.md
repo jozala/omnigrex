@@ -31,6 +31,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Complete Pi Agent Turns and both-backend Workflow qualification](./docs/plans/2026-10-09-complete-pi-agent-turns.md)
 - [Pi failure recovery and boundary independence](./docs/plans/2026-10-10-pi-failure-recovery.md)
 - [Pi upgrades and state recovery](./docs/plans/2026-10-10-pi-upgrades-and-state-recovery.md)
+- [Pi operational integration and backend CI](./docs/plans/2026-10-11-pi-operational-integration.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 
@@ -38,6 +39,7 @@ The implementation is written in Go and deployable with Docker Compose.
 
 Deploy without cloning the repository by using the published GHCR images and pinned deployment files.
 Follow the authoritative procedure in the [operator guide](./docs/operator-guide.md), including digest lookup, initial deployment, upgrades, retained Runtime Profile images, and restore prerequisites.
+The preparatory [Pi deployment bundles](./docs/operator-guide.md#pi-operational-deployment) support Docker and Linux/amd64 Microsandbox with KVM using image-only deployment files.
 
 ## Development
 
@@ -144,6 +146,16 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-int
 
 Both use a disposable pinned Pi image and a controlled provider with fixture credentials.
 See the [operator guide](./docs/operator-guide.md#pi-protocol-diagnostic) for the standalone diagnostic command.
+
+The complete backend gates, including shared conformance and Pi lifecycle qualification, are:
+
+```sh
+mise run test-docker-integration
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
+```
+
+Image-only deployment smoke uses `mise run test-pi-deployment` or `mise run test-pi-microsandbox-deployment` on the Docker daemon's host, with isolated fixture secrets and resources.
+See the [operator guide](./docs/operator-guide.md#diagnostics-and-backend-gates) for remote-host and published-image qualification.
 
 The live GitHub gate checks the Developer App's repository-ID read and uses a pre-existing Developer App-authored Pull Request to submit both Reviewer App outcomes.
 Set the `OMNIGREX_LIVE_GITHUB_*` variables listed by the skipped test, then run:

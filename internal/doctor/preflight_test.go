@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -31,6 +33,38 @@ func TestValidateDeveloperWebhookURL(t *testing.T) {
 	} {
 		if err := validateDeveloperWebhookURL(value); err == nil {
 			t.Errorf("validateDeveloperWebhookURL(%q) error = nil", value)
+		}
+	}
+}
+
+func TestPiDoctorRegistryAndEffectiveCredentials(t *testing.T) {
+	state := productionState{settings: config.Config{PiRPCV1Image: "registry.example/pi@sha256:" + strings.Repeat("a", 64), PiRPCV1Platform: runtimeprofile.Platform{OS: "linux", Arch: "amd64"}}}
+	if err := state.checkRuntimeProfile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.registry.Resolve("opencode-acp", "v1"); err == nil {
+		t.Fatal("unconfigured runtime was admitted")
+	}
+	p, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\nReview the Change Proposal.\n"), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, auth := range []struct {
+		value string
+		valid bool
+	}{
+		{`{"openai":{"type":"api_key","key":"fixture-only"}}`, true},
+		{`{"other":{"type":"api_key","key":"fixture-only"}}`, false},
+		{`{"openai":{"type":"api","key":"legacy-format"}}`, false},
+		{`{"openai":{"type":"api_key","key":"!executable"}}`, false},
+	} {
+		err := validateEffectiveProfile(state.registry, role.Reviewer, p, agentinstructions.Operator{}, definition, []byte(auth.value))
+		if (err == nil) != auth.valid {
+			t.Fatalf("effective credential validity = %v, want %t", err, auth.valid)
 		}
 	}
 }
