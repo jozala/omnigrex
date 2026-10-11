@@ -41,5 +41,6 @@ The operator guide owns deployment and recovery procedures.
 ## Links
 
 - [Step 15 implementation and evidence](../plans/2026-10-11-pi-operational-integration.md).
+- [Operator cutover rehearsal and remaining release boundary](../plans/2026-10-11-pi-operator-documentation-and-cutover.md).
 - [Execution Backend ownership](0005-separate-execution-backends-from-coordination.md).
 - [Participant image policy](0009-pin-participant-images-and-use-working-revision-tools.md).

@@ -35,6 +35,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 13 | Shared eleven-scenario Pi recovery qualification and cross-target production dependency enforcement | [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md) |
 | 14 | Backend-scoped Pi qualification artifacts, isolated source-to-candidate continuation/replay, and protected-state recovery | [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md) |
 | 15 | Backend-selected Pi diagnostics/readiness, qualified image-only bundles, and required KVM CI/publication wiring; release execution pending | [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md) |
+| 16 | Pi operator procedures, original Work Item reconciliation, and isolated source-fixture reset/recovery on both backends; published-release rehearsal pending | [Pi operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -565,6 +566,8 @@ Missing KVM or unsupported capabilities fail before accepting work.
 Diagnostic sessions leave no retained runtime state.
 
 ### Step 16: Complete operator documentation and cutover rehearsal
+
+**Deliverable:** [Pi operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md), including observed both-backend source evidence and the outstanding published-release gate.
 
 **Goal:** Make the final transition reproducible.
 

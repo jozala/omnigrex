@@ -3,9 +3,16 @@
 set -eu
 backend="${OMNIGREX_PI_BACKEND:-docker}"
 case "$backend" in docker|microsandbox) ;; *) exit 2 ;; esac
+rehearsal="${OMNIGREX_PI_CUTOVER_REHEARSAL:-0}"
+case "$rehearsal" in 0|1) ;; *) exit 2 ;; esac
+source_root="$PWD"
+if [ "$rehearsal" = 1 ]; then
+  . "$source_root/scripts/pi-cutover-rehearsal.sh"
+fi
 namespace="pi-deploy-$(date +%s)-$$"
 directory="$(mktemp -d)"
 registry="$namespace-registry"
+registry_started=0
 COMPOSE_FILE="compose.pi.yaml:compose.pi-$backend.yaml:smoke.yaml"
 # Deployment smoke must never inherit an operator's App IDs, secret paths,
 # image selection, or stable Compose project from the invoking shell.
@@ -14,6 +21,19 @@ compose() {
     DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONTEXT="${DOCKER_CONTEXT:-}" \
     DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
     COMPOSE_FILE="$COMPOSE_FILE" COMPOSE_PROJECT_NAME="$namespace" docker compose "$@"
+}
+ensure_fixture_registry() {
+  if [ "$registry_started" = 1 ]; then return; fi
+  # Bind in the daemon's network namespace, including Docker Desktop's VM.
+  # Both source and target fixture publication share this one registry.
+  registry_port="$((30000 + $$ % 20000))"
+  docker run --detach --rm --name "$registry" --network host \
+    --env "REGISTRY_HTTP_ADDR=127.0.0.1:$registry_port" registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
+  registry_started=1
+  attempt=0
+  until docker exec "$registry" wget -q -O /dev/null "http://127.0.0.1:$registry_port/v2/"; do
+    attempt=$((attempt+1)); test "$attempt" -lt 30; sleep 1
+  done
 }
 cleanup() {
   status=$?
@@ -39,22 +59,14 @@ if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
   docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
   if [ "$backend" = docker ]; then
     docker build --quiet --tag omnigrex/orchestrator:dev .
-    # Bind in the daemon's network namespace, including Docker Desktop's VM.
-    # The fixture registry does not need a client-side published port.
-    port="$((30000 + $$ % 20000))"
-    docker run --detach --rm --name "$registry" --network host \
-      --env "REGISTRY_HTTP_ADDR=127.0.0.1:$port" registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
-    attempt=0
-    until docker exec "$registry" wget -q -O /dev/null "http://127.0.0.1:$port/v2/"; do
-      attempt=$((attempt+1)); test "$attempt" -lt 30; sleep 1
-    done
+    ensure_fixture_registry
     for image in pi:1.0.4 orchestrator:dev; do
       name="${image%%:*}"
-      docker tag "omnigrex/$image" "127.0.0.1:$port/omnigrex/$name:fixture"
-      docker push "127.0.0.1:$port/omnigrex/$name:fixture" >/dev/null
+      docker tag "omnigrex/$image" "127.0.0.1:$registry_port/omnigrex/$name:fixture"
+      docker push "127.0.0.1:$registry_port/omnigrex/$name:fixture" >/dev/null
     done
-    orchestrator="$(docker image inspect "127.0.0.1:$port/omnigrex/orchestrator:fixture" --format '{{index .RepoDigests 0}}')"
-    pi="$(docker image inspect "127.0.0.1:$port/omnigrex/pi:fixture" --format '{{index .RepoDigests 0}}')"
+    orchestrator="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/orchestrator:fixture" --format '{{index .RepoDigests 0}}')"
+    pi="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/pi:fixture" --format '{{index .RepoDigests 0}}')"
   else
     : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the host KVM group}"
     docker build --quiet --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
@@ -70,6 +82,9 @@ else
   docker pull --platform linux/amd64 "$pi"
 fi
 arch="$(docker image inspect "$pi" --format '{{.Architecture}}')"
+if [ "$rehearsal" = 1 ]; then
+  prepare_legacy_images
+fi
 cp deploy/compose.pi.yaml deploy/compose.pi-"$backend".yaml "$directory/"
 mkdir "$directory/secrets"
 openssl rand -hex 32 > "$directory/secrets/database-password"
@@ -121,6 +136,9 @@ services:
       OMNIGREX_MICROSANDBOX_NAMESPACE: $namespace
 EOF
 cd "$directory"
+if [ "$rehearsal" = 1 ]; then
+  rehearse_legacy_reset
+fi
 if [ "$backend" = microsandbox ]; then
   cat > native-smoke.yaml <<EOF
 volumes:
@@ -167,6 +185,9 @@ else
   grep -q '^PASS microsandbox-kvm-resources$' doctor.txt
 fi
 compose exec -T orchestrator /bin/sh -ec 'files="$(find /var/lib/omnigrex/runtime-state -type f -print)"; test -z "$files"'
+if [ "$rehearsal" = 1 ]; then
+  rehearse_pi_recovery
+fi
 if [ "$backend" = microsandbox ]; then
   cat > missing-kvm.yaml <<EOF
 services:

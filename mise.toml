@@ -169,6 +169,14 @@ run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
 description = "Smoke-test the Pi image-only Linux/KVM bundle on the daemon host"
 run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
 
+[tasks.test-pi-cutover]
+description = "Rehearse isolated OpenCode reset, Pi Docker deployment, and coordinated recovery on the daemon host"
+run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
+
+[tasks.test-pi-microsandbox-cutover]
+description = "Rehearse the same reset and Pi coordinated recovery on the Linux/KVM daemon host"
+run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
+
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
 run = '''

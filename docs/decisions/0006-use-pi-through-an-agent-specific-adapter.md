@@ -31,6 +31,8 @@ Native Pi MCP is a credible alternative, but its presence alone does not qualify
 
 This supersedes ADR 0002's ACP protocol choice, not its separation of Session Continuation and History Replay or its immutable Runtime Profile principle.
 The initial cutover resets OpenCode operational/runtime state; it does not convert conversations.
+The [operator cutover procedure](../operator-guide.md#one-time-opencode-to-pi-cutover) requires coordinated pre-reset recovery, explicit storage disposal, and fresh Pi admission.
+An OpenCode rollback after fresh Pi work cannot merge the two ledgers or undo published GitHub effects.
 Pi-to-Pi qualification and retained-image availability remain required.
 An interface does not promise cross-agent conversation migration.
 
@@ -40,3 +42,4 @@ An interface does not promise cross-agent conversation migration.
 - [Superseded ADR 0002](../adr/0002-use-acp-as-the-agent-runtime-boundary.md)
 - [Pi evidence](../experiments/pi.md)
 - [Replace OpenCode with Pi RPC](https://github.com/jozala/omnigrex/issues/33)
+- [Step 16 documentation and rehearsal evidence](../plans/2026-10-11-pi-operator-documentation-and-cutover.md)
