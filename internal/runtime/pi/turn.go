@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
@@ -17,7 +18,10 @@ import (
 	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
-type TurnAdapter struct{ Store session.RuntimeBindingStore }
+type TurnAdapter struct {
+	Store          session.RuntimeBindingStore
+	StartupTimeout time.Duration
+}
 
 func (TurnAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID string, memory int64, tools map[string]string) (execution.Request, error) {
 	c := p.Contract()
@@ -81,7 +85,7 @@ func (adapter TurnAdapter) Prepare(ctx context.Context, request session.TurnPrep
 	coordinator := session.NewRuntimeCoordinator(adapter.Store)
 	result, err := coordinator.Prepare(ctx, session.RuntimePrepareRequest{Lease: request.Lease, Session: request.Session, State: request.State, Connect: func(ctx context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
 		configuration.Session = &identity
-		return Start(ctx, request.Transport, configuration, Options{CallerDeadlineOnly: true})
+		return Start(ctx, request.Transport, configuration, Options{CallerDeadlineOnly: true, StartupTimeout: adapter.StartupTimeout, DeferStartupCompletion: true, EventContext: agentevent.Context{TurnID: request.Lease.ID, AgentSessionID: request.Session.ID}})
 	}})
 	if err != nil {
 		return nil, err

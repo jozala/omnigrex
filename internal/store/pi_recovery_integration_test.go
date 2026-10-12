@@ -43,11 +43,13 @@ func TestPiFailureRecovery(t *testing.T) {
 	for _, mode := range []string{
 		"restart-during-creation", "restart-during-prompt", "lost-transport",
 		"runtime-exit-137", "resource-exhaustion", "lease-expiry", "mcp-expiry",
-		"cleanup-failure", "interrupted-publication-capture", "lost-terminal-mutation-response", "concurrent-turns",
+		"cleanup-failure", "interrupted-publication-capture", "lost-terminal-mutation-response", "concurrent-turns", "startup-timeout",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPiWorkflowFixture(t, mode)
 			switch mode {
+			case "startup-timeout":
+				f.testStartupTimeout(t)
 			case "interrupted-publication-capture", "lost-terminal-mutation-response":
 				f.testMutationFault(t)
 			case "concurrent-turns":
@@ -57,6 +59,30 @@ func TestPiFailureRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *piWorkflowFixture) testStartupTimeout(t *testing.T) {
+	prepared := f.prepare(t)
+	processed, err := f.worker.ProcessNext(f.ctx)
+	if !processed || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, execution.ErrUnknownEffect) {
+		t.Fatalf("startup timeout with unconfirmed stop: %t %v", processed, err)
+	}
+	if len(f.fault.executions) != 1 || f.fault.executions[0].key.AgentTurnID != prepared.Commit.Turn.ID || f.github.openCalls != 0 {
+		t.Fatalf("startup timeout admitted prompt or lost execution identity: %+v", f.fault.executions)
+	}
+	// The Session is still CREATING. Live finalization cannot close mutation
+	// admission under an active-Session fence, so recovery starts only after
+	// the abandoned execution lease is expired and reconciled.
+	job := agentTurnExecutionJob(t, f.pool(t), f.ctx, prepared.Commit.Turn)
+	expireAgentTurnExecution(t, f.pool(t), f.ctx, job.ID, prepared.Commit.Turn.ID)
+	recovery, err := f.database.RecoverExpiredAgentTurn(f.ctx, prepared.Commit.Turn.ID, prepared.Commit.Turn.ExecutionEpoch)
+	if err != nil || recovery.StopRuntimeJobID == "" {
+		t.Fatalf("startup timeout did not enqueue fenced stop: %+v %v", recovery, err)
+	}
+	lease := store.AgentTurnLease{AgentTurn: prepared.Commit.Turn}
+	f.assertRecoveryBarrier(t, lease)
+	f.recover(t, lease, true)
+	f.assertSuccessorAllowed(t, lease)
 }
 
 type piWorkflowFixture struct {

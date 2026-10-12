@@ -147,13 +147,16 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 	}
 	c := Connect(transport, options).(*connection)
 	job := writeJob{content: content, done: make(chan error, 1)}
-	bounded, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)
+	bounded, cancel := c.startupContext(ctx)
 	defer cancel()
 	select {
 	case c.writes <- job:
 	case <-bounded.Done():
+		c.finishStartup(c.startupError(bounded.Err()))
 		_ = c.Close()
-		return nil, bounded.Err()
+		return nil, c.startupError(bounded.Err())
+	case <-c.done:
+		return nil, c.failureValue()
 	}
 	select {
 	case err := <-job.done:
@@ -163,7 +166,10 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 		_ = c.Close()
 		return nil, agent.ErrTransport
 	case <-bounded.Done():
+		c.finishStartup(c.startupError(bounded.Err()))
 		_ = c.Close()
-		return nil, bounded.Err()
+		return nil, c.startupError(bounded.Err())
+	case <-c.done:
+		return nil, c.failureValue()
 	}
 }

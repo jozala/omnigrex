@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -21,9 +22,14 @@ const maxRequests = 32
 
 type Options struct {
 	EventContext      agentevent.Context
+	Logger            *slog.Logger
 	ExpectedSessionID string
 	RequestTimeout    time.Duration
-	PromptTimeout     time.Duration
+	StartupTimeout    time.Duration
+	// DeferStartupCompletion leaves the readiness observation open until the
+	// durable Session coordinator completes its fence and binding checks.
+	DeferStartupCompletion bool
+	PromptTimeout          time.Duration
 	// CallerDeadlineOnly requires a finite caller budget instead of imposing
 	// the standalone protocol probe's adapter timeout.
 	CallerDeadlineOnly  bool
@@ -35,23 +41,27 @@ type Options struct {
 }
 
 type connection struct {
-	transport      io.ReadWriteCloser
-	options        Options
-	mu             sync.Mutex
-	nextID         uint64
-	pending        map[string]*pendingRequest
-	active         *turn
-	cancelling     int
-	ready          bool
-	sessionID      string
-	persistedReady *agent.Ready
-	replaying      bool
-	failure        error
-	done           chan struct{}
-	writes         chan writeJob
-	closeOnce      sync.Once
-	closed         chan struct{}
-	closeErr       error
+	transport       io.ReadWriteCloser
+	options         Options
+	mu              sync.Mutex
+	nextID          uint64
+	pending         map[string]*pendingRequest
+	active          *turn
+	cancelling      int
+	ready           bool
+	startupPending  bool
+	startupRPCReady bool
+	startupStarted  time.Time
+	startupDeadline time.Time
+	sessionID       string
+	persistedReady  *agent.Ready
+	replaying       bool
+	failure         error
+	done            chan struct{}
+	writes          chan writeJob
+	closeOnce       sync.Once
+	closed          chan struct{}
+	closeErr        error
 }
 
 type pendingRequest struct {
@@ -85,8 +95,14 @@ func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
 		selection := *options.Selection
 		options.Selection = &selection
 	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	if options.RequestTimeout <= 0 {
 		options.RequestTimeout = 30 * time.Second
+	}
+	if options.StartupTimeout <= 0 {
+		options.StartupTimeout = 10 * time.Minute
 	}
 	if options.PromptTimeout <= 0 {
 		options.PromptTimeout = 5 * time.Minute
@@ -97,13 +113,24 @@ func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
 	if options.CloseTimeout <= 0 {
 		options.CloseTimeout = 2 * time.Second
 	}
-	c := &connection{transport: transport, options: options, pending: make(map[string]*pendingRequest), done: make(chan struct{}), writes: make(chan writeJob, maxRequests), closed: make(chan struct{})}
+	started := time.Now()
+	c := &connection{transport: transport, options: options, pending: make(map[string]*pendingRequest), done: make(chan struct{}), writes: make(chan writeJob, maxRequests), closed: make(chan struct{}), startupPending: true, startupStarted: started, startupDeadline: started.Add(options.StartupTimeout)}
+	options.Logger.Info("Pi startup readiness started", "agent_turn_id", options.EventContext.TurnID, "agent_session_id", options.EventContext.AgentSessionID, "startup_budget", options.StartupTimeout)
 	go c.read()
 	go c.write()
 	return c
 }
 
 func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
+	c.mu.Lock()
+	initial := c.startupPending && !c.startupRPCReady
+	preparingStartup := c.startupPending
+	c.mu.Unlock()
+	if preparingStartup {
+		var cancel context.CancelFunc
+		ctx, cancel = c.startupContext(ctx)
+		defer cancel()
+	}
 	c.mu.Lock()
 	if c.active != nil || c.replaying || c.cancelling != 0 && (c.options.Selection != nil || c.options.RequireMCP) {
 		c.mu.Unlock()
@@ -113,8 +140,18 @@ func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
 	c.cancelling++ // Hold the prompt barrier through checked preparation.
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); c.cancelling--; c.mu.Unlock() }()
-	result, err := c.request(ctx, "get_state", nil)
+	var result response
+	var err error
+	if initial {
+		result, err = c.exchange(ctx, "get_state", nil)
+	} else {
+		result, err = c.request(ctx, "get_state", nil)
+	}
 	if err != nil {
+		if initial {
+			err = c.startupError(err)
+			c.fail(err)
+		}
 		return agent.Ready{}, err
 	}
 	var state struct {
@@ -131,26 +168,125 @@ func (c *connection) Prepare(ctx context.Context) (agent.Ready, error) {
 		c.fail(agent.ErrSession)
 		return agent.Ready{}, agent.ErrSession
 	}
+	if err := ctx.Err(); err != nil {
+		if preparingStartup {
+			err = c.startupError(err)
+			c.fail(err)
+		}
+		return agent.Ready{}, err
+	}
+	if initial {
+		c.mu.Lock()
+		c.startupRPCReady = true
+		c.mu.Unlock()
+	}
 	if *state.Streaming || state.Compacting || state.Pending != 0 {
 		return agent.Ready{}, agent.ErrBusy
 	}
 	if err := c.configure(ctx); err != nil {
+		if preparingStartup {
+			err = c.startupError(err)
+			c.fail(err)
+		}
+		return agent.Ready{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		if preparingStartup {
+			err = c.startupError(err)
+			c.fail(err)
+		}
 		return agent.Ready{}, err
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.failure != nil {
-		return agent.Ready{}, c.failure
+		err := c.failure
+		c.mu.Unlock()
+		return agent.Ready{}, err
 	}
 	if c.options.RequirePersistence && (c.persistedReady == nil || c.persistedReady.RuntimeSessionID != state.SessionID) {
+		c.mu.Unlock()
+		if preparingStartup {
+			c.fail(agent.ErrSession)
+		}
 		return agent.Ready{}, agent.ErrSession
 	}
 	c.ready = true
 	c.sessionID = state.SessionID
+	ready := agent.Ready{RuntimeSessionID: state.SessionID}
 	if c.persistedReady != nil {
-		return *c.persistedReady, nil
+		ready = *c.persistedReady
 	}
-	return agent.Ready{RuntimeSessionID: state.SessionID}, nil
+	c.mu.Unlock()
+	if preparingStartup && !c.options.DeferStartupCompletion {
+		c.finishStartup(nil)
+	}
+	return ready, nil
+}
+
+// CompletePreparation records the result of both protocol and durable Session
+// preparation. Only the first completion is emitted, including failure paths
+// already reported by the reader or initial configuration delivery.
+func (c *connection) CompletePreparation(err error) error {
+	if err != nil {
+		err = c.startupError(err)
+	}
+	c.finishStartup(err)
+	return err
+}
+
+// One deadline is established at attachment, before the initial frame is sent.
+// Caller deadlines may shorten it, but repeated Prepare calls never reset it.
+func (c *connection) startupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(ctx, c.startupDeadline)
+}
+
+// PreparationDeadline lets neutral coordination retain the same startup
+// ceiling through durable fencing and binding after protocol preparation.
+// An already initialized connection has only its ordinary caller budget.
+func (c *connection) PreparationDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.startupPending {
+		return time.Time{}
+	}
+	return c.startupDeadline
+}
+
+func (c *connection) startupError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(c.startupDeadline) {
+		return fmt.Errorf("Pi startup readiness deadline exceeded: %w", err)
+	}
+	return err
+}
+
+func (c *connection) finishStartup(err error) {
+	c.mu.Lock()
+	if !c.startupPending {
+		c.mu.Unlock()
+		return
+	}
+	c.startupPending = false
+	duration := time.Since(c.startupStarted)
+	owner, budget := c.options.EventContext, c.options.StartupTimeout
+	c.mu.Unlock()
+	outcome := "ready"
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			outcome = "timeout"
+		case errors.Is(err, ErrConfiguration), errors.Is(err, agent.ErrSession), errors.Is(err, agent.ErrProtocol):
+			outcome = "configuration_failure"
+		case errors.Is(err, agent.ErrRuntime):
+			outcome = "runtime_rejection"
+		case errors.Is(err, context.Canceled):
+			outcome = "cancelled"
+		case errors.Is(err, agent.ErrTransport):
+			outcome = "transport_failure"
+		default:
+			outcome = "preparation_failure"
+		}
+	}
+	c.options.Logger.Info("Pi startup readiness completed", "agent_turn_id", owner.TurnID, "agent_session_id", owner.AgentSessionID, "startup_budget", budget, "duration", duration, "outcome", outcome)
 }
 
 func (c *connection) SetAgentEventContext(owner agentevent.Context) {
@@ -367,6 +503,10 @@ func (c *connection) Close() error {
 func (c *connection) request(ctx context.Context, command string, fields map[string]string) (result response, failure error) {
 	ctx, cancel := context.WithTimeout(ctx, c.options.RequestTimeout)
 	defer cancel()
+	return c.exchange(ctx, command, fields)
+}
+
+func (c *connection) exchange(ctx context.Context, command string, fields map[string]string) (result response, failure error) {
 	if err := ctx.Err(); err != nil {
 		return response{}, err
 	}
@@ -431,7 +571,14 @@ func (c *connection) request(ctx context.Context, command string, fields map[str
 			written = nil
 		case <-ctx.Done():
 			if written != nil {
-				c.fail(agent.ErrTransport)
+				c.mu.Lock()
+				startup := c.startupPending
+				c.mu.Unlock()
+				if startup {
+					c.fail(ctx.Err())
+				} else {
+					c.fail(agent.ErrTransport)
+				}
 			}
 			return response{}, ctx.Err()
 		case <-c.done:
@@ -638,6 +785,7 @@ func (c *connection) fail(err error) {
 		close(c.done)
 	}
 	c.mu.Unlock()
+	c.finishStartup(err)
 	c.closeOnce.Do(func() {
 		go func() {
 			err := c.transport.Close()

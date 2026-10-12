@@ -44,6 +44,7 @@ const (
 	defaultExecutionHeartbeat          = 10 * time.Second
 	defaultExecutionPollInterval       = 250 * time.Millisecond
 	defaultExecutionTurnTimeout        = 2 * time.Hour
+	defaultPiStartupTimeout            = 10 * time.Minute
 	defaultExecutionCleanupTimeout     = 10 * time.Second
 	defaultTerminalCorroboration       = 30 * time.Minute
 	defaultWorkflowEffectLeaseDuration = 30 * time.Second
@@ -87,6 +88,7 @@ type Config struct {
 	OpenCodeACPV1Platform                  profile.Platform
 	PiRPCV1Image                           string
 	PiRPCV1Platform                        profile.Platform
+	PiStartupTimeout                       time.Duration
 	RuntimeProfileCompatibilityResultsFile string
 	GitHubAPIURL                           string
 	GitRemoteBaseURL                       string
@@ -173,6 +175,7 @@ func Load(getenv func(string) string) (Config, error) {
 		AgentImageReference:                    valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
 		OpenCodeACPV1Image:                     getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
 		PiRPCV1Image:                           getenv("OMNIGREX_PI_RPC_V1_IMAGE"),
+		PiStartupTimeout:                       defaultPiStartupTimeout,
 		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
 		GitHubAPIURL:                           valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
 		GitRemoteBaseURL:                       valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
@@ -296,6 +299,14 @@ func Load(getenv func(string) string) (Config, error) {
 		config.PiRPCV1Platform = profile.Platform{OS: os, Arch: arch}
 		if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) || !profile.IsExactRegistryImage(config.PiRPCV1Image) {
 			problems = append(problems, fmt.Errorf("candidate Pi requires OMNIGREX_PI_RPC_V1_IMAGE as an exact registry digest and OMNIGREX_PI_RPC_V1_PLATFORM as a supported linux platform"))
+		}
+	}
+	if value := getenv("OMNIGREX_PI_STARTUP_TIMEOUT"); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < time.Microsecond || duration > maximumWorkerDuration {
+			problems = append(problems, fmt.Errorf("OMNIGREX_PI_STARTUP_TIMEOUT must be between one microsecond and %s", maximumWorkerDuration))
+		} else {
+			config.PiStartupTimeout = duration
 		}
 	}
 	if config.RuntimeProfileCompatibilityResultsFile != "" &&

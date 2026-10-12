@@ -226,7 +226,12 @@ func (worker *ExecutionWorker) ProcessNext(ctx context.Context) (processed bool,
 		heartbeat.stop()
 		return true, fmt.Errorf("heartbeat acquired Agent Turn: %w", heartbeat.initialErr)
 	}
-	released, operationErr := worker.execute(heartbeat.workCtx, heartbeat.leaseCtx, &heartbeat, &lease, &secrets)
+	// The Turn budget begins before Runtime Process launch and preparation, not
+	// when the first model prompt is submitted. Lease-backed cleanup remains
+	// independent so a deadline cannot bypass the stop/capture barrier.
+	turnCtx, cancelTurn := context.WithTimeout(heartbeat.workCtx, worker.turnTimeout)
+	released, operationErr := worker.execute(turnCtx, heartbeat.leaseCtx, &heartbeat, &lease, &secrets)
+	cancelTurn()
 	heartbeatErr := heartbeat.stop()
 	if operationErr != nil {
 		if heartbeatErr != nil && !released {
@@ -334,6 +339,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		} else if nilDependency(runtime) || nilDependency(runtime.PromptClient()) && nilDependency(runtimeAgentConnection(runtime)) {
 			operationErr = errors.Join(operationErr, errors.New("launch Agent Turn Runtime Process: launcher returned an invalid runtime"))
 		}
+		if operationErr == nil && workCtx.Err() != nil {
+			operationErr = fmt.Errorf("launch Agent Turn Runtime Process: %w", workCtx.Err())
+		}
 		launchOperation.Finish(&operationErr)
 	}
 
@@ -362,7 +370,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		if envelopeErr != nil {
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
-			promptCtx, cancelPrompt := context.WithTimeout(workCtx, worker.turnTimeout)
+			promptCtx := workCtx
 			var response acp.PromptResponse
 			var promptErr error
 			if connection := runtimeAgentConnection(runtime); connection != nil {
@@ -380,7 +388,6 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			if promptErr == nil && response.StopReason == acp.StopReasonCancelled && promptCtx.Err() == context.DeadlineExceeded {
 				promptErr = context.DeadlineExceeded
 			}
-			cancelPrompt()
 			if promptErr != nil {
 				// Classify the ACP ending before an independent Docker observation
 				// can add a deadline or transport error to the diagnostic chain.

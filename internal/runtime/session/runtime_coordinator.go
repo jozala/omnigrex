@@ -67,7 +67,7 @@ func NewRuntimeCoordinator(bindingStore RuntimeBindingStore) *RuntimeCoordinator
 
 // Prepare reserves identity before calling the adapter, and revalidates the
 // fence before adopting its result. It never authorizes or submits a prompt.
-func (c *RuntimeCoordinator) Prepare(ctx context.Context, request RuntimePrepareRequest) (RuntimeResult, error) {
+func (c *RuntimeCoordinator) Prepare(ctx context.Context, request RuntimePrepareRequest) (result RuntimeResult, err error) {
 	if c == nil || c.store == nil || request.Connect == nil {
 		return RuntimeResult{}, errors.New("prepare Agent Session: dependency is nil")
 	}
@@ -98,8 +98,21 @@ func (c *RuntimeCoordinator) Prepare(ctx context.Context, request RuntimePrepare
 	if connection == nil {
 		return RuntimeResult{}, agent.ErrNotReady
 	}
+	// A runtime may impose one deadline spanning protocol initialization and
+	// durable binding. Only the attached connection knows its absolute start
+	// time; a fresh timeout here would incorrectly restart that budget.
+	if timed, ok := connection.(interface{ PreparationDeadline() time.Time }); ok {
+		if deadline := timed.PreparationDeadline(); !deadline.IsZero() {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+			defer cancel()
+		}
+	}
 	adopted := false
 	defer func() {
+		if completing, ok := connection.(interface{ CompletePreparation(error) error }); ok {
+			err = completing.CompletePreparation(err)
+		}
 		if !adopted {
 			_ = connection.Close()
 		}
@@ -120,6 +133,9 @@ func (c *RuntimeCoordinator) Prepare(ctx context.Context, request RuntimePrepare
 		return RuntimeResult{}, err
 	}
 	if err := c.store.MarkAgentTurnStateInitialized(ctx, lease, ref); err != nil {
+		return RuntimeResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return RuntimeResult{}, err
 	}
 	adopted = true

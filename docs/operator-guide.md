@@ -290,6 +290,12 @@ Use the existing [GitHub Apps](#github-apps), [secret-file placement](#secrets),
 For Pi, the provider file must use literal Pi-native API keys, for example `{"openai":{"type":"api_key","key":"REPLACE_WITH_SECRET"}}`, rather than OpenCode's `type: api` shape.
 Only API keys are supported; executable key references, environment references, OAuth entries, and missing selected providers fail preflight.
 Pi Profiles use `runtime: pi-rpc/v1`, `provider/model`, optional thinking, and the permissions described in the [candidate Profile schema](./plans/2026-10-09-pi-configuration-and-mcp.md#candidate-agent-profile-schema).
+Set `OMNIGREX_PI_STARTUP_TIMEOUT` in the selected Compose deployment's `.env` to budget repository bootstrap, initial Pi configuration delivery, and initial RPC readiness (default `10m`).
+The adapter starts this single deadline when it attaches to the Runtime Process; a shorter Agent Turn or diagnostic deadline still wins.
+After the first validated `get_state` response, each subsequent configuration RPC uses its ordinary 30-second deadline while the remaining startup deadline bounds preparation overall.
+The Agent Turn's overall timeout (default `2h`) begins before Runtime Process launch, includes startup and prompt execution, and leaves stop/capture cleanup under its separate budget; increasing it alone does not extend the startup allowance.
+The INFO-level `Pi startup readiness started` and `Pi startup readiness completed` observations include Agent Turn and Session identifiers, budget, duration, and a safe outcome after both RPC and durable Session preparation; they do not diagnose a specific tool download or establish that an uncertain execution stopped.
+Doctor uses a disposable environment and its own shorter outer diagnostic budget, so passing doctor does not prove that working-revision repository tools will install during a real Agent Turn.
 
 ### Docker bundle
 

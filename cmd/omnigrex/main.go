@@ -349,7 +349,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
 		LegacyBootstrapImage: settings.OpenCodeACPV1Image,
-		AgentAdapters:        map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}},
+		AgentAdapters:        map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: settings.PiStartupTimeout}},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)

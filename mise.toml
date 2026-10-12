@@ -144,7 +144,7 @@ description = "Run shared conformance, Pi lifecycle/recovery/upgrade, and image-
 run = '''
 mise run test-integration
 mise run test-pi-integration
-OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$' mise run test-pi-workflow
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-workflow
 mise run test-pi-recovery
 mise run test-pi-upgrade
 mise run test-pi-deployment
@@ -155,7 +155,7 @@ description = "Run the same release gates plus nested-container qualification on
 run = '''
 mise run test-microsandbox-integration
 mise run test-pi-microsandbox-integration
-OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$' mise run test-pi-microsandbox-workflow
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-microsandbox-workflow
 mise run test-pi-microsandbox-recovery
 mise run test-pi-microsandbox-upgrade
 mise run test-pi-microsandbox-deployment

@@ -495,6 +495,22 @@ func TestExecutionWorkerMapsPromptDeadlineAndCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutionWorkerTurnDeadlineIncludesLaunchAndDoesNotAdmitPrompt(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.config.TurnTimeout = 40 * time.Millisecond
+	fixture.launcher.delay = 100 * time.Millisecond
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, mapPromptClassToStatus(request.PromptError))
+	}
+	processed, err := fixture.worker(t).ProcessNext(t.Context())
+	if !processed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("launch exceeded Turn deadline: processed=%t err=%v", processed, err)
+	}
+	if contains(fixture.operations.values(), "prompt") || fixture.store.settled.Completion.Status != store.AgentTurnTimedOut {
+		t.Fatalf("deadline admitted prompt or did not settle timeout: operations=%v settlement=%+v", fixture.operations.values(), fixture.store.settled)
+	}
+}
+
 func TestExecutionWorkerTreatsCancelledACPResponseAfterTurnDeadlineAsDeadline(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.config.TurnTimeout = time.Millisecond
@@ -1867,6 +1883,7 @@ type executionLauncher struct {
 	runtime               *executionRuntime
 	request               agentturn.LaunchRequest
 	err                   error
+	delay                 time.Duration
 	launchStarted         chan struct{}
 	registrationRelease   chan struct{}
 	registrationPublished chan struct{}
@@ -1879,12 +1896,19 @@ func (recover executionPublicationRecoveryFunc) Recover(ctx context.Context, lea
 	return recover(ctx, lease, execution, url, credential, base)
 }
 
-func (launcher *executionLauncher) LaunchExecution(_ context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
+func (launcher *executionLauncher) LaunchExecution(ctx context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
 	launcher.operations.add("launch")
 	launcher.request = request
 	launcher.request.ProviderCredentialJSON = append(json.RawMessage(nil), request.ProviderCredentialJSON...)
 	if launcher.launchStarted != nil {
 		close(launcher.launchStarted)
+	}
+	if launcher.delay > 0 {
+		select {
+		case <-time.After(launcher.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if launcher.registrationRelease != nil {
 		<-launcher.registrationRelease

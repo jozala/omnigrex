@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 backend="${OMNIGREX_PI_BACKEND:-docker}"
-pattern="${OMNIGREX_PI_WORKFLOW_TEST_PATTERN:-^TestPiControlledWorkflow$}"
+pattern="${OMNIGREX_PI_WORKFLOW_TEST_PATTERN:-^(TestPiControlledWorkflow|TestPiSlowRepositoryBootstrap)$}"
 namespace="pi-workflow-$(date +%s)-$$"
 network="$namespace-network"
 database="$namespace-database"

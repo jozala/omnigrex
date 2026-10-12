@@ -1,9 +1,27 @@
 package config_test
 
 import (
-	"github.com/jozala/omnigrex/internal/config"
 	"testing"
+	"time"
+
+	"github.com/jozala/omnigrex/internal/config"
 )
+
+func TestPiStartupTimeoutConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  time.Duration
+		valid bool
+	}{
+		{"", 10 * time.Minute, true}, {"45s", 45 * time.Second, true}, {"1us", time.Microsecond, true},
+		{"0", 0, false}, {"-1s", 0, false}, {"not-a-duration", 0, false}, {"8761h", 0, false},
+	} {
+		got, err := config.Load(environment(map[string]string{"OMNIGREX_PI_STARTUP_TIMEOUT": tc.input}))
+		if tc.valid && (err != nil || got.PiStartupTimeout != tc.want) || !tc.valid && err == nil {
+			t.Errorf("startup timeout %q = %s, %v", tc.input, got.PiStartupTimeout, err)
+		}
+	}
+}
 
 func TestCandidatePiConfigurationRequiresCompleteImmutableBinding(t *testing.T) {
 	for _, tc := range []struct {

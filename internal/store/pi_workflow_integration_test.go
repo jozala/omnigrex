@@ -96,6 +96,29 @@ func TestPiControlledWorkflow(t *testing.T) {
 	t.Log("PASS: production Pi launch, fenced MCP publication, native Reviewer review and durable human-review transition")
 }
 
+// Both backends run the real environment bootstrap from the working checkout.
+// mise's postinstall hook spends longer than the ordinary 30s RPC deadline
+// before Node is started, then the production Pi adapter admits a full Turn.
+func TestPiSlowRepositoryBootstrap(t *testing.T) {
+	f := newPiWorkflowFixture(t, "slow-bootstrap")
+	prepared := f.prepare(t)
+	started := time.Now()
+	processed, err := f.worker.ProcessNext(f.ctx)
+	if err != nil || !processed {
+		t.Fatalf("delayed repository bootstrap: %t %v", processed, err)
+	}
+	if time.Since(started) < 30*time.Second {
+		t.Fatal("repository installation did not exceed ordinary RPC budget")
+	}
+	if _, err := os.Stat(filepath.Join(f.settings.MiseRoot, "assignment-"+prepared.Commit.Participant.ID, "tool-data", "assignment", "slow-bootstrap-complete")); err != nil {
+		t.Fatalf("repository install hook did not finish: %v", err)
+	}
+	f.assertState(t, workflow.StateReviewing)
+	if f.github.openCalls != 1 {
+		t.Fatalf("controlled prompt did not publish a Change Proposal: %d", f.github.openCalls)
+	}
+}
+
 func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	t.Helper()
 	if os.Getenv("OMNIGREX_PI_WORKFLOW_INTEGRATION") != "1" {
@@ -174,7 +197,15 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("Controlled Work Item\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	run(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "add", "README.md")
+	if mode == "slow-bootstrap" || mode == "startup-timeout" {
+		// Deliberately slow repository-defined installation, without downloading
+		// tools or calling an external provider. The real Bootstrap runs this hook.
+		content := "[hooks]\npostinstall = \"sleep 32; touch /home/opencode/.local/share/omnigrex-tool-data/assignment/slow-bootstrap-complete\"\n"
+		if err := os.WriteFile(filepath.Join(seed, "mise.toml"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "add", ".")
 	run(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Seed repository")
 	head := run(seed, "rev-parse", "HEAD")
 	run(seed, "push", bare, "HEAD:refs/heads/main")
@@ -206,7 +237,11 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	t.Cleanup(func() { _ = server.Close() })
 	authority := &workflowAuthorityAudit{Gateway: gateway}
 	factory := &workflowFixtureFactory{Factory: backend.Factory, localImage: localImage, fault: fault}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
+	startupTimeout := 2 * time.Minute
+	if mode == "startup-timeout" {
+		startupTimeout = 200 * time.Millisecond
+	}
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: startupTimeout}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +379,7 @@ func (e workflowFixtureEngine) Create(ctx context.Context, _ execution.Request, 
 			_ = process.Transport().Close()
 			return nil, execution.ErrUnknownEffect
 		}
-		if e.fault.mode == "cleanup-failure" {
+		if e.fault.mode == "cleanup-failure" || e.fault.mode == "startup-timeout" {
 			process = piFaultProcess{Process: process}
 		}
 	}

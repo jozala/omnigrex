@@ -2,10 +2,12 @@ package pi_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -266,7 +268,7 @@ func TestEventOverflowFailsExplicitlyWithoutWaitingForSlowSink(t *testing.T) {
 
 func TestBlockedWriteHonorsDeadlineAndClosesTransport(t *testing.T) {
 	client, runtime := net.Pipe()
-	c := pi.Connect(client, pi.Options{RequestTimeout: 30 * time.Millisecond})
+	c := pi.Connect(client, pi.Options{StartupTimeout: 30 * time.Millisecond})
 	t.Cleanup(func() { _ = runtime.Close(); _ = c.Close() })
 	start := time.Now()
 	_, err := c.Prepare(context.Background())
@@ -275,6 +277,128 @@ func TestBlockedWriteHonorsDeadlineAndClosesTransport(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadyConnectionUsesOrdinaryBudgetForRepeatedPreparation(t *testing.T) {
+	client, runtime := net.Pipe()
+	c := pi.Connect(client, pi.Options{StartupTimeout: 300 * time.Millisecond, RequestTimeout: 30 * time.Millisecond})
+	t.Cleanup(func() { _ = c.Close(); _ = runtime.Close() })
+	go func() {
+		scanner := bufio.NewScanner(runtime)
+		count := 0
+		for scanner.Scan() {
+			var command struct{ ID, Type string }
+			_ = json.Unmarshal(scanner.Bytes(), &command)
+			count++
+			if count == 2 {
+				time.Sleep(90 * time.Millisecond)
+			}
+			writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": true, "data": map[string]any{"sessionId": "fixture", "isStreaming": false}})
+		}
+	}()
+	if _, err := c.Prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Prepare(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("repeated preparation used startup allowance: %v", err)
+	}
+}
+
+func TestConfigurationAfterInitialStateUsesOrdinaryRequestBudget(t *testing.T) {
+	client, runtime := net.Pipe()
+	c := pi.Connect(client, pi.Options{StartupTimeout: 300 * time.Millisecond, RequestTimeout: 30 * time.Millisecond, RequireMCP: true})
+	t.Cleanup(func() { _ = c.Close(); _ = runtime.Close() })
+	go func() {
+		scanner := bufio.NewScanner(runtime)
+		for scanner.Scan() {
+			var command struct{ ID, Type string }
+			_ = json.Unmarshal(scanner.Bytes(), &command)
+			if command.Type == "get_state" {
+				writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": true, "data": map[string]any{"sessionId": "fixture", "isStreaming": false}})
+			} else {
+				time.Sleep(90 * time.Millisecond)
+				writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": true, "data": map[string]any{"commands": []any{map[string]string{"name": "omnigrex-ready", "source": "extension"}}}})
+			}
+		}
+	}()
+	if _, err := c.Prepare(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("post-readiness RPC used startup allowance: %v", err)
+	}
+	if outcome, err := c.Prompt(t.Context(), "must not admit", nil); err == nil || outcome.Admitted {
+		t.Fatalf("prompt admitted after configuration timeout: %+v %v", outcome, err)
+	}
+}
+
+func TestStartupRPCRejectionIsNotLoggedAsTransportFailure(t *testing.T) {
+	client, runtime := net.Pipe()
+	var output bytes.Buffer
+	c := pi.Connect(client, pi.Options{Logger: slog.New(slog.NewJSONHandler(&output, nil))})
+	t.Cleanup(func() { _ = c.Close(); _ = runtime.Close() })
+	go func() {
+		scanner := bufio.NewScanner(runtime)
+		if scanner.Scan() {
+			var command struct{ ID, Type string }
+			_ = json.Unmarshal(scanner.Bytes(), &command)
+			writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": false, "error": "private guest text"})
+		}
+	}()
+	if _, err := c.Prepare(t.Context()); !errors.Is(err, agent.ErrRuntime) {
+		t.Fatalf("RPC rejection: %v", err)
+	}
+	if !strings.Contains(output.String(), `"outcome":"runtime_rejection"`) || strings.Contains(output.String(), "private guest text") {
+		t.Fatalf("misclassified or unsafe startup observation: %s", output.String())
+	}
+}
+
+func TestStartupObservationWaitsForDurablePreparation(t *testing.T) {
+	client, runtime := net.Pipe()
+	var output bytes.Buffer
+	c := pi.Connect(client, pi.Options{DeferStartupCompletion: true, Logger: slog.New(slog.NewJSONHandler(&output, nil))})
+	t.Cleanup(func() { _ = c.Close(); _ = runtime.Close() })
+	go func() {
+		scanner := bufio.NewScanner(runtime)
+		if scanner.Scan() {
+			var command struct{ ID, Type string }
+			_ = json.Unmarshal(scanner.Bytes(), &command)
+			writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": true, "data": map[string]any{"sessionId": "fixture", "isStreaming": false}})
+		}
+	}()
+	if _, err := c.Prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "Pi startup readiness completed") {
+		t.Fatal("startup logged ready before durable binding")
+	}
+	completion := c.(interface{ CompletePreparation(error) error })
+	if err := completion.CompletePreparation(agent.ErrSession); !errors.Is(err, agent.ErrSession) {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"outcome":"configuration_failure"`) || strings.Contains(output.String(), `"outcome":"ready"`) {
+		t.Fatalf("durable binding failure logged as ready: %s", output.String())
+	}
+}
+
+func TestStartupObservationDoesNotCallNonTransportFailuresTransportLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		outcome string
+	}{
+		{"busy", agent.ErrBusy, "preparation_failure"},
+		{"binding", errors.New("durable binding failed"), "preparation_failure"},
+		{"transport", agent.ErrTransport, "transport_failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, runtime := net.Pipe()
+			var output bytes.Buffer
+			c := pi.Connect(client, pi.Options{Logger: slog.New(slog.NewJSONHandler(&output, nil))})
+			t.Cleanup(func() { _ = c.Close(); _ = runtime.Close() })
+			c.(interface{ CompletePreparation(error) error }).CompletePreparation(tc.err)
+			if !strings.Contains(output.String(), `"outcome":"`+tc.outcome+`"`) {
+				t.Fatalf("misclassified %s: %s", tc.name, output.String())
+			}
+		})
 	}
 }
 
