@@ -83,6 +83,26 @@ The first native recovery attempt found that a diagnostic-only installation has 
 One Docker doctor resource probe exited with status 137 during qualification; a full repeat passed without changing limits or checks, and no OOM cause was established.
 An interrupted short SSH tool deadline and a source transfer containing macOS metadata were environmental rehearsal failures; a clean metadata-free transfer and sufficient execution deadline produced the final passing native gate.
 
+## Live candidate Workflow validation between Steps 16 and 17
+
+On 2026-10-12, the operator successfully retried [Print a random quote after the greeting, Issue 13](https://github.com/jozala/omnigrex-testrun/issues/13) using Pi on a Linux/amd64 Microsandbox candidate deployment.
+The Developer implemented and published [Change Proposal PR 14](https://github.com/jozala/omnigrex-testrun/pull/14), and the separate Omnigrex Reviewer App submitted an `APPROVED` review at 23:20:28 UTC for head `411b75d9edb419e7e8a9ca439c55946ba9388640`.
+Both the Issue and Pull Request carried `omnigrex:pr-ready` when the outcome was verified; the Pull Request remained open for human review and merge.
+
+The successful retry followed repository Go toolchain declaration through mise and deployment of the Pi startup-readiness fix in commit `0755fa273aee2fb8a4d24a7aa9d51233c929d2de`.
+Earlier attempts had stopped for unavailable Go tools and then exhausted infrastructure retries during Session preparation.
+The [startup-readiness corrective plan](2026-10-12-pi-startup-readiness-budget.md) describes the observed bootstrap/deadline coupling and proposed separation of startup and ordinary RPC budgets.
+
+The Reviewer reported successful `gofmt -d main.go`, `go test ./...`, `go vet ./...`, `go build`, and smoke checks with a supplied name and with no input.
+The `go test` result established package compilation, with no test files present; the smoke checks confirmed one supplied quote and its matching author after each greeting path.
+The Reviewer also reported a clean merge tree and no blocking findings.
+These commands are recorded as Reviewer-reported verification, not as independently rerun checks by the documentation author.
+
+This is live candidate evidence for the Step 16 operator procedure's Developer publication, Reviewer approval, and human review readiness, and early evidence for Step 17's isolated Microsandbox dogfooding requirement.
+The trial used manually published candidate images and does not replace merged-release publication, public-pull qualification, exact-digest deployment/cutover rehearsal, coordinated backup/restore verification, or final qualification after OpenCode removal.
+This small Go Work Item did not exercise Docker, Compose, or Testcontainers inside the guest.
+The outstanding release and final-cutover boundaries remain as described above.
+
 ## Independent review corrections
 
 Round 1 used separate Standards and Spec subagents over the entire Step 16 working tree against pre-Step-16 HEAD, including every untracked addition.
