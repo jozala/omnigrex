@@ -249,12 +249,104 @@ func TestNormalizeSubmittedReviewDecisions(t *testing.T) {
 	}
 }
 
+func TestNormalizePullRequestLabeledRun(t *testing.T) {
+	delivery := webhook.Delivery{
+		DeliveryID: validDeliveryID(),
+		EventName:  "pull_request",
+		Action:     "labeled",
+		Payload: []byte(`{
+			"action":"labeled",
+			"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},
+			"installation":{"id":88},
+			"sender":{"id":77,"login":"octocat"},
+			"label":{"name":"omnigrex:run"},
+			"pull_request":{
+				"id":654,"number":21,"node_id":"PR_node",
+				"body":"visible text\n<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->",
+				"base":{"ref":"main","sha":"base123"},
+				"head":{"ref":"feature","sha":"head456"}
+			}
+		}`),
+	}
+
+	result, err := webhook.Normalize(delivery)
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if result.Outcome != webhook.NormalizationSupported {
+		t.Fatalf("outcome = %q, want %q", result.Outcome, webhook.NormalizationSupported)
+	}
+	if result.Event == nil || result.Event.PullRequest == nil {
+		t.Fatal("event = nil, want normalized pull request activation")
+	}
+	event := result.Event
+	if event.DeliveryID != delivery.DeliveryID || event.EventName != "pull_request" || event.Action != "labeled" {
+		t.Errorf("event identity = (%q, %q, %q), want delivery identity", event.DeliveryID, event.EventName, event.Action)
+	}
+	if event.Repository.ID != 9123 || event.Repository.Owner != "jozala" || event.Repository.Name != "omnigrex" {
+		t.Errorf("repository = %#v, want GitHub repository identity", event.Repository)
+	}
+	if event.Label != "omnigrex:run" {
+		t.Errorf("label = %q, want omnigrex:run", event.Label)
+	}
+	pullRequest := event.PullRequest
+	if pullRequest.ID != 654 || pullRequest.Number != 21 || pullRequest.NodeID != "PR_node" {
+		t.Errorf("Pull Request identity = %#v, want 654/21/PR_node", pullRequest)
+	}
+	if pullRequest.BaseRef != "main" || pullRequest.BaseSHA != "base123" || pullRequest.HeadRef != "feature" || pullRequest.HeadSHA != "head456" {
+		t.Errorf("Pull Request revision = %#v, want main/base123 and feature/head456", pullRequest)
+	}
+	if pullRequest.WorkflowMarkerID != "40000000-0000-4000-8000-000000000001" {
+		t.Errorf("Workflow marker = %q, want marker Workflow UUID for conflict detection", pullRequest.WorkflowMarkerID)
+	}
+	if event.Issue != nil {
+		t.Errorf("Issue = %#v, want nil for pull request activation", event.Issue)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal normalized event: %v", err)
+	}
+	if strings.Contains(string(encoded), "visible text") || strings.Contains(string(encoded), "body") {
+		t.Errorf("normalized payload retained Pull Request body: %s", encoded)
+	}
+}
+
+func TestNormalizePullRequestLabeledPreservesConflictingMarkersForRejection(t *testing.T) {
+	body := `<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000001 -->
+<!-- omnigrex:v1 workflow=40000000-0000-4000-8000-000000000002 -->`
+	delivery := webhook.Delivery{
+		DeliveryID: validDeliveryID(),
+		EventName:  "pull_request",
+		Action:     "labeled",
+		Payload: []byte(`{"action":"labeled",
+			"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}},
+			"label":{"name":"omnigrex:run"},
+			"pull_request":{"id":654,"number":21,
+				"body":` + strconv.Quote(body) + `,
+				"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}}}`),
+	}
+
+	result, err := webhook.Normalize(delivery)
+	if err != nil || result.Outcome != webhook.NormalizationSupported || result.Event == nil || result.Event.PullRequest == nil {
+		t.Fatalf("Normalize() = (%#v, %v), want supported event with marker warning", result, err)
+	}
+	if !result.Event.PullRequest.WorkflowMarkerInvalid || result.Event.PullRequest.WorkflowMarkerID != "" {
+		t.Errorf("Pull Request marker state = %#v, want invalid without trusted Workflow ID", result.Event.PullRequest)
+	}
+	if result.Event.Label != "omnigrex:run" {
+		t.Errorf("label = %q, want omnigrex:run preserved with conflicting markers", result.Event.Label)
+	}
+}
+
 func TestNormalizeReturnsExplicitIgnoredOutcome(t *testing.T) {
 	const repository = `"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}`
+	const pullRequest = `"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"head"}}`
 	tests := []webhook.Delivery{
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,"label":{"name":"bug"}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "opened", Payload: []byte(`{"action":"opened",` + repository + `}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "closed", Payload: []byte(`{"action":"closed",` + repository + `}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,"label":{"name":"bug"},` + pullRequest + `}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "unlabeled", Payload: []byte(`{"action":"unlabeled",` + repository + `,"label":{"name":"omnigrex:run"},` + pullRequest + `}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "dismissed", Payload: []byte(`{"action":"dismissed",` + repository + `}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"review":{"state":"commented"}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "push", Payload: []byte(`{` + repository + `}`)},
@@ -286,6 +378,7 @@ func TestNormalizeDoesNotParseUnsupportedEventPayload(t *testing.T) {
 
 func TestNormalizeReturnsExplicitFailureForMalformedSupportedEvent(t *testing.T) {
 	const repository = `"repository":{"id":9123,"name":"omnigrex","owner":{"login":"jozala"}}`
+	const pullRequest = `"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}}`
 	tests := []webhook.Delivery{
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "closed", Payload: []byte(`{`)},
 		{DeliveryID: validDeliveryID(), EventName: "issues", Payload: []byte(`{` + repository + `}`)},
@@ -293,6 +386,9 @@ func TestNormalizeReturnsExplicitFailureForMalformedSupportedEvent(t *testing.T)
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "closed", Payload: []byte(`{"action":"closed",` + repository + `}`)},
 		{DeliveryID: validDeliveryID(), EventName: "issues", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,"issue":{"id":456,"number":12}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "opened", Payload: []byte(`{"action":"opened",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature"}}}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,` + pullRequest + `}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "labeled", Payload: []byte(`{"action":"labeled",` + repository + `,"label":{"name":"omnigrex:run"}}`)},
+		{DeliveryID: validDeliveryID(), EventName: "pull_request", Action: "labeled", Payload: []byte(`{"action":"opened",` + repository + `,"label":{"name":"omnigrex:run"},` + pullRequest + `}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"state":"approved","commit_id":"head456"}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"id":987,"node_id":"PRR_node","state":"approved","commit_id":"head456"}}`)},
 		{DeliveryID: validDeliveryID(), EventName: "pull_request_review", Action: "submitted", Payload: []byte(`{"action":"submitted",` + repository + `,"pull_request":{"id":654,"number":21,"base":{"ref":"main","sha":"base123"},"head":{"ref":"feature","sha":"head456"}},"review":{"id":987,"state":"approved","commit_id":"head456","user":{"id":77,"login":"reviewer"}}}`)},

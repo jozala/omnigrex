@@ -137,3 +137,23 @@ The authorized Linux/KVM host passed the two corrected claim tests with `-count=
 The exact `mise run test-integration` task and both `test-pi-deployment` and `test-pi-microsandbox-deployment` smokes also passed after the corrections.
 An independent read-only review subagent confirmed both findings resolved and reported no new actionable P1/P2 findings in this correction.
 The host's original services, container identities, volumes, and networks remained unchanged, with no fixture resources left behind.
+
+## Integration with current main
+
+The PR conflict resolution merges `main` through `558bee2` while retaining Pi-only execution, neutral outcomes, and sealed capture ownership.
+Current Change Proposal activation, tracking-only head synchronization, authoritative reactivation verification, and operation-scoped GitHub credentials now run through those boundaries.
+Each independent GitHub observation and trusted publication inspection acquires a current credential, including retries after slow repository preparation or transient failures.
+The upstream APK refresh is retained in the renamed orchestrator package lock.
+The independently numbered upstream decisions are canonical records 0021-0023, with their original filename links retained as pointers.
+
+The new scoped CI tools remain available through the owned Pi MCP extension.
+An integration review found that its generic tool-error handling discarded the upstream CI error classifications.
+The extension now reconstructs allowlisted CI classification messages for the five CI tools while keeping transport errors, unknown payloads, and arbitrary error reasons generic.
+All 351 actual HTTP/SDK boundary tests pass, including malformed responses, malicious reasons, transport impersonation, and endpoint redirects.
+
+Local `mise run check` and integration-tag compilation passed after resolution.
+The authorized qualification host passed `mise run test-integration` and every remaining Docker aggregate constituent in order, reusing the already successful shared integration result.
+The complete `mise run test-microsandbox` aggregate also passed, including both-backend CI boundary tests, controlled Workflows, all twelve recovery scenarios, upgrade/restore, nested Docker/Compose/Testcontainers, and image-only deployment.
+A stale integration assertion was updated to require the separate credential acquisition for sealed publication inspection without changing its settlement or successor assertions.
+An independent final review confirmed the CI error-boundary finding resolved and reported no other actionable P1/P2 integration findings against either merge parent.
+The original host services and storage inventories remained unchanged after qualification.

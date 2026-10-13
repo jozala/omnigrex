@@ -40,7 +40,8 @@ func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.
 		t.Fatalf("ProcessNext() = (%t, %v), want processed success", processed, err)
 	}
 	want := []string{
-		"claim", "heartbeat", "execution", "developer-credential", "default-branch", "launch",
+		"claim", "heartbeat", "execution", "developer-credential", "default-branch",
+		"developer-credential", "developer-credential", "launch",
 		"execution", "open-admission", "prompt", "close-admission", "mcp-drain",
 		"list-unsettled", "cleanup", "terminal-capture", "reconcile", "settle",
 	}
@@ -1056,16 +1057,53 @@ func TestExecutionWorkerUsesPolicyCredentialsAndDeterministicRepositoryInputs(t 
 			if err := json.Unmarshal([]byte(fixture.prompter.request.Text), &envelope); err != nil || envelope.CurrentHeadSHA != test.wantCurrentHead {
 				t.Fatalf("event envelope current head = %q, error = %v", envelope.CurrentHeadSHA, err)
 			}
-			if fixture.developerCredentials.calls != 1 || fixture.reviewerCredentials.calls != test.wantReviewerCalls {
-				t.Fatalf("policy credential calls = Orchestrator %d, Reviewer %d", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
+			// Each launch phase (default-branch resolution, publication
+			// recovery, Runtime Process launch) re-acquires a current launch
+			// credential, plus a validation-only Reviewer prerequisite check
+			// that retains no token. Final reconciliation acquires current
+			// credentials itself.
+			if fixture.developerCredentials.calls != 3 || fixture.reviewerCredentials.calls != test.wantReviewerCalls {
+				t.Fatalf("policy credential calls = Orchestrator %d, Reviewer %d, want 3 and %d", fixture.developerCredentials.calls, fixture.reviewerCredentials.calls, test.wantReviewerCalls)
 			}
-			if test.role == workflow.RoleReviewer && fixture.outcomes.request.ReviewerRepositoryCredential != executionReviewerRepositoryCredential {
-				t.Fatalf("review reconciliation credential = %q", fixture.outcomes.request.ReviewerRepositoryCredential)
+			if fixture.outcomes.request.RepositoryCredential != executionDeveloperRepositoryCredential {
+				t.Fatalf("reconciliation diagnostic credential = %q, want launch-time credential", fixture.outcomes.request.RepositoryCredential)
+			}
+			if fixture.outcomes.request.ReviewerRepositoryCredential != "" {
+				t.Fatalf("reconciliation must not retain a pre-prompt Reviewer token: %q", fixture.outcomes.request.ReviewerRepositoryCredential)
 			}
 			if fixture.defaultBranch.credential != test.wantRepository {
 				t.Fatal("default branch resolver did not receive the selected Role credential")
 			}
 		})
+	}
+}
+
+func TestExecutionWorkerFailsReviewerTurnBeforeLaunchWithoutReviewerAccess(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleReviewer)
+	fixture.reviewerCredentials.err = errors.New("GitHub App is not installed for repository acme/widgets")
+	worker := fixture.worker(t)
+
+	_, err := worker.ProcessNext(context.Background())
+	if err == nil {
+		t.Fatal("ProcessNext() error = nil, want Reviewer prerequisite failure")
+	}
+	if fixture.launcher.request.RepositoryURL != "" {
+		t.Fatalf("launch repository URL = %q, want no launch before Reviewer validation", fixture.launcher.request.RepositoryURL)
+	}
+	if fixture.prompter.request.Text != "" {
+		t.Fatal("prompt ran despite unavailable Reviewer credentials")
+	}
+	// The turn still finalizes so the prerequisite failure is settled, but it
+	// must never launch a Runtime Process or prompt without Reviewer access.
+	operations := fixture.operations.values()
+	for _, forbidden := range []string{"launch", "prompt"} {
+		if contains(operations, forbidden) {
+			t.Fatalf("operations = %v, unavailable Reviewer access must not reach %s", operations, forbidden)
+		}
+	}
+	if fixture.developerCredentials.calls != 1 || fixture.reviewerCredentials.calls != 1 {
+		t.Fatalf("validation credential calls = Orchestrator %d, Reviewer %d, want 1 and 1",
+			fixture.developerCredentials.calls, fixture.reviewerCredentials.calls)
 	}
 }
 
@@ -1869,13 +1907,117 @@ type executionCredentialProvider struct {
 	operations *executionOperations
 	operation  string
 	credential string
+	err        error
 	calls      int
 }
 
 func (provider *executionCredentialProvider) RepositoryCredential(context.Context, string, string) (string, error) {
 	provider.operations.add(provider.operation)
 	provider.calls++
+	if provider.err != nil {
+		return "", provider.err
+	}
 	return provider.credential, nil
+}
+
+type phaseAdvancingCacheProvider struct {
+	cache    *githubapi.InstallationTokenCache
+	id       int64
+	clock    *expiryClock
+	advances map[int]time.Duration
+	calls    int
+}
+
+func (provider *phaseAdvancingCacheProvider) RepositoryCredential(ctx context.Context, _, _ string) (string, error) {
+	provider.calls++
+	if delta, ok := provider.advances[provider.calls]; ok {
+		provider.clock.Advance(delta)
+	}
+	return provider.cache.Token(ctx, provider.id)
+}
+
+// TestExecutionWorkerReacquiresLaunchCredentialPerPhase bounds the delayed
+// reuse of retained launch credentials with fake time: the fake clock expires
+// the cached token between launch phases, and each phase (default-branch
+// resolution, publication recovery, Runtime Process launch) must observe a
+// credential that is current at its own use.
+func TestExecutionWorkerReacquiresLaunchCredentialPerPhase(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
+	cache, _ := newExpiryCache(t, clock, "launch", 5*time.Minute, time.Hour)
+	provider := &phaseAdvancingCacheProvider{cache: cache, id: 77, clock: clock, advances: map[int]time.Duration{
+		// Prime outside the worker; the first in-turn acquisition then sees
+		// an expired token and refreshes, and so on for each phase.
+		2: 6 * time.Minute,
+		3: 61 * time.Minute,
+		4: 61 * time.Minute,
+	}}
+	primed, err := provider.RepositoryCredential(context.Background(), "acme", "widgets")
+	if err != nil || primed != "launch-token-A" {
+		t.Fatalf("prime launch token = %q, %v", primed, err)
+	}
+	dependencies := fixture.dependencies()
+	dependencies.DeveloperCredentials = provider
+	var recoveryCredential string
+	dependencies.PublicationRecovery = executionPublicationRecoveryFunc(func(_ context.Context, _ store.AgentTurnLease, _ store.AgentTurnExecutionContext, _, credential, _ string) error {
+		recoveryCredential = credential
+		return nil
+	})
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.ProcessNext(context.Background()); err != nil {
+		t.Fatalf("ProcessNext() error = %v", err)
+	}
+	// Call 1 primed token A; calls 2-4 are the three launch phases, each of
+	// which must observe a credential current at its own use.
+	if provider.calls != 4 {
+		t.Fatalf("launch credential acquisitions = %d, want 4 (prime plus three phases)", provider.calls)
+	}
+	if fixture.defaultBranch.credential != "launch-token-B" {
+		t.Fatalf("default-branch credential = %q, want refreshed token B", fixture.defaultBranch.credential)
+	}
+	if recoveryCredential != "launch-token-C" || fixture.launcher.request.RepositoryCredential != "launch-token-D" {
+		t.Fatalf("recovery credential = %q, launch credential = %q, want refreshed tokens C and D",
+			recoveryCredential, fixture.launcher.request.RepositoryCredential)
+	}
+	if fixture.outcomes.request.RepositoryCredential != "launch-token-D" || fixture.outcomes.request.ReviewerRepositoryCredential != "" {
+		t.Fatal("reconciliation retained credentials beyond the diagnostic-only launch snapshot")
+	}
+}
+
+func TestExecutionWorkerRedactsEveryLaunchPhaseCredentialFromSettlementDiagnostic(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleReviewer)
+	credentials := []string{"branch-phase-token", "recovery-phase-token", "launch-phase-token"}
+	provider := &executionPhaseCredentialProvider{credentials: credentials}
+	dependencies := fixture.dependencies()
+	dependencies.DeveloperCredentials = provider
+	fixture.prompter.err = errors.New(strings.Join(append(credentials, executionReviewerRepositoryCredential), " "))
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(t.Context())
+	if !processed || err == nil || provider.calls != 3 {
+		t.Fatalf("phase failure = %t, %v, acquisitions %d", processed, err, provider.calls)
+	}
+	for _, credential := range append(credentials, executionReviewerRepositoryCredential) {
+		if strings.Contains(err.Error(), credential) || strings.Contains(fixture.outcomes.request.PromptDiagnostic, credential) {
+			t.Fatalf("launch credential leaked into a failure diagnostic: %q", credential)
+		}
+	}
+}
+
+type executionPhaseCredentialProvider struct {
+	credentials []string
+	calls       int
+}
+
+func (provider *executionPhaseCredentialProvider) RepositoryCredential(context.Context, string, string) (string, error) {
+	credential := provider.credentials[provider.calls]
+	provider.calls++
+	return credential, nil
 }
 
 type executionDefaultBranch struct {

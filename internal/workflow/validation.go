@@ -246,7 +246,7 @@ func legalInState(state State, kind EventKind) bool {
 	case EventKindTurnSettled:
 		return state == StateDeveloping || state == StateReviewing
 	case EventKindSynchronization:
-		return state == StateDeveloping || state == StateReviewing || state == StatePRReady
+		return state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	case EventKindReviewObserved:
 		return state == StateDeveloping || state == StateReviewing
 	case EventKindChangeProposalObserved:

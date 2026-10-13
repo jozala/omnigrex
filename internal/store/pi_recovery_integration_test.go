@@ -366,7 +366,7 @@ func (f *piWorkflowFixture) testMutationFault(t *testing.T) {
 	f.assertRecoveryBarrier(t, lease)
 	f.recover(t, lease, false)
 	worker := f.reconcileMutations(t)
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: f.database, GitHub: f.github, Workspace: f.workspaces})
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: f.database, GitHub: f.github, Workspace: f.workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -172,3 +172,7 @@ func (*captureCorroborationStore) SettleTerminalRevalidation(context.Context, st
 func (*captureCorroborationStore) CompleteTerminalRevalidationHandoff(context.Context, store.JobLease, workflow.Reason, string) error {
 	panic("unexpected revalidation handoff")
 }
+
+func (*captureCorroborationStore) RedirectRevalidationToFreshTurn(context.Context, store.JobLease, int64, string, int64, int64) error {
+	panic("unexpected revalidation redirect")
+}

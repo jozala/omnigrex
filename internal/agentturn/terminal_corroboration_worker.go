@@ -23,6 +23,7 @@ type terminalCorroborationStore interface {
 	SettleTerminalRevalidation(context.Context, store.JobLease, int64, store.AgentTurnSettlementObservation) error
 	CompleteTerminalCorroborationHandoff(context.Context, store.JobLease, workflow.Reason, string) (store.AgentTurnSettlement, error)
 	CompleteTerminalRevalidationHandoff(context.Context, store.JobLease, workflow.Reason, string) error
+	RedirectRevalidationToFreshTurn(ctx context.Context, lease store.JobLease, expectedRevision int64, headSHA string, pullRequestID, pullRequestNumber int64) error
 }
 
 var _ terminalCorroborationStore = (*store.Store)(nil)
@@ -36,23 +37,34 @@ type TerminalCorroborationWorkerConfig struct {
 }
 
 type TerminalCorroborationWorker struct {
-	store     terminalCorroborationStore
-	outcomes  *OutcomeReconciler
-	developer RepositoryCredentialProvider
-	reviewer  RepositoryCredentialProvider
-	workspace ExecutionWorkspace
-	config    TerminalCorroborationWorkerConfig
+	store        terminalCorroborationStore
+	outcomes     *OutcomeReconciler
+	developer    RepositoryCredentialProvider
+	reviewer     RepositoryCredentialProvider
+	pullRequests ChangeProposalVerifier
+	workspace    ExecutionWorkspace
+	config       TerminalCorroborationWorkerConfig
 }
 
 func NewTerminalCorroborationWorker(database terminalCorroborationStore, outcomes *OutcomeReconciler,
 	developer, reviewer RepositoryCredentialProvider, captures ExecutionWorkspace,
 	config TerminalCorroborationWorkerConfig) (*TerminalCorroborationWorker, error) {
-	if database == nil || outcomes == nil || developer == nil || reviewer == nil || nilDependency(captures) ||
+	if nilDependency(database) || outcomes == nil || nilDependency(developer) || nilDependency(reviewer) || nilDependency(captures) ||
 		config.ClaimOwner == "" || config.Window <= 0 || config.PollInterval <= 0 || config.LeaseDuration < 3*time.Second {
 		return nil, errors.New("invalid terminal corroboration Worker configuration")
 	}
 	return &TerminalCorroborationWorker{store: database, outcomes: outcomes, developer: developer,
 		reviewer: reviewer, workspace: captures, config: config}, nil
+}
+
+// WithChangeProposalVerifier adds authoritative GitHub verification for
+// terminal-intent revalidation and returns the worker for chaining. With a
+// verifier, a changed live head redirects the obsolete intent to a fresh Turn
+// instead of adopting it; without one, revalidation keeps its existing
+// behavior.
+func (worker *TerminalCorroborationWorker) WithChangeProposalVerifier(verifier ChangeProposalVerifier) *TerminalCorroborationWorker {
+	worker.pullRequests = verifier
+	return worker
 }
 
 func (worker *TerminalCorroborationWorker) Run(ctx context.Context) error {
@@ -127,29 +139,46 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if remaining <= 0 {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationExhausted, pending.Checkpoint.LastFailureCode)
 	}
-	var credential string
 	role := pending.Execution.Assignment.Role
 	switch role {
-	case workflow.RoleDeveloper:
-		credential, err = worker.developer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
-	case workflow.RoleReviewer:
-		credential, err = worker.reviewer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
+	case workflow.RoleDeveloper, workflow.RoleReviewer:
 	default:
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
-	if err != nil {
-		classification := classifyGitHubCorroborationFailure(err)
-		metadata := githubapi.ExtractSafeErrorMetadata(err)
-		retryAfter := metadata.RetryAfter
-		if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
-			retryAfter = untilReset
+	// Changed-head revalidation verification keeps its own current credential;
+	// final outcome observations acquire operation-scoped credentials inside
+	// the reconciler immediately before each GitHub read.
+	var verificationCredential string
+	if lease.Kind == store.RevalidateTerminalIntentJobKind && worker.pullRequests != nil && pending.Execution.ChangeProposal != nil {
+		var credential string
+		switch role {
+		case workflow.RoleDeveloper:
+			credential, err = worker.developer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
+		case workflow.RoleReviewer:
+			credential, err = worker.reviewer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
 		}
-		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
-			TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
-				Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
-	}
-	if credential == "" {
-		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
+		if err != nil {
+			classification := classifyGitHubCorroborationFailure(err)
+			metadata := githubapi.ExtractSafeErrorMetadata(err)
+			retryAfter := metadata.RetryAfter
+			if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
+				retryAfter = untilReset
+			}
+			return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
+				TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
+					Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
+		}
+		if credential == "" {
+			return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
+		}
+		redirected, redirectErr := worker.redirectChangedHeadRevalidation(ctx, *lease, pending, credential, remaining)
+		if redirectErr != nil {
+			return true, redirectErr
+		}
+		if redirected {
+			return true, nil
+		}
+		verificationCredential = credential
 	}
 	turn := pending.Execution.Turn
 	request := OutcomeReconciliation{
@@ -157,15 +186,17 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		Execution:                 pending.Execution,
 		PriorPublicationMutations: pending.PriorPublicationMutations,
 	}
+	// Retain the verifier token only as diagnostic redaction material, since
+	// reconciliation may rotate it before its own independent observations.
+	if role == workflow.RoleReviewer {
+		request.ReviewerRepositoryCredential = verificationCredential
+	} else {
+		request.RepositoryCredential = verificationCredential
+	}
 	// Resolve the original Turn/epoch's sealed evidence, never a replacement
 	// checkout. Missing evidence is classified only if the outcome needs it.
 	if capture, captureErr := worker.workspace.TerminalCapture(ctx, runtimeKey(pending.Execution)); captureErr == nil {
 		request.Capture = capture
-	}
-	if role == workflow.RoleReviewer {
-		request.ReviewerRepositoryCredential = credential
-	} else {
-		request.RepositoryCredential = credential
 	}
 	if pending.Checkpoint.PromptError != "" {
 		request.PromptError = PromptErrorClassification(pending.Checkpoint.PromptError)
@@ -221,6 +252,56 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	default:
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
 	}
+}
+
+// redirectChangedHeadRevalidation reports whether revalidation is complete for
+// this iteration: true after a redirect, an acknowledged retry, or an
+// acknowledged handoff, and false only when an explicitly successful
+// matching-head verification lets ordinary revalidation continue. It fetches
+// the current GitHub Pull Request outside database locks; when its head moved
+// beyond the source Turn's expected head, the obsolete intent is never
+// adopted. Acknowledged outcomes release job authority, so the iteration must
+// stop instead of falling through into workspace inspection and outcome
+// reconciliation.
+func (worker *TerminalCorroborationWorker) redirectChangedHeadRevalidation(ctx context.Context, lease store.JobLease, pending store.TerminalCorroborationContext, credential string, remaining time.Duration) (bool, error) {
+	durable := pending.Execution.ChangeProposal
+	live, err := worker.pullRequests.GetPullRequest(ctx, credential, pending.Execution.Repository.Owner, pending.Execution.Repository.Name, int(durable.PullRequestNumber))
+	if err != nil {
+		classification := classifyGitHubCorroborationFailure(err)
+		metadata := githubapi.ExtractSafeErrorMetadata(err)
+		retryAfter := metadata.RetryAfter
+		if untilReset := time.Until(metadata.ResetAt); untilReset > retryAfter {
+			retryAfter = untilReset
+		}
+		return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+			TerminalCorroborationFailure{Code: classification.code, Retryable: classification.retryable,
+				Prerequisite: classification.prerequisite, RetryAfter: retryAfter})
+	}
+	head, err := VerifyObservedChangeProposal(durable.PullRequestID, durable.PullRequestNumber, durable.HeadRef, durable.BaseRef, live)
+	if err != nil {
+		return true, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+	}
+	if head == pending.Execution.Turn.ExpectedHeadSHA {
+		return false, nil
+	}
+	if err := worker.store.RedirectRevalidationToFreshTurn(ctx, lease, pending.WorkflowRevision, head, live.ID, int64(live.Number)); err != nil {
+		if errors.Is(err, store.ErrJobLeaseLost) {
+			telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
+			return true, nil
+		}
+		if errors.Is(err, store.ErrTerminalCorroborationHeadMoved) {
+			return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+				TerminalCorroborationFailure{Code: "head_changed_during_corroboration", Retryable: true})
+		}
+		if errors.Is(err, store.ErrTerminalCorroborationConflict) || errors.Is(err, store.ErrAgentTurnSettlementRejected) ||
+			errors.Is(err, store.ErrAgentTurnChangeProposalConflict) || errors.Is(err, store.ErrReviewerActorConflict) ||
+			errors.Is(err, store.ErrAgentTurnSettlementInvalid) {
+			return true, worker.handoff(ctx, lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+		}
+		return true, worker.retryOrHandoff(ctx, lease, pending.Checkpoint, remaining,
+			TerminalCorroborationFailure{Code: "database_observation_unavailable", Retryable: true})
+	}
+	return true, nil
 }
 
 func (worker *TerminalCorroborationWorker) handoff(ctx context.Context, lease store.JobLease, reason workflow.Reason, code string) error {

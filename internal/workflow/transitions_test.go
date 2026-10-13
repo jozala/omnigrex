@@ -734,6 +734,81 @@ func TestRetriggerCompletesPriorAttemptBeforeCreatingFreshAttempt(t *testing.T) 
 	}
 }
 
+func TestRetriggerWithChangedHeadSkipsTerminalRevalidation(t *testing.T) {
+	newNeedsHumanWithHead := func(head string) workflow.Snapshot {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 3)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, head)
+		return snapshot
+	}
+	newPriorTerminalTrigger := func(snapshot workflow.Snapshot, sourceHead string) workflow.TriggerEvent {
+		return workflow.TriggerEvent{
+			EventMetadata: metadata(snapshot, "retrigger-"+sourceHead), AttemptID: "attempt-2", AttemptNumber: 2,
+			PriorTerminalTurnID: "old-turn", PriorTerminalStage: workflow.StageImplementation,
+			PriorTerminalRole:            workflow.RoleDeveloper,
+			PriorTerminalExpectedHeadSHA: sourceHead,
+		}
+	}
+
+	t.Run("changed head uses normal reactivation", func(t *testing.T) {
+		snapshot := newNeedsHumanWithHead("head-b")
+		decision := reduce(snapshot, newPriorTerminalTrigger(snapshot, "head-a"))
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		intent := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
+		if intent.Purpose != workflow.TurnPurposeReactivation || intent.ExpectedHeadSHA != "head-b" {
+			t.Errorf("reactivation intent = %#v, want fresh Developer Turn for head-b", intent)
+		}
+		assertActionCount[workflow.EnqueueTerminalRevalidationAction](t, decision.Actions, 0)
+	})
+
+	t.Run("matching head revalidates without a new prompt", func(t *testing.T) {
+		snapshot := newNeedsHumanWithHead("head-b")
+		decision := reduce(snapshot, newPriorTerminalTrigger(snapshot, "head-b"))
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		revalidation := onlyAction[workflow.EnqueueTerminalRevalidationAction](t, decision.Actions)
+		if revalidation.SourceTurnID != "old-turn" {
+			t.Errorf("revalidation = %#v, want source old-turn", revalidation)
+		}
+		assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	})
+}
+
+func TestTriggerDefersVisibleLabelsUntilVerifiedPreparation(t *testing.T) {
+	t.Run("handoff activation queues preparation without label effects", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-1")
+		event := workflow.TriggerEvent{
+			EventMetadata: metadata(snapshot, "deferred-labels"), AttemptID: "attempt-2", AttemptNumber: 2,
+		}
+
+		decision := reduce(snapshot, event)
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, snapshot.Revision+1)
+		assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 1)
+		assertActionCount[workflow.ConsumeRunLabelAction](t, decision.Actions, 0)
+		assertActionCount[workflow.ReconcileLabelsAction](t, decision.Actions, 0)
+	})
+
+	t.Run("initial development keeps trigger-time labels", func(t *testing.T) {
+		snapshot := workflow.Snapshot{State: workflow.StateAbsent}
+		event := workflow.TriggerEvent{
+			EventMetadata: workflow.EventMetadata{ID: "absent-trigger", ObservedAt: observedAt, WorkItem: workflow.WorkItem{RepositoryID: 91, IssueID: 45, IssueNumber: 12}},
+			AttemptID:     "attempt-1", AttemptNumber: 1,
+		}
+
+		decision := reduce(snapshot, event)
+
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonTriggered, workflow.StateDeveloping, 1)
+		assertActionCount[workflow.ConsumeRunLabelAction](t, decision.Actions, 1)
+		assertActionCount[workflow.ReconcileLabelsAction](t, decision.Actions, 1)
+	})
+}
+
 func TestRetriggerCannotReusePriorAttemptIdentityOrSequence(t *testing.T) {
 	snapshot := baseSnapshot(workflow.StateNeedsHuman, 3)
 	snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
@@ -815,6 +890,72 @@ func TestSynchronizationGuardsPreviousAndAuthoritativeHeads(t *testing.T) {
 		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-duplicate"), ChangeProposalID: 64, PreviousHeadSHA: "head-1", HeadSHA: "head-2"}
 		decision := reduce(snapshot, event)
 		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonSynchronizationDuplicate, snapshot.State, snapshot.Revision)
+	})
+}
+
+func TestSynchronizationInHumanHandoffIsTrackingOnly(t *testing.T) {
+	snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+	snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+	snapshot.ResumeRole = workflow.RoleDeveloper
+	snapshot.ChangeProposal = proposal(64, "head-a")
+	before := snapshot.Clone()
+	event := workflow.SynchronizationEvent{
+		EventMetadata: metadata(snapshot, "sync-tracking"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-b",
+	}
+
+	decision := reduce(snapshot, event)
+
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateNeedsHuman, snapshot.Revision+1)
+	if decision.Snapshot.ChangeProposal.HeadSHA != "head-b" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" {
+		t.Errorf("tracked head = %#v, want head-b without readiness", decision.Snapshot.ChangeProposal)
+	}
+	if decision.Snapshot.ResumeRole != workflow.RoleDeveloper || decision.Snapshot.Assignments.Status != workflow.AssignmentWaitingForHuman ||
+		decision.Snapshot.CurrentAttempt.ID != before.CurrentAttempt.ID || decision.Snapshot.CurrentAttempt.CurrentStage != before.CurrentAttempt.CurrentStage {
+		t.Errorf("handoff mutated by tracking-only synchronization: %#v", decision.Snapshot)
+	}
+	if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != before.CurrentAttempt.ReviewUsage[workflow.StageReview] ||
+		decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget != before.CurrentAttempt.InfrastructureRetryBudget {
+		t.Errorf("budgets mutated by tracking-only synchronization: %#v", decision.Snapshot.CurrentAttempt)
+	}
+	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 0)
+	if actionCount[workflow.ReconcileLabelsAction](decision.Actions) != 1 {
+		t.Errorf("actions = %#v, want one needs-human label reconciliation", decision.Actions)
+	}
+}
+
+func TestSynchronizationInHumanHandoffGuardsDuplicateAndStaleChains(t *testing.T) {
+	t.Run("duplicate is harmless", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-b")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-duplicate-handoff"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-b"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionDuplicate, workflow.ReasonSynchronizationDuplicate, workflow.StateNeedsHuman, snapshot.Revision)
+	})
+
+	t.Run("stale cannot rewind", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-b")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-stale-handoff"), ChangeProposalID: 64, PreviousHeadSHA: "head-a", HeadSHA: "head-a"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionStale, workflow.ReasonSynchronizationStale, workflow.StateNeedsHuman, snapshot.Revision)
+		if decision.Snapshot.ChangeProposal.HeadSHA != "head-b" {
+			t.Errorf("head rewound to %q", decision.Snapshot.ChangeProposal.HeadSHA)
+		}
+	})
+
+	t.Run("unrelated Change Proposal is ignored", func(t *testing.T) {
+		snapshot := baseSnapshot(workflow.StateNeedsHuman, 1)
+		snapshot.Assignments.Status = workflow.AssignmentWaitingForHuman
+		snapshot.ResumeRole = workflow.RoleDeveloper
+		snapshot.ChangeProposal = proposal(64, "head-a")
+		event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-unrelated-handoff"), ChangeProposalID: 65, PreviousHeadSHA: "head-a", HeadSHA: "head-b"}
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionUnrelated, workflow.ReasonChangeProposalUnrelated, workflow.StateNeedsHuman, snapshot.Revision)
 	})
 }
 

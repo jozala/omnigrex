@@ -16,14 +16,19 @@ Inspect surrounding code and affected callers as needed to understand changed be
 Perform both passes yourself; they organize attention rather than provide independent reviewers.
 
 1. **Requirements:** Account for every required behavior, identifying missing, partial, or incorrect implementation and unjustified scope expansion.
+   Check affected supporting artifacts, including those absent from the diff: documentation, configuration examples, deployment settings, doctor checks, and applicable decision records.
+   Verify their claims against the current implementation after substantive revisions, especially operational limits, failure outcomes, and recovery instructions.
 2. **Correctness and maintainability:** Trace changed behavior through relevant callers and dependencies.
    Check applicable failure paths, compatibility, security boundaries, concurrency, retries, and resource cleanup.
    Assess whether tests exercise real behavior and would detect the failures they claim to cover.
    Apply documented standards and accepted architecture; distinguish concrete design problems from personal preferences.
 
 Run appropriate verification and inspect check results for the current head.
+Retrieve failed-step diagnostics before judging a CI failure; run duration and passing local tests do not establish its cause.
+Use continuation or targeted search before concluding that incomplete diagnostics contain no relevant failure evidence.
 Distinguish code defects from unavailable services or toolchain mismatches; use current-head CI evidence where it covers a local gap.
 An environment failure alone does not prove the Change Proposal is defective, but missing required evidence may prevent a verdict.
+Green CI establishes only the behavior exercised by its checks, not complete Work Item coverage.
 
 ## Validate findings
 
@@ -31,6 +36,8 @@ Investigate each suspected problem with a focused check or a concrete execution 
 Identify the triggering condition, the affected code, and the consequence; a speculative downstream failure is not a supported finding.
 Distinguish introduced defects and unmet Work Item requirements from unrelated pre-existing problems.
 Re-evaluate prior substantive findings against current evidence, following the current Stage's rules.
+If finding details are unavailable, establish the requirement and resolution from other authoritative evidence or report an evaluation blocker; a matching topic alone does not establish resolution.
+Treat missing supporting updates as findings only when they leave a requirement unmet or a concrete operational instruction or contract incorrect.
 Inspect the entire review scope before submitting, consolidate duplicates, and prioritize by impact.
 
 ## Report a defensible verdict

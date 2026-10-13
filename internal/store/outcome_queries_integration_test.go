@@ -246,7 +246,7 @@ SELECT (SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1),
 	}
 
 	github := &replayOutcomeGitHub{}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: newIntegrationOutcomeWorkspace(t)})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: newIntegrationOutcomeWorkspace(t), DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *t
 		Base: githubapi.PullRequestBranch{Ref: proposal.BaseRef, SHA: proposal.BaseSHA, Label: "owner:main"},
 	}}
 	workspaces, capture := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), head, "developer-token")
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

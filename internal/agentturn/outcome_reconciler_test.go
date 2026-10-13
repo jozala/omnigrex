@@ -79,6 +79,8 @@ func TestOutcomeReconcilerAuthorizesExactPinnedPublicationObservation(t *testing
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store:  &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
 				GitHub: &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}, Workspace: inspector, GitRemoteBaseURL: test.base,
+				DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+				ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -95,10 +97,35 @@ func TestOutcomeReconcilerRejectsUnsafeGitRemoteBase(t *testing.T) {
 	for _, base := range []string{"http://github.com", "file:///fixture", "https://token@github.com", "https://github.com?token=secret", "https://github.com/a/../b"} {
 		_, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 			Store: &outcomeStore{}, GitHub: &outcomeGitHub{}, Workspace: outcomeCaptureInspector{}, GitRemoteBaseURL: base,
+			DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+			ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
 		})
 		if !errors.Is(err, agentturn.ErrInvalidOutcomeReconciler) {
 			t.Fatalf("unsafe Git remote base error = %v", err)
 		}
+	}
+}
+
+func TestOutcomeReconcilerRequiresBothOperationCredentialProviders(t *testing.T) {
+	var typedNil *outcomeCredentialProvider
+	for _, test := range []struct {
+		name                string
+		developer, reviewer agentturn.RepositoryCredentialProvider
+	}{
+		{"missing Developer", nil, &outcomeCredentialProvider{credential: outcomeCredential}},
+		{"missing Reviewer", &outcomeCredentialProvider{credential: outcomeCredential}, nil},
+		{"nil Developer", typedNil, &outcomeCredentialProvider{credential: outcomeCredential}},
+		{"nil Reviewer", &outcomeCredentialProvider{credential: outcomeCredential}, typedNil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store: &outcomeStore{}, GitHub: &outcomeGitHub{}, Workspace: outcomeCaptureInspector{},
+				DeveloperCredentials: test.developer, ReviewerCredentials: test.reviewer,
+			})
+			if !errors.Is(err, agentturn.ErrInvalidOutcomeReconciler) {
+				t.Fatalf("missing operation credential provider = %v", err)
+			}
+		})
 	}
 }
 
@@ -107,8 +134,10 @@ func TestOutcomeReconcilerKeepsAuthoritativePublicationFailureCredentialSafe(t *
 	var failure *agentturn.TerminalCorroborationFailure
 	request.OnCorroborationFailure = func(observed agentturn.TerminalCorroborationFailure) { failure = &observed }
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store:  &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
-		GitHub: &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)},
+		Store:                &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+		GitHub:               &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)},
+		DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
 		Workspace: outcomeInspectionFunc(func(_ context.Context, _ execution.CaptureRef, observation workspace.PublicationObservation) (bool, error) {
 			return false, errors.New("fetch failed with " + observation.Credential + " and provider-secret")
 		}),
@@ -644,7 +673,7 @@ func TestOutcomeReconcilerAcceptsReviewerReviewAndRetrievesExistingIdentity(t *t
 	storeAPI := &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)}, existing: existing}
 	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
 
-	observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+	observation, err := newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, "reviewer-repository-secret").Reconcile(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
@@ -756,7 +785,7 @@ func TestOutcomeReconcilerAcceptsGatewaySignedReviewerReviews(t *testing.T) {
 			review.State = test.state
 			storeAPI := &outcomeStore{mutations: []store.MutationReservation{mutation}}
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{review}}
-			observation, err := newOutcomeReconciler(t, storeAPI, github).Reconcile(context.Background(), request)
+			observation, err := newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, "reviewer-repository-secret").Reconcile(context.Background(), request)
 			if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
@@ -1145,8 +1174,10 @@ func TestOutcomeReconcilerLogsSafeGitHubObservationFailure(t *testing.T) {
 			}
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
-				Workspace: outcomeCaptureInspector{},
-				Clock:     outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
+				Workspace:            outcomeCaptureInspector{},
+				DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+				ReviewerCredentials:  &outcomeCredentialProvider{credential: "reviewer-repository-secret"},
+				Clock:                outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1359,15 +1390,45 @@ type outcomeClock struct{}
 
 func (outcomeClock) Now() time.Time { return outcomeObservedAt }
 
+type outcomeCredentialProvider struct {
+	credential string
+	err        error
+	calls      int
+}
+
+func (provider *outcomeCredentialProvider) RepositoryCredential(context.Context, string, string) (string, error) {
+	provider.calls++
+	if provider.err != nil {
+		return "", provider.err
+	}
+	return provider.credential, nil
+}
+
 func newOutcomeReconciler(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub) *agentturn.OutcomeReconciler {
-	return newOutcomeReconcilerWithProviders(t, storeAPI, github)
+	return newOutcomeReconcilerWithCredentials(t, storeAPI, github, outcomeCredential, outcomeCredential)
 }
 
 func newOutcomeReconcilerWithProviders(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub, providers ...json.RawMessage) *agentturn.OutcomeReconciler {
 	t.Helper()
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: storeAPI, GitHub: github, Clock: outcomeClock{}, ProviderCredentialJSON: providers,
-		Workspace: outcomeCaptureInspector{},
+		Workspace:            outcomeCaptureInspector{},
+		DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
+	})
+	if err != nil {
+		t.Fatalf("NewOutcomeReconciler() error = %v", err)
+	}
+	return reconciler
+}
+
+func newOutcomeReconcilerWithCredentials(t *testing.T, storeAPI agentturn.OutcomeReconcilerStore, github agentturn.OutcomeReconcilerGitHub, developerCredential, reviewerCredential string) *agentturn.OutcomeReconciler {
+	t.Helper()
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: storeAPI, GitHub: github, Clock: outcomeClock{},
+		Workspace:            outcomeCaptureInspector{credential: developerCredential},
+		DeveloperCredentials: &outcomeCredentialProvider{credential: developerCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: reviewerCredential},
 	})
 	if err != nil {
 		t.Fatalf("NewOutcomeReconciler() error = %v", err)

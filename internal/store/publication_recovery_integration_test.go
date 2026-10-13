@@ -137,7 +137,7 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	}
 	_, nextLease, nextExecution := acquireReplayGatewayTurn(t, database, pool, fixture, root, "publication-retry")
 	remote := &recoveredPRRemote{head: head}
-	if err := agentturn.NewPublicationRecovery(database, remote, github).Recover(ctx, nextLease, nextExecution,
+	if err := agentturn.NewPublicationRecoveryWithCredentials(database, remote, github, nil).Recover(ctx, nextLease, nextExecution,
 		"https://github.com/owner/repo.git", "developer-token", "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaces, capture := integrationTerminalWorkspace(t, pool, nextLease, committedPublicationPaths(t), head, "developer-token")
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -228,7 +228,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Reviewer repository credentials: %w", err)
 	}
 	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
-	preparer := agentturn.NewPreparer(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database)
+	preparer := agentturn.NewPreparerWithChangeProposalVerifier(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database, githubServices.api)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
 		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,
@@ -347,9 +347,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway, States: retainedState,
-		Execution:   backend.Factory,
-		MemoryBytes: settings.AgentTurnMemoryBytes,
-		Policies:    rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
+		Execution:            backend.Factory,
+		MemoryBytes:          settings.AgentTurnMemoryBytes,
+		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
+		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
 		AgentAdapters: map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: settings.PiStartupTimeout}},
 	})
@@ -362,8 +363,9 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: database, GitHub: githubServices.api, Logger: logger,
-		Workspace:              workspaces,
-		GitRemoteBaseURL:       settings.GitRemoteBaseURL,
+		Workspace:            workspaces,
+		GitRemoteBaseURL:     settings.GitRemoteBaseURL,
+		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
@@ -376,7 +378,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		Launcher:            runtimeLauncher,
 		Outcomes:            outcomeReconciler,
 		Workspace:           workspaces,
-		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
+		PublicationRecovery: agentturn.NewPublicationRecoveryWithCredentials(database, workspaces, githubServices.api, developerRepositoryCredentials),
 		Policies:            rolePolicies,
 		Definition:          definition,
 		AgentEventSink:      loggingAgentEventSink{logger: logger},
@@ -408,6 +410,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure terminal corroboration Worker: %w", err)
 	}
+	terminalCorroborationWorker = terminalCorroborationWorker.WithChangeProposalVerifier(githubServices.api)
 	reconciliationWorker, err := webhook.NewReconciliationWorker(database, githubServices.webhookProcessor, webhook.ReconciliationWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":reconcile-pending-events", LeaseDuration: settings.WorkflowEffectLeaseDuration,
 		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,

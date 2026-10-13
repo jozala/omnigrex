@@ -56,7 +56,7 @@ func TestHandoffPublicationRecoveryAndReadScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaces, capture := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), head, "developer-token")
-	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces})
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: api, Workspace: workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}

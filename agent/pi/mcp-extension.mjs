@@ -1,6 +1,22 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+const operationFailure = 'Omnigrex MCP operation failed or was rejected';
+const ciTools = new Set(['get_check_run_diagnostics', 'list_ci_runs', 'get_ci_run', 'get_ci_job_logs', 'search_ci_job_logs']);
+// Keep this allowlist aligned with internal/mcp/ci.go. Gateway reasons remain
+// untrusted; only a recognized code can become a canonical Session error.
+const ciCodes = new Set(['pending', 'missing', 'expired', 'unavailable', 'unauthorized', 'rate_limited', 'transient',
+  'scope_rejected', 'invalid_continuation', 'deadline_exceeded', 'resource_exhausted', 'step_filter_unsupported']);
+
+function ciDiagnosticFailure(tool, content) {
+  if (!ciTools.has(tool) || !Array.isArray(content) || content.length !== 1 || content[0]?.type !== 'text') return operationFailure;
+  const text = content[0].text;
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 256) return operationFailure;
+  const match = /^ci diagnostics ([a-z_]+): [^\x00-\x1f\x7f]+$/.exec(text);
+  if (!match || match[0] !== text || !ciCodes.has(match[1])) return operationFailure;
+  return `ci diagnostics ${match[1]}: ${match[1]}`;
+}
+
 // This factory is loaded only by the owned runner. Project files cannot supply
 // endpoints, headers, tools, extension paths, or MCP configuration.
 export function mcpExtension(configuration) {
@@ -43,14 +59,15 @@ export function mcpExtension(configuration) {
           name: `omnigrex_${tool.name}`, label: tool.name,
           description: tool.description ?? tool.name, parameters: tool.inputSchema,
           async execute(_id, args, signal) {
+            let result;
             try {
-              const result = await client.callTool({ name: tool.name, arguments: args }, undefined, { signal, timeout: 7200000 });
-              if (result.isError) throw new Error('rejected');
-              return { content: result.content, details: {} };
+              result = await client.callTool({ name: tool.name, arguments: args }, undefined, { signal, timeout: 7200000 });
             } catch {
               // Headers and upstream error bodies must not become Session data.
-              throw new Error('Omnigrex MCP operation failed or was rejected');
+              throw new Error(operationFailure);
             }
+            if (result.isError) throw new Error(ciDiagnosticFailure(tool.name, result.content));
+            return { content: result.content, details: {} };
           },
         });
       }

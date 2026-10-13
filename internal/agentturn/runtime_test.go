@@ -67,10 +67,12 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	client := &runtimeTurnConnection{operations: &operations}
 	adapter := &runtimeTurnAdapter{operations: &operations, connection: client}
 	states := &runtimeRetainedState{}
+	credentials := &runtimeCredentialProvider{operations: &operations, credential: "fresh-repository-secret"}
 	launcherConfig := agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces, Gateway: gateway, Execution: engineFactory,
 		States: states, AgentAdapters: runtimeAdapters(adapter),
+		DeveloperCredentials: credentials, ReviewerCredentials: credentials,
 		MemoryBytes: 1024 << 20,
 	}
 	withoutMemory := launcherConfig
@@ -78,7 +80,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if _, err := agentturn.NewLauncher(withoutMemory); !errors.Is(err, agentturn.ErrInvalidLauncher) {
 		t.Fatalf("NewLauncher() with no memory error = %v, want ErrInvalidLauncher", err)
 	}
-	for _, missing := range []string{"retained state", "agent adapters", "nil adapter"} {
+	for _, missing := range []string{"retained state", "agent adapters", "nil adapter", "Developer credentials", "Reviewer credentials"} {
 		invalid := launcherConfig
 		switch missing {
 		case "retained state":
@@ -87,6 +89,10 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 			invalid.AgentAdapters = nil
 		case "nil adapter":
 			invalid.AgentAdapters = runtimeAdapters(nil)
+		case "Developer credentials":
+			invalid.DeveloperCredentials = nil
+		case "Reviewer credentials":
+			invalid.ReviewerCredentials = nil
 		}
 		if _, err := agentturn.NewLauncher(invalid); !errors.Is(err, agentturn.ErrInvalidLauncher) {
 			t.Fatalf("NewLauncher() with missing %s error = %v, want ErrInvalidLauncher", missing, err)
@@ -114,7 +120,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)
 	}
-	wantPrefix := []string{"fence", "execution", "profile", "workspace", "refresh", "mcp-register", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "session-prepare"}
+	wantPrefix := []string{"fence", "execution", "profile", "workspace", "refresh", "mcp-register", "repository-credential", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "session-prepare"}
 	if !reflect.DeepEqual(operations, wantPrefix) {
 		t.Fatalf("dependency operations = %v, want %v", operations, wantPrefix)
 	}
@@ -192,7 +198,10 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if !slices.Equal(spec.Command, append([]string{"/usr/local/bin/omnigrex-environment", "run"}, runtimeProfile.Contract().Command...)) {
 		t.Fatalf("runtime did not bootstrap in-environment: %v", spec.Command)
 	}
-	for _, secret := range []string{runtimeTestCredential, "mcp-secret"} {
+	if credentials.calls != 1 || credentials.owner != "acme" || credentials.repository != "widgets" {
+		t.Fatalf("post-checkout credential refresh = %#v, want one request for the bound repository", credentials)
+	}
+	for _, secret := range []string{runtimeTestCredential, credentials.credential, "mcp-secret"} {
 		if strings.Contains(strings.Join(spec.Environment, "\n"), secret) || strings.Contains(stringMap(spec.Labels), secret) {
 			t.Errorf("Docker contract contains non-provider credential %q", secret)
 		}
@@ -202,6 +211,9 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 	if !reflect.DeepEqual(adapter.request.MCP, gateway.registration.Server) {
 		t.Errorf("Session MCP endpoint = %#v, want registered descriptor", adapter.request.MCP)
+	}
+	if strings.Contains(string(adapter.request.Credentials), credentials.credential) {
+		t.Fatal("agent adapter received GitHub credentials")
 	}
 	if adapter.request.Lease.ExecutionEpoch != 7 || adapter.request.Session.ID != runtimeTestSession ||
 		adapter.request.State.ParticipantID != runtimeTestAssignment || adapter.request.Transport != engineFactory.engine.process.transport ||
@@ -1079,6 +1091,124 @@ func TestLauncherRefusesToStartRepositorySetupAfterTurnFenceLoss(t *testing.T) {
 	}
 }
 
+// A slow trusted checkout must not bypass the current-credential prelaunch gate.
+func TestLauncherReacquiresCredentialAfterCheckoutBeforeDispatch(t *testing.T) {
+	operations := []string{}
+	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
+	cache, _ := newExpiryCache(t, clock, "launch", 5*time.Minute, time.Hour)
+	provider := &phaseAdvancingCacheProvider{cache: cache, id: 78, clock: clock}
+	primed, err := provider.RepositoryCredential(context.Background(), "acme", "widgets")
+	if err != nil || primed != "launch-token-A" {
+		t.Fatalf("prime launch token = %q, %v", primed, err)
+	}
+	runtimeProfile := runtimeLauncherProfile(t)
+	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
+	database := &runtimeStore{operations: &operations, execution: execution}
+	workspaces := &runtimeWorkspace{operations: &operations}
+	// The checkout performs unbounded I/O; expire the primed token there.
+	workspaces.afterPrepare = func() { clock.Advance(6 * time.Minute) }
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	}}}
+	engineFactory := &runtimeEngineFactory{operations: &operations}
+	adapter := &runtimeTurnAdapter{operations: &operations}
+	adapter.prepareHook = func() {
+		if provider.calls != 2 {
+			t.Fatalf("credential acquisitions at adapter preparation = %d, want prime plus post-checkout refresh", provider.calls)
+		}
+	}
+	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
+		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
+		Workspace: workspaces, Gateway: gateway, Execution: engineFactory, AgentAdapters: runtimeAdapters(adapter),
+		DeveloperCredentials: provider, ReviewerCredentials: provider,
+	})
+	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
+		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
+		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "omnigrex/issue-17",
+		RepositoryCredential: primed, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
+	if workspaces.checkout.Credential != "launch-token-A" {
+		t.Fatalf("workspace checkout credential = %q, want primed token A", workspaces.checkout.Credential)
+	}
+	fresh, err := cache.Token(context.Background(), 78)
+	if err != nil || fresh != "launch-token-B" || provider.calls != 2 {
+		t.Fatalf("prelaunch credential = %q, %v, acquisitions %d, want refreshed token B", fresh, err, provider.calls)
+	}
+	for _, credential := range []string{primed, fresh} {
+		if strings.Contains(strings.Join(engineFactory.request.Environment, "\n"), credential) || strings.Contains(string(adapter.request.Credentials), credential) {
+			t.Fatal("GitHub credential entered the Runtime Process or adapter")
+		}
+	}
+}
+
+func TestLauncherFailsSafeWhenCredentialRefreshFailsAfterCheckout(t *testing.T) {
+	operations := []string{}
+	authErr := errors.New("git: authentication failed: credentials expired")
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.credentials.err = authErr
+		})
+	if !errors.Is(err, authErr) || !strings.Contains(err.Error(), "refresh repository credential") || handle != nil {
+		t.Fatalf("Launch() = (%v, %v), want credential refresh failure without a handle", handle, err)
+	}
+	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "session-prepare") {
+		t.Fatalf("failed credential refresh progressed to Runtime Process: %v", operations)
+	}
+	if !containsInOrder(operations, "workspace", "repository-credential", "mcp-close-and-drain") {
+		t.Fatalf("launch operations = %v, want checkout, refresh, and authority cleanup", operations)
+	}
+}
+
+func TestLauncherRequiresNonemptyFreshCredentialBeforeDispatch(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) { resources.credentials.credential = " \t" })
+	if err == nil || !strings.Contains(err.Error(), "repository credential is empty") || handle != nil || resources.credentials.calls != 1 {
+		t.Fatalf("empty prelaunch credential = (%v, %v), acquisitions %d", handle, err, resources.credentials.calls)
+	}
+	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "session-prepare") {
+		t.Fatalf("empty credential authorized dispatch: %v", operations)
+	}
+}
+
+func TestLauncherRedactsFreshCredentialsFromRefreshAndCleanupErrors(t *testing.T) {
+	const fresh = "refreshed-github-token"
+	for _, failRefresh := range []bool{false, true} {
+		t.Run(fmt.Sprint(failRefresh), func(t *testing.T) {
+			operations := []string{}
+			handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+				func(resources *runtimeLaunchResources) {
+					resources.credentials.credential = fresh
+					if failRefresh {
+						resources.credentials.err = errors.New("refresh exposed " + fresh)
+					}
+				})
+			if failRefresh {
+				if err == nil || handle != nil || strings.Contains(err.Error(), fresh) || !strings.Contains(err.Error(), "[REDACTED]") {
+					t.Fatalf("credential acquisition error = (%v, %v)", handle, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			resources.engineFactory.engine.process.stopErr = errors.New("stop exposed " + fresh)
+			if err := handle.Cleanup(t.Context()); err == nil || strings.Contains(err.Error(), fresh) || !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Fatalf("cleanup error = %v", err)
+			}
+			resources.engineFactory.engine.process.stopErr = nil
+			if err := handle.Cleanup(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t *testing.T) {
 	operations := []string{}
 	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
@@ -1434,6 +1564,7 @@ type runtimeLaunchResources struct {
 	engineFactory *runtimeEngineFactory
 	client        *runtimeTurnConnection
 	adapter       *runtimeTurnAdapter
+	credentials   *runtimeCredentialProvider
 }
 
 func launchRuntimeForCleanupTest(t *testing.T, operations *[]string, sessionErr error) (*agentturn.RuntimeHandle, *runtimeLaunchResources) {
@@ -1466,14 +1597,16 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	engineFactory := &runtimeEngineFactory{operations: operations}
 	client := &runtimeTurnConnection{operations: operations}
 	adapter := &runtimeTurnAdapter{operations: operations, connection: client, err: sessionErr}
+	credentials := &runtimeCredentialProvider{operations: operations, credential: "fresh-repository-secret"}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces,
 		Gateway:   gateway, Execution: engineFactory,
+		DeveloperCredentials: credentials, ReviewerCredentials: credentials,
 		AgentAdapters:            runtimeAdapters(adapter),
 		PathEnvironmentAllowlist: []string{"TMPDIR"},
 	})
-	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client, adapter: adapter}
+	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client, adapter: adapter, credentials: credentials}
 	if configure != nil {
 		configure(resources)
 	}
@@ -1495,6 +1628,12 @@ func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.L
 	}
 	if config.AgentAdapters == nil {
 		config.AgentAdapters = runtimeAdapters(&runtimeTurnAdapter{operations: config.Store.(*runtimeStore).operations})
+	}
+	if config.DeveloperCredentials == nil {
+		config.DeveloperCredentials = &runtimeCredentialProvider{operations: config.Store.(*runtimeStore).operations, credential: "fresh-repository-secret"}
+	}
+	if config.ReviewerCredentials == nil {
+		config.ReviewerCredentials = &runtimeCredentialProvider{operations: config.Store.(*runtimeStore).operations, credential: "fresh-reviewer-secret"}
 	}
 	launcher, err := agentturn.NewLauncher(config)
 	if err != nil {
@@ -1671,6 +1810,21 @@ func (database *runtimeStore) acquireRecoveryLock(attempted, acquired chan<- str
 	database.turnFence.Unlock()
 }
 
+type runtimeCredentialProvider struct {
+	operations        *[]string
+	credential        string
+	err               error
+	calls             int
+	owner, repository string
+}
+
+func (provider *runtimeCredentialProvider) RepositoryCredential(_ context.Context, owner, repository string) (string, error) {
+	*provider.operations = append(*provider.operations, "repository-credential")
+	provider.calls++
+	provider.owner, provider.repository = owner, repository
+	return provider.credential, provider.err
+}
+
 type runtimeRegistry struct {
 	operations     *[]string
 	runtimeProfile profile.Profile
@@ -1697,6 +1851,7 @@ type runtimeWorkspace struct {
 	preparationKey        execution.Key
 	prepareRef            *execution.WorkspaceRef
 	captureHook           func(context.Context) error
+	afterPrepare          func()
 }
 
 func (lifecycle *runtimeWorkspace) Prepare(ctx context.Context, request workspace.Preparation) (execution.WorkspaceRef, error) {
@@ -1704,6 +1859,9 @@ func (lifecycle *runtimeWorkspace) Prepare(ctx context.Context, request workspac
 	*lifecycle.operations = append(*lifecycle.operations, "workspace")
 	lifecycle.checkout = checkout
 	lifecycle.preparationKey = request.Key
+	if lifecycle.afterPrepare != nil {
+		lifecycle.afterPrepare()
+	}
 	if lifecycle.requirePromotionFence {
 		if checkout.Fence == nil {
 			return execution.WorkspaceRef{}, errors.New("workspace promotion is not fenced")

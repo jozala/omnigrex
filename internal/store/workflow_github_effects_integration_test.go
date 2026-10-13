@@ -93,6 +93,162 @@ VALUES ('7a000000-0000-4000-8000-000000000002', $1, 91, 'acme', 'widgets',
 	}
 }
 
+func TestGitHubEffectVerificationPendingFollowsPreparationOutcome(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workflowID := "7a000000-0000-4000-8000-000000000011"
+	attemptID := "7a000000-0000-4000-8000-000000000012"
+	if _, err := pool.Exec(ctx, `
+INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision
+)
+VALUES ($1, 91, 'acme', 'widgets', 92, 17, 'DEVELOPING', 1)`, workflowID); err != nil {
+		t.Fatalf("seed Workflow: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO workflow_attempts (id, workflow_id, attempt_number, status)
+VALUES ($1, $2, 1, 'ACTIVE')`, attemptID, workflowID); err != nil {
+		t.Fatalf("seed Workflow Attempt: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha,
+    head_ref, head_sha
+)
+VALUES ('7a000000-0000-4000-8000-000000000013', $1, 91, 'acme', 'widgets',
+        93, 23, 'OPEN', 'main', 'base-sha', 'feature', 'head-sha')`, workflowID); err != nil {
+		t.Fatalf("seed Change Proposal: %v", err)
+	}
+	labelJobID := insertJob(t, pool, ctx, jobSeed{
+		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
+		Payload:     json.RawMessage(`{"revision":1}`),
+		MaxAttempts: 3, IdempotencyKey: "verification-pending-label", WorkflowID: workflowID,
+	})
+	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker", time.Minute)
+	if err != nil || lease == nil || lease.ID != labelJobID {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v), want label job", lease, err)
+	}
+	readPending := func() bool {
+		t.Helper()
+		effect, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
+		if err != nil {
+			t.Fatalf("GetWorkflowGitHubEffectContext() error = %v", err)
+		}
+		if effect.State != workflow.StateDeveloping {
+			t.Fatalf("effect state = %s, want DEVELOPING", effect.State)
+		}
+		return effect.VerificationPending
+	}
+	if readPending() {
+		t.Errorf("verification is pending without any preparation job")
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id
+)
+VALUES ('7a000000-0000-4000-8000-000000000014', $1, 'PREPARE_AGENT_TURN',
+        '{"mode":"CURRENT","stage":"implementation","role":"DEVELOPER","purpose":"REACTIVATION","expected_head_sha":"head-sha","retry_of_turn_id":"","revision":1}',
+        'AVAILABLE', 0, clock_timestamp(), 3, 'verification-pending-preparation', $2, $3)`, store.WorkflowActionQueue, workflowID, attemptID); err != nil {
+		t.Fatalf("seed pending preparation: %v", err)
+	}
+	if !readPending() {
+		t.Errorf("verification is not pending with an unfinished preparation job")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'SUCCEEDED', completed_at = clock_timestamp() WHERE id = '7a000000-0000-4000-8000-000000000014'`); err != nil {
+		t.Fatalf("complete preparation: %v", err)
+	}
+	if readPending() {
+		t.Errorf("verification is pending after preparation succeeded")
+	}
+}
+
+func TestGitHubEffectVerificationPendingIncludesRevalidation(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workflowID := "7b000000-0000-4000-8000-000000000011"
+	attemptID := "7b000000-0000-4000-8000-000000000012"
+	if _, err := pool.Exec(ctx, `
+INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision
+)
+VALUES ($1, 91, 'acme', 'widgets', 92, 17, 'DEVELOPING', 1)`, workflowID); err != nil {
+		t.Fatalf("seed Workflow: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO workflow_attempts (id, workflow_id, attempt_number, status)
+VALUES ($1, $2, 1, 'ACTIVE')`, attemptID, workflowID); err != nil {
+		t.Fatalf("seed Workflow Attempt: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO change_proposals (
+    id, workflow_id, repository_id, repository_owner, repository_name,
+    pull_request_id, pull_request_number, status, base_ref, base_sha,
+    head_ref, head_sha
+)
+VALUES ('7b000000-0000-4000-8000-000000000013', $1, 91, 'acme', 'widgets',
+        93, 23, 'OPEN', 'main', 'base-sha', 'feature', 'head-sha')`, workflowID); err != nil {
+		t.Fatalf("seed Change Proposal: %v", err)
+	}
+	labelJobID := insertJob(t, pool, ctx, jobSeed{
+		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
+		Payload:     json.RawMessage(`{"revision":1}`),
+		MaxAttempts: 3, IdempotencyKey: "revalidation-pending-label", WorkflowID: workflowID,
+	})
+	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker", time.Minute)
+	if err != nil || lease == nil || lease.ID != labelJobID {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v), want label job", lease, err)
+	}
+	readPending := func() bool {
+		t.Helper()
+		effect, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
+		if err != nil {
+			t.Fatalf("GetWorkflowGitHubEffectContext() error = %v", err)
+		}
+		return effect.VerificationPending
+	}
+	if readPending() {
+		t.Errorf("verification is pending without any revalidation job")
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id
+)
+VALUES ('7b000000-0000-4000-8000-000000000014', $1, 'REVALIDATE_TERMINAL_INTENT',
+        '{"source_turn_id":"7b000000-0000-4000-8000-000000000015"}',
+        'AVAILABLE', 0, clock_timestamp(), 3, 'revalidation-pending-revalidation', $2, $3)`, store.WorkflowActionQueue, workflowID, attemptID); err != nil {
+		t.Fatalf("seed pending revalidation: %v", err)
+	}
+	if !readPending() {
+		t.Errorf("verification is not pending with an unfinished revalidation job")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'SUCCEEDED', completed_at = clock_timestamp() WHERE id = '7b000000-0000-4000-8000-000000000014'`); err != nil {
+		t.Fatalf("complete revalidation: %v", err)
+	}
+	if readPending() {
+		t.Errorf("verification is pending after settled revalidation without a following preparation")
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO jobs (
+    id, queue, kind, payload, status, priority, available_at, max_attempts,
+    idempotency_key, workflow_id, workflow_attempt_id
+)
+VALUES ('7b000000-0000-4000-8000-000000000016', $1, 'PREPARE_AGENT_TURN',
+        '{"mode":"CURRENT","stage":"implementation","role":"DEVELOPER","purpose":"REACTIVATION","expected_head_sha":"head-sha","retry_of_turn_id":"","revision":1}',
+        'AVAILABLE', 0, clock_timestamp(), 3, 'revalidation-pending-preparation', $2, $3)`, store.WorkflowActionQueue, workflowID, attemptID); err != nil {
+		t.Fatalf("seed redirected preparation: %v", err)
+	}
+	if !readPending() {
+		t.Errorf("verification is not pending with a redirected preparation outstanding")
+	}
+}
+
 func TestWorkflowGitHubEffectFailureRetriesDurably(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

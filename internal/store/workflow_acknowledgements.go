@@ -195,12 +195,34 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		if resolvedWorkflowID != job.WorkflowID {
 			return PendingEventReconciliation{}, ErrWorkflowLocatorMismatch
 		}
-		decision, err := store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
-			ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
-			WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
-		}, eventFactory)
-		if err != nil {
-			return PendingEventReconciliation{}, fmt.Errorf("reduce reconciled event %s: %w", linked.record.DeliveryID, err)
+		var decision workflow.Decision
+		if locator.PullRequestActivation {
+			eligible, err := pullRequestActivationEligibleTx(ctx, tx, locator, job.WorkflowID, snapshot)
+			if err != nil {
+				return PendingEventReconciliation{}, err
+			}
+			if !eligible {
+				decision = workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonChangeProposalUnrelated}
+				if err := validateWorkflowDecision(snapshot, decision); err != nil {
+					return PendingEventReconciliation{}, err
+				}
+			} else {
+				decision, err = store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+					ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
+					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
+				}, eventFactory)
+				if err != nil {
+					return PendingEventReconciliation{}, fmt.Errorf("reduce reconciled event %s: %w", linked.record.DeliveryID, err)
+				}
+			}
+		} else {
+			decision, err = store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+				ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
+				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
+			}, eventFactory)
+			if err != nil {
+				return PendingEventReconciliation{}, fmt.Errorf("reduce reconciled event %s: %w", linked.record.DeliveryID, err)
+			}
 		}
 		if decision.Disposition == workflow.DispositionDeferred {
 			return PendingEventReconciliation{}, ErrWorkflowDecisionInvalid

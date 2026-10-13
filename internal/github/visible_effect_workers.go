@@ -211,6 +211,20 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 			acknowledged = true
 			return nil
 		}
+		if kind == store.ReconcileGitHubLabelsJobKind && effect.VerificationPending {
+			// Authoritative verification has not succeeded for the current
+			// attempt yet: applying current active-state labels now would
+			// advertise Developer/Reviewer activity prematurely. Complete this
+			// job without GitHub calls; the successful preparation enqueues
+			// fresh labels, and handoff decisions converge theirs.
+			acknowledgement, err := worker.store.AcknowledgeWorkflowGitHubEffect(workCtx, *lease, effect, json.RawMessage(`{"deferred_pending_verification":true}`))
+			if err != nil {
+				return fmt.Errorf("defer %s pending verification: %w", kind, err)
+			}
+			_ = acknowledgement
+			acknowledged = true
+			return nil
+		}
 		result, effectErr := operation(workCtx, credential, effect, *lease)
 		if effectErr != nil {
 			if workCtx.Err() != nil {

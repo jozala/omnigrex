@@ -686,6 +686,7 @@ Configure the Developer App with these exact repository permissions:
 | --- | --- |
 | Metadata | Read-only |
 | Checks | Read-only |
+| Actions | Read-only |
 | Contents | Read and write |
 | Issues | Read and write |
 | Pull requests | Read and write |
@@ -724,6 +725,8 @@ Configure the Reviewer App with these exact repository permissions:
 
 Select no webhook events and disable the webhook.
 The Reviewer App must not reuse the Developer App identity or private key.
+The Reviewer App permission contract is unchanged; CI diagnostics reads use the Developer App.
+After upgrading to a release that includes scoped CI diagnostics, approve the added Actions read-only permission on the Developer App installation, then run preflight for each managed repository before agents receive the new capabilities.
 
 ### Agent Participant Signatures
 
@@ -1214,6 +1217,9 @@ After the first Workflow starts, existing Workflow label reconciliation creates 
 
 Create a small Issue with explicit acceptance criteria and add the `omnigrex:run` label.
 Omnigrex creates missing workflow labels when needed.
+Adding `omnigrex:run` to the Workflow's current Change Proposal invokes the same activation rules as adding it to the Work Item Issue.
+The command requires the durable current Change Proposal association for the same repository, Pull Request ID, and Pull Request number.
+Historical or replaced Pull Requests, unrelated Pull Requests, and a Workflow marker alone cannot activate a Workflow, and the command never creates a Work Item, adopts an external Pull Request, or reopens a closed Issue.
 
 | Label | Meaning |
 | --- | --- |
@@ -1258,7 +1264,12 @@ A review counts only after the Reviewer App publishes it for the expected Pull R
 A stale review does not consume the budget.
 The third accepted changes-requesting review creates a Human Handoff.
 
-Re-adding `omnigrex:run` creates a new Workflow Attempt, resets both budgets, and reuses retained Agent Sessions when possible.
+Re-adding `omnigrex:run` to the Issue or to the current Change Proposal creates a new Workflow Attempt, resets both budgets, and reuses retained Agent Sessions when possible.
+Accepted Pull Request commands consume the trigger and reconcile state labels on both the Issue and the current Pull Request through the existing durable label worker.
+Rejected Pull Request commands leave labels unchanged.
+Pushes to the current Change Proposal during a Human Handoff only update its tracked head and preserve the handoff; they never resume automation on their own.
+Each reactivation then verifies the current GitHub Pull Request (identity, open status, head and base branches) before its first Turn and repairs a stale tracked head, so no new push is needed after a previously rejected synchronization.
+See [decision 0022](./decisions/0022-track-heads-without-resuming-work.md).
 The default Agent Turn timeout is two hours, and the default global Agent Turn concurrency is two.
 
 ## Session Retention
@@ -1266,7 +1277,7 @@ The default Agent Turn timeout is two hours, and the default global Agent Turn c
 Closing an Issue fences new work, settles admitted mutations, completes its current Agent Participants, and schedules Runtime Process state deletion.
 The default retention period is 30 days and is configured with `OMNIGREX_ASSIGNMENT_RETENTION_DURATION`.
 Reopening before garbage collection cancels scheduled deletion but does not restart automation.
-Add `omnigrex:run` after reopening to create a new Workflow Attempt.
+Add `omnigrex:run` to the Issue or to the current Change Proposal after reopening to create a new Workflow Attempt.
 
 Once physical collection starts, deletion is intentionally irrevocable.
 After collection, a new trigger creates a new Assignment Generation whose Stage Assignments lazily select new Agent Participants and Agent Sessions, while PostgreSQL retains prior operational history.

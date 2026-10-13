@@ -145,7 +145,8 @@ func SanitizeFailureDiagnostics(result FailureDiagnostics) FailureDiagnostics {
 }
 
 var diagnosticStages = strings.Fields(`review_threads_query review_threads_validation review_comments_query review_comments_validation
-	issue_validation github_http response_decoding graphql_envelope graphql_data_decoding`)
+	issue_validation github_http response_decoding graphql_envelope graphql_data_decoding
+	ci_check_validation ci_run_validation ci_job_validation ci_logs_location ci_logs_download ci_scope_validation`)
 
 var diagnosticReasons = strings.Fields(`missing_field invalid_node_id identity_mismatch identity_changed invalid_count count_mismatch count_changed
 	oversized_page repeated_cursor invalid_cursor empty_continuation empty_page_has_cursor empty_page_has_next duplicate_id invalid_path

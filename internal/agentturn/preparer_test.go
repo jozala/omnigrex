@@ -38,14 +38,21 @@ type profileSource struct {
 	contents    map[string][]byte
 	resolveCall []sourceCall
 	fetchCalls  []sourceCall
+	operations  *[]string
 }
 
 func (source *profileSource) ResolveDefaultBranchCommit(_ context.Context, credential, owner, repository string) (string, error) {
+	if source.operations != nil {
+		*source.operations = append(*source.operations, "default-branch")
+	}
 	source.resolveCall = append(source.resolveCall, sourceCall{credential: credential, owner: owner, repository: repository})
 	return source.commitSHA, nil
 }
 
-func (source *profileSource) ListRepositoryDirectoryFiles(_ context.Context, _, _, _, _ string, _ string) ([]string, error) {
+func (source *profileSource) ListRepositoryDirectoryFiles(_ context.Context, _, _, _, directory string, _ string) ([]string, error) {
+	if source.operations != nil {
+		*source.operations = append(*source.operations, "list:"+directory)
+	}
 	paths := make([]string, 0, len(source.contents))
 	for path := range source.contents {
 		paths = append(paths, path)
@@ -55,6 +62,9 @@ func (source *profileSource) ListRepositoryDirectoryFiles(_ context.Context, _, 
 }
 
 func (source *profileSource) FetchRepositoryFile(_ context.Context, credential, owner, repository, path, commitSHA string) ([]byte, error) {
+	if source.operations != nil {
+		*source.operations = append(*source.operations, "fetch:"+path)
+	}
 	source.fetchCalls = append(source.fetchCalls, sourceCall{
 		credential: credential,
 		owner:      owner,
@@ -66,10 +76,12 @@ func (source *profileSource) FetchRepositoryFile(_ context.Context, credential, 
 }
 
 type preparationStore struct {
-	selected workflow.Role
-	bindings store.AgentTurnPreparationRuntimeBindings
-	calls    []store.AgentTurnPreparationSpec
-	err      error
+	selected       workflow.Role
+	bindings       store.AgentTurnPreparationRuntimeBindings
+	calls          []store.AgentTurnPreparationSpec
+	err            error
+	activeProposal *store.ActiveChangeProposal
+	operations     *[]string
 }
 
 func (database *preparationStore) GetAgentTurnPreparationRuntimeBindings(context.Context, store.JobLease) (store.AgentTurnPreparationRuntimeBindings, error) {
@@ -99,7 +111,17 @@ func (database *preparationStore) GetAgentTurnPreparationRuntimeBindings(context
 	return bindings, nil
 }
 
+func (database *preparationStore) GetActiveChangeProposal(context.Context, string) (*store.ActiveChangeProposal, error) {
+	if database.operations != nil {
+		*database.operations = append(*database.operations, "active-proposal")
+	}
+	return database.activeProposal, nil
+}
+
 func (database *preparationStore) PrepareAgentTurn(_ context.Context, _ store.JobLease, spec store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error) {
+	if database.operations != nil {
+		*database.operations = append(*database.operations, "commit")
+	}
 	database.calls = append(database.calls, clonePreparationSpec(spec))
 	if database.err != nil {
 		return store.AgentTurnPreparationCommit{}, database.err
@@ -614,6 +636,146 @@ func validProfileSource() *profileSource {
 func mutateRequest(request agentturn.Request, mutate func(*agentturn.Request)) agentturn.Request {
 	mutate(&request)
 	return request
+}
+
+type verificationGitHub struct {
+	pullRequest                   githubapi.PullRequest
+	err                           error
+	calls                         int
+	operations                    *[]string
+	credential, owner, repository string
+	number                        int
+}
+
+func (api *verificationGitHub) GetPullRequest(_ context.Context, credential, owner, repository string, number int) (githubapi.PullRequest, error) {
+	if api.operations != nil {
+		*api.operations = append(*api.operations, "verify-proposal")
+	}
+	api.credential, api.owner, api.repository, api.number = credential, owner, repository, number
+	api.calls++
+	return api.pullRequest, api.err
+}
+
+func verificationPullRequest(id int64, number int, state, headRef, headSHA, baseRef string) githubapi.PullRequest {
+	return githubapi.PullRequest{
+		ID: id, NodeID: "PR_node", Number: number, Title: "Change", State: state,
+		Head: githubapi.PullRequestBranch{Ref: headRef, SHA: headSHA},
+		Base: githubapi.PullRequestBranch{Ref: baseRef, SHA: "base-sha"},
+	}
+}
+
+func TestPrepareVerifiesCurrentChangeProposalHead(t *testing.T) {
+	operations := []string{}
+	source := validProfileSource()
+	source.operations = &operations
+	const image = "registry.example/repository@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + image + "\nplatform: linux/amd64\nrequirements: [nested-containers, tool-installation]\n")
+	source.contents[".omnigrex/turn-configuration.yaml"] = []byte("version: 1\nenvironment-paths:\n  directories:\n    build: {lifecycle: turn}\n  environment:\n    - {name: TMPDIR, directory: build}\n")
+	runtime := runtimeProfile(t, testImage)
+	registry, err := runtimeprofile.NewRegistry(runtime)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	durable := &store.ActiveChangeProposal{
+		PullRequestID: 64, PullRequestNumber: 12, RepositoryID: 91,
+		RepositoryOwner: "acme", RepositoryName: "widgets",
+		HeadRef: "feature", HeadSHA: "head-a", BaseRef: "main", BaseSHA: "base-sha",
+	}
+	database := &preparationStore{selected: workflow.RoleDeveloper, activeProposal: durable, operations: &operations}
+	github := &verificationGitHub{pullRequest: verificationPullRequest(64, 12, "open", "feature", "0123456789abcdef0123456789abcdef01234567", "main"), operations: &operations}
+	preparer := agentturn.NewPreparerWithChangeProposalVerifier(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog(), "TMPDIR"), agentprofile.SingletonSelector{}, registry, database, github)
+
+	_, err = preparer.Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if github.calls != 1 {
+		t.Fatalf("GitHub verification calls = %d, want one", github.calls)
+	}
+	wantOperations := []string{"default-branch", "list:.omnigrex", "fetch:.omnigrex/environment.yaml", "fetch:.omnigrex/turn-configuration.yaml", "list:.omnigrex/team", "fetch:.omnigrex/team/developer.md", "fetch:.omnigrex/team/reviewer.md", "active-proposal", "verify-proposal", "commit"}
+	if !reflect.DeepEqual(operations, wantOperations) {
+		t.Fatalf("preparation operations = %v, want %v", operations, wantOperations)
+	}
+	if github.credential != "installation-secret" || github.owner != "acme" || github.repository != "widgets" || github.number != 12 {
+		t.Fatalf("verification did not use the durable repository and Pull Request: %#v", github)
+	}
+	if len(database.calls) != 1 {
+		t.Fatalf("PrepareAgentTurn() calls = %d, want one", len(database.calls))
+	}
+	spec := database.calls[0]
+	if spec.VerifiedHeadSHA != "0123456789abcdef0123456789abcdef01234567" || spec.VerifiedPRID != 64 || spec.VerifiedPRNumber != 12 {
+		t.Errorf("verified spec = (%q, %d, %d), want repaired head", spec.VerifiedHeadSHA, spec.VerifiedPRID, spec.VerifiedPRNumber)
+	}
+	var contract runtimeprofile.Contract
+	if err := json.Unmarshal(spec.Developer.RuntimeContract, &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract.Image != image || contract.Platform.Arch != "amd64" || contract.RepositoryEnvironment == nil ||
+		!reflect.DeepEqual(contract.RepositoryEnvironment.Requirements, []string{"nested-containers", "tool-installation"}) || len(spec.Developer.TurnConfiguration) == 0 {
+		t.Fatalf("fresh-head verification lost the repository environment or turn configuration: %#v", contract)
+	}
+}
+
+func TestPrepareVerificationRejectsClosedOrRetargetedPullRequest(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		mutate      func(*githubapi.PullRequest)
+		wantContain string
+	}{
+		{name: "closed", mutate: func(pr *githubapi.PullRequest) { pr.State = "closed" }, wantContain: "not open"},
+		{name: "merged", mutate: func(pr *githubapi.PullRequest) { pr.State = "closed"; pr.Merged = true }, wantContain: "not open"},
+		{name: "identity", mutate: func(pr *githubapi.PullRequest) { pr.ID = 65 }, wantContain: "identity changed"},
+		{name: "head branch", mutate: func(pr *githubapi.PullRequest) { pr.Head.Ref = "other" }, wantContain: "head branch changed"},
+		{name: "base branch", mutate: func(pr *githubapi.PullRequest) { pr.Base.Ref = "other" }, wantContain: "base branch changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := validProfileSource()
+			runtime := runtimeProfile(t, testImage)
+			registry, err := runtimeprofile.NewRegistry(runtime)
+			if err != nil {
+				t.Fatalf("NewRegistry() error = %v", err)
+			}
+			durable := &store.ActiveChangeProposal{
+				PullRequestID: 64, PullRequestNumber: 12, RepositoryID: 91,
+				RepositoryOwner: "acme", RepositoryName: "widgets",
+				HeadRef: "feature", HeadSHA: "head-a", BaseRef: "main", BaseSHA: "base-sha",
+			}
+			database := &preparationStore{selected: workflow.RoleDeveloper, activeProposal: durable}
+			observed := verificationPullRequest(64, 12, "open", "feature", "0123456789abcdef0123456789abcdef01234567", "main")
+			test.mutate(&observed)
+			github := &verificationGitHub{pullRequest: observed}
+			preparer := agentturn.NewPreparerWithChangeProposalVerifier(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database, github)
+			_, err = preparer.Prepare(context.Background(), validRequest())
+			if !errors.Is(err, agentturn.ErrChangeProposalVerificationFailed) || !strings.Contains(err.Error(), test.wantContain) {
+				t.Fatalf("Prepare() error = %v, want verification failure containing %q", err, test.wantContain)
+			}
+			if len(database.calls) != 0 {
+				t.Errorf("PrepareAgentTurn() calls = %d, want none after verification failure", len(database.calls))
+			}
+		})
+	}
+}
+
+func TestPrepareSkipsVerificationWithoutChangeProposal(t *testing.T) {
+	source := validProfileSource()
+	runtime := runtimeProfile(t, testImage)
+	registry, err := runtimeprofile.NewRegistry(runtime)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	database := &preparationStore{selected: workflow.RoleDeveloper}
+	github := &verificationGitHub{pullRequest: verificationPullRequest(64, 12, "open", "feature", "0123456789abcdef0123456789abcdef01234567", "main")}
+	preparer := agentturn.NewPreparerWithChangeProposalVerifier(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database, github)
+	_, err = preparer.Prepare(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if github.calls != 0 {
+		t.Errorf("GitHub calls = %d, want none without a durable Change Proposal", github.calls)
+	}
+	if len(database.calls) != 1 || database.calls[0].VerifiedHeadSHA != "" {
+		t.Errorf("spec = %#v, want no verified head", database.calls)
+	}
 }
 
 func clonePreparationSpec(spec store.AgentTurnPreparationSpec) store.AgentTurnPreparationSpec {

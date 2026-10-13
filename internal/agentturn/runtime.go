@@ -95,6 +95,8 @@ type LauncherConfig struct {
 	Gateway                  MCPRegistrar
 	Execution                RuntimeEngineFactory
 	States                   execution.RetainedState
+	DeveloperCredentials     RepositoryCredentialProvider
+	ReviewerCredentials      RepositoryCredentialProvider
 	MemoryBytes              int64
 	StopTimeout              time.Duration
 	Policies                 role.PolicyCatalog
@@ -132,6 +134,8 @@ type Launcher struct {
 	gateway                  MCPRegistrar
 	execution                RuntimeEngineFactory
 	states                   execution.RetainedState
+	developerCredentials     RepositoryCredentialProvider
+	reviewerCredentials      RepositoryCredentialProvider
 	memoryBytes              int64
 	stopTimeout              time.Duration
 	policies                 role.PolicyCatalog
@@ -180,7 +184,8 @@ type RuntimeHandle struct {
 // NewLauncher validates deployment dependencies before any turn is launched.
 func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if nilInterface(config.Store) || nilInterface(config.Registry) || nilInterface(config.Workspace) ||
-		nilInterface(config.Gateway) || nilInterface(config.Execution) || nilInterface(config.States) || len(config.AgentAdapters) == 0 {
+		nilInterface(config.Gateway) || nilInterface(config.Execution) || nilInterface(config.States) ||
+		nilInterface(config.DeveloperCredentials) || nilInterface(config.ReviewerCredentials) || len(config.AgentAdapters) == 0 {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidLauncher)
 	}
 	if config.MemoryBytes <= 0 {
@@ -210,13 +215,26 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
 		gateway: config.Gateway, execution: config.Execution,
-		states:      config.States,
+		states:               config.States,
+		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
 		memoryBytes: config.MemoryBytes,
 		stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
 		agentAdapters: cloneAdapters(config.AgentAdapters),
 	}, nil
+}
+
+// launchCredentialProvider selects the authority for trusted repository preparation.
+func (launcher *Launcher) launchCredentialProvider(policy role.Policy) (RepositoryCredentialProvider, error) {
+	switch policy.RepositoryCredentialAuthority {
+	case role.OrchestratorAuthority:
+		return launcher.developerCredentials, nil
+	case role.ReviewerAuthority:
+		return launcher.reviewerCredentials, nil
+	default:
+		return nil, fmt.Errorf("%w: repository credential authority", ErrRuntimeBinding)
+	}
 }
 
 // Launch starts and attaches one Runtime Process without submitting a prompt.
@@ -410,6 +428,26 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	spec.GoldenResources = true
 	spec.Environment = environment.BindEnvironment(spec.Environment)
 	spec.Requirements = runtimeRequirements(runtimeProfile)
+	// Workspace preparation performs unbounded trusted Git I/O. Reacquire
+	// current repository authority immediately before dispatch, rather than
+	// accepting a token that expired during checkout. Pi installs tools from
+	// the working checkout in the Execution Environment; this prerequisite
+	// token remains control-plane-only and never enters the adapter or spec.
+	provider, err := launcher.launchCredentialProvider(rolePolicy)
+	if err != nil {
+		return nil, err
+	}
+	fresh, credentialErr := provider.RepositoryCredential(ctx, execution.Repository.Owner, execution.Repository.Name)
+	if fresh != "" {
+		secrets = append(secrets, fresh)
+		resources.secrets = append(resources.secrets, fresh)
+	}
+	if credentialErr != nil {
+		return nil, fmt.Errorf("refresh repository credential before Runtime Process launch: %w", credentialErr)
+	}
+	if strings.TrimSpace(fresh) == "" {
+		return nil, errors.New("refresh repository credential before Runtime Process launch: repository credential is empty")
+	}
 	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine

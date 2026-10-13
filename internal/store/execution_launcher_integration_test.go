@@ -138,7 +138,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 	if err := database.BindExecutionBackend(ctx, states.Binding()); err != nil {
 		t.Fatal(err)
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": adapter}, States: states, MemoryBytes: 512 << 20})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": adapter}, States: states, DeveloperCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, ReviewerCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, MemoryBytes: 512 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
