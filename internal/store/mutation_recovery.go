@@ -252,7 +252,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		&stopReason, &errorClass, &recorded); err != nil {
 		return nil, err
 	}
-	if recorded && (stopReason == "end_turn" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
+	if recorded && (stopReason == "completed" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
 		var participantRole workflow.Role
 		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, job.AgentAssignmentID).Scan(&participantRole); err != nil {
 			return nil, err

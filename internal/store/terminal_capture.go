@@ -84,7 +84,7 @@ func (store *Store) RecordAgentTurnUnpromptedCleanup(ctx context.Context, lease 
 		}
 		var eligible bool
 		if err := tx.QueryRow(ctx, `
-SELECT session.status = 'CREATING' AND session.acp_session_id IS NULL
+SELECT session.status = 'CREATING' AND session.runtime_capabilities IS NULL
     AND session.activated_at IS NULL AND session.human_prompt_token IS NULL
     AND turn.prompt_recorded_at IS NULL AND turn.next_invocation_number = 1
     AND NOT EXISTS (SELECT 1 FROM tool_invocations

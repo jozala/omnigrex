@@ -129,7 +129,7 @@ func TestWorkspaceCaptureDuringAuthenticatedOutstandingCallAndRetainedState(t *t
 		t.Fatal(err)
 	}
 	request.Workspace = execution.WorkspaceRef{Key: request.Key, Seed: strings.Repeat("a", 40)}
-	ref := execution.StateRef{ID: request.Key.AssignmentID, ParticipantID: request.Key.AssignmentID, SessionID: request.Key.AgentSessionID, Backend: backend.Binding(), Format: "opencode-data/v1", Image: request.Image, RuntimeProfileSHA256: strings.Repeat("b", 64)}
+	ref := execution.StateRef{ID: request.Key.AssignmentID, ParticipantID: request.Key.AssignmentID, SessionID: request.Key.AgentSessionID, Backend: backend.Binding(), Format: "pi-session/v3", Image: request.Image, RuntimeProfileSHA256: strings.Repeat("b", 64)}
 	source := &stateFixtureSource{ref: ref}
 	states, err := dirstate.New(backend.options.StateRoot, backend.Binding(), source)
 	if err != nil {
@@ -143,7 +143,7 @@ func TestWorkspaceCaptureDuringAuthenticatedOutstandingCallAndRetainedState(t *t
 	}
 	request.State = ref
 	request.Attachments = []execution.Attachment{{Resource: "workspace", Target: "/workspace"}, {Resource: "state", Target: "/state"}}
-	request.Environment = []string{`OPENCODE_AUTH_CONTENT={"key":"provider-fixture-secret"}`}
+	request.Environment = []string{`FIXTURE_EPHEMERAL_AUTH={"key":"provider-fixture-secret"}`}
 	request.Command = []string{"/bin/sh", "-ec", `printf '{"session":"retained"}' > /state/session.json
 printf executable > /workspace/executable; chmod 0755 /workspace/executable; ln -s executable /workspace/link
 (while :; do head -c 1048576 /dev/zero | tr '\000' X > /workspace/.generation; mv /workspace/.generation /workspace/generation; sleep .01; done) &

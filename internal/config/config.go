@@ -28,7 +28,6 @@ const (
 	defaultMCPAddr                     = "omnigrex-mcp:8081"
 	defaultMCPEndpointURL              = "http://omnigrex-mcp:8081/mcp"
 	defaultMCPMutationOperationTimeout = 2 * time.Hour
-	defaultAgentImageReference         = "omnigrex/opencode:1.18.29"
 	defaultGitHubAPIURL                = "https://api.github.com"
 	defaultGitRemoteBaseURL            = gitremote.DefaultBaseURL
 	defaultHTTPAddr                    = ":8080"
@@ -61,31 +60,26 @@ const (
 )
 
 type Config struct {
-	ExecutionBackend            string
-	MicrosandboxExecutable      string
-	MicrosandboxFirmware        string
-	MicrosandboxHome            string
-	MicrosandboxNamespace       string
-	MicrosandboxCPUs            int
-	MicrosandboxRootDiskMiB     int64
-	DatabaseURL                 string
-	DatabasePasswordSecretFile  string
-	DockerAgentNetwork          string
-	WorkspaceVolume             string
-	RuntimeStateVolume          string
-	MiseVolume                  string
-	WorkspaceRoot               string
-	WorkspaceCaptureRoot        string
-	RuntimeStateRoot            string
-	MiseRoot                    string
-	MCPAddr                     string
-	MCPEndpointURL              string
-	MCPMutationOperationTimeout time.Duration
-	// AgentImageReference is a legacy resource-probe hint retained during preparation.
-	AgentImageReference string
-	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
-	OpenCodeACPV1Image                     string
-	OpenCodeACPV1Platform                  profile.Platform
+	ExecutionBackend                       string
+	MicrosandboxExecutable                 string
+	MicrosandboxFirmware                   string
+	MicrosandboxHome                       string
+	MicrosandboxNamespace                  string
+	MicrosandboxCPUs                       int
+	MicrosandboxRootDiskMiB                int64
+	DatabaseURL                            string
+	DatabasePasswordSecretFile             string
+	DockerAgentNetwork                     string
+	WorkspaceVolume                        string
+	RuntimeStateVolume                     string
+	MiseVolume                             string
+	WorkspaceRoot                          string
+	WorkspaceCaptureRoot                   string
+	RuntimeStateRoot                       string
+	MiseRoot                               string
+	MCPAddr                                string
+	MCPEndpointURL                         string
+	MCPMutationOperationTimeout            time.Duration
 	PiRPCV1Image                           string
 	PiRPCV1Platform                        profile.Platform
 	PiStartupTimeout                       time.Duration
@@ -172,8 +166,6 @@ func Load(getenv func(string) string) (Config, error) {
 		MCPAddr:                                valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
 		MCPEndpointURL:                         valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
 		MCPMutationOperationTimeout:            defaultMCPMutationOperationTimeout,
-		AgentImageReference:                    valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
-		OpenCodeACPV1Image:                     getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
 		PiRPCV1Image:                           getenv("OMNIGREX_PI_RPC_V1_IMAGE"),
 		PiStartupTimeout:                       defaultPiStartupTimeout,
 		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
@@ -277,29 +269,13 @@ func Load(getenv func(string) string) (Config, error) {
 	if strings.TrimSpace(config.MCPAddr) == "" {
 		problems = append(problems, fmt.Errorf("OMNIGREX_MCP_ADDR must not be blank"))
 	}
-	if config.OpenCodeACPV1Image != "" || getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM") != "" || config.PiRPCV1Image == "" {
-		imageValid := profile.IsExactRegistryImage(config.OpenCodeACPV1Image)
-		if !imageValid {
-			problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_IMAGE must be a registry name with an exact sha256 digest"))
-		}
-		platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM"), "/")
-		config.OpenCodeACPV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
-		platformValid := found && !strings.Contains(platformArch, "/") && profile.IsSupportedPlatform(config.OpenCodeACPV1Platform)
-		if !platformValid {
-			problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_PLATFORM must be a supported linux platform"))
-		}
-		if imageValid && platformValid {
-			if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
-				problems = append(problems, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err))
-			}
-		}
+	if !profile.IsExactRegistryImage(config.PiRPCV1Image) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_IMAGE must be a registry name with an exact sha256 digest"))
 	}
-	if config.PiRPCV1Image != "" || getenv("OMNIGREX_PI_RPC_V1_PLATFORM") != "" {
-		os, arch, found := strings.Cut(getenv("OMNIGREX_PI_RPC_V1_PLATFORM"), "/")
-		config.PiRPCV1Platform = profile.Platform{OS: os, Arch: arch}
-		if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) || !profile.IsExactRegistryImage(config.PiRPCV1Image) {
-			problems = append(problems, fmt.Errorf("candidate Pi requires OMNIGREX_PI_RPC_V1_IMAGE as an exact registry digest and OMNIGREX_PI_RPC_V1_PLATFORM as a supported linux platform"))
-		}
+	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_PI_RPC_V1_PLATFORM"), "/")
+	config.PiRPCV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
+	if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_PLATFORM must be a supported linux platform"))
 	}
 	if value := getenv("OMNIGREX_PI_STARTUP_TIMEOUT"); value != "" {
 		duration, err := time.ParseDuration(value)
@@ -359,7 +335,6 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_WORKSPACE_VOLUME", value: config.WorkspaceVolume},
 		{name: "OMNIGREX_RUNTIME_STATE_VOLUME", value: config.RuntimeStateVolume},
 		{name: "OMNIGREX_MISE_VOLUME", value: config.MiseVolume},
-		{name: "OMNIGREX_AGENT_IMAGE_REFERENCE", value: config.AgentImageReference},
 	} {
 		if strings.TrimSpace(setting.value) == "" {
 			problems = append(problems, fmt.Errorf("%s must not be blank", setting.name))

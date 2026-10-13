@@ -204,7 +204,7 @@ func (cleaner *ExactLabelCleaner) EnsureManagedContainerAbsent(ctx context.Conte
 		if inspected.Container.ID != containerID {
 			return fmt.Errorf("%w: inspected container ID does not match", ErrInvalidExactLabelCleanup)
 		}
-		if inspected.Container.Config != nil && !diagnosticOwned(inspected.Container.Config.Labels, cleaner.diagnosticNamespace) {
+		if inspected.Container.Config != nil && inspected.Container.Config.Labels[diagnosticMarkerLabel] == "true" && !diagnosticOwned(inspected.Container.Config.Labels, cleaner.diagnosticNamespace) {
 			return fmt.Errorf("%w: diagnostic belongs to another installation", ErrInvalidExactLabelCleanup)
 		}
 		if inspected.Container.Config == nil || inspected.Container.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue &&

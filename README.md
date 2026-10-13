@@ -34,6 +34,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Pi upgrades and state recovery](./docs/plans/2026-10-10-pi-upgrades-and-state-recovery.md)
 - [Pi operational integration and backend CI](./docs/plans/2026-10-11-pi-operational-integration.md)
 - [Pi operator documentation and cutover rehearsal](./docs/plans/2026-10-11-pi-operator-documentation-and-cutover.md)
+- [Pi-only source and final backend qualification](./docs/plans/2026-10-13-pi-only-final-qualification.md)
 
 The implementation is written in Go and deployable with Docker Compose.
 
@@ -58,7 +59,9 @@ mise run check
 
 Build Pi with `mise run pi-image` and the Docker control plane with `mise run image`, or build `Dockerfile.microsandbox` on a Linux/amd64 builder.
 Use the [Pi deployment procedure](./docs/operator-guide.md#pi-operational-deployment) with actual registry digests for a configured local stack.
-The root `compose.yaml`, `.env.example`, and `agent-image` task still support the legacy OpenCode development stack until Step 17.
+The root `compose.yaml` and `.env.example` provide the Pi-only Docker development stack, with a source-built orchestrator and an exact registry-pinned Pi image.
+Set `OMNIGREX_PI_RPC_V1_IMAGE` and its matching platform, provision that image, and run `docker compose up --build --wait` after configuring the required secrets.
+For a locally built Pi environment, publish it to a development registry and select its resolved digest using the image procedure in the operator guide.
 Secret placement, GitHub Apps, ingress, image provisioning, and recovery procedures are authoritative in the [operator guide](./docs/operator-guide.md).
 
 ## Preflight Diagnostics
@@ -80,13 +83,13 @@ The MCP endpoint check expects a running orchestrator and confirms that an unaut
 
 The command never prints private keys, webhook secrets, provider credentials, App JWTs, or installation tokens.
 
-Run Docker-backed integration tests, including retained preparatory OpenCode coverage, with:
+Run Docker-backed integration tests with:
 
 ```sh
 mise run test-integration
 ```
 
-The full-stack test deliberately recreates the stable local networks and volumes, so run it only when those resources can be removed:
+The full-stack gate uses disposable Pi networks and volumes to check authenticated durable webhooks, persistent storage, network isolation, dependency readiness, and operational diagnostics:
 
 ```sh
 mise run test-compose
@@ -101,7 +104,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox-integr
 Use an approved Linux Docker host through `DOCKER_HOST` when developing on macOS.
 See the [operator guide](./docs/operator-guide.md#microsandbox-execution-backend) for native build, backend selection, storage, and resource guarantees.
 
-Run the preparatory Pi protocol adapter gates with:
+Run the Pi protocol adapter gates with:
 
 ```sh
 mise run test-pi-integration
@@ -121,11 +124,14 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
 Image-only deployment smoke uses `mise run test-pi-deployment` or `mise run test-pi-microsandbox-deployment` on the Docker daemon's host, with isolated fixture secrets and resources.
 See the [operator guide](./docs/operator-guide.md#diagnostics-and-backend-gates) for remote-host and published-image qualification.
 
-Rehearse the isolated OpenCode reset and Pi coordinated recovery on the daemon host:
+Rehearse the historical OpenCode reset and Pi coordinated recovery on the daemon host with an externally selected old-release Compose bundle and both exact published source images:
 
 ```sh
+OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE=/private/old-release/compose.yaml \
+OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE=REGISTRY/ORCHESTRATOR@sha256:SOURCE_DIGEST \
+OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE=REGISTRY/AGENT@sha256:SOURCE_DIGEST \
 mise run test-pi-cutover
-OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-cutover
+# Select test-pi-microsandbox-cutover with the same source inputs and the host KVM group for Microsandbox.
 ```
 
 See the [rehearsal procedure and evidence boundaries](./docs/operator-guide.md#isolated-cutover-rehearsal) before running these fixture-only gates.

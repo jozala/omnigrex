@@ -57,7 +57,6 @@ type Spec struct {
 	MemoryBytes int64
 	PIDsLimit   int64
 	// Reattachable keeps stdin open across a lost pre-launch attachment.
-	// Legacy OpenCode qualification fixtures retain EOF-driven shutdown until Step 17.
 	Reattachable bool
 }
 
@@ -217,7 +216,7 @@ type ExitObservation = execution.ExitObservation
 // ObserveExit inspects the exact container before Stop or Remove can overwrite its exit state.
 // Missing containers and running containers provide no evidence of an OOM.
 func (process *Process) ObserveExit(ctx context.Context) (ExitObservation, error) {
-	// The ACP attach stream can close just before Docker publishes the terminal state.
+	// The process attach stream can close just before Docker publishes the terminal state.
 	for attempt := 0; attempt < 6; attempt++ {
 		observation, err := observeExit(ctx, process.api, process.ID, process.labels)
 		uncertainExit := observation.Running || observation.Exited && observation.ExitCode == 137 && !observation.OOMKilled

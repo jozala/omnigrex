@@ -3,6 +3,7 @@
 package docker
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"os/exec"
@@ -12,10 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -24,7 +25,7 @@ func TestRepositoryEnvironmentQualifiesResourcesAndInstallsWorkingRevisionTools(
 	defer cancel()
 	root := t.TempDir()
 	// A separately built repository image supplies one extra development tool.
-	dockerfile := `FROM omnigrex/opencode:1.18.29
+	dockerfile := `FROM omnigrex/pi:1.0.4
 USER root
 RUN printf '#!/bin/sh\nprintf "repository-tool-v1\\n"\n' > /usr/local/bin/repository-tool && chmod 0755 /usr/local/bin/repository-tool
 USER 10001:10001
@@ -45,12 +46,12 @@ USER 10001:10001
 	if len(fields) != 2 {
 		t.Fatal("repository image identity is incomplete")
 	}
-	bound, err := profile.NewOpenCodeV1("registry.example/repository@"+fields[0], profile.Platform{OS: "linux", Arch: fields[1]})
+	bound, err := profile.NewPiV1("registry.example/repository@"+fields[0], profile.Platform{OS: "linux", Arch: fields[1]})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Local image IDs are allowed only by this disposable integration fixture.
-	qualify, err := environment.QualificationScript(fields[1], "opencode-acp")
+	qualify, err := environment.QualificationScript(fields[1], "pi-rpc", bound.Contract().GoldenResourceContract)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ USER 10001:10001
 	// An image with valid ancestry and an unchanged version claim still fails
 	// qualification if it replaces the actual pinned runtime executable.
 	tamperedTag := tag + "-tampered"
-	if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte(dockerfile+"USER root\nRUN printf '#!/bin/sh\\nprintf \\\"1.18.29\\\\n\\\"\\n' > /usr/local/bin/opencode\nUSER 10001:10001\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte(dockerfile+"USER root\nRUN printf 'throw new Error(\"replaced runner\");\\n' > /opt/omnigrex/pi/runner.mjs\nUSER 10001:10001\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.CommandContext(ctx, "docker", "build", "-t", tamperedTag, root).CombinedOutput(); err != nil {
@@ -70,8 +71,8 @@ USER 10001:10001
 	if _, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--read-only", "--entrypoint", "/bin/sh", tamperedTag, "-ec", qualify).CombinedOutput(); err == nil {
 		t.Fatal("accepted a replaced golden runtime executable")
 	}
-	for _, role := range []opencode.Role{opencode.RoleDeveloper, opencode.RoleReviewer} {
-		t.Run(string(role), func(t *testing.T) {
+	for _, roleID := range []role.ID{role.Developer, role.Reviewer} {
+		t.Run(string(roleID), func(t *testing.T) {
 			fixture := newWorkspaceDockerFixture(t, nil)
 			// Stop the seed writer before launching the next exact environment.
 			if output, err := exec.CommandContext(ctx, "docker", "stop", fixture.id).CombinedOutput(); err != nil {
@@ -81,23 +82,19 @@ USER 10001:10001
 mkdir -p /workspace/assignment-` + fixture.key.AssignmentID + `/workspace
 cd /workspace/assignment-` + fixture.key.AssignmentID + `/workspace
 printf '[env]\nREVISION_TOOLS = "working-revision"\n[hooks]\npostinstall = "sh ./install.sh"\n' > mise.toml
-printf 'set -eu\ntest "$(id -u)" = 10001\ntest -z "${OPENCODE_AUTH_CONTENT:-}"\ntest "$(repository-tool)" = repository-tool-v1\nprintf installed-in-environment > installation-proof\n' > install.sh
+printf 'set -eu\ntest "$(id -u)" = 10001\ntest ! -S /var/run/docker.sock\ntest ! -e /run/pi-agent/auth.json\ntest "$(repository-tool)" = repository-tool-v1\nprintf installed-in-environment > installation-proof\n' > install.sh
 `
 			if output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--user", "10001:10001", "--mount", "type=volume,src="+fixture.volume+",dst=/workspace", "--entrypoint", "/bin/sh", tag, "-ec", seed).CombinedOutput(); err != nil {
 				t.Fatalf("seed working tools: %v\n%s", err, output)
 			}
-			rendered, err := opencode.Render(role, opencode.Profile{Instructions: "Test repository environment.", Model: "openai/gpt-5", Steps: 1, Permissions: opencode.PermissionPolicy{"read": opencode.PermissionAllow}})
-			if err != nil {
-				t.Fatal(err)
-			}
 			key := fixture.key
 			key.AgentTurnID = uuid.NewString()
-			request, err := opencode.BuildProcess(bound, rendered, opencode.ProviderCredentials{Role: role, Content: []byte(`{}`)}, opencode.ProcessOptions{Key: key, MemoryBytes: 512 << 20})
+			request, err := (pi.TurnAdapter{}).BuildProcess(bound, key, "", 512<<20, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			request.Image = fields[0]
-			request.Command = []string{environment.Executable, "run", "acp"}
+			request.Command = []string{environment.Executable, "run", "/bin/sh", "-ec", `test "$(cat /workspace/installation-proof)" = installed-in-environment; test "$REVISION_TOOLS" = working-revision; test ! -S /var/run/docker.sock; printf 'working-revision-ready\n'; exec sleep 300`}
 			request.Environment = environment.BindEnvironment(request.Environment)
 			request.GoldenResources = true
 			request.Requirements = []execution.Requirement{execution.ToolInstallation}
@@ -117,20 +114,16 @@ printf 'set -eu\ntest "$(id -u)" = 10001\ntest -z "${OPENCODE_AUTH_CONTENT:-}"\n
 			if err := process.Start(ctx); err != nil {
 				t.Fatal(err)
 			}
-			client := acp.NewClient(process.Transport(), acp.ClientOptions{})
-			defer client.Close()
-			if _, err := client.Initialize(ctx); err != nil {
-				t.Fatalf("initialize after tool installation: %v\n%s", err, stderr.String())
-			}
-			check := `test "$(cat /workspace/installation-proof)" = installed-in-environment; tr '\000' '\n' < /proc/$(pgrep -f '^/usr/local/bin/opencode acp' | tail -n 1)/environ | grep '^REVISION_TOOLS=working-revision$'`
-			output, err := exec.CommandContext(ctx, "docker", "exec", ledger.records[key].Resource, "/bin/sh", "-ec", check).CombinedOutput()
-			if err != nil {
-				t.Fatalf("working revision tool proof: %v\n%s", err, output)
+			stopRead := context.AfterFunc(ctx, func() { _ = process.Transport().Close() })
+			defer stopRead()
+			line, err := bufio.NewReader(process.Transport()).ReadString('\n')
+			if err != nil || line != "working-revision-ready\n" {
+				t.Fatalf("working revision tool proof: %q, %v\n%s", line, err, stderr.String())
 			}
 		})
 	}
 	// An unrelated image cannot qualify merely by claiming the runtime version.
-	bad, _ := profile.NewOpenCodeV1("docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b", profile.Platform{OS: "linux", Arch: fields[1]})
+	bad, _ := profile.NewPiV1("docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b", profile.Platform{OS: "linux", Arch: fields[1]})
 	if err := CheckRepositoryEnvironment(ctx, bad); err == nil {
 		t.Fatal("accepted image without golden resources")
 	}

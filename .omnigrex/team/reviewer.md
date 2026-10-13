@@ -1,17 +1,15 @@
 ---
 name: reviewer
 role: REVIEWER
-runtime: opencode-acp/v1
+runtime: pi-rpc/v1
 model: opencode-go/glm-5.3-flash
-variant: max
-steps: 100
 permissions:
   read: allow
   edit: deny
-  glob: allow
+  find: allow
   grep: allow
-  list: allow
-  patch: deny
+  ls: allow
+  write: deny
   bash: allow
   skill: allow
 ---

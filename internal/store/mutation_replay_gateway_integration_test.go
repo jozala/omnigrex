@@ -19,7 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -58,7 +58,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	if err := database.CloseMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.FinalizeAgentTurn(ctx, rootLease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "ACP prompt failed"}); err != nil {
+	if err := database.FinalizeAgentTurn(ctx, rootLease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "Agent prompt failed"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,7 +112,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: retryLease, Execution: retryExecution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		Lease: retryLease, Execution: retryExecution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil {
@@ -468,7 +468,7 @@ func TestGatewaySignedReviewerReviewReconcilesToWorkflowOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token",
 	})
 	if err != nil {

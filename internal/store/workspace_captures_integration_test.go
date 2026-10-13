@@ -185,11 +185,22 @@ func TestWorkspaceCaptureLedgerRejectsReinterpretationAndInvalidDurableKeys(t *t
 		}
 	}
 	// Session and Participant profile bindings must agree, not just match input.
-	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_profile_version = 'other' WHERE id = $1`, ref.Request.Workspace.Key.AgentSessionID); err != nil {
+	// An unreserved Session permits constructing the mismatch without violating
+	// the unrelated immutable Pi runtime identity constraint.
+	inconsistent := seedCreatingAgentSession(t, pool, 1799)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, inconsistent.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_profile_version = 'other' WHERE id = $1`, inconsistent.sessionID); err != nil {
 		t.Fatal(err)
 	}
 	newRef := ref
 	newRef.Request.OperationID = "new capture with inconsistent Session"
+	newRef.Request.Workspace.Key.AssignmentID = inconsistent.assignmentID
+	newRef.Request.Workspace.Key.AgentSessionID = inconsistent.sessionID
+	newRef.Request.Workspace.Key.AgentTurnID = turn.ID
+	newRef.Request.Workspace.Key.ExecutionEpoch = turn.ExecutionEpoch
 	if err := database.SealCapture(ctx, newRef); !errors.Is(err, execution.ErrConflict) {
 		t.Fatalf("inconsistent Session profile = %v", err)
 	}

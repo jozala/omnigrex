@@ -8,7 +8,7 @@ import (
 	"time"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -114,6 +114,9 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
 		return true, nil // Closure or another fenced transition won.
 	}
+	if errors.Is(err, store.ErrTerminalCorroborationConflict) {
+		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+	}
 	if errors.Is(err, store.ErrAgentTurnSettlementRejected) && lease.Kind == store.RevalidateTerminalIntentJobKind {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
@@ -166,15 +169,17 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	}
 	if pending.Checkpoint.PromptError != "" {
 		request.PromptError = PromptErrorClassification(pending.Checkpoint.PromptError)
-		request.PromptDiagnostic = "the ACP response was unavailable before corroboration"
+		request.PromptDiagnostic = "the agent response was unavailable before corroboration"
 	} else {
 		var outcome struct {
-			StopReason acp.StopReason `json:"stop_reason"`
+			Admitted     bool         `json:"admitted"`
+			Status       agent.Status `json:"status"`
+			LimitReached bool         `json:"limit_reached,omitempty"`
 		}
-		if json.Unmarshal(pending.Checkpoint.PromptOutcome, &outcome) != nil || outcome.StopReason != acp.StopReasonEndTurn {
+		if json.Unmarshal(pending.Checkpoint.PromptOutcome, &outcome) != nil || !outcome.Admitted || outcome.Status != agent.Completed || outcome.LimitReached {
 			return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 		}
-		request.PromptResponse = &acp.PromptResponse{StopReason: outcome.StopReason}
+		request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Completed}
 	}
 	var failure *TerminalCorroborationFailure
 	request.OnCorroborationFailure = func(observed TerminalCorroborationFailure) { failure = &observed }

@@ -3,6 +3,7 @@
 package docker
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -15,9 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -37,7 +37,7 @@ func TestRetainedStateDockerConformance(t *testing.T) {
 	}
 	const helperImage = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 	run("pull", helperImage)
-	agent := strings.Fields(run("image", "inspect", "omnigrex/opencode:1.18.29", "--format", "{{.Id}} {{.Architecture}}"))
+	agent := strings.Fields(run("image", "inspect", "omnigrex/pi:1.0.4", "--format", "{{.Id}} {{.Architecture}}"))
 	if len(agent) != 2 {
 		t.Fatal("incomplete agent image identity")
 	}
@@ -85,23 +85,29 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.initialized[ref.ID] = true
-	runtimeProfile, err := profile.NewOpenCodeV1("registry.example/omnigrex/opencode@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
+	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{Instructions: "Use authorized tools only.", Model: "openai/gpt-5", Steps: 1, Permissions: opencode.PermissionPolicy{"read": opencode.PermissionAllow}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := func(epoch int64) (*acp.Client, execution.Engine) {
+	sessionID := strings.Replace(ref.ID, "10000000", "20000000", 1)
+	start := func(epoch int64, mustExist bool) (execution.Engine, error) {
 		t.Helper()
 		turnID := fmt.Sprintf("30000000-0000-4000-8000-%012x", time.Now().UnixNano()&((1<<48)-1))
-		key := execution.Key{AssignmentID: ref.ID, AgentSessionID: strings.Replace(ref.ID, "10000000", "20000000", 1), AgentTurnID: turnID, ExecutionEpoch: epoch, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1"}
-		request, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{Role: opencode.RoleDeveloper, Content: []byte(`{"openai":{"type":"api","key":"ephemeral-credential-sentinel"}}`)}, opencode.ProcessOptions{Key: key, MemoryBytes: 512 << 20})
+		key := execution.Key{AssignmentID: ref.ID, AgentSessionID: sessionID, AgentTurnID: turnID, ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		request, err := (pi.TurnAdapter{}).BuildProcess(runtimeProfile, key, "", 512<<20, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		request.Image = ref.Image // exact locally qualified image, like existing ACP fixtures
+		request.Image = ref.Image // exact locally qualified fixture image
+		request.Command = []string{"/usr/local/bin/node", "--input-type=module", "-e", fmt.Sprintf(`
+import { openDurableSession } from '/opt/omnigrex/pi/session-state.mjs';
+import { writeFile } from 'node:fs/promises';
+await writeFile('/run/pi-agent/auth.json', 'ephemeral-credential-sentinel', {mode: 0o600});
+const { manager, disposition } = await openDurableSession({agentSessionId: %q, runtimeSessionId: %q, mustExist: %t});
+if (manager.getSessionId() !== %q) throw new Error('wrong Session');
+console.log(disposition);
+setInterval(() => {}, 1000);
+`, sessionID, sessionID, mustExist, sessionID)}
 		request.State = ref
 		request.State.SessionID = key.AgentSessionID
 		var attachments []execution.Attachment
@@ -131,22 +137,27 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 		if err := process.Start(ctx); err != nil {
 			t.Fatal(err)
 		}
-		client := acp.NewClient(process.Transport(), acp.ClientOptions{RequiredCapabilities: acp.RequiredCapabilities{SessionList: true, SessionLoad: true, SessionResume: true}})
-		if _, err := client.Initialize(ctx); err != nil {
-			t.Fatal(err)
+		stopRead := context.AfterFunc(ctx, func() { _ = process.Transport().Close() })
+		defer stopRead()
+		line, err := bufio.NewReader(process.Transport()).ReadString('\n')
+		if err != nil {
+			return engine, err
 		}
-		return client, engine
+		want := "created\n"
+		if mustExist {
+			want = "continued\n"
+		}
+		if line != want {
+			return engine, fmt.Errorf("Session disposition = %q, want %q", line, want)
+		}
+		return engine, nil
 	}
-	first, firstEngine := start(1)
-	created, err := first.CreateSession(ctx, acp.CreateSessionRequest{CWD: "/workspace"})
+	firstEngine, err := start(1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckStateRecoveryBoundary(ctx, volume); !errors.Is(err, execution.ErrUnknownEffect) {
 		t.Fatalf("live writer recovery = %v", err)
-	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
 	}
 	if err := firstEngine.EnsureAbsent(ctx); err != nil {
 		t.Fatal(err)
@@ -190,12 +201,9 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 			t.Fatalf("restore retry retained Session-data copies: %v, %v", entries, err)
 		}
 	}
-	second, secondEngine := start(2)
-	if err := second.ContinueSession(ctx, acp.ContinueSessionRequest{SessionID: created.ID, CWD: "/workspace"}); err != nil {
+	secondEngine, err := start(2, true)
+	if err != nil {
 		t.Fatalf("fresh environment could not continue exported/restored exact Session: %v", err)
-	}
-	if err := second.Close(); err != nil {
-		t.Fatal(err)
 	}
 	if err := secondEngine.EnsureAbsent(ctx); err != nil {
 		t.Fatal(err)
@@ -208,12 +216,9 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.initialized[ref.ID] = true
-	neighbor, neighborEngine := start(1)
-	if err := neighbor.ContinueSession(ctx, acp.ContinueSessionRequest{SessionID: created.ID, CWD: "/workspace"}); err == nil {
+	neighborEngine, err := start(1, true)
+	if err == nil {
 		t.Fatal("another Participant continued the protected Session")
-	}
-	if err := neighbor.Close(); err != nil {
-		t.Fatal(err)
 	}
 	if err := neighborEngine.EnsureAbsent(ctx); err != nil {
 		t.Fatal(err)

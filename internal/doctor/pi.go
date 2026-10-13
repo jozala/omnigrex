@@ -6,15 +6,24 @@ import (
 	"io"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
+type piProbeOptions struct {
+	Settings    config.Config
+	Network     string
+	MCPHost     string
+	ExtraHosts  []string
+	MemoryBytes int64
+}
+
 // checkPi initializes the production runner and authenticated MCP extension
 // without a model prompt, real credentials, or a retained-state attachment.
-func checkPi(ctx context.Context, runtime profile.Profile, options acpProbeOptions, selections ...agent.ModelSelection) (err error) {
+func checkPi(ctx context.Context, runtime profile.Profile, options piProbeOptions, selections ...agent.ModelSelection) (err error) {
 	diagnostic, err := startDiagnosticMCP(options.MCPHost, map[string]any{"name": "get_issue", "description": "Disposable diagnostic tool", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}})
 	if err != nil {
 		return err

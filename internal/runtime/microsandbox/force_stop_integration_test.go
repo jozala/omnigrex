@@ -40,7 +40,7 @@ func TestMicrosandboxForceStopPreservesUnflushedTerminalEvidence(t *testing.T) {
 	request.Workspace = execution.WorkspaceRef{Key: request.Key, Seed: strings.Repeat("a", 40)}
 	request.State = execution.StateRef{
 		ID: request.Key.AssignmentID, ParticipantID: request.Key.AssignmentID, SessionID: request.Key.AgentSessionID,
-		Backend: backend.Binding(), Format: "opencode-data/v1", Image: request.Image, RuntimeProfileSHA256: strings.Repeat("b", 64),
+		Backend: backend.Binding(), Format: "pi-session/v3", Image: request.Image, RuntimeProfileSHA256: strings.Repeat("b", 64),
 	}
 	request.Attachments = []execution.Attachment{{Resource: "workspace", Target: "/workspace"}, {Resource: "state", Target: "/state"}}
 	request.Command = []string{"/bin/sh", "-ec", `test "$(cat /workspace/required.txt)" = workspace-retained

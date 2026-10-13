@@ -40,17 +40,12 @@ run = "go test -race ./..."
 
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
-depends = ["agent-images", "pi-image"]
-run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment"
+depends = ["pi-image"]
+run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/deployment"
 
 [tasks.test-compose]
-description = "Run the destructive full-stack Docker Compose integration test"
-depends = ["image", "agent-image"]
-run = '''
-OMNIGREX_COMPOSE_INTEGRATION=1 \
-OMNIGREX_DOCKER_GID="${OMNIGREX_DOCKER_GID:-0}" \
-go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
-'''
+description = "Run disposable Pi full-stack deployment, persistence, webhook, and readiness gates"
+run = "mise run test-pi-deployment"
 
 [tasks.test-live-github]
 description = "Run the opt-in live GitHub App repository read and review gate"
@@ -64,7 +59,7 @@ run = "OMNIGREX_MICROSANDBOX_FEASIBILITY=1 go test -race -tags=integration -time
 description = "Qualify the SDK-backed adapter, captures, state, golden resources, and nested Docker on Linux/KVM"
 run = '''
 : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the Docker host's /dev/kvm group}"
-docker build --file agent/opencode/Dockerfile --tag omnigrex/microsandbox-golden-fixture:step08 .
+docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/microsandbox-golden-fixture:step08 .
 docker build --file Dockerfile.microsandbox --target qualification --tag omnigrex/microsandbox-qualification:step08 .
 set -o pipefail
 docker image save omnigrex/microsandbox-golden-fixture:step08 | docker run --rm -i \
@@ -85,7 +80,7 @@ description = "Build the pinned disposable Pi protocol diagnostic image"
 run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
 
 [tasks.pi-image]
-description = "Build the pinned candidate Pi repository environment"
+description = "Build the pinned Pi repository environment"
 run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
 
 [tasks.test-pi-integration]
@@ -185,27 +180,14 @@ OMNIGREX_SECRET_GID=1 \
 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 \
 OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
 OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
 docker compose config --quiet
-OMNIGREX_DOCKER_GID=0 \
-OMNIGREX_SECRET_GID=1 \
-OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
-OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
-OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64 \
-OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
-OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
-OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
-OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
-OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
-docker compose --file deploy/compose.yaml config --quiet
 OMNIGREX_SECRET_GID=1 OMNIGREX_DOCKER_GID=0 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
 OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
@@ -227,27 +209,6 @@ docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml 
 [tasks.image]
 description = "Build the orchestrator image"
 run = "docker build --tag omnigrex/orchestrator:dev ."
-
-[tasks.agent-image]
-description = "Build the pinned OpenCode Runtime Process image"
-run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 ."
-
-[tasks.agent-image-previous]
-description = "Build the previous OpenCode image used for controlled upgrade tests"
-run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.19 --tag omnigrex/opencode:1.18.19 ."
-
-[tasks.agent-images]
-description = "Build current and previous OpenCode compatibility images"
-depends = ["agent-image", "agent-image-previous"]
-
-[tasks.release-check-runtime-upgrade]
-description = "Qualify source-to-candidate state compatibility and optionally emit an exact-digest result"
-depends = ["agent-images"]
-run = '''
-go test -race -tags=integration ./internal/runtime/acp -run '^TestOpenCodeControlledStateUpgrade$' -count=1
-go test -race ./internal/agentturn -run '^TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration$' -count=1
-go test -race ./internal/runtime/profile -run '^TestCompatibilityResults'
-'''
 
 [tasks.check]
 description = "Run all local verification checks"

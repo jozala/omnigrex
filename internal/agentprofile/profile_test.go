@@ -15,7 +15,7 @@ import (
 )
 
 func TestParseReturnsFrontmatterIdentityIndependentOfPath(t *testing.T) {
-	content := []byte("---\nname: release_developer\nrole: DEVELOPER\nruntime: opencode-acp/v1\nmodel: openai/gpt-5.2\nvariant: high\nsteps: 250\npermissions:\n  read: allow\n  edit: deny\n---\nImplement the Work Item carefully.\n")
+	content := []byte("---\nname: release_developer\nrole: DEVELOPER\nruntime: pi-rpc/v1\nmodel: openai/gpt-5.2\nthinking: high\npermissions:\n  read: allow\n  edit: deny\n---\nImplement the Work Item carefully.\n")
 
 	profile, err := agentprofile.Parse(".omnigrex/team/arbitrary.. profile.md", content, role.BuiltinPolicyCatalog())
 	if err != nil {
@@ -24,8 +24,8 @@ func TestParseReturnsFrontmatterIdentityIndependentOfPath(t *testing.T) {
 	if profile.Name() != "release_developer" || profile.Role() != role.Developer || profile.Path() != ".omnigrex/team/arbitrary.. profile.md" {
 		t.Errorf("identity = (%q, %q, %q)", profile.Name(), profile.Role(), profile.Path())
 	}
-	if profile.Runtime() != "opencode-acp/v1" || profile.Model() != "openai/gpt-5.2" || profile.Variant() != "high" || profile.Steps() != 250 {
-		t.Errorf("configuration = (%q, %q, %q, %d)", profile.Runtime(), profile.Model(), profile.Variant(), profile.Steps())
+	if profile.Runtime() != "pi-rpc/v1" || profile.Model() != "openai/gpt-5.2" || profile.Thinking() != "high" {
+		t.Errorf("configuration = (%q, %q, %q)", profile.Runtime(), profile.Model(), profile.Thinking())
 	}
 	if profile.Instructions() != "Implement the Work Item carefully.\n" {
 		t.Errorf("Instructions() = %q", profile.Instructions())
@@ -44,7 +44,7 @@ func TestParseReturnsFrontmatterIdentityIndependentOfPath(t *testing.T) {
 	if profile.ContentSHA256() != digest || profile.ContentHash() != hex.EncodeToString(digest[:]) {
 		t.Errorf("content hashes = (%x, %q), want %x", profile.ContentSHA256(), profile.ContentHash(), digest)
 	}
-	wantJSON := `{"instructions":"Implement the Work Item carefully.\n","model":"openai/gpt-5.2","name":"release_developer","path":".omnigrex/team/arbitrary.. profile.md","permissions":{"edit":"deny","read":"allow"},"role":"DEVELOPER","runtime":"opencode-acp/v1","steps":250,"variant":"high"}`
+	wantJSON := `{"instructions":"Implement the Work Item carefully.\n","model":"openai/gpt-5.2","name":"release_developer","path":".omnigrex/team/arbitrary.. profile.md","permissions":{"edit":"deny","read":"allow"},"role":"DEVELOPER","runtime":"pi-rpc/v1","thinking":"high"}`
 	if got := string(profile.CanonicalJSON()); got != wantJSON || !json.Valid(profile.CanonicalJSON()) {
 		t.Errorf("CanonicalJSON() = %s\nwant = %s", got, wantJSON)
 	}
@@ -96,19 +96,19 @@ func TestParseUsesInjectedPolicyCatalog(t *testing.T) {
 }
 
 func TestParseAcceptsEveryKnownToolForReviewer(t *testing.T) {
-	content := []byte("---\nname: quality\nrole: REVIEWER\nruntime: opencode-acp/v1\nmodel: anthropic/claude-sonnet-4\nsteps: 1000\npermissions:\n  read: allow\n  edit: deny\n  glob: allow\n  grep: allow\n  list: deny\n  patch: deny\n  bash: deny\n  task: allow\n  webfetch: allow\n  websearch: deny\n  codesearch: allow\n  todoread: allow\n  todowrite: deny\n  question: allow\n  skill: allow\n---\nReview the Change Proposal.\n")
+	content := []byte("---\nname: quality\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: anthropic/claude-sonnet-4\npermissions:\n  read: allow\n  edit: deny\n  write: deny\n  grep: allow\n  find: allow\n  ls: deny\n  bash: deny\n  skill: allow\n---\nReview the Change Proposal.\n")
 
 	profile, err := agentprofile.Parse(".omnigrex/team/review.md", content, role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if profile.Name() != "quality" || profile.Role() != role.Reviewer || profile.Variant() != "" || len(profile.Permissions()) != 15 {
-		t.Errorf("Profile = (%q, %q, %q, %#v)", profile.Name(), profile.Role(), profile.Variant(), profile.Permissions())
+	if profile.Name() != "quality" || profile.Role() != role.Reviewer || profile.Thinking() != "" || len(profile.Permissions()) != 8 {
+		t.Errorf("Profile = (%q, %q, %q, %#v)", profile.Name(), profile.Role(), profile.Thinking(), profile.Permissions())
 	}
 }
 
 func TestParseAcceptsExactDelimitersWithCRLFLineEndings(t *testing.T) {
-	content := []byte("---\r\nname: developer\r\nrole: DEVELOPER\r\nruntime: opencode-acp/v1\r\nmodel: openai/gpt-5.2\r\nsteps: 10\r\npermissions:\r\n  read: allow\r\n---\r\nInstructions.\r\n")
+	content := []byte("---\r\nname: developer\r\nrole: DEVELOPER\r\nruntime: pi-rpc/v1\r\nmodel: openai/gpt-5.2\r\npermissions:\r\n  read: allow\r\n---\r\nInstructions.\r\n")
 	profile, err := agentprofile.Parse(".omnigrex/team/developer.md", content, role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -136,9 +136,9 @@ func TestParseRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestParseRejectsReviewerEditingPermissions(t *testing.T) {
-	for _, tool := range []string{"edit", "patch"} {
+	for _, tool := range []string{"edit", "write"} {
 		t.Run(tool, func(t *testing.T) {
-			content := []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: opencode-acp/v1\nmodel: openai/gpt-5.2\nsteps: 10\npermissions:\n  " + tool + ": allow\n---\nReview the Change Proposal.\n")
+			content := []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-5.2\npermissions:\n  " + tool + ": allow\n---\nReview the Change Proposal.\n")
 			if _, err := agentprofile.Parse(".omnigrex/team/reviewer.md", content, role.BuiltinPolicyCatalog()); !errorsIsInvalidProfile(err) {
 				t.Fatalf("Parse() error = %v, want editing permission rejection", err)
 			}
@@ -157,16 +157,21 @@ func TestParseRejectsInvalidProfileConfiguration(t *testing.T) {
 		{name: "malformed closing delimiter", content: []byte(strings.Replace(valid, "---\nInstructions", "----\nInstructions", 1))},
 		{name: "BOM before delimiter", content: append([]byte{0xef, 0xbb, 0xbf}, []byte(valid)...)},
 		{name: "BOM in instructions", content: append([]byte(valid), 0xef, 0xbb, 0xbf)},
-		{name: "unknown key", content: []byte(strings.Replace(valid, "runtime:", "extra: value\nruntime:", 1))},
-		{name: "duplicate key", content: []byte(strings.Replace(valid, "runtime:", "runtime: other/v2\nruntime:", 1))},
-		{name: "alias", content: []byte(strings.Replace(valid, "runtime: opencode-acp/v1", "runtime: &runtime opencode-acp/v1\nvariant: *runtime", 1))},
-		{name: "custom tag", content: []byte(strings.Replace(valid, "runtime: opencode-acp/v1", "runtime: !profile opencode-acp/v1", 1))},
-		{name: "missing runtime", content: []byte(strings.Replace(valid, "runtime: opencode-acp/v1\n", "", 1))},
-		{name: "runtime missing version", content: []byte(strings.Replace(valid, "opencode-acp/v1", "opencode-acp", 1))},
-		{name: "runtime extra slash", content: []byte(strings.Replace(valid, "opencode-acp/v1", "org/opencode/v1", 1))},
+		{name: "unknown key", content: []byte(strings.Replace(valid, "model:", "extra: value\nmodel:", 1))},
+		{name: "duplicate key", content: []byte(strings.Replace(valid, "model:", "model: other/model\nmodel:", 1))},
+		{name: "alias", content: []byte(strings.Replace(valid, "model: openai/gpt-5.2", "model: &model openai/gpt-5.2\nthinking: *model", 1))},
+		{name: "custom tag", content: []byte(strings.Replace(valid, "model: openai/gpt-5.2", "model: !profile openai/gpt-5.2", 1))},
+		{name: "missing model", content: []byte(strings.Replace(valid, "model: openai/gpt-5.2\n", "", 1))},
+		{name: "missing runtime", content: []byte(strings.Replace(valid, "runtime: pi-rpc/v1\n", "", 1))},
+		{name: "legacy runtime", content: []byte(strings.Replace(valid, "pi-rpc/v1", "opencode-acp/v1", 1))},
+		{name: "unknown runtime", content: []byte(strings.Replace(valid, "pi-rpc/v1", "other/v1", 1))},
+		{name: "unsupported runtime version", content: []byte(strings.Replace(valid, "pi-rpc/v1", "pi-rpc/v2", 1))},
+		{name: "runtime whitespace", content: []byte(strings.Replace(valid, "pi-rpc/v1", "' pi-rpc/v1'", 1))},
 		{name: "model missing provider", content: []byte(strings.Replace(valid, "openai/gpt-5.2", "/gpt-5.2", 1))},
-		{name: "zero steps", content: []byte(strings.Replace(valid, "steps: 50", "steps: 0", 1))},
-		{name: "steps over maximum", content: []byte(strings.Replace(valid, "steps: 50", "steps: 1001", 1))},
+		{name: "zero steps", content: []byte(strings.Replace(valid, "permissions:", "steps: 0\npermissions:", 1))},
+		{name: "positive steps", content: []byte(strings.Replace(valid, "permissions:", "steps: 50\npermissions:", 1))},
+		{name: "empty variant", content: []byte(strings.Replace(valid, "permissions:", "variant: ''\npermissions:", 1))},
+		{name: "invalid thinking", content: []byte(strings.Replace(valid, "permissions:", "thinking: impossible\npermissions:", 1))},
 		{name: "empty permissions", content: []byte(strings.Replace(valid, "permissions:\n  read: allow", "permissions: {}", 1))},
 		{name: "unknown tool", content: []byte(strings.Replace(valid, "read: allow", "execute: allow", 1))},
 		{name: "unknown action", content: []byte(strings.Replace(valid, "read: allow", "read: ask", 1))},
@@ -183,7 +188,7 @@ func TestParseRejectsInvalidProfileConfiguration(t *testing.T) {
 }
 
 func validProfileContent(name string, roleID role.ID, model, instructions string) []byte {
-	return []byte("---\nname: " + name + "\nrole: " + string(roleID) + "\nruntime: opencode-acp/v1\nmodel: " + model + "\nsteps: 50\npermissions:\n  read: allow\n---\n" + instructions)
+	return []byte("---\nname: " + name + "\nrole: " + string(roleID) + "\nruntime: pi-rpc/v1\nmodel: " + model + "\npermissions:\n  read: allow\n---\n" + instructions)
 }
 
 func errorsIsInvalidProfile(err error) bool {

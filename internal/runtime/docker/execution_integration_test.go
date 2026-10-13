@@ -13,10 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/conformance"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -41,10 +40,10 @@ func TestExecutionConformanceDocker(t *testing.T) {
 	conformance.Transport(t, ctx, factory, request, newExecutionTestLedger())
 }
 
-func TestExecutionOpenCodeUsesNeutralFactoryAndTransport(t *testing.T) {
+func TestExecutionPiUsesNeutralFactoryAndTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "omnigrex/opencode:1.18.29", "--format", "{{.Id}} {{.Architecture}}").Output()
+	output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "omnigrex/pi:1.0.4", "--format", "{{.Id}} {{.Architecture}}").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,17 +51,13 @@ func TestExecutionOpenCodeUsesNeutralFactoryAndTransport(t *testing.T) {
 	if len(fields) != 2 {
 		t.Fatal("fixture image identity is incomplete")
 	}
-	profile, err := runtimeprofile.NewOpenCodeV1("registry.example/omnigrex/opencode@"+fields[0], runtimeprofile.Platform{OS: "linux", Arch: fields[1]})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{Instructions: "Use only the authorized Role capabilities.", Model: "openai/gpt-5", Steps: 1, Permissions: opencode.PermissionPolicy{"read": opencode.PermissionAllow}})
+	profile, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@"+fields[0], runtimeprofile.Platform{OS: "linux", Arch: fields[1]})
 	if err != nil {
 		t.Fatal(err)
 	}
 	key := executionTestRequest().Key
 	key.AgentTurnID = fmt.Sprintf("30000000-0000-4000-8000-%012x", time.Now().UnixNano()&((1<<48)-1))
-	request, err := opencode.BuildProcess(profile, rendered, opencode.ProviderCredentials{Role: opencode.RoleDeveloper, Content: []byte(`{}`)}, opencode.ProcessOptions{Key: key, MemoryBytes: 512 << 20})
+	request, err := (pi.TurnAdapter{}).BuildProcess(profile, key, "", 512<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +87,16 @@ func TestExecutionOpenCodeUsesNeutralFactoryAndTransport(t *testing.T) {
 	if err := process.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	client := acp.NewClient(process.Transport(), acp.ClientOptions{RequiredCapabilities: acp.RequiredCapabilities{SessionList: true, SessionResume: true, SessionLoad: true}})
-	defer client.Close()
-	initialized, err := client.Initialize(ctx)
-	if err != nil || initialized.AgentInfo == nil || initialized.AgentInfo.Name != "OpenCode" || initialized.AgentInfo.Version != "1.18.29" {
-		t.Fatalf("neutral OpenCode initialization = %#v, %v", initialized.AgentInfo, err)
-	}
-	if _, err := client.CreateSession(ctx, acp.CreateSessionRequest{CWD: "/workspace"}); err != nil {
+	stopRead := context.AfterFunc(ctx, func() { _ = process.Transport().Close() })
+	defer stopRead()
+	// The runner fails closed on invalid bootstrap input over the neutral streams.
+	// Full Pi protocol and Session coverage lives in the shared both-backend Pi suite.
+	if _, err := io.WriteString(process.Transport(), "{}\n"); err != nil {
 		t.Fatal(err)
+	}
+	response, err := io.ReadAll(process.Transport())
+	if err != nil || !strings.Contains(string(response), `"type":"omnigrex_configuration_error"`) {
+		t.Fatalf("neutral Pi bootstrap rejection = %q, %v", response, err)
 	}
 }
 

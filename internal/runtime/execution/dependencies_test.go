@@ -21,7 +21,7 @@ func TestCoreDependencyGraphDoesNotReachExecutionImplementations(t *testing.T) {
 			command := exec.Command("go", "list", "-deps", "-json", "-tags="+tags,
 				"github.com/jozala/omnigrex/internal/agentturn", "github.com/jozala/omnigrex/internal/startup",
 				"github.com/jozala/omnigrex/internal/workflow", "github.com/jozala/omnigrex/internal/workflowaction",
-				"github.com/jozala/omnigrex/internal/store", "github.com/jozala/omnigrex/internal/runtime/opencode",
+				"github.com/jozala/omnigrex/internal/store",
 				"github.com/jozala/omnigrex/internal/runtime/execution", "github.com/jozala/omnigrex/internal/runtime/agent",
 				"github.com/jozala/omnigrex/internal/runtime/session", "github.com/jozala/omnigrex/internal/mcp",
 				"github.com/jozala/omnigrex/internal/retention", "github.com/jozala/omnigrex/internal/workspace")
@@ -124,9 +124,8 @@ func boundaryImportForbidden(owner, dependency string) bool {
 			return true
 		}
 	}
-	// Transitional ACP vocabulary is confined to the existing compatibility
-	// consumers until Step 17. Neutral contracts and Workflow policy cannot use it.
-	if dependency == internal+"runtime/acp" && (owner == "workflow" || owner == "workflowaction" || owner == "mcp" || owner == "startup" || owner == "store") {
+	// Removed runtime families cannot return through any production dependency.
+	if packageFamily(dependency, internal+"runtime/acp") || packageFamily(dependency, internal+"runtime/opencode") {
 		return true
 	}
 	return false
@@ -154,6 +153,8 @@ func TestBoundaryRulesRejectLeakageAndPermitOwnedComposition(t *testing.T) {
 		{"runtime/pi", "github.com/superradcompany/microsandbox/sdk/go", true},
 		{"runtime/execution", "github.com/jozala/omnigrex/internal/store", true},
 		{"runtime/agent", "github.com/jozala/omnigrex/internal/runtime/acp", true},
+		{"agentturn", "github.com/jozala/omnigrex/internal/runtime/acp", true},
+		{"runtime/composition", "github.com/jozala/omnigrex/internal/runtime/opencode", true},
 		{"workflow", "github.com/jozala/omnigrex/internal/runtime/pi", true},
 		{"runtime/composition", "github.com/jozala/omnigrex/internal/runtime/pi", false},
 		{"runtime/docker", "github.com/moby/moby/client", false},

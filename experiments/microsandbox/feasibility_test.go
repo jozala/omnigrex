@@ -76,7 +76,7 @@ func TestFixtureArchiveIncludesStandaloneModuleAndSource(t *testing.T) {
 func TestCommittedSourceArchiveIncludesRepositoryRoot(t *testing.T) {
 	p := &experiment{t: t, ctx: context.Background()}
 	archive := tar.NewReader(bytes.NewReader(p.committedSource()))
-	required := map[string]bool{"go.mod": false, "agent/opencode/Dockerfile": false}
+	required := map[string]bool{"go.mod": false, "agent/pi/Dockerfile": false}
 	for {
 		header, err := archive.Next()
 		if err == io.EOF {

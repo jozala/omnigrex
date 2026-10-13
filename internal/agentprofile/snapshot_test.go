@@ -25,7 +25,7 @@ func TestSnapshotRoundTripPreservesEscapedInstructions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("valid source (%d bytes), snapshot (%d bytes) rejected: %v", len(source), len(snapshot), err)
 		}
-		if decoded.Instructions() != instructions || !bytes.Equal(decoded.CanonicalJSON(), snapshot) {
+		if decoded.Runtime() != "pi-rpc/v1" || decoded.Instructions() != instructions || !bytes.Equal(decoded.CanonicalJSON(), snapshot) {
 			t.Fatal("snapshot changed validated Profile values")
 		}
 	}
@@ -37,7 +37,7 @@ func TestSnapshotRetainsBoundsAndPresenceSensitivePiSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, patch := range []map[string]any{{"instructions": strings.Repeat("x", agentprofile.MaxContentSize+1)}, {"steps": 0}, {"variant": ""}, {"STEPS": 0}, {"unexpected": "value"}} {
+	for _, patch := range []map[string]any{{"instructions": strings.Repeat("x", agentprofile.MaxContentSize+1)}, {"runtime": "opencode-acp/v1"}, {"runtime": "pi-rpc/v2"}, {"runtime": "other/v1"}, {"runtime": ""}, {"runtime": nil}, {"steps": 0}, {"variant": ""}, {"STEPS": 0}, {"unexpected": "value"}} {
 		var fields map[string]any
 		_ = json.Unmarshal(p.CanonicalJSON(), &fields)
 		for key, value := range patch {
@@ -47,6 +47,13 @@ func TestSnapshotRetainsBoundsAndPresenceSensitivePiSchema(t *testing.T) {
 		if _, err := agentprofile.DecodeSnapshot(encoded, role.BuiltinPolicyCatalog()); err == nil {
 			t.Fatalf("invalid snapshot accepted: keys %+v", keysForSnapshotTest(patch))
 		}
+	}
+	var fields map[string]any
+	_ = json.Unmarshal(p.CanonicalJSON(), &fields)
+	delete(fields, "runtime")
+	encoded, _ := json.Marshal(fields)
+	if _, err := agentprofile.DecodeSnapshot(encoded, role.BuiltinPolicyCatalog()); err == nil {
+		t.Fatal("snapshot without an explicit runtime was accepted")
 	}
 }
 

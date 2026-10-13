@@ -46,7 +46,7 @@ func TestDurableRuntimeSessionReservationAndActivationAreFenced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reserved.RuntimeSessionID != reserved.ID || reserved.Status != store.AgentSessionCreating || reserved.ACPSessionID != "" {
+	if reserved.RuntimeSessionID != reserved.ID || reserved.Status != store.AgentSessionCreating {
 		t.Fatalf("reservation: %+v", reserved)
 	}
 	stale := lease

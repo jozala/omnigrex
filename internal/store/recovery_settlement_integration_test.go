@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -680,7 +680,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+	response := agent.Outcome{Admitted: true, Status: agent.Completed}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: retryLease, Execution: execution, PromptResponse: &response,
 	})

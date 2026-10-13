@@ -7,10 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
-const testImage = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const testImage = "registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestIsExactRegistryImageUsesCanonicalDistributionGrammar(t *testing.T) {
 	digest := strings.Repeat("a", 64)
@@ -37,14 +38,14 @@ func TestIsExactRegistryImageUsesCanonicalDistributionGrammar(t *testing.T) {
 	}
 }
 
-func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
-	got, err := profile.NewOpenCodeV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+func TestNewPiV1ReturnsQualifiedContract(t *testing.T) {
+	got, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewOpenCodeV1() error = %v", err)
+		t.Fatalf("NewPiV1() error = %v", err)
 	}
 
 	want := profile.Contract{
-		Name:    "opencode-acp",
+		Name:    "pi-rpc",
 		Version: "v1",
 		Image:   testImage,
 		Platform: profile.Platform{
@@ -52,37 +53,31 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 			Arch: "arm64",
 		},
 		User:    profile.User{UID: 10001, GID: 10001},
-		Command: []string{"acp"},
+		Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
 		Environment: []profile.EnvironmentVariable{
-			{Name: "HOME", Value: "/home/opencode"},
-			{Name: "MISE_DATA_DIR", Value: "/home/opencode/.local/share/mise"},
-			{Name: "OPENCODE_AUTH_CONTENT", Value: "{}"},
-			{Name: "OPENCODE_AUTO_SHARE", Value: "false"},
-			{Name: "OPENCODE_DISABLE_AUTOUPDATE", Value: "1"},
-			{Name: "OPENCODE_DISABLE_MODELS_FETCH", Value: "true"},
-			{Name: "OPENCODE_DISABLE_SHARE", Value: "1"},
-			{Name: "XDG_CACHE_HOME", Value: "/home/opencode/.cache"},
-			{Name: "XDG_CONFIG_HOME", Value: "/home/opencode/.config"},
-			{Name: "XDG_DATA_HOME", Value: "/home/opencode/.local/share"},
-			{Name: "XDG_STATE_HOME", Value: "/home/opencode/.local/state"},
+			{Name: "HOME", Value: "/tmp"},
+			{Name: "PATH", Value: "/usr/local/bin:/usr/bin:/bin"},
+			{Name: "PI_CODING_AGENT_DIR", Value: "/run/pi-agent"},
+			{Name: "PI_OFFLINE", Value: "1"},
+			{Name: "PI_SKIP_VERSION_CHECK", Value: "1"},
+			{Name: "PI_TELEMETRY", Value: "0"},
+			{Name: "TMPDIR", Value: "/tmp"},
 		},
 		Mounts: []profile.Mount{
 			{Name: "mise", Path: "/home/opencode/.local/share/mise"},
-			{Name: "state", Path: "/home/opencode/.local/share/opencode"},
+			{Name: "state", Path: "/state"},
 			{Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"},
 			{Name: "workspace", Path: "/workspace"},
 		},
-		Capabilities: []string{"session/list", "session/load", "session/resume"},
+		Capabilities: []string{"authenticated-mcp", "checked-configuration", "exact-session", "history-replay"},
 		Tmpfs: []profile.Tmpfs{
-			{Path: "/home/opencode/.cache", SizeBytes: 64 << 20},
-			{Path: "/home/opencode/.config", SizeBytes: 16 << 20},
-			{Path: "/home/opencode/.local/state", SizeBytes: 16 << 20},
-			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
-			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
+			{Path: "/run/pi-agent", SizeBytes: 16 << 20},
+			{Path: "/tmp", SizeBytes: 64 << 20, Executable: true},
 		},
-		Workspace:             "/workspace",
-		PIDsLimit:             128,
-		RepositoryEnvironment: &profile.RepositoryEnvironment{Version: 1},
+		Workspace:              "/workspace",
+		PIDsLimit:              128,
+		RepositoryEnvironment:  &profile.RepositoryEnvironment{Version: 1},
+		GoldenResourceContract: piresources.CurrentContract("arm64"),
 	}
 	if contract := got.Contract(); !reflect.DeepEqual(contract, want) {
 		t.Fatalf("Contract() = %#v, want %#v", contract, want)
@@ -92,45 +87,36 @@ func TestNewOpenCodeV1ReturnsQualifiedContract(t *testing.T) {
 	}
 }
 
-func TestOpenCodeV1EnvironmentContainsOnlyRoleNeutralStaticValues(t *testing.T) {
+func TestPiV1EnvironmentContainsOnlyRoleNeutralStaticValues(t *testing.T) {
 	contract := validContract(t)
-	reviewerOnly := map[string]struct{}{
-		"OPENCODE_DISABLE_CLAUDE_CODE":     {},
-		"OPENCODE_DISABLE_DEFAULT_PLUGINS": {},
-		"OPENCODE_DISABLE_EXTERNAL_SKILLS": {},
-		"OPENCODE_DISABLE_PROJECT_CONFIG":  {},
-		"OPENCODE_PURE":                    {},
-	}
 	for _, variable := range contract.Environment {
-		if variable.Name == "OPENCODE_CONFIG_CONTENT" {
-			t.Fatal("static Runtime Profile contains turn-specific OpenCode configuration")
-		}
-		if _, found := reviewerOnly[variable.Name]; found {
-			t.Fatalf("static Runtime Profile contains Reviewer-only environment key %q", variable.Name)
+		if strings.Contains(variable.Name, "AUTH") || strings.Contains(variable.Name, "TOKEN") || strings.Contains(variable.Name, "MODEL") || strings.Contains(variable.Name, "THINKING") || strings.Contains(variable.Name, "PERMISSION") {
+			t.Fatalf("static Runtime Profile contains Turn-specific configuration %q", variable.Name)
 		}
 	}
 }
 
-func TestNewRejectsContractsOutsideOpenCodeV1(t *testing.T) {
+func TestNewRejectsContractsOutsidePiV1(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*profile.Contract)
 	}{
 		{name: "unknown profile", mutate: func(contract *profile.Contract) { contract.Name = "other" }},
+		{name: "legacy profile", mutate: func(contract *profile.Contract) { contract.Name = "opencode-acp" }},
 		{name: "unknown version", mutate: func(contract *profile.Contract) { contract.Version = "v2" }},
-		{name: "mutable image tag", mutate: func(contract *profile.Contract) { contract.Image = "registry.example/omnigrex/opencode:1.18.19" }},
+		{name: "mutable image tag", mutate: func(contract *profile.Contract) { contract.Image = "registry.example/omnigrex/pi:latest" }},
 		{name: "bare local image ID", mutate: func(contract *profile.Contract) {
 			contract.Image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		}},
-		{name: "short image digest", mutate: func(contract *profile.Contract) { contract.Image = "registry.example/opencode@sha256:aaaa" }},
+		{name: "short image digest", mutate: func(contract *profile.Contract) { contract.Image = "registry.example/pi@sha256:aaaa" }},
 		{name: "uppercase image digest", mutate: func(contract *profile.Contract) {
-			contract.Image = "registry.example/opencode@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			contract.Image = "registry.example/pi@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		}},
 		{name: "unsupported OS", mutate: func(contract *profile.Contract) { contract.Platform.OS = "darwin" }},
 		{name: "unsupported architecture", mutate: func(contract *profile.Contract) { contract.Platform.Arch = "s390x" }},
 		{name: "root UID", mutate: func(contract *profile.Contract) { contract.User.UID = 0 }},
 		{name: "root GID", mutate: func(contract *profile.Contract) { contract.User.GID = 0 }},
-		{name: "wrong command", mutate: func(contract *profile.Contract) { contract.Command = []string{"opencode", "acp"} }},
+		{name: "wrong command", mutate: func(contract *profile.Contract) { contract.Command = []string{"node", "runner.mjs"} }},
 		{name: "missing environment", mutate: func(contract *profile.Contract) { contract.Environment = contract.Environment[1:] }},
 		{name: "unknown environment", mutate: func(contract *profile.Contract) {
 			contract.Environment = append(contract.Environment, profile.EnvironmentVariable{Name: "UNDECLARED", Value: "true"})
@@ -162,8 +148,14 @@ func TestNewRejectsContractsOutsideOpenCodeV1(t *testing.T) {
 			contract.Tmpfs = append(contract.Tmpfs, contract.Tmpfs[0])
 		}},
 		{name: "wrong tmpfs size", mutate: func(contract *profile.Contract) { contract.Tmpfs[0].SizeBytes++ }},
-		{name: "executable home tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[0].Executable = true }},
-		{name: "non-executable temp tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[4].Executable = false }},
+		{name: "executable configuration tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[0].Executable = true }},
+		{name: "non-executable temp tmpfs", mutate: func(contract *profile.Contract) { contract.Tmpfs[1].Executable = false }},
+		{name: "missing repository environment", mutate: func(contract *profile.Contract) { contract.RepositoryEnvironment = nil }},
+		{name: "unsupported environment version", mutate: func(contract *profile.Contract) { contract.RepositoryEnvironment.Version = 2 }},
+		{name: "unknown requirement", mutate: func(contract *profile.Contract) { contract.RepositoryEnvironment.Requirements = []string{"unknown"} }},
+		{name: "duplicate requirement", mutate: func(contract *profile.Contract) {
+			contract.RepositoryEnvironment.Requirements = []string{"tool-installation", "tool-installation"}
+		}},
 		{name: "wrong workspace", mutate: func(contract *profile.Contract) { contract.Workspace = "/work" }},
 		{name: "zero PID limit", mutate: func(contract *profile.Contract) { contract.PIDsLimit = 0 }},
 		{name: "wrong PID limit", mutate: func(contract *profile.Contract) { contract.PIDsLimit++ }},
@@ -235,15 +227,20 @@ func TestProfileOwnsContractDataAndCanonicalHash(t *testing.T) {
 	snapshot.Mounts[0].Path = "/changed"
 	snapshot.Capabilities[0] = "changed"
 	snapshot.Tmpfs[0].SizeBytes = 1
+	snapshot.RepositoryEnvironment.Version = 2
+	snapshot.GoldenResourceContract[0] = 'x'
 	if reflect.DeepEqual(snapshot, value.Contract()) {
 		t.Fatal("Contract() returned profile-owned slices")
 	}
 	if value.ContentSHA256() != baseline.ContentSHA256() {
 		t.Fatal("mutating a Contract() snapshot changed the profile hash")
 	}
+	if !reflect.DeepEqual(value.Contract(), baseline.Contract()) {
+		t.Fatal("mutating a Contract() snapshot changed profile-owned resources")
+	}
 
 	changed := validContract(t)
-	changed.Image = "registry.example/omnigrex/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	changed.Image = "registry.example/omnigrex/pi@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	changedProfile, err := profile.New(changed)
 	if err != nil {
 		t.Fatalf("New() changed profile error = %v", err)
@@ -263,13 +260,13 @@ func TestRegistryResolvesExactImmutableReference(t *testing.T) {
 		t.Fatalf("NewRegistry() error = %v", err)
 	}
 
-	resolved, err := registry.Resolve("opencode-acp", "v1")
+	resolved, err := registry.Resolve("pi-rpc", "v1")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	snapshot := resolved.Contract()
 	snapshot.Environment[0].Value = "changed"
-	again, err := registry.Resolve("opencode-acp", "v1")
+	again, err := registry.Resolve("pi-rpc", "v1")
 	if err != nil {
 		t.Fatalf("Resolve() again error = %v", err)
 	}
@@ -277,7 +274,7 @@ func TestRegistryResolvesExactImmutableReference(t *testing.T) {
 		t.Fatal("mutating a resolved contract changed the Registry")
 	}
 
-	for _, reference := range [][2]string{{"opencode-acp", ""}, {"opencode-acp", "v2"}, {"other", "v1"}} {
+	for _, reference := range [][2]string{{"pi-rpc", ""}, {"pi-rpc", "v2"}, {"other", "v1"}, {"opencode-acp", "v1"}} {
 		if _, err := registry.Resolve(reference[0], reference[1]); !errors.Is(err, profile.ErrNotFound) {
 			t.Errorf("Resolve(%q, %q) error = %v, want ErrNotFound", reference[0], reference[1], err)
 		}
@@ -290,7 +287,7 @@ func TestRegistryRejectsDuplicateReferenceConflict(t *testing.T) {
 		t.Fatalf("New() first error = %v", err)
 	}
 	contract := validContract(t)
-	contract.Image = "registry.example/omnigrex/opencode@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	contract.Image = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("b", 64)
 	second, err := profile.New(contract)
 	if err != nil {
 		t.Fatalf("New() second error = %v", err)
@@ -306,13 +303,13 @@ func TestRegistryRejectsDuplicateReferenceConflict(t *testing.T) {
 
 func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 	oldContract := validContract(t)
-	oldContract.Image = "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("1", 64)
+	oldContract.Image = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("1", 64)
 	oldProfile, err := profile.New(oldContract)
 	if err != nil {
 		t.Fatal(err)
 	}
 	candidateContract := validContract(t)
-	candidateContract.Image = "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("2", 64)
+	candidateContract.Image = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("2", 64)
 	candidateProfile, err := profile.New(candidateContract)
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +319,7 @@ func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 		t.Fatalf("NewCatalog() error = %v", err)
 	}
 
-	current, err := catalog.Resolve("opencode-acp", "v1")
+	current, err := catalog.Resolve("pi-rpc", "v1")
 	if err != nil || current.ContentSHA256() != candidateProfile.ContentSHA256() {
 		t.Fatalf("Resolve() current = (%s, %v), want candidate", current.ContentSHA256(), err)
 	}
@@ -339,17 +336,16 @@ func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := currentOnly.ResolveBinding(oldProfile.Binding())
-	if err != nil || recovered.Contract().Platform != oldProfile.Contract().Platform {
-		t.Fatalf("ResolveBinding() qualified persisted history = (%#v, %v)", recovered.Contract(), err)
+	if _, err := currentOnly.ResolveBinding(oldProfile.Binding()); !errors.Is(err, profile.ErrNotFound) {
+		t.Fatalf("ResolveBinding() fabricated uncatalogued historical contract: %v", err)
 	}
 }
 
 func validContract(t *testing.T) profile.Contract {
 	t.Helper()
-	value, err := profile.NewOpenCodeV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewOpenCodeV1() error = %v", err)
+		t.Fatalf("NewPiV1() error = %v", err)
 	}
 	return value.Contract()
 }

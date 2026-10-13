@@ -56,10 +56,19 @@ func TestBeginTerminalCorroborationFencesStoppedTurnAndQueuesOneVerifier(t *test
 			if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+			if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 				t.Fatal(err)
 			}
-			prompt := json.RawMessage(`{"stop_reason":"end_turn"}`)
+			prompt := json.RawMessage(`{"admitted":true,"status":"completed"}`)
+			for _, invalid := range []json.RawMessage{
+				json.RawMessage(`{"admitted":false,"status":"completed"}`),
+				json.RawMessage(`{"admitted":true,"status":"completed","limit_reached":true}`),
+				json.RawMessage(`{"admitted":true,"status":"aborted"}`),
+			} {
+				if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID, invalid, "", "transient_transport"); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+					t.Fatalf("ineligible prompt %s created a checkpoint: %v", invalid, err)
+				}
+			}
 			checkpoint, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID, prompt, "", "transient_transport")
 			if err != nil {
 				t.Fatalf("BeginTerminalCorroboration() error = %v", err)
@@ -137,10 +146,25 @@ WHERE turn.id = $1`, lease.ID, lease.JobLease.ID).Scan(
 					t.Fatalf("unrelated Reviewer evidence error = %v", err)
 				}
 			}
-			wrongPrompt := observation
-			wrongPrompt.Completion.Outcome = json.RawMessage(`{"stop_reason":"cancelled"}`)
-			if _, err := database.SettleTerminalCorroboration(ctx, *verificationLease, wrongPrompt); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
-				t.Fatalf("contradictory ACP completion error = %v", err)
+			for _, changed := range []json.RawMessage{
+				json.RawMessage(`{"admitted":true,"status":"aborted"}`),
+				json.RawMessage(`{"admitted":false,"status":"completed"}`),
+				json.RawMessage(`{"admitted":true,"status":"completed","limit_reached":true}`),
+			} {
+				wrongPrompt := observation
+				wrongPrompt.Completion.Outcome = changed
+				if _, err := database.SettleTerminalCorroboration(ctx, *verificationLease, wrongPrompt); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+					t.Fatalf("contradictory prompt completion %s error = %v", changed, err)
+				}
+				if _, err := pool.Exec(ctx, `UPDATE agent_turns SET outcome = $2 WHERE id = $1`, lease.ID, changed); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.SettleTerminalCorroboration(ctx, *verificationLease, observation); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+					t.Fatalf("changed durable prompt completion %s error = %v", changed, err)
+				}
+			}
+			if _, err := pool.Exec(ctx, `UPDATE agent_turns SET outcome = NULL WHERE id = $1`, lease.ID); err != nil {
+				t.Fatal(err)
 			}
 			staleLease := *verificationLease
 			staleLease.LeaseToken = "10000000-0000-4000-8000-000000000001"
@@ -164,14 +188,14 @@ func TestPromptEndingIsCheckpointedBeforeRuntimeCleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 995, workflow.RoleDeveloper, "")
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
-		t.Fatalf("repeat identical ACP ending: %v", err)
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
+		t.Fatalf("repeat identical prompt ending: %v", err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "cancelled", ""); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
-		t.Fatalf("contradictory ACP ending error = %v", err)
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "aborted", ""); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+		t.Fatalf("contradictory prompt ending error = %v", err)
 	}
 	var stop, promptError string
 	var recorded bool
@@ -180,17 +204,17 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
        prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, lease.ID).Scan(&stop, &promptError, &recorded); err != nil {
 		t.Fatal(err)
 	}
-	if stop != "end_turn" || promptError != "" || !recorded {
-		t.Fatalf("stored ACP classification = %q/%q recorded %t", stop, promptError, recorded)
+	if stop != "completed" || promptError != "" || !recorded {
+		t.Fatalf("stored prompt classification = %q/%q recorded %t", stop, promptError, recorded)
 	}
 	if _, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
 		OperationID: "after-end-turn", ToolName: "comment_on_issue", Request: json.RawMessage(`{}`),
 	}); !errors.Is(err, store.ErrMutationAdmissionClosed) {
-		t.Fatalf("mutation admitted after recorded ACP ending: %v", err)
+		t.Fatalf("mutation admitted after recorded prompt ending: %v", err)
 	}
 }
 
-func TestKnownACPCompletionSurvivesCleanupFailureAndCorroboratesAfterStop(t *testing.T) {
+func TestKnownPromptCompletionSurvivesCleanupFailureAndCorroboratesAfterStop(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -214,7 +238,7 @@ func TestKnownACPCompletionSurvivesCleanupFailureAndCorroboratesAfterStop(t *tes
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
@@ -316,7 +340,7 @@ func TestStoppedTerminalRecoveryStillReconcilesSuccessfulIssueComment(t *testing
 	if err := database.CompleteMutation(ctx, lease, comment.ID, json.RawMessage(`{"comment_id":100101}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
@@ -333,7 +357,7 @@ func TestStoppedTerminalRecoveryStillReconcilesSuccessfulIssueComment(t *testing
 	}
 }
 
-func TestRecordedACPCompletionSurvivesExecutionLeaseExpiry(t *testing.T) {
+func TestRecordedPromptCompletionSurvivesExecutionLeaseExpiry(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -357,7 +381,7 @@ func TestRecordedACPCompletionSurvivesExecutionLeaseExpiry(t *testing.T) {
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, expiration := range []struct {
@@ -389,7 +413,7 @@ func TestRecordedACPCompletionSurvivesExecutionLeaseExpiry(t *testing.T) {
 	}
 	recovery, err := database.CompleteAgentTurnRecovery(ctx, lease.ID, lease.ExecutionEpoch)
 	if err != nil || recovery.Status != store.AgentTurnCorroborating || recovery.SuccessorAllowed {
-		t.Fatalf("recover previously recorded ACP ending = (%#v, %v)", recovery, err)
+		t.Fatalf("recover previously recorded prompt ending = (%#v, %v)", recovery, err)
 	}
 	var executionStatus, continuation string
 	if err := pool.QueryRow(ctx, `
@@ -436,91 +460,111 @@ FROM agent_turns AS turn JOIN jobs AS execution ON execution.agent_turn_id = tur
 	}
 }
 
-func TestRecordedACPRefusalCannotBecomeTerminalRecoveryOrConfirmation(t *testing.T) {
-	databases, pool := openPhaseFiveStores(t, 1)
-	database := databases[0]
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	const number = 998
-	fixture, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, number, workflow.RoleDeveloper, "")
-	spec := store.MutationSpec{
-		OperationID: "review-before-refusal", ToolName: "request_review",
-		Request:         json.RawMessage(`{"operation_id":"review-before-refusal","summary":"Ready"}`),
-		ExternalService: "omnigrex", ExternalResourceID: fmt.Sprintf("%d:%s", number, proposal.HeadRef),
-		ExpectedSHA: proposal.HeadSHA,
-	}
-	mutation, err := database.ReserveMutation(ctx, lease, spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(fmt.Sprintf(`{"outcome":"REVIEW_REQUESTED","pull_request_id":%d,"pull_request_number":%d,"head_sha":%q}`,
-		proposal.PullRequestID, proposal.PullRequestNumber, proposal.HeadSHA))); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "refusal", ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport"); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
-		t.Fatalf("refused ACP ending was replaced by end_turn checkpoint: %v", err)
-	}
-	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
-		t.Fatal(err)
-	}
-	stop := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "stop-refused-prompt")
-	mutationJob := claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "reconcile-refused-prompt")
-	if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, stop); err != nil {
-		t.Fatal(err)
-	}
-	if candidates, err := database.ListAgentTurnMutationsForReconciliation(ctx, mutationJob); err != nil || len(candidates) != 1 || candidates[0].ID != mutation.ID {
-		t.Fatalf("refused intent retained ordinary mutation recovery: %#v, error %v", candidates, err)
-	}
-	if _, err := database.CompleteAgentTurnMutationReconciliation(ctx, mutationJob); err != nil {
-		t.Fatal(err)
-	}
-	recovery, err := database.CompleteAgentTurnRecovery(ctx, lease.ID, lease.ExecutionEpoch)
-	if err != nil || recovery.Status != store.AgentTurnInterrupted || !recovery.SuccessorAllowed || recovery.SettlementID == "" {
-		t.Fatalf("refused prompt recovery = (%#v, %v)", recovery, err)
-	}
-	var checkpoints int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turn_corroborations WHERE agent_turn_id = $1`, lease.ID).Scan(&checkpoints); err != nil || checkpoints != 0 {
-		t.Fatalf("refused prompt created %d pending checkpoints, error %v", checkpoints, err)
-	}
-	var successorJobID string
-	if err := pool.QueryRow(ctx, `SELECT id::text FROM jobs WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`,
-		recovery.SettlementID).Scan(&successorJobID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp()
+func TestRecordedIneligiblePromptCannotBecomeTerminalRecoveryOrConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stop       string
+		errorClass string
+		outcome    json.RawMessage
+	}{
+		{name: "limit", stop: "limit_reached"},
+		{name: "abort", stop: "aborted"},
+		{name: "unadmitted", errorClass: "INVALID_RESPONSE", outcome: json.RawMessage(`{"admitted":false,"status":"completed"}`)},
+		{name: "mutable completion becomes limited", stop: "completed", outcome: json.RawMessage(`{"admitted":true,"status":"completed","limit_reached":true}`)},
+		{name: "mutable completion becomes unadmitted", stop: "completed", outcome: json.RawMessage(`{"admitted":false,"status":"completed"}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			database := databases[0]
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			const number = 998
+			fixture, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, number, workflow.RoleDeveloper, "")
+			spec := store.MutationSpec{
+				OperationID: "review-before-ineligible-outcome", ToolName: "request_review",
+				Request:         json.RawMessage(`{"operation_id":"review-before-ineligible-outcome","summary":"Ready"}`),
+				ExternalService: "omnigrex", ExternalResourceID: fmt.Sprintf("%d:%s", number, proposal.HeadRef),
+				ExpectedSHA: proposal.HeadSHA,
+			}
+			mutation, err := database.ReserveMutation(ctx, lease, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(fmt.Sprintf(`{"outcome":"REVIEW_REQUESTED","pull_request_id":%d,"pull_request_number":%d,"head_sha":%q}`,
+				proposal.PullRequestID, proposal.PullRequestNumber, proposal.HeadSHA))); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, test.stop, test.errorClass); err != nil {
+				t.Fatal(err)
+			}
+			if test.outcome != nil {
+				if _, err := pool.Exec(ctx, `UPDATE agent_turns SET outcome = $2 WHERE id = $1`, lease.ID, test.outcome); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
+				json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport"); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+				t.Fatalf("limited prompt ending was replaced by completed checkpoint: %v", err)
+			}
+			if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			stop := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "stop-ineligible-prompt")
+			mutationJob := claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "reconcile-ineligible-prompt")
+			if _, err := database.AcknowledgeRecoveredRuntimeStopped(ctx, stop); err != nil {
+				t.Fatal(err)
+			}
+			if candidates, err := database.ListAgentTurnMutationsForReconciliation(ctx, mutationJob); err != nil || len(candidates) != 1 || candidates[0].ID != mutation.ID {
+				t.Fatalf("ineligible intent retained ordinary mutation recovery: %#v, error %v", candidates, err)
+			}
+			if _, err := database.CompleteAgentTurnMutationReconciliation(ctx, mutationJob); err != nil {
+				t.Fatal(err)
+			}
+			recovery, err := database.CompleteAgentTurnRecovery(ctx, lease.ID, lease.ExecutionEpoch)
+			if err != nil || recovery.Status != store.AgentTurnInterrupted || !recovery.SuccessorAllowed || recovery.SettlementID == "" {
+				t.Fatalf("ineligible prompt recovery = (%#v, %v)", recovery, err)
+			}
+			var checkpoints int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turn_corroborations WHERE agent_turn_id = $1`, lease.ID).Scan(&checkpoints); err != nil || checkpoints != 0 {
+				t.Fatalf("ineligible prompt created %d pending checkpoints, error %v", checkpoints, err)
+			}
+			var successorJobID string
+			if err := pool.QueryRow(ctx, `SELECT id::text FROM jobs WHERE agent_turn_settlement_id = $1 AND kind = 'PREPARE_AGENT_TURN'`,
+				recovery.SettlementID).Scan(&successorJobID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'CANCELLED', completed_at = clock_timestamp()
 WHERE id = $1 AND status = 'AVAILABLE'`, successorJobID); err != nil {
-		t.Fatal(err)
-	}
-	retrySpec := fixture.turnSpec()
-	retrySpec.Purpose, retrySpec.RetryOfTurnID = workflow.TurnPurposeRetry, lease.ID
-	retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, retrySpec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retryLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, retry), retry.ControlRevision,
-		"refused-prompt-retry", time.Minute, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.OpenMutationAdmission(ctx, retryLease); err != nil {
-		t.Fatal(err)
-	}
-	execution, err := database.GetAgentTurnExecutionContext(ctx, retryLease)
-	if err != nil || execution.PriorTerminalIntent != nil {
-		t.Fatalf("refused prompt offered confirmation = (%#v, %v)", execution.PriorTerminalIntent, err)
-	}
-	if _, err := database.GetConfirmablePriorTerminalIntent(ctx, retryLease, mutation.ID); !errors.Is(err, store.ErrMutationOperationConflict) {
-		t.Fatalf("refused prompt confirmation error = %v", err)
-	}
-	if _, err := database.ReserveMutation(ctx, retryLease, spec); !errors.Is(err, store.ErrMutationOperationConflict) {
-		t.Fatalf("refused prompt exact replay error = %v", err)
+				t.Fatal(err)
+			}
+			retrySpec := fixture.turnSpec()
+			retrySpec.Purpose, retrySpec.RetryOfTurnID = workflow.TurnPurposeRetry, lease.ID
+			retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, retrySpec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryLease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, retry), retry.ControlRevision,
+				"ineligible-prompt-retry", time.Minute, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.OpenMutationAdmission(ctx, retryLease); err != nil {
+				t.Fatal(err)
+			}
+			execution, err := database.GetAgentTurnExecutionContext(ctx, retryLease)
+			if err != nil || execution.PriorTerminalIntent != nil {
+				t.Fatalf("ineligible prompt offered confirmation = (%#v, %v)", execution.PriorTerminalIntent, err)
+			}
+			if _, err := database.GetConfirmablePriorTerminalIntent(ctx, retryLease, mutation.ID); !errors.Is(err, store.ErrMutationOperationConflict) {
+				t.Fatalf("ineligible prompt confirmation error = %v", err)
+			}
+			if _, err := database.ReserveMutation(ctx, retryLease, spec); !errors.Is(err, store.ErrMutationOperationConflict) {
+				t.Fatalf("ineligible prompt exact replay error = %v", err)
+			}
+		})
 	}
 }
 
@@ -547,7 +591,7 @@ func TestIssueClosureCancelsRecoveredPendingTurnWithFailedExecutionJob(t *testin
 		proposal.PullRequestID, proposal.PullRequestNumber, proposal.HeadSHA))); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, expiration := range []struct {
@@ -643,11 +687,11 @@ func TestIssueClosureCancelsPendingTerminalCorroboration(t *testing.T) {
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"outcome":"REVIEW_REQUESTED"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport")
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,11 +766,11 @@ func TestTerminalCorroborationExhaustionHandsOffWithoutAgentRetry(t *testing.T) 
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport"); err != nil {
 		t.Fatal(err)
 	}
 	verifier, err := database.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind,
@@ -983,11 +1027,11 @@ func TestTerminalCorroborationWorkerSettlesOriginalDeveloperWithoutAnotherPrompt
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport"); err != nil {
 		t.Fatal(err)
 	}
 	if _, recovered, err := databases[1].ClaimAndRecoverExpiredAgentTurn(ctx); err != nil || recovered {
@@ -1109,11 +1153,11 @@ func TestTerminalCorroborationWorkerAcceptsExistingReviewerReviewOnce(t *testing
 	if alreadySubmitted, err := database.HasPriorSuccessfulReviewForTurn(ctx, lease); err != nil || !alreadySubmitted {
 		t.Fatalf("second submit_review in same Turn must be blocked = (%t, %v)", alreadySubmitted, err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "rate_limited"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "rate_limited"); err != nil {
 		t.Fatal(err)
 	}
 	api := &corroborationReviewGitHub{
@@ -1182,11 +1226,11 @@ func TestTerminalReviewerRevalidationAfterHumanTriggerCountsOneCycle(t *testing.
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "permission_denied"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "permission_denied"); err != nil {
 		t.Fatal(err)
 	}
 	verifier, err := database.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind, "verify-review-prerequisite", time.Minute)
@@ -1293,7 +1337,7 @@ func TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	settled, err := database.SettleAgentTurn(ctx, original, failedSettlementObservation("ACP response unavailable"))
+	settled, err := database.SettleAgentTurn(ctx, original, failedSettlementObservation("agent response unavailable"))
 	if err != nil || settled.Reason != workflow.ReasonInfrastructureRetry {
 		t.Fatalf("settle lost-response Turn = (%#v, %v)", settled, err)
 	}
@@ -1350,11 +1394,11 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	if err := database.CompleteMutation(ctx, retryLease, confirmation.ID, confirmationResult); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, err := database.BeginTerminalCorroboration(ctx, retryLease, confirmation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport")
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport")
 	if err != nil || checkpoint.SourceInvocationID != confirmation.ID {
 		t.Fatalf("checkpoint confirmed intent = (%#v, %v)", checkpoint, err)
 	}
@@ -1445,11 +1489,11 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	if err := database.AcknowledgeMutationReplay(ctx, retryLease, source.ID, spec); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, err := database.BeginTerminalCorroboration(ctx, retryLease, source.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport")
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport")
 	if err != nil || checkpoint.SourceInvocationID != source.ID || checkpoint.TurnID != retry.ID {
 		t.Fatalf("replayed intent checkpoint = (%#v, %v)", checkpoint, err)
 	}
@@ -1520,7 +1564,7 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	retrySpec := fixture.turnSpec()
 	retrySpec.Stage, retrySpec.Purpose, retrySpec.RetryOfTurnID = workflow.StageReview, workflow.TurnPurposeRetry, original.ID
 	retrySpec.ChangeProposalID, retrySpec.ExpectedHeadSHA = original.ChangeProposalID, original.ExpectedHeadSHA
-	retrySpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10,
+	retrySpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0,
 		"Review test instructions.", nil)
 	retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, retrySpec)
 	if err != nil {
@@ -1540,11 +1584,11 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	if err := database.AcknowledgeMutationReplay(ctx, retryLease, source.ID, spec); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, retryLease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, retryLease, source.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "review_not_visible_yet"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "review_not_visible_yet"); err != nil {
 		t.Fatal(err)
 	}
 	api := &corroborationReviewGitHub{
@@ -1668,11 +1712,11 @@ func TestReviewerSynchronizationCancelsLeasedPriorIntentVerifier(t *testing.T) {
 		json.RawMessage(fmt.Sprintf(`{"review_id":98001,"node_id":"PRR_sync","state":"APPROVED","commit_id":%q,"actor_id":98002,"html_url":"https://github.test/review"}`, proposal.HeadSHA))); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "rate_limited"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "rate_limited"); err != nil {
 		t.Fatal(err)
 	}
 	originalVerifier, err := database.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind, "verify-before-sync", time.Minute)
@@ -1900,7 +1944,7 @@ func TestConfirmationOfSameAncestorEffectRemainsConfirmableAfterInterruptedRetry
 	if err := database.CloseMutationAdmission(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	first, err := database.SettleAgentTurn(ctx, original, failedSettlementObservation("lost ACP response"))
+	first, err := database.SettleAgentTurn(ctx, original, failedSettlementObservation("lost agent response"))
 	if err != nil || first.Reason != workflow.ReasonInfrastructureRetry {
 		t.Fatalf("original settlement = (%#v, %v)", first, err)
 	}
@@ -1970,13 +2014,24 @@ WHERE id = $1 AND status = 'AVAILABLE'`, second.SuccessorJobID); err != nil {
 	}
 }
 
-func TestExplicitlyCancelledTerminalIntentCannotBeConfirmed(t *testing.T) {
-	databases, pool := openPhaseFiveStores(t, 1)
-	database := databases[0]
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for index, promptOutcome := range []json.RawMessage{json.RawMessage(`{"stop_reason":"cancelled"}`), nil} {
-		t.Run(fmt.Sprintf("cancelled-%d", index), func(t *testing.T) {
+func TestIneligibleTerminalOutcomesCannotBeConfirmedOrReplayed(t *testing.T) {
+	for index, test := range []struct {
+		name       string
+		outcome    json.RawMessage
+		diagnostic string
+	}{
+		{name: "aborted", outcome: json.RawMessage(`{"admitted":true,"status":"aborted"}`), diagnostic: "Agent prompt was cancelled"},
+		{name: "cancellation without response", diagnostic: "Agent prompt was cancelled"},
+		{name: "limited", outcome: json.RawMessage(`{"admitted":true,"status":"completed","limit_reached":true}`), diagnostic: "Agent prompt reached its token limit"},
+		{name: "unadmitted", outcome: json.RawMessage(`{"admitted":false,"status":"completed"}`), diagnostic: "Agent prompt failed"},
+		{name: "malformed admission", outcome: json.RawMessage(`{"admitted":"true","status":"completed"}`), diagnostic: "Agent prompt failed"},
+		{name: "malformed limit", outcome: json.RawMessage(`{"admitted":true,"status":"completed","limit_reached":"false"}`), diagnostic: "Agent prompt failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			database := databases[0]
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
 			fixture, original, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 985+index, workflow.RoleDeveloper, "")
 			mutation, err := database.ReserveMutation(ctx, original, store.MutationSpec{
 				OperationID: "cancelled-ready", ToolName: "request_review",
@@ -1998,11 +2053,10 @@ func TestExplicitlyCancelledTerminalIntentCannotBeConfirmed(t *testing.T) {
 			if err := database.CloseMutationAdmission(ctx, original); err != nil {
 				t.Fatal(err)
 			}
-			const diagnostic = "ACP prompt was cancelled"
 			observation := store.AgentTurnSettlementObservation{
 				ObservedAt: time.Now().UTC(), Outcome: workflow.TurnOutcomeInfrastructureFailed,
-				Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{
-					Status: store.AgentTurnInterrupted, Outcome: promptOutcome, LastError: diagnostic,
+				Diagnostic: test.diagnostic, Completion: store.AgentTurnCompletion{
+					Status: store.AgentTurnInterrupted, Outcome: test.outcome, LastError: test.diagnostic,
 				},
 			}
 			settled, err := database.SettleAgentTurn(ctx, original, observation)
@@ -2034,6 +2088,13 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 			if _, err := database.GetConfirmablePriorTerminalIntent(ctx, retryLease, mutation.ID); !errors.Is(err, store.ErrMutationOperationConflict) {
 				t.Fatalf("cancelled Turn confirmation error = %v", err)
 			}
+			if _, err := database.ReserveMutation(ctx, retryLease, store.MutationSpec{
+				OperationID: mutation.OperationID, ToolName: mutation.ToolName, Request: mutation.Request,
+				ExternalService: mutation.ExternalService, ExternalResourceID: mutation.ExternalResourceID,
+				ExpectedSHA: mutation.ExpectedSHA,
+			}); !errors.Is(err, store.ErrMutationOperationConflict) {
+				t.Fatalf("ineligible terminal replay = %v", err)
+			}
 		})
 	}
 }
@@ -2058,11 +2119,11 @@ func TestRevalidationIncompatibleDefinitionCreatesHumanHandoff(t *testing.T) {
 	if err := database.CompleteMutation(ctx, original, mutation.ID, json.RawMessage(`{"outcome":"REVIEW_REQUESTED"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, original, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, original, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginTerminalCorroboration(ctx, original, mutation.ID,
-		json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport"); err != nil {
+		json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport"); err != nil {
 		t.Fatal(err)
 	}
 	verifier, err := database.ClaimJobKind(ctx, "agent-turn-recovery", store.VerifyTerminalIntentJobKind,
@@ -2148,11 +2209,11 @@ func TestCancelledReviewerReviewInRetryRequiresHumanNotDuplicateSubmission(t *te
 	if err := database.CloseMutationAdmission(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	const diagnostic = "ACP prompt was cancelled"
+	const diagnostic = "Agent prompt was cancelled"
 	settled, err := database.SettleAgentTurn(ctx, original, store.AgentTurnSettlementObservation{
 		ObservedAt: time.Now().UTC(), Outcome: workflow.TurnOutcomeInfrastructureFailed,
 		Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{
-			Status: store.AgentTurnInterrupted, Outcome: json.RawMessage(`{"stop_reason":"cancelled"}`), LastError: diagnostic,
+			Status: store.AgentTurnInterrupted, Outcome: json.RawMessage(`{"admitted":true,"status":"aborted"}`), LastError: diagnostic,
 		},
 	})
 	if err != nil || settled.Reason != workflow.ReasonInfrastructureRetry {
@@ -2165,7 +2226,7 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	spec := fixture.turnSpec()
 	spec.Stage, spec.Purpose, spec.RetryOfTurnID = workflow.StageReview, workflow.TurnPurposeRetry, original.ID
 	spec.ChangeProposalID, spec.ExpectedHeadSHA = original.ChangeProposalID, original.ExpectedHeadSHA
-	spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10,
+	spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0,
 		"Review test instructions.", nil)
 	retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {
@@ -2208,8 +2269,8 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 		t.Fatal(err)
 	}
 	content, err := agentturn.BuildEventEnvelope(execution, proposal.HeadSHA, definition, role.BuiltinPolicyCatalog())
-	if err != nil || len(content) != 1 || !strings.Contains(content[0].Text, `"prior_unconfirmable_review"`) ||
-		!strings.Contains(content[0].Text, "Do not submit another review") {
+	if err != nil || !strings.Contains(content, `"prior_unconfirmable_review"`) ||
+		!strings.Contains(content, "Do not submit another review") {
 		t.Fatalf("cancelled review envelope = (%#v, %v)", content, err)
 	}
 }

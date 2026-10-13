@@ -17,7 +17,6 @@ import (
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
@@ -33,7 +32,7 @@ var (
 
 const maxOutcomeDiagnosticRunes = 4096
 
-// PromptErrorClassification is the credential-free terminal classification of an ACP prompt error.
+// PromptErrorClassification is the credential-free terminal classification of a prompt error.
 type PromptErrorClassification string
 
 const (
@@ -43,12 +42,12 @@ const (
 	PromptErrorInvalidResponse PromptErrorClassification = "INVALID_RESPONSE"
 )
 
-// ClassifyPromptError maps ACP prompt errors to the terminal Agent Turn status contract.
+// ClassifyPromptError maps prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
 	if errors.Is(err, ErrRuntimeOOMKilled) {
 		return PromptErrorFailure
 	}
-	if errors.Is(err, acp.ErrUnknownStopReason) || errors.Is(err, agent.ErrProtocol) {
+	if errors.Is(err, agent.ErrProtocol) {
 		return PromptErrorInvalidResponse
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -107,7 +106,7 @@ func (OutcomeReconcilerConfig) GoString() string {
 type OutcomeReconciliation struct {
 	Lease                        store.AgentTurnLease
 	Execution                    store.AgentTurnExecutionContext
-	PromptResponse               *acp.PromptResponse
+	PromptResponse               *agent.Outcome
 	PromptError                  PromptErrorClassification
 	PromptDiagnostic             string
 	RepositoryCredential         string
@@ -132,7 +131,7 @@ func (OutcomeReconciliation) GoString() string {
 	return "agentturn.OutcomeReconciliation{<credentials redacted>}"
 }
 
-// OutcomeReconciler derives settlement observations without consulting ACP output text.
+// OutcomeReconciler derives settlement observations without consulting agent output text.
 type OutcomeReconciler struct {
 	store              OutcomeReconcilerStore
 	github             OutcomeReconcilerGitHub
@@ -228,7 +227,7 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 	}
 	promptDiagnostic := promptFailureDiagnostic(request)
 	// A lost response or deadline does not invalidate a completed terminal intent.
-	// Explicit cancellation and non-normal ACP stop reasons still prevent acceptance.
+	// Explicit cancellation and inadmissible terminal outcomes still prevent acceptance.
 	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline {
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
@@ -250,7 +249,7 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		if promptDiagnostic != "" {
 			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 		}
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent"), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent prompt ended without a successful terminal mutation intent"), nil
 	}
 	intent := intents[0]
 	var result store.AgentTurnSettlementObservation
@@ -363,7 +362,7 @@ func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replac
 		add(string(provider))
 		canonical, _ := json.Marshal(decoded)
 		add(string(canonical))
-		// OpenCode auth secrets are strings; its accepted numeric expires field is metadata.
+		// Provider auth secrets are strings; standalone numeric scalars are metadata.
 		// Redacting standalone JSON scalars would erase ordinary diagnostics such as 1, true, or null.
 		leaves := make([]string, 0)
 		collectStringSecrets(decoded, &leaves)
@@ -910,33 +909,37 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 
 func promptFailureDiagnostic(request OutcomeReconciliation) string {
 	if request.PromptError != "" {
-		diagnostic := "ACP prompt failed"
+		diagnostic := "Agent prompt failed"
 		switch request.PromptError {
 		case PromptErrorDeadline:
-			diagnostic = "ACP prompt deadline exceeded"
+			diagnostic = "Agent prompt deadline exceeded"
 		case PromptErrorCancellation:
-			diagnostic = "ACP prompt was cancelled"
+			diagnostic = "Agent prompt was cancelled"
 		case PromptErrorInvalidResponse:
-			diagnostic = "ACP prompt returned an invalid stop reason"
+			diagnostic = "Agent prompt returned an invalid outcome"
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
 		}
 		return diagnostic
 	}
-	switch request.PromptResponse.StopReason {
-	case acp.StopReasonEndTurn:
+	if !request.PromptResponse.Admitted {
+		return "Agent prompt admission is unconfirmed"
+	}
+	switch request.PromptResponse.Status {
+	case agent.Completed:
+		if request.PromptResponse.LimitReached {
+			return "Agent prompt reached its runtime limit"
+		}
 		return ""
-	case acp.StopReasonMaxTokens:
-		return "ACP prompt reached its token limit"
-	case acp.StopReasonMaxTurnRequests:
-		return "ACP prompt reached its request limit"
-	case acp.StopReasonRefusal:
-		return "ACP prompt was refused"
-	case acp.StopReasonCancelled:
-		return "ACP prompt was cancelled"
+	case agent.Aborted:
+		return "Agent prompt was cancelled"
+	case agent.Failed, agent.Rejected:
+		return "Agent prompt failed"
+	case agent.Unknown:
+		return "Agent prompt outcome is unknown"
 	default:
-		return "ACP prompt returned an invalid stop reason"
+		return "Agent prompt returned an invalid outcome"
 	}
 }
 
@@ -944,19 +947,21 @@ func promptTerminalStatus(request OutcomeReconciliation) store.AgentTurnStatus {
 	if request.PromptError == PromptErrorDeadline {
 		return store.AgentTurnTimedOut
 	}
-	if request.PromptError == PromptErrorCancellation || request.PromptResponse != nil && request.PromptResponse.StopReason == acp.StopReasonCancelled {
+	if request.PromptError == PromptErrorCancellation || request.PromptResponse != nil && request.PromptResponse.Admitted && request.PromptResponse.Status == agent.Aborted {
 		return store.AgentTurnInterrupted
 	}
 	return store.AgentTurnFailed
 }
 
-func encodedPromptOutcome(response *acp.PromptResponse) json.RawMessage {
+func encodedPromptOutcome(response *agent.Outcome) json.RawMessage {
 	if response == nil {
 		return nil
 	}
 	encoded, _ := json.Marshal(struct {
-		StopReason acp.StopReason `json:"stop_reason"`
-	}{response.StopReason})
+		Admitted     bool         `json:"admitted"`
+		Status       agent.Status `json:"status"`
+		LimitReached bool         `json:"limit_reached,omitempty"`
+	}{response.Admitted, response.Status, response.LimitReached})
 	return encoded
 }
 

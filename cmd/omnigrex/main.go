@@ -25,7 +25,6 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
@@ -196,6 +195,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Runtime Profiles: %w", err)
 	}
+	// Check all installation history before runtime recovery, webhook serving, or
+	// Worker admission. Collected legacy Sessions still require a clean cutover.
+	historyCtx, cancelHistory := context.WithTimeout(ctx, settings.ReadinessTimeout)
+	err = database.CheckPendingRuntimeProfileCompatibility(historyCtx, profiles[0])
+	cancelHistory()
+	if err != nil {
+		return fmt.Errorf("validate installation runtime history: %w", err)
+	}
 	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
@@ -338,18 +345,13 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure stale Runtime Process stop Worker: %w", err)
 	}
-	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
 		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway, States: retainedState,
-		Execution: backend.Factory, ACP: agentturn.ProductionACPFactory{}, Sessions: sessions,
-		MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
-			Logger:         logger,
-			AgentEventSink: loggingAgentEventSink{logger: logger},
-		},
-		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
+		Execution:   backend.Factory,
+		MemoryBytes: settings.AgentTurnMemoryBytes,
+		Policies:    rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
-		LegacyBootstrapImage: settings.OpenCodeACPV1Image,
-		AgentAdapters:        map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: settings.PiStartupTimeout}},
+		AgentAdapters: map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: settings.PiStartupTimeout}},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -371,7 +373,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
-		Launcher: runtimeLauncher, Sessions: sessions,
+		Launcher:            runtimeLauncher,
 		Outcomes:            outcomeReconciler,
 		Workspace:           workspaces,
 		PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, githubServices.api),
@@ -573,11 +575,11 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		return nil
 	}
 	level := slog.LevelDebug
-	message := "ACP tool update"
+	message := "Agent tool update"
 	failureClass := event.Metadata.FailureClass
 	if event.Metadata.Status == "failed" && strings.HasPrefix(event.Metadata.ToolName, "omnigrex_") {
 		level = slog.LevelWarn
-		message = "ACP MCP tool failed"
+		message = "Agent MCP tool failed"
 		if failureClass == "" {
 			failureClass = "unclassified"
 		}

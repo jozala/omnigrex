@@ -128,8 +128,8 @@ func TestAvailabilityCheckerCanFailStartupOnBindingWithoutInspectingImages(t *te
 
 func availabilityProfile(t *testing.T, digit, arch string) profile.Profile {
 	t.Helper()
-	value, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat(digit, 64),
+	value, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat(digit, 64),
 		profile.Platform{OS: "linux", Arch: arch},
 	)
 	if err != nil {

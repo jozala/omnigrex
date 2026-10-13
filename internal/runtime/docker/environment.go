@@ -37,11 +37,15 @@ func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) er
 	}
 	defer api.Close()
 	pids := int64(32)
+	// Pi's executable/resource check starts Node and loads the pinned CLI.
+	// Its measured startup can exceed 64 MiB; allow bounded headroom without
+	// borrowing the Agent Turn's much larger runtime budget or enabling swap.
+	const probeMemory = 256 << 20
 	options := mobyclient.ContainerCreateOptions{
 		Name:       "omnigrex-environment-probe-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		Platform:   &v1.Platform{OS: contract.Platform.OS, Architecture: contract.Platform.Arch},
 		Config:     &container.Config{Image: contract.Image, User: "10001:10001", Entrypoint: []string{"/bin/sh", "-ec"}, Cmd: []string{script}, Labels: map[string]string{diagnosticMarkerLabel: "true", diagnosticExpiryLabel: time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)}},
-		HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}, Resources: container.Resources{Memory: 64 << 20, PidsLimit: &pids}},
+		HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}, Resources: container.Resources{Memory: probeMemory, MemorySwap: probeMemory, PidsLimit: &pids}},
 	}
 	if err := runOneShotContainer(ctx, api, options, "repository golden-resource qualification"); err != nil {
 		return fmt.Errorf("repository image does not satisfy golden resources: %w", err)

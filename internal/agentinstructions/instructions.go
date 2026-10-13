@@ -67,10 +67,9 @@ func Load(directory string, policies role.PolicyCatalog) (Operator, error) {
 			return Operator{}, fmt.Errorf("load agent instructions %s: %w", entry.Name(), err)
 		}
 	}
-	// OpenCode carries its configuration in one environment string. Bound the
-	// escaped operator contribution as well as each file's raw bytes, leaving
-	// room for platform, Stage, Profile, and tool configuration. The runtime
-	// renderer separately checks the complete serialized configuration.
+	// Bound the escaped operator contribution as well as each file's raw bytes,
+	// leaving room for platform, Stage, Profile, and tool configuration.
+	// The Pi adapter separately checks the complete serialized configuration.
 	for _, id := range policies.Roles() {
 		encoded, err := json.Marshal(result.common + "\n\n" + result.roles[id])
 		if err != nil || len(encoded) > maxOperatorJSONBytes {

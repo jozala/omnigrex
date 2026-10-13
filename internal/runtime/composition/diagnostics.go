@@ -52,22 +52,6 @@ func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile, se
 	}
 	return docker.CheckRepositoryEnvironment(ctx, profile)
 }
-func StartDiagnostic(ctx context.Context, profile profile.Profile, image string, options ProbeOptions, stderr io.Writer, settings ...config.Config) (execution.Process, io.Closer, error) {
-	if len(settings) > 0 && settings[0].ExecutionBackend == "microsandbox" {
-		backend, err := microsandbox.New(MicrosandboxOptions(settings[0]), nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		process, err := backend.StartDiagnostic(ctx, profile, image, options.MemoryBytes, options.ExtraHosts, stderr)
-		if err != nil {
-			_ = backend.Close()
-			return nil, nil, err
-		}
-		return process, backend, nil
-	}
-	return docker.StartDiagnostic(ctx, profile, image, docker.DiagnosticOptions{Network: options.Network, ExtraHosts: options.ExtraHosts, MemoryBytes: options.MemoryBytes}, stderr)
-}
-
 func StartProtocolDiagnostic(ctx context.Context, spec execution.DiagnosticSpec, options ProbeOptions, stderr io.Writer, settings config.Config) (execution.Process, io.Closer, error) {
 	if settings.ExecutionBackend == "microsandbox" {
 		backend, err := microsandbox.New(MicrosandboxOptions(settings), nil)

@@ -30,7 +30,7 @@ func newRetainedStateFixture() *retainedStateFixtureSource {
 }
 
 func (source *retainedStateFixtureSource) add(id, namespace string) execution.StateRef {
-	ref := execution.StateRef{ID: id, ParticipantID: id, Backend: execution.BackendBinding{Family: "docker", Version: 1, Namespace: namespace}, Format: "opencode-data/v1", Image: "registry.example/agent@sha256:" + strings.Repeat("a", 64), RuntimeProfileSHA256: strings.Repeat("b", 64)}
+	ref := execution.StateRef{ID: id, ParticipantID: id, Backend: execution.BackendBinding{Family: "docker", Version: 1, Namespace: namespace}, Format: "pi-session/v3", Image: "registry.example/pi@sha256:" + strings.Repeat("a", 64), RuntimeProfileSHA256: strings.Repeat("b", 64)}
 	source.refs[id] = ref
 	return ref
 }

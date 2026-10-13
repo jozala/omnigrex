@@ -48,7 +48,7 @@ Selecting a remote Docker daemon for this experiment does not implement a remote
 4. Boot a Docker 29.7.2-dind microVM on a flat ext4 root disk and start its own Unix-socket Docker daemon.
 5. Verify Compose service health and service-to-service HTTP networking.
 6. Verify a Testcontainers-created service through its published HTTP port, including the Ryuk resource reaper.
-7. Build the existing OpenCode image from the archived source and run `TestReadinessProbeExercisesRealDockerResources` inside the microVM.
+7. Build the pinned Pi image from the archived source and run `TestReadinessProbeExercisesRealDockerResources` inside the microVM.
 8. Remove the microVMs and their wrapper.
 
 The development guest runs as root to start its private Docker daemon.

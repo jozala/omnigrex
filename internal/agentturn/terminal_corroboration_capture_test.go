@@ -140,7 +140,7 @@ func newCaptureCorroborationStore(request agentturn.OutcomeReconciliation) *capt
 		pending: store.TerminalCorroborationContext{
 			Execution: request.Execution, Mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)},
 			Checkpoint: store.TerminalCorroboration{WorkflowID: outcomeWorkflowID, TurnID: outcomeTurnID, ExecutionEpoch: 7,
-				SourceInvocationID: "mutation-1", PendingSince: time.Now(), PromptOutcome: json.RawMessage(`{"stop_reason":"end_turn"}`)},
+				SourceInvocationID: "mutation-1", PendingSince: time.Now(), PromptOutcome: json.RawMessage(`{"admitted":true,"status":"completed"}`)},
 		},
 	}
 }

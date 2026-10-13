@@ -20,7 +20,7 @@ func (source contractSource) RuntimeProfileContract(context.Context, profile.Bin
 }
 
 func TestPersistedRepositoryContractSurvivesCurrentImageAndRequirementChanges(t *testing.T) {
-	current, err := profile.NewOpenCodeV1(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
+	current, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,5 +43,12 @@ func TestPersistedRepositoryContractSurvivesCurrentImageAndRequirementChanges(t 
 	resolver.Source = contractSource{err: errors.New("database unavailable")}
 	if _, err := resolver.ResolveBinding(current.Binding()); err == nil {
 		t.Fatal("source failure silently fell back")
+	}
+	resolver.Source = contractSource{err: profile.ErrNotFound}
+	if _, err := resolver.ResolveBinding(bound.Binding()); !errors.Is(err, profile.ErrNotFound) {
+		t.Fatalf("missing ledger definition fabricated historical content: %v", err)
+	}
+	if resolved, err := resolver.ResolveBinding(current.Binding()); err != nil || resolved.Binding() != current.Binding() {
+		t.Fatalf("explicit current contract unavailable: %+v %v", resolved.Binding(), err)
 	}
 }

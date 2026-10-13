@@ -89,7 +89,7 @@ func TestProtectedRuntimeBindingsRejectInconsistentAssignmentAndSession(t *testi
 
 func TestProtectedRuntimeBindingsRejectMutableTagsAndLocalImageIDs(t *testing.T) {
 	for index, image := range []string{
-		"registry.example/omnigrex/opencode:latest",
+		"registry.example/omnigrex/pi:latest",
 		"sha256:" + strings.Repeat("f", 64),
 	} {
 		t.Run(image[:6], func(t *testing.T) {
@@ -115,7 +115,7 @@ func TestProtectedRuntimeBindingsRejectMixedLegacyAndQualifiedRows(t *testing.T)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			binding := protectedTestBinding("9", "8")
-			legacy := runtimeprofile.Binding{Name: "runtime", Version: "1", Image: "sha256:test"}
+			legacy := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", Image: "sha256:test"}
 			assignment, session := binding, legacy
 			if qualifiedTarget == "session" {
 				assignment, session = legacy, binding
@@ -289,8 +289,8 @@ func (images *legacyAvailabilityImages) Available(context.Context, string, runti
 
 func protectedTestBinding(hashDigit, imageDigit string) runtimeprofile.Binding {
 	return runtimeprofile.Binding{
-		Name: "opencode-acp", Version: "v1", ContentSHA256: strings.Repeat(hashDigit, 64),
-		Image: "registry.example/omnigrex/opencode@sha256:" + strings.Repeat(imageDigit, 64),
+		Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat(hashDigit, 64),
+		Image: "registry.example/omnigrex/pi@sha256:" + strings.Repeat(imageDigit, 64),
 	}
 }
 

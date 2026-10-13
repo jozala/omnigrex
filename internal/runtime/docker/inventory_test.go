@@ -50,7 +50,7 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 		AgentSessionID: "20000000-0000-4000-8000-000000000001",
 		AgentTurnID:    "30000000-0000-4000-8000-000000000001",
 		ExecutionEpoch: 9,
-		RuntimeProfile: RuntimeProfileIdentity{Name: "opencode-acp", Version: "v1"},
+		RuntimeProfile: RuntimeProfileIdentity{Name: "pi-rpc", Version: "v1"},
 	}) {
 		t.Fatalf("managed process = %#v", process)
 	}
@@ -89,7 +89,7 @@ func TestRuntimeProcessInventoryIgnoresUnprovenOwnership(t *testing.T) {
 		{ID: "session-only", Labels: map[string]string{RuntimeProcessSessionLabel: "20000000-0000-4000-8000-000000000001"}},
 		{ID: "turn-only", Labels: map[string]string{RuntimeProcessTurnLabel: "30000000-0000-4000-8000-000000000001"}},
 		{ID: "epoch-only", Labels: map[string]string{RuntimeProcessEpochLabel: "9"}},
-		{ID: "profile-only", Labels: map[string]string{RuntimeProfileIdentityLabel: "opencode-acp/v1"}},
+		{ID: "profile-only", Labels: map[string]string{RuntimeProfileIdentityLabel: "pi-rpc/v1"}},
 		{ID: "marker-false", Labels: markerFalse},
 		{ID: "partial-legacy", Labels: partialLegacy},
 		{ID: "invalid-legacy", Labels: invalidLegacy},
@@ -123,7 +123,7 @@ func TestRuntimeProcessInventoryQuarantinesMalformedManagedContainers(t *testing
 		{name: "epoch zero", id: "zero", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "0" }, reason: MalformedExecutionEpoch},
 		{name: "epoch noncanonical", id: "epoch", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "09" }, reason: MalformedExecutionEpoch},
 		{name: "epoch overflow", id: "overflow", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "9223372036854775808" }, reason: MalformedExecutionEpoch},
-		{name: "profile", id: "profile", mutate: func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "opencode-acp/v1/extra" }, reason: MalformedRuntimeProfile},
+		{name: "profile", id: "profile", mutate: func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "pi-rpc/v1/extra" }, reason: MalformedRuntimeProfile},
 	}
 
 	items := make([]container.Summary, 0, len(tests))
@@ -209,7 +209,7 @@ func managedRuntimeLabels() map[string]string {
 		RuntimeProcessSessionLabel:    "20000000-0000-4000-8000-000000000001",
 		RuntimeProcessTurnLabel:       "30000000-0000-4000-8000-000000000001",
 		RuntimeProcessEpochLabel:      "9",
-		RuntimeProfileIdentityLabel:   "opencode-acp/v1",
+		RuntimeProfileIdentityLabel:   "pi-rpc/v1",
 	}
 }
 

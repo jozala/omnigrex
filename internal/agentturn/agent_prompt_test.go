@@ -2,12 +2,10 @@ package agentturn_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/store"
@@ -18,35 +16,41 @@ func TestExecutionWorkerPreservesNeutralPromptEndings(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		outcome        agent.Outcome
-		reason         acp.StopReason
+		preserved      bool
 		classification agentturn.PromptErrorClassification
 	}{
-		{"settled", agent.Outcome{Admitted: true, Status: agent.Completed}, acp.StopReasonEndTurn, ""},
-		{"token limit", agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, acp.StopReasonMaxTokens, ""},
-		{"abort", agent.Outcome{Admitted: true, Status: agent.Aborted}, acp.StopReasonCancelled, ""},
-		{"provider failure", agent.Outcome{Admitted: true, Status: agent.Failed}, "", agentturn.PromptErrorFailure},
-		{"lost settlement", agent.Outcome{Admitted: true, Status: agent.Unknown}, "", agentturn.PromptErrorFailure},
-		{"unconfirmed admission", agent.Outcome{Status: agent.Completed}, "", agentturn.PromptErrorFailure},
+		{"settled", agent.Outcome{Admitted: true, Status: agent.Completed}, true, ""},
+		{"runtime limit", agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, true, ""},
+		{"abort", agent.Outcome{Admitted: true, Status: agent.Aborted}, true, ""},
+		{"provider failure", agent.Outcome{Admitted: true, Status: agent.Failed}, false, agentturn.PromptErrorFailure},
+		{"lost settlement", agent.Outcome{Admitted: true, Status: agent.Unknown}, false, agentturn.PromptErrorFailure},
+		{"rejected admission", agent.Outcome{Status: agent.Rejected}, false, agentturn.PromptErrorFailure},
+		{"admitted rejection", agent.Outcome{Admitted: true, Status: agent.Rejected}, false, agentturn.PromptErrorFailure},
+		{"unconfirmed completed admission", agent.Outcome{Status: agent.Completed}, false, agentturn.PromptErrorFailure},
+		{"unconfirmed aborted admission", agent.Outcome{Status: agent.Aborted}, false, agentturn.PromptErrorFailure},
+		{"unconfirmed unknown admission", agent.Outcome{Status: agent.Unknown}, false, agentturn.PromptErrorFailure},
+		{"invalid status", agent.Outcome{Admitted: true, Status: "unrecognized"}, false, agentturn.PromptErrorInvalidResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 			connection := &neutralPromptFixture{outcome: tc.outcome}
 			fixture.runtime.agent = connection
-			fixture.runtime.client = nil
-			fixture.prompter.err = errors.New("legacy protocol must not be called")
-			processed, _ := fixture.worker(t).ProcessNext(t.Context())
+			processed, err := fixture.worker(t).ProcessNext(t.Context())
 			if !processed || !strings.Contains(connection.text, "agent_turn_id") {
 				t.Fatal("neutral runtime did not receive the structured prompt")
+			}
+			if tc.preserved && err != nil || !tc.preserved && err == nil {
+				t.Fatalf("ProcessNext() error = %v, preserved ending = %t", err, tc.preserved)
 			}
 			request := fixture.outcomes.request
 			if request.PromptError != tc.classification {
 				t.Fatalf("classification: %s", request.PromptError)
 			}
-			if tc.reason == "" {
+			if !tc.preserved {
 				if request.PromptResponse != nil {
 					t.Fatal("uncertain/failure ending became completion")
 				}
-			} else if request.PromptResponse == nil || request.PromptResponse.StopReason != tc.reason {
+			} else if request.PromptResponse == nil || *request.PromptResponse != tc.outcome {
 				t.Fatalf("ending: %+v", request.PromptResponse)
 			}
 		})

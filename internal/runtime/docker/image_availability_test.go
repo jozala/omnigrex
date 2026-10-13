@@ -26,7 +26,7 @@ func TestExactImageAvailabilityInspectsRegistryDigestForPlatform(t *testing.T) {
 	api := &fakeImageAvailabilityAPI{}
 	closed := false
 	availability := newExactImageAvailability(api, func() error { closed = true; return nil })
-	image := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64)
+	image := "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64)
 	if err := availability.Available(context.Background(), image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"}); err != nil {
 		t.Fatalf("Available() error = %v", err)
 	}
@@ -40,7 +40,7 @@ func TestExactImageAvailabilityInspectsRegistryDigestForPlatform(t *testing.T) {
 
 func TestExactImageAvailabilityRejectsMutableTagsAndLocalIDs(t *testing.T) {
 	for _, image := range []string{
-		"registry.example/omnigrex/opencode:latest",
+		"registry.example/omnigrex/pi:latest",
 		"sha256:" + strings.Repeat("a", 64),
 	} {
 		api := &fakeImageAvailabilityAPI{}

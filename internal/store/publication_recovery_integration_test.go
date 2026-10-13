@@ -11,7 +11,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -52,11 +52,11 @@ func TestFailedTurnPublicationBindsNewSessionOfSameParticipant(t *testing.T) {
 	const replacementSession = "20000000-0000-4000-8000-000000000196"
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name, runtime_profile_version,
-    runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
+    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name, runtime_profile_version,
+    runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-SELECT $1, agent_assignment_id, session_number + 1, 'new-acp-session', runtime_profile_name, runtime_profile_version,
-       runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, 'ACTIVE'
+SELECT $1::uuid, agent_assignment_id, session_number + 1, $1::text, runtime_profile_name, runtime_profile_version,
+       runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, 'ACTIVE', runtime_capabilities
 FROM agent_sessions WHERE id = $2`, replacementSession, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: nextLease, Execution: bound, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		Lease: nextLease, Execution: bound, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {

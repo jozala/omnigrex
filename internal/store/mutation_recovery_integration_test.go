@@ -45,7 +45,7 @@ INSERT INTO agent_assignments (
     github_app_actor_id
 )
 VALUES ('40000000-0000-4000-8000-000000000219', $1, 'REVIEWER', 'ACTIVE',
-        'reviewer', 'runtime', '1', 'sha256:test', '/state/reviewer-21', 7001)`, fixture.workflowID); err != nil {
+        'reviewer', 'pi-rpc', 'v1', 'sha256:test', '/state/reviewer-21', 7001)`, fixture.workflowID); err != nil {
 		t.Fatalf("seed Reviewer Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -351,7 +351,7 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 	proposalID := seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, "review-head")
 	turnSpec.ChangeProposalID = proposalID
 	turnSpec.ExpectedHeadSHA = "review-head"
-	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
+	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, turnSpec)
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)

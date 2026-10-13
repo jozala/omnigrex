@@ -66,7 +66,7 @@ func (state *RetainedState) location(ctx context.Context, ref execution.StateRef
 	if err := ref.Validate(); err != nil {
 		return "", false, err
 	}
-	if ref.Backend != state.binding || ref.Format != "opencode-data/v1" && ref.Format != "pi-session/v3" {
+	if ref.Backend != state.binding || ref.Format != "pi-session/v3" {
 		return "", false, execution.ErrBindingMismatch
 	}
 	content, initialized, err := state.source.StateMetadata(ctx, ref)
@@ -255,7 +255,7 @@ func safeStateName(name string) bool {
 	if name == "." || name == ".." || name == "" || len(name) > 4096 || name == stateManifestName || path.Clean(name) != name || strings.HasPrefix(name, "../") || path.IsAbs(name) || strings.ContainsAny(name, "\\\x00") {
 		return false
 	}
-	// OpenCode receives credentials in its ephemeral environment; fail closed
+	// Pi receives credentials in disposable files; fail closed
 	// if a credential file was nevertheless written into Session storage.
 	base := strings.ToLower(path.Base(name))
 	return base != "auth.json" && base != "provider-credentials.json" && base != ".env"

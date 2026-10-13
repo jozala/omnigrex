@@ -13,15 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
-func TestOpenCodeImageRunsGoRaceTests(t *testing.T) {
-	image := environmentOrDefault("OMNIGREX_OPENCODE_IMAGE", "omnigrex/opencode:1.18.29")
+func TestPiImageRunsGoRaceTests(t *testing.T) {
+	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
 	arch := dockerCommand(t, "image", "inspect", "--format", "{{.Architecture}}", image)
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	profile, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: arch},
 	)
 	if err != nil {
@@ -57,8 +58,7 @@ func TestOpenCodeImageRunsGoRaceTests(t *testing.T) {
 	}
 
 	prefix := fmt.Sprintf("omnigrex-go-race-%d", time.Now().UnixNano())
-	setup := []string{"run", "--platform", "linux/" + arch, "--user", "0:0", "--network", "none",
-		"--mount", "type=bind,src=" + fixture + ",dst=/fixture,readonly"}
+	setup := []string{"create", "--platform", "linux/" + arch, "--user", "0:0", "--network", "none"}
 	run := []string{"run", "--platform", "linux/" + arch,
 		"--user", fmt.Sprintf("%d:%d", contract.User.UID, contract.User.GID),
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -82,9 +82,16 @@ done
 cp /fixture/* /volumes/workspace/assignment/
 mkdir -p /volumes/tool-data/assignment/turn/build-tmp \
   /volumes/tool-data/assignment/assignment/go-build-cache \
-  /volumes/tool-data/assignment/assignment/go-modules
+  /volumes/tool-data/assignment/assignment/go-modules \
+  /volumes/mise/assignment/home /volumes/mise/assignment/tmp
 chown -R 10001:10001 /volumes/*/assignment
 `)...)
+	// Transfer fixture inputs through the daemon API, including for remote hosts.
+	dockerCommand(t, "cp", fixture+"/.", setupName+":/fixture")
+	dockerCommand(t, "start", "--attach", setupName)
+	if exit := dockerCommand(t, "inspect", "--format", "{{.State.ExitCode}}", setupName); exit != "0" {
+		t.Fatalf("fixture storage setup exited %s", exit)
+	}
 	for _, temporary := range contract.Tmpfs {
 		options := fmt.Sprintf("rw,nosuid,nodev,size=%d,uid=%d,gid=%d,mode=0700", temporary.SizeBytes, contract.User.UID, contract.User.GID)
 		if !temporary.Executable {
@@ -96,6 +103,21 @@ chown -R 10001:10001 /volumes/*/assignment
 		run = append(run, "--env", variable.Name+"="+variable.Value)
 	}
 	for _, variable := range []string{
+		// Direct mise invocation needs the same disk-backed installation paths as
+		// environment bootstrap, rather than the Runtime Profile's tmpfs HOME.
+		"HOME=" + environment.DataDirectory + "/home",
+		"MISE_DATA_DIR=" + environment.DataDirectory,
+		"MISE_CONFIG_DIR=" + environment.DataDirectory + "/config",
+		"MISE_CACHE_DIR=" + environment.DataDirectory + "/cache",
+		"MISE_STATE_DIR=" + environment.DataDirectory + "/state",
+		"MISE_TMP_DIR=" + environment.DataDirectory + "/tmp",
+		"MISE_GLOBAL_CONFIG_FILE=/etc/omnigrex/mise-global.toml",
+		"MISE_SYSTEM_CONFIG_FILE=/etc/omnigrex/mise-system.toml",
+		"XDG_CONFIG_HOME=" + environment.DataDirectory + "/xdg-config",
+		"XDG_CACHE_HOME=" + environment.DataDirectory + "/xdg-cache",
+		"XDG_DATA_HOME=" + environment.DataDirectory + "/xdg-data",
+		"XDG_STATE_HOME=" + environment.DataDirectory + "/xdg-state",
+		"MISE_JOBS=1",
 		"TMPDIR=" + workspace.TurnPathMount + "/turn/build-tmp",
 		"GOTMPDIR=" + workspace.TurnPathMount + "/turn/build-tmp",
 		"GOCACHE=" + workspace.TurnPathMount + "/assignment/go-build-cache",

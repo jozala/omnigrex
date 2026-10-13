@@ -1,42 +1,24 @@
 package agentturn
 
-import (
-	"github.com/jozala/omnigrex/internal/runtime/acp"
-	"github.com/jozala/omnigrex/internal/runtime/agent"
-	"github.com/jozala/omnigrex/internal/runtime/session"
-)
+import "github.com/jozala/omnigrex/internal/runtime/agent"
 
-func runtimeAgentConnection(runtime ExecutionRuntime) session.TurnConnection {
-	if runtime == nil {
-		return nil
-	}
-	if capable, ok := runtime.(interface{ AgentConnection() session.TurnConnection }); ok {
-		return capable.AgentConnection()
-	}
-	return nil
-}
-
-// Translate neutral observations to the existing durable ending vocabulary.
-// This compatibility shim disappears with the ACP surface in Step 17; it does
-// not turn uncertain execution into completion or environment-stop evidence.
-func legacyPromptEvidence(outcome agent.Outcome, err error) (acp.PromptResponse, error) {
+// Only positively admitted completion or abort evidence is a terminal response.
+// Uncertain admission and settlement remain failures and never prove execution stopped.
+func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, error) {
 	if err != nil {
-		return acp.PromptResponse{}, err
-	}
-	if !outcome.Admitted {
-		return acp.PromptResponse{}, agent.ErrRuntime
+		return agent.Outcome{}, err
 	}
 	switch outcome.Status {
-	case agent.Completed:
-		if outcome.LimitReached {
-			return acp.PromptResponse{StopReason: acp.StopReasonMaxTokens}, nil
+	case agent.Completed, agent.Aborted:
+		if !outcome.Admitted {
+			return agent.Outcome{}, agent.ErrRuntime
 		}
-		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
-	case agent.Aborted:
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
-	case agent.Failed:
-		return acp.PromptResponse{}, agent.ErrRuntime
+		return outcome, nil
+	case agent.Failed, agent.Rejected:
+		return agent.Outcome{}, agent.ErrRuntime
+	case agent.Unknown:
+		return agent.Outcome{}, agent.ErrTransport
 	default:
-		return acp.PromptResponse{}, agent.ErrTransport
+		return agent.Outcome{}, agent.ErrProtocol
 	}
 }

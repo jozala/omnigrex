@@ -177,14 +177,17 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`, job.AgentAssignmentID
 			Reason: handoffReason, Diagnostic: diagnostic,
 		})
 	} else {
+		if !validCorroborationPrompt(promptOutcome, promptError) {
+			return ErrTerminalCorroborationConflict
+		}
 		if promptError == "" {
 			checkpointOutcome, err := canonicalJSON(promptOutcome)
 			if err != nil || !bytes.Equal(canonical.TerminalOutcome, checkpointOutcome) {
 				return ErrTerminalCorroborationConflict
 			}
 		} else if len(canonical.TerminalOutcome) != 0 ||
-			promptError == "FAILURE" && !strings.HasPrefix(canonical.Diagnostic, "ACP prompt failed") ||
-			promptError == "DEADLINE" && !strings.HasPrefix(canonical.Diagnostic, "ACP prompt deadline exceeded") {
+			promptError == "FAILURE" && !strings.HasPrefix(canonical.Diagnostic, "Agent prompt failed") ||
+			promptError == "DEADLINE" && !strings.HasPrefix(canonical.Diagnostic, "Agent prompt deadline exceeded") {
 			return ErrTerminalCorroborationConflict
 		}
 		// A synchronization may have committed after the external read. Do not

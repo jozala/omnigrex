@@ -39,7 +39,7 @@ func TestExecutionOrphanCleanupPreservesLegitimateProfileReservation(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			legitimate := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
+			legitimate := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
 			orphan := legitimate
 			orphan.RuntimeProfileVersion = "orphan"
 			ledger := database.ExecutionLedger(lease)
@@ -175,7 +175,7 @@ func (inventory orphanFixtureInventory) List(ctx context.Context) (execution.Sna
 }
 
 func TestExecutionOrphanInventoryScopesEveryCategory(t *testing.T) {
-	identity := execution.Key{RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
+	identity := execution.Key{RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
 	source := execution.Snapshot{
 		Processes: []execution.ManagedProcess{{Identity: identity, Resource: "owned-unique"}, {Identity: identity, Resource: "unrelated-unique"}},
 		Duplicates: []execution.DuplicateProcesses{

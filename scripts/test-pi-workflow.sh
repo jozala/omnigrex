@@ -10,7 +10,7 @@ states="$namespace-states"
 tools="$namespace-tools"
 publication="$namespace-publication"
 cleanup() {
-  docker rm -f "$database" >/dev/null 2>&1 || true
+  docker rm -f -v "$database" >/dev/null 2>&1 || true
   docker volume rm "$workspaces" "$states" "$tools" "$publication" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }

@@ -67,41 +67,9 @@ func nameFor(key execution.Key) string {
 }
 
 func requestDigest(request execution.Request) string {
-	request.Environment = slices.Clone(request.Environment)
-	for index, entry := range request.Environment {
-		name, content, _ := strings.Cut(entry, "=")
-		if name == "OPENCODE_AUTH_CONTENT" {
-			request.Environment[index] = name + "=<ephemeral>"
-		}
-		if name == "OPENCODE_CONFIG_CONTENT" {
-			var configuration map[string]any
-			if json.Unmarshal([]byte(content), &configuration) == nil {
-				redactAuthorization(configuration)
-				content, _ := json.Marshal(configuration)
-				request.Environment[index] = name + "=" + string(content)
-			}
-		}
-	}
 	content, _ := json.Marshal(request)
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])
-}
-
-func redactAuthorization(value any) {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if strings.EqualFold(key, "authorization") {
-				value[key] = "<ephemeral>"
-			} else {
-				redactAuthorization(child)
-			}
-		}
-	case []any:
-		for _, child := range value {
-			redactAuthorization(child)
-		}
-	}
 }
 
 func (backend *Backend) New(request execution.Request, ledger execution.Ledger) (execution.Engine, error) {
@@ -149,9 +117,6 @@ func (backend *Backend) validate(request execution.Request) error {
 		if strings.ContainsRune(argument, '\x00') {
 			return execution.ErrInvalidSpec
 		}
-	}
-	if request.BootstrapImage != "" {
-		return fmt.Errorf("%w: legacy Docker bootstrap binding", execution.ErrBindingMismatch)
 	}
 	if slices.Contains(request.Requirements, execution.ToolInstallation) && !request.GoldenResources {
 		return execution.ErrInvalidSpec

@@ -19,15 +19,11 @@ import (
 )
 
 const Executable = "/usr/local/bin/omnigrex-environment"
-const RuntimeExecutable = "/usr/local/bin/opencode"
 const MiseExecutable = "/usr/local/bin/mise"
+
+// DataDirectory is part of the immutable Pi Runtime Profile mount contract.
 const DataDirectory = "/home/opencode/.local/share/mise"
 const environmentKeys = "OMNIGREX_RUNTIME_ENV_KEYS"
-const RetainedBootstrapMount = "/opt/omnigrex/environment-bootstrap"
-const RetainedBootstrapExecutable = RetainedBootstrapMount + "/omnigrex-environment"
-
-// BootstrapDirectory is platform-owned Turn scratch, independent of installation data.
-func BootstrapDirectory(turnID string) string { return "bootstrap-" + turnID }
 
 // BindEnvironment identifies the control-plane entries that may reach the agent.
 // Unrequested image ENV settings cannot enable runtime discovery or loaders.

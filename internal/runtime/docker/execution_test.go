@@ -25,7 +25,7 @@ func TestExecutionCompileOwnsLabelsPolicyAndParticipantStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Name != "omnigrex-turn-"+request.Key.AgentTurnID+"-epoch-9" || spec.Network != factory.Network || spec.Labels[RuntimeProfileIdentityLabel] != "opencode-acp/v1" {
+	if spec.Name != "omnigrex-turn-"+request.Key.AgentTurnID+"-epoch-9" || spec.Network != factory.Network || spec.Labels[RuntimeProfileIdentityLabel] != "pi-rpc/v1" {
 		t.Fatalf("compiled identity = %#v", spec)
 	}
 	if err := validateResources(EngineOptions{AgentNetwork: factory.Network, RuntimePolicy: policy}, spec); err != nil {
@@ -52,19 +52,15 @@ func TestExecutionCompileOwnsLabelsPolicyAndParticipantStorage(t *testing.T) {
 	}
 }
 
-func TestExecutionDigestExcludesCredentialsAndDetectsNonsecretChanges(t *testing.T) {
+func TestExecutionDigestDetectsEnvironmentAndCommandChanges(t *testing.T) {
 	request := executionTestRequest()
-	request.Environment = []string{"OPENCODE_AUTH_CONTENT={\"key\":\"first\"}", "HOME=/home/opencode"}
+	request.Environment = []string{"HOME=/tmp"}
 	first := requestDigest(request)
-	request.Environment[0] = "OPENCODE_AUTH_CONTENT={\"key\":\"second\"}"
-	if requestDigest(request) != first {
-		t.Fatal("credential bytes entered durable digest")
-	}
-	request.BootstrapImage = "registry.example/bootstrap@sha256:" + strings.Repeat("b", 64)
+	request.Environment[0] = "HOME=/different"
 	if requestDigest(request) == first {
-		t.Fatal("retained bootstrap source was not bound to the execution specification")
+		t.Fatal("changed environment reused digest")
 	}
-	request.BootstrapImage = ""
+	request.Environment[0] = "HOME=/tmp"
 	request.Command = []string{"different"}
 	if requestDigest(request) == first {
 		t.Fatal("changed execution content reused digest")
@@ -97,9 +93,8 @@ func TestExecutionCompileRejectsUnsupportedRequirementsAndUnpinnedImages(t *test
 		t.Fatalf("unattached repository tool installation accepted: %v", err)
 	}
 	request.GoldenResources = false
-	request.BootstrapImage = "registry.example/bootstrap:latest"
 	if _, _, err := factory.Compile(request); !errors.Is(err, execution.ErrInvalidSpec) {
-		t.Fatalf("mutable retained bootstrap image accepted: %v", err)
+		t.Fatalf("tool installation without golden resources accepted: %v", err)
 	}
 }
 
@@ -249,7 +244,7 @@ func TestExecutionRecoversLostSetupDeletionAcknowledgement(t *testing.T) {
 	spec.Labels[executionDigestLabel] = digest
 	spec.Volumes = []VolumeMount{{Name: "state", Subpath: "assignment-" + key.AssignmentID + "/runtime-state", Target: "/state"}}
 	api := &lostSetupDeletionAPI{runtimeAPIFake: newRuntimeAPIFake()}
-	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key, false, "", nil)
+	failure := prepareExecutionSubpaths(context.Background(), api, spec, ledger, key, false, nil)
 	if failure == nil || api.removeCalls != 1 {
 		t.Fatalf("lost setup deletion = %v, removes %d", failure, api.removeCalls)
 	}
@@ -287,7 +282,7 @@ func (api *lostSetupDeletionAPI) ContainerRemove(ctx context.Context, id string,
 
 func executionTestRequest() execution.Request {
 	return execution.Request{
-		Key:   execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1"},
+		Key:   execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"},
 		Image: testImage, Platform: execution.Platform{OS: "linux", Architecture: "arm64"}, User: "10001:10001", WorkingDir: "/workspace", Command: []string{"/bin/sh"}, MemoryBytes: 64 << 20, PIDsLimit: 32,
 	}
 }

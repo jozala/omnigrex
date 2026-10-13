@@ -16,14 +16,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
-	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -62,25 +63,28 @@ func testExecutionLauncherSingleConnectionPool(t *testing.T, capture, preparatio
 	}
 	defer database.Close()
 	pool := openPool(t, postgres.databaseURL(true))
-	runtimeProfile, err := profile.NewOpenCodeV1("registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 992, workflow.RoleDeveloper, runtimeProfile.Binding(), runtimeProfile.Binding())
-	spec := fixture.turnSpec()
-	spec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/v1", "provider/test", "", 10, "Test instructions.", nil)
-	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
+	triggerPreparationWorkflow(t, database, ctx, "60000000-0000-4000-8000-000000009920", "60000000-0000-4000-8000-000000009921")
+	spec := preparationSpec("single-connection-profile", "provider/test")
+	spec.Developer.Binding = store.AssignmentRuntimeBinding{
+		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
+	}
+	spec.Developer.RuntimeContract, _ = json.Marshal(runtimeProfile.Contract())
+	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preparationOnly {
-		if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
-			t.Fatal(err)
-		}
-	}
+	turn := prepared.Turn
 	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, "runtime", time.Minute, 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !preparationOnly {
+		bindPreparedRuntime(t, database, ctx, lease)
 	}
 	registry, err := profile.NewRegistry(runtimeProfile)
 	if err != nil {
@@ -109,7 +113,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 		}
 	}
 	workspaces := singleConnectionWorkspace{}
-	acpFactory := singleConnectionACP{}
+	adapter := singleConnectionAdapter{prepareErr: errors.New("fixture Session preparation unavailable")}
 	captures := 0
 	if preparationOnly {
 		workspaces.capture = func(context.Context) error {
@@ -118,7 +122,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 		}
 	}
 	if capture {
-		acpFactory.client = &singleConnectionClient{}
+		adapter.prepareErr = nil
 		workspaces.capture = func(ctx context.Context) error {
 			captures++
 			// Reentering the real Store needs the same sole pool connection. This
@@ -134,7 +138,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 	if err := database.BindExecutionBackend(ctx, states.Binding()); err != nil {
 		t.Fatal(err)
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, ACP: acpFactory, Sessions: singleConnectionSessions{}, States: states, MemoryBytes: 512 << 20})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": adapter}, States: states, MemoryBytes: 512 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +194,9 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 		}
 		return
 	}
-	// A deliberately unavailable ACP client ends the test after creation/start,
+	// A deliberately unavailable Session preparation ends the test after creation/start,
 	// avoiding a model prompt while exercising the actual Launcher/Store boundary.
-	if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "attach ACP client") || !factory.engine.started {
+	if !errors.Is(err, adapter.prepareErr) || errors.Is(err, context.DeadlineExceeded) || !factory.engine.started {
 		t.Fatalf("single-connection launch = %v, started %t", err, factory.engine.started)
 	}
 }
@@ -316,21 +320,24 @@ func (singleConnectionGateway) Renew(mcp.Registration, time.Time) bool          
 func (singleConnectionGateway) CloseAndDrain(context.Context, mcp.Registration) error { return nil }
 func (singleConnectionGateway) Revoke(mcp.Registration) bool                          { return true }
 
-type singleConnectionACP struct {
-	client agentturn.RuntimeACPClient
+type singleConnectionAdapter struct {
+	prepareErr error
 }
 
-func (factory singleConnectionACP) New(io.ReadWriteCloser, acp.ClientOptions) agentturn.RuntimeACPClient {
-	return factory.client
+func (singleConnectionAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID string, memory int64, tools map[string]string) (execution.Request, error) {
+	return (pi.TurnAdapter{}).BuildProcess(p, key, workflowID, memory, tools)
 }
 
-// Only Close is used: the test's Session preparer never calls the ACP protocol.
-type singleConnectionClient struct{ agentturn.RuntimeACPClient }
-
-func (*singleConnectionClient) Close() error { return nil }
-
-type singleConnectionSessions struct{}
-
-func (singleConnectionSessions) Prepare(context.Context, session.PrepareRequest) (session.Result, error) {
-	return session.Result{}, nil
+func (adapter singleConnectionAdapter) Prepare(context.Context, session.TurnPreparation) (session.TurnConnection, error) {
+	if adapter.prepareErr != nil {
+		return nil, adapter.prepareErr
+	}
+	return singleConnectionTurn{}, nil
 }
+
+type singleConnectionTurn struct{}
+
+func (singleConnectionTurn) Prompt(context.Context, store.AgentTurnLease, store.AgentSession, string, agentevent.Sink) (agent.Outcome, error) {
+	return agent.Outcome{Status: agent.Rejected}, errors.New("unexpected fixture prompt")
+}
+func (singleConnectionTurn) Close() error { return nil }

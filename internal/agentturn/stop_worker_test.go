@@ -35,7 +35,7 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 	wantLabels := execution.Key{
 		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
 		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: 7,
-		RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	if cleaner.callCount() != 1 || !reflect.DeepEqual(cleaner.labelsAt(0), wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labelsAt(0), wantLabels)
@@ -169,7 +169,7 @@ func TestStopWorkerCapturesAfterConfirmedStopBeforeRemovalAndReviewerDiscard(t *
 	}
 	wantKey := execution.Key{
 		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID, AgentTurnID: lease.AgentTurnID,
-		ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	want := execution.CaptureRequest{
 		Workspace: execution.WorkspaceRef{Key: wantKey}, OperationID: lease.AgentTurnID, Purpose: execution.TerminalCapture,
@@ -730,7 +730,7 @@ func (durable *stopWorkerStore) GetAgentTurnRuntimeCleanupContext(_ context.Cont
 	}
 	cleanup := durable.cleanupContext
 	if cleanup.RuntimeProfileName == "" {
-		cleanup.RuntimeProfileName = "opencode-acp"
+		cleanup.RuntimeProfileName = "pi-rpc"
 		cleanup.RuntimeProfileVersion = "v1"
 	}
 	return cleanup, result

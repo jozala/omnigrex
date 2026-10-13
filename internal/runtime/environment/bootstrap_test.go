@@ -23,7 +23,7 @@ func TestBootstrapUsesCheckoutToolsWithoutAuthorityAndPreservesControlEnvironmen
 	mise := filepath.Join(root, "mise")
 	script := `#!/bin/sh
 set -eu
-test -z "${OPENCODE_AUTH_CONTENT:-}"
+test -z "${PI_CODING_AGENT_DIR:-}"
 test -z "${OMNIGREX_TOKEN:-}"
 test -z "${NODE_OPTIONS:-}"
 test "$(cat mise.toml)" = working-revision-tools
@@ -39,13 +39,13 @@ fi
 	if err := os.WriteFile(mise, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	inherited := BindEnvironment([]string{"OPENCODE_AUTH_CONTENT=provider-secret", "OMNIGREX_TOKEN=authority", "NODE_OPTIONS=protected", "HOME=/home/opencode", "TMPDIR=/disk/scratch"})
-	inherited = append(inherited, "OPENCODE_CONFIG_DIR=/workspace/poison", "MISE_CONFIG_FILE=/workspace/poison", "PI_CODING_AGENT_DIR=/workspace/poison")
+	inherited := BindEnvironment([]string{"PI_CODING_AGENT_DIR=/run/pi-agent", "OMNIGREX_TOKEN=authority", "NODE_OPTIONS=protected", "HOME=/tmp", "TMPDIR=/disk/scratch"})
+	inherited = append(inherited, "MISE_CONFIG_FILE=/workspace/poison", "PI_OFFLINE=/workspace/poison")
 	values, err := Bootstrap(context.Background(), checkout, data, mise, inherited, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PROJECT_MODE=working-revision", "PATH=/opt/development/bin:/usr/bin:/bin", "OPENCODE_AUTH_CONTENT=provider-secret", "HOME=/home/opencode", "TMPDIR=/disk/scratch"} {
+	for _, want := range []string{"PROJECT_MODE=working-revision", "PATH=/opt/development/bin:/usr/bin:/bin", "PI_CODING_AGENT_DIR=/run/pi-agent", "HOME=/tmp", "TMPDIR=/disk/scratch"} {
 		if !slices.Contains(values, want) {
 			t.Fatalf("missing %s in runtime activation", want)
 		}
@@ -67,7 +67,7 @@ fi
 }
 
 func TestBootstrapRejectsRuntimeInjectionAndBoundsOutput(t *testing.T) {
-	for _, value := range []string{`{"NODE_OPTIONS":"--require=/workspace/poison.js"}`, `{"PI_CODING_AGENT_DIR":"/workspace"}`, `{"OPENCODE_DISABLE_PROJECT_CONFIG":"false"}`, `{"LD_PRELOAD":"/workspace/poison.so"}`, `{"PATH":".:/bin"}`, strings.Repeat("x", 121<<10)} {
+	for _, value := range []string{`{"NODE_OPTIONS":"--require=/workspace/poison.js"}`, `{"PI_CODING_AGENT_DIR":"/workspace"}`, `{"PI_OFFLINE":"0"}`, `{"LD_PRELOAD":"/workspace/poison.so"}`, `{"PATH":".:/bin"}`, strings.Repeat("x", 121<<10)} {
 		t.Run(value[:min(len(value), 35)], func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, "mise.toml"), nil, 0o644); err != nil {
@@ -81,7 +81,7 @@ func TestBootstrapRejectsRuntimeInjectionAndBoundsOutput(t *testing.T) {
 			if err := os.WriteFile(mise, []byte("#!/bin/sh\nif [ \"$1\" = env ]; then cat "+fixture+"; fi\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Bootstrap(context.Background(), root, filepath.Join(root, "data"), mise, BindEnvironment([]string{"HOME=/home/opencode"}), nil); err == nil {
+			if _, err := Bootstrap(context.Background(), root, filepath.Join(root, "data"), mise, BindEnvironment([]string{"HOME=/tmp"}), nil); err == nil {
 				t.Fatal("accepted unsafe activation")
 			}
 		})
@@ -103,7 +103,7 @@ fi
 		t.Fatal(err)
 	}
 	admitted := []string{
-		"HOME=/home/opencode", "GOCACHE=/participant/tool-data/go-cache",
+		"HOME=/tmp", "GOCACHE=/participant/tool-data/go-cache",
 		"GOPATH=/participant/tool-data/go-path", "CUSTOM_CACHE=/participant/tool-data/custom",
 	}
 	values, err := Bootstrap(context.Background(), root, filepath.Join(root, "data"), mise, BindEnvironment(admitted), nil)
@@ -128,7 +128,7 @@ func TestBootstrapCancellationAndFailureDoNotLeakRepositoryOutput(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := Bootstrap(ctx, root, filepath.Join(root, "data"), mise, BindEnvironment([]string{"HOME=/home/opencode"}), nil)
+	_, err := Bootstrap(ctx, root, filepath.Join(root, "data"), mise, BindEnvironment([]string{"HOME=/tmp"}), nil)
 	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("unsafe failure: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestToolReplacementPreservesSiblingStateCachesAndSymlinkTargets(t *testing.
 	if err := os.Chmod(filepath.Join(data, "stale"), 0o500); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Bootstrap(context.Background(), filepath.Join(root, "workspace"), data, "/does-not-exist", BindEnvironment([]string{"HOME=/home/opencode"}), nil); err != nil {
+	if _, err := Bootstrap(context.Background(), filepath.Join(root, "workspace"), data, "/does-not-exist", BindEnvironment([]string{"HOME=/tmp"}), nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"runtime-state", "tool-data", "workspace", "external"} {

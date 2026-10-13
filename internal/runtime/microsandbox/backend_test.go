@@ -175,18 +175,18 @@ func TestAdmissionRejectsUnsupportedOrUnsafeExecution(t *testing.T) {
 	}
 }
 
-func TestDurableDigestExcludesProviderAndMCPSecrets(t *testing.T) {
+func TestDurableDigestBindsEnvironmentAndCommand(t *testing.T) {
 	request := testRequest()
-	request.Environment = []string{`OPENCODE_AUTH_CONTENT={"api_key":"first"}`, `OPENCODE_CONFIG_CONTENT={"mcp":{"omnigrex":{"headers":{"Authorization":"Bearer first"}}},"model":"test"}`}
+	request.Environment = []string{"HOME=/tmp", "PI_OFFLINE=1"}
 	first := requestDigest(request)
-	request.Environment[0] = `OPENCODE_AUTH_CONTENT={"api_key":"second"}`
-	request.Environment[1] = `OPENCODE_CONFIG_CONTENT={"mcp":{"omnigrex":{"headers":{"Authorization":"Bearer second"}}},"model":"test"}`
-	if requestDigest(request) != first {
-		t.Fatal("ephemeral secret entered durable specification digest")
-	}
-	request.Environment[1] = `OPENCODE_CONFIG_CONTENT={"model":"changed"}`
+	request.Environment[0] = "HOME=/different"
 	if requestDigest(request) == first {
-		t.Fatal("nonsecret configuration change was ignored")
+		t.Fatal("environment change was ignored")
+	}
+	request.Environment[0] = "HOME=/tmp"
+	request.Command = []string{"/bin/sh", "-c", "different"}
+	if requestDigest(request) == first {
+		t.Fatal("command change was ignored")
 	}
 }
 

@@ -1,9 +1,12 @@
 ---
-status: accepted
+status: superseded
 date: 2026-10-11
 decision-makers: [OpenCode implementation agent]
 ---
 # Gate Pi publication on both backend deployments
+
+The preparatory runtime-selection policy is superseded by [decision 0020](0020-finish-pi-only-runtime-and-neutral-outcome-evidence.md).
+The both-backend publication and exact-digest deployment gates remain applicable.
 
 ## Context
 

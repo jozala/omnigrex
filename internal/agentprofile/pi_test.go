@@ -14,7 +14,7 @@ func TestPiProfileUsesNativeConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Thinking() != "high" || strings.Contains(string(p.CanonicalJSON()), "steps") || strings.Contains(string(p.CanonicalJSON()), "variant") {
+	if p.Runtime() != "pi-rpc/v1" || p.Thinking() != "high" || !strings.Contains(string(p.CanonicalJSON()), `"runtime":"pi-rpc/v1"`) || strings.Contains(string(p.CanonicalJSON()), "steps") || strings.Contains(string(p.CanonicalJSON()), "variant") {
 		t.Fatalf("Pi configuration: %s", p.CanonicalJSON())
 	}
 	if _, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte(strings.Replace(content, "openai/o4-mini", "openrouter/openai/o4-mini", 1)), role.BuiltinPolicyCatalog()); err != nil {

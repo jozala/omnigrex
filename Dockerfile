@@ -15,11 +15,11 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/omnigrex ./cmd/omnigrex
 
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
 ARG TARGETARCH
 
-RUN --mount=type=bind,source=agent/opencode/apk-packages.sha256,target=/tmp/apk-packages.sha256,readonly \
+RUN --mount=type=bind,source=deploy/orchestrator-apk-packages.sha256,target=/tmp/apk-packages.sha256,readonly \
     case "$TARGETARCH" in \
       amd64) apk_arch="x86_64" ;; \
       arm64) apk_arch="aarch64" ;; \

@@ -92,8 +92,8 @@ FOR EACH ROW EXECUTE FUNCTION reject_attempt_backfill()`); err != nil {
 	if err := retryPool.QueryRow(ctx, `SELECT max(version), count(*) FROM schema_migrations`).Scan(&latestVersion, &migrationCount); err != nil {
 		t.Fatalf("read migration history after retry: %v", err)
 	}
-	if latestVersion != 35 || migrationCount != 35 {
-		t.Errorf("migration history after retry = max %d, count %d; want max 35, count 35", latestVersion, migrationCount)
+	if latestVersion != 36 || migrationCount != 36 {
+		t.Errorf("migration history after retry = max %d, count %d; want max 36, count 36", latestVersion, migrationCount)
 	}
 	if err := retryPool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000001'`).Scan(&attemptLimit); err != nil {
 		t.Fatalf("read delivery after retry: %v", err)
@@ -123,7 +123,11 @@ func TestUpgradeFromSchema25PreservesExistingAcceptedReview(t *testing.T) {
 		t.Fatalf("pre-upgrade migrations = %d, want 25", len(earlier))
 	}
 	applyRecordedMigrations(t, ctx, pool, earlier...)
-	fixture := seedAgentSession(t, pool, 990)
+	fixture := agentFixture{workflowID: "40000000-0000-4000-8000-000000009901"}
+	if _, err := pool.Exec(ctx, `INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
+VALUES ($1, 990, 'owner', 'repo', 990, 990, 'ACTIVE')`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
 	const proposalID = "95000000-0000-4000-8000-000000000991"
 	const deliveryID = "95000000-0000-4000-8000-000000000992"
 	if _, err := pool.Exec(ctx, `
@@ -164,7 +168,7 @@ SELECT (SELECT max(version) FROM schema_migrations),
 		deliveryID, fixture.workflowID).Scan(&version, &reviews, &checkpoints); err != nil {
 		t.Fatal(err)
 	}
-	if version != 35 || reviews != 1 || checkpoints != 0 {
+	if version != 36 || reviews != 1 || checkpoints != 0 {
 		t.Fatalf("upgraded history = v%d, preserved reviews %d, retroactive checkpoints %d", version, reviews, checkpoints)
 	}
 }
@@ -262,8 +266,8 @@ func TestRunSerializesConcurrentCallsAndReleasesLock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("read migration history: %v", err)
 	}
-	if migrationCount != 35 {
-		t.Errorf("migration history count = %d, want 35", migrationCount)
+	if migrationCount != 36 {
+		t.Errorf("migration history count = %d, want 36", migrationCount)
 	}
 
 	observerPool := openPool(t, postgres.databaseURL(true))

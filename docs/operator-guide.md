@@ -6,7 +6,10 @@ Read the trust model before installing credentials or granting Docker access.
 ## Supported Deployment
 
 The Pi deployment consists of one Docker Compose control-plane stack running the orchestrator and PostgreSQL, with disposable Pi Runtime Processes on the selected Docker or Microsandbox Execution Backend.
-OpenCode remains a preparatory compatibility path until Step 17; the one-time transition uses the [clean-cutover procedure](#one-time-opencode-to-pi-cutover), never a conversation or populated-ledger migration.
+Pi is the only supported coding-agent runtime in the current source and deployment artifacts.
+The [final source qualification](./plans/2026-10-13-pi-only-final-qualification.md) records both-backend evidence and the remaining published-release, live dogfooding, and production cutover gates.
+Historical OpenCode installations use the [clean-cutover procedure](#one-time-opencode-to-pi-cutover), never a conversation or populated-ledger migration.
+These source changes do not establish release publication, exact-digest smoke success, or production cutover; require the matching release evidence before deployment.
 Docker Engine API 1.45 or newer and Docker Compose v2 are required.
 The operator must provide public DNS and HTTPS ingress for GitHub webhooks.
 Production hosts deploy without cloning the repository by using published `linux/amd64` images from `ghcr.io/jozala/omnigrex/` and the [Pi deployment files](#pi-operational-deployment) for one qualified commit.
@@ -125,7 +128,7 @@ It removes that wrapper and the VMs it owns, while fixture images remain in the 
 
 ## Pi protocol diagnostic
 
-Step 09 introduces a disposable Pi 1.0.4 protocol diagnostic while OpenCode remains the default runtime.
+The disposable Pi 1.0.4 protocol diagnostic exercises the supported agent adapter on either backend.
 Its [implementation evidence](./plans/2026-10-09-pi-protocol-adapter.md) describes the supported boundary and subsequent integration steps.
 The diagnostic accepts no real provider credentials and uses a controlled HTTP provider inside its disposable environment.
 It has no GitHub or business MCP authority, does not create a Workflow, and stores its temporary Session in tmpfs.
@@ -181,7 +184,7 @@ mise exec -- go run ./cmd/omnigrex pi-diagnostic --backend docker --image sha256
 ```
 
 For Microsandbox, use the native binary and exact provisioned image with the previously described backend arguments, adding `--configuration` and optionally `--reviewer`.
-These preparatory diagnostics accept only fixture credentials; production Pi credential configuration and cutover follow the later deployment steps.
+These diagnostics accept only fixture credentials; production credential configuration follows [Pi operational deployment](#pi-operational-deployment).
 
 Step 11 adds a disposable Session-coordination diagnostic with exact file-backed identity and History Replay:
 
@@ -196,13 +199,13 @@ The shared automated backend gates additionally qualify actual continuation acro
 PostgreSQL integration tests verify durable identity reservation and admission fencing separately.
 See the [Step 11 evidence](./plans/2026-10-09-durable-pi-sessions.md) for the precise delivery boundary and acceptance coverage.
 
-## Candidate Pi Agent Turn qualification
+## Pi Agent Turn qualification
 
-Step 12 exposes explicit `pi-rpc/v1` Agent Turns for qualification before the clean cutover.
+Pi Agent Turns use `pi-rpc/v1` on both supported backends.
 The [implementation evidence](./plans/2026-10-09-complete-pi-agent-turns.md) describes the precise delivery boundary.
 Use a disposable deployment and fresh database/storage for this qualification; existing retained Participants keep their original runtime/image bindings.
 
-Build the production candidate environment:
+Build the production environment:
 
 ```sh
 mise run pi-image
@@ -210,12 +213,12 @@ mise run pi-image
 
 Build/publish repository environments outside Omnigrex and configure their actual registry digest using the existing [image and deployment procedures](#deploy).
 Set both `OMNIGREX_PI_RPC_V1_IMAGE=REGISTRY/IMAGE@sha256:DIGEST` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64` or `linux/arm64` in the disposable deployment configuration.
-Both settings are optional together and required together; mutable tags, incomplete bindings, and unsupported platforms are rejected.
+Both settings are required; mutable tags, incomplete bindings, and unsupported platforms are rejected.
 Explicit repository Profiles use `runtime: pi-rpc/v1`, an exact `provider/model`, optional supported thinking, and Pi permissions described in the [configuration evidence](./plans/2026-10-09-pi-configuration-and-mcp.md#candidate-agent-profile-schema).
-The candidate credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
+The credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
 Follow the existing secret placement and recovery procedures in this guide; keep provider keys and deployment metadata out of source control and retained-state backups.
 Backend selection uses the existing `OMNIGREX_EXECUTION_BACKEND` setting and the applicable backend prerequisites.
-Step 15 adds Pi-selected operational diagnostics and release publication; the operator-controlled cutover remains a later milestone.
+CI gates release publication on both backends; the operator-controlled cutover requires the published release's evidence.
 
 Run the controlled complete Workflow gates without deployment secrets or external GitHub mutations:
 
@@ -246,7 +249,8 @@ The [recovery evidence](./plans/2026-10-10-pi-failure-recovery.md) records the f
 The image-only Pi bundles support a fresh installation or isolated qualification deployment.
 Read the [Step 15 evidence](./plans/2026-10-11-pi-operational-integration.md) for verification and release status.
 Do not apply these bundles to populated OpenCode state; follow the [one-time cutover](#one-time-opencode-to-pi-cutover).
-The existing OpenCode bundle remains available through the preparatory period.
+Startup and readiness reject unsupported runtime history even when its Participant and Session storage has already been collected.
+Historical source bundles must come from the selected old release or its private recovery set; current source contains no OpenCode bundle or image build.
 
 The release workflow publishes `linux/amd64` Pi 1.0.4 / Node 24.14.1 golden environments at `ghcr.io/jozala/omnigrex/pi:sha-<commit>` and the SDK-enabled control plane at `ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-<commit>`.
 Docker uses the existing `ghcr.io/jozala/omnigrex/orchestrator:sha-<commit>` image.
@@ -278,7 +282,7 @@ export COMPOSE_FILE=compose.pi.yaml:compose.pi-docker.yaml
 For Microsandbox download `compose.pi-microsandbox.yaml` instead and select `COMPOSE_FILE=compose.pi.yaml:compose.pi-microsandbox.yaml`.
 Keep that exact `COMPOSE_FILE` exported in every deployment, diagnostic, backup, restore, and rotation shell; add any instruction or storage override to the same file set.
 The ordinary `docker compose` commands later in this guide assume this selection.
-Leaving it unset can select the old `compose.yaml` or omit the backend overlay.
+Leaving it unset can omit the backend overlay or select the source-built developer `compose.yaml` in a checkout.
 The default bundle volume and network names are fixed, so a different project name alone does not isolate a second installation.
 Rehearsals must override every storage/network name and matching `OMNIGREX_*_VOLUME`, agent-network, and native namespace setting as the [isolated gate](#isolated-cutover-rehearsal) does.
 
@@ -339,13 +343,11 @@ Docker writable-path probes use the selected immutable Runtime Profile rather th
 The healthcheck HTTP client uses the same `OMNIGREX_READINESS_TIMEOUT` as the readiness handler, plus a five-second response allowance, instead of a fixed twenty-second timeout.
 The Pi bundle defaults to a 60-second readiness budget, a 65-second client deadline, and a 70-second Compose healthcheck deadline.
 When changing the readiness budget, also set `OMNIGREX_HEALTHCHECK_TIMEOUT` at least ten seconds longer so Compose can receive the bounded client's result before terminating the probe.
-The legacy Docker bundles retain the corresponding 15/20/25-second defaults and support the same outer-timeout override.
 
 Doctor resolves the same configured registry as startup, checks repository environments for each Role's selected runtime, validates Pi credentials and effective instructions/permissions, and verifies selected Pi models and thinking values without fallback.
 Its `pi-runtime` check starts the production owned runner with a random exact Session identity in temporary `/state`, fixture-only provider auth, and isolated authenticated diagnostic MCP authority.
 It prepares but submits no model prompt, does not invoke business capabilities, and removes the disposable environment before reporting success.
 Diagnostic Session files and authority never attach to retained Participant state.
-For mixed preparatory runtime configuration, doctor checks every configured runtime and reports `agent-runtime`; an OpenCode-only deployment retains `acp-runtime`.
 
 The complete source-checkout backend gates are:
 
@@ -357,6 +359,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
 The component conformance, Pi protocol, Workflow, recovery, and upgrade gates remain separately runnable as documented above, and can use an approved remote `DOCKER_HOST`.
 The image-only smoke entry points, `test-pi-deployment` and `test-pi-microsandbox-deployment`, must run on the daemon host because Compose secrets are host-side files.
 They stage only deployment files and disposable fixture secrets into a separate no-clone directory, use unique resource names, verify liveness/readiness and operational doctor checks, and remove only their own resources.
+The same disposable gates retain full-stack coverage of authenticated durable and deduplicated webhooks, rejection of invalid signatures, ignored unsupported events, PostgreSQL and storage persistence after container recreation, agent-network isolation, and readiness failure/recovery while liveness stays healthy.
 External GitHub installation checks intentionally fail for fixture App identities; no live repository is mutated.
 The Microsandbox smoke additionally proves that removing KVM access rejects normal startup.
 Set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to actual registry digests to run the same smoke against published images without local builds.
@@ -366,7 +369,7 @@ CI runs the shared suites on Docker and on an ephemeral `ubuntu-24.04` KVM runne
 
 This is one explicit reset of OpenCode operational state and conversations, followed by a fresh Pi installation.
 It implements [decision 0006](./decisions/0006-use-pi-through-an-agent-specific-adapter.md), not an in-place runtime upgrade.
-Step 17 owns the Pi-only release and operator-controlled production cutover; Step 16 rehearses the procedure using isolated resources.
+The current source is Pi-only; operator-controlled production cutover still requires the selected published release and isolated rehearsal evidence.
 
 ### Preparation and shutdown
 
@@ -434,21 +437,31 @@ After forward-only schema migrations, application rollback requires the matching
 Run on the Docker daemon's host in a source checkout, using only disposable fixture credentials:
 
 ```sh
+export OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE=/private/old-release/compose.yaml
+export OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE=REGISTRY/ORCHESTRATOR@sha256:SOURCE_DIGEST
+export OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE=REGISTRY/AGENT@sha256:SOURCE_DIGEST
 mise run test-pi-cutover
 OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-cutover
 ```
 
 The equivalent host command without a mise installation is `OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh`, or `OMNIGREX_PI_BACKEND=microsandbox` with its KVM group supplied.
 A remote `DOCKER_HOST` alone is insufficient because Compose secrets are host-side files; stage the source on the daemon host and run there.
-The gate isolates ambient configuration, creates unique networks/volumes/namespaces, starts the actual OpenCode stack, seeds synthetic disposal markers, validates a pre-reset dump/archive, removes the old resources, and starts the fresh Pi bundle.
+Select the trusted image-only old-release Docker Compose bundle from that release's commit-pinned download or private recovery set, with its exact matching published orchestrator and agent image pair.
+The helper requires an available bundle file and full untagged registry SHA-256 image references before any Docker operation; it has no source-build fallback.
+The supplied historical bundle must expose the original `postgres`, `opencode-image`, and `orchestrator` services and `backend`, `agent`, `postgres-data`, `runtime-state`, `workspaces`, and `mise-data` resource keys so the generated isolation override covers every installation resource.
+The rendered source bundle must be image-only and contain only the covered service, volume, and network keys, fixture secret files, and standard Docker socket or disabled compatibility-file bind mounts.
+Historical volumes must use the default or explicit `local` driver with no backing-store options; a generated volume name does not isolate bind-backed or network-backed storage.
+An extra resource, external volume/network, custom volume driver, nonempty `driver_opts`, foreign bind mount, or source build context fails the gate before historical startup or cleanup authorization.
+The gate isolates ambient configuration, creates unique networks/volumes/namespaces, starts that supplied historical stack, seeds synthetic disposal markers, validates a pre-reset dump/archive, removes the old resources, and starts the fresh Pi bundle.
 It verifies readiness and independent doctor/MCP checks without paid model calls or real GitHub mutation authority.
 It then checks coordinated Pi dump/state/capture recovery, numeric ownership, native-journal inclusion, and readiness after recreated containers.
 Failure to back up or remove legacy storage stops the cutover before Pi startup.
-All fixture resources and temporary secrets/backups are removed afterward; source images remain cached.
+All fixture resources and temporary secrets/backups are removed afterward; pulled source images remain cached.
 
-For exact published-image rehearsal, set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to target registry digests, and both `OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE` to the old release's registry digests.
+For exact published-image rehearsal, additionally set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to target registry digests.
 The Microsandbox target uses its native control plane, while the old OpenCode source uses its Docker control plane.
-Without those pairs the gate builds source fixtures, which do not establish publication or no-login release evidence.
+Without the target pair the gate builds Pi target fixtures, which do not establish publication or no-login release evidence.
+The old-release bundle and exact source pair are mandatory in every rehearsal.
 
 The archive markers in this procedure test operational round-trip and disposal mechanics, not Pi conversation correctness.
 Also run `test-pi-workflow` with `OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery)$'` and `test-pi-upgrade`, or their Microsandbox equivalents, to qualify actual fenced Pi Sessions, protected ledger/state ownership, fresh-environment continuation, and replay without model activity.
@@ -497,7 +510,7 @@ Failed transfers or validation do not leave a partial final output path.
 Transfer the private artifact and configure `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` through the existing [upgrade procedure](#runtime-profile-image-change), together with the matching candidate Pi digest/platform.
 Startup and doctor validate every result against a configured exact Runtime Profile and the selected backend family/contract version before accepting it.
 Keep the full canonical Runtime Profile definitions in the coordinated PostgreSQL recovery set; they preserve historical Node, mise, and owned-file checks across deployment upgrades.
-Version-2 Pi results and version-1 OpenCode results use separate immutable ledger tables during preparation.
+Pi qualification uses version-2 backend-scoped results; historical OpenCode artifacts are not accepted as Pi qualification.
 Qualification direction is significant and does not establish rollback compatibility.
 Fresh Participants have independent Session state and retain the image-selection policy described in [Repository Environments](#repository-environments).
 
@@ -629,10 +642,9 @@ See [Published Images And Deployment Files](#published-images-and-deployment-fil
 
 ## Published Images And Deployment Files
 
-Every push to `main` that passes the Docker and Linux/KVM jobs publishes four `linux/amd64` images for discovery:
+Every push to `main` that passes the Docker and Linux/KVM jobs publishes three `linux/amd64` images for discovery:
 
 - `ghcr.io/jozala/omnigrex/orchestrator:sha-<full-commit-SHA>` from `Dockerfile`.
-- `ghcr.io/jozala/omnigrex/opencode:sha-<full-commit-SHA>` from `agent/opencode/Dockerfile`.
 - `ghcr.io/jozala/omnigrex/pi:sha-<full-commit-SHA>` from the golden target of `agent/pi/Dockerfile`.
 - `ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-<full-commit-SHA>` from the runtime target of `Dockerfile.microsandbox`.
 
@@ -644,17 +656,6 @@ Select a commit whose `main` CI run successfully published the matching images a
 Open that run and read its `Published Omnigrex images` workflow summary, which records the commit SHA, `sha-<commit>` tags, and resolved `sha256` digests.
 
 The Pi download and Compose selection procedure is in [Pi operational deployment](#pi-operational-deployment).
-For the preparatory legacy OpenCode stack only, download these files into one empty host directory:
-
-```sh
-COMMIT=<full-commit-SHA>
-mkdir -p omnigrex-deploy && cd omnigrex-deploy
-curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/compose.yaml"
-curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/.env.example"
-cp .env.example .env
-install -m 0700 -d secrets
-```
-
 There is no GitHub Release for every merge; the commit-pinned raw URLs are the distribution mechanism.
 
 For Pi, pull the matching selected control-plane and golden-image tags and resolve their digests:
@@ -670,19 +671,6 @@ docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${COMMIT}" --format '{{inde
 The inspected values must match the workflow summary and are recorded as `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_RPC_V1_IMAGE` in the private `.env`.
 The native backend also needs [exact registry provisioning](#microsandbox-bundle) into its own cache; a host Docker pull alone is insufficient.
 Until a commit has both-backend publication and post-publication smoke evidence, source fixtures do not establish a deployable Pi release.
-
-For legacy OpenCode only, resolve the two matching images:
-
-```sh
-docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/orchestrator:sha-${COMMIT}"
-docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/opencode:sha-${COMMIT}"
-docker image inspect "ghcr.io/jozala/omnigrex/orchestrator:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
-docker image inspect "ghcr.io/jozala/omnigrex/opencode:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
-```
-
-The inspected `...@sha256:...` values must match the digests in the workflow summary.
-Record them in `.env` as `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_OPENCODE_ACP_V1_IMAGE`, keep `OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64`, and fill in the host-specific settings and file-backed secrets described below.
-The deployment bundle uses one OpenCode digest for the `opencode-image` validation service, `OMNIGREX_AGENT_IMAGE_REFERENCE`, and `OMNIGREX_OPENCODE_ACP_V1_IMAGE` so they cannot diverge.
 
 ## GitHub Apps
 
@@ -710,9 +698,8 @@ Subscribe to exactly these repository events:
 - Pull request review.
 - Repository.
 
-The Repository subscription delivers `repository.created` so newly created
-repositories are provisioned. The Developer App also receives the default
-`installation.created` and `installation_repositories.added` deliveries.
+The Repository subscription delivers `repository.created` so newly created repositories are provisioned.
+The Developer App also receives the default `installation.created` and `installation_repositories.added` deliveries.
 
 Enable the webhook and configure:
 
@@ -740,20 +727,16 @@ The Reviewer App must not reuse the Developer App identity or private key.
 
 ### Agent Participant Signatures
 
-GitHub attributes every comment to the GitHub App that published it, so
-comments from different Agent Profiles sharing one App look identical.
-Every new Agent Participant comment, Pull Request comment, native review
-body (including otherwise bodyless approvals), and inline review comment
-ends with a visible footer identifying its Agent Profile:
+GitHub attributes every comment to the GitHub App that published it, so comments from different Agent Profiles sharing one App look identical.
+Every new Agent Participant comment, Pull Request comment, native review body (including otherwise bodyless approvals), and inline review comment ends with a visible footer identifying its Agent Profile:
 
 ```text
 _By Omnigrex: `profile-name` [Role Display Name]_
 ```
 
-The profile name comes from the Agent Participant's validated Agent Turn
-identity and the display name from the configured Role catalog. The hidden
-idempotency marker follows the footer. Historical comments and Human
-Handoff diagnostics are never re-signed.
+The profile name comes from the Agent Participant's validated Agent Turn identity and the display name from the configured Role catalog.
+The hidden idempotency marker follows the footer.
+Historical comments and Human Handoff diagnostics are never re-signed.
 
 ### Keys And Installation
 
@@ -811,7 +794,6 @@ Only the selected entry is written to mode-0600 `/run/pi-agent/auth.json` in dis
 Keys are excluded from normal retained-state, database, image, and diagnostic paths.
 Repository code can deliberately read or copy supplied keys, including from a microVM; this is not credential mediation.
 Preflight checks configuration and capabilities without making a paid provider request.
-For the transitional OpenCode stack, keep its existing `type: api` bundle instead; do not share incompatible credential shapes across runtimes.
 
 ### Secret File Group
 
@@ -852,7 +834,7 @@ The supported fields are:
 | --- | --- |
 | `name` | Repository-local stable identity using lowercase letters, digits, hyphens, or underscores |
 | `role` | Role ID referenced by the active Workflow Definition, such as `DEVELOPER` or `REVIEWER` |
-| `runtime` | `pi-rpc/v1` for Pi; `opencode-acp/v1` remains transitional |
+| `runtime` | `pi-rpc/v1` |
 | `model` | Provider model in `provider/model` form |
 | `thinking` | Optional Pi level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; actual model support is verified |
 | `permissions` | Nonempty map of local permissions to `allow` or `deny` |
@@ -861,7 +843,6 @@ Pi local permission names are `read`, `edit`, `write`, `bash`, `grep`, `find`, `
 Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `write`.
 Pi rejects `steps`, `variant`, unavailable OpenCode tool names, and delegation permissions; there is no OpenCode-style step limiter.
-The transitional OpenCode schema retains `variant`, integer `steps` from 1 through 1000, and its original tool vocabulary until Step 17.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
 
 A Pi Developer Profile can use:
@@ -914,7 +895,6 @@ The common file and individual Role files are optional; an unset directory adds 
 A configured missing or unreadable directory, unexpected entry, unknown Role, non-text file, invalid UTF-8, NUL byte, or file exceeding 64 KiB fails startup and the operator-instruction preflight check.
 The common and applicable Role instructions must also fit a combined 64 KiB JSON-encoded budget, including escaped characters.
 Pi configuration travels over stdin rather than an environment entry; the Pi adapter validates its bounded configuration and verified effective model/thinking before prompt admission.
-The transitional OpenCode adapter additionally enforces its 120 KiB composed environment-configuration limit.
 Empty instruction files add no guidance.
 
 Create a Compose override alongside the deployment files, for example `compose.instructions.yaml`:
@@ -1028,7 +1008,7 @@ environment-paths:
 Set `OMNIGREX_AGENT_PATH_ENV_ALLOWLIST` to a comma-separated list of approved variable names in the deployment configuration, such as `TMPDIR,GOTMPDIR,GOCACHE,GOPATH`.
 The operator allowlist is shared across Roles; the repository may request only approved names and cannot supply path values.
 Omnigrex always rejects runtime-control and credential-related names such as `PI_*`, `OPENCODE_*`, `OMNIGREX_*`, `NODE_OPTIONS`, `HOME`, and `PATH` even if listed by the operator.
-Without the optional file, `TMPDIR` uses the Runtime Profile's bounded temporary path, `/tmp` for Pi and `/tmp/opencode` for transitional OpenCode.
+Without the optional file, `TMPDIR` uses the Runtime Profile's bounded `/tmp` path.
 Requested paths are created on the disk-backed mise volume under an isolated Assignment subpath, outside the repository workspace and Change Proposal tree.
 Turn-lifecycle scratch is removed after the Runtime Process stops; assignment-lifecycle caches remain across turns and are removed during Assignment collection.
 These directories have no per-Participant disk quota, like the workspace storage, so monitor available backing storage on the selected backend.
@@ -1039,7 +1019,6 @@ The monitor retains at most four active scans, each with at most 32 directory ha
 Collection, cache replacement, fatal errors, completion, and shutdown release retained handles.
 Unreadable or unsafe entries and depth or hardlink limits produce partial (truncated) measurements, which never clear a warning based on a below-threshold partial sum.
 Moving build output to disk does not increase the Execution Environment's memory limit or constrain compiler parallelism.
-This implementation changes the `opencode-acp/v1` Runtime Profile content hash; existing Agent Sessions bound to the earlier contract cannot continue unless the deployment resets their stored associations before upgrading.
 
 Agent Profiles are loaded from the latest default-branch commit before each Agent Turn.
 Directory listing and every Profile file are read from the same exact commit.
@@ -1080,11 +1059,9 @@ requirements:
 ```
 
 Replace the example digest with the resolved registry digest of a prebuilt image derived from the current Omnigrex golden image.
-Without this file, new Participants select the deployment golden image for their Agent Profile's runtime, Pi after cutover.
+Without this file, new Participants select the deployment Pi golden image.
 Each Participant retains its selected exact image, platform, and full versioned contract; later Participants can select newer images even in the same Assignment Generation.
 Retained Participants do not rebind when this file or deployment configuration changes.
-Pre-Step07 Participants continue inside their original images using a bootstrap staged from the configured deployment golden image into read-only-mounted Turn scratch.
-Keep a Step07-capable deployment golden image available for their platform as well as every retained Participant image; an unavailable bootstrap source fails rather than skipping repository tool setup.
 Keep their images available until Session collection, and include PostgreSQL's immutable contract records in the coordinated recovery set.
 
 Build Pi repository images outside Omnigrex using the [Debian-based Pi example Dockerfile](../agent/environments/pi-example/Dockerfile):
@@ -1101,7 +1078,6 @@ docker image inspect registry.example/team/development:qualified --format '{{ind
 Use real approved digests and package versions instead of the placeholders, then put the resulting untagged `registry.example/team/development@sha256:...` reference in the environment file.
 Preserve Node 24.14.1, Pi 1.0.4 and its locked package/resource inventory, the Omnigrex-owned runner/extensions/bootstrap, mise, Git/shell/search resources, and UID/GID 10001.
 The example installs an exact Debian package version; use a controlled package mirror/snapshot when reproducible rebuilding is required.
-For the transitional OpenCode golden image, the [Alpine example](../agent/environments/example/Dockerfile) still applies; its `apk` commands do not work on the Pi base.
 Place additional image-provided tools under `/usr/local/bin` or activate them explicitly through working-revision mise configuration.
 Image labels and ancestry do not replace executable/resource qualification.
 Omnigrex does not build repository images; provision the exact digest/platform into the selected backend before accepting work.
@@ -1126,14 +1102,11 @@ See the [implementation and qualification evidence](./plans/2026-10-08-repositor
 ### Agent Turn Memory
 
 Set `OMNIGREX_AGENT_TURN_MEMORY_MIB` in `.env` to a positive integer number of MiB per Agent Turn Execution Environment.
-The Pi bundle defaults to `1024` MiB (1 GiB); the legacy bundle defaults to `512`.
+The Pi bundles and developer Compose stack default to `1024` MiB (1 GiB).
 After changing `.env`, recreate the orchestrator with `docker compose up -d --force-recreate orchestrator` and run `doctor` for each repository.
 New Agent Turns and runtime diagnostic probes use the new limit; running environments are not resized.
 Changing this setting does not change the Runtime Profile binding or require a database reset.
 At the default concurrency of two, 1 GiB per Turn allows up to 2 GiB across Execution Environments, in addition to native VMM overhead and other host processes.
-For the historical OpenCode deployment only, the first memory-independent `opencode-acp/v1` contract changed its content hash once.
-Coordinate the agreed one-time database reset with active turns before that upgrade; it discards Omnigrex Workflow and session associations, including those for existing Issues and Pull Requests, while GitHub Issues, Pull Requests, and labels remain.
-Later memory-setting changes do not require another reset.
 
 ## HTTPS Ingress
 
@@ -1176,17 +1149,6 @@ This GitHub-side delivery check is required because `doctor` cannot prove that t
 ## Deploy
 
 For Pi, use the [selected backend bundle](#pi-operational-deployment), pre-provision exact images, validate Compose with `docker compose config --quiet`, and start with `docker compose up --no-build --wait`.
-For the transitional OpenCode deployment only, use the pinned `compose.yaml`, `.env`, and operator-provided `secrets/`, pre-pull its exact digest, validate Compose, and start without `--build`.
-Docker Compose loads `.env` automatically, but the shell does not, so source it first for the explicit pre-pull:
-
-```sh
-set -a
-. ./.env
-set +a
-docker pull --platform=linux/amd64 "$OMNIGREX_OPENCODE_ACP_V1_IMAGE"
-docker compose config --quiet
-docker compose up --wait
-```
 
 Verify local health and dependency readiness:
 
@@ -1220,23 +1182,14 @@ When the Developer App gains access to a repository, Omnigrex queues provisionin
 Provisioning is asynchronous; wait until the managed labels, including `omnigrex:run`, appear before adding the trigger label to an Issue.
 
 - A new Developer App installation provisions every accessible repository.
-  Accessible repositories are enumerated through a paginated
-  installation-token request, not the webhook repository list.
-  Enumeration is bounded at 100 pages of 100 repositories; an installation
-  with more than 10,000 accessible repositories fails observably for
-  operator follow-up instead of provisioning partially.
-- Explicitly added repositories are provisioned from the
-  `installation_repositories.added` delivery.
-- Repositories created under all-repository access are provisioned from the
-  `repository.created` delivery.
+  Accessible repositories are enumerated through a paginated installation-token request, not the webhook repository list.
+  Enumeration is bounded at 100 pages of 100 repositories; an installation with more than 10,000 accessible repositories fails observably for operator follow-up instead of provisioning partially.
+- Explicitly added repositories are provisioned from the `installation_repositories.added` delivery.
+- Repositories created under all-repository access are provisioned from the `repository.created` delivery.
 
 Onboarding deliveries use a separate processor, so installation enumeration does not block Issue and Pull Request webhook processing.
-Provisioning creates missing label names only, preserves the color and
-description of existing labels, leaves unrelated labels untouched, and never
-applies a state label to an Issue or Pull Request or starts a Workflow.
-Duplicate or overlapping deliveries are harmless, one repository's failure
-does not block other repositories, and terminal failures are recorded as
-observable provisioning and delivery failures for operator follow-up.
+Provisioning creates missing label names only, preserves the color and description of existing labels, leaves unrelated labels untouched, and never applies a state label to an Issue or Pull Request or starts a Workflow.
+Duplicate or overlapping deliveries are harmless, one repository's failure does not block other repositories, and terminal failures are recorded as observable provisioning and delivery failures for operator follow-up.
 
 Inspect webhook deliveries and their repository jobs together when provisioning fails.
 A delivery in state `FAILED` with a `last_error` may have queued no jobs because its payload or installation enumeration failed, but valid entries in a mixed delivery or earlier committed batches can leave jobs even when a later attempt exhausts the delivery.
@@ -1328,7 +1281,7 @@ Restore the matching state before resuming work.
 ## Backup
 
 PostgreSQL and the runtime-state volume form one coordinated recovery set, plus the Microsandbox protected journal when that backend is selected.
-PostgreSQL is the authoritative execution ledger, including canonical Runtime Profile contracts and immutable backend/image ownership; the runtime-state volume contains Pi Session data needed for Session Continuation and History Replay (or transitional OpenCode state before reset).
+PostgreSQL is the authoritative execution ledger, including canonical Runtime Profile contracts and immutable backend/image ownership; the runtime-state volume contains Pi Session data needed for Session Continuation and History Replay.
 The same volume now contains sealed Workspace Captures under `workspace-captures`, mounted only into the orchestrator at `/var/lib/omnigrex/runtime-state/workspace-captures`.
 These captures preserve original-Turn publication and terminal evidence through deferred corroboration and human revalidation, even after its Execution Environment and live workspace have been removed.
 They are protected retained data, collected with their Agent Participant rather than with Turn scratch or the workspace cache.
@@ -1438,7 +1391,7 @@ Run preflight before reopening ingress and human-trigger admission.
 
 ### Supplemental Session Exports
 
-Use `omnigrex state export --participant UUID` for a checksummed, ownership-bound archive of one Agent Participant's retained Session data, including preparatory Pi Participants.
+Use `omnigrex state export --participant UUID` for a checksummed, ownership-bound archive of one Agent Participant's retained Pi Session data.
 Use the exact Participant UUID from the operational ledger, not a Role, Agent Profile name, or runtime Session ID.
 This export is supplemental: it does not replace the coordinated recovery set above because it excludes PostgreSQL and protected Workspace Captures.
 Stop the orchestrator and confirm managed Runtime Processes are stopped as described above before running it.
@@ -1580,7 +1533,6 @@ Create a coordinated backup before every application, PostgreSQL, or Runtime Pro
 
 An orchestrator-only upgrade keeps the same configured agent digest/platform, protected historical images, and compatibility artifact.
 Record the current commit and image references, download the target commit's common Pi bundle, selected backend overlay, and environment example, keep `OMNIGREX_PI_RPC_V1_IMAGE`, its platform, namespaces, and compatibility file unchanged, and update only the selected control-plane digest before validating Compose and deploying.
-For the preparatory OpenCode stack use its legacy files and `OMNIGREX_OPENCODE_ACP_V1_*` binding instead.
 
 ```sh
 docker compose config --quiet
@@ -1602,30 +1554,10 @@ A source-to-candidate qualification does not migrate those sessions and does not
 
 Qualify the exact old-image to new-image upgrade in CI or another source checkout, not on the clone-free deployment host.
 For Pi use the backend-scoped [Pi upgrade qualification procedure](#pi-upgrade-and-state-recovery-qualification); its results do not rebind protected Participants, and only new Participants select the current image.
-The following OpenCode commands are transitional and do not qualify Pi images.
 Packaging a host-side qualification tool is out of scope.
-Pull both exact source and candidate image digests there, choose an absolute output path whose file does not yet exist, and run:
-
-```sh
-SOURCE='ghcr.io/jozala/omnigrex/opencode@sha256:SOURCE_DIGEST'
-TARGET='ghcr.io/jozala/omnigrex/opencode@sha256:TARGET_DIGEST'
-ARTIFACT="$PWD/runtime-profile-compatibility-results.json"
-docker pull --platform=linux/amd64 "$SOURCE"
-docker pull --platform=linux/amd64 "$TARGET"
-OMNIGREX_PREVIOUS_OPENCODE_IMAGE="$SOURCE" \
-OMNIGREX_PREVIOUS_OPENCODE_VERSION=1.18.19 \
-OMNIGREX_OPENCODE_IMAGE="$TARGET" \
-OMNIGREX_OPENCODE_VERSION=1.18.29 \
-OMNIGREX_OPENCODE_ARCH=amd64 \
-OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE="$ARTIFACT" \
-mise run release-check-runtime-upgrade
-```
-
-Use the actual source and target versions.
-The qualification creates the artifact with mode `0600`, and it refuses to overwrite an existing file.
 
 Transfer the resulting JSON file to the deployment host (for example with `scp`), place it at an absolute host path outside the downloaded deployment directory, and set `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` to that path.
-Set `OMNIGREX_OPENCODE_ACP_V1_IMAGE` to the candidate digest, pull that digest into the Docker Engine before startup, validate Compose, deploy, and run `doctor` for every repository.
+Set `OMNIGREX_PI_RPC_V1_IMAGE` to the candidate digest and its matching platform, provision that digest into the selected backend before startup, validate Compose, deploy, and run `doctor` for every repository.
 Keep source and candidate digests available for every active and retained session.
 
 An in-place Runtime Profile rollback is unsupported after Agent Participants using the candidate Runtime Profile exist unless the reverse direction has also been qualified.
@@ -1651,7 +1583,8 @@ If an earlier Developer Turn published a branch or opened a Pull Request but did
 The later Turn starts at the verified published head and must explicitly request review; publication alone never schedules Reviewer.
 An unproven branch, changed head, different Participant, or publication that cannot be matched to its recorded proposed commit (or, for older publications, its operation marker) causes a publication-conflict Human Handoff rather than automatic adoption.
 If Git or GitHub cannot be reached during verification, execution follows bounded infrastructure retries instead of claiming a conflict.
-Developer publication preserves committed Git history: an uncommitted workspace is rejected, while ignored local build artifacts are not published. A validated proposed commit is recorded before pushing; if an interrupted push cannot be corroborated on the branch, recovery does not reconstruct it from a later workspace and may require a Human Handoff.
+Developer publication preserves committed Git history: an uncommitted workspace is rejected, while ignored local build artifacts are not published.
+A validated proposed commit is recorded before pushing; if an interrupted push cannot be corroborated on the branch, recovery does not reconstruct it from a later workspace and may require a Human Handoff.
 
 For an apparently stuck deployment, inspect safe operational metadata:
 
@@ -1686,7 +1619,6 @@ Sending the final generic tool error does not add a duplicate rejection entry.
 Keep diagnostic call IDs and GitHub request IDs as log fields, not Loki stream labels or metric labels.
 
 `tool_invocations.last_error` and agent-facing read messages remain generic; these diagnostics never include arguments, GitHub response bodies, review text, or raw dependency errors.
-In the transitional OpenCode path, `ACP MCP tool failed` is a runtime summary with a fixed `failure_class`, or `unclassified` for an unknown failure, rather than the authoritative backend cause.
 Runtime tool-call IDs and gateway diagnostic IDs are separate identities with no guaranteed direct mapping.
 Runtime-local failures that never reach the gateway and authentication failures without trusted live registration scope remain blind spots.
 Stale-authorization logs cover checks after successful authentication, not all expired or removed registrations.

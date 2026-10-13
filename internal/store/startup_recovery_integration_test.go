@@ -35,7 +35,7 @@ func TestStartupRecoveryClassifiesAndRecoversExactRuntimeIdentity(t *testing.T) 
 	identity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	assertRuntimeDisposition(t, databases[0], ctx, identity, store.AgentTurnRuntimeActive)
 
@@ -494,7 +494,7 @@ func runtimeIdentityForFixture(fixture agentFixture, turn store.AgentTurn) store
 	return store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 }
 
@@ -597,7 +597,7 @@ func TestPeriodicExpiredTurnMonitorLeavesLiveOwnerThenRecoversAfterLeaseExpiry(t
 	identity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	monitor, err := startup.NewMonitor(databases[0], startup.MonitorOptions{
 		PollInterval: 10 * time.Millisecond, MaxRecoveriesPerPoll: 10,

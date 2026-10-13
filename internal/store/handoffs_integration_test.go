@@ -10,7 +10,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -61,7 +61,7 @@ func TestHandoffPublicationRecoveryAndReadScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	outcomeRequest := agentturn.OutcomeReconciliation{
-		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 		RepositoryCredential: "developer-token", Capture: capture,
 	}
 	before, err := outcomes.Reconcile(ctx, outcomeRequest)

@@ -379,7 +379,7 @@ func runtimeIdentity(number int) store.AgentTurnRuntimeIdentity {
 		AgentSessionID:        fmt.Sprintf("20000000-0000-4000-8000-%012d", number),
 		AgentTurnID:           fmt.Sprintf("30000000-0000-4000-8000-%012d", number),
 		ExecutionEpoch:        int64(number + 1),
-		RuntimeProfileName:    "opencode-acp",
+		RuntimeProfileName:    "pi-rpc",
 		RuntimeProfileVersion: "v1",
 	}
 }

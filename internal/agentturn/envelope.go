@@ -8,7 +8,6 @@ import (
 	"unicode"
 
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -64,13 +63,13 @@ type eventEnvelope struct {
 }
 
 // BuildEventEnvelope projects a Turn using the deployment's Workflow Definition and Role policies.
-func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policies role.PolicyCatalog) ([]acp.ContentBlock, error) {
+func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policies role.PolicyCatalog) (string, error) {
 	policy, ok := policies.Lookup(execution.Assignment.Role)
 	if !ok {
-		return nil, fmt.Errorf("%w: Role policy", ErrInvalidEventEnvelope)
+		return "", fmt.Errorf("%w: Role policy", ErrInvalidEventEnvelope)
 	}
 	if err := validateEventEnvelopeContext(execution, currentHeadSHA, definition, policy); err != nil {
-		return nil, err
+		return "", err
 	}
 
 	expectedOutcomes := definition.ExpectedOutcomes(execution.Turn.Stage)
@@ -108,15 +107,15 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	if prior := execution.PriorReviewRequiresHuman; prior != nil {
 		envelope.PriorUnconfirmableReview = &priorUnconfirmableReviewEvent{
 			SourceInvocationID: prior.SourceInvocationID, ExpectedHeadSHA: prior.ExpectedHeadSHA,
-			Instruction: "A native GitHub review already succeeded at this head, but its earlier ACP ending does not authorize confirmation. Do not submit another review or claim the old one as a successful handoff. Call report_blocked to request human reconciliation.",
+			Instruction: "A native GitHub review already succeeded at this head, but its earlier Agent Turn ending does not authorize confirmation. Do not submit another review or claim the old one as a successful handoff. Call report_blocked to request human reconciliation.",
 		}
 	}
 
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
-		return nil, fmt.Errorf("encode Agent Turn event envelope: %w", err)
+		return "", fmt.Errorf("encode Agent Turn event envelope: %w", err)
 	}
-	return []acp.ContentBlock{acp.TextContent(string(encoded))}, nil
+	return string(encoded), nil
 }
 
 func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policy role.Policy) error {

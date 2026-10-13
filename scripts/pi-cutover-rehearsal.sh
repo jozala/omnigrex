@@ -1,45 +1,84 @@
 # Sourced only by the isolated deployment smoke, never by an operator deployment.
 # Every destructive operation uses the smoke's generated project and volume names.
-prepare_legacy_images() {
-  legacy_orchestrator="${OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE:-}"
-  legacy_agent="${OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE:-}"
-  if [ -z "$legacy_orchestrator" ] && [ -z "$legacy_agent" ]; then
-    docker build --quiet --platform "linux/$arch" --tag omnigrex/orchestrator:cutover-source .
-    docker build --quiet --platform "linux/$arch" --file agent/opencode/Dockerfile --tag omnigrex/opencode:cutover-source .
-    ensure_fixture_registry
-    for name in orchestrator opencode; do
-      docker tag "omnigrex/$name:cutover-source" "127.0.0.1:$registry_port/omnigrex/$name:cutover-source"
-      docker push "127.0.0.1:$registry_port/omnigrex/$name:cutover-source" >/dev/null
-    done
-    legacy_orchestrator="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/orchestrator:cutover-source" --format '{{index .RepoDigests 0}}')"
-    legacy_agent="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/opencode:cutover-source" --format '{{index .RepoDigests 0}}')"
-  elif [ -z "$legacy_orchestrator" ] || [ -z "$legacy_agent" ]; then
-    printf '%s\n' 'Supply both cutover source registry digests or neither.' >&2
+validate_legacy_source() {
+  : "${OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE:?supply the old release image-only Compose bundle file}"
+  : "${OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE:?supply the exact published old orchestrator digest}"
+  : "${OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE:?supply the exact published old agent digest}"
+  legacy_bundle="$OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE"
+  case "$legacy_bundle" in /*) ;; *) legacy_bundle="$source_root/$legacy_bundle" ;; esac
+  if [ ! -f "$legacy_bundle" ] || [ ! -r "$legacy_bundle" ]; then
+    printf '%s\n' 'Cutover source Compose bundle must be an available readable file.' >&2
     exit 2
-  else
-    case "$legacy_orchestrator,$legacy_agent" in *@sha256:*,*@sha256:*) ;; *) exit 2 ;; esac
-    docker pull --platform "linux/$arch" "$legacy_orchestrator"
-    docker pull --platform "linux/$arch" "$legacy_agent"
   fi
+  legacy_orchestrator="$OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE"
+  legacy_agent="$OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE"
+  for image in "$legacy_orchestrator" "$legacy_agent"; do
+    reference="${image%@sha256:*}"
+    digest="${image##*@sha256:}"
+    case "$reference" in */*) ;; *) exit 2 ;; esac
+    case "$reference" in *@*) exit 2 ;; esac
+    case "${reference##*/}" in *:*) exit 2 ;; esac
+    case "$digest" in *[!0-9a-f]*|'') exit 2 ;; esac
+    test "${#digest}" = 64 || exit 2
+  done
+}
+
+prepare_legacy_images() {
+  docker pull --platform "linux/$arch" "$legacy_orchestrator"
+  docker pull --platform "linux/$arch" "$legacy_agent"
 }
 
 rehearse_legacy_reset() {
   pi_compose="$COMPOSE_FILE"
-  cp "$source_root/deploy/compose.yaml" compose.legacy.yaml
+  cp "$legacy_bundle" compose.legacy.yaml
   cat >> .env <<EOF
 OMNIGREX_OPENCODE_ACP_V1_IMAGE=$legacy_agent
 OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/$arch
 EOF
   cat > legacy.yaml <<EOF
 services:
+  opencode-image:
+    image: $legacy_agent
+    platform: linux/$arch
   orchestrator:
     image: $legacy_orchestrator
     environment:
+      OMNIGREX_AGENT_IMAGE_REFERENCE: $legacy_agent
+      OMNIGREX_OPENCODE_ACP_V1_IMAGE: $legacy_agent
+      OMNIGREX_OPENCODE_ACP_V1_PLATFORM: linux/$arch
       OMNIGREX_PI_RPC_V1_IMAGE: ""
       OMNIGREX_PI_RPC_V1_PLATFORM: ""
 EOF
   printf '%s\n' '{"openai":{"type":"api","key":"cutover-fixture-only"}}' > secrets/provider-credentials.json
   COMPOSE_FILE=compose.legacy.yaml:smoke.yaml:legacy.yaml
+  # Reject an incompatible historical bundle before starting or disposing it.
+  # Every resource must be covered by the generated fixture overrides.
+  compose config --format json > legacy-config.json
+  jq -e --arg namespace "$namespace" --arg directory "$directory" \
+    --arg orchestrator "$legacy_orchestrator" --arg agent "$legacy_agent" '
+    (.services | keys == ["opencode-image", "orchestrator", "postgres"]) and
+    (.services | all(.[]; has("build") | not)) and
+    .services.orchestrator.image == $orchestrator and
+    .services["opencode-image"].image == $agent and
+    .services.orchestrator.environment.OMNIGREX_OPENCODE_ACP_V1_IMAGE == $agent and
+    (.networks | keys == ["agent", "backend"]) and
+    (.networks | all(to_entries[]; (.value.external // false) == false and .value.name == ($namespace + "-" + .key))) and
+    (.volumes | keys == ["mise-data", "postgres-data", "runtime-state", "workspaces"]) and
+    .volumes["postgres-data"].name == ($namespace + "-postgres") and
+    .volumes["mise-data"].name == ($namespace + "-mise") and
+    .volumes["runtime-state"].name == ($namespace + "-runtime-state") and
+    .volumes.workspaces.name == ($namespace + "-workspaces") and
+    (.volumes | all(.[];
+      (.external // false) == false and
+      (.driver // "local") == "local" and
+      ((.driver_opts // {}) | type == "object" and length == 0))) and
+    (.secrets | all(.[]; (.external // false) == false and (.file | startswith($directory + "/secrets/")))) and
+    (.services | all(.[]; all(.volumes[]?;
+      .source as $source |
+      (.type == "volume" and (["mise-data", "postgres-data", "runtime-state", "workspaces"] | index($source)) != null) or
+      (.type == "bind" and (.source == "/var/run/docker.sock" or .source == "/dev/null")))))
+  ' legacy-config.json > /dev/null
+  cleanup_compose_file="$COMPOSE_FILE"
   compose up --no-build --wait --wait-timeout 180
   # Seed unmistakable old operational data and storage in the isolated stack.
   # This is disposal evidence, not an OpenCode conversation migration fixture.
@@ -66,6 +105,7 @@ EOF
       exit 1
     fi
   done
+  cleanup_compose_file=
   COMPOSE_FILE="$pi_compose"
   printf '%s\n' '{"openai":{"type":"api_key","key":"smoke-fixture-only"}}' > secrets/provider-credentials.json
   printf 'PASS isolated OpenCode backup and explicit reset (%s)\n' "$backend"

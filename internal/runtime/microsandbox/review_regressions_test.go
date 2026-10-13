@@ -16,12 +16,12 @@ import (
 func TestCreateRejectsChangedEphemeralInputsWithinEngine(t *testing.T) {
 	backend, driver, ledger := testBackend(t)
 	request := testRequest()
-	request.Environment = []string{`OPENCODE_AUTH_CONTENT={"key":"original"}`}
+	request.Environment = []string{`FIXTURE_INPUT=original`}
 	engine, err := backend.New(request, ledger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Environment[0] = `OPENCODE_AUTH_CONTENT={"key":"replacement"}`
+	request.Environment[0] = `FIXTURE_INPUT=replacement`
 	if _, err := engine.Create(context.Background(), request, io.Discard); !errors.Is(err, execution.ErrConflict) {
 		t.Fatalf("changed credentials = %v", err)
 	}
@@ -33,7 +33,7 @@ func TestCreateRejectsChangedEphemeralInputsWithinEngine(t *testing.T) {
 func TestPreparedExecutionRejectsDifferentRegistrationOnRetry(t *testing.T) {
 	backend, _, ledger := testBackend(t)
 	request := testRequest()
-	request.Environment = []string{`OPENCODE_CONFIG_CONTENT={"mcp":{"gateway":{"headers":{"Authorization":"Bearer registration-B"}}}}`}
+	request.Environment = []string{`FIXTURE_INPUT=registration-B`}
 	first, err := backend.New(request, ledger)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestPreparedExecutionRejectsDifferentRegistrationOnRetry(t *testing.T) {
 	if _, err := first.Create(context.Background(), request, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	request.Environment[0] = `OPENCODE_CONFIG_CONTENT={"mcp":{"gateway":{"headers":{"Authorization":"Bearer registration-C"}}}}`
+	request.Environment[0] = `FIXTURE_INPUT=registration-C`
 	retry, err := backend.New(request, ledger)
 	if err == nil {
 		_, err = retry.Create(context.Background(), request, io.Discard)
@@ -54,7 +54,7 @@ func TestPreparedExecutionRejectsDifferentRegistrationOnRetry(t *testing.T) {
 func TestInputOwnershipSurvivesJournalWithoutPersistingSecrets(t *testing.T) {
 	backend, _, ledger := testBackend(t)
 	request := testRequest()
-	request.Environment = []string{`OPENCODE_AUTH_CONTENT={"key":"provider-owned-input"}`, `OPENCODE_CONFIG_CONTENT={"mcp":{"gateway":{"headers":{"Authorization":"Bearer exact-registration"}}}}`}
+	request.Environment = []string{`FIXTURE_INPUT=provider-owned-input`, `FIXTURE_REGISTRATION=exact-registration`}
 	engine, err := backend.New(request, ledger)
 	if err != nil {
 		t.Fatal(err)

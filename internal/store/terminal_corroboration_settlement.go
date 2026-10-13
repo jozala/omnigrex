@@ -142,6 +142,9 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND verification_job_id = $3
 	if sourceID == "" || originalOwnerID == "" || len(originalOwnerHash) != sha256.Size {
 		return AgentTurnSettlement{}, ErrJobLeaseLost
 	}
+	if handoffReason == "" && !validCorroborationPrompt(promptOutcome, promptError) {
+		return AgentTurnSettlement{}, ErrTerminalCorroborationConflict
+	}
 	if handoffReason == "" && promptError == "" {
 		checkpointOutcome, err := canonicalJSON(promptOutcome)
 		if err != nil || !bytes.Equal(canonical.TerminalOutcome, checkpointOutcome) {
@@ -149,8 +152,8 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND verification_job_id = $3
 		}
 	} else if handoffReason == "" {
 		if len(canonical.TerminalOutcome) != 0 ||
-			promptError == "FAILURE" && !strings.HasPrefix(canonical.Diagnostic, "ACP prompt failed") ||
-			promptError == "DEADLINE" && !strings.HasPrefix(canonical.Diagnostic, "ACP prompt deadline exceeded") {
+			promptError == "FAILURE" && !strings.HasPrefix(canonical.Diagnostic, "Agent prompt failed") ||
+			promptError == "DEADLINE" && !strings.HasPrefix(canonical.Diagnostic, "Agent prompt deadline exceeded") {
 			return AgentTurnSettlement{}, ErrTerminalCorroborationConflict
 		}
 	}
@@ -372,17 +375,28 @@ SELECT tool_name, operation_id, request, result, COALESCE(external_service, ''),
        COALESCE(external_resource_id, ''), COALESCE(expected_sha, '')
 FROM tool_invocations
 WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
-  AND ((agent_turn_id = $2 AND execution_epoch = $3)
+  AND EXISTS (
+      SELECT 1 FROM agent_turns AS current_turn
+      WHERE current_turn.id = $2 AND current_turn.execution_epoch = $3
+        AND (current_turn.outcome IS NULL OR (current_turn.outcome->'admitted' = 'true'::jsonb
+             AND current_turn.outcome->>'status' = 'completed'
+             AND COALESCE(current_turn.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+  )
+   AND ((agent_turn_id = $2 AND execution_epoch = $3)
        OR EXISTS (
            SELECT 1 FROM tool_invocation_replays AS replay
            JOIN agent_turns AS original_turn ON original_turn.id = replay.source_agent_turn_id
            WHERE replay.agent_turn_id = $2 AND replay.execution_epoch = $3
              AND replay.source_tool_invocation_id = tool_invocations.id
-             AND replay.source_agent_turn_id = tool_invocations.agent_turn_id
-             AND (original_turn.outcome IS NULL OR original_turn.outcome->>'stop_reason' = 'end_turn')
-             AND (original_turn.last_error IS NULL OR
-                 (original_turn.last_error NOT LIKE 'ACP prompt was cancelled%'
-                  AND original_turn.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
+              AND replay.source_agent_turn_id = tool_invocations.agent_turn_id
+              AND (original_turn.prompt_recorded_at IS NULL OR original_turn.prompt_stop_reason = 'completed'
+                   OR original_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+              AND (original_turn.outcome IS NULL OR (original_turn.outcome->'admitted' = 'true'::jsonb
+                   AND original_turn.outcome->>'status' = 'completed'
+                   AND COALESCE(original_turn.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+              AND (original_turn.last_error IS NULL OR
+                  (original_turn.last_error NOT LIKE 'Agent prompt was cancelled%'
+                   AND original_turn.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))
        ))`, sourceID, job.AgentTurnID, job.ExecutionEpoch).Scan(
 		&tool, &operation, &request, &result, &service, &resource, &expectedSHA)
 	if err != nil {
@@ -430,11 +444,13 @@ JOIN agent_turns AS current_turn ON current_turn.id = $2
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source_turn.workflow_id = current_turn.workflow_id
   AND source_turn.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
-  AND (source_turn.prompt_recorded_at IS NULL OR source_turn.prompt_stop_reason = 'end_turn'
-       OR source_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
-  AND (source_turn.outcome IS NULL OR source_turn.outcome->>'stop_reason' = 'end_turn')
-  AND (source_turn.last_error IS NULL OR (source_turn.last_error NOT LIKE 'ACP prompt was cancelled%'
-       AND source_turn.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))`,
+   AND (source_turn.prompt_recorded_at IS NULL OR source_turn.prompt_stop_reason = 'completed'
+        OR source_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (source_turn.outcome IS NULL OR (source_turn.outcome->'admitted' = 'true'::jsonb
+        AND source_turn.outcome->>'status' = 'completed'
+        AND COALESCE(source_turn.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+   AND (source_turn.last_error IS NULL OR (source_turn.last_error NOT LIKE 'Agent prompt was cancelled%'
+        AND source_turn.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))`,
 			confirmed.SourceInvocationID, job.AgentTurnID).Scan(
 			&sourceTurnID, &sourceSessionID, &sourceAttemptID, &sourceLineage, &currentLineage,
 			&priorTool, &priorOperation, &priorRequest, &priorResult,

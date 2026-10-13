@@ -8,12 +8,15 @@ case "$rehearsal" in 0|1) ;; *) exit 2 ;; esac
 source_root="$PWD"
 if [ "$rehearsal" = 1 ]; then
   . "$source_root/scripts/pi-cutover-rehearsal.sh"
+  validate_legacy_source
 fi
 namespace="pi-deploy-$(date +%s)-$$"
 directory="$(mktemp -d)"
 registry="$namespace-registry"
 registry_started=0
 COMPOSE_FILE="compose.pi.yaml:compose.pi-$backend.yaml:smoke.yaml"
+# Cleanup is authorized for an exact isolated file set, not ambient selection.
+cleanup_compose_file=
 # Deployment smoke must never inherit an operator's App IDs, secret paths,
 # image selection, or stable Compose project from the invoking shell.
 compose() {
@@ -25,7 +28,7 @@ compose() {
 ensure_fixture_registry() {
   if [ "$registry_started" = 1 ]; then return; fi
   # Bind in the daemon's network namespace, including Docker Desktop's VM.
-  # Both source and target fixture publication share this one registry.
+  # Source-built Pi targets publish through this disposable registry.
   registry_port="$((30000 + $$ % 20000))"
   docker run --detach --rm --name "$registry" --network host \
     --env "REGISTRY_HTTP_ADDR=127.0.0.1:$registry_port" registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
@@ -37,16 +40,16 @@ ensure_fixture_registry() {
 }
 cleanup() {
   status=$?
-  if [ -f "$directory/.env" ]; then
+  if [ -n "$cleanup_compose_file" ] && [ -f "$directory/.env" ]; then
     if [ "$status" -ne 0 ]; then
-      (cd "$directory" && compose logs --no-color orchestrator) >&2 || true
+      (cd "$directory" && COMPOSE_FILE="$cleanup_compose_file" compose logs --no-color orchestrator) >&2 || true
     fi
-    if ! (cd "$directory" && compose down --volumes --remove-orphans --timeout 10) >/dev/null 2>&1; then
+    if ! (cd "$directory" && COMPOSE_FILE="$cleanup_compose_file" compose down --volumes --remove-orphans --timeout 10) >/dev/null 2>&1; then
       printf 'Failed to remove disposable deployment resources: %s\n' "$namespace" >&2
       status=1
     fi
   fi
-  docker rm -f "$registry" >/dev/null 2>&1 || true
+  docker rm -f -v "$registry" >/dev/null 2>&1 || true
   rm -rf "$directory"
   exit "$status"
 }
@@ -136,6 +139,8 @@ services:
       OMNIGREX_MICROSANDBOX_NAMESPACE: $namespace
 EOF
 cd "$directory"
+# Compose canonicalizes secret paths, including macOS's /var -> /private/var.
+directory="$(pwd -P)"
 if [ "$rehearsal" = 1 ]; then
   rehearse_legacy_reset
 fi
@@ -146,6 +151,7 @@ volumes:
     name: $namespace-msb
 EOF
   COMPOSE_FILE="$COMPOSE_FILE:native-smoke.yaml"
+  cleanup_compose_file="$COMPOSE_FILE"
   if [ "$pi" = omnigrex/pi:1.0.4 ]; then
     # Docker archive import synthesizes a new manifest. Only source fixtures
     # may bind that imported digest; it is not registry-image release evidence.
@@ -168,6 +174,7 @@ EOF
     compose run --rm --no-deps -T --entrypoint /usr/local/bin/msb orchestrator image pull "$pi"
   fi
 fi
+cleanup_compose_file="$COMPOSE_FILE"
 compose up --no-build --wait --wait-timeout 180
 port="$(compose port orchestrator 8080 | cut -d : -f 2)"
 curl -fsS "http://127.0.0.1:$port/healthz"
@@ -185,6 +192,71 @@ else
   grep -q '^PASS microsandbox-kvm-resources$' doctor.txt
 fi
 compose exec -T orchestrator /bin/sh -ec 'files="$(find /var/lib/omnigrex/runtime-state -type f -print)"; test -z "$files"'
+# Preserve the full-stack regression gates in this disposable Pi topology.
+psql() {
+  compose exec -T postgres psql --no-psqlrc --quiet --tuples-only --no-align \
+    --set ON_ERROR_STOP=1 --username omnigrex --dbname omnigrex --command "$1"
+}
+await_sql() {
+  attempt=0
+  until [ "$(psql "$1")" = "$2" ]; do
+    attempt=$((attempt+1)); test "$attempt" -lt 60; sleep 1
+  done
+}
+send_webhook() {
+  signature="$(printf '%s' "$4" | openssl dgst -sha256 -hmac "$3")"
+  curl -sS -o /dev/null -w '%{http_code}' \
+    -H 'Content-Type: application/json' -H "X-GitHub-Delivery: $1" \
+    -H "X-GitHub-Event: $2" -H "X-Hub-Signature-256: sha256=${signature##* }" \
+    --data-binary "$4" "http://127.0.0.1:$port/webhooks/github"
+}
+webhook_secret="$(cat secrets/github-webhook-secret)"
+delivery=123e4567-e89b-42d3-a456-426614174000
+body='{"action":"closed","repository":{"id":9123,"name":"fixture","owner":{"login":"fixture"}},"issue":{"id":456,"number":12}}'
+test "$(send_webhook "$delivery" issues "$webhook_secret" "$body")" = 202
+test "$(send_webhook "$delivery" issues "$webhook_secret" "$body")" = 202
+await_sql "SELECT delivery.status || ':' || count(event.delivery_id)::text FROM webhook_deliveries AS delivery LEFT JOIN normalized_events AS event ON event.delivery_id = delivery.delivery_id WHERE delivery.delivery_id = '$delivery' GROUP BY delivery.status" PROCESSED:1
+ignored=323e4567-e89b-42d3-a456-426614174000
+test "$(send_webhook "$ignored" ping "$webhook_secret" 'not JSON')" = 202
+await_sql "SELECT status FROM webhook_deliveries WHERE delivery_id = '$ignored'" IGNORED
+test "$(psql "SELECT count(*) FROM normalized_events WHERE delivery_id = '$ignored'")" = 0
+invalid=223e4567-e89b-42d3-a456-426614174000
+test "$(send_webhook "$invalid" issues wrong-secret "$body")" = 401
+test "$(psql "SELECT count(*) FROM webhook_deliveries WHERE delivery_id = '$invalid'")" = 0
+unset webhook_secret
+compose exec -T orchestrator /bin/sh -ec '
+  for root in runtime-state workspaces mise; do
+    printf persistent > "/var/lib/omnigrex/$root/.pi-deployment-marker"
+  done'
+compose up -d --force-recreate --no-deps --wait --wait-timeout 180 orchestrator
+port="$(compose port orchestrator 8080 | cut -d : -f 2)"
+compose exec -T orchestrator /bin/sh -ec '
+  for root in runtime-state workspaces mise; do
+    test "$(cat "/var/lib/omnigrex/$root/.pi-deployment-marker")" = persistent
+    rm "/var/lib/omnigrex/$root/.pi-deployment-marker"
+  done'
+psql "CREATE TABLE deployment_marker (value text); INSERT INTO deployment_marker VALUES ('persistent-ledger')"
+compose up -d --force-recreate --no-deps --wait --wait-timeout 180 postgres
+test "$(psql 'SELECT value FROM deployment_marker')" = persistent-ledger
+test "$(psql "SELECT status FROM webhook_deliveries WHERE delivery_id = '$delivery'")" = PROCESSED
+postgres_id="$(compose ps --quiet postgres)"
+postgres_ip="$(docker inspect --format "{{(index .NetworkSettings.Networks \"$namespace-backend\").IPAddress}}" "$postgres_id")"
+test -n "$postgres_ip"
+docker run --rm --network "$namespace-agent" --user 10001:10001 --read-only \
+  --cap-drop ALL --security-opt no-new-privileges --entrypoint node "$pi" -e '
+    const socket = require("net").connect(5432, process.argv[1]);
+    socket.on("connect", () => process.exit(1));
+    socket.on("error", () => process.exit(0));
+    socket.setTimeout(2000, () => { socket.destroy(); process.exit(0); });
+  ' "$postgres_ip"
+compose stop --timeout 10 postgres
+test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/healthz")" = 200
+test "$(curl --max-time 70 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/readyz")" = 503
+test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/healthz")" = 200
+compose start postgres
+compose up --no-build --wait --wait-timeout 180
+curl -fsS "http://127.0.0.1:$port/readyz"
+printf 'PASS durable authenticated webhooks, persistent storage, network isolation and readiness (%s)\n' "$backend"
 if [ "$rehearsal" = 1 ]; then
   rehearse_pi_recovery
 fi

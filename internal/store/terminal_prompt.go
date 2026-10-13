@@ -8,13 +8,13 @@ import (
 )
 
 // CloseMutationAdmissionWithPromptEvidence atomically fences new MCP mutations
-// and records only the eligible or ineligible ACP ending before Runtime Process
+// and records only the eligible or ineligible agent outcome before Runtime Process
 // cleanup. A repeated identical call is safe after an ambiguous commit.
 func (store *Store) CloseMutationAdmissionWithPromptEvidence(ctx context.Context, lease AgentTurnLease, stopReason, errorClass string) error {
 	if !validAgentTurnPromptEvidence(stopReason, errorClass) {
 		return ErrTerminalCorroborationConflict
 	}
-	return store.withLockedAgentTurnLease(ctx, lease, "close mutation admission with ACP ending", func(tx pgx.Tx, turn lockedTurn) error {
+	return store.withLockedAgentTurnLease(ctx, lease, "close mutation admission with agent outcome", func(tx pgx.Tx, turn lockedTurn) error {
 		return closeLiveMutationAdmissionTx(ctx, tx, turn, true, stopReason, errorClass)
 	})
 }
@@ -30,7 +30,7 @@ func closeLiveMutationAdmissionTx(ctx context.Context, tx pgx.Tx, turn lockedTur
 SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
        prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, turn.ID).Scan(
 			&recordedStop, &recordedError, &recorded); err != nil {
-			return fmt.Errorf("inspect ACP prompt ending: %w", err)
+			return fmt.Errorf("inspect agent prompt outcome: %w", err)
 		}
 		if recorded && (recordedStop != stopReason || recordedError != errorClass) {
 			return ErrTerminalCorroborationConflict
@@ -75,7 +75,7 @@ func validAgentTurnPromptEvidence(stopReason, errorClass string) bool {
 		}
 	}
 	switch stopReason {
-	case "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled":
+	case "completed", "limit_reached", "aborted":
 		return true
 	default:
 		return false

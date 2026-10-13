@@ -12,13 +12,13 @@ import (
 )
 
 const (
-	CompatibilityResultsSchemaVersion   = "omnigrex.runtime-profile-compatibility-results/v1"
+	CompatibilityResultsSchemaVersion   = PiCompatibilityResultsSchemaVersion
 	PiCompatibilityResultsSchemaVersion = "omnigrex.runtime-profile-compatibility-results/v2"
 	PiCompatibilityQualificationSuite   = "pi-controlled-state-upgrade"
 	PiStateContractVersion              = "pi-session/v3"
-	CompatibilityQualificationSuite     = "opencode-controlled-state-upgrade"
+	CompatibilityQualificationSuite     = PiCompatibilityQualificationSuite
 	CompatibilityQualificationVersion   = "1"
-	StateContractVersion                = "opencode-acp-state/v1"
+	StateContractVersion                = PiStateContractVersion
 	StableWorkspacePath                 = "/workspace"
 )
 
@@ -65,7 +65,7 @@ func DecodeCompatibilityResultsFile(reader io.Reader) (CompatibilityResultsFile,
 
 // Validate rejects results that do not describe the supported exact compatibility contract.
 func (file CompatibilityResultsFile) Validate() error {
-	if file.SchemaVersion != CompatibilityResultsSchemaVersion && file.SchemaVersion != PiCompatibilityResultsSchemaVersion {
+	if file.SchemaVersion != PiCompatibilityResultsSchemaVersion {
 		return fmt.Errorf("invalid Runtime Profile compatibility results: unsupported schema version %q", file.SchemaVersion)
 	}
 	if len(file.Results) == 0 {
@@ -73,9 +73,6 @@ func (file CompatibilityResultsFile) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(file.Results))
 	for index, result := range file.Results {
-		if (result.Source.Name == "pi-rpc") != (file.SchemaVersion == PiCompatibilityResultsSchemaVersion) {
-			return errors.New("compatibility schema does not match runtime")
-		}
 		if err := result.Validate(); err != nil {
 			return fmt.Errorf("invalid Runtime Profile compatibility result %d: %w", index, err)
 		}
@@ -121,7 +118,7 @@ func (file CompatibilityResultsFile) ValidateDeployment(family string, version i
 		if !matched {
 			return errors.New("compatibility result does not target a configured exact Runtime Profile")
 		}
-		if result.Source.Name == "pi-rpc" && (result.BackendFamily != family || result.BackendContractVersion != version) {
+		if result.BackendFamily != family || result.BackendContractVersion != version {
 			return errors.New("compatibility result backend contract mismatch")
 		}
 	}
@@ -142,25 +139,19 @@ func (result CompatibilityResult) Validate() error {
 	if result.Platform.OS != "linux" || result.Platform.Arch != "amd64" && result.Platform.Arch != "arm64" {
 		return fmt.Errorf("unsupported platform %q/%q", result.Platform.OS, result.Platform.Arch)
 	}
-	state, suite := StateContractVersion, CompatibilityQualificationSuite
-	if result.Source.Name == "pi-rpc" || result.Target.Name == "pi-rpc" {
-		if result.Source.Name != "pi-rpc" || result.Target.Name != "pi-rpc" || result.Source.Version != "v1" || result.Target.Version != "v1" {
-			return errors.New("Pi qualification requires Pi-to-Pi v1 bindings")
-		}
-		if (result.BackendFamily != "docker" && result.BackendFamily != "microsandbox") || result.BackendContractVersion != 1 {
-			return errors.New("unsupported Pi qualification backend contract")
-		}
-		state, suite = PiStateContractVersion, PiCompatibilityQualificationSuite
-	} else if result.BackendFamily != "" || result.BackendContractVersion != 0 {
-		return errors.New("legacy qualification cannot carry Pi backend axes")
+	if result.Source.Name != "pi-rpc" || result.Target.Name != "pi-rpc" || result.Source.Version != "v1" || result.Target.Version != "v1" {
+		return errors.New("Pi qualification requires Pi-to-Pi v1 bindings")
 	}
-	if result.StateContractVersion != state {
+	if (result.BackendFamily != "docker" && result.BackendFamily != "microsandbox") || result.BackendContractVersion != 1 {
+		return errors.New("unsupported Pi qualification backend contract")
+	}
+	if result.StateContractVersion != PiStateContractVersion {
 		return fmt.Errorf("unsupported state contract version %q", result.StateContractVersion)
 	}
 	if result.WorkspacePath != StableWorkspacePath {
 		return fmt.Errorf("unsupported workspace path %q", result.WorkspacePath)
 	}
-	if result.QualificationSuite != suite || result.QualificationVersion != CompatibilityQualificationVersion {
+	if result.QualificationSuite != PiCompatibilityQualificationSuite || result.QualificationVersion != CompatibilityQualificationVersion {
 		return fmt.Errorf("unsupported qualification suite %q version %q", result.QualificationSuite, result.QualificationVersion)
 	}
 	qualifiedAt, err := time.Parse(time.RFC3339, result.QualifiedAt)

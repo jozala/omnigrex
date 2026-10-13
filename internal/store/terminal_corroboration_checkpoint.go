@@ -16,6 +16,16 @@ import (
 // An empty requestedID discovers the sole source for stopped-Turn recovery.
 func findTerminalCorroborationSourceTx(ctx context.Context, tx pgx.Tx, turnID string, epoch int64,
 	role workflow.Role, requestedID string) (string, bool, error) {
+	var eligible bool
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(outcome IS NULL OR
+    (outcome->'admitted' = 'true'::jsonb AND outcome->>'status' = 'completed'
+     AND COALESCE(outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb), FALSE)
+FROM agent_turns WHERE id = $1 AND execution_epoch = $2`, turnID, epoch).Scan(&eligible); err != nil {
+		return "", false, err
+	}
+	if !eligible {
+		return "", false, nil
+	}
 	rows, err := tx.Query(ctx, mutationLedgerSelect, turnID, epoch)
 	if err != nil {
 		return "", false, err
@@ -125,7 +135,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		&stopReason, &errorClass, &recorded); err != nil {
 		return false, err
 	}
-	if !recorded || (stopReason != "end_turn" && errorClass != "FAILURE" && errorClass != "DEADLINE") {
+	if !recorded || (stopReason != "completed" && errorClass != "FAILURE" && errorClass != "DEADLINE") {
 		return false, nil
 	}
 	sourceID, valid, err := findTerminalCorroborationSourceTx(ctx, tx, turn.ID, turn.ExecutionEpoch, role, "")
@@ -133,8 +143,8 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		return false, err
 	}
 	var outcome json.RawMessage
-	if stopReason == "end_turn" {
-		outcome = json.RawMessage(`{"stop_reason":"end_turn"}`)
+	if stopReason == "completed" {
+		outcome = json.RawMessage(`{"admitted":true,"status":"completed"}`)
 	}
 	if _, err := createTerminalCorroborationCheckpointTx(ctx, tx, executionJob, turn, sourceID,
 		outcome, errorClass, "runtime_interrupted_after_prompt", originalOwnerID, originalOwnerHash); err != nil {

@@ -15,7 +15,7 @@ import (
 
 func TestAPIClientResolvesDefaultBranchCommitAndFetchesExactFile(t *testing.T) {
 	const commitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	wantContent := []byte("---\nruntime: opencode-acp/v1\n---\nInstructions.\n")
+	wantContent := []byte("---\nruntime: pi-rpc/v1\n---\nInstructions.\n")
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests++

@@ -23,7 +23,7 @@ func (store *Store) ReserveAgentSessionRuntime(ctx context.Context, lease AgentT
 		if err != nil {
 			return err
 		}
-		if session.RuntimeProfileName != "pi-rpc" || session.RuntimeProfileVersion != "v1" || session.ACPSessionID != "" || session.Status != AgentSessionCreating && session.Status != AgentSessionActive {
+		if session.RuntimeProfileName != "pi-rpc" || session.RuntimeProfileVersion != "v1" || session.Status != AgentSessionCreating && session.Status != AgentSessionActive {
 			return ErrAgentSessionRuntimeConflict
 		}
 		if session.RuntimeSessionID == "" && session.Status == AgentSessionCreating {
@@ -64,7 +64,7 @@ func (store *Store) BindAgentSessionRuntime(ctx context.Context, lease AgentTurn
 		if err != nil {
 			return err
 		}
-		if session.RuntimeSessionID == "" || session.RuntimeSessionID != ready.RuntimeSessionID || session.ACPSessionID != "" {
+		if session.RuntimeProfileName != "pi-rpc" || session.RuntimeProfileVersion != "v1" || session.RuntimeSessionID == "" || session.RuntimeSessionID != ready.RuntimeSessionID {
 			return ErrAgentSessionRuntimeConflict
 		}
 		if session.Status == AgentSessionCreating && len(session.RuntimeCapabilities) == 0 {

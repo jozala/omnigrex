@@ -39,11 +39,33 @@ func TestRetainedStateMigrationPreservesLegacySessionBinding(t *testing.T) {
 		t.Fatalf("prior schema migrations = %d", len(earlier))
 	}
 	applyRecordedMigrations(t, ctx, pool, earlier...)
-	runtimeProfile, err := profile.NewOpenCodeV1("registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
-	if err != nil {
+	// This fixture exercises the pre-Pi schema, independently of current Session APIs.
+	fixture := agentFixture{
+		workflowID:   "40000000-0000-4000-8000-000000009951",
+		assignmentID: "40000000-0000-4000-8000-000000009953",
+		sessionID:    "40000000-0000-4000-8000-000000009954",
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
+VALUES ($1, 995, 'owner', 'repo', 995, 995, 'ACTIVE')`, fixture.workflowID); err != nil {
 		t.Fatal(err)
 	}
-	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 995, workflow.RoleDeveloper, runtimeProfile.Binding(), runtimeProfile.Binding())
+	image := "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64)
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_assignments (
+    id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
+)
+VALUES ($1, $2, 'DEVELOPER', 'ACTIVE', 'developer', 'pi-rpc', 'v1', $3, $4, $5)`,
+		fixture.assignmentID, fixture.workflowID, strings.Repeat("b", 64), image, canonicalRuntimePath(fixture.assignmentID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_sessions (
+    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
+)
+VALUES ($1, $2, 1, 'historical-session', 'pi-rpc', 'v1', $3, $4, $5, 'ACTIVE')`,
+		fixture.sessionID, fixture.assignmentID, strings.Repeat("b", 64), image, canonicalRuntimePath(fixture.assignmentID)); err != nil {
+		t.Fatal(err)
+	}
 	var sessionID string
 	if err := pool.QueryRow(ctx, `SELECT acp_session_id FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionID); err != nil {
 		t.Fatal(err)
@@ -89,13 +111,13 @@ func TestRetainedStateBindingsPersistAndFenceWriters(t *testing.T) {
 			t.Fatalf("backend mismatch = %v", err)
 		}
 	}
-	runtimeProfile, err := profile.NewOpenCodeV1("registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 993, workflow.RoleDeveloper, runtimeProfile.Binding(), runtimeProfile.Binding())
 	spec := fixture.turnSpec()
-	spec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/v1", "provider/test", "", 10, "Test instructions.", nil)
+	spec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "provider/test", "", 0, "Test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +223,7 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	if err := database.BindExecutionBackend(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
-	runtimeProfile, err := profile.NewOpenCodeV1("registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}

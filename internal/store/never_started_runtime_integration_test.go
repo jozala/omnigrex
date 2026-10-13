@@ -76,7 +76,7 @@ func TestNeverStartedRuntimeRecoveryCompletesWithRealDocker(t *testing.T) {
 					t.Fatalf("prior settlement = (%#v, %v)", settled, err)
 				}
 				current := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "never-started-profile", "openai/never-started")
-				if current.Session.ID != prepared.Session.ID || current.Session.ACPSessionID != "retained-never-started-session" || current.Turn.RetryOfTurnID != prepared.Turn.ID {
+				if current.Session.ID != prepared.Session.ID || current.Session.RuntimeSessionID != prepared.Session.ID || current.Turn.RetryOfTurnID != prepared.Turn.ID {
 					t.Fatal("fixture did not retain the already bound Session")
 				}
 				prepared = current
@@ -101,9 +101,9 @@ func TestNeverStartedRuntimeRecoveryCompletesWithRealDocker(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			image, err := client.ImageInspect(ctx, "omnigrex/opencode:1.18.29")
+			image, err := client.ImageInspect(ctx, "omnigrex/pi:1.0.4")
 			if err != nil {
-				t.Fatalf("inspect built OpenCode image: %v", err)
+				t.Fatalf("inspect built Pi image: %v", err)
 			}
 			created, err := client.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 				Name: "omnigrex-turn-" + key.AgentTurnID + "-epoch-" + strconv.FormatInt(key.ExecutionEpoch, 10),
@@ -239,7 +239,7 @@ func TestRecoveredNeverStartedProofRejectsConflictingEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
+				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
 			ledger := database.ExecutionLedger(lease)
 			if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 				t.Fatal(err)
@@ -340,7 +340,7 @@ WHERE id = $1`
 			case "open admission", "monotonic proof and later admission":
 				update = `UPDATE agent_turns SET mutation_admission_open = true WHERE id = $1`
 			case "prompt checkpoint", "monotonic proof and later activity":
-				update = `UPDATE agent_turns SET prompt_stop_reason = 'end_turn', prompt_recorded_at = clock_timestamp() WHERE id = $1`
+				update = `UPDATE agent_turns SET prompt_stop_reason = 'completed', prompt_recorded_at = clock_timestamp() WHERE id = $1`
 			case "invocation counter", "monotonic proof and later invocation counter":
 				update = `UPDATE agent_turns SET next_invocation_number = 2 WHERE id = $1`
 			case "stale token":
@@ -411,7 +411,7 @@ func TestRecoveredNeverStartedProofRejectsMutationReplayWithNoCurrentInvocations
 		t.Fatal(err)
 	}
 	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
+		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
 	ledger := database.ExecutionLedger(lease)
 	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)

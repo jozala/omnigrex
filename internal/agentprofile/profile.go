@@ -16,10 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	MaxContentSize = 256 << 10
-	MaxSteps       = 1000
-)
+const MaxContentSize = 256 << 10
 
 var (
 	ErrInvalidProfile  = errors.New("invalid Agent Profile")
@@ -38,21 +35,13 @@ const (
 	Deny  PermissionAction = "deny"
 )
 
-var knownTools = map[string]struct{}{
-	"read": {}, "edit": {}, "glob": {}, "grep": {}, "list": {}, "patch": {},
-	"bash": {}, "task": {}, "webfetch": {}, "websearch": {}, "codesearch": {},
-	"todoread": {}, "todowrite": {}, "question": {}, "skill": {},
-}
-
 type Profile struct {
 	name         Name
 	role         Role
 	path         string
 	runtime      string
 	model        string
-	variant      string
 	thinking     string
-	steps        int
 	permissions  map[string]PermissionAction
 	instructions string
 	contentHash  [sha256.Size]byte
@@ -64,9 +53,7 @@ type frontMatter struct {
 	Role        Role                        `yaml:"role"`
 	Runtime     string                      `yaml:"runtime"`
 	Model       string                      `yaml:"model"`
-	Variant     string                      `yaml:"variant,omitempty"`
 	Thinking    string                      `yaml:"thinking,omitempty"`
-	Steps       int                         `yaml:"steps"`
 	Permissions map[string]PermissionAction `yaml:"permissions"`
 }
 
@@ -95,7 +82,7 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 	if !validPath(path) {
 		return Profile{}, ErrInvalidProfile
 	}
-	for _, value := range []string{string(configuration.Name), string(configuration.Role), configuration.Runtime, configuration.Model, configuration.Variant, configuration.Thinking, string(instructions)} {
+	for _, value := range []string{string(configuration.Name), string(configuration.Role), configuration.Runtime, configuration.Model, configuration.Thinking, string(instructions)} {
 		if strings.ContainsRune(value, '\ufeff') {
 			return Profile{}, ErrInvalidProfile
 		}
@@ -117,9 +104,7 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		path:         path,
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
-		variant:      configuration.Variant,
 		thinking:     configuration.Thinking,
-		steps:        configuration.Steps,
 		permissions:  clonePermissions(configuration.Permissions),
 		instructions: string(instructions),
 		contentHash:  contentHash,
@@ -133,8 +118,6 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		Permissions  map[string]PermissionAction `json:"permissions"`
 		Role         Role                        `json:"role"`
 		Runtime      string                      `json:"runtime"`
-		Steps        int                         `json:"steps,omitempty"`
-		Variant      string                      `json:"variant,omitempty"`
 		Thinking     string                      `json:"thinking,omitempty"`
 	}{
 		Instructions: profile.instructions,
@@ -144,8 +127,6 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		Permissions:  profile.permissions,
 		Role:         profile.role,
 		Runtime:      profile.runtime,
-		Steps:        profile.steps,
-		Variant:      profile.variant,
 		Thinking:     profile.thinking,
 	})
 	if err != nil {
@@ -159,9 +140,7 @@ func (profile Profile) Role() Role                       { return profile.role }
 func (profile Profile) Path() string                     { return profile.path }
 func (profile Profile) Runtime() string                  { return profile.runtime }
 func (profile Profile) Model() string                    { return profile.model }
-func (profile Profile) Variant() string                  { return profile.variant }
 func (profile Profile) Thinking() string                 { return profile.thinking }
-func (profile Profile) Steps() int                       { return profile.steps }
 func (profile Profile) Instructions() string             { return profile.instructions }
 func (profile Profile) ContentSHA256() [sha256.Size]byte { return profile.contentHash }
 func (profile Profile) ContentHash() string              { return hex.EncodeToString(profile.contentHash[:]) }
@@ -228,14 +207,6 @@ func decodeFrontMatter(content []byte) (frontMatter, error) {
 	if err := ensureSingleYAMLDocument(strict); err != nil {
 		return frontMatter{}, err
 	}
-	if configuration.Runtime == "pi-rpc/v1" {
-		mapping := document.Content[0]
-		for i := 0; i < len(mapping.Content); i += 2 {
-			if mapping.Content[i].Value == "steps" || mapping.Content[i].Value == "variant" {
-				return frontMatter{}, fmt.Errorf("%w: OpenCode fields are not part of the Pi schema", ErrInvalidProfile)
-			}
-		}
-	}
 	return configuration, nil
 }
 
@@ -266,68 +237,24 @@ func validateYAMLNode(node *yaml.Node) error {
 }
 
 func validateConfiguration(policy role.Policy, configuration frontMatter, instructions []byte) error {
-	if !validReference(configuration.Runtime) {
-		return fmt.Errorf("%w: runtime must use name/version syntax without whitespace or control characters", ErrInvalidProfile)
+	if configuration.Runtime != "pi-rpc/v1" {
+		return fmt.Errorf("%w: runtime must be pi-rpc/v1", ErrInvalidProfile)
 	}
-	validModel := validReference(configuration.Model)
-	if configuration.Runtime == "pi-rpc/v1" {
-		provider, model, found := strings.Cut(configuration.Model, "/")
-		validModel = found && provider != "" && model != "" && !containsWhitespaceOrControl(configuration.Model)
-	}
-	if !validModel {
+	provider, model, found := strings.Cut(configuration.Model, "/")
+	if !found || provider == "" || model == "" || containsWhitespaceOrControl(configuration.Model) {
 		return fmt.Errorf("%w: model must use provider/model syntax without whitespace or control characters", ErrInvalidProfile)
 	}
-	if configuration.Variant != "" && containsWhitespaceOrControl(configuration.Variant) {
-		return fmt.Errorf("%w: variant contains whitespace or control characters", ErrInvalidProfile)
+	if configuration.Thinking != "" && !ValidThinking(configuration.Thinking) {
+		return fmt.Errorf("%w: invalid Pi thinking level", ErrInvalidProfile)
 	}
-	if configuration.Runtime == "pi-rpc/v1" {
-		if configuration.Steps != 0 || configuration.Variant != "" {
-			return fmt.Errorf("%w: Pi does not support steps or variant", ErrInvalidProfile)
-		}
-		if configuration.Thinking != "" && !ValidThinking(configuration.Thinking) {
-			return fmt.Errorf("%w: invalid Pi thinking level", ErrInvalidProfile)
-		}
-		if err := ValidatePiPermissions(policy, configuration.Permissions); err != nil {
-			return err
-		}
-	} else {
-		if configuration.Thinking != "" {
-			return fmt.Errorf("%w: thinking requires Pi", ErrInvalidProfile)
-		}
-		if err := ValidateRolePolicy(policy, configuration.Steps, configuration.Permissions); err != nil {
-			return err
-		}
+	if err := ValidatePiPermissions(policy, configuration.Permissions); err != nil {
+		return err
 	}
 	if strings.TrimSpace(string(instructions)) == "" {
 		return fmt.Errorf("%w: Role instructions must not be blank", ErrInvalidProfile)
 	}
 	if !utf8.Valid(instructions) {
 		return fmt.Errorf("%w: Role instructions must be valid UTF-8", ErrInvalidProfile)
-	}
-	return nil
-}
-
-// ValidateRolePolicy checks mutable Agent Profile values against an immutable Role policy.
-func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]PermissionAction) error {
-	if !role.ValidID(policy.Role) {
-		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
-	}
-	if steps <= 0 || steps > MaxSteps {
-		return fmt.Errorf("%w: steps must be between 1 and %d", ErrInvalidProfile, MaxSteps)
-	}
-	if len(permissions) == 0 {
-		return fmt.Errorf("%w: permissions must not be empty", ErrInvalidProfile)
-	}
-	for tool, action := range permissions {
-		if _, ok := knownTools[tool]; !ok {
-			return fmt.Errorf("%w: unknown permission tool %q", ErrInvalidProfile, tool)
-		}
-		if action != Allow && action != Deny {
-			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
-		}
-		if !policy.AllowFileEdits && action == Allow && (tool == "edit" || tool == "patch") {
-			return fmt.Errorf("%w: Role permission for %q must be deny", ErrInvalidProfile, tool)
-		}
 	}
 	return nil
 }
@@ -358,14 +285,6 @@ func ValidatePiPermissions(policy role.Policy, permissions map[string]Permission
 		}
 	}
 	return nil
-}
-
-func validReference(value string) bool {
-	if strings.Count(value, "/") != 1 || containsWhitespaceOrControl(value) {
-		return false
-	}
-	parts := strings.Split(value, "/")
-	return parts[0] != "" && parts[1] != ""
 }
 
 func containsWhitespaceOrControl(value string) bool {

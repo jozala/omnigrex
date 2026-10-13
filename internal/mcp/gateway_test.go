@@ -1484,7 +1484,7 @@ func TestRegisteredTokenIsAcceptedOnlyBeforeItsExpiry(t *testing.T) {
 
 			current = test.current
 			response := httptest.NewRecorder()
-			gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
+			gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"omnigrex-pi","version":"1.0.4"}}}`))
 			if response.Code != test.want {
 				t.Fatalf("initialize status = %d, want %d; body = %s", response.Code, test.want, response.Body.String())
 			}
@@ -1520,7 +1520,7 @@ func TestRenewedRegistrationIsAcceptedPastItsOriginalExpiry(t *testing.T) {
 
 	current = now.Add(90 * time.Minute)
 	response := httptest.NewRecorder()
-	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
+	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"omnigrex-pi","version":"1.0.4"}}}`))
 	if response.Code != http.StatusOK {
 		t.Fatalf("renewed initialize status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -1551,7 +1551,7 @@ func TestInitializeRejectsTokenWhenStoreFenceIsStale(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
+	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"omnigrex-pi","version":"1.0.4"}}}`))
 	if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "store-secret") {
 		t.Fatalf("stale initialize response = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -1923,7 +1923,7 @@ func TestCloseAndDrainAggregatesUnresolvedStatusAcrossAdmittedMutations(t *testi
 	assertUnresolvedDrain(t, gateway, registration)
 }
 
-func TestRegistrationProvidesAuthenticatedOpenCodeCompatibleInitialization(t *testing.T) {
+func TestRegistrationProvidesAuthenticatedPiMCPInitialization(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	gateway, err := mcp.New(mcp.Config{
 		EndpointURL: "https://gateway.internal/mcp",
@@ -1947,7 +1947,7 @@ func TestRegistrationProvidesAuthenticatedOpenCodeCompatibleInitialization(t *te
 		t.Fatalf("MCP Authorization header = %#v", registration.Server.Headers)
 	}
 
-	request := rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`)
+	request := rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"omnigrex-pi","version":"1.0.4"}}}`)
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -2043,7 +2043,7 @@ func newTestGateway(t *testing.T, now time.Time, durable *fakeStore, backend mcp
 func initialize(t *testing.T, gateway *mcp.Gateway, registration mcp.Registration) {
 	t.Helper()
 	response := httptest.NewRecorder()
-	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"opencode","version":"1.0.0"}}}`))
+	gateway.ServeHTTP(response, rpcRequest(t, registration, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"omnigrex-pi","version":"1.0.4"}}}`))
 	if response.Code != http.StatusOK {
 		t.Fatalf("initialize status = %d, body = %s", response.Code, response.Body.String())
 	}

@@ -14,8 +14,6 @@ func NewBuiltinV1(name, image string, platform Platform) (Profile, error) {
 	switch name {
 	case "pi-rpc":
 		return NewPiV1(image, platform)
-	case "opencode-acp":
-		return NewOpenCodeV1(image, platform)
 	default:
 		return Profile{}, ErrNotFound
 	}

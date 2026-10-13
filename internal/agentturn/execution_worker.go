@@ -13,7 +13,6 @@ import (
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -52,7 +51,7 @@ type DefaultBranchResolver interface {
 // ExecutionRuntime is the minimal live runtime retained after launch readiness.
 type ExecutionRuntime interface {
 	CurrentLease() store.AgentTurnLease
-	PromptClient() session.PromptClient
+	AgentConnection() session.TurnConnection
 	ConfirmedOOM() bool
 	CloseMCP(context.Context) error
 	Cleanup(context.Context) error
@@ -61,11 +60,6 @@ type ExecutionRuntime interface {
 // ExecutionLauncher launches one prepared runtime without prompting it.
 type ExecutionLauncher interface {
 	LaunchExecution(context.Context, LaunchRequest) (ExecutionRuntime, error)
-}
-
-// ExecutionPrompter submits the sole structured Agent Turn prompt.
-type ExecutionPrompter interface {
-	Prompt(context.Context, session.PromptRequest) (acp.PromptResponse, error)
 }
 
 // ExecutionOutcomeReconciler derives a settlement observation from durable and fresh evidence.
@@ -82,7 +76,6 @@ var (
 	_ ExecutionWorkerStore       = (*store.Store)(nil)
 	_ DefaultBranchResolver      = (*githubapi.APIClient)(nil)
 	_ ExecutionLauncher          = (*Launcher)(nil)
-	_ ExecutionPrompter          = (*session.Coordinator)(nil)
 	_ ExecutionOutcomeReconciler = (*OutcomeReconciler)(nil)
 	_ ExecutionWorkspace         = (*workspace.Lifecycle)(nil)
 )
@@ -94,7 +87,6 @@ type ExecutionWorkerDependencies struct {
 	ReviewerCredentials  RepositoryCredentialProvider
 	DefaultBranch        DefaultBranchResolver
 	Launcher             ExecutionLauncher
-	Sessions             ExecutionPrompter
 	Outcomes             ExecutionOutcomeReconciler
 	Workspace            ExecutionWorkspace
 	PublicationRecovery  ExecutionPublicationRecovery
@@ -129,7 +121,6 @@ type ExecutionWorker struct {
 	reviewerCredentials  RepositoryCredentialProvider
 	defaultBranch        DefaultBranchResolver
 	launcher             ExecutionLauncher
-	sessions             ExecutionPrompter
 	outcomes             ExecutionOutcomeReconciler
 	workspace            ExecutionWorkspace
 	publicationRecovery  ExecutionPublicationRecovery
@@ -155,7 +146,7 @@ func (*ExecutionWorker) GoString() string { return "agentturn.ExecutionWorker{<c
 func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config ExecutionWorkerConfig) (*ExecutionWorker, error) {
 	if nilDependency(dependencies.Store) || nilDependency(dependencies.DeveloperCredentials) ||
 		nilDependency(dependencies.ReviewerCredentials) || nilDependency(dependencies.DefaultBranch) ||
-		nilDependency(dependencies.Launcher) || nilDependency(dependencies.Sessions) ||
+		nilDependency(dependencies.Launcher) ||
 		nilDependency(dependencies.Outcomes) || nilDependency(dependencies.Workspace) ||
 		nilDependency(dependencies.PublicationRecovery) {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidExecutionWorker)
@@ -192,7 +183,7 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 	return &ExecutionWorker{
 		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
-		launcher: dependencies.Launcher, sessions: dependencies.Sessions, outcomes: dependencies.Outcomes,
+		launcher: dependencies.Launcher, outcomes: dependencies.Outcomes,
 		workspace: dependencies.Workspace, publicationRecovery: dependencies.PublicationRecovery,
 		policies: dependencies.Policies, definition: dependencies.Definition, claimOwner: config.ClaimOwner, leaseDuration: config.LeaseDuration,
 		heartbeatInterval: config.HeartbeatInterval, idlePollInterval: config.IdlePollInterval,
@@ -336,7 +327,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		}
 		if err != nil {
 			operationErr = errors.Join(operationErr, fmt.Errorf("launch Agent Turn Runtime Process: %w", err))
-		} else if nilDependency(runtime) || nilDependency(runtime.PromptClient()) && nilDependency(runtimeAgentConnection(runtime)) {
+		} else if nilDependency(runtime) || nilDependency(runtime.AgentConnection()) {
 			operationErr = errors.Join(operationErr, errors.New("launch Agent Turn Runtime Process: launcher returned an invalid runtime"))
 		}
 		if operationErr == nil && workCtx.Err() != nil {
@@ -357,7 +348,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		}
 	}
 
-	var promptResponse *acp.PromptResponse
+	var promptResponse *agent.Outcome
 	var promptClassification PromptErrorClassification
 	if operationErr == nil {
 		currentHead := defaultBranch.CommitSHA
@@ -371,25 +362,13 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
 			promptCtx := workCtx
-			var response acp.PromptResponse
-			var promptErr error
-			if connection := runtimeAgentConnection(runtime); connection != nil {
-				if len(content) != 1 || content[0].Type != "text" {
-					promptErr = agent.ErrProtocol
-				} else {
-					outcome, err := connection.Prompt(promptCtx, *lease, execution.Session, content[0].Text, worker.agentEventSink)
-					response, promptErr = legacyPromptEvidence(outcome, err)
-				}
-			} else {
-				response, promptErr = worker.sessions.Prompt(promptCtx, session.PromptRequest{
-					Lease: *lease, Session: execution.Session, Client: runtime.PromptClient(), Content: content,
-				})
-			}
-			if promptErr == nil && response.StopReason == acp.StopReasonCancelled && promptCtx.Err() == context.DeadlineExceeded {
+			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, worker.agentEventSink)
+			response, promptErr := normalizedPromptEvidence(outcome, promptErr)
+			if promptErr == nil && response.Status == agent.Aborted && promptCtx.Err() == context.DeadlineExceeded {
 				promptErr = context.DeadlineExceeded
 			}
 			if promptErr != nil {
-				// Classify the ACP ending before an independent Docker observation
+				// Classify the agent ending before an independent backend observation
 				// can add a deadline or transport error to the diagnostic chain.
 				promptClassification = ClassifyPromptError(promptErr)
 				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)
@@ -439,7 +418,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *acp.PromptResponse, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryCredential, reviewerOutcomeCredential string, runtime ExecutionRuntime, promptResponse *agent.Outcome, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
@@ -448,7 +427,10 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	if promptResponse != nil || promptClassification != "" {
 		stopReason := ""
 		if promptResponse != nil {
-			stopReason = string(promptResponse.StopReason)
+			stopReason = string(promptResponse.Status)
+			if promptResponse.LimitReached {
+				stopReason = "limit_reached"
+			}
 		}
 		closeErr = worker.retryBoundedFinalization(leaseCtx, func(ctx context.Context) error {
 			return worker.store.CloseMutationAdmissionWithPromptEvidence(ctx, lease, stopReason, string(promptClassification))

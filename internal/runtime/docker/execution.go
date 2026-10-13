@@ -61,12 +61,9 @@ func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolic
 		return RuntimePolicy{}, Spec{}, err
 	}
 	for _, requirement := range request.Requirements {
-		if requirement == execution.ToolInstallation && !request.GoldenResources && request.BootstrapImage == "" {
+		if requirement == execution.ToolInstallation && !request.GoldenResources {
 			return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: tool installation requires golden resources", execution.ErrInvalidSpec)
 		}
-	}
-	if request.BootstrapImage != "" && (request.GoldenResources || !validImageDigest(request.BootstrapImage)) {
-		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: retained bootstrap artifact image", execution.ErrInvalidSpec)
 	}
 	if request.MemoryBytes <= 0 || request.PIDsLimit <= 0 {
 		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: resource budgets must be positive", ErrInvalidSpec)
@@ -111,13 +108,8 @@ func (factory ExecutionFactory) Compile(request execution.Request) (RuntimePolic
 		volume.Target = attachment.Target
 		volumes = append(volumes, volume)
 	}
-	if (request.GoldenResources || request.BootstrapImage != "") && (!seen["workspace"] || !seen["mise"] || !seen["state"] || !seen["tool-data"]) {
+	if request.GoldenResources && (!seen["workspace"] || !seen["mise"] || !seen["state"] || !seen["tool-data"]) {
 		return RuntimePolicy{}, Spec{}, fmt.Errorf("%w: repository environment requires isolated workspace, state, installation, and cache attachments", execution.ErrInvalidSpec)
-	}
-	if request.BootstrapImage != "" {
-		volumes = append(volumes, VolumeMount{Name: factory.MiseVolume,
-			Subpath: root + "/tool-data/turn/" + key.AgentTurnID + "/" + environment.BootstrapDirectory(key.AgentTurnID),
-			Target:  environment.RetainedBootstrapMount, ReadOnly: true})
 	}
 	var temporary []TmpfsMount
 	for _, directory := range request.TemporaryDirectories {
@@ -197,7 +189,7 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	}
 	// Keep setup termination evidence separate from the main create. A known
 	// setup failure must not leave a fictitious unresolved main creation.
-	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key, request.GoldenResources, request.BootstrapImage, request.GoldenResourceContract); err != nil {
+	if err := prepareExecutionSubpaths(ctx, engine.engine.client, engine.spec, engine.ledger, engine.key, request.GoldenResources, request.GoldenResourceContract); err != nil {
 		return nil, engine.recordCreationFailure(ctx, err)
 	}
 	if err := engine.ledger.BeginExecutionPhase(ctx, engine.key, execution.Main); err != nil {
@@ -214,38 +206,24 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	return wrapped, err
 }
 
-func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, bootstrapImage string, resources json.RawMessage) error {
+func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, resources json.RawMessage) error {
 	options, err := buildSubpathCreateOptions(spec)
 	if err != nil || options.Config == nil {
 		return err
 	}
-	if golden || bootstrapImage != "" {
+	if golden {
 		script, err := environment.QualificationScript(spec.Platform.Architecture, key.RuntimeProfileName, resources)
 		if err != nil {
 			return noExecutionEffectsError{cause: err}
 		}
 		options.Config.Cmd[0] += script
 	}
-	if bootstrapImage != "" {
-		// Only the trusted initializer uses the deployment image. Repository tools
-		// and the retained agent run in spec.Image with their original bindings.
-		// Compile appends the artifact mount last, making the last validated path
-		// argument its destination. No repository command runs with volume roots.
-		options.Config.Image = bootstrapImage
-		options.Config.Cmd[0] += `
-for destination do :; done
-test ! -L "$destination"
-cp /usr/local/bin/omnigrex-environment "$destination/omnigrex-environment"
-chmod 0555 "$destination/omnigrex-environment"
-test "$(sha256sum /usr/local/bin/omnigrex-environment | cut -d ' ' -f 1)" = "$(sha256sum "$destination/omnigrex-environment" | cut -d ' ' -f 1)"
-`
-	}
 	options.Name = spec.Name + "-setup"
 	if err := ledger.BeginExecutionPhase(ctx, key, execution.Setup); err != nil {
 		return err
 	}
 	operation := "assignment subpath initializer"
-	if golden || bootstrapImage != "" {
+	if golden {
 		operation = "repository golden-resource qualification and storage initializer"
 	}
 	return runManagedOneShotContainer(ctx, api, options, operation,
@@ -453,13 +431,6 @@ func (cleaner *ExactLabelCleaner) confirmResourceAbsent(ctx context.Context, id 
 }
 
 func requestDigest(request execution.Request) string {
-	request.Environment = slices.Clone(request.Environment)
-	for index, entry := range request.Environment {
-		name, _, _ := strings.Cut(entry, "=")
-		if name == "OPENCODE_AUTH_CONTENT" {
-			request.Environment[index] = name + "=<ephemeral>"
-		}
-	}
 	content, _ := json.Marshal(request)
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])

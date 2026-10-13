@@ -74,7 +74,7 @@ printf 'PASS: Testcontainers published-port HTTP request\n'
 mkdir /workspace
 tar -xf /probe/source.tar -C /workspace
 cd /workspace
-docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 .
+docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
 if ! go test -p 1 -race -tags=integration -timeout 10m -count=1 -v ./internal/runtime/docker -run '^TestReadinessProbeExercisesRealDockerResources$' >/tmp/readiness-test.log 2>&1; then
     cat /tmp/readiness-test.log
     exit 1

@@ -22,7 +22,7 @@ import (
 
 const (
 	testCommitSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	testImage     = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testImage     = "registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 type sourceCall struct {
@@ -185,7 +185,7 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 	wantBinding := func(name string) store.AssignmentRuntimeBinding {
 		return store.AssignmentRuntimeBinding{
 			AgentProfileName:            name,
-			RuntimeProfileName:          "opencode-acp",
+			RuntimeProfileName:          "pi-rpc",
 			RuntimeProfileVersion:       "v1",
 			RuntimeProfileContentSHA256: runtime.ContentSHA256(),
 			RuntimeImageDigest:          testImage,
@@ -334,7 +334,7 @@ func TestPrepareRejectsMissingDependenciesAndInvalidRequestBeforeLoadingProfiles
 	}
 }
 
-func TestPrepareRejectsMissingAndUnknownRuntimeBeforeStore(t *testing.T) {
+func TestPrepareRejectsMissingProfilesAndUnavailablePiRuntimeBeforeStore(t *testing.T) {
 	runtime := runtimeProfile(t, testImage)
 	registry, err := runtimeprofile.NewRegistry(runtime)
 	if err != nil {
@@ -342,33 +342,30 @@ func TestPrepareRejectsMissingAndUnknownRuntimeBeforeStore(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		loader agentturn.ProfileLoader
-		want   error
+		name     string
+		loader   agentturn.ProfileLoader
+		registry agentturn.RuntimeRegistry
+		want     error
 	}{
 		{
-			name: "missing runtime",
+			name:     "missing profiles",
+			registry: registry,
 			loader: profileLoaderFunc(func(context.Context, string, string, string) (agentprofile.Snapshot, error) {
 				return agentprofile.Snapshot{}, nil
 			}),
 			want: agentprofile.ErrInvalidSelection,
 		},
 		{
-			name: "unknown runtime",
-			loader: agentprofile.NewLoader(&profileSource{
-				commitSHA: testCommitSHA,
-				contents: map[string][]byte{
-					".omnigrex/team/developer.md": agentProfileContentWithRuntime("developer", role.Developer, "unknown-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
-					".omnigrex/team/reviewer.md":  agentProfileContent("reviewer", role.Reviewer, "anthropic/reviewer", "", 40, "Review.\n"),
-				},
-			}, role.BuiltinPolicyCatalog()),
-			want: runtimeprofile.ErrNotFound,
+			name:     "unavailable Pi runtime",
+			registry: runtimeprofile.Registry{},
+			loader:   agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()),
+			want:     runtimeprofile.ErrNotFound,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			database := &preparationStore{selected: workflow.RoleDeveloper}
-			_, err := agentturn.NewPreparer(test.loader, agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
+			_, err := agentturn.NewPreparer(test.loader, agentprofile.SingletonSelector{}, test.registry, database).Prepare(context.Background(), validRequest())
 			if err == nil || !strings.Contains(err.Error(), test.want.Error()) || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
 				t.Fatalf("Prepare() error = %v, want %v", err, test.want)
 			}
@@ -379,35 +376,6 @@ func TestPrepareRejectsMissingAndUnknownRuntimeBeforeStore(t *testing.T) {
 				t.Fatalf("PrepareAgentTurn() calls = %d, want none", len(database.calls))
 			}
 		})
-	}
-}
-
-func TestPrepareRejectsResolvedRuntimeWithDifferentReferenceBeforeStore(t *testing.T) {
-	source := &profileSource{
-		commitSHA: testCommitSHA,
-		contents: map[string][]byte{
-			".omnigrex/team/developer.md": agentProfileContentWithRuntime("developer", role.Developer, "other-runtime/v9", "openai/gpt-5.2", "Develop.\n"),
-			".omnigrex/team/reviewer.md":  agentProfileContent("reviewer", role.Reviewer, "anthropic/reviewer", "", 40, "Review.\n"),
-		},
-	}
-	resolved := runtimeProfile(t, testImage)
-	registry := runtimeRegistryFunc(func(name, version string) (runtimeprofile.Profile, error) {
-		if name != "other-runtime" || version != "v9" {
-			t.Fatalf("Resolve() = (%q, %q), want exact other-runtime/v9", name, version)
-		}
-		return resolved, nil
-	})
-	database := &preparationStore{selected: workflow.RoleDeveloper}
-
-	_, err := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database).Prepare(context.Background(), validRequest())
-	if err == nil || !strings.Contains(err.Error(), agentturn.ErrRuntimeProfileReferenceMismatch.Error()) || !githubapi.ExtractSafeErrorMetadata(err).Permanent {
-		t.Fatalf("Prepare() error = %v, want ErrRuntimeProfileReferenceMismatch", err)
-	}
-	if errors.Is(err, agentturn.ErrRuntimeProfileReferenceMismatch) {
-		t.Fatal("Prepare() retained ErrRuntimeProfileReferenceMismatch")
-	}
-	if len(database.calls) != 0 {
-		t.Fatalf("PrepareAgentTurn() calls = %d, want none", len(database.calls))
 	}
 }
 
@@ -451,8 +419,8 @@ func TestPrepareRefreshesMutableProfileSnapshotsWithoutChangingBindings(t *testi
 }
 
 func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration(t *testing.T) {
-	oldImage := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("1", 64)
-	candidateImage := "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("2", 64)
+	oldImage := "registry.example/omnigrex/pi@sha256:" + strings.Repeat("1", 64)
+	candidateImage := "registry.example/omnigrex/pi@sha256:" + strings.Repeat("2", 64)
 	oldProfile := runtimeProfile(t, oldImage)
 	candidateProfile := runtimeProfile(t, candidateImage)
 	catalog, err := runtimeprofile.NewCatalog([]runtimeprofile.Profile{candidateProfile}, []runtimeprofile.Profile{oldProfile})
@@ -460,7 +428,7 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 		t.Fatalf("NewCatalog() error = %v", err)
 	}
 	oldDeveloper := store.AssignmentRuntimeBinding{
-		AgentProfileName: "developer", RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 		RuntimeProfileContentSHA256: oldProfile.ContentSHA256(), RuntimeImageDigest: oldImage,
 	}
 	oldReviewer := oldDeveloper
@@ -602,23 +570,19 @@ func assertRolePreparation(t *testing.T, got store.RolePreparation, wantBinding 
 
 func runtimeProfile(t *testing.T, image string) runtimeprofile.Profile {
 	t.Helper()
-	value, err := runtimeprofile.NewOpenCodeV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewOpenCodeV1() error = %v", err)
+		t.Fatalf("NewPiV1() error = %v", err)
 	}
 	return value
 }
 
-func agentProfileContent(name string, profileRole role.ID, model, variant string, steps int, instructions string) []byte {
-	variantLine := ""
-	if variant != "" {
-		variantLine = "variant: " + variant + "\n"
+func agentProfileContent(name string, profileRole role.ID, model, thinking string, _ int, instructions string) []byte {
+	thinkingLine := ""
+	if thinking != "" {
+		thinkingLine = "thinking: " + thinking + "\n"
 	}
-	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: opencode-acp/v1\nmodel: %s\n%ssteps: %d\npermissions:\n  read: allow\n  edit: deny\n---\n%s", name, profileRole, model, variantLine, steps, instructions))
-}
-
-func agentProfileContentWithRuntime(name string, profileRole role.ID, runtime, model, instructions string) []byte {
-	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: %s\nmodel: %s\nsteps: 40\npermissions:\n  read: allow\n---\n%s", name, profileRole, runtime, model, instructions))
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v1\nmodel: %s\n%spermissions:\n  read: allow\n  edit: deny\n---\n%s", name, profileRole, model, thinkingLine, instructions))
 }
 
 func validRequest() agentturn.Request {

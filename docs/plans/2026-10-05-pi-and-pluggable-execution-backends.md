@@ -36,6 +36,7 @@ When implementation begins, update their descriptions to link this plan and iden
 | 14 | Backend-scoped Pi qualification artifacts, isolated source-to-candidate continuation/replay, and protected-state recovery | [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md) |
 | 15 | Backend-selected Pi diagnostics/readiness, qualified image-only bundles, and required KVM CI/publication wiring; release execution pending | [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md) |
 | 16 | Pi operator procedures, original Work Item reconciliation, and isolated source-fixture reset/recovery on both backends; published-release rehearsal pending | [Pi operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md) |
+| 17 | Pi-only source, neutral settlement, clean-ledger admission, and final both-backend source qualification; released rehearsal, final live dogfooding, and operator cutover pending | [Pi-only implementation and final qualification](2026-10-13-pi-only-final-qualification.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
 
@@ -588,6 +589,8 @@ An operator can deploy, diagnose, back up, restore, and rehearse cutover using t
 Keep operational procedures authoritative in the operator guide.
 
 ### Step 17: Remove OpenCode and perform final qualification
+
+**Deliverable:** [Pi-only source and final backend qualification](2026-10-13-pi-only-final-qualification.md), including neutral settlement, migration 000036, clean-ledger admission, both-backend evidence, and the remaining release/operator gates.
 
 **Goal:** Finish with Pi-only agent support and two retained execution backends.
 

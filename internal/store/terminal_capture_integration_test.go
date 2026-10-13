@@ -22,16 +22,16 @@ func TestAgentTurnTerminalCaptureRequiredUsesDurableSessionAndTurnEvidence(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	for index, test := range []struct {
-		name            string
-		neverBound      bool
-		promptEvidence  bool
-		toolEvidence    bool
-		priorActivation bool
-		clearBinding    bool
-		phase           execution.Phase
-		noExecution     bool
-		boundResource   bool
-		want            bool
+		name              string
+		neverBound        bool
+		promptEvidence    bool
+		toolEvidence      bool
+		priorActivation   bool
+		creatingLifecycle bool
+		phase             execution.Phase
+		noExecution       bool
+		boundResource     bool
+		want              bool
 	}{
 		{name: "never prepared", neverBound: true, want: false},
 		{name: "existing Session without current reservation", want: false},
@@ -41,26 +41,29 @@ func TestAgentTurnTerminalCaptureRequiredUsesDurableSessionAndTurnEvidence(t *te
 		{name: "existing Session main creation authoritatively had no effects", phase: execution.Main, noExecution: true, want: false},
 		{name: "existing Session settled creation with main resource", phase: execution.Main, boundResource: true, want: true},
 		{name: "Turn activity overrides no-effect creation", phase: execution.Main, noExecution: true, toolEvidence: true, want: true},
-		{name: "terminal prompt ending survives missing binding", phase: execution.Main, promptEvidence: true, clearBinding: true, want: true},
-		{name: "unstarted mutation survives recovery closure", phase: execution.Main, toolEvidence: true, clearBinding: true, want: true},
+		{name: "terminal prompt ending survives creating lifecycle", phase: execution.Main, promptEvidence: true, creatingLifecycle: true, want: true},
+		{name: "unstarted mutation survives recovery closure", phase: execution.Main, toolEvidence: true, creatingLifecycle: true, want: true},
 		{name: "historical activation without current dispatch", neverBound: true, priorActivation: true, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := seedAgentSession(t, pool, 1600+index)
+			var fixture agentFixture
+			if test.neverBound {
+				// Seed an unactivated Session rather than clearing its immutable identity.
+				fixture = seedCreatingAgentSession(t, pool, 1600+index)
+			} else {
+				fixture = seedAgentSession(t, pool, 1600+index)
+			}
 			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 			if err != nil {
 				t.Fatal(err)
 			}
 			key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
-				AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
-			clearBinding := func() {
+				AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+			setCreatingLifecycle := func() {
 				t.Helper()
-				if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
+				if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING' WHERE id = $1`, fixture.sessionID); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if test.neverBound {
-				clearBinding()
 			}
 			if test.priorActivation {
 				if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET activated_at = clock_timestamp() WHERE id = $1`, fixture.sessionID); err != nil {
@@ -98,7 +101,7 @@ func TestAgentTurnTerminalCaptureRequiredUsesDurableSessionAndTurnEvidence(t *te
 				}
 			}
 			if test.promptEvidence {
-				if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+				if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -113,8 +116,8 @@ func TestAgentTurnTerminalCaptureRequiredUsesDurableSessionAndTurnEvidence(t *te
 			if _, err := database.RecoverExpiredAgentTurn(ctx, lease.ID, lease.ExecutionEpoch); err != nil {
 				t.Fatal(err)
 			}
-			if test.clearBinding {
-				clearBinding()
+			if test.creatingLifecycle {
+				setCreatingLifecycle()
 			}
 			recovery, err := database.ClaimJobKind(ctx, store.AgentTurnRecoveryQueue, store.StopStaleRuntimeJobKind, "capture-stop", time.Minute)
 			if err != nil || recovery == nil || recovery.AgentTurnID != turn.ID {
@@ -179,7 +182,7 @@ func TestExistingSessionRecoveryCapturesOnlyCurrentMainDispatch(t *testing.T) {
 				t.Fatalf("prior Turn settlement = (%#v, %v), want infrastructure retry", settled, err)
 			}
 			current := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "capture-profile", "openai/capture")
-			if current.Session.ID != root.Session.ID || current.Session.ACPSessionID != "existing-capture-session" || current.Turn.RetryOfTurnID != root.Turn.ID {
+			if current.Session.ID != root.Session.ID || current.Session.RuntimeSessionID != root.Session.ID || current.Turn.RetryOfTurnID != root.Turn.ID {
 				t.Fatal("regression fixture did not reuse the previous Turn's bound Session")
 			}
 			lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, current.Turn), current.Turn.ControlRevision, "capture-runtime", time.Minute, 1)
@@ -249,22 +252,22 @@ func TestUnpromptedCleanupProofRejectsSessionAndTurnActivity(t *testing.T) {
 	defer cancel()
 	for index, evidence := range []string{"bound Session", "open admission", "prompt checkpoint", "invocation counter", "wrong runtime identity", "late invocation after proof"} {
 		t.Run(evidence, func(t *testing.T) {
-			fixture := seedAgentSession(t, pool, 1700+index)
+			var fixture agentFixture
+			if evidence == "bound Session" {
+				fixture = seedAgentSession(t, pool, 1700+index)
+			} else {
+				fixture = seedCreatingAgentSession(t, pool, 1700+index)
+			}
 			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
 			if err != nil {
 				t.Fatal(err)
-			}
-			if evidence != "bound Session" {
-				if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
-					t.Fatal(err)
-				}
 			}
 			lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, turn), turn.ControlRevision, "proof-runtime", time.Minute, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
 			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "runtime", RuntimeProfileVersion: "1"}
+				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
 			if evidence == "wrong runtime identity" {
 				key.RuntimeProfileVersion = "other"
 			}
@@ -291,7 +294,7 @@ func TestUnpromptedCleanupProofRejectsSessionAndTurnActivity(t *testing.T) {
 			case "open admission":
 				update = `UPDATE agent_turns SET mutation_admission_open = true WHERE id = $1`
 			case "prompt checkpoint":
-				update = `UPDATE agent_turns SET prompt_stop_reason = 'end_turn', prompt_recorded_at = clock_timestamp() WHERE id = $1`
+				update = `UPDATE agent_turns SET prompt_stop_reason = 'completed', prompt_recorded_at = clock_timestamp() WHERE id = $1`
 			case "invocation counter", "late invocation after proof":
 				update = `UPDATE agent_turns SET next_invocation_number = 2 WHERE id = $1`
 			}

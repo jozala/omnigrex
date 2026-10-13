@@ -21,7 +21,6 @@ type BackendBinding struct {
 }
 
 // StateRef identifies retained data independently of any execution environment.
-// A Participant can own multiple Sessions in its transitional OpenCode store.
 // SessionID scopes attachment authority; collection/export use the Participant root.
 type StateRef struct {
 	ID                   string         `json:"id"`

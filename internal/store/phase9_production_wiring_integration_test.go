@@ -24,8 +24,8 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64),
+	profile, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {

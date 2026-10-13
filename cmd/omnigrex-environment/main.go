@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/jozala/omnigrex/internal/runtime/environment"
@@ -16,7 +17,7 @@ func main() {
 		fmt.Println("omnigrex-environment/v1")
 		return
 	}
-	if len(os.Args) < 2 || os.Args[1] != "run" {
+	if len(os.Args) < 3 || os.Args[1] != "run" || !filepath.IsAbs(os.Args[2]) || filepath.Clean(os.Args[2]) != os.Args[2] {
 		fmt.Fprintln(os.Stderr, "invalid environment bootstrap command")
 		os.Exit(2)
 	}
@@ -27,12 +28,7 @@ func main() {
 		err = ctx.Err()
 	}
 	if err == nil {
-		executable, args := environment.RuntimeExecutable, os.Args[2:]
-		if len(args) == 2 && args[0] == "/usr/local/bin/node" {
-			executable = args[0]
-			args = args[1:]
-		}
-		err = syscall.Exec(executable, append([]string{executable}, args...), values)
+		err = syscall.Exec(os.Args[2], os.Args[2:], values)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -15,7 +15,7 @@ import (
 )
 
 func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
-	image := environmentOrDefault("OMNIGREX_OPENCODE_IMAGE", "omnigrex/opencode:1.18.29")
+	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	network := "omnigrex-readiness-agent-" + suffix
 	workspace := "omnigrex-readiness-workspaces-" + suffix
@@ -65,11 +65,11 @@ func initializeVolumeRoots(t *testing.T, image, workspace, runtimeState, mise st
 		"--security-opt", "no-new-privileges",
 		"--network", "none",
 		"--mount", "type=volume,src="+workspace+",dst=/workspace",
-		"--mount", "type=volume,src="+runtimeState+",dst=/home/opencode/.local/share/opencode",
+		"--mount", "type=volume,src="+runtimeState+",dst=/state",
 		"--mount", "type=volume,src="+mise+",dst=/home/opencode/.local/share/mise",
 		"--entrypoint", "sh",
 		image,
-		"-c", "for path in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do touch \"$path/.volume-root-probe\" && rm \"$path/.volume-root-probe\"; done",
+		"-c", "for path in /workspace /state /home/opencode/.local/share/mise; do touch \"$path/.volume-root-probe\" && rm \"$path/.volume-root-probe\"; done",
 	)
 }
 
@@ -83,11 +83,11 @@ func assertReadinessCleanup(t *testing.T, image, workspace, runtimeState, mise s
 		"--security-opt", "no-new-privileges",
 		"--network", "none",
 		"--mount", "type=volume,src="+workspace+",dst=/workspace",
-		"--mount", "type=volume,src="+runtimeState+",dst=/home/opencode/.local/share/opencode",
+		"--mount", "type=volume,src="+runtimeState+",dst=/state",
 		"--mount", "type=volume,src="+mise+",dst=/home/opencode/.local/share/mise",
 		"--entrypoint", "sh",
 		image,
-		"-c", "for root in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do set -- \"$root\"/readiness-*; test ! -e \"$1\"; done",
+		"-c", "for root in /workspace /state /home/opencode/.local/share/mise; do set -- \"$root\"/readiness-*; test ! -e \"$1\"; done",
 	)
 }
 

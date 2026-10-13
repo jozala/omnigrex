@@ -25,8 +25,9 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0015: Reserve exact Pi Sessions and replay bounded append-order history](0015-reserve-exact-pi-sessions-and-replay-bounded-history.md) | Accepted | 2026-10-09 |
 | [0016: Qualify Pi Agent Turns with existing settlement policy](0016-qualify-pi-turns-with-existing-settlement-policy.md) | Accepted | 2026-10-10 |
 | [0017: Bind Pi qualification to backend contracts](0017-bind-pi-qualification-to-backend-contracts.md) | Accepted | 2026-10-10 |
-| [0018: Gate Pi publication on both backend deployments](0018-gate-pi-publication-on-both-backend-deployments.md) | Accepted | 2026-10-11 |
+| [0018: Gate Pi publication on both backend deployments](0018-gate-pi-publication-on-both-backend-deployments.md) | Superseded by 0020; publication gates retained | 2026-10-11 |
 | [0019: Separate Pi startup readiness from ordinary RPC deadlines](0019-separate-pi-startup-readiness-from-rpc-deadlines.md) | Proposed | 2026-10-12 |
+| [0020: Finish Pi-only runtime selection and neutral outcome evidence](0020-finish-pi-only-runtime-and-neutral-outcome-evidence.md) | Accepted | 2026-10-13 |
 
 ## Existing architectural decisions
 

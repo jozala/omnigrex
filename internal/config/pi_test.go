@@ -23,12 +23,12 @@ func TestPiStartupTimeoutConfiguration(t *testing.T) {
 	}
 }
 
-func TestCandidatePiConfigurationRequiresCompleteImmutableBinding(t *testing.T) {
+func TestPiConfigurationRequiresCompleteImmutableBinding(t *testing.T) {
 	for _, tc := range []struct {
 		image, platform string
 		valid           bool
 	}{
-		{"", "", true}, {deploymentImage, "linux/amd64", true}, {deploymentImage, "", false}, {"", "linux/amd64", false}, {"registry.example/pi:latest", "linux/amd64", false}, {deploymentImage, "darwin/arm64", false},
+		{"", "", false}, {deploymentImage, "linux/amd64", true}, {deploymentImage, "", false}, {"", "linux/amd64", false}, {"registry.example/pi:latest", "linux/amd64", false}, {deploymentImage, "darwin/arm64", false},
 	} {
 		got, err := config.Load(environment(map[string]string{"OMNIGREX_PI_RPC_V1_IMAGE": tc.image, "OMNIGREX_PI_RPC_V1_PLATFORM": tc.platform}))
 		if tc.valid {
@@ -38,5 +38,20 @@ func TestCandidatePiConfigurationRequiresCompleteImmutableBinding(t *testing.T) 
 		} else if err == nil {
 			t.Fatalf("invalid candidate accepted: %+v", tc)
 		}
+	}
+}
+
+func TestLegacyImageSettingsCannotSupplyPiBinding(t *testing.T) {
+	_, err := config.Load(environment(map[string]string{
+		"OMNIGREX_PI_RPC_V1_IMAGE": "", "OMNIGREX_PI_RPC_V1_PLATFORM": "",
+		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":    deploymentImage,
+		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM": "linux/amd64",
+		"OMNIGREX_AGENT_IMAGE_REFERENCE":    deploymentImage,
+	}))
+	if err == nil {
+		t.Fatal("legacy image settings supplied an implicit Pi contract")
+	}
+	if _, err := (config.Config{}).RuntimeProfiles(); err == nil {
+		t.Fatal("empty configuration supplied a default Runtime Profile")
 	}
 }

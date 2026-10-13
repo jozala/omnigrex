@@ -38,7 +38,7 @@ func TestPiOperatorExamplesPreserveComposeSelection(t *testing.T) {
 			}
 			files = append(files, "compose.instructions.yaml")
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployOpencodeImage,
+				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployPiImage,
 				"OMNIGREX_PI_RPC_V1_PLATFORM":   "linux/amd64",
 				"OMNIGREX_MICROSANDBOX_KVM_GID": "992",
 			})
@@ -101,14 +101,14 @@ func TestPiDeployBackendRequirements(t *testing.T) {
 	for _, backend := range []string{"docker", "microsandbox"} {
 		t.Run(backend, func(t *testing.T) {
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployOpencodeImage,
+				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployPiImage,
 				"OMNIGREX_PI_RPC_V1_PLATFORM":   "linux/amd64",
 				"OMNIGREX_MICROSANDBOX_KVM_GID": "992",
 			})
 			var filtered []string
 			for _, entry := range environment {
 				name, _, _ := strings.Cut(entry, "=")
-				if name == "COMPOSE_FILE" || name == "OMNIGREX_OPENCODE_ACP_V1_IMAGE" || name == "OMNIGREX_OPENCODE_ACP_V1_PLATFORM" || backend == "docker" && name == "OMNIGREX_MICROSANDBOX_KVM_GID" || backend == "microsandbox" && name == "OMNIGREX_DOCKER_GID" {
+				if name == "COMPOSE_FILE" || backend == "docker" && name == "OMNIGREX_MICROSANDBOX_KVM_GID" || backend == "microsandbox" && name == "OMNIGREX_DOCKER_GID" {
 					continue
 				}
 				filtered = append(filtered, entry)
@@ -130,7 +130,7 @@ func TestPiDeployBackendRequirements(t *testing.T) {
 				t.Fatal(err)
 			}
 			orchestrator := document.Services["orchestrator"]
-			if orchestrator.Environment["OMNIGREX_EXECUTION_BACKEND"] != backend || orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_IMAGE"] != "" {
+			if orchestrator.Environment["OMNIGREX_EXECUTION_BACKEND"] != backend {
 				t.Fatal("incorrect operational selection")
 			}
 			socket := false
@@ -160,7 +160,7 @@ func TestPiDeployHealthcheckBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":     testDeployOpencodeImage,
+				"OMNIGREX_PI_RPC_V1_IMAGE":     testDeployPiImage,
 				"OMNIGREX_PI_RPC_V1_PLATFORM":  "linux/amd64",
 				"OMNIGREX_READINESS_TIMEOUT":   test.readiness,
 				"OMNIGREX_HEALTHCHECK_TIMEOUT": test.healthcheck,

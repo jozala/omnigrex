@@ -15,7 +15,7 @@ Read the minimum repository context needed for the change.
 - `cmd/omnigrex/` — process entry point.
 - `internal/` — Go implementation: `config`, `workflow`/`workflowaction`, `store`, `github`, `runtime/`, `mcp`, `workspace`, `agentturn`, `doctor`, `deployment`, plus supporting packages.
 - `internal/store/migrations/` — forward-only embedded PostgreSQL migrations.
-- `agent/opencode/` — common non-root OpenCode Runtime Process image.
+- `agent/pi/` - common non-root Pi Runtime Process image, owned runner, MCP extension, and qualification fixtures.
 - `.omnigrex/team/` — repository Agent Profiles (one per Workflow Role).
 - `compose.yaml`, `Dockerfile`, `mise.toml`, `.env.example` — stack, images, pinned toolchain, and local configuration shape.
 

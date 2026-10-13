@@ -14,7 +14,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -252,7 +252,7 @@ SELECT (SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1),
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: retryLease, Execution: execution,
-		PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -282,10 +282,10 @@ SELECT (SELECT count(*) FROM tool_invocation_replays WHERE agent_turn_id = $1),
 	}
 	observation, err = reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: noReplayLease, Execution: noReplayExecution,
-		PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeInfrastructureFailed ||
-		observation.Diagnostic != "ACP prompt ended without a successful terminal mutation intent" {
+		observation.Diagnostic != "Agent prompt ended without a successful terminal mutation intent" {
 		t.Fatalf("retry without replay reconciliation = (%#v, %v)", observation, err)
 	}
 }
@@ -355,7 +355,7 @@ func TestPromptEOFAfterDurableDeveloperHandoffSchedulesReviewerWithoutRetry(t *t
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptError: agentturn.PromptErrorFailure,
-		PromptDiagnostic: "submit ACP prompt: EOF", RepositoryCredential: "developer-token",
+		PromptDiagnostic: "submit Agent prompt: EOF", RepositoryCredential: "developer-token",
 		Capture: capture,
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||

@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	postgresImage  = "postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545"
-	readinessImage = "omnigrex/opencode:1.18.29"
-	dockerSocket   = "/var/run/docker.sock"
+	postgresImage = "postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545"
+	dockerSocket  = "/var/run/docker.sock"
 )
 
 var composeSecretNames = []string{
@@ -86,37 +85,31 @@ type composeResource struct {
 
 func TestComposeTopology(t *testing.T) {
 	config := loadComposeConfig(t)
-	assertExactKeys(t, "services", config.Services, "postgres", "opencode-image", "orchestrator")
+	assertExactKeys(t, "services", config.Services, "postgres", "pi-image", "orchestrator")
 	assertExactKeys(t, "secrets", config.Secrets, composeSecretNames...)
 
 	postgres := config.Services["postgres"]
-	validator := config.Services["opencode-image"]
+	validator := config.Services["pi-image"]
 	orchestrator := config.Services["orchestrator"]
 
 	assertServiceSandbox(t, "postgres", postgres, "70:70")
-	assertServiceSandbox(t, "opencode-image", validator, "10001:10001")
+	assertServiceSandbox(t, "pi-image", validator, "10001:10001")
 	assertServiceSandbox(t, "orchestrator", orchestrator, "10001:10001")
 
 	if postgres.Image != postgresImage {
 		t.Errorf("postgres image = %q, want pinned %q", postgres.Image, postgresImage)
 	}
-	if validator.Image != readinessImage {
-		t.Errorf("opencode-image image = %q, want local readiness image %q", validator.Image, readinessImage)
+	if validator.Image != testDeploymentImage || orchestrator.Environment["OMNIGREX_PI_RPC_V1_IMAGE"] != validator.Image {
+		t.Fatal("validator and Pi Runtime Profile must use one exact digest")
 	}
-	if got := orchestrator.Environment["OMNIGREX_AGENT_IMAGE_REFERENCE"]; got != readinessImage {
-		t.Errorf("orchestrator readiness image reference = %q, want %q", got, readinessImage)
+	if got := orchestrator.Environment["OMNIGREX_EXECUTION_BACKEND"]; got != "docker" {
+		t.Errorf("developer backend = %q, want docker", got)
 	}
-	if got := orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_IMAGE"]; got != testDeploymentImage {
-		t.Errorf("orchestrator opencode-acp/v1 image = %q, want exact registry digest %q", got, testDeploymentImage)
-	}
-	if got := orchestrator.Environment["OMNIGREX_OPENCODE_ACP_V1_PLATFORM"]; got != "linux/amd64" {
-		t.Errorf("orchestrator opencode-acp/v1 platform = %q, want linux/amd64", got)
+	if got := orchestrator.Environment["OMNIGREX_PI_RPC_V1_PLATFORM"]; got != "linux/amd64" {
+		t.Errorf("orchestrator Pi platform = %q, want linux/amd64", got)
 	}
 	if got := orchestrator.Environment["OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"]; got != "" {
 		t.Errorf("orchestrator optional compatibility results file = %q, want empty", got)
-	}
-	if readinessImage == testDeploymentImage {
-		t.Fatal("local readiness image and deployment Runtime Profile image must be separate settings")
 	}
 	if got := orchestrator.Environment["OMNIGREX_PROVIDER_CREDENTIALS_FILE"]; got != "/run/secrets/omnigrex-provider-credentials" {
 		t.Errorf("provider credentials path = %q", got)
@@ -124,8 +117,8 @@ func TestComposeTopology(t *testing.T) {
 	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT"]; got != "2" {
 		t.Errorf("Agent Turn concurrency limit = %q, want 2", got)
 	}
-	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_MEMORY_MIB"]; got != "512" {
-		t.Errorf("Agent Turn memory MiB = %q, want 512", got)
+	if got := orchestrator.Environment["OMNIGREX_AGENT_TURN_MEMORY_MIB"]; got != "1024" {
+		t.Errorf("Agent Turn memory MiB = %q, want 1024", got)
 	}
 	if got := orchestrator.Environment["OMNIGREX_ASSIGNMENT_RETENTION_DURATION"]; got != "720h" {
 		t.Errorf("Assignment retention duration = %q, want 720h", got)
@@ -144,20 +137,20 @@ func TestComposeTopology(t *testing.T) {
 	}
 
 	if validator.NetworkMode != "none" {
-		t.Errorf("opencode-image network mode = %q, want none", validator.NetworkMode)
+		t.Errorf("pi-image network mode = %q, want none", validator.NetworkMode)
 	}
 	if len(validator.Networks) != 0 {
-		t.Errorf("opencode-image networks = %v, want none", sortedKeys(validator.Networks))
+		t.Errorf("pi-image networks = %v, want none", sortedKeys(validator.Networks))
 	}
 	if len(validator.Ports) != 0 {
-		t.Errorf("opencode-image published ports = %+v, want none", validator.Ports)
+		t.Errorf("pi-image published ports = %+v, want none", validator.Ports)
 	}
 	if len(validator.Secrets) != 0 {
-		t.Errorf("opencode-image secrets = %+v, want none", validator.Secrets)
+		t.Errorf("pi-image secrets = %+v, want none", validator.Secrets)
 	}
-	assertMounts(t, "opencode-image", validator.Volumes,
+	assertMounts(t, "pi-image", validator.Volumes,
 		composeMount{Type: "volume", Source: "workspaces", Target: "/workspace"},
-		composeMount{Type: "volume", Source: "runtime-state", Target: "/home/opencode/.local/share/opencode"},
+		composeMount{Type: "volume", Source: "runtime-state", Target: "/state"},
 		composeMount{Type: "volume", Source: "mise-data", Target: "/home/opencode/.local/share/mise"},
 	)
 
@@ -202,12 +195,12 @@ func TestComposeTopology(t *testing.T) {
 	if !slices.Contains(orchestrator.GroupAdd, "123") || !slices.Contains(orchestrator.GroupAdd, "456") {
 		t.Errorf("orchestrator supplementary groups = %v, want Docker group 123 and secret-file group 456", orchestrator.GroupAdd)
 	}
-	assertExactKeys(t, "orchestrator dependencies", orchestrator.DependsOn, "opencode-image", "postgres")
+	assertExactKeys(t, "orchestrator dependencies", orchestrator.DependsOn, "pi-image", "postgres")
 	if got := orchestrator.DependsOn["postgres"].Condition; got != "service_healthy" {
 		t.Errorf("orchestrator postgres dependency condition = %q, want service_healthy", got)
 	}
-	if got := orchestrator.DependsOn["opencode-image"].Condition; got != "service_completed_successfully" {
-		t.Errorf("orchestrator opencode-image dependency condition = %q, want service_completed_successfully", got)
+	if got := orchestrator.DependsOn["pi-image"].Condition; got != "service_completed_successfully" {
+		t.Errorf("orchestrator pi-image dependency condition = %q, want service_completed_successfully", got)
 	}
 
 	assertSoleDockerSocketMount(t, config.Services, "orchestrator")

@@ -439,17 +439,17 @@ INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'runtime', '1', 'sha256:test', $3)`,
+VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v1', 'sha256:test', $3)`,
 		assignmentID, fixture.workflowID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status
+    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, $3, 'runtime', '1', 'sha256:test', $4, 'ACTIVE')`,
-		sessionID, assignmentID, "session-"+sessionID, canonicalRuntimePath(assignmentID)); err != nil {
+VALUES ($1, $2, 1, $3, 'pi-rpc', 'v1', 'sha256:test', $4, 'ACTIVE', '{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}')`,
+		sessionID, assignmentID, sessionID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Agent Session: %v", err)
 	}
 	return assignmentID, sessionID

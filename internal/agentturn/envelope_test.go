@@ -9,12 +9,11 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
-func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
+func TestBuildEventEnvelopeReturnsCanonicalDeveloperText(t *testing.T) {
 	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeInitialDevelopment, nil)
 	execution.Turn.AgentProfileConfig = json.RawMessage(`{"instructions":"sensitive-body-sentinel sensitive-comment-sentinel sensitive-review-sentinel sensitive-check-sentinel sensitive-finding-sentinel sensitive-credential-sentinel sensitive-model-sentinel"}`)
 
@@ -22,19 +21,16 @@ func TestBuildEventEnvelopeReturnsOneCanonicalDeveloperTextBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	if len(content) != 1 || content[0].Type != "text" || content[0].Data != "" || content[0].MIMEType != "" || content[0].URI != "" {
-		t.Fatalf("BuildEventEnvelope() content = %#v, want one text block", content)
-	}
 	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","publish_changes","open_pr","request_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked"]}`
-	if content[0] != acp.TextContent(want) {
-		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content[0].Text, want)
+	if content != want {
+		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content, want)
 	}
 	second, err := agentturn.BuildEventEnvelope(execution, "1111111111111111111111111111111111111111", builtinDefinition(t), role.BuiltinPolicyCatalog())
 	if err != nil || !reflect.DeepEqual(second, content) {
 		t.Fatalf("second BuildEventEnvelope() = (%#v, %v), want deterministic output", second, err)
 	}
 	for _, forbidden := range []string{"sensitive-body-sentinel", "sensitive-comment-sentinel", "sensitive-review-sentinel", "sensitive-check-sentinel", "sensitive-finding-sentinel", "sensitive-credential-sentinel", "sensitive-model-sentinel"} {
-		if strings.Contains(content[0].Text, forbidden) {
+		if strings.Contains(content, forbidden) {
 			t.Errorf("event envelope contains forbidden source text %q", forbidden)
 		}
 	}
@@ -73,7 +69,7 @@ func TestBuildEventEnvelopeUsesInjectedWorkflowDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	if len(content) != 1 || !strings.Contains(content[0].Text, `"stage":"implementation-followup"`) {
+	if !strings.Contains(content, `"stage":"implementation-followup"`) {
 		t.Fatalf("custom Stage envelope = %#v", content)
 	}
 }
@@ -88,10 +84,10 @@ func TestBuildEventEnvelopeExplainsRecoveredInProgressPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(content) != 1 || !strings.Contains(content[0].Text, `"pull_request_number":23`) ||
-		!strings.Contains(content[0].Text, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
-		!strings.Contains(content[0].Text, "Inspect the recovered publication") ||
-		!strings.Contains(content[0].Text, `"expected_head_sha":""`) {
+	if !strings.Contains(content, `"pull_request_number":23`) ||
+		!strings.Contains(content, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
+		!strings.Contains(content, "Inspect the recovered publication") ||
+		!strings.Contains(content, `"expected_head_sha":""`) {
 		t.Fatalf("recovered Developer envelope = %#v", content)
 	}
 }
@@ -108,7 +104,7 @@ func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
 	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","submit_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked"]}`
-	if len(content) != 1 || content[0] != acp.TextContent(want) {
+	if content != want {
 		t.Fatalf("BuildEventEnvelope() = %#v\nwant text = %s", content, want)
 	}
 }
@@ -135,7 +131,7 @@ func TestBuildEventEnvelopeSupportsEveryDurableTurnTrigger(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			content, err := agentturn.BuildEventEnvelope(envelopeExecutionContext(test.role, test.purpose, test.proposal), "1111111111111111111111111111111111111111", builtinDefinition(t), role.BuiltinPolicyCatalog())
-			if err != nil || len(content) != 1 {
+			if err != nil || content == "" {
 				t.Fatalf("BuildEventEnvelope() = (%#v, %v)", content, err)
 			}
 			var envelope struct {
@@ -145,7 +141,7 @@ func TestBuildEventEnvelopeSupportsEveryDurableTurnTrigger(t *testing.T) {
 					TurnPurpose workflow.TurnPurpose `json:"turn_purpose"`
 				} `json:"triggering_event"`
 			}
-			if err := json.Unmarshal([]byte(content[0].Text), &envelope); err != nil {
+			if err := json.Unmarshal([]byte(content), &envelope); err != nil {
 				t.Fatalf("decode event envelope: %v", err)
 			}
 			stage := workflow.StageImplementation
@@ -209,7 +205,7 @@ func TestBuildEventEnvelopeRejectsInvalidDurableContext(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			content, err := agentturn.BuildEventEnvelope(test.execution, test.currentSHA, builtinDefinition(t), role.BuiltinPolicyCatalog())
-			if !errors.Is(err, agentturn.ErrInvalidEventEnvelope) || content != nil {
+			if !errors.Is(err, agentturn.ErrInvalidEventEnvelope) || content != "" {
 				t.Fatalf("BuildEventEnvelope() = (%#v, %v), want ErrInvalidEventEnvelope", content, err)
 			}
 		})

@@ -21,7 +21,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -38,8 +38,8 @@ const (
 	outcomeNewHead        = "2222222222222222222222222222222222222222"
 	outcomeBaseSHA        = "3333333333333333333333333333333333333333"
 	outcomeCredential     = "installation-secret"
-	outcomeProfileName    = "opencode-acp-v1"
-	outcomeProfileVersion = "1"
+	outcomeProfileName    = "pi-rpc"
+	outcomeProfileVersion = "v1"
 )
 
 var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
@@ -384,11 +384,11 @@ func TestOutcomeReconcilerBlocksRecoveredBranchOnDefinitePublishConflict(t *test
 	}
 }
 
-func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterACPPromptEOF(t *testing.T) {
+func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterPromptEOF(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleDeveloper, true)
 	request.PromptResponse = nil
 	request.PromptError = agentturn.PromptErrorFailure
-	request.PromptDiagnostic = "submit ACP prompt: EOF"
+	request.PromptDiagnostic = "submit agent prompt: EOF"
 	request.Execution.ChangeProposal.HeadSHA = outcomeNewHead
 	request.Execution.Turn.ExpectedHeadSHA = outcomeNewHead
 	request.Lease.ExpectedHeadSHA = outcomeNewHead
@@ -408,7 +408,7 @@ func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterACPPromptEOF(t *t
 	if observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.Completion.LastError != "" || len(observation.Completion.Outcome) != 0 ||
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != outcomeHead ||
-		!strings.Contains(observation.Diagnostic, "submit ACP prompt: EOF") {
+		!strings.Contains(observation.Diagnostic, "submit agent prompt: EOF") {
 		t.Fatalf("corroborated Developer handoff after EOF = %#v", observation)
 	}
 }
@@ -431,7 +431,7 @@ func TestOutcomeReconcilerAcceptsCorroboratedTerminalIntentsAfterPromptLoss(t *t
 			request := outcomeRequest(t, test.role, true)
 			request.PromptResponse = nil
 			request.PromptError = test.promptError
-			request.PromptDiagnostic = "submit ACP prompt: EOF"
+			request.PromptDiagnostic = "submit agent prompt: EOF"
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{test.mutation}}, github).Reconcile(context.Background(), request)
 			if err != nil || observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded || observation.Completion.LastError != "" {
@@ -441,7 +441,7 @@ func TestOutcomeReconcilerAcceptsCorroboratedTerminalIntentsAfterPromptLoss(t *t
 				if observation.Diagnostic != test.wantBlockedDiagnostic || github.getCalls != 0 {
 					t.Fatalf("blocked handoff = %#v, GitHub gets %d", observation, github.getCalls)
 				}
-			} else if !strings.Contains(observation.Diagnostic, "submit ACP prompt: EOF") {
+			} else if !strings.Contains(observation.Diagnostic, "submit agent prompt: EOF") {
 				t.Fatalf("successful handoff lost transport diagnostic: %#v", observation)
 			}
 		})
@@ -453,19 +453,25 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 		name        string
 		mutations   []store.MutationReservation
 		promptError agentturn.PromptErrorClassification
-		stopReason  acp.StopReason
+		response    *agent.Outcome
 		head        string
 		wantStatus  store.AgentTurnStatus
 		wantDetail  string
 	}{
-		{name: "published without handoff", mutations: []store.MutationReservation{outcomeSucceededMutation(1, mcp.ToolPublishChanges, "publish-1", `{"operation_id":"publish-1"}`, `{"head":"`+outcomeHead+`"}`, "git", "41:feature/work", outcomeNewHead)}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "ACP prompt failed"},
+		{name: "published without handoff", mutations: []store.MutationReservation{outcomeSucceededMutation(1, mcp.ToolPublishChanges, "publish-1", `{"operation_id":"publish-1"}`, `{"head":"`+outcomeHead+`"}`, "git", "41:feature/work", outcomeNewHead)}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "prompt failed"},
 		{name: "stale head", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorFailure, head: outcomeNewHead, wantStatus: store.AgentTurnFailed, wantDetail: "does not match"},
 		{name: "deadline and stale head", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorDeadline, head: outcomeNewHead, wantStatus: store.AgentTurnTimedOut, wantDetail: "does not match"},
 		{name: "conflicting intents", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1), outcomeBlockedMutation(2, "blocked", "")}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "duplicate or conflicting"},
 		{name: "cancelled prompt", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorCancellation, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
-		{name: "unknown stop reason", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorInvalidResponse, wantStatus: store.AgentTurnFailed, wantDetail: "invalid stop reason"},
-		{name: "cancelled stop", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonCancelled, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
-		{name: "token limit", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonMaxTokens, wantStatus: store.AgentTurnFailed, wantDetail: "token limit"},
+		{name: "protocol failure", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorInvalidResponse, wantStatus: store.AgentTurnFailed, wantDetail: "invalid"},
+		{name: "aborted outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Aborted}, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
+		{name: "runtime limit", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, wantStatus: store.AgentTurnFailed, wantDetail: "limit"},
+		{name: "completion without admission", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Completed}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "abort without admission", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Aborted}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "failed outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Failed}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "unknown outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Unknown}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "rejected outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Rejected}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "invalid outcome status", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: "unrecognized"}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -474,7 +480,7 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 			if test.promptError != "" {
 				request.PromptResponse = nil
 			} else {
-				request.PromptResponse = &acp.PromptResponse{StopReason: test.stopReason}
+				request.PromptResponse = test.response
 			}
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}
 			if test.head != "" {
@@ -482,8 +488,8 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 			}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: test.mutations}, github).Reconcile(context.Background(), request)
 			assertOutcomeInfrastructureFailure(t, observation, err, test.wantStatus, test.wantDetail)
-			if test.promptError == agentturn.PromptErrorInvalidResponse && github.getCalls != 0 {
-				t.Fatalf("invalid ACP stop reason triggered %d GitHub observations", github.getCalls)
+			if (test.promptError == agentturn.PromptErrorInvalidResponse || test.response != nil) && github.getCalls != 0 {
+				t.Fatalf("inadmissible prompt evidence triggered %d GitHub observations", github.getCalls)
 			}
 		})
 	}
@@ -959,19 +965,18 @@ func TestOutcomeReconcilerDoesNotTreatProviderNonStringScalarsAsStandaloneSecret
 	}
 }
 
-func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *testing.T) {
-	endTurn := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+func TestOutcomeReconcilerMapsMissingIntentAndPromptFailuresToTerminalStatuses(t *testing.T) {
+	completed := agent.Outcome{Admitted: true, Status: agent.Completed}
 	tests := []struct {
 		name     string
-		response *acp.PromptResponse
+		response *agent.Outcome
 		failure  agentturn.PromptErrorClassification
 		status   store.AgentTurnStatus
 	}{
-		{name: "end turn without intent", response: &endTurn, status: store.AgentTurnFailed},
-		{name: "refusal", response: &acp.PromptResponse{StopReason: acp.StopReasonRefusal}, status: store.AgentTurnFailed},
-		{name: "max tokens", response: &acp.PromptResponse{StopReason: acp.StopReasonMaxTokens}, status: store.AgentTurnFailed},
-		{name: "max requests", response: &acp.PromptResponse{StopReason: acp.StopReasonMaxTurnRequests}, status: store.AgentTurnFailed},
-		{name: "ACP cancellation", response: &acp.PromptResponse{StopReason: acp.StopReasonCancelled}, status: store.AgentTurnInterrupted},
+		{name: "completed without intent", response: &completed, status: store.AgentTurnFailed},
+		{name: "failed prompt", failure: agentturn.PromptErrorFailure, status: store.AgentTurnFailed},
+		{name: "runtime limit", response: &agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, status: store.AgentTurnFailed},
+		{name: "agent abort", response: &agent.Outcome{Admitted: true, Status: agent.Aborted}, status: store.AgentTurnInterrupted},
 		{name: "deadline error", failure: agentturn.PromptErrorDeadline, status: store.AgentTurnTimedOut},
 		{name: "cancellation error", failure: agentturn.PromptErrorCancellation, status: store.AgentTurnInterrupted},
 		{name: "invalid response error", failure: agentturn.PromptErrorInvalidResponse, status: store.AgentTurnFailed},
@@ -983,21 +988,21 @@ func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *t
 			request.PromptResponse = test.response
 			request.PromptError = test.failure
 			observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(context.Background(), request)
-			assertOutcomeInfrastructureFailure(t, observation, err, test.status, "ACP prompt")
+			assertOutcomeInfrastructureFailure(t, observation, err, test.status, "prompt")
 		})
 	}
 	if agentturn.ClassifyPromptError(context.DeadlineExceeded) != agentturn.PromptErrorDeadline ||
 		agentturn.ClassifyPromptError(context.Canceled) != agentturn.PromptErrorCancellation ||
-		agentturn.ClassifyPromptError(fmt.Errorf("ACP prompt: %w", acp.ErrUnknownStopReason)) != agentturn.PromptErrorInvalidResponse ||
+		agentturn.ClassifyPromptError(fmt.Errorf("agent prompt: %w", agent.ErrProtocol)) != agentturn.PromptErrorInvalidResponse ||
 		agentturn.ClassifyPromptError(errors.New("transport")) != agentturn.PromptErrorFailure ||
 		agentturn.ClassifyPromptError(errors.Join(context.DeadlineExceeded, agentturn.ErrRuntimeOOMKilled)) != agentturn.PromptErrorFailure {
 		t.Fatal("ClassifyPromptError() returned an incorrect classification")
 	}
 
 	request := outcomeRequest(t, workflow.RoleDeveloper, true)
-	request.PromptResponse = &acp.PromptResponse{StopReason: acp.StopReasonRefusal}
+	request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Failed}
 	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}}, &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}).Reconcile(context.Background(), request)
-	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "refused")
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "prompt")
 }
 
 func TestOutcomeReconcilerRejectsMalformedAndUnsettledLedgers(t *testing.T) {
@@ -1400,7 +1405,7 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 		lease.ChangeProposalID = proposal.ID
 		lease.ExpectedHeadSHA = outcomeHead
 	}
-	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+	response := agent.Outcome{Admitted: true, Status: agent.Completed}
 	return agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptResponse: &response,
 		RepositoryCredential: outcomeCredential, ReviewerRepositoryCredential: outcomeCredential, Capture: outcomeCapture(t, false),

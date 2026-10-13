@@ -20,7 +20,7 @@ func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 	if err := probe.Check(context.Background()); err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if api.image != "omnigrex/opencode:qualified" {
+	if api.image != "omnigrex/pi:1.0.4" {
 		t.Errorf("inspected image = %q", api.image)
 	}
 	if api.network != "omnigrex-agent" {
@@ -61,7 +61,7 @@ func TestReadinessProbeInspectDoesNotCreateContainers(t *testing.T) {
 	if err := probe.Inspect(context.Background()); err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
-	if api.image != "omnigrex/opencode:qualified" || api.network != "omnigrex-agent" || len(api.volumes) != 3 {
+	if api.image != "omnigrex/pi:1.0.4" || api.network != "omnigrex-agent" || len(api.volumes) != 3 {
 		t.Fatalf("inspected resources = image %q, network %q, volumes %v", api.image, api.network, api.volumes)
 	}
 	if len(api.created) != 0 {
@@ -162,7 +162,7 @@ func testReadinessProbeOptions() ReadinessProbeOptions {
 		WorkspaceVolume:    "omnigrex-workspaces",
 		RuntimeStateVolume: "omnigrex-runtime-state",
 		MiseVolume:         "omnigrex-mise",
-		AgentImage:         "omnigrex/opencode:qualified",
+		AgentImage:         "omnigrex/pi:1.0.4",
 	}
 }
 

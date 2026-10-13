@@ -69,9 +69,9 @@ func TestPiDoctorRegistryAndEffectiveCredentials(t *testing.T) {
 	}
 }
 
-func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
-	runtime, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+func TestEffectivePiProfileAcceptsComposedInstructionsWithinPiBudget(t *testing.T) {
+	runtime, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
@@ -85,11 +85,12 @@ func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: opencode-acp/v1\nmodel: provider/model\nsteps: 1\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
+	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEffectiveProfile(registry, role.Reviewer, profile, agentinstructions.Operator{}, definition); err != nil {
+	credentials := []byte(`{"openai":{"type":"api_key","key":"fixture-only"}}`)
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, agentinstructions.Operator{}, definition, credentials); err != nil {
 		t.Fatalf("Profile fits without operator additions: %v", err)
 	}
 	dir := t.TempDir()
@@ -100,8 +101,8 @@ func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEffectiveProfile(registry, role.Reviewer, profile, operator, definition); err == nil || !strings.Contains(err.Error(), "120 KiB") {
-		t.Fatalf("preflight did not reject oversized composed instructions: %v", err)
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, operator, definition, credentials); err != nil {
+		t.Fatalf("valid Pi instructions were rejected by an obsolete environment-string limit: %v", err)
 	}
 }
 

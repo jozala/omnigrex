@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TurnPathMount is part of the immutable Pi Runtime Profile mount contract.
 const TurnPathMount = "/home/opencode/.local/share/omnigrex-tool-data"
 
 func (lifecycle *Lifecycle) toolDataRoot(assignmentID string) (string, error) {

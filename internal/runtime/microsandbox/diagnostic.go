@@ -89,43 +89,6 @@ func (backend *Backend) CheckRepositoryEnvironment(ctx context.Context, runtime 
 	return nil
 }
 
-func (backend *Backend) StartDiagnostic(ctx context.Context, runtime profile.Profile, image string, memory int64, extraHosts []string, stderr io.Writer) (execution.Process, error) {
-	process, err := backend.diagnostic(ctx, runtime, image, memory, true)
-	if err != nil {
-		return nil, err
-	}
-	fail := func(err error) (execution.Process, error) {
-		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		return nil, errors.Join(err, process.Remove(cleanup))
-	}
-	for _, entry := range extraHosts {
-		host, address, found := strings.Cut(entry, ":")
-		if !found || strings.ContainsAny(host+address, "\n\x00") {
-			return fail(execution.ErrInvalidSpec)
-		}
-		if err := backend.platform.Execute(ctx, process.meta, []string{"/bin/sh", "-ec", "printf '%s\\n' " + quote(address+" "+host) + " >> /etc/hosts"}, "0:0", nil); err != nil {
-			return fail(err)
-		}
-	}
-	command := []string{"/usr/bin/env", "-i"}
-	for _, variable := range runtime.Contract().Environment {
-		command = append(command, variable.Name+"="+variable.Value)
-	}
-	command = append(command, "/usr/local/bin/opencode", "acp")
-	session, err := backend.platform.Stream(ctx, process.meta, command, "10001:10001")
-	if err != nil {
-		return fail(err)
-	}
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	if err := process.transport.attach(session, stderr, nil); err != nil {
-		return fail(err)
-	}
-	return process, nil
-}
-
 // StartProtocolDiagnostic gives the agent adapter the same isolated non-TTY
 // streams as a Turn, using only disposable files and diagnostic ownership.
 func (backend *Backend) StartProtocolDiagnostic(ctx context.Context, spec execution.DiagnosticSpec, stderr io.Writer) (process execution.Process, err error) {

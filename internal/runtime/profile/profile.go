@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	piresources "github.com/jozala/omnigrex/agent/pi"
-	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -126,52 +125,7 @@ type bindingReference struct {
 	image         string
 }
 
-// NewOpenCodeV1 constructs the qualified opencode-acp/v1 contract.
-// Its tmpfs sizes are 64 MiB for cache, 16 MiB each for config, state, and .opencode,
-// and 64 MiB for the executable /tmp/opencode.
-func NewOpenCodeV1(image string, platform Platform) (Profile, error) {
-	contract := Contract{
-		Name:     "opencode-acp",
-		Version:  "v1",
-		Image:    image,
-		Platform: platform,
-		User:     User{UID: 10001, GID: 10001},
-		Command:  []string{"acp"},
-		Environment: []EnvironmentVariable{
-			{Name: "HOME", Value: "/home/opencode"},
-			{Name: "MISE_DATA_DIR", Value: "/home/opencode/.local/share/mise"},
-			{Name: "OPENCODE_AUTH_CONTENT", Value: "{}"},
-			{Name: "OPENCODE_AUTO_SHARE", Value: "false"},
-			{Name: "OPENCODE_DISABLE_AUTOUPDATE", Value: "1"},
-			{Name: "OPENCODE_DISABLE_MODELS_FETCH", Value: "true"},
-			{Name: "OPENCODE_DISABLE_SHARE", Value: "1"},
-			{Name: "XDG_CACHE_HOME", Value: "/home/opencode/.cache"},
-			{Name: "XDG_CONFIG_HOME", Value: "/home/opencode/.config"},
-			{Name: "XDG_DATA_HOME", Value: "/home/opencode/.local/share"},
-			{Name: "XDG_STATE_HOME", Value: "/home/opencode/.local/state"},
-		},
-		Mounts: []Mount{
-			{Name: "mise", Path: "/home/opencode/.local/share/mise"},
-			{Name: "state", Path: "/home/opencode/.local/share/opencode"},
-			{Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"},
-			{Name: "workspace", Path: "/workspace"},
-		},
-		Capabilities: []string{"session/list", "session/load", "session/resume"},
-		Tmpfs: []Tmpfs{
-			{Path: "/home/opencode/.cache", SizeBytes: 64 << 20},
-			{Path: "/home/opencode/.config", SizeBytes: 16 << 20},
-			{Path: "/home/opencode/.local/state", SizeBytes: 16 << 20},
-			{Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
-			{Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
-		},
-		Workspace:             "/workspace",
-		PIDsLimit:             128,
-		RepositoryEnvironment: &RepositoryEnvironment{Version: 1},
-	}
-	return New(contract)
-}
-
-// New validates and snapshots an opencode-acp/v1 contract.
+// New validates and snapshots a Pi Runtime Profile contract.
 func New(contract Contract) (Profile, error) {
 	if err := validate(contract); err != nil {
 		return Profile{}, err
@@ -276,22 +230,6 @@ func (catalog Catalog) ResolveBinding(binding Binding) (Profile, error) {
 	}
 	value, ok := catalog.profiles[key]
 	if !ok {
-		// Qualified built-in contracts can recover historical image/platform content from
-		// the persisted hash without accepting a mutable reference or guessing a platform.
-		for _, platform := range []Platform{{OS: "linux", Arch: "amd64"}, {OS: "linux", Arch: "arm64"}} {
-			candidate, err := NewOpenCodeV1(binding.Image, platform)
-			if err == nil && candidate.Binding() == binding {
-				return candidate, nil
-			}
-			if err == nil {
-				legacy := candidate.Contract()
-				legacy.RepositoryEnvironment = nil
-				candidate, err = New(legacy)
-				if err == nil && candidate.Binding() == binding {
-					return candidate, nil
-				}
-			}
-		}
 		return Profile{}, fmt.Errorf("%w: immutable %s/%s", ErrNotFound, binding.Name, binding.Version)
 	}
 	return cloneProfile(value), nil
@@ -338,7 +276,7 @@ func IsExactRegistryImage(image string) bool {
 	return imageDigest.Algorithm() == digest.SHA256 && imageDigest.Validate() == nil
 }
 
-// IsSupportedPlatform reports whether platform is supported by opencode-acp/v1.
+// IsSupportedPlatform reports whether platform is supported by Pi.
 func IsSupportedPlatform(platform Platform) bool {
 	return platform.OS == "linux" && (platform.Arch == "arm64" || platform.Arch == "amd64")
 }
@@ -379,154 +317,7 @@ func validate(contract Contract) error {
 	if contract.Name == "pi-rpc" && contract.Version == "v1" {
 		return validatePi(contract)
 	}
-	if contract.Name != "opencode-acp" || contract.Version != "v1" {
-		return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)
-	}
-	if len(contract.GoldenResourceContract) > 0 {
-		return invalid("OpenCode cannot use a Pi resource contract")
-	}
-	if !IsExactRegistryImage(contract.Image) {
-		return invalid("image must be a registry name with an exact sha256 digest")
-	}
-	if !IsSupportedPlatform(contract.Platform) {
-		return invalid("unsupported platform %q/%q", contract.Platform.OS, contract.Platform.Arch)
-	}
-	if contract.User != (User{UID: 10001, GID: 10001}) {
-		return invalid("user must be numeric non-root identity 10001:10001")
-	}
-	if !slices.Equal(contract.Command, []string{"acp"}) {
-		return invalid("command must be exactly acp")
-	}
-
-	wantEnvironment := map[string]string{
-		"HOME":                          "/home/opencode",
-		"MISE_DATA_DIR":                 "/home/opencode/.local/share/mise",
-		"OPENCODE_AUTH_CONTENT":         "{}",
-		"OPENCODE_AUTO_SHARE":           "false",
-		"OPENCODE_DISABLE_AUTOUPDATE":   "1",
-		"OPENCODE_DISABLE_MODELS_FETCH": "true",
-		"OPENCODE_DISABLE_SHARE":        "1",
-		"XDG_CACHE_HOME":                "/home/opencode/.cache",
-		"XDG_CONFIG_HOME":               "/home/opencode/.config",
-		"XDG_DATA_HOME":                 "/home/opencode/.local/share",
-		"XDG_STATE_HOME":                "/home/opencode/.local/state",
-	}
-	seenEnvironment := make(map[string]struct{}, len(contract.Environment))
-	for _, variable := range contract.Environment {
-		value, known := wantEnvironment[variable.Name]
-		if !known {
-			return invalid("unknown environment key %q", variable.Name)
-		}
-		if _, duplicate := seenEnvironment[variable.Name]; duplicate {
-			return invalid("duplicate environment key %q", variable.Name)
-		}
-		if variable.Value != value {
-			return invalid("environment key %q has an invalid value", variable.Name)
-		}
-		seenEnvironment[variable.Name] = struct{}{}
-	}
-	if len(seenEnvironment) != len(wantEnvironment) {
-		return invalid("environment contract is incomplete")
-	}
-
-	wantMounts := map[string]string{
-		"mise":      "/home/opencode/.local/share/mise",
-		"state":     "/home/opencode/.local/share/opencode",
-		"tool-data": "/home/opencode/.local/share/omnigrex-tool-data",
-		"workspace": "/workspace",
-	}
-	seenMounts := make(map[string]struct{}, len(contract.Mounts))
-	for _, mount := range contract.Mounts {
-		wantPath, known := wantMounts[mount.Name]
-		if !known {
-			return invalid("unknown logical mount %q", mount.Name)
-		}
-		if _, duplicate := seenMounts[mount.Name]; duplicate {
-			return invalid("duplicate logical mount %q", mount.Name)
-		}
-		if mount.Path != wantPath || !validAbsolutePath(mount.Path) {
-			return invalid("logical mount %q has invalid path %q", mount.Name, mount.Path)
-		}
-		seenMounts[mount.Name] = struct{}{}
-	}
-	if len(seenMounts) != len(wantMounts) {
-		return invalid("logical mount contract is incomplete")
-	}
-
-	wantCapabilities := map[string]struct{}{
-		"session/list":   {},
-		"session/load":   {},
-		"session/resume": {},
-	}
-	seenCapabilities := make(map[string]struct{}, len(contract.Capabilities))
-	for _, capability := range contract.Capabilities {
-		if _, known := wantCapabilities[capability]; !known {
-			return invalid("unknown ACP capability %q", capability)
-		}
-		if _, duplicate := seenCapabilities[capability]; duplicate {
-			return invalid("duplicate ACP capability %q", capability)
-		}
-		seenCapabilities[capability] = struct{}{}
-	}
-	if len(seenCapabilities) != len(wantCapabilities) {
-		return invalid("required ACP capability contract is incomplete")
-	}
-
-	wantTmpfs := map[string]Tmpfs{
-		"/home/opencode/.cache":       {Path: "/home/opencode/.cache", SizeBytes: 64 << 20},
-		"/home/opencode/.config":      {Path: "/home/opencode/.config", SizeBytes: 16 << 20},
-		"/home/opencode/.local/state": {Path: "/home/opencode/.local/state", SizeBytes: 16 << 20},
-		"/home/opencode/.opencode":    {Path: "/home/opencode/.opencode", SizeBytes: 16 << 20},
-		"/tmp/opencode":               {Path: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true},
-	}
-	seenTmpfs := make(map[string]struct{}, len(contract.Tmpfs))
-	for _, tmpfs := range contract.Tmpfs {
-		want, known := wantTmpfs[tmpfs.Path]
-		if !known {
-			return invalid("unknown tmpfs path %q", tmpfs.Path)
-		}
-		if _, duplicate := seenTmpfs[tmpfs.Path]; duplicate {
-			return invalid("duplicate tmpfs path %q", tmpfs.Path)
-		}
-		if tmpfs != want || !validAbsolutePath(tmpfs.Path) {
-			return invalid("tmpfs path %q has invalid size or executable flag", tmpfs.Path)
-		}
-		seenTmpfs[tmpfs.Path] = struct{}{}
-	}
-	if len(seenTmpfs) != len(wantTmpfs) {
-		return invalid("tmpfs contract is incomplete")
-	}
-
-	paths := make([]string, 0, len(contract.Mounts)+len(contract.Tmpfs))
-	for _, mount := range contract.Mounts {
-		paths = append(paths, mount.Path)
-	}
-	for _, tmpfs := range contract.Tmpfs {
-		paths = append(paths, tmpfs.Path)
-	}
-	for i, first := range paths {
-		for _, second := range paths[i+1:] {
-			if pathsOverlap(first, second) {
-				return invalid("writable paths %q and %q overlap", first, second)
-			}
-		}
-	}
-
-	if contract.Workspace != "/workspace" {
-		return invalid("workspace must be exactly /workspace")
-	}
-	if contract.PIDsLimit != 128 {
-		return invalid("PID limit must be exactly 128")
-	}
-	return nil
-}
-
-func validAbsolutePath(value string) bool {
-	return strings.HasPrefix(value, "/") && value != "/" && path.Clean(value) == value
-}
-
-func pathsOverlap(first, second string) bool {
-	return first == second || strings.HasPrefix(first, second+"/") || strings.HasPrefix(second, first+"/")
+	return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)
 }
 
 func invalid(format string, arguments ...any) error {

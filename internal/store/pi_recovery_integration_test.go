@@ -182,7 +182,7 @@ func (f *piWorkflowFixture) prompt(t *testing.T, lease store.AgentTurnLease, han
 	}
 	ctx, cancel := context.WithTimeout(f.ctx, 45*time.Second)
 	defer cancel()
-	return handle.AgentConnection().Prompt(ctx, lease, execution.Session, envelope[0].Text, &piAdmissionSink{admitted: onAdmitted})
+	return handle.AgentConnection().Prompt(ctx, lease, execution.Session, envelope, &piAdmissionSink{admitted: onAdmitted})
 }
 
 func (f *piWorkflowFixture) testExecutionFault(t *testing.T) {

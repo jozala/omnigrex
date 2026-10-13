@@ -66,7 +66,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 	}
 	for _, participant := range participants {
 		durable, err := database.GetAgentSessionForParticipant(ctx, participant.ID)
-		if err != nil || durable.RuntimeSessionID != durable.ID || durable.ACPSessionID != "" {
+		if err != nil || durable.RuntimeSessionID != durable.ID {
 			t.Fatalf("durable Pi binding: %+v %v", durable, err)
 		}
 		bytes, err := os.ReadFile(filepath.Join(settings.RuntimeStateRoot, "assignment-"+participant.ID, "runtime-state", "sessions", durable.ID, "session.jsonl"))
@@ -155,7 +155,6 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	settings := config.Config{ExecutionBackend: os.Getenv("OMNIGREX_PI_BACKEND"), DockerAgentNetwork: os.Getenv("OMNIGREX_PI_WORKFLOW_NETWORK"), WorkspaceVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_WORKSPACES"), RuntimeStateVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_STATES"), MiseVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_TOOLS"), WorkspaceRoot: filepath.Join(root, "workspaces"), RuntimeStateRoot: filepath.Join(root, "state"), MiseRoot: filepath.Join(root, "tools"), MicrosandboxExecutable: "/usr/local/bin/msb", MicrosandboxFirmware: "/usr/local/lib/libkrunfw.so.5.6.1", MicrosandboxHome: "/tmp/msb-workflow", MicrosandboxNamespace: uuid.NewString(), MicrosandboxCPUs: 1, MicrosandboxRootDiskMiB: 4096, MCPEndpointURL: endpoint, AgentTurnExecutionTurnTimeout: 3 * time.Minute}
 	image, platform := workflowQualificationImage(t)
 	settings.ShutdownTimeout = 10 * time.Second
-	settings.AgentImageReference = image
 	p, err := profile.NewPiV1(image, platform)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +240,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if mode == "startup-timeout" {
 		startupTimeout = 200 * time.Millisecond
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, ACP: agentturn.ProductionACPFactory{}, Sessions: session.NewCoordinator(database), AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: startupTimeout}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: startupTimeout}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +248,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{Store: database, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}, DefaultBranch: workflowQualificationBranch{head: head}, Launcher: launcher, Sessions: session.NewCoordinator(database), Outcomes: outcomes, Workspace: workspaces, PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, github), Policies: configuration.Policies, Definition: configuration.Reducer.Definition()}, agentturn.ExecutionWorkerConfig{ClaimOwner: "qualified-workflow", LeaseDuration: 30 * time.Second, HeartbeatInterval: time.Second, IdlePollInterval: time.Millisecond, TurnTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second, ConcurrencyLimit: 1, ProviderCredentialJSON: json.RawMessage(`{"controlled":{"type":"api_key","key":"workflow-only-provider-key"}}`)})
+	worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{Store: database, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}, DefaultBranch: workflowQualificationBranch{head: head}, Launcher: launcher, Outcomes: outcomes, Workspace: workspaces, PublicationRecovery: agentturn.NewPublicationRecovery(database, workspaces, github), Policies: configuration.Policies, Definition: configuration.Reducer.Definition()}, agentturn.ExecutionWorkerConfig{ClaimOwner: "qualified-workflow", LeaseDuration: 30 * time.Second, HeartbeatInterval: time.Second, IdlePollInterval: time.Millisecond, TurnTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second, ConcurrencyLimit: 1, ProviderCredentialJSON: json.RawMessage(`{"controlled":{"type":"api_key","key":"workflow-only-provider-key"}}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

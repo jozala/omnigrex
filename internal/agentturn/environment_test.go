@@ -14,7 +14,6 @@ import (
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
-	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -69,7 +68,7 @@ func TestUnsupportedDockerCapabilitiesFailBeforeRepositoryWork(t *testing.T) {
 			launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 				Store: &runtimeStore{operations: &operations, execution: state}, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: bound},
 				Workspace: &runtimeWorkspace{operations: &operations}, Gateway: &runtimeGateway{operations: &operations},
-				Execution: &runtimeEngineFactory{operations: &operations}, ACP: &runtimeACPFactory{operations: &operations}, Sessions: &runtimeSessionPreparer{operations: &operations},
+				Execution: &runtimeEngineFactory{operations: &operations},
 			})
 			handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git", DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "feature", RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"key":"test"}}`)})
 			if handle != nil || !errors.Is(err, execution.ErrUnsupportedRequirement) || !strings.Contains(err.Error(), requirement) {
@@ -82,35 +81,35 @@ func TestUnsupportedDockerCapabilitiesFailBeforeRepositoryWork(t *testing.T) {
 	}
 }
 
-func TestRetainedPreStep07ParticipantProvisionsToolsWithoutRebinding(t *testing.T) {
+func TestRetainedPiParticipantProvisionsToolsWithoutRebinding(t *testing.T) {
 	current := runtimeLauncherProfile(t)
 	contract := current.Contract()
-	contract.RepositoryEnvironment = nil
 	contract.Image = "registry.example/retained@sha256:" + strings.Repeat("b", 64)
-	legacy, err := profile.New(contract)
+	retained, err := profile.New(contract)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Resolve the historical binding through the deployment's current catalog,
 	// just as the first Turn following an orchestrator upgrade does.
-	catalog, err := profile.NewCatalog([]profile.Profile{current}, nil)
+	catalog, err := profile.NewCatalog([]profile.Profile{current}, []profile.Profile{retained})
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, lease := runtimeExecutionContext(t, legacy, workflow.RoleDeveloper, nil)
+	state, lease := runtimeExecutionContext(t, retained, workflow.RoleDeveloper, nil)
 	state.Assignment.RuntimeImageDigest = contract.Image
 	state.Session.RuntimeImageDigest = contract.Image
 	state.Session.Status = store.AgentSessionActive
-	state.Session.ACPSessionID = "retained-acp-session"
+	state.Session.RuntimeSessionID = state.Session.ID
+	state.Session.RuntimeCapabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
 	operations := []string{}
 	factory := &runtimeEngineFactory{operations: &operations}
 	workspaces := &runtimeWorkspace{operations: &operations}
-	sessions := &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: state.Session.ID, ACPSessionID: state.Session.ACPSessionID}}
+	adapter := &runtimeTurnAdapter{operations: &operations}
+	states := &runtimeRetainedState{}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: &runtimeStore{operations: &operations, execution: state}, Registry: catalog,
 		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations},
-		Execution: factory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: sessions,
-		LegacyBootstrapImage: current.Contract().Image,
+		Execution: factory, States: states, AgentAdapters: runtimeAdapters(adapter),
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
 		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
@@ -121,28 +120,17 @@ func TestRetainedPreStep07ParticipantProvisionsToolsWithoutRebinding(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
-	if !slices.Equal(factory.engine.spec.Command, []string{"/opt/omnigrex/environment-bootstrap/omnigrex-environment", "run", "acp"}) {
+	if !slices.Equal(factory.engine.spec.Command, append([]string{"/usr/local/bin/omnigrex-environment", "run"}, retained.Contract().Command...)) {
 		t.Fatal("retained Participant bypassed in-environment tool provisioning and activation")
 	}
-	if factory.request.BootstrapImage != current.Contract().Image {
-		t.Fatal("retained provisioning did not select the exact deployment bootstrap artifact")
-	}
-	bootstrapMounted := false
-	for _, mount := range factory.engine.spec.Volumes {
-		if mount.Target == "/opt/omnigrex/environment-bootstrap" {
-			bootstrapMounted = mount.ReadOnly && strings.Contains(mount.Subpath, "/turn/"+state.Turn.ID+"/")
-		}
-	}
-	if !bootstrapMounted {
-		t.Fatal("deployment bootstrap was not mounted read-only from exact Turn scratch")
-	}
-	if factory.engine.spec.Image != legacy.Contract().Image || sessions.request.Session.RuntimeProfileContentSHA256 != legacy.ContentSHA256() || sessions.request.Session.ID != state.Session.ID || sessions.request.Session.ACPSessionID != state.Session.ACPSessionID {
+	if factory.engine.spec.Image != retained.Contract().Image || adapter.request.Session.RuntimeProfileContentSHA256 != retained.ContentSHA256() || adapter.request.Session.ID != state.Session.ID || adapter.request.Session.RuntimeSessionID != state.Session.RuntimeSessionID {
 		t.Fatal("upgrade changed the retained image, contract, or Session identity")
+	}
+	if len(states.ensured) != 1 || states.ensured[0] != factory.request.State || adapter.request.State != factory.request.State ||
+		factory.request.State.RuntimeProfileSHA256 != retained.ContentSHA256() || factory.request.State.Image != contract.Image {
+		t.Fatal("retained state attachment lost the immutable Participant binding")
 	}
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	if workspaces.cleanedTurnID != state.Turn.ID {
-		t.Fatal("stopped retained environment did not release its exact bootstrap scratch")
 	}
 }

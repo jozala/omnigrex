@@ -173,7 +173,7 @@ func (c *RuntimeCoordinator) HumanPrompt(ctx context.Context, request RuntimeHum
 	if _, bounded := ctx.Deadline(); !bounded {
 		return agent.Outcome{Status: agent.Rejected}, errors.New("human prompt requires a deadline")
 	}
-	duration, interval, err := humanPromptTiming(HumanPromptRequest{LeaseDuration: request.LeaseDuration, HeartbeatInterval: request.HeartbeatInterval})
+	duration, interval, err := humanPromptTiming(request)
 	if err != nil {
 		return agent.Outcome{Status: agent.Rejected}, err
 	}
