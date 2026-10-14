@@ -40,21 +40,139 @@ run = "go test -race ./..."
 
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
-depends = ["agent-images"]
-run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/acp ./internal/runtime/docker ./internal/store ./internal/deployment"
+depends = ["pi-image"]
+run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/deployment"
 
 [tasks.test-compose]
-description = "Run the destructive full-stack Docker Compose integration test"
-depends = ["image", "agent-image"]
-run = '''
-OMNIGREX_COMPOSE_INTEGRATION=1 \
-OMNIGREX_DOCKER_GID="${OMNIGREX_DOCKER_GID:-0}" \
-go test -race -tags=integration ./internal/deployment -run TestComposeFullStack -count=1 -v
-'''
+description = "Run disposable Pi full-stack deployment, persistence, webhook, and readiness gates"
+run = "mise run test-pi-deployment"
 
 [tasks.test-live-github]
 description = "Run the opt-in live GitHub App repository read and review gate"
 run = "go test -tags=live ./internal/github -run 'TestLive(DeveloperAppGetsRepositoryByID|ReviewerAppSubmitsApproveAndRequestChanges)' -count=1 -v"
+
+[tasks.test-microsandbox-feasibility]
+description = "Run the opt-in Linux/KVM Microsandbox development-environment experiment"
+run = "OMNIGREX_MICROSANDBOX_FEASIBILITY=1 go test -race -tags=integration -timeout 45m -count=1 -v ./experiments/microsandbox"
+
+[tasks.test-microsandbox-integration]
+description = "Qualify the SDK-backed adapter, captures, state, golden resources, and nested Docker on Linux/KVM"
+shell = "bash -ec"
+run = '''
+: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
+docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/microsandbox-golden-fixture:step08 .
+docker build --file Dockerfile.microsandbox --target qualification --tag omnigrex/microsandbox-qualification:step08 .
+set -o pipefail
+docker image save omnigrex/microsandbox-golden-fixture:step08 | docker run --rm -i \
+  --label io.omnigrex.qualification=microsandbox-step08 \
+  --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
+  --memory 6g --memory-swap 6g --cpus 2 --pids-limit 1024 \
+  --env "OMNIGREX_MICROSANDBOX_TEST_PATTERN=${OMNIGREX_MICROSANDBOX_TEST_PATTERN:-.}" \
+  --entrypoint /bin/sh omnigrex/microsandbox-qualification:step08 \
+  -ec 'cat > /tmp/golden-image.tar; exec /usr/local/bin/microsandbox.test -test.v -test.run "$OMNIGREX_MICROSANDBOX_TEST_PATTERN" -test.timeout 30m'
+'''
+
+[tasks.test-pi-feasibility]
+description = "Prove pinned Pi RPC and authenticated MCP on the selected execution backend"
+run = "OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run 'TestPiRPCFeasibility|TestRPCClientCorrelatesConcurrentResponses'"
+
+[tasks.pi-diagnostic-image]
+description = "Build the pinned disposable Pi protocol diagnostic image"
+run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
+
+[tasks.pi-image]
+description = "Build the pinned Pi repository environment"
+run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
+
+[tasks.test-pi-integration]
+description = "Qualify the Pi adapter with a controlled provider on Docker"
+depends = ["pi-diagnostic-image"]
+run = "OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 -v ./internal/runtime/pi"
+
+[tasks.test-pi-workflow]
+description = "Qualify complete Pi Developer-to-Reviewer Agent Turns on Docker"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-microsandbox-workflow]
+description = "Run the same controlled Pi Workflow on the Linux/KVM SDK backend"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-recovery]
+description = "Qualify the shared Pi failure/recovery matrix on Docker"
+run = "OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-upgrade]
+description = "Qualify isolated Pi source-to-candidate continuation, replay, and portable state restore on Docker"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh"
+
+[tasks.test-pi-microsandbox-upgrade]
+description = "Qualify the same Pi upgrade and state recovery contract on Linux/KVM"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-upgrade.sh"
+
+[tasks.test-pi-microsandbox-recovery]
+description = "Qualify the same Pi failure/recovery matrix on Linux/KVM"
+run = "OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh"
+
+[tasks.test-pi-microsandbox-integration]
+description = "Run the same Pi adapter scenarios through the Linux/KVM SDK backend"
+shell = "bash -ec"
+depends = ["pi-diagnostic-image"]
+run = '''
+: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
+docker build --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-qualification:step09 .
+set -o pipefail
+docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
+  --label io.omnigrex.qualification=pi-step09 \
+  --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
+  --memory 4g --memory-swap 4g --cpus 2 --pids-limit 1024 \
+  --entrypoint /bin/sh omnigrex/pi-qualification:step09 \
+  -ec 'cat > /tmp/pi-image.tar; exec /usr/local/bin/pi.test -test.v -test.timeout 15m'
+'''
+
+[tasks.test-pi-live]
+description = "Run bounded live OpenCode Go and OpenAI API-key checks using an explicitly supplied auth file"
+run = '''
+: "${OMNIGREX_PI_LIVE_AUTH_FILE:?set the local path to a Pi API-key auth file}"
+OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run '^TestPiLiveProviders$'
+'''
+
+[tasks.test-docker-integration]
+description = "Run shared conformance, Pi lifecycle/recovery/upgrade, and image-only deployment gates on Docker"
+run = '''
+mise run test-integration
+mise run test-pi-integration
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-workflow
+mise run test-pi-recovery
+mise run test-pi-upgrade
+mise run test-pi-deployment
+'''
+
+[tasks.test-microsandbox]
+description = "Run the same release gates plus nested-container qualification on Linux/KVM"
+run = '''
+mise run test-microsandbox-integration
+mise run test-pi-microsandbox-integration
+OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-microsandbox-workflow
+mise run test-pi-microsandbox-recovery
+mise run test-pi-microsandbox-upgrade
+mise run test-pi-microsandbox-deployment
+'''
+
+[tasks.test-pi-deployment]
+description = "Smoke-test the Pi image-only Docker bundle on the daemon host, using disposable fixture secrets"
+run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
+
+[tasks.test-pi-microsandbox-deployment]
+description = "Smoke-test the Pi image-only Linux/KVM bundle on the daemon host"
+run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
+
+[tasks.test-pi-cutover]
+description = "Rehearse isolated OpenCode reset, Pi Docker deployment, and coordinated recovery on the daemon host"
+run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
+
+[tasks.test-pi-microsandbox-cutover]
+description = "Rehearse the same reset and Pi coordinated recovery on the Linux/KVM daemon host"
+run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
 
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
@@ -64,53 +182,35 @@ OMNIGREX_SECRET_GID=1 \
 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 \
 OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
 OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
 docker compose config --quiet
-OMNIGREX_DOCKER_GID=0 \
-OMNIGREX_SECRET_GID=1 \
-OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
-OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
-OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_OPENCODE_ACP_V1_IMAGE=registry.example/omnigrex/opencode@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_OPENCODE_ACP_V1_PLATFORM=linux/amd64 \
-OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
-OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
-OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
-OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_SECRET_GID=1 OMNIGREX_DOCKER_GID=0 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
+OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
-docker compose --file deploy/compose.yaml config --quiet
+docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-docker.yaml config --quiet
+OMNIGREX_SECRET_GID=1 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
+OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
+OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
+OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
+docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml config --quiet
 '''
 
 [tasks.image]
 description = "Build the orchestrator image"
 run = "docker build --tag omnigrex/orchestrator:dev ."
-
-[tasks.agent-image]
-description = "Build the pinned OpenCode Runtime Process image"
-run = "docker build --file agent/opencode/Dockerfile --tag omnigrex/opencode:1.18.29 ."
-
-[tasks.agent-image-previous]
-description = "Build the previous OpenCode image used for controlled upgrade tests"
-run = "docker build --file agent/opencode/Dockerfile --build-arg OPENCODE_VERSION=1.18.19 --tag omnigrex/opencode:1.18.19 ."
-
-[tasks.agent-images]
-description = "Build current and previous OpenCode compatibility images"
-depends = ["agent-image", "agent-image-previous"]
-
-[tasks.release-check-runtime-upgrade]
-description = "Qualify source-to-candidate state compatibility and optionally emit an exact-digest result"
-depends = ["agent-images"]
-run = '''
-go test -race -tags=integration ./internal/runtime/acp -run '^TestOpenCodeControlledStateUpgrade$' -count=1
-go test -race ./internal/agentturn -run '^TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGeneration$' -count=1
-go test -race ./internal/runtime/profile -run '^TestCompatibilityResults'
-'''
 
 [tasks.check]
 description = "Run all local verification checks"

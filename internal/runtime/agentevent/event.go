@@ -11,7 +11,6 @@ type Kind string
 type Context struct {
 	AssignmentID    string
 	AgentSessionID  string
-	ACPSessionID    string
 	TurnID          string
 	ExecutionEpoch  uint64
 	ControlRevision uint64

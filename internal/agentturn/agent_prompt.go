@@ -1,0 +1,24 @@
+package agentturn
+
+import "github.com/jozala/omnigrex/internal/runtime/agent"
+
+// Only positively admitted completion or abort evidence is a terminal response.
+// Uncertain admission and settlement remain failures and never prove execution stopped.
+func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, error) {
+	if err != nil {
+		return agent.Outcome{}, err
+	}
+	switch outcome.Status {
+	case agent.Completed, agent.Aborted:
+		if !outcome.Admitted {
+			return agent.Outcome{}, agent.ErrRuntime
+		}
+		return outcome, nil
+	case agent.Failed, agent.Rejected:
+		return agent.Outcome{}, agent.ErrRuntime
+	case agent.Unknown:
+		return agent.Outcome{}, agent.ErrTransport
+	default:
+		return agent.Outcome{}, agent.ErrProtocol
+	}
+}

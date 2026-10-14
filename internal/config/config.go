@@ -22,11 +22,12 @@ const (
 	defaultRuntimeStateVolume          = "omnigrex-runtime-state"
 	defaultMiseVolume                  = "omnigrex-mise"
 	defaultWorkspaceRoot               = "/var/lib/omnigrex/workspaces"
+	defaultWorkspaceCaptureRoot        = "/var/lib/omnigrex/runtime-state/workspace-captures"
+	defaultRuntimeStateRoot            = "/var/lib/omnigrex/runtime-state"
 	defaultMiseRoot                    = "/var/lib/omnigrex/mise"
 	defaultMCPAddr                     = "omnigrex-mcp:8081"
 	defaultMCPEndpointURL              = "http://omnigrex-mcp:8081/mcp"
 	defaultMCPMutationOperationTimeout = 2 * time.Hour
-	defaultAgentImageReference         = "omnigrex/opencode:1.18.29"
 	defaultGitHubAPIURL                = "https://api.github.com"
 	defaultGitRemoteBaseURL            = gitremote.DefaultBaseURL
 	defaultHTTPAddr                    = ":8080"
@@ -42,6 +43,7 @@ const (
 	defaultExecutionHeartbeat          = 10 * time.Second
 	defaultExecutionPollInterval       = 250 * time.Millisecond
 	defaultExecutionTurnTimeout        = 2 * time.Hour
+	defaultPiStartupTimeout            = 10 * time.Minute
 	defaultExecutionCleanupTimeout     = 10 * time.Second
 	defaultTerminalCorroboration       = 30 * time.Minute
 	defaultWorkflowEffectLeaseDuration = 30 * time.Second
@@ -58,22 +60,29 @@ const (
 )
 
 type Config struct {
-	DatabaseURL                 string
-	DatabasePasswordSecretFile  string
-	DockerAgentNetwork          string
-	WorkspaceVolume             string
-	RuntimeStateVolume          string
-	MiseVolume                  string
-	WorkspaceRoot               string
-	MiseRoot                    string
-	MCPAddr                     string
-	MCPEndpointURL              string
-	MCPMutationOperationTimeout time.Duration
-	// AgentImageReference is the mutable local image used by deployment readiness checks.
-	AgentImageReference string
-	// OpenCodeACPV1Image and OpenCodeACPV1Platform define the immutable deployment Runtime Profile.
-	OpenCodeACPV1Image                     string
-	OpenCodeACPV1Platform                  profile.Platform
+	ExecutionBackend                       string
+	MicrosandboxExecutable                 string
+	MicrosandboxFirmware                   string
+	MicrosandboxHome                       string
+	MicrosandboxNamespace                  string
+	MicrosandboxCPUs                       int
+	MicrosandboxRootDiskMiB                int64
+	DatabaseURL                            string
+	DatabasePasswordSecretFile             string
+	DockerAgentNetwork                     string
+	WorkspaceVolume                        string
+	RuntimeStateVolume                     string
+	MiseVolume                             string
+	WorkspaceRoot                          string
+	WorkspaceCaptureRoot                   string
+	RuntimeStateRoot                       string
+	MiseRoot                               string
+	MCPAddr                                string
+	MCPEndpointURL                         string
+	MCPMutationOperationTimeout            time.Duration
+	PiRPCV1Image                           string
+	PiRPCV1Platform                        profile.Platform
+	PiStartupTimeout                       time.Duration
 	RuntimeProfileCompatibilityResultsFile string
 	GitHubAPIURL                           string
 	GitRemoteBaseURL                       string
@@ -136,6 +145,13 @@ func (err *ValidationError) Problems() []error {
 
 func Load(getenv func(string) string) (Config, error) {
 	config := Config{
+		ExecutionBackend:                       valueOrDefault(getenv("OMNIGREX_EXECUTION_BACKEND"), "docker"),
+		MicrosandboxExecutable:                 valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_EXECUTABLE"), "/usr/local/bin/msb"),
+		MicrosandboxFirmware:                   valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_FIRMWARE"), "/usr/local/lib/libkrunfw.so.5.6.1"),
+		MicrosandboxHome:                       valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_HOME"), "/var/lib/omnigrex/msb"),
+		MicrosandboxNamespace:                  valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_NAMESPACE"), "omnigrex"),
+		MicrosandboxCPUs:                       2,
+		MicrosandboxRootDiskMiB:                20480,
 		AgentInstructionsDir:                   getenv("OMNIGREX_AGENT_INSTRUCTIONS_DIR"),
 		DatabaseURL:                            valueOrDefault(getenv("OMNIGREX_DATABASE_URL"), defaultDatabaseURL),
 		DatabasePasswordSecretFile:             valueOrDefault(getenv("OMNIGREX_DATABASE_PASSWORD_SECRET_FILE"), defaultDatabasePasswordSecretFile),
@@ -144,12 +160,14 @@ func Load(getenv func(string) string) (Config, error) {
 		RuntimeStateVolume:                     valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_VOLUME"), defaultRuntimeStateVolume),
 		MiseVolume:                             valueOrDefault(getenv("OMNIGREX_MISE_VOLUME"), defaultMiseVolume),
 		WorkspaceRoot:                          valueOrDefault(getenv("OMNIGREX_WORKSPACE_ROOT"), defaultWorkspaceRoot),
+		WorkspaceCaptureRoot:                   valueOrDefault(getenv("OMNIGREX_WORKSPACE_CAPTURE_ROOT"), defaultWorkspaceCaptureRoot),
+		RuntimeStateRoot:                       valueOrDefault(getenv("OMNIGREX_RUNTIME_STATE_ROOT"), defaultRuntimeStateRoot),
 		MiseRoot:                               valueOrDefault(getenv("OMNIGREX_MISE_ROOT"), defaultMiseRoot),
 		MCPAddr:                                valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
 		MCPEndpointURL:                         valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
 		MCPMutationOperationTimeout:            defaultMCPMutationOperationTimeout,
-		AgentImageReference:                    valueOrDefault(getenv("OMNIGREX_AGENT_IMAGE_REFERENCE"), defaultAgentImageReference),
-		OpenCodeACPV1Image:                     getenv("OMNIGREX_OPENCODE_ACP_V1_IMAGE"),
+		PiRPCV1Image:                           getenv("OMNIGREX_PI_RPC_V1_IMAGE"),
+		PiStartupTimeout:                       defaultPiStartupTimeout,
 		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
 		GitHubAPIURL:                           valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
 		GitRemoteBaseURL:                       valueOrDefault(getenv("OMNIGREX_GIT_REMOTE_BASE_URL"), defaultGitRemoteBaseURL),
@@ -184,6 +202,42 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var problems []error
+	if config.ExecutionBackend != "docker" && config.ExecutionBackend != "microsandbox" {
+		problems = append(problems, fmt.Errorf("OMNIGREX_EXECUTION_BACKEND must be docker or microsandbox"))
+	}
+	if config.ExecutionBackend == "microsandbox" {
+		for _, setting := range []struct{ name, value string }{
+			{"OMNIGREX_MICROSANDBOX_EXECUTABLE", config.MicrosandboxExecutable},
+			{"OMNIGREX_MICROSANDBOX_FIRMWARE", config.MicrosandboxFirmware},
+			{"OMNIGREX_MICROSANDBOX_HOME", config.MicrosandboxHome},
+		} {
+			if !filepath.IsAbs(setting.value) || filepath.Clean(setting.value) != setting.value || strings.ContainsAny(setting.value, ":\x00\n") {
+				problems = append(problems, fmt.Errorf("%s must be a clean absolute path", setting.name))
+			}
+		}
+		if len(config.MicrosandboxHome) > 40 {
+			problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_HOME must not exceed 40 bytes (Unix socket path budget)"))
+		}
+		if strings.TrimSpace(config.MicrosandboxNamespace) == "" || strings.ContainsAny(config.MicrosandboxNamespace, "\x00\n=") {
+			problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_NAMESPACE must be a nonempty label value"))
+		}
+		if value := getenv("OMNIGREX_MICROSANDBOX_CPUS"); value != "" {
+			number, err := positiveInt64(value)
+			if err != nil || number > 64 {
+				problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_CPUS must be between 1 and 64"))
+			} else {
+				config.MicrosandboxCPUs = int(number)
+			}
+		}
+		if value := getenv("OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB"); value != "" {
+			number, err := positiveInt64(value)
+			if err != nil || number < 1024 || number > 1<<20 {
+				problems = append(problems, fmt.Errorf("OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB must be between 1024 and 1048576"))
+			} else {
+				config.MicrosandboxRootDiskMiB = number
+			}
+		}
+	}
 	if config.AgentInstructionsDir != "" && (!filepath.IsAbs(config.AgentInstructionsDir) || filepath.Clean(config.AgentInstructionsDir) != config.AgentInstructionsDir) {
 		problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_INSTRUCTIONS_DIR must be a clean absolute path"))
 	}
@@ -199,6 +253,8 @@ func Load(getenv func(string) string) (Config, error) {
 		value string
 	}{
 		{name: "OMNIGREX_WORKSPACE_ROOT", value: config.WorkspaceRoot},
+		{name: "OMNIGREX_WORKSPACE_CAPTURE_ROOT", value: config.WorkspaceCaptureRoot},
+		{name: "OMNIGREX_RUNTIME_STATE_ROOT", value: config.RuntimeStateRoot},
 		{name: "OMNIGREX_MISE_ROOT", value: config.MiseRoot},
 	} {
 		if !filepath.IsAbs(root.value) || filepath.Clean(root.value) != root.value {
@@ -213,19 +269,20 @@ func Load(getenv func(string) string) (Config, error) {
 	if strings.TrimSpace(config.MCPAddr) == "" {
 		problems = append(problems, fmt.Errorf("OMNIGREX_MCP_ADDR must not be blank"))
 	}
-	imageValid := profile.IsExactRegistryImage(config.OpenCodeACPV1Image)
-	if !imageValid {
-		problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_IMAGE must be a registry name with an exact sha256 digest"))
+	if !profile.IsExactRegistryImage(config.PiRPCV1Image) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_IMAGE must be a registry name with an exact sha256 digest"))
 	}
-	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_OPENCODE_ACP_V1_PLATFORM"), "/")
-	config.OpenCodeACPV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
-	platformValid := found && !strings.Contains(platformArch, "/") && profile.IsSupportedPlatform(config.OpenCodeACPV1Platform)
-	if !platformValid {
-		problems = append(problems, fmt.Errorf("OMNIGREX_OPENCODE_ACP_V1_PLATFORM must be a supported linux platform"))
+	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_PI_RPC_V1_PLATFORM"), "/")
+	config.PiRPCV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
+	if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_PLATFORM must be a supported linux platform"))
 	}
-	if imageValid && platformValid {
-		if _, err := profile.NewOpenCodeV1(config.OpenCodeACPV1Image, config.OpenCodeACPV1Platform); err != nil {
-			problems = append(problems, fmt.Errorf("invalid opencode-acp/v1 deployment settings: %w", err))
+	if value := getenv("OMNIGREX_PI_STARTUP_TIMEOUT"); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < time.Microsecond || duration > maximumWorkerDuration {
+			problems = append(problems, fmt.Errorf("OMNIGREX_PI_STARTUP_TIMEOUT must be between one microsecond and %s", maximumWorkerDuration))
+		} else {
+			config.PiStartupTimeout = duration
 		}
 	}
 	if config.RuntimeProfileCompatibilityResultsFile != "" &&
@@ -278,22 +335,16 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_WORKSPACE_VOLUME", value: config.WorkspaceVolume},
 		{name: "OMNIGREX_RUNTIME_STATE_VOLUME", value: config.RuntimeStateVolume},
 		{name: "OMNIGREX_MISE_VOLUME", value: config.MiseVolume},
-		{name: "OMNIGREX_AGENT_IMAGE_REFERENCE", value: config.AgentImageReference},
 	} {
 		if strings.TrimSpace(setting.value) == "" {
 			problems = append(problems, fmt.Errorf("%s must not be blank", setting.name))
 		}
 	}
 
-	if value := getenv("OMNIGREX_READINESS_TIMEOUT"); value != "" {
-		timeout, err := time.ParseDuration(value)
-		if err != nil {
-			problems = append(problems, fmt.Errorf("OMNIGREX_READINESS_TIMEOUT must be a valid duration"))
-		} else if timeout <= 0 {
-			problems = append(problems, fmt.Errorf("OMNIGREX_READINESS_TIMEOUT must be positive"))
-		} else {
-			config.ReadinessTimeout = timeout
-		}
+	if timeout, err := LoadReadinessTimeout(getenv("OMNIGREX_READINESS_TIMEOUT")); err != nil {
+		problems = append(problems, err)
+	} else {
+		config.ReadinessTimeout = timeout
 	}
 
 	if value := getenv("OMNIGREX_SHUTDOWN_TIMEOUT"); value != "" {

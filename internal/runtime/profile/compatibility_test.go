@@ -33,7 +33,7 @@ func TestCompatibilityResultsRejectMutableImagesAndMalformedContracts(t *testing
 		name   string
 		mutate func(*profile.CompatibilityResult)
 	}{
-		{name: "source tag", mutate: func(result *profile.CompatibilityResult) { result.Source.Image = "registry.example/opencode:old" }},
+		{name: "source tag", mutate: func(result *profile.CompatibilityResult) { result.Source.Image = "registry.example/pi:old" }},
 		{name: "target local ID", mutate: func(result *profile.CompatibilityResult) { result.Target.Image = "sha256:" + strings.Repeat("c", 64) }},
 		{name: "source hash", mutate: func(result *profile.CompatibilityResult) { result.Source.ContentSHA256 = "ABC" }},
 		{name: "platform", mutate: func(result *profile.CompatibilityResult) { result.Platform.Arch = "s390x" }},
@@ -56,15 +56,15 @@ func TestCompatibilityResultsRejectMutableImagesAndMalformedContracts(t *testing
 }
 
 func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
-	target, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("b", 64),
+	target, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64),
+	source, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -75,8 +75,8 @@ func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
 	if err := file.ValidateTarget(target); err != nil {
 		t.Fatalf("ValidateTarget() error = %v", err)
 	}
-	other, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("c", 64),
+	other, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("c", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -90,8 +90,8 @@ func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
 func TestDecodeCompatibilityResultsFileIsStrict(t *testing.T) {
 	for _, content := range []string{
 		`{}`,
-		`{"schema_version":"omnigrex.runtime-profile-compatibility-results/v1","results":[],"unknown":true}`,
-		`{"schema_version":"omnigrex.runtime-profile-compatibility-results/v1","results":[]} trailing`,
+		`{"schema_version":"omnigrex.runtime-profile-compatibility-results/v2","results":[],"unknown":true}`,
+		`{"schema_version":"omnigrex.runtime-profile-compatibility-results/v2","results":[]} trailing`,
 	} {
 		if _, err := profile.DecodeCompatibilityResultsFile(strings.NewReader(content)); err == nil {
 			t.Fatalf("DecodeCompatibilityResultsFile(%q) error = nil", content)
@@ -99,17 +99,71 @@ func TestDecodeCompatibilityResultsFileIsStrict(t *testing.T) {
 	}
 }
 
+func TestPiCompatibilityResultsBindExactRuntimePlatformAndBackend(t *testing.T) {
+	platform := profile.Platform{OS: "linux", Arch: "amd64"}
+	source, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := profile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: profile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: profile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z", Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	file := profile.CompatibilityResultsFile{SchemaVersion: profile.PiCompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
+	encoded, _ := json.Marshal(file)
+	if _, err := profile.DecodeCompatibilityResultsFile(bytes.NewReader(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.ValidateDeployment("docker", 1, target); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		family  string
+		version int
+		target  profile.Profile
+	}{{"microsandbox", 1, target}, {"docker", 2, target}, {"docker", 1, source}} {
+		if err := file.ValidateDeployment(tc.family, tc.version, tc.target); err == nil {
+			t.Fatal("unqualified deployment accepted")
+		}
+	}
+	for _, mutate := range []func(*profile.CompatibilityResult){
+		func(r *profile.CompatibilityResult) { r.StateContractVersion = "opencode-acp-state/v1" },
+		func(r *profile.CompatibilityResult) { r.Source.Name = "opencode-acp" },
+		func(r *profile.CompatibilityResult) { r.BackendFamily = "" },
+		func(r *profile.CompatibilityResult) { r.BackendContractVersion = 2 },
+		func(r *profile.CompatibilityResult) { r.QualificationSuite = "opencode-controlled-state-upgrade" },
+	} {
+		bad := result
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Fatal("unsupported Pi state qualification accepted")
+		}
+	}
+	other := result
+	other.BackendFamily = "microsandbox"
+	a, _ := result.QualificationKey()
+	b, _ := other.QualificationKey()
+	if a == b {
+		t.Fatal("backend qualifications share identity")
+	}
+	file.SchemaVersion = "omnigrex.runtime-profile-compatibility-results/v1"
+	if err := file.Validate(); err == nil {
+		t.Fatal("legacy schema accepted Pi qualification")
+	}
+}
+
 func compatibilityResult(t *testing.T) profile.CompatibilityResult {
 	t.Helper()
-	source, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64),
+	source, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("b", 64),
+	target, err := profile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -125,5 +179,6 @@ func newCompatibilityResult(source, target profile.Binding, platform profile.Pla
 		StateContractVersion: profile.StateContractVersion, WorkspacePath: profile.StableWorkspacePath,
 		QualificationSuite: profile.CompatibilityQualificationSuite, QualificationVersion: profile.CompatibilityQualificationVersion,
 		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+		BackendFamily: "docker", BackendContractVersion: 1,
 	}
 }

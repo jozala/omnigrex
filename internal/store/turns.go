@@ -41,11 +41,6 @@ const (
 	stopStaleRuntimeJobPriority        = 100
 	reconcileTurnMutationsJobPriority  = 90
 
-	RuntimeLabelAssignmentID = "io.omnigrex.assignment"
-	RuntimeLabelSessionID    = "io.omnigrex.agent-session"
-	RuntimeLabelTurnID       = "io.omnigrex.agent-turn"
-	RuntimeLabelEpoch        = "io.omnigrex.execution-epoch"
-
 	agentTurnSlotsLockID = int64(0x4f4d4e49534c4f54)
 
 	recoveryContinuationPendingInfrastructure = "PENDING_INFRASTRUCTURE_FAILURE"
@@ -1069,11 +1064,13 @@ JOIN agent_turns AS source ON source.id = ancestors.id
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
   AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
-  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
-       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
-  AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
-  AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
-       AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))
+   AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
+        OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
+        AND source.outcome->>'status' = 'completed'
+        AND COALESCE(source.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+   AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'Agent prompt was cancelled%'
+        AND source.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))
   AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND mutation.tool_name IN ('request_review', 'submit_review')
 	  AND (SELECT count(DISTINCT CASE WHEN terminal.tool_name = 'confirm_prior_terminal_intent'
@@ -1167,20 +1164,6 @@ WHERE id = $1 AND workflow_id = $2 AND repository_id = $3 AND active`,
 		return AgentTurnExecutionContext{}, err
 	}
 	return execution, nil
-}
-
-// ValidateAgentSessionPromptFence checks a live Agent Turn lease and its exact durable ACP Session identity.
-func (store *Store) ValidateAgentSessionPromptFence(ctx context.Context, lease AgentTurnLease, acpSessionID string) error {
-	return store.withLockedAgentTurnLease(ctx, lease, "validate Agent Session prompt fence", func(tx pgx.Tx, _ lockedTurn) error {
-		var persisted string
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(acp_session_id, '') FROM agent_sessions WHERE id = $1`, lease.AgentSessionID).Scan(&persisted); err != nil {
-			return err
-		}
-		if persisted != acpSessionID {
-			return ErrAgentSessionACPConflict
-		}
-		return nil
-	})
 }
 
 // ReserveMutation allocates a stable operation and monotonic invocation before a side effect.
@@ -1564,7 +1547,6 @@ type lockedHierarchy struct {
 	assignmentStatus string
 	sessionStatus    AgentSessionStatus
 	controlOwner     SessionControlOwner
-	acpSessionID     string
 }
 
 type lockedTurn struct {
@@ -1585,10 +1567,10 @@ func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, 
 		return lockedHierarchy{}, hierarchyLockError("agent assignment", err)
 	}
 	if err := tx.QueryRow(ctx, `
-SELECT status, control_owner, control_revision, COALESCE(acp_session_id, '')
+SELECT status, control_owner, control_revision
 FROM agent_sessions WHERE id = $1 AND agent_assignment_id = $2 FOR UPDATE`,
 		hierarchy.sessionID, hierarchy.assignmentID).Scan(&locked.sessionStatus, &locked.controlOwner,
-		&locked.controlRevision, &locked.acpSessionID); err != nil {
+		&locked.controlRevision); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent session", err)
 	}
 	return locked, nil
@@ -1606,7 +1588,7 @@ func (locked lockedHierarchy) allowsAcquisition(turn AgentTurn) bool {
 	}
 	return workflowAllowsTurns(locked.workflowStatus) && locked.attemptActive &&
 		locked.assignmentStatus == "ACTIVE" && locked.sessionStatus == AgentSessionCreating &&
-		locked.controlOwner == SessionControlAutomation && locked.acpSessionID == ""
+		locked.controlOwner == SessionControlAutomation
 }
 
 func decodeAgentTurnJobPayload(value json.RawMessage) (agentTurnJobPayload, error) {
@@ -2244,11 +2226,13 @@ func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source Mutat
 	}
 	var eligible bool
 	if err := tx.QueryRow(ctx, `
-SELECT COALESCE((outcome IS NULL OR outcome->>'stop_reason' = 'end_turn')
-   AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'end_turn'
-        OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
-   AND (last_error IS NULL OR (last_error NOT LIKE 'ACP prompt was cancelled%'
-       AND last_error NOT LIKE 'ACP prompt returned an invalid stop reason%')), FALSE)
+SELECT COALESCE((outcome IS NULL OR (outcome->'admitted' = 'true'::jsonb
+        AND outcome->>'status' = 'completed'
+        AND COALESCE(outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+   AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'completed'
+         OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (last_error IS NULL OR (last_error NOT LIKE 'Agent prompt was cancelled%'
+        AND last_error NOT LIKE 'Agent prompt returned an invalid outcome%')), FALSE)
 FROM agent_turns WHERE id = $1`, source.AgentTurnID).Scan(&eligible); err != nil {
 		return err
 	}

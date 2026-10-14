@@ -1,0 +1,104 @@
+package docker
+
+import (
+	"context"
+	"errors"
+	"io"
+	"strconv"
+	"time"
+
+	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/moby/moby/api/types/container"
+	mobyclient "github.com/moby/moby/client"
+)
+
+// WorkspaceSource reads only an exact managed environment. No guest command or
+// prompt completion is needed to suspend every container writer and transfer.
+type WorkspaceSource struct{ client *mobyclient.Client }
+
+func NewWorkspaceSource() (*WorkspaceSource, error) {
+	client, err := mobyclient.New(mobyclient.FromEnv)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkspaceSource{client: client}, nil
+}
+
+func (source *WorkspaceSource) Close() error { return source.client.Close() }
+
+func (source *WorkspaceSource) ReadWorkspace(ctx context.Context, request execution.CaptureRequest, seal func(io.Reader) error) (err error) {
+	key := request.Workspace.Key
+	if !validCanonicalRuntimeUUID(key.AgentTurnID) || key.ExecutionEpoch <= 0 || key.RuntimeProfileName == "" || key.RuntimeProfileVersion == "" {
+		return execution.ErrInvalidSpec
+	}
+	name := "omnigrex-turn-" + key.AgentTurnID + "-epoch-" + strconv.FormatInt(key.ExecutionEpoch, 10)
+	inspected, err := source.client.ContainerInspect(ctx, name, mobyclient.ContainerInspectOptions{})
+	if err != nil {
+		return err
+	}
+	actual := inspected.Container
+	if actual.ID == "" || actual.Config == nil || actual.State == nil || actual.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue ||
+		!hasExactRuntimeLabels(actual.Config.Labels, keyLabels(key)) {
+		return execution.ErrConflict
+	}
+	filters := make(mobyclient.Filters).Add("label", RuntimeProcessMarkerLabel+"="+RuntimeProcessMarkerValue)
+	for name, value := range keyLabels(key) {
+		filters = filters.Add("label", name+"="+value)
+	}
+	resources, err := source.client.ContainerList(ctx, mobyclient.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return err
+	}
+	mainResources := 0
+	for _, resource := range resources.Items {
+		if !hasExactRuntimeLabels(resource.Labels, keyLabels(key)) {
+			return execution.ErrConflict
+		}
+		if resource.Labels["io.omnigrex.assignment-subpath-initializer"] == "true" {
+			if resource.State == container.StateRunning {
+				return execution.ErrConflict
+			}
+			continue
+		}
+		mainResources++
+		if resource.ID != actual.ID {
+			return execution.ErrConflict
+		}
+	}
+	if mainResources != 1 {
+		return execution.ErrConflict
+	}
+	if request.Purpose == execution.TerminalCapture {
+		if actual.State.Running || actual.State.Status != container.StateExited && actual.State.Status != container.StateDead {
+			return execution.ErrUnknownEffect
+		}
+	} else {
+		if !actual.State.Running || actual.State.Paused {
+			return execution.ErrConflict
+		}
+		// Even an ambiguous pause acknowledgement requires a bounded resume
+		// attempt against the immutable ID; otherwise a lost response strands it.
+		defer func() {
+			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			_, resumeErr := source.client.ContainerUnpause(resumeCtx, actual.ID, mobyclient.ContainerUnpauseOptions{})
+			err = errors.Join(err, resumeErr)
+		}()
+		if _, err := source.client.ContainerPause(ctx, actual.ID, mobyclient.ContainerPauseOptions{}); err != nil {
+			return err
+		}
+		paused, err := source.client.ContainerInspect(ctx, actual.ID, mobyclient.ContainerInspectOptions{})
+		if err != nil {
+			return err
+		}
+		if paused.Container.State == nil || !paused.Container.State.Paused {
+			return execution.ErrUnknownEffect
+		}
+	}
+	archive, err := source.client.CopyFromContainer(ctx, actual.ID, mobyclient.CopyFromContainerOptions{SourcePath: "/workspace"})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, archive.Content.Close()) }()
+	return seal(archive.Content)
+}

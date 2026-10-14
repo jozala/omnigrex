@@ -727,8 +727,18 @@ VALUES ($1, 201, 'acme', 'widgets-a', 202, 17, 'REVIEWING', 3),
 		}
 		claimed[result.lease.WorkflowID] = result.lease
 	}
-	if claimed[workflowA] == nil || claimed[workflowA].ID != oldA || claimed[workflowB] == nil || claimed[workflowB].ID != jobB {
-		t.Fatalf("concurrent claims = %#v, want oldest A %s and unrelated B %s", claimed, oldA, jobB)
+	if claimed[workflowA] == nil || claimed[workflowB] == nil || claimed[workflowB].ID != jobB {
+		t.Fatalf("concurrent claims = %#v, want one eligible A job and unrelated B %s", claimed, jobB)
+	}
+	// SKIP LOCKED may skip the higher-priority A candidate under contention.
+	// Exclusivity and unrelated progress hold regardless of which A job wins.
+	remainingA, claimedRevision := newA, uint64(1)
+	switch claimed[workflowA].ID {
+	case oldA:
+	case newA:
+		remainingA, claimedRevision = oldA, 2
+	default:
+		t.Fatalf("Workflow A claimed an unseeded job: %#v", claimed[workflowA])
 	}
 	if blocked, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker-2", 5*time.Second); err != nil || blocked != nil {
 		t.Fatalf("claim while both Workflows have live label effects = (%#v, %v), want nil", blocked, err)
@@ -739,19 +749,334 @@ VALUES ($1, 201, 'acme', 'widgets-a', 202, 17, 'REVIEWING', 3),
 		if err != nil {
 			t.Fatalf("GetWorkflowGitHubEffectContext(%s) error = %v", workflowID, err)
 		}
-		if workflowID == workflowA && (effect.JobRevision != 1 || effect.Revision != 3 || effect.State != workflow.StateReviewing) {
-			t.Fatalf("older A job context = %#v, want latest durable revision 3", effect)
+		if workflowID == workflowA && (effect.JobRevision != claimedRevision || effect.Revision != 3 || effect.State != workflow.StateReviewing) {
+			t.Fatalf("claimed A job context = %#v, want job revision %d and latest durable revision 3", effect, claimedRevision)
 		}
 		if _, err := databases[2].AcknowledgeWorkflowGitHubEffect(ctx, *lease, effect, json.RawMessage(`{}`)); err != nil {
 			t.Fatalf("acknowledge %s: %v", workflowID, err)
 		}
 	}
 	next, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "label-worker-2", 5*time.Second)
-	if err != nil || next == nil || next.ID != newA {
-		t.Fatalf("next serialized A claim = (%#v, %v), want %s", next, err, newA)
+	if err != nil || next == nil || next.ID != remainingA {
+		t.Fatalf("next serialized A claim = (%#v, %v), want remaining job %s", next, err, remainingA)
 	}
 	effect, err := databases[2].GetWorkflowGitHubEffectContext(ctx, *next)
 	if err != nil || effect.Revision != 3 || effect.State != workflow.StateReviewing {
 		t.Fatalf("newer queued A job latest context = (%#v, %v)", effect, err)
+	}
+}
+
+func TestWorkflowGitHubEffectClaimsKeepLiveLeasesExclusiveUnderContention(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 3)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	const workflowA = "7d000000-0000-4000-8000-000000000001"
+	const workflowB = "7d000000-0000-4000-8000-000000000002"
+	if _, err := pool.Exec(ctx, `INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision, human_handoff_reason
+)
+VALUES ($1, 301, 'acme', 'widgets-a', 302, 17, 'NEEDS_HUMAN', 1, 'agent_blocked'),
+       ($2, 311, 'acme', 'widgets-b', 312, 18, 'NEEDS_HUMAN', 1, 'agent_blocked')`, workflowA, workflowB); err != nil {
+		t.Fatal(err)
+	}
+	const leaseDuration = 5 * time.Minute // Live for longer than the entire test deadline.
+	acknowledge := func(lease *store.JobLease) {
+		t.Helper()
+		effect, err := databases[2].GetWorkflowGitHubEffectContext(ctx, *lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := databases[2].AcknowledgeWorkflowGitHubEffect(ctx, *lease, effect, json.RawMessage(`{}`))
+		if err != nil || ack.CleanupRequired || ack.Superseded {
+			t.Fatalf("acknowledge contention fixture = (%#v, %v)", ack, err)
+		}
+	}
+	for _, kind := range []string{store.ReconcileGitHubLabelsJobKind, store.PublishHumanHandoffJobKind} {
+		otherKind := store.PublishHumanHandoffJobKind
+		if kind == otherKind {
+			otherKind = store.ReconcileGitHubLabelsJobKind
+		}
+		for round := range 50 {
+			enqueue := func(suffix, workflowID, jobKind string, priority int) string {
+				t.Helper()
+				return insertJob(t, pool, ctx, jobSeed{
+					Queue: store.WorkflowActionQueue, Kind: jobKind,
+					Payload:  json.RawMessage(`{"state":"NEEDS_HUMAN","reason":"agent_blocked","revision":1}`),
+					Priority: priority, MaxAttempts: 3,
+					IdempotencyKey: fmt.Sprintf("effect-contention:%s:%d:%s", kind, round, suffix), WorkflowID: workflowID,
+				})
+			}
+			firstA := enqueue("first-a", workflowA, kind, 100)
+			secondA := enqueue("second-a", workflowA, kind, 50)
+			jobB := enqueue("b", workflowB, kind, 0)
+			otherA := enqueue("other-kind-a", workflowA, otherKind, 100)
+			unlockCandidate := func() error { return nil }
+			if round%2 == 1 {
+				// Make the lower-priority winner deterministic in half the rounds.
+				// A locked job is skipped, without excluding its entire Workflow.
+				barrier, err := pool.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = barrier.Rollback(cleanup)
+				})
+				var lockedID string
+				if err := barrier.QueryRow(ctx, `SELECT id::text FROM jobs WHERE id = $1 FOR UPDATE`, firstA).Scan(&lockedID); err != nil || lockedID != firstA {
+					t.Fatalf("lock higher-priority candidate = (%s, %v)", lockedID, err)
+				}
+				unlockCandidate = func() error { return barrier.Rollback(ctx) }
+			}
+			type claimResult struct {
+				lease *store.JobLease
+				err   error
+			}
+			start := make(chan struct{})
+			results := make(chan claimResult, 2)
+			for index := range 2 {
+				go func(database *store.Store, owner string) {
+					<-start
+					lease, err := database.ClaimWorkflowGitHubEffectJob(ctx, kind, owner, leaseDuration)
+					results <- claimResult{lease: lease, err: err}
+				}(databases[index], fmt.Sprintf("effect-contender-%d", index))
+			}
+			close(start)
+			claimed := make(map[string]*store.JobLease, 2)
+			for range 2 {
+				result := <-results
+				if result.err != nil || result.lease == nil {
+					t.Fatalf("%s round %d: concurrent claim = (%#v, %v)", kind, round, result.lease, result.err)
+				}
+				if previous := claimed[result.lease.WorkflowID]; previous != nil {
+					t.Fatalf("%s round %d: overlapping live Workflow leases: %#v and %#v", kind, round, previous, result.lease)
+				}
+				claimed[result.lease.WorkflowID] = result.lease
+			}
+			if claimed[workflowA] == nil || claimed[workflowB] == nil || claimed[workflowB].ID != jobB {
+				t.Fatalf("%s round %d: unrelated Workflow starved: claims %#v, want one eligible A job and B %s", kind, round, claimed, jobB)
+			}
+			if round%2 == 1 && claimed[workflowA].ID != secondA {
+				t.Fatalf("%s round %d: locked first candidate was not skipped: %#v", kind, round, claimed[workflowA])
+			}
+			if err := unlockCandidate(); err != nil {
+				t.Fatal(err)
+			}
+			remainingA := secondA
+			switch claimed[workflowA].ID {
+			case firstA:
+			case secondA:
+				remainingA = firstA
+			default:
+				t.Fatalf("%s round %d: Workflow A claimed an unseeded job: %#v", kind, round, claimed[workflowA])
+			}
+			if blocked, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "blocked-effect-contender", leaseDuration); err != nil || blocked != nil {
+				t.Fatalf("%s round %d: claim alongside live same-kind lease = (%#v, %v)", kind, round, blocked, err)
+			}
+			other, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, otherKind, "independent-kind-contender", leaseDuration)
+			if err != nil || other == nil || other.ID != otherA {
+				t.Fatalf("%s round %d: independent kind blocked = (%#v, %v)", kind, round, other, err)
+			}
+			acknowledge(other)
+			acknowledge(claimed[workflowA])
+			acknowledge(claimed[workflowB])
+			next, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "released-effect-contender", leaseDuration)
+			if err != nil || next == nil || next.ID != remainingA {
+				t.Fatalf("%s round %d: queued successor claim = (%#v, %v), want remaining job %s", kind, round, next, err, remainingA)
+			}
+			acknowledge(next)
+		}
+	}
+}
+
+func TestWorkflowGitHubEffectClaimsBlockUncommittedHeartbeatAcrossExpiry(t *testing.T) {
+	for _, kind := range []string{store.ReconcileGitHubLabelsJobKind, store.PublishHumanHandoffJobKind} {
+		for _, abortHeartbeat := range []bool{false, true} {
+			outcome := "commit"
+			if abortHeartbeat {
+				outcome = "abort"
+			}
+			t.Run(kind+"/"+outcome, func(t *testing.T) {
+				databases, pool := openPhaseFiveStores(t, 3)
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
+				const workflowA = "7e000000-0000-4000-8000-000000000001"
+				const workflowC = "7e000000-0000-4000-8000-000000000002"
+				if _, err := pool.Exec(ctx, `INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision, human_handoff_reason
+)
+VALUES ($1, 401, 'acme', 'widgets-a', 402, 17, 'NEEDS_HUMAN', 1, 'agent_blocked'),
+       ($2, 411, 'acme', 'widgets-c', 412, 18, 'NEEDS_HUMAN', 1, 'agent_blocked')`, workflowA, workflowC); err != nil {
+					t.Fatal(err)
+				}
+				enqueue := func(key, workflowID string, priority int) string {
+					t.Helper()
+					return insertJob(t, pool, ctx, jobSeed{
+						Queue: store.WorkflowActionQueue, Kind: kind,
+						Payload:  json.RawMessage(`{"state":"NEEDS_HUMAN","reason":"agent_blocked","revision":1}`),
+						Priority: priority, MaxAttempts: 3, IdempotencyKey: key, WorkflowID: workflowID,
+					})
+				}
+				jobA := enqueue("heartbeat-expiry-a", workflowA, 100)
+				jobB := enqueue("heartbeat-expiry-b", workflowA, 50)
+				jobC := enqueue("heartbeat-expiry-c", workflowC, 0)
+				original, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, kind, "original-effect-owner", 3*time.Second)
+				if err != nil || original == nil || original.ID != jobA {
+					t.Fatalf("claim A before heartbeat = (%#v, %v)", original, err)
+				}
+				barrier, err := pool.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = barrier.Rollback(cleanup)
+				}()
+				var blockerPID, attempt int
+				if err := barrier.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+					t.Fatal(err)
+				}
+				if err := barrier.QueryRow(ctx, `SELECT attempt_number FROM job_attempts
+WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`, jobA, original.Attempt).Scan(&attempt); err != nil || attempt != original.Attempt {
+					t.Fatalf("lock A's attempt row = (%d, %v)", attempt, err)
+				}
+				heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+				defer stopHeartbeat()
+				heartbeatDone := make(chan error, 1)
+				go func() {
+					heartbeatDone <- databases[1].HeartbeatJob(heartbeatCtx, *original, time.Minute)
+				}()
+				await := func(description string, condition func() (bool, error)) {
+					t.Helper()
+					ticker := time.NewTicker(10 * time.Millisecond)
+					defer ticker.Stop()
+					for {
+						ready, err := condition()
+						if err != nil {
+							t.Fatalf("wait for %s: %v", description, err)
+						}
+						if ready {
+							return
+						}
+						select {
+						case <-ctx.Done():
+							t.Fatalf("wait for %s: %v", description, ctx.Err())
+						case <-ticker.C:
+						}
+					}
+				}
+				isHeartbeatWaiting := func() (bool, error) {
+					var waiting bool
+					// The attempt UPDATE follows the job UPDATE, so this real lock
+					// wait proves renewal has reached the uncommitted window.
+					err := pool.QueryRow(ctx, `SELECT EXISTS (
+    SELECT 1 FROM pg_stat_activity AS activity
+    WHERE activity.wait_event_type = 'Lock'
+      AND $1 = ANY(pg_blocking_pids(activity.pid))
+      AND position('UPDATE job_attempts' IN activity.query) > 0
+)`, blockerPID).Scan(&waiting)
+					return waiting, err
+				}
+				await("heartbeat blocked on the attempt row", func() (bool, error) {
+					select {
+					case err := <-heartbeatDone:
+						return false, fmt.Errorf("heartbeat ended before reaching the lock barrier: %v", err)
+					default:
+						return isHeartbeatWaiting()
+					}
+				})
+				await("A's committed lease expiry", func() (bool, error) {
+					var expired bool
+					err := pool.QueryRow(ctx, `SELECT status = 'LEASED' AND lease_expires_at <= clock_timestamp()
+FROM jobs WHERE id = $1`, jobA).Scan(&expired)
+					return expired, err
+				})
+				if waiting, err := isHeartbeatWaiting(); err != nil || !waiting {
+					t.Fatalf("heartbeat no longer waiting across committed expiry: %t, %v", waiting, err)
+				}
+				unrelated, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "unrelated-effect-owner", time.Minute)
+				if err != nil || unrelated == nil || unrelated.ID != jobC {
+					t.Fatalf("claim during uncommitted renewal = (%#v, %v), want unrelated C %s, never B %s", unrelated, err, jobC, jobB)
+				}
+				assertBlocked := func() {
+					t.Helper()
+					if lease, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "blocked-effect-owner", time.Minute); err != nil || lease != nil {
+						t.Fatalf("claim B alongside unresolved A = (%#v, %v)", lease, err)
+					}
+				}
+				assertBlocked()
+				current := original
+				if abortHeartbeat {
+					stopHeartbeat()
+					select {
+					case err := <-heartbeatDone:
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("aborted heartbeat = %v, want cancellation", err)
+						}
+					case <-ctx.Done():
+						t.Fatalf("aborted heartbeat did not return: %v", ctx.Err())
+					}
+					if err := barrier.Rollback(ctx); err != nil {
+						t.Fatal(err)
+					}
+					await("successful reclamation after heartbeat rollback", func() (bool, error) {
+						var err error
+						current, err = databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "replacement-effect-owner", time.Minute)
+						return current != nil, err
+					})
+					if current.ID != jobA || current.Attempt != original.Attempt+1 || current.LeaseToken == original.LeaseToken {
+						t.Fatalf("reclaimed A after aborted renewal = %#v", current)
+					}
+					var expiredAttempt bool
+					if err := pool.QueryRow(ctx, `SELECT status = 'EXPIRED' AND heartbeat_at IS NULL
+FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`, jobA, original.Attempt).Scan(&expiredAttempt); err != nil || !expiredAttempt {
+						t.Fatalf("original attempt after heartbeat rollback = expired %t, error %v", expiredAttempt, err)
+					}
+					if _, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *original); !errors.Is(err, store.ErrWorkflowGitHubEffectFenceLost) {
+						t.Fatalf("original effect fence survived reclamation: %v", err)
+					}
+				} else {
+					if err := barrier.Commit(ctx); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case err := <-heartbeatDone:
+						if err != nil {
+							t.Fatalf("commit heartbeat: %v", err)
+						}
+					case <-ctx.Done():
+						t.Fatalf("renewing heartbeat did not commit: %v", ctx.Err())
+					}
+					var renewed bool
+					if err := pool.QueryRow(ctx, `SELECT status = 'LEASED'
+    AND lease_expires_at > clock_timestamp() AND lease_expires_at > $2
+FROM jobs WHERE id = $1`, jobA, original.LeaseExpiresAt).Scan(&renewed); err != nil || !renewed {
+						t.Fatalf("renewed A = %t, error %v", renewed, err)
+					}
+				}
+				assertBlocked()
+				acknowledge := func(lease *store.JobLease) {
+					t.Helper()
+					effect, err := databases[2].GetWorkflowGitHubEffectContext(ctx, *lease)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if ack, err := databases[2].AcknowledgeWorkflowGitHubEffect(ctx, *lease, effect, json.RawMessage(`{}`)); err != nil || ack.CleanupRequired || ack.Superseded {
+						t.Fatalf("acknowledge heartbeat fixture = (%#v, %v)", ack, err)
+					}
+				}
+				acknowledge(current)
+				next, err := databases[2].ClaimWorkflowGitHubEffectJob(ctx, kind, "queued-effect-owner", time.Minute)
+				if err != nil || next == nil || next.ID != jobB {
+					t.Fatalf("B after A acknowledgement = (%#v, %v), want %s", next, err, jobB)
+				}
+				acknowledge(next)
+				acknowledge(unrelated)
+			})
+		}
 	}
 }

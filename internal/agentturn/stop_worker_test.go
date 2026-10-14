@@ -3,7 +3,8 @@ package agentturn_test
 import (
 	"context"
 	"errors"
-	"maps"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -31,13 +32,12 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 		durable.claimOwner != "runtime-stop-worker" || durable.claimDuration != 100*time.Millisecond {
 		t.Fatalf("ClaimJobKind() = (%q, %q, %q, %s)", durable.claimQueue, durable.claimKind, durable.claimOwner, durable.claimDuration)
 	}
-	wantLabels := map[string]string{
-		store.RuntimeLabelAssignmentID: lease.AgentAssignmentID,
-		store.RuntimeLabelSessionID:    lease.AgentSessionID,
-		store.RuntimeLabelTurnID:       lease.AgentTurnID,
-		store.RuntimeLabelEpoch:        "7",
+	wantLabels := execution.Key{
+		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: 7,
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
-	if cleaner.callCount() != 1 || !maps.Equal(cleaner.labelsAt(0), wantLabels) {
+	if cleaner.callCount() != 1 || !reflect.DeepEqual(cleaner.labelsAt(0), wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labelsAt(0), wantLabels)
 	}
 	if durable.acknowledgements != 1 || durable.acknowledged.ID != lease.ID || durable.acknowledged.LeaseToken != lease.LeaseToken {
@@ -48,8 +48,8 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 func TestStopWorkerPersistsRecoveredOOMBeforeRemovingContainer(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease}
-	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
-		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	cleaner := &recordingRuntimeCleaner{exitObservation: execution.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, Resource: "stopped-oom",
 	}}
 	durable.cleaner = cleaner
 	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
@@ -64,8 +64,8 @@ func TestStopWorkerPersistsRecoveredOOMBeforeRemovingContainer(t *testing.T) {
 func TestStopWorkerKeepsContainerWhenOOMEvidenceCannotBeSaved(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, oomErr: errors.New("store unavailable")}
-	cleaner := &recordingRuntimeCleaner{exitObservation: dockerruntime.ExitObservation{
-		Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "stopped-oom",
+	cleaner := &recordingRuntimeCleaner{exitObservation: execution.ExitObservation{
+		Exited: true, OOMKilled: true, ExitCode: 137, Resource: "stopped-oom",
 	}}
 	worker := newStopWorker(t, durable, cleaner, 100*time.Millisecond, 5*time.Millisecond, time.Millisecond)
 	processed, err := worker.ProcessNext(context.Background())
@@ -75,10 +75,64 @@ func TestStopWorkerKeepsContainerWhenOOMEvidenceCannotBeSaved(t *testing.T) {
 	}
 }
 
+func TestStopWorkerNeverStartedCleanupRequiresDurableProofAndRemoval(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		observation execution.ExitObservation
+		proofErr    error
+		stopErr     error
+		removeErr   error
+		wantProof   bool
+		wantRemoval bool
+		wantSuccess bool
+	}{
+		{name: "proof authorizes preparation-only cleanup", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created"}, wantProof: true, wantRemoval: true, wantSuccess: true},
+		{name: "proof failure retains resource", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created"}, proofErr: errors.New("proof unavailable"), wantProof: true},
+		{name: "stop failure cannot admit proof", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created"}, stopErr: execution.ErrUnknownEffect},
+		{name: "removal failure cannot acknowledge", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created"}, removeErr: execution.ErrUnknownEffect, wantProof: true, wantRemoval: true},
+		{name: "missing resource is not proof", observation: execution.ExitObservation{NeverStarted: true}},
+		{name: "exit contradicts no-start", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created", Exited: true}},
+		{name: "running contradicts no-start", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created", Running: true}},
+		{name: "OOM exit contradicts no-start", observation: execution.ExitObservation{NeverStarted: true, Resource: "exact-created", Exited: true, OOMKilled: true, ExitCode: 137}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := staleRuntimeLease()
+			durable := &stopWorkerStore{lease: &lease, neverStartedErr: test.proofErr, cleanupContext: store.AgentTurnRuntimeCleanupContext{AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleDeveloper}}
+			cleaner := &recordingRuntimeCleaner{exitObservation: test.observation, stopErr: test.stopErr}
+			if test.removeErr != nil {
+				cleaner.results = []error{test.removeErr}
+			}
+			workspaces := &recordingWorkspaceDiscarder{captureErr: errors.New("created resource must not be captured")}
+			durable.cleaner, durable.workspaces = cleaner, workspaces
+			worker, err := agentturn.NewStopWorker(durable, cleaner, workspaces, agentturn.StopWorkerConfig{
+				ClaimOwner: "never-started-stop", LeaseDuration: time.Second, HeartbeatInterval: time.Millisecond,
+				IdlePollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
+				TerminalCaptureRequired: func(context.Context, store.JobLease) (bool, error) {
+					if durable.neverStartedResource != "exact-created" || len(cleaner.stopLabels) != 1 {
+						t.Fatal("capture exemption was consulted before fenced stop and durable proof")
+					}
+					return false, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			processed, err := worker.ProcessNext(t.Context())
+			wantAcknowledgements := 0
+			if test.wantSuccess {
+				wantAcknowledgements = 1
+			}
+			if !processed || (err == nil) != test.wantSuccess || (durable.neverStartedResource != "") != test.wantProof || (cleaner.callCount() != 0) != test.wantRemoval || durable.acknowledgements != wantAcknowledgements || len(workspaces.captureRequests) != 0 || durable.oomID != "" {
+				t.Fatalf("no-start cleanup = processed %t, error %v, proof %q, removals %d, acknowledgements %d, captures %d", processed, err, durable.neverStartedResource, cleaner.callCount(), durable.acknowledgements, len(workspaces.captureRequests))
+			}
+		})
+	}
+}
+
 func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *testing.T) {
 	lease := staleRuntimeLease()
 	cleanup := store.AgentTurnRuntimeCleanupContext{
-		AssignmentID:     "60000000-0000-4000-8000-000000000001",
+		AssignmentID:     lease.AgentAssignmentID,
 		Role:             workflow.RoleReviewer,
 		DiscardWorkspace: true,
 	}
@@ -95,6 +149,173 @@ func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *te
 	}
 	if durable.acknowledgements != 1 || durable.discardSuccessesAtAcknowledgement != 1 {
 		t.Fatalf("acknowledgements = %d after %d successful discards", durable.acknowledgements, durable.discardSuccessesAtAcknowledgement)
+	}
+}
+
+func TestStopWorkerCapturesAfterConfirmedStopBeforeRemovalAndReviewerDiscard(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
+		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+	}}
+	operations := []string{}
+	cleaner := &recordingRuntimeCleaner{operations: &operations}
+	workspaces := &recordingWorkspaceDiscarder{operations: &operations}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || err != nil {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	if !reflect.DeepEqual(operations, []string{"stop", "capture", "remove", "discard"}) {
+		t.Fatalf("cleanup ordering = %v", operations)
+	}
+	wantKey := execution.Key{
+		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID, AgentTurnID: lease.AgentTurnID,
+		ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+	}
+	want := execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: wantKey}, OperationID: lease.AgentTurnID, Purpose: execution.TerminalCapture,
+	}
+	if len(workspaces.captureRequests) != 1 || workspaces.captureRequests[0] != want ||
+		len(cleaner.stopLabels) != 1 || cleaner.stopLabels[0] != wantKey || workspaces.discardedRefs[0].Key != wantKey {
+		t.Fatalf("stop/capture/discard lost epoch identity: captures %#v, stops %#v, discards %#v",
+			workspaces.captureRequests, cleaner.stopLabels, workspaces.discardedRefs)
+	}
+}
+
+func TestStopWorkerCaptureFailureRetainsEnvironmentAndReviewerWorkspaceForRetry(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
+		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+	}}
+	failure := errors.New("capture transport unavailable")
+	cleaner := &recordingRuntimeCleaner{}
+	workspaces := &recordingWorkspaceDiscarder{captureErr: failure}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || !errors.Is(err, failure) {
+		t.Fatalf("ProcessNext() = (%t, %v), want retryable capture failure", processed, err)
+	}
+	if cleaner.callCount() != 0 || workspaces.callCount() != 0 || durable.acknowledgements != 0 || durable.failureAcknowledgements != 1 {
+		t.Fatal("capture failure destroyed evidence or acknowledged successful cleanup")
+	}
+	workspaces.captureErr = nil
+	durable.lease = &lease
+	if processed, err := worker.ProcessNext(context.Background()); !processed || err != nil {
+		t.Fatalf("retry ProcessNext() = (%t, %v)", processed, err)
+	}
+	if len(workspaces.captureRequests) != 2 || workspaces.captureRequests[0] != workspaces.captureRequests[1] ||
+		cleaner.callCount() != 1 || workspaces.callCount() != 1 || durable.acknowledgements != 1 {
+		t.Fatal("recovery did not retry the same terminal observation before destruction")
+	}
+}
+
+func TestStopWorkerReusesSealedCaptureWhenRetryingFailedRemoval(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	failure := errors.New("removal outcome unavailable")
+	cleaner := &recordingRuntimeCleaner{results: []error{failure}}
+	workspaces := &recordingWorkspaceDiscarder{}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || !errors.Is(err, failure) {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	sealed := workspaces.retainedCapture
+	// A successful removal with a lost reply may leave no source on retry.
+	workspaces.captureErr = errors.New("original environment is now missing")
+	durable.lease = &lease
+	if processed, err := worker.ProcessNext(context.Background()); !processed || err != nil {
+		t.Fatalf("retry ProcessNext() = (%t, %v)", processed, err)
+	}
+	if workspaces.sealedCaptures != 1 || workspaces.retainedCapture != sealed || durable.acknowledgements != 1 {
+		t.Fatal("removal retry replaced or lost sealed evidence")
+	}
+}
+
+func TestStopWorkerMissingEnvironmentWithoutCaptureIsNotSuccessfulEvidence(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	cleaner := &recordingRuntimeCleaner{}
+	workspaces := &recordingWorkspaceDiscarder{captureErr: errors.New("environment and terminal capture missing")}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || err == nil {
+		t.Fatalf("ProcessNext() = (%t, %v), want unavailable observation", processed, err)
+	}
+	if cleaner.callCount() != 0 || durable.acknowledgements != 0 || durable.failureAcknowledgements != 1 {
+		t.Fatal("missing environment fabricated successful terminal evidence")
+	}
+}
+
+func TestStopWorkerUnconfirmedStopCannotCaptureOrRemove(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	cleaner := &recordingRuntimeCleaner{stopErr: execution.ErrUnknownEffect}
+	workspaces := &recordingWorkspaceDiscarder{}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || !errors.Is(err, execution.ErrUnknownEffect) {
+		t.Fatalf("ProcessNext() = (%t, %v)", processed, err)
+	}
+	if len(workspaces.captureRequests) != 0 || cleaner.callCount() != 0 || durable.acknowledgements != 0 {
+		t.Fatal("unknown stop authorized capture or destructive cleanup")
+	}
+}
+
+func TestStopWorkerCannotAdoptCaptureAfterRecoveryFenceLoss(t *testing.T) {
+	lease := staleRuntimeLease()
+	durable := &stopWorkerStore{lease: &lease}
+	cleaner := &recordingRuntimeCleaner{}
+	workspaces := &recordingWorkspaceDiscarder{captureHook: func() {
+		if durable.inCleanupFence {
+			t.Fatal("recovered capture transfer ran inside the cleanup transaction")
+		}
+		durable.cleanupFenceErr = store.ErrAgentTurnRecoveryFenceLost
+	}}
+	worker := newStopWorkerWithWorkspace(t, durable, cleaner, workspaces, time.Second, time.Millisecond, time.Millisecond)
+	if processed, err := worker.ProcessNext(context.Background()); !processed || !errors.Is(err, store.ErrAgentTurnRecoveryFenceLost) {
+		t.Fatalf("ProcessNext() = (%t, %v), want post-capture fence loss", processed, err)
+	}
+	if len(workspaces.captureRequests) != 1 || cleaner.callCount() != 0 || durable.acknowledgements != 0 || durable.failureAcknowledgements != 0 {
+		t.Fatal("stale capture adoption removed resources or acknowledged the stale job")
+	}
+}
+
+func TestStopWorkerPreparationOnlyCleanupUsesDurableCaptureExemption(t *testing.T) {
+	lease := staleRuntimeLease()
+	for _, fenceErr := range []error{nil, store.ErrAgentTurnRecoveryFenceLost} {
+		t.Run(fmt.Sprint(fenceErr), func(t *testing.T) {
+			durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
+				AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+			}}
+			cleaner := &recordingRuntimeCleaner{}
+			workspaces := &recordingWorkspaceDiscarder{captureErr: errors.New("workspace was never materialized")}
+			worker, err := agentturn.NewStopWorker(durable, cleaner, workspaces, agentturn.StopWorkerConfig{
+				ClaimOwner: "runtime-stop-worker", LeaseDuration: time.Second, HeartbeatInterval: time.Millisecond,
+				IdlePollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
+				TerminalCaptureRequired: func(_ context.Context, claimed store.JobLease) (bool, error) {
+					if len(cleaner.stopLabels) != 1 {
+						t.Fatal("capture exemption was evaluated before stop/revocation")
+					}
+					if claimed.ID != lease.ID || claimed.LeaseToken != lease.LeaseToken {
+						t.Fatal("capture exemption did not receive the recovery fence")
+					}
+					return false, fenceErr
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			processed, err := worker.ProcessNext(context.Background())
+			if !processed || !errors.Is(err, fenceErr) {
+				t.Fatalf("ProcessNext() = (%t, %v), want %v", processed, err, fenceErr)
+			}
+			if len(workspaces.captureRequests) != 0 {
+				t.Fatal("preparation-only cleanup attempted terminal capture")
+			}
+			if fenceErr == nil {
+				if cleaner.callCount() != 1 || workspaces.callCount() != 1 || durable.acknowledgements != 1 {
+					t.Fatal("preparation-only cleanup failed to progress")
+				}
+			} else if len(cleaner.stopLabels) != 1 || cleaner.callCount() != 0 || workspaces.callCount() != 0 || durable.acknowledgements != 0 {
+				t.Fatal("stale capture exemption authorized cleanup")
+			}
+		})
 	}
 }
 
@@ -455,6 +676,14 @@ type stopWorkerStore struct {
 	oomExitCode                        int
 	oomErr                             error
 	cleanupCallsAtOOM                  int
+	inCleanupFence                     bool
+	neverStartedResource               string
+	neverStartedErr                    error
+}
+
+func (durable *stopWorkerStore) RecordRecoveredRuntimeNeverStarted(_ context.Context, _ store.JobLease, resource string) error {
+	durable.neverStartedResource = resource
+	return durable.neverStartedErr
 }
 
 func (durable *stopWorkerStore) RecordRecoveredRuntimeOOM(_ context.Context, _ store.JobLease, id string, code int) error {
@@ -501,7 +730,7 @@ func (durable *stopWorkerStore) GetAgentTurnRuntimeCleanupContext(_ context.Cont
 	}
 	cleanup := durable.cleanupContext
 	if cleanup.RuntimeProfileName == "" {
-		cleanup.RuntimeProfileName = "opencode-acp"
+		cleanup.RuntimeProfileName = "pi-rpc"
 		cleanup.RuntimeProfileVersion = "v1"
 	}
 	return cleanup, result
@@ -517,6 +746,8 @@ func (durable *stopWorkerStore) WithRecoveredRuntimeCleanupFence(ctx context.Con
 	if durable.cleanupFenceErr != nil {
 		return durable.cleanupFenceErr
 	}
+	durable.inCleanupFence = true
+	defer func() { durable.inCleanupFence = false }()
 	return operation(ctx)
 }
 
@@ -549,20 +780,36 @@ func (durable *stopWorkerStore) AcknowledgeRecoveredRuntimeStopFailure(_ context
 type recordingRuntimeCleaner struct {
 	mutex              sync.Mutex
 	results            []error
-	labels             []map[string]string
+	labels             []execution.Key
 	blockUntilCanceled bool
 	canceled           bool
 	delay              time.Duration
-	exitObservation    dockerruntime.ExitObservation
+	exitObservation    execution.ExitObservation
+	stopErr            error
+	stopLabels         []execution.Key
+	operations         *[]string
 }
 
-func (cleaner *recordingRuntimeCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+func (cleaner *recordingRuntimeCleaner) EnsureKeyStopped(_ context.Context, key execution.Key) error {
+	cleaner.mutex.Lock()
+	defer cleaner.mutex.Unlock()
+	cleaner.stopLabels = append(cleaner.stopLabels, key)
+	if cleaner.operations != nil {
+		*cleaner.operations = append(*cleaner.operations, "stop")
+	}
+	return cleaner.stopErr
+}
+
+func (cleaner *recordingRuntimeCleaner) ObserveKeyExit(context.Context, execution.Key) (execution.ExitObservation, error) {
 	return cleaner.exitObservation, nil
 }
 
-func (cleaner *recordingRuntimeCleaner) EnsureAbsent(ctx context.Context, labels map[string]string) error {
+func (cleaner *recordingRuntimeCleaner) EnsureKeyAbsent(ctx context.Context, labels execution.Key) error {
 	cleaner.mutex.Lock()
-	cleaner.labels = append(cleaner.labels, maps.Clone(labels))
+	if cleaner.operations != nil {
+		*cleaner.operations = append(*cleaner.operations, "remove")
+	}
+	cleaner.labels = append(cleaner.labels, labels)
 	block := cleaner.blockUntilCanceled
 	var result error
 	if len(cleaner.results) != 0 {
@@ -595,13 +842,13 @@ func (cleaner *recordingRuntimeCleaner) callCount() int {
 	return len(cleaner.labels)
 }
 
-func (cleaner *recordingRuntimeCleaner) labelsAt(index int) map[string]string {
+func (cleaner *recordingRuntimeCleaner) labelsAt(index int) execution.Key {
 	cleaner.mutex.Lock()
 	defer cleaner.mutex.Unlock()
 	if index >= len(cleaner.labels) {
-		return nil
+		return execution.Key{}
 	}
-	return maps.Clone(cleaner.labels[index])
+	return cleaner.labels[index]
 }
 
 func (cleaner *recordingRuntimeCleaner) wasCanceled() bool {
@@ -611,15 +858,46 @@ func (cleaner *recordingRuntimeCleaner) wasCanceled() bool {
 }
 
 type recordingWorkspaceDiscarder struct {
-	mutex         sync.Mutex
-	results       []error
-	assignmentIDs []string
-	successes     int
+	mutex           sync.Mutex
+	results         []error
+	assignmentIDs   []string
+	successes       int
+	captureErr      error
+	captureRequests []execution.CaptureRequest
+	retainedCapture execution.CaptureRef
+	sealedCaptures  int
+	operations      *[]string
+	discardedRefs   []execution.WorkspaceRef
+	captureHook     func()
+}
+
+func (discarder *recordingWorkspaceDiscarder) Capture(_ context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	discarder.mutex.Lock()
+	defer discarder.mutex.Unlock()
+	discarder.captureRequests = append(discarder.captureRequests, request)
+	if discarder.captureHook != nil {
+		discarder.captureHook()
+	}
+	if discarder.operations != nil {
+		*discarder.operations = append(*discarder.operations, "capture")
+	}
+	if discarder.retainedCapture.Request == request {
+		return discarder.retainedCapture, nil
+	}
+	if discarder.captureErr != nil {
+		return execution.CaptureRef{}, discarder.captureErr
+	}
+	discarder.retainedCapture = execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}
+	discarder.sealedCaptures++
+	return discarder.retainedCapture, nil
 }
 
 func (discarder *recordingWorkspaceDiscarder) DiscardWorkspace(assignmentID string) error {
 	discarder.mutex.Lock()
 	defer discarder.mutex.Unlock()
+	if discarder.operations != nil {
+		*discarder.operations = append(*discarder.operations, "discard")
+	}
 	discarder.assignmentIDs = append(discarder.assignmentIDs, assignmentID)
 	var result error
 	if len(discarder.results) != 0 {
@@ -632,8 +910,11 @@ func (discarder *recordingWorkspaceDiscarder) DiscardWorkspace(assignmentID stri
 	return result
 }
 
-func (discarder *recordingWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, _ int64, fence workspace.WorkspaceFence) error {
-	return fence(ctx, func(context.Context) error { return discarder.DiscardWorkspace(assignmentID) })
+func (discarder *recordingWorkspaceDiscarder) Discard(ctx context.Context, ref execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error {
+		discarder.discardedRefs = append(discarder.discardedRefs, ref)
+		return discarder.DiscardWorkspace(ref.Key.AssignmentID)
+	})
 }
 
 func (*recordingWorkspaceDiscarder) CleanupTurnPaths(ctx context.Context, _, _ string, fence workspace.WorkspaceFence) error {

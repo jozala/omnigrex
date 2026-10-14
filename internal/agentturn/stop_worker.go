@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/role"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/uuidtext"
@@ -24,19 +23,21 @@ type StopWorkerStore interface {
 	GetAgentTurnRuntimeCleanupContext(context.Context, store.JobLease) (store.AgentTurnRuntimeCleanupContext, error)
 	WithRecoveredRuntimeCleanupFence(context.Context, store.JobLease, func(context.Context) error) error
 	RecordRecoveredRuntimeOOM(context.Context, store.JobLease, string, int) error
+	RecordRecoveredRuntimeNeverStarted(context.Context, store.JobLease, string) error
 	AcknowledgeRecoveredRuntimeStopped(context.Context, store.JobLease) (store.AgentTurnRecovery, error)
 	AcknowledgeRecoveredRuntimeStopFailure(context.Context, store.JobLease, error, time.Duration) (store.AgentTurnRuntimeStopFailureAcknowledgement, error)
 }
 
-// ExactRuntimeCleaner removes every Runtime Process carrying an exact runtime identity.
+// ExactRuntimeCleaner confirms stop without destroying the workspace needed for capture.
 type ExactRuntimeCleaner interface {
-	ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error)
-	EnsureAbsent(context.Context, map[string]string) error
+	execution.Cleaner
+	EnsureKeyStopped(context.Context, execution.Key) error
 }
 
 // WorkspaceDiscarder removes recovered Reviewer workspace changes.
 type WorkspaceDiscarder interface {
-	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
+	Capture(context.Context, execution.CaptureRequest) (execution.CaptureRef, error)
+	Discard(context.Context, execution.WorkspaceRef, workspace.WorkspaceFence) error
 	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
 }
 
@@ -49,20 +50,25 @@ type StopWorkerConfig struct {
 	CleanupRetryInterval time.Duration
 	Policies             role.PolicyCatalog
 	OnError              func(error)
+	// TerminalCaptureRequired may exempt only durably proven preparation-only
+	// failures. Without that evidence, capture is always required, even when the
+	// environment is missing. The callback must validate the recovery-job fence.
+	TerminalCaptureRequired func(context.Context, store.JobLease) (bool, error)
 }
 
 // StopWorker makes STOP_STALE_RUNTIME recovery jobs reachable from the durable queue.
 type StopWorker struct {
-	store                StopWorkerStore
-	cleaner              ExactRuntimeCleaner
-	workspaces           WorkspaceDiscarder
-	claimOwner           string
-	leaseDuration        time.Duration
-	heartbeatInterval    time.Duration
-	idlePollInterval     time.Duration
-	cleanupRetryInterval time.Duration
-	policies             role.PolicyCatalog
-	onError              func(error)
+	store                   StopWorkerStore
+	cleaner                 ExactRuntimeCleaner
+	workspaces              WorkspaceDiscarder
+	claimOwner              string
+	leaseDuration           time.Duration
+	heartbeatInterval       time.Duration
+	idlePollInterval        time.Duration
+	cleanupRetryInterval    time.Duration
+	policies                role.PolicyCatalog
+	onError                 func(error)
+	terminalCaptureRequired func(context.Context, store.JobLease) (bool, error)
 }
 
 var _ StopWorkerStore = (*store.Store)(nil)
@@ -89,7 +95,8 @@ func NewStopWorker(workerStore StopWorkerStore, cleaner ExactRuntimeCleaner, wor
 		store: workerStore, cleaner: cleaner, workspaces: workspaces, claimOwner: config.ClaimOwner,
 		leaseDuration: config.LeaseDuration, heartbeatInterval: config.HeartbeatInterval,
 		idlePollInterval: config.IdlePollInterval, cleanupRetryInterval: config.CleanupRetryInterval, policies: config.Policies,
-		onError: config.OnError,
+		onError:                 config.OnError,
+		terminalCaptureRequired: config.TerminalCaptureRequired,
 	}, nil
 }
 
@@ -104,7 +111,7 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 	}
 	ctx, operation := telemetry.StartOperation(ctx, telemetry.RuntimeProcessCleanup, jobAttributes(*lease)...)
 	defer finishOperation(ctx, operation, &err)
-	labels, err := recoveryRuntimeLabels(*lease)
+	key, err := recoveryRuntimeKey(*lease)
 	if err != nil {
 		return true, err
 	}
@@ -120,7 +127,7 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 		heartbeatDone <- heartbeatErr
 	}()
 
-	operationErr := worker.stopRuntime(workCtx, *lease, labels)
+	operationErr := worker.stopRuntime(workCtx, *lease, key)
 	stopHeartbeat()
 	heartbeatErr := <-heartbeatDone
 	cancelWork()
@@ -142,23 +149,21 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 	return true, operationErr
 }
 
-func recoveryRuntimeLabels(lease store.JobLease) (map[string]string, error) {
+func recoveryRuntimeKey(lease store.JobLease) (execution.Key, error) {
 	if lease.Queue != store.AgentTurnRecoveryQueue || lease.Kind != store.StopStaleRuntimeJobKind ||
 		!uuidtext.Valid(lease.AgentAssignmentID) ||
 		!uuidtext.Valid(lease.AgentSessionID) ||
 		!uuidtext.Valid(lease.AgentTurnID) ||
 		lease.ExecutionEpoch <= 0 {
-		return nil, errors.New("stale Runtime Process stop job has invalid identity")
+		return execution.Key{}, errors.New("stale Runtime Process stop job has invalid identity")
 	}
-	return map[string]string{
-		store.RuntimeLabelAssignmentID: lease.AgentAssignmentID,
-		store.RuntimeLabelSessionID:    lease.AgentSessionID,
-		store.RuntimeLabelTurnID:       lease.AgentTurnID,
-		store.RuntimeLabelEpoch:        strconv.FormatInt(lease.ExecutionEpoch, 10),
+	return execution.Key{
+		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: lease.ExecutionEpoch,
 	}, nil
 }
 
-func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, labels map[string]string) error {
+func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease, key execution.Key) error {
 	cleanup, err := worker.store.GetAgentTurnRuntimeCleanupContext(ctx, lease)
 	if err != nil {
 		return fmt.Errorf("read stale Runtime Process cleanup context: %w", err)
@@ -167,33 +172,63 @@ func (worker *StopWorker) stopRuntime(ctx context.Context, lease store.JobLease,
 	if cleanup.RuntimeProfileName == "" || cleanup.RuntimeProfileVersion == "" {
 		return errors.New("stale Runtime Process has no immutable Runtime Profile identity")
 	}
-	observationLabels := make(map[string]string, len(labels)+1)
-	for name, value := range labels {
-		observationLabels[name] = value
+	if cleanup.AssignmentID != key.AssignmentID {
+		return execution.ErrConflict
 	}
-	observationLabels[dockerruntime.RuntimeProfileIdentityLabel] = cleanup.RuntimeProfileName + "/" + cleanup.RuntimeProfileVersion
-	observation, err := worker.cleaner.ObserveExactExit(ctx, observationLabels)
+	key.RuntimeProfileName, key.RuntimeProfileVersion = cleanup.RuntimeProfileName, cleanup.RuntimeProfileVersion
+	observation, err := worker.cleaner.ObserveKeyExit(ctx, key)
 	if err != nil {
 		return fmt.Errorf("inspect stale Runtime Process before removal: %w", err)
 	}
+	if observation.NeverStarted && (observation.Resource == "" || observation.Exited || observation.Running || observation.OOMKilled) {
+		return execution.ErrConflict
+	}
 	if observation.Exited && observation.OOMKilled {
-		if err := worker.store.RecordRecoveredRuntimeOOM(ctx, lease, observation.ContainerID, observation.ExitCode); err != nil {
+		if err := worker.store.RecordRecoveredRuntimeOOM(ctx, lease, string(observation.Resource), observation.ExitCode); err != nil {
 			return fmt.Errorf("persist recovered Runtime Process OOM before removal: %w", err)
 		}
 	}
 
-	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {
-		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
+	if err := worker.cleaner.EnsureKeyStopped(ctx, key); err != nil {
+		return fmt.Errorf("confirm stale Runtime Process stopped: %w", err)
+	}
+	if observation.NeverStarted {
+		// A delayed native start cannot have admitted a prompt before the
+		// backend's positive no-start observation. Recovery fences any new
+		// prompt/creation, records that fact, and removes the exact ID below
+		// before acknowledging cleanup. Created is not a terminal snapshot.
+		if err := worker.store.RecordRecoveredRuntimeNeverStarted(ctx, lease, string(observation.Resource)); err != nil {
+			return fmt.Errorf("record never-started Runtime Process cleanup: %w", err)
+		}
+	}
+	// Evaluate no-main-dispatch evidence only after exact-key stop/revocation.
+	// Historical Session binding does not establish admission for this Turn.
+	captureRequired := true
+	if worker.terminalCaptureRequired != nil {
+		captureRequired, err = worker.terminalCaptureRequired(ctx, lease)
+		if err != nil {
+			return fmt.Errorf("read recovered terminal capture requirement: %w", err)
+		}
 	}
 	fence := func(ctx context.Context, operation func(context.Context) error) error {
 		return worker.store.WithRecoveredRuntimeCleanupFence(ctx, lease, operation)
+	}
+	if captureRequired {
+		if _, err := captureTerminalWorkspace(ctx, key, worker.workspaces.Capture, fence); err != nil {
+			return fmt.Errorf("capture recovered Agent Turn workspace: %w", err)
+		}
+	} else if err := fence(ctx, func(context.Context) error { return nil }); err != nil {
+		return fmt.Errorf("validate preparation-only runtime cleanup: %w", err)
+	}
+	if err := worker.cleaner.EnsureKeyAbsent(ctx, key); err != nil {
+		return fmt.Errorf("ensure stale Runtime Process absent: %w", err)
 	}
 	if err := worker.workspaces.CleanupTurnPaths(ctx, cleanup.AssignmentID, lease.AgentTurnID, fence); err != nil {
 		return fmt.Errorf("clean recovered Agent Turn scratch: %w", err)
 	}
 
 	if cleanup.DiscardWorkspace {
-		if err := worker.workspaces.DiscardWorkspaceFenced(ctx, cleanup.AssignmentID, lease.ExecutionEpoch, fence); err != nil {
+		if err := worker.workspaces.Discard(ctx, execution.WorkspaceRef{Key: key}, fence); err != nil {
 			return fmt.Errorf("discard recovered Agent workspace: %w", err)
 		}
 	}

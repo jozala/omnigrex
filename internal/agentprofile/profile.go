@@ -16,10 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	MaxContentSize = 256 << 10
-	MaxSteps       = 1000
-)
+const MaxContentSize = 256 << 10
 
 var (
 	ErrInvalidProfile  = errors.New("invalid Agent Profile")
@@ -38,20 +35,13 @@ const (
 	Deny  PermissionAction = "deny"
 )
 
-var knownTools = map[string]struct{}{
-	"read": {}, "edit": {}, "glob": {}, "grep": {}, "list": {}, "patch": {},
-	"bash": {}, "task": {}, "webfetch": {}, "websearch": {}, "codesearch": {},
-	"todoread": {}, "todowrite": {}, "question": {}, "skill": {},
-}
-
 type Profile struct {
 	name         Name
 	role         Role
 	path         string
 	runtime      string
 	model        string
-	variant      string
-	steps        int
+	thinking     string
 	permissions  map[string]PermissionAction
 	instructions string
 	contentHash  [sha256.Size]byte
@@ -63,8 +53,7 @@ type frontMatter struct {
 	Role        Role                        `yaml:"role"`
 	Runtime     string                      `yaml:"runtime"`
 	Model       string                      `yaml:"model"`
-	Variant     string                      `yaml:"variant,omitempty"`
-	Steps       int                         `yaml:"steps"`
+	Thinking    string                      `yaml:"thinking,omitempty"`
 	Permissions map[string]PermissionAction `yaml:"permissions"`
 }
 
@@ -86,6 +75,18 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 	if err != nil {
 		return Profile{}, err
 	}
+	return profileFromConfiguration(path, configuration, instructions, sha256.Sum256(content), policies)
+}
+
+func profileFromConfiguration(path string, configuration frontMatter, instructions []byte, contentHash [sha256.Size]byte, policies role.PolicyCatalog) (Profile, error) {
+	if !validPath(path) {
+		return Profile{}, ErrInvalidProfile
+	}
+	for _, value := range []string{string(configuration.Name), string(configuration.Role), configuration.Runtime, configuration.Model, configuration.Thinking, string(instructions)} {
+		if strings.ContainsRune(value, '\ufeff') {
+			return Profile{}, ErrInvalidProfile
+		}
+	}
 	if !validName(configuration.Name) {
 		return Profile{}, fmt.Errorf("%w: name must use safe lowercase syntax", ErrInvalidProfile)
 	}
@@ -103,12 +104,12 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		path:         path,
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
-		variant:      configuration.Variant,
-		steps:        configuration.Steps,
+		thinking:     configuration.Thinking,
 		permissions:  clonePermissions(configuration.Permissions),
 		instructions: string(instructions),
-		contentHash:  sha256.Sum256(content),
+		contentHash:  contentHash,
 	}
+	var err error
 	profile.canonical, err = json.Marshal(struct {
 		Instructions string                      `json:"instructions"`
 		Model        string                      `json:"model"`
@@ -117,8 +118,7 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		Permissions  map[string]PermissionAction `json:"permissions"`
 		Role         Role                        `json:"role"`
 		Runtime      string                      `json:"runtime"`
-		Steps        int                         `json:"steps"`
-		Variant      string                      `json:"variant,omitempty"`
+		Thinking     string                      `json:"thinking,omitempty"`
 	}{
 		Instructions: profile.instructions,
 		Model:        profile.model,
@@ -127,8 +127,7 @@ func Parse(path string, content []byte, policies role.PolicyCatalog) (Profile, e
 		Permissions:  profile.permissions,
 		Role:         profile.role,
 		Runtime:      profile.runtime,
-		Steps:        profile.steps,
-		Variant:      profile.variant,
+		Thinking:     profile.thinking,
 	})
 	if err != nil {
 		return Profile{}, fmt.Errorf("encode Agent Profile snapshot: %w", err)
@@ -141,8 +140,7 @@ func (profile Profile) Role() Role                       { return profile.role }
 func (profile Profile) Path() string                     { return profile.path }
 func (profile Profile) Runtime() string                  { return profile.runtime }
 func (profile Profile) Model() string                    { return profile.model }
-func (profile Profile) Variant() string                  { return profile.variant }
-func (profile Profile) Steps() int                       { return profile.steps }
+func (profile Profile) Thinking() string                 { return profile.thinking }
 func (profile Profile) Instructions() string             { return profile.instructions }
 func (profile Profile) ContentSHA256() [sha256.Size]byte { return profile.contentHash }
 func (profile Profile) ContentHash() string              { return hex.EncodeToString(profile.contentHash[:]) }
@@ -239,16 +237,17 @@ func validateYAMLNode(node *yaml.Node) error {
 }
 
 func validateConfiguration(policy role.Policy, configuration frontMatter, instructions []byte) error {
-	if !validReference(configuration.Runtime) {
-		return fmt.Errorf("%w: runtime must use name/version syntax without whitespace or control characters", ErrInvalidProfile)
+	if configuration.Runtime != "pi-rpc/v1" {
+		return fmt.Errorf("%w: runtime must be pi-rpc/v1", ErrInvalidProfile)
 	}
-	if !validReference(configuration.Model) {
+	provider, model, found := strings.Cut(configuration.Model, "/")
+	if !found || provider == "" || model == "" || containsWhitespaceOrControl(configuration.Model) {
 		return fmt.Errorf("%w: model must use provider/model syntax without whitespace or control characters", ErrInvalidProfile)
 	}
-	if configuration.Variant != "" && containsWhitespaceOrControl(configuration.Variant) {
-		return fmt.Errorf("%w: variant contains whitespace or control characters", ErrInvalidProfile)
+	if configuration.Thinking != "" && !ValidThinking(configuration.Thinking) {
+		return fmt.Errorf("%w: invalid Pi thinking level", ErrInvalidProfile)
 	}
-	if err := ValidateRolePolicy(policy, configuration.Steps, configuration.Permissions); err != nil {
+	if err := ValidatePiPermissions(policy, configuration.Permissions); err != nil {
 		return err
 	}
 	if strings.TrimSpace(string(instructions)) == "" {
@@ -260,37 +259,32 @@ func validateConfiguration(policy role.Policy, configuration frontMatter, instru
 	return nil
 }
 
-// ValidateRolePolicy checks mutable Agent Profile values against an immutable Role policy.
-func ValidateRolePolicy(policy role.Policy, steps int, permissions map[string]PermissionAction) error {
-	if !role.ValidID(policy.Role) {
-		return fmt.Errorf("%w: unknown Role", ErrInvalidProfile)
+// ValidThinking checks vocabulary only; the adapter verifies model support.
+func ValidThinking(value string) bool {
+	switch value {
+	case "off", "minimal", "low", "medium", "high", "xhigh":
+		return true
 	}
-	if steps <= 0 || steps > MaxSteps {
-		return fmt.Errorf("%w: steps must be between 1 and %d", ErrInvalidProfile, MaxSteps)
-	}
-	if len(permissions) == 0 {
-		return fmt.Errorf("%w: permissions must not be empty", ErrInvalidProfile)
+	return false
+}
+
+// ValidatePiPermissions applies immutable Role constraints to Pi's local tools.
+// Skill authorization adds checkout-local guidance, not another tool authority.
+func ValidatePiPermissions(policy role.Policy, permissions map[string]PermissionAction) error {
+	if !role.ValidID(policy.Role) || len(permissions) == 0 {
+		return ErrInvalidProfile
 	}
 	for tool, action := range permissions {
-		if _, ok := knownTools[tool]; !ok {
-			return fmt.Errorf("%w: unknown permission tool %q", ErrInvalidProfile, tool)
+		switch tool {
+		case "read", "edit", "write", "bash", "grep", "find", "ls", "skill":
+		default:
+			return fmt.Errorf("%w: unsupported Pi local tool", ErrInvalidProfile)
 		}
-		if action != Allow && action != Deny {
-			return fmt.Errorf("%w: permission for %q must be allow or deny", ErrInvalidProfile, tool)
-		}
-		if !policy.OpenCode.AllowFileEdits && action == Allow && (tool == "edit" || tool == "patch") {
-			return fmt.Errorf("%w: Role permission for %q must be deny", ErrInvalidProfile, tool)
+		if action != Allow && action != Deny || !policy.AllowFileEdits && action == Allow && (tool == "edit" || tool == "write") {
+			return fmt.Errorf("%w: invalid Pi Role permission", ErrInvalidProfile)
 		}
 	}
 	return nil
-}
-
-func validReference(value string) bool {
-	if strings.Count(value, "/") != 1 || containsWhitespaceOrControl(value) {
-		return false
-	}
-	parts := strings.Split(value, "/")
-	return parts[0] != "" && parts[1] != ""
 }
 
 func containsWhitespaceOrControl(value string) bool {

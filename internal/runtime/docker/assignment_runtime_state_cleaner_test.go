@@ -175,7 +175,7 @@ func TestAssignmentRuntimeStateCleanerValidatesOptionsAndVolumeAvailability(t *t
 		name   string
 		mutate func(*AssignmentRuntimeStateCleanerOptions)
 	}{
-		{name: "image", mutate: func(options *AssignmentRuntimeStateCleanerOptions) { options.Image = "omnigrex/opencode:latest" }},
+		{name: "image", mutate: func(options *AssignmentRuntimeStateCleanerOptions) { options.Image = "omnigrex/pi:latest" }},
 		{name: "platform", mutate: func(options *AssignmentRuntimeStateCleanerOptions) { options.Platform.Architecture = "s390x" }},
 		{name: "root user", mutate: func(options *AssignmentRuntimeStateCleanerOptions) { options.User = "0:0" }},
 		{name: "volume path", mutate: func(options *AssignmentRuntimeStateCleanerOptions) { options.RuntimeStateVolume = "/tmp/state" }},

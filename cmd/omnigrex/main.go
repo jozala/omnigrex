@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,9 +25,9 @@ import (
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/composition"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/server"
@@ -59,6 +57,14 @@ func main() {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction))
+		case "state":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+		case "pi-diagnostic":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runPiDiagnostic(ctx, os.Args[2:], os.Stdout, os.Stderr))
 		default:
 			_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 			os.Exit(2)
@@ -185,21 +191,30 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		unregisterObservations = func() {}
 		return errors.New("register durable telemetry observations")
 	}
-	openCodeV1, err := runtimeprofile.NewOpenCodeV1(settings.OpenCodeACPV1Image, settings.OpenCodeACPV1Platform)
+	profiles, err := settings.RuntimeProfiles()
 	if err != nil {
-		return fmt.Errorf("configure opencode-acp/v1 Runtime Profile: %w", err)
+		return fmt.Errorf("configure Runtime Profiles: %w", err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, openCodeV1); err != nil {
-		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
+	// Check all installation history before runtime recovery, webhook serving, or
+	// Worker admission. Collected legacy Sessions still require a clean cutover.
+	historyCtx, cancelHistory := context.WithTimeout(ctx, settings.ReadinessTimeout)
+	err = database.CheckPendingRuntimeProfileCompatibility(historyCtx, profiles[0])
+	cancelHistory()
+	if err != nil {
+		return fmt.Errorf("validate installation runtime history: %w", err)
 	}
 	githubServices, err := configureGitHub(settings, database, logger)
 	if err != nil {
 		return err
 	}
-	runtimeRegistry, err := runtimeprofile.NewRegistry(openCodeV1)
+	if err := importRuntimeProfileCompatibilityResults(ctx, database, settings.RuntimeProfileCompatibilityResultsFile, composition.StateBinding(settings).Family, profiles...); err != nil {
+		return fmt.Errorf("import Runtime Profile compatibility results: %w", err)
+	}
+	registry, err := runtimeprofile.NewRegistry(profiles...)
 	if err != nil {
 		return fmt.Errorf("configure Runtime Profile Registry: %w", err)
 	}
+	runtimeRegistry := runtimeprofile.Resolver{Catalog: registry.Catalog, Source: database}
 	developerRepositoryCredentials, err := githubapi.NewRepositoryInstallationCredentialProvider(
 		githubServices.developerSigner, githubServices.api, githubapi.DeveloperAppPermissions(), nil,
 	)
@@ -227,8 +242,15 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn preparation Worker: %w", err)
 	}
+	backend, err := composition.NewBackend(ctx, settings, profiles[0], database, database)
+	if err != nil {
+		return fmt.Errorf("configure execution backend: %w", err)
+	}
+	defer func() { _ = backend.Close() }()
 	workspaces, err := workspace.New(workspace.Options{
 		WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: settings.WorkspaceRoot, MiseRoot: settings.MiseRoot,
+		CaptureRoot: settings.WorkspaceCaptureRoot, CaptureSource: backend.Workspaces,
+		CaptureLedger: database,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Assignment workspaces: %w", err)
@@ -285,59 +307,16 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Agent Turn mutation recovery Worker: %w", err)
 	}
-	runtimeCleaner, err := dockerruntime.NewExactLabelCleaner(dockerruntime.ExactLabelCleanerOptions{
-		StopTimeout: settings.ShutdownTimeout,
-	})
-	if err != nil {
-		return fmt.Errorf("configure stale Runtime Process cleanup: %w", err)
+	runtimeCleaner := backend.Cleaner
+	retainedState := backend.States
+	if err := database.BindExecutionBackend(ctx, retainedState.Binding()); err != nil {
+		return fmt.Errorf("bind execution backend: %w", err)
 	}
-	defer func() {
-		if err := runtimeCleaner.Close(); err != nil {
-			logger.Error("close stale Runtime Process cleanup", "error", err)
-		}
-	}()
-	runtimeInventory, err := dockerruntime.NewRuntimeProcessInventory()
-	if err != nil {
-		return fmt.Errorf("configure Runtime Process inventory: %w", err)
-	}
-	defer func() {
-		if err := runtimeInventory.Close(); err != nil {
-			logger.Error("close Runtime Process inventory", "error", err)
-		}
-	}()
-	profileContract := openCodeV1.Contract()
-	runtimeStateCleaner, err := dockerruntime.NewAssignmentRuntimeStateCleaner(dockerruntime.AssignmentRuntimeStateCleanerOptions{
-		Image: profileContract.Image,
-		Platform: dockerruntime.Platform{
-			OS: profileContract.Platform.OS, Architecture: profileContract.Platform.Arch,
-		},
-		User: strconv.FormatUint(uint64(profileContract.User.UID), 10) + ":" +
-			strconv.FormatUint(uint64(profileContract.User.GID), 10),
-		RuntimeStateVolume: settings.RuntimeStateVolume,
-	})
-	if err != nil {
-		return fmt.Errorf("configure Assignment runtime-state cleanup: %w", err)
-	}
-	defer func() {
-		if err := runtimeStateCleaner.Close(); err != nil {
-			logger.Error("close Assignment runtime-state cleanup", "error", err)
-		}
-	}()
-	exactImages, err := dockerruntime.NewExactImageAvailability()
-	if err != nil {
-		return fmt.Errorf("configure exact Runtime Profile image availability: %w", err)
-	}
-	defer func() {
-		if err := exactImages.Close(); err != nil {
-			logger.Error("close exact Runtime Profile image availability", "error", err)
-		}
-	}()
-	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry.Catalog, exactImages)
+	profileAvailability, err := runtimeprofile.NewAvailabilityChecker(database, runtimeRegistry, backend.Images)
 	if err != nil {
 		return fmt.Errorf("configure protected Runtime Profile availability: %w", err)
 	}
-	startupDocker := startupDockerAdapter{inventory: runtimeInventory, cleaner: runtimeCleaner}
-	startupReconciler, err := startup.NewReconciler(database, startupDocker, startupDocker, startupDocker, startup.ReconcilerOptions{
+	startupReconciler, err := startup.NewReconciler(database, backend.Recovery, backend.Recovery, backend.Recovery, startup.ReconcilerOptions{
 		MaxPasses: startupMaximumPasses, MaxRuntimeProcesses: startupMaximumRuntimeProcesses,
 		MaxRecoveries: startupMaximumRecoveries,
 	})
@@ -352,12 +331,13 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure expired Agent Turn monitor: %w", err)
 	}
 	runtimeStopWorker, err := agentturn.NewStopWorker(database, runtimeCleaner, workspaces, agentturn.StopWorkerConfig{
-		ClaimOwner:           githubServices.claimOwner + ":stop-stale-runtime",
-		LeaseDuration:        settings.AgentTurnPreparationLeaseDuration,
-		HeartbeatInterval:    settings.AgentTurnPreparationHeartbeatInterval,
-		IdlePollInterval:     settings.AgentTurnPreparationPollInterval,
-		CleanupRetryInterval: settings.AgentTurnPreparationRetryDelay,
-		Policies:             rolePolicies,
+		ClaimOwner:              githubServices.claimOwner + ":stop-stale-runtime",
+		LeaseDuration:           settings.AgentTurnPreparationLeaseDuration,
+		HeartbeatInterval:       settings.AgentTurnPreparationHeartbeatInterval,
+		IdlePollInterval:        settings.AgentTurnPreparationPollInterval,
+		CleanupRetryInterval:    settings.AgentTurnPreparationRetryDelay,
+		Policies:                rolePolicies,
+		TerminalCaptureRequired: database.AgentTurnTerminalCaptureRequired,
 		OnError: func(err error) {
 			logger.ErrorContext(telemetry.ErrorContext(ctx, err), "stop stale Runtime Process", "error", err)
 		},
@@ -365,19 +345,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure stale Runtime Process stop Worker: %w", err)
 	}
-	sessions := runtimesession.NewCoordinator(database)
 	runtimeLauncher, err := agentturn.NewLauncher(agentturn.LauncherConfig{
-		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway,
-		Docker: agentturn.ProductionDockerFactory{}, ACP: agentturn.ProductionACPFactory{},
-		Sessions: sessions, DeveloperCredentials: developerRepositoryCredentials,
-		ReviewerCredentials: reviewerRepositoryCredentials, Network: settings.DockerAgentNetwork,
-		WorkspaceVolume: settings.WorkspaceVolume, RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume: settings.MiseVolume, MemoryBytes: settings.AgentTurnMemoryBytes, ACPOptions: acp.ClientOptions{
-			Logger:         logger,
-			AgentEventSink: loggingAgentEventSink{logger: logger},
-		},
+		Store: database, Registry: runtimeRegistry, Workspace: workspaces, Gateway: toolGateway, States: retainedState,
+		Execution:            backend.Factory,
+		MemoryBytes:          settings.AgentTurnMemoryBytes,
+		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
 		Policies: rolePolicies, PathEnvironmentAllowlist: settings.AgentPathEnvironmentAllowlist,
 		Definition: definition, OperatorInstructions: operatorInstructions,
+		AgentAdapters: map[string]runtimesession.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: settings.PiStartupTimeout}},
 	})
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
@@ -387,9 +362,10 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api,
+		Store: database, GitHub: githubServices.api, Logger: logger,
+		Workspace:            workspaces,
+		GitRemoteBaseURL:     settings.GitRemoteBaseURL,
 		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
-		Logger:                 logger,
 		ProviderCredentialJSON: []json.RawMessage{providerCredentialJSON},
 	})
 	if err != nil {
@@ -399,12 +375,13 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
-		Launcher: runtimeLauncher, Sessions: sessions,
+		Launcher:            runtimeLauncher,
 		Outcomes:            outcomeReconciler,
 		Workspace:           workspaces,
 		PublicationRecovery: agentturn.NewPublicationRecoveryWithCredentials(database, workspaces, githubServices.api, developerRepositoryCredentials),
 		Policies:            rolePolicies,
 		Definition:          definition,
+		AgentEventSink:      loggingAgentEventSink{logger: logger},
 	}, agentturn.ExecutionWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":execute-agent-turn", LeaseDuration: settings.AgentTurnExecutionLeaseDuration,
 		HeartbeatInterval: settings.AgentTurnExecutionHeartbeatInterval, IdlePollInterval: settings.AgentTurnExecutionPollInterval,
@@ -506,7 +483,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
 	}
-	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(runtimeStateCleaner, workspaces), retention.WorkerConfig{
+	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: retainedState}, workspaces), retention.WorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
 		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,
@@ -525,6 +502,14 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Agent Participant tool cache monitor: %w", err)
 	}
 
+	qualificationCtx, qualificationCancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
+	for _, profile := range profiles {
+		if err := composition.CheckRepositoryEnvironment(qualificationCtx, profile, settings); err != nil {
+			qualificationCancel()
+			return fmt.Errorf("qualify configured Runtime Profile: %w", err)
+		}
+	}
+	qualificationCancel()
 	reconciliation, err := prepareStartup(ctx, settings.ReadinessTimeout, profileAvailability, startupReconciler)
 	if err != nil {
 		return err
@@ -536,25 +521,18 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		"removed_malformed_processes", reconciliation.RemovedMalformedProcesses,
 	)
 
-	dockerProbe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
-		AgentNetwork:       settings.DockerAgentNetwork,
-		WorkspaceVolume:    settings.WorkspaceVolume,
-		RuntimeStateVolume: settings.RuntimeStateVolume,
-		MiseVolume:         settings.MiseVolume,
-		AgentImage:         settings.AgentImageReference,
-	})
-	if err != nil {
-		return fmt.Errorf("initialize Docker readiness: %w", err)
-	}
-	defer func() {
-		if err := dockerProbe.Close(); err != nil {
-			logger.Error("close Docker readiness", "error", err)
-		}
-	}()
-
-	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, dockerProbe.Check,
-		profileAvailability.Check, func(ctx context.Context) error {
-			return database.CheckPendingRuntimeProfileCompatibility(ctx, openCodeV1)
+	readiness := combinedReadiness(settings.ReadinessTimeout, database.Ready, backend.Check,
+		profileAvailability.Check, retainedState.Check, func(ctx context.Context) error {
+			for _, profile := range profiles {
+				contract := profile.Contract()
+				if err := backend.Images.Available(ctx, contract.Image, contract.Platform); err != nil {
+					return err
+				}
+				if err := database.CheckPendingRuntimeProfileCompatibility(ctx, profile); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	return runServices(ctx,
 		func(ctx context.Context) error {
@@ -588,15 +566,23 @@ type loggingAgentEventSink struct {
 }
 
 func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.AgentEvent) error {
-	if sink.logger == nil || event.Metadata.ToolCallID == "" {
+	if sink.logger == nil {
+		return nil
+	}
+	if event.Metadata.ToolCallID == "" {
+		level := slog.LevelDebug
+		if event.Metadata.FailureClass != "" {
+			level = slog.LevelWarn
+		}
+		sink.logger.Log(ctx, level, "Agent Session observation", "agent_participant_id", event.AssignmentID, "agent_session_id", event.AgentSessionID, "agent_turn_id", event.TurnID, "execution_epoch", event.ExecutionEpoch, "control_revision", event.ControlRevision, "kind", event.Kind, "status", event.Metadata.Status, "failure_class", event.Metadata.FailureClass, "runtime", string(event.Metadata.Runtime))
 		return nil
 	}
 	level := slog.LevelDebug
-	message := "ACP tool update"
+	message := "Agent tool update"
 	failureClass := event.Metadata.FailureClass
 	if event.Metadata.Status == "failed" && strings.HasPrefix(event.Metadata.ToolName, "omnigrex_") {
 		level = slog.LevelWarn
-		message = "ACP MCP tool failed"
+		message = "Agent MCP tool failed"
 		if failureClass == "" {
 			failureClass = "unclassified"
 		}
@@ -614,89 +600,6 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		"failure_class", failureClass,
 	)
 	return nil
-}
-
-type runtimeProcessInventory interface {
-	List(context.Context) (dockerruntime.RuntimeProcessInventorySnapshot, error)
-}
-
-type startupRuntimeCleaner interface {
-	EnsureAbsent(context.Context, map[string]string) error
-	EnsureManagedContainerAbsent(context.Context, string) error
-}
-
-type startupDockerAdapter struct {
-	inventory runtimeProcessInventory
-	cleaner   startupRuntimeCleaner
-}
-
-func (adapter startupDockerAdapter) List(ctx context.Context) (startup.RuntimeInventorySnapshot, error) {
-	dockerSnapshot, err := adapter.inventory.List(ctx)
-	if err != nil {
-		return startup.RuntimeInventorySnapshot{}, err
-	}
-	snapshot := startup.RuntimeInventorySnapshot{
-		Processes:  make([]startup.ManagedRuntimeProcess, 0, len(dockerSnapshot.Processes)),
-		Duplicates: make([]startup.DuplicateManagedRuntimeProcess, 0, len(dockerSnapshot.Duplicates)),
-		Malformed:  make([]startup.MalformedManagedRuntimeProcess, 0, len(dockerSnapshot.Malformed)),
-	}
-	for _, process := range dockerSnapshot.Processes {
-		identity, ok := startupRuntimeIdentity(process.Identity)
-		if !ok {
-			snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-				ContainerID: process.ContainerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
-			})
-			continue
-		}
-		snapshot.Processes = append(snapshot.Processes, startup.ManagedRuntimeProcess{
-			Identity: identity, ContainerID: process.ContainerID,
-		})
-	}
-	for _, duplicate := range dockerSnapshot.Duplicates {
-		identity, ok := startupRuntimeIdentity(duplicate.Identity)
-		if !ok {
-			for _, containerID := range duplicate.ContainerIDs {
-				snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-					ContainerID: containerID, Reason: string(dockerruntime.MalformedExecutionEpoch),
-				})
-			}
-			continue
-		}
-		snapshot.Duplicates = append(snapshot.Duplicates, startup.DuplicateManagedRuntimeProcess{
-			Identity: identity, ContainerIDs: append([]string(nil), duplicate.ContainerIDs...),
-		})
-	}
-	for _, malformed := range dockerSnapshot.Malformed {
-		snapshot.Malformed = append(snapshot.Malformed, startup.MalformedManagedRuntimeProcess{
-			ContainerID: malformed.ContainerID, Reason: string(malformed.Reason),
-		})
-	}
-	return snapshot, nil
-}
-
-func (adapter startupDockerAdapter) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {
-	return adapter.cleaner.EnsureAbsent(ctx, map[string]string{
-		dockerruntime.RuntimeProcessAssignmentLabel: identity.AssignmentID,
-		dockerruntime.RuntimeProcessSessionLabel:    identity.AgentSessionID,
-		dockerruntime.RuntimeProcessTurnLabel:       identity.AgentTurnID,
-		dockerruntime.RuntimeProcessEpochLabel:      strconv.FormatInt(identity.ExecutionEpoch, 10),
-		dockerruntime.RuntimeProfileIdentityLabel:   identity.RuntimeProfileName + "/" + identity.RuntimeProfileVersion,
-	})
-}
-
-func (adapter startupDockerAdapter) EnsureMalformedAbsent(ctx context.Context, process startup.MalformedManagedRuntimeProcess) error {
-	return adapter.cleaner.EnsureManagedContainerAbsent(ctx, process.ContainerID)
-}
-
-func startupRuntimeIdentity(identity dockerruntime.RuntimeProcessIdentity) (store.AgentTurnRuntimeIdentity, bool) {
-	if identity.ExecutionEpoch > math.MaxInt64 {
-		return store.AgentTurnRuntimeIdentity{}, false
-	}
-	return store.AgentTurnRuntimeIdentity{
-		AssignmentID: identity.AssignmentID, AgentSessionID: identity.AgentSessionID,
-		AgentTurnID: identity.AgentTurnID, ExecutionEpoch: int64(identity.ExecutionEpoch),
-		RuntimeProfileName: identity.RuntimeProfile.Name, RuntimeProfileVersion: identity.RuntimeProfile.Version,
-	}, true
 }
 
 type protectedBindingChecker interface {
@@ -863,7 +766,7 @@ type runtimeProfileCompatibilityImporter interface {
 	ImportRuntimeProfileCompatibilityResults(context.Context, runtimeprofile.CompatibilityResultsFile) error
 }
 
-func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runtimeProfileCompatibilityImporter, filePath string, target runtimeprofile.Profile) error {
+func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runtimeProfileCompatibilityImporter, filePath, backend string, targets ...runtimeprofile.Profile) error {
 	if filePath == "" {
 		return nil
 	}
@@ -876,7 +779,7 @@ func importRuntimeProfileCompatibilityResults(ctx context.Context, importer runt
 	if err != nil {
 		return err
 	}
-	if err := results.ValidateTarget(target); err != nil {
+	if err := results.ValidateDeployment(backend, 1, targets...); err != nil {
 		return err
 	}
 	if err := importer.ImportRuntimeProfileCompatibilityResults(ctx, results); err != nil {
@@ -921,7 +824,12 @@ func healthcheck() int {
 		url = "http://127.0.0.1:8080/healthz"
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	readinessTimeout, err := config.LoadReadinessTimeout(os.Getenv("OMNIGREX_READINESS_TIMEOUT"))
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: readinessTimeout + config.HealthcheckResponseAllowance}
 	response, err := client.Get(url)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

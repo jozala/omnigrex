@@ -35,7 +35,7 @@ func TestStartupRecoveryClassifiesAndRecoversExactRuntimeIdentity(t *testing.T) 
 	identity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	assertRuntimeDisposition(t, databases[0], ctx, identity, store.AgentTurnRuntimeActive)
 
@@ -187,7 +187,7 @@ func TestStartupReconcilerFencesLiveDuplicateRuntimeProcessesBeforeCleanup(t *te
 	runtimes := &duplicateStartupRuntimes{
 		database: database,
 		duplicate: startup.DuplicateManagedRuntimeProcess{
-			Identity: identity, ContainerIDs: []string{"duplicate-live-a", "duplicate-live-b"},
+			Identity: identity, Resources: []string{"duplicate-live-a", "duplicate-live-b"},
 		},
 	}
 	reconciler, err := startup.NewReconciler(database, runtimes, runtimes, runtimes, startup.ReconcilerOptions{
@@ -494,7 +494,7 @@ func runtimeIdentityForFixture(fixture agentFixture, turn store.AgentTurn) store
 	return store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 }
 
@@ -597,7 +597,7 @@ func TestPeriodicExpiredTurnMonitorLeavesLiveOwnerThenRecoversAfterLeaseExpiry(t
 	identity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
 		AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch,
-		RuntimeProfileName: "runtime", RuntimeProfileVersion: "1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	monitor, err := startup.NewMonitor(databases[0], startup.MonitorOptions{
 		PollInterval: 10 * time.Millisecond, MaxRecoveriesPerPoll: 10,
@@ -641,6 +641,10 @@ func (runtimes *duplicateStartupRuntimes) List(context.Context) (startup.Runtime
 		return startup.RuntimeInventorySnapshot{}, nil
 	}
 	return startup.RuntimeInventorySnapshot{Duplicates: []startup.DuplicateManagedRuntimeProcess{runtimes.duplicate}}, nil
+}
+
+func (runtimes *duplicateStartupRuntimes) EnsureOrphansAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity, _ []string) error {
+	return runtimes.EnsureAbsent(ctx, identity)
 }
 
 func (runtimes *duplicateStartupRuntimes) EnsureAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity) error {

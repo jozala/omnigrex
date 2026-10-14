@@ -65,7 +65,8 @@ func (cleaner *AssignmentRuntimeStateCleaner) Close() error {
 	return cleaner.close()
 }
 
-// EnsureAbsent idempotently deletes exactly assignment-<UUID>/runtime-state.
+// EnsureAbsent idempotently deletes exactly assignment-<UUID>/runtime-state,
+// including directories with restrictive restored permissions.
 func (cleaner *AssignmentRuntimeStateCleaner) EnsureAbsent(ctx context.Context, assignmentID, runtimeStateSubpath string) error {
 	if !validCanonicalRuntimeUUID(assignmentID) || runtimeStateSubpath != "assignment-"+assignmentID+"/runtime-state" {
 		return fmt.Errorf("%w: path is not canonical for the Assignment", ErrInvalidAssignmentRuntimeStateCleanup)
@@ -86,6 +87,9 @@ assignment_root="/volumes/runtime-state/assignment-$1"
 target="$assignment_root/runtime-state"
 if [ -L "$assignment_root" ]; then
   exit 64
+fi
+if [ -d "$target" ] && [ ! -L "$target" ]; then
+  find "$target" -type d -exec chmod u+rwx {} \;
 fi
 rm -rf -- "$target"
 test ! -e "$target"

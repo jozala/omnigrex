@@ -14,9 +14,11 @@ import (
 	"unicode"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -30,7 +32,7 @@ var (
 
 const maxOutcomeDiagnosticRunes = 4096
 
-// PromptErrorClassification is the credential-free terminal classification of an ACP prompt error.
+// PromptErrorClassification is the credential-free terminal classification of a prompt error.
 type PromptErrorClassification string
 
 const (
@@ -40,12 +42,12 @@ const (
 	PromptErrorInvalidResponse PromptErrorClassification = "INVALID_RESPONSE"
 )
 
-// ClassifyPromptError maps ACP prompt errors to the terminal Agent Turn status contract.
+// ClassifyPromptError maps prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
 	if errors.Is(err, ErrRuntimeOOMKilled) {
 		return PromptErrorFailure
 	}
-	if errors.Is(err, acp.ErrUnknownStopReason) {
+	if errors.Is(err, agent.ErrProtocol) {
 		return PromptErrorInvalidResponse
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -70,6 +72,11 @@ type OutcomeReconcilerGitHub interface {
 	ListPullRequestReviews(context.Context, string, string, string, int) ([]githubapi.Review, error)
 }
 
+// OutcomeWorkspaceInspector observes sealed terminal evidence through trusted publication policy.
+type OutcomeWorkspaceInspector interface {
+	CaptureTreesEqual(context.Context, execution.CaptureRef, workspace.PublicationObservation) (bool, error)
+}
+
 type outcomeReconcilerClock interface {
 	Now() time.Time
 }
@@ -83,6 +90,8 @@ func (realOutcomeReconcilerClock) Now() time.Time { return time.Now() }
 type OutcomeReconcilerConfig struct {
 	Store                  OutcomeReconcilerStore
 	GitHub                 OutcomeReconcilerGitHub
+	Workspace              OutcomeWorkspaceInspector
+	GitRemoteBaseURL       string
 	DeveloperCredentials   RepositoryCredentialProvider
 	ReviewerCredentials    RepositoryCredentialProvider
 	Clock                  interface{ Now() time.Time }
@@ -110,12 +119,12 @@ func (OutcomeReconcilerConfig) GoString() string {
 type OutcomeReconciliation struct {
 	Lease                        store.AgentTurnLease
 	Execution                    store.AgentTurnExecutionContext
-	PromptResponse               *acp.PromptResponse
+	PromptResponse               *agent.Outcome
 	PromptError                  PromptErrorClassification
 	PromptDiagnostic             string
 	RepositoryCredential         string
 	ReviewerRepositoryCredential string
-	Paths                        workspace.Paths
+	Capture                      execution.CaptureRef
 	PriorPublicationMutations    []store.MutationReservation
 	OnCorroborationFailure       func(TerminalCorroborationFailure)
 }
@@ -135,10 +144,12 @@ func (OutcomeReconciliation) GoString() string {
 	return "agentturn.OutcomeReconciliation{<credentials redacted>}"
 }
 
-// OutcomeReconciler derives settlement observations without consulting ACP output text.
+// OutcomeReconciler derives settlement observations without consulting agent output text.
 type OutcomeReconciler struct {
 	store                OutcomeReconcilerStore
 	github               OutcomeReconcilerGitHub
+	workspace            OutcomeWorkspaceInspector
+	gitRemoteBase        gitremote.BaseURL
 	developerCredentials RepositoryCredentialProvider
 	reviewerCredentials  RepositoryCredentialProvider
 	clock                outcomeReconcilerClock
@@ -158,7 +169,11 @@ var (
 )
 
 func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, error) {
-	if nilInterface(config.Store) || nilInterface(config.GitHub) {
+	if nilInterface(config.Store) || nilInterface(config.GitHub) || nilInterface(config.Workspace) {
+		return nil, ErrInvalidOutcomeReconciler
+	}
+	remoteBase, err := gitremote.ParseBaseURL(config.GitRemoteBaseURL)
+	if err != nil {
 		return nil, ErrInvalidOutcomeReconciler
 	}
 	if nilInterface(config.DeveloperCredentials) || nilInterface(config.ReviewerCredentials) {
@@ -177,6 +192,7 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 	}
 	return &OutcomeReconciler{
 		store: config.Store, github: config.GitHub,
+		workspace: config.Workspace, gitRemoteBase: remoteBase,
 		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
 		clock: clock, logger: config.Logger, diagnosticRedactor: redactor, retryWait: config.RetryWait,
 	}, nil
@@ -247,7 +263,7 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 	}
 	promptDiagnostic := promptFailureDiagnostic(request)
 	// A lost response or deadline does not invalidate a completed terminal intent.
-	// Explicit cancellation and non-normal ACP stop reasons still prevent acceptance.
+	// Explicit cancellation and inadmissible terminal outcomes still prevent acceptance.
 	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline {
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
@@ -269,7 +285,7 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		if promptDiagnostic != "" {
 			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 		}
-		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "ACP prompt ended without a successful terminal mutation intent"), nil
+		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent prompt ended without a successful terminal mutation intent"), nil
 	}
 	intent := intents[0]
 	var result store.AgentTurnSettlementObservation
@@ -380,7 +396,7 @@ func newProviderDiagnosticRedactor(providers []json.RawMessage) (*strings.Replac
 		add(string(provider))
 		canonical, _ := json.Marshal(decoded)
 		add(string(canonical))
-		// OpenCode auth secrets are strings; its accepted numeric expires field is metadata.
+		// Provider auth secrets are strings; standalone numeric scalars are metadata.
 		// Redacting standalone JSON scalars would erase ordinary diagnostics such as 1, true, or null.
 		leaves := make([]string, 0)
 		collectStringSecrets(decoded, &leaves)
@@ -565,7 +581,32 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 		containsAnyCredentialInProposal(proposal, fresh) {
 		return failure("fresh Developer Pull Request contains unsafe credential material")
 	}
-	matching, err := workspace.CommittedTreesEqual(ctx, request.Paths)
+	// Evidence from another epoch, profile, operation, or publication cannot
+	// prove this Turn's terminal workspace, even if its trees happen to match.
+	if request.Capture.Request.Workspace.Key != runtimeKey(request.Execution) ||
+		request.Capture.Request.OperationID != request.Lease.ID ||
+		request.Capture.Request.Purpose != execution.TerminalCapture || request.Capture.SHA256 == "" {
+		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
+		return failure("Developer terminal workspace capture is unavailable")
+	}
+	repositoryURL, err := reconciler.gitRemoteBase.RepositoryURL(request.Execution.Repository.Owner, request.Execution.Repository.Name)
+	if err != nil {
+		return failure("Developer repository identity is invalid")
+	}
+	// Trusted tree inspection fetches the pinned publication from the remote.
+	// Acquire again after the PR read, never authorize it with a Turn-start token.
+	credential, err := acquireDeveloper(ctx)
+	if err != nil {
+		reportGitHubCorroborationFailure(request, intent.ID, err)
+		return failure("fresh Developer publication credential acquisition failed")
+	}
+	*fresh = append(*fresh, credential)
+	if containsAnyCredentialInProposal(proposal, fresh) {
+		return failure("fresh Developer Pull Request contains unsafe credential material")
+	}
+	matching, err := reconciler.workspace.CaptureTreesEqual(ctx, request.Capture, workspace.PublicationObservation{
+		RepositoryURL: repositoryURL, Credential: credential, Revision: result.HeadSHA,
+	})
 	if err != nil {
 		reportTerminalCorroborationFailure(request, intent.ID, corroborationFailure{code: "workspace_observation_unavailable", retryable: true})
 		return failure("Developer committed workspace observation failed")
@@ -988,33 +1029,37 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 
 func promptFailureDiagnostic(request OutcomeReconciliation) string {
 	if request.PromptError != "" {
-		diagnostic := "ACP prompt failed"
+		diagnostic := "Agent prompt failed"
 		switch request.PromptError {
 		case PromptErrorDeadline:
-			diagnostic = "ACP prompt deadline exceeded"
+			diagnostic = "Agent prompt deadline exceeded"
 		case PromptErrorCancellation:
-			diagnostic = "ACP prompt was cancelled"
+			diagnostic = "Agent prompt was cancelled"
 		case PromptErrorInvalidResponse:
-			diagnostic = "ACP prompt returned an invalid stop reason"
+			diagnostic = "Agent prompt returned an invalid outcome"
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
 		}
 		return diagnostic
 	}
-	switch request.PromptResponse.StopReason {
-	case acp.StopReasonEndTurn:
+	if !request.PromptResponse.Admitted {
+		return "Agent prompt admission is unconfirmed"
+	}
+	switch request.PromptResponse.Status {
+	case agent.Completed:
+		if request.PromptResponse.LimitReached {
+			return "Agent prompt reached its runtime limit"
+		}
 		return ""
-	case acp.StopReasonMaxTokens:
-		return "ACP prompt reached its token limit"
-	case acp.StopReasonMaxTurnRequests:
-		return "ACP prompt reached its request limit"
-	case acp.StopReasonRefusal:
-		return "ACP prompt was refused"
-	case acp.StopReasonCancelled:
-		return "ACP prompt was cancelled"
+	case agent.Aborted:
+		return "Agent prompt was cancelled"
+	case agent.Failed, agent.Rejected:
+		return "Agent prompt failed"
+	case agent.Unknown:
+		return "Agent prompt outcome is unknown"
 	default:
-		return "ACP prompt returned an invalid stop reason"
+		return "Agent prompt returned an invalid outcome"
 	}
 }
 
@@ -1022,19 +1067,21 @@ func promptTerminalStatus(request OutcomeReconciliation) store.AgentTurnStatus {
 	if request.PromptError == PromptErrorDeadline {
 		return store.AgentTurnTimedOut
 	}
-	if request.PromptError == PromptErrorCancellation || request.PromptResponse != nil && request.PromptResponse.StopReason == acp.StopReasonCancelled {
+	if request.PromptError == PromptErrorCancellation || request.PromptResponse != nil && request.PromptResponse.Admitted && request.PromptResponse.Status == agent.Aborted {
 		return store.AgentTurnInterrupted
 	}
 	return store.AgentTurnFailed
 }
 
-func encodedPromptOutcome(response *acp.PromptResponse) json.RawMessage {
+func encodedPromptOutcome(response *agent.Outcome) json.RawMessage {
 	if response == nil {
 		return nil
 	}
 	encoded, _ := json.Marshal(struct {
-		StopReason acp.StopReason `json:"stop_reason"`
-	}{response.StopReason})
+		Admitted     bool         `json:"admitted"`
+		Status       agent.Status `json:"status"`
+		LimitReached bool         `json:"limit_reached,omitempty"`
+	}{response.Admitted, response.Status, response.LimitReached})
 	return encoded
 }
 

@@ -252,7 +252,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		&stopReason, &errorClass, &recorded); err != nil {
 		return nil, err
 	}
-	if recorded && (stopReason == "end_turn" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
+	if recorded && (stopReason == "completed" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
 		var participantRole workflow.Role
 		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, job.AgentAssignmentID).Scan(&participantRole); err != nil {
 			return nil, err
@@ -370,7 +370,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 	var continuation string
 	var runtimeOOMKilled bool
 	if err := tx.QueryRow(ctx, `
-SELECT assignment.role, turn.recovery_continuation, turn.runtime_oom_container_id IS NOT NULL
+SELECT assignment.role, turn.recovery_continuation, turn.runtime_oom_resource_ref IS NOT NULL
 FROM agent_assignments AS assignment
 JOIN agent_turns AS turn ON turn.id = $3 AND turn.execution_epoch = $4
 WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID,

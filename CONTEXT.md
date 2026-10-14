@@ -73,11 +73,30 @@ _Avoid_: Agent Run, invocation
 
 **Runtime Profile**:
 An immutable, versioned contract describing how an Agent Session is executed and restored.
+An Agent Participant retains its exact image, guest platform, and resource contract; qualifying copied state under another image does not rebind the Participant.
 _Avoid_: Agent type, container configuration
 
 **Runtime Process**:
 A disposable execution of a Runtime Profile that hosts one or more active Agent Turns without owning the durable Agent Session.
 _Avoid_: Agent, session
+
+**Execution Environment**:
+An isolated set of execution resources hosting a Runtime Process and any repository workloads launched alongside it.
+_Avoid_: Agent Session, workspace
+
+**Execution Backend**:
+The deployment-selected implementation responsible for provisioning, observing, and terminating Execution Environments.
+One installation retains its Backend family, contract version, and storage namespace; selecting another backend requires explicit disposal or a separately implemented migration.
+_Avoid_: Agent runtime, Runtime Profile
+
+**Retained Runtime State**:
+The agent-specific persisted data required to continue or replay an Agent Session after its Runtime Process is gone.
+It excludes disposable credentials and execution snapshots; a complete recovery set also includes the operational ledger and protected Workspace Captures.
+_Avoid_: Workspace, tool cache, running process
+
+**Workspace Capture**:
+An immutable, consistent observation of a prepared workspace associated with one Agent Turn execution epoch and a specific publication or corroboration operation.
+_Avoid_: Live checkout, Agent Session history, Execution Environment snapshot
 
 **Session Continuation**:
 The ability to continue an existing Agent Session with its prior context.

@@ -25,9 +25,9 @@ type WorkerStore interface {
 	AcknowledgeAssignmentCollectionFailure(context.Context, store.JobLease, error, bool, time.Duration) (store.WorkflowActionFailureAcknowledgement, error)
 }
 
-// Cleaner idempotently removes one canonical Assignment runtime-state path.
+// Cleaner collects an authorized Participant's logical retained resources.
 type Cleaner interface {
-	EnsureAbsent(context.Context, string, string) error
+	CollectParticipant(context.Context, string) error
 }
 
 // WorkerConfig controls collection claims, heartbeats, retries, and idle polling.
@@ -127,12 +127,12 @@ func (worker *Worker) collect(ctx context.Context, lease store.JobLease) error {
 	if err != nil {
 		return fmt.Errorf("authorize Assignment collection: %w", err)
 	}
-	paths, err := canonicalCleanupPaths(authorization.Targets)
+	participants, err := cleanupParticipants(authorization.Targets)
 	if err != nil {
 		return err
 	}
-	for _, path := range paths {
-		if err := worker.cleaner.EnsureAbsent(ctx, path.assignmentID, path.runtimeStatePath); err != nil {
+	for _, participant := range participants {
+		if err := worker.cleaner.CollectParticipant(ctx, participant); err != nil {
 			return fmt.Errorf("ensure Assignment runtime state absent: %w", err)
 		}
 	}
@@ -142,31 +142,21 @@ func (worker *Worker) collect(ctx context.Context, lease store.JobLease) error {
 	return nil
 }
 
-type cleanupPath struct {
-	assignmentID     string
-	runtimeStatePath string
-}
-
-func canonicalCleanupPaths(targets []store.AssignmentCleanupTarget) ([]cleanupPath, error) {
+func cleanupParticipants(targets []store.AssignmentCleanupTarget) ([]string, error) {
 	if err := store.ValidateAssignmentCleanupTargets(targets); err != nil {
 		return nil, err
 	}
-	assignments := make(map[string]string)
+	assignments := make(map[string]bool)
 	for _, target := range targets {
-		assignments[target.AssignmentID] = target.RuntimeStatePath
+		assignments[target.AssignmentID] = true
 	}
 
-	paths := make([]cleanupPath, 0, len(assignments))
-	for assignmentID, path := range assignments {
-		paths = append(paths, cleanupPath{assignmentID: assignmentID, runtimeStatePath: path})
+	participants := make([]string, 0, len(assignments))
+	for assignmentID := range assignments {
+		participants = append(participants, assignmentID)
 	}
-	sort.Slice(paths, func(left, right int) bool {
-		if paths[left].runtimeStatePath == paths[right].runtimeStatePath {
-			return paths[left].assignmentID < paths[right].assignmentID
-		}
-		return paths[left].runtimeStatePath < paths[right].runtimeStatePath
-	})
-	return paths, nil
+	sort.Strings(participants)
+	return participants, nil
 }
 
 func (worker *Worker) heartbeat(ctx context.Context, lease store.JobLease) error {

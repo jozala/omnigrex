@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -35,9 +37,41 @@ func TestValidateDeveloperWebhookURL(t *testing.T) {
 	}
 }
 
-func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
-	runtime, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+func TestPiDoctorRegistryAndEffectiveCredentials(t *testing.T) {
+	state := productionState{settings: config.Config{PiRPCV1Image: "registry.example/pi@sha256:" + strings.Repeat("a", 64), PiRPCV1Platform: runtimeprofile.Platform{OS: "linux", Arch: "amd64"}}}
+	if err := state.checkRuntimeProfile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.registry.Resolve("opencode-acp", "v1"); err == nil {
+		t.Fatal("unconfigured runtime was admitted")
+	}
+	p, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\nReview the Change Proposal.\n"), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, auth := range []struct {
+		value string
+		valid bool
+	}{
+		{`{"openai":{"type":"api_key","key":"fixture-only"}}`, true},
+		{`{"other":{"type":"api_key","key":"fixture-only"}}`, false},
+		{`{"openai":{"type":"api","key":"legacy-format"}}`, false},
+		{`{"openai":{"type":"api_key","key":"!executable"}}`, false},
+	} {
+		err := validateEffectiveProfile(state.registry, role.Reviewer, p, agentinstructions.Operator{}, definition, []byte(auth.value))
+		if (err == nil) != auth.valid {
+			t.Fatalf("effective credential validity = %v, want %t", err, auth.valid)
+		}
+	}
+}
+
+func TestEffectivePiProfileAcceptsComposedInstructionsWithinPiBudget(t *testing.T) {
+	runtime, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
@@ -51,11 +85,12 @@ func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: opencode-acp/v1\nmodel: provider/model\nsteps: 1\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
+	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEffectiveProfile(registry, role.Reviewer, profile, agentinstructions.Operator{}, definition); err != nil {
+	credentials := []byte(`{"openai":{"type":"api_key","key":"fixture-only"}}`)
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, agentinstructions.Operator{}, definition, credentials); err != nil {
 		t.Fatalf("Profile fits without operator additions: %v", err)
 	}
 	dir := t.TempDir()
@@ -66,30 +101,8 @@ func TestEffectiveProfileChecksComposedInstructionSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEffectiveProfile(registry, role.Reviewer, profile, operator, definition); err == nil || !strings.Contains(err.Error(), "120 KiB") {
-		t.Fatalf("preflight did not reject oversized composed instructions: %v", err)
-	}
-}
-
-func TestACPContainerContractUsesConfiguredMemoryInSpecAndPolicy(t *testing.T) {
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, memory := range []int64{512 << 20, 1024 << 20} {
-		policy, spec, err := acpContainerContract(profile, profile.Contract().Image, acpProbeOptions{Network: "omnigrex-agent", MemoryBytes: memory})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if policy.MemoryBytes != memory || spec.MemoryBytes != memory || policy.PIDsLimit != 128 || spec.PIDsLimit != 128 {
-			t.Errorf("ACP policy/spec memory = %d/%d, PIDs = %d/%d", policy.MemoryBytes, spec.MemoryBytes, policy.PIDsLimit, spec.PIDsLimit)
-		}
-	}
-	if _, _, err := acpContainerContract(profile, profile.Contract().Image, acpProbeOptions{}); err == nil {
-		t.Error("ACP probe accepted missing memory")
+	if err := validateEffectiveProfile(registry, role.Reviewer, profile, operator, definition, credentials); err != nil {
+		t.Fatalf("valid Pi instructions were rejected by an obsolete environment-string limit: %v", err)
 	}
 }
 

@@ -216,14 +216,11 @@ func TestAgentTurnFenceOperationRejectsStaleAuthorityWithoutCallingOperation(t *
 
 func TestAgentTurnFenceOperationAllowsRunningTurnWhileSessionIsCreating(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
-	fixture := seedAgentSession(t, pool, 11)
+	fixture := seedCreatingAgentSession(t, pool, 11)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
 	job := agentTurnExecutionJob(t, pool, ctx, turn)
@@ -333,7 +330,7 @@ func TestReadToolInvocationIsRecordedUnderTheLiveEpochFence(t *testing.T) {
 	}
 }
 
-func TestAgentSessionPromptFenceValidatesPersistedACPIdentityAndTurnLease(t *testing.T) {
+func TestAgentSessionPromptFenceValidatesPersistedRuntimeIdentityAndTurnLease(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	fixture := seedAgentSession(t, pool, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -347,21 +344,21 @@ func TestAgentSessionPromptFenceValidatesPersistedACPIdentityAndTurnLease(t *tes
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
-	acpSessionID := "session-" + fixture.sessionID
-	if err := databases[0].ValidateAgentSessionPromptFence(ctx, lease, acpSessionID); err != nil {
-		t.Fatalf("ValidateAgentSessionPromptFence() error = %v", err)
+	runtimeSessionID := fixture.sessionID
+	if err := databases[0].ValidateRuntimeSessionPromptFence(ctx, lease, runtimeSessionID); err != nil {
+		t.Fatalf("ValidateRuntimeSessionPromptFence() error = %v", err)
 	}
-	if err := databases[0].ValidateAgentSessionPromptFence(ctx, lease, "stale-acp-session"); !errors.Is(err, store.ErrAgentSessionACPConflict) {
-		t.Errorf("ValidateAgentSessionPromptFence() mismatch error = %v, want ErrAgentSessionACPConflict", err)
+	if err := databases[0].ValidateRuntimeSessionPromptFence(ctx, lease, "stale-runtime-session"); !errors.Is(err, store.ErrAgentSessionRuntimeConflict) {
+		t.Errorf("ValidateRuntimeSessionPromptFence() mismatch error = %v, want ErrAgentSessionRuntimeConflict", err)
 	}
 	stale := lease
 	stale.OwnerToken = "30000000-0000-4000-8000-000000000099"
-	if err := databases[0].ValidateAgentSessionPromptFence(ctx, stale, acpSessionID); !errors.Is(err, store.ErrAgentTurnFenceLost) {
-		t.Errorf("ValidateAgentSessionPromptFence() stale lease error = %v, want ErrAgentTurnFenceLost", err)
+	if err := databases[0].ValidateRuntimeSessionPromptFence(ctx, stale, runtimeSessionID); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Errorf("ValidateRuntimeSessionPromptFence() stale lease error = %v, want ErrAgentTurnFenceLost", err)
 	}
 }
 
-func TestHumanPromptLeaseValidatesControlRevisionOwnerAndExactACPIdentity(t *testing.T) {
+func TestHumanPromptLeaseValidatesControlRevisionOwnerAndExactRuntimeIdentity(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 1)
@@ -372,15 +369,15 @@ func TestHumanPromptLeaseValidatesControlRevisionOwnerAndExactACPIdentity(t *tes
 	if err != nil {
 		t.Fatalf("TransferAgentSessionControl() error = %v", err)
 	}
-	lease, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, time.Second)
+	lease, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, time.Second)
 	if err != nil {
 		t.Fatalf("AcquireHumanPromptLease() error = %v", err)
 	}
-	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision-1, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
+	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision-1, human.RuntimeSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
 		t.Errorf("AcquireHumanPromptLease() stale revision error = %v, want ErrAgentSessionControlFenceLost", err)
 	}
-	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, "stale-acp-session", time.Second); !errors.Is(err, store.ErrAgentSessionACPConflict) {
-		t.Errorf("AcquireHumanPromptLease() stale ACP identity error = %v, want ErrAgentSessionACPConflict", err)
+	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, "stale-runtime-session", time.Second); !errors.Is(err, store.ErrAgentSessionRuntimeConflict) {
+		t.Errorf("AcquireHumanPromptLease() stale runtime identity error = %v, want ErrAgentSessionRuntimeConflict", err)
 	}
 	if err := database.ReleaseHumanPromptLease(ctx, lease); err != nil {
 		t.Fatalf("ReleaseHumanPromptLease() error = %v", err)
@@ -388,22 +385,19 @@ func TestHumanPromptLeaseValidatesControlRevisionOwnerAndExactACPIdentity(t *tes
 	if _, err := database.TransferAgentSessionControl(ctx, human.ID, human.ControlRevision, store.SessionControlAutomation, "orchestrator"); err != nil {
 		t.Fatalf("return control to automation: %v", err)
 	}
-	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
+	if _, err := database.AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
 		t.Errorf("AcquireHumanPromptLease() after transfer error = %v, want ErrAgentSessionControlFenceLost", err)
 	}
 }
 
 func TestAgentTurnFenceAllowsCreatingSessionPreparation(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
-	fixture := seedAgentSession(t, pool, 1)
+	fixture := seedCreatingAgentSession(t, pool, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec())
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
-		t.Fatalf("restore creating Agent Session state: %v", err)
 	}
 	job := agentTurnExecutionJob(t, pool, ctx, turn)
 	lease, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "runtime", time.Second, 1)
@@ -1750,7 +1744,7 @@ func TestSuccessfulSubmitReviewBindsReviewerActorWithCompareOrSet(t *testing.T) 
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.ChangeProposalID = seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, "review-head")
 	turnSpec.ExpectedHeadSHA = "review-head"
-	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
+	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, turnSpec)
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
@@ -1985,7 +1979,7 @@ func (fixture agentFixture) turnSpec() store.AgentTurnSpec {
 		Purpose:         workflow.TurnPurposeInitialDevelopment,
 		ControlRevision: 1, AgentProfileCommitSHA: "0123456789abcdef",
 		AgentProfileContentSHA256: digest[:],
-		AgentProfileConfig:        agentProfileConfig("developer", workflow.RoleDeveloper, "runtime/1", "provider/test", "", 10, "Test instructions.", nil),
+		AgentProfileConfig:        agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "provider/test", "", 0, "Test instructions.", nil),
 	}
 }
 
@@ -2015,22 +2009,32 @@ func seedAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture
 	return seedAgentSessionForRole(t, pool, number, workflow.RoleDeveloper)
 }
 
+func seedCreatingAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture {
+	t.Helper()
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	return seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, number, workflow.RoleDeveloper, binding, binding, store.AgentSessionCreating)
+}
+
 func seedAgentSessionForRole(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role) agentFixture {
-	binding := runtimeprofile.Binding{Name: "runtime", Version: "1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindings(t, pool, number, participantRole, binding, binding)
 }
 
 func seedLegacyAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture {
-	legacy := runtimeprofile.Binding{Name: "runtime", Version: "1", Image: "sha256:test"}
+	legacy := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindings(t, pool, number, workflow.RoleDeveloper, legacy, legacy)
 }
 
 func seedAgentSessionWithRuntimeStatePaths(t *testing.T, pool *pgxpool.Pool, number int, participantPath, sessionPath string) agentFixture {
-	binding := runtimeprofile.Binding{Name: "runtime", Version: "1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindings(t, pool, number, workflow.RoleDeveloper, binding, binding, participantPath, sessionPath)
 }
 
 func seedAgentSessionWithRuntimeBindings(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role, participantBinding, sessionBinding runtimeprofile.Binding, runtimeStatePaths ...string) agentFixture {
+	return seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, number, participantRole, participantBinding, sessionBinding, store.AgentSessionActive, runtimeStatePaths...)
+}
+
+func seedAgentSessionWithRuntimeBindingsAndStatus(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role, participantBinding, sessionBinding runtimeprofile.Binding, status store.AgentSessionStatus, runtimeStatePaths ...string) agentFixture {
 	t.Helper()
 	fixture := agentFixture{
 		workflowID:   fmt.Sprintf("40000000-0000-4000-8000-%012d", number*10+1),
@@ -2072,14 +2076,20 @@ VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, NULLIF($7, ''), $8, $9)`, fixture.assi
 	if err != nil {
 		t.Fatalf("seed agent assignment: %v", err)
 	}
+	var runtimeID *string
+	var capabilities json.RawMessage
+	if status == store.AgentSessionActive {
+		runtimeID = &fixture.sessionID
+		capabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
+	}
 	_, err = pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
+    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, $3, $4, $5, NULLIF($6, ''), $7, $8, 'ACTIVE')`, fixture.sessionID, fixture.assignmentID,
-		"session-"+fixture.sessionID, sessionBinding.Name, sessionBinding.Version, sessionBinding.ContentSHA256,
-		sessionBinding.Image, sessionPath)
+VALUES ($1, $2, 1, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10)`, fixture.sessionID, fixture.assignmentID,
+		runtimeID, sessionBinding.Name, sessionBinding.Version, sessionBinding.ContentSHA256,
+		sessionBinding.Image, sessionPath, status, capabilities)
 	if err != nil {
 		t.Fatalf("seed agent session: %v", err)
 	}

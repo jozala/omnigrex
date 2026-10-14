@@ -17,9 +17,10 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/retention"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -97,11 +98,11 @@ func TestPhaseNineActivePromptLossRetriesSameSessionInFreshRuntimeProcess(t *tes
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "restart-profile", "openai/restart")
 
 	promptStarted := make(chan struct{})
-	firstLauncher := &phaseNineExecutionLauncher{store: database, acpSessionID: "phase-nine-session"}
-	firstPrompter := &phaseNineExecutionPrompter{prompt: func(ctx context.Context) (acp.PromptResponse, error) {
+	firstLauncher := &phaseNineExecutionLauncher{store: database}
+	firstPrompter := &phaseNineExecutionPrompter{prompt: func(ctx context.Context) (agent.Outcome, error) {
 		close(promptStarted)
 		<-ctx.Done()
-		return acp.PromptResponse{}, ctx.Err()
+		return agent.Outcome{}, ctx.Err()
 	}}
 	firstWorker := newPhaseNineExecutionWorker(t, database, firstLauncher, firstPrompter)
 	processCtx, stopProcess := context.WithCancel(ctx)
@@ -128,18 +129,18 @@ func TestPhaseNineActivePromptLossRetriesSameSessionInFreshRuntimeProcess(t *tes
 		t.Fatalf("prepared retry = Session %s, retry of %s; want %s and %s",
 			retry.Session.ID, retry.Turn.RetryOfTurnID, root.Session.ID, root.Turn.ID)
 	}
-	secondLauncher := &phaseNineExecutionLauncher{store: database, acpSessionID: "phase-nine-session"}
+	secondLauncher := &phaseNineExecutionLauncher{store: database}
 	secondWorker := newPhaseNineExecutionWorker(t, database, secondLauncher, &phaseNineExecutionPrompter{
-		prompt: func(context.Context) (acp.PromptResponse, error) {
-			return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+		prompt: func(context.Context) (agent.Outcome, error) {
+			return agent.Outcome{Admitted: true, Status: agent.Completed}, nil
 		},
 	})
 	if processed, err := secondWorker.ProcessNext(ctx); err != nil || !processed {
 		t.Fatalf("fresh ProcessNext() = (%t, %v)", processed, err)
 	}
-	var acpSessionID string
+	var runtimeSessionID string
 	var turns, settlements int
-	if err := pool.QueryRow(ctx, `SELECT acp_session_id FROM agent_sessions WHERE id = $1`, root.Session.ID).Scan(&acpSessionID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT runtime_session_id FROM agent_sessions WHERE id = $1`, root.Session.ID).Scan(&runtimeSessionID); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `
@@ -147,9 +148,9 @@ SELECT (SELECT count(*) FROM agent_turns WHERE workflow_id = $1),
        (SELECT count(*) FROM agent_turn_settlements WHERE workflow_id = $1)`, application.WorkflowID).Scan(&turns, &settlements); err != nil {
 		t.Fatal(err)
 	}
-	if firstLauncher.calls != 1 || secondLauncher.calls != 1 || acpSessionID != "phase-nine-session" || turns != 2 || settlements != 2 {
-		t.Fatalf("restart result = launches %d/%d, ACP %q, Turns %d, settlements %d",
-			firstLauncher.calls, secondLauncher.calls, acpSessionID, turns, settlements)
+	if firstLauncher.calls != 1 || secondLauncher.calls != 1 || runtimeSessionID != root.Session.ID || turns != 2 || settlements != 2 {
+		t.Fatalf("restart result = launches %d/%d, runtime identity %q, Turns %d, settlements %d",
+			firstLauncher.calls, secondLauncher.calls, runtimeSessionID, turns, settlements)
 	}
 }
 
@@ -162,6 +163,9 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 		"7b200000-0000-4000-8000-000000000001", "7b200000-0000-4000-8000-000000000002")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "mutation-profile", "openai/mutation")
 	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "mutation-session")
+	if err := phaseNineMainExecution(ctx, database, rootLease); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +191,7 @@ func TestPhaseNineInFlightMCPMutationRecoversAndReplaysWithoutSecondSideEffect(t
 	stopWorker, err := agentturn.NewStopWorker(database, &phaseNineExactCleaner{}, phaseNineWorkspaceDiscarder{}, agentturn.StopWorkerConfig{
 		ClaimOwner: "phase-nine-stop", LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond,
 		IdlePollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
+		TerminalCaptureRequired: database.AgentTurnTerminalCaptureRequired,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -243,9 +248,9 @@ func TestPhaseNineSettlementCommitResponseLossDoesNotRecoverOrDuplicateSuccessor
 	prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "settlement-profile", "openai/settlement")
 	lossStore := &phaseNineSettlementResponseLossStore{Store: database}
 	worker := newPhaseNineExecutionWorker(t, lossStore,
-		&phaseNineExecutionLauncher{store: database, acpSessionID: "settlement-session"},
-		&phaseNineExecutionPrompter{prompt: func(context.Context) (acp.PromptResponse, error) {
-			return acp.PromptResponse{}, errors.New("runtime transport failed")
+		&phaseNineExecutionLauncher{store: database},
+		&phaseNineExecutionPrompter{prompt: func(context.Context) (agent.Outcome, error) {
+			return agent.Outcome{}, errors.New("runtime transport failed")
 		}})
 	processed, err := worker.ProcessNext(ctx)
 	if !processed || !errors.Is(err, store.ErrAgentTurnFenceLost) {
@@ -253,7 +258,7 @@ func TestPhaseNineSettlementCommitResponseLossDoesNotRecoverOrDuplicateSuccessor
 	}
 
 	replacement := newPhaseNineExecutionWorker(t, database,
-		&phaseNineExecutionLauncher{store: database, acpSessionID: "unused"},
+		&phaseNineExecutionLauncher{store: database},
 		&phaseNineExecutionPrompter{})
 	if processed, err := replacement.ProcessNext(ctx); err != nil || processed {
 		t.Fatalf("replacement ProcessNext() = (%t, %v), want idle", processed, err)
@@ -473,8 +478,8 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("7", 64),
+	profile, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("7", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -605,48 +610,70 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 }
 
 type phaseNineExecutionLauncher struct {
-	store        *store.Store
-	acpSessionID string
-	calls        int
+	store  *store.Store
+	client session.TurnConnection
+	calls  int
 }
 
 func (launcher *phaseNineExecutionLauncher) LaunchExecution(ctx context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
-	if _, err := launcher.store.BindAgentSessionACP(ctx, request.Lease, launcher.acpSessionID, json.RawMessage(`{"resume":true}`)); err != nil {
+	if err := phaseNineMainExecution(ctx, launcher.store, request.Lease); err != nil {
+		return nil, err
+	}
+	reserved, err := launcher.store.ReserveAgentSessionRuntime(ctx, request.Lease)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := launcher.store.BindAgentSessionRuntime(ctx, request.Lease, agent.Ready{RuntimeSessionID: reserved.ID, Capabilities: json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)}); err != nil {
 		return nil, err
 	}
 	launcher.calls++
-	return &phaseNineExecutionRuntime{lease: request.Lease, client: &phaseNinePromptClient{}}, nil
+	return &phaseNineExecutionRuntime{lease: request.Lease, client: launcher.client}, nil
+}
+
+func phaseNineMainExecution(ctx context.Context, database *store.Store, lease store.AgentTurnLease) error {
+	current, err := database.GetAgentTurnExecutionContext(ctx, lease)
+	if err != nil {
+		return err
+	}
+	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
+		RuntimeProfileName: current.Assignment.RuntimeProfileName, RuntimeProfileVersion: current.Assignment.RuntimeProfileVersion}
+	ledger := database.ExecutionLedger(lease)
+	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
+		return err
+	}
+	if err := ledger.BeginExecutionPhase(ctx, key, execution.Main); err != nil {
+		return err
+	}
+	return ledger.BindExecution(ctx, key, "phase-nine-"+lease.ID)
 }
 
 type phaseNineExecutionRuntime struct {
 	lease  store.AgentTurnLease
-	client session.PromptClient
+	client session.TurnConnection
 }
 
 func (runtime *phaseNineExecutionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
 func (*phaseNineExecutionRuntime) ConfirmedOOM() bool                         { return false }
-func (runtime *phaseNineExecutionRuntime) PromptClient() session.PromptClient { return runtime.client }
-func (*phaseNineExecutionRuntime) RenewMCP(time.Time) bool                    { return true }
-func (*phaseNineExecutionRuntime) CloseMCP(context.Context) error             { return nil }
-func (*phaseNineExecutionRuntime) Cleanup(context.Context) error              { return nil }
-
-type phaseNinePromptClient struct{}
-
-func (*phaseNinePromptClient) SetAgentEventContext(agentevent.Context) {}
-func (*phaseNinePromptClient) Prompt(context.Context, string, []acp.ContentBlock) (acp.PromptResponse, error) {
-	return acp.PromptResponse{}, errors.New("prompt must pass through the execution prompter")
+func (runtime *phaseNineExecutionRuntime) AgentConnection() session.TurnConnection {
+	return runtime.client
 }
+func (*phaseNineExecutionRuntime) RenewMCP(time.Time) bool        { return true }
+func (*phaseNineExecutionRuntime) CloseMCP(context.Context) error { return nil }
+func (*phaseNineExecutionRuntime) Cleanup(context.Context) error  { return nil }
 
 type phaseNineExecutionPrompter struct {
-	prompt func(context.Context) (acp.PromptResponse, error)
+	prompt func(context.Context) (agent.Outcome, error)
 }
 
-func (prompter *phaseNineExecutionPrompter) Prompt(ctx context.Context, _ session.PromptRequest) (acp.PromptResponse, error) {
+func (prompter *phaseNineExecutionPrompter) Prompt(ctx context.Context, _ store.AgentTurnLease, _ store.AgentSession, _ string, _ agentevent.Sink) (agent.Outcome, error) {
 	if prompter.prompt == nil {
-		return acp.PromptResponse{}, errors.New("unexpected prompt")
+		return agent.Outcome{}, errors.New("unexpected prompt")
 	}
 	return prompter.prompt(ctx)
 }
+
+func (*phaseNineExecutionPrompter) Close() error { return nil }
 
 type phaseNineDefaultBranch struct{}
 
@@ -654,11 +681,13 @@ func (phaseNineDefaultBranch) ResolveDefaultBranch(context.Context, string, stri
 	return githubapi.DefaultBranch{Name: "main", CommitSHA: strings.Repeat("1", 40)}, nil
 }
 
-type phaseNineWorkspace struct {
-	paths workspace.Paths
-}
+type phaseNineWorkspace struct{}
 
-func (resolver phaseNineWorkspace) Paths(string) (workspace.Paths, error) { return resolver.paths, nil }
+func (phaseNineWorkspace) TerminalCapture(_ context.Context, key execution.Key) (execution.CaptureRef, error) {
+	return execution.CaptureRef{Request: execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture,
+	}, SHA256: strings.Repeat("a", 64)}, nil
+}
 
 type phaseNineOutcomeReconciler struct{}
 
@@ -669,14 +698,15 @@ func (phaseNineOutcomeReconciler) Reconcile(_ context.Context, request agentturn
 	return successfulSettlementObservation(workflow.TurnOutcomeBlocked, nil), nil
 }
 
-func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWorkerStore, launcher agentturn.ExecutionLauncher, prompter agentturn.ExecutionPrompter) *agentturn.ExecutionWorker {
+func newPhaseNineExecutionWorker(t *testing.T, workerStore agentturn.ExecutionWorkerStore, launcher *phaseNineExecutionLauncher, prompter *phaseNineExecutionPrompter) *agentturn.ExecutionWorker {
 	t.Helper()
+	launcher.client = prompter
 	credential := &integrationCredentialProvider{credential: "repository-token"}
 	workflowConfig := builtinStoreConfig(t)
 	worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 		Store: workerStore, DeveloperCredentials: credential, ReviewerCredentials: credential,
-		DefaultBranch: phaseNineDefaultBranch{}, Launcher: launcher, Sessions: prompter,
-		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{paths: workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}},
+		DefaultBranch: phaseNineDefaultBranch{}, Launcher: launcher,
+		Outcomes: phaseNineOutcomeReconciler{}, Workspace: phaseNineWorkspace{},
 		PublicationRecovery: phaseNinePublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
 			return nil
 		}),
@@ -775,20 +805,33 @@ type phaseNineExactCleaner struct {
 	calls int
 }
 
-func (*phaseNineExactCleaner) ObserveExactExit(context.Context, map[string]string) (dockerruntime.ExitObservation, error) {
+func (*phaseNineExactCleaner) EnsureKeyStopped(context.Context, execution.Key) error { return nil }
+
+func (*phaseNineExactCleaner) ObserveKeyExit(context.Context, execution.Key) (dockerruntime.ExitObservation, error) {
 	return dockerruntime.ExitObservation{}, nil
 }
 
-func (cleaner *phaseNineExactCleaner) EnsureAbsent(context.Context, map[string]string) error {
+func (cleaner *phaseNineExactCleaner) EnsureKeyAbsent(context.Context, execution.Key) error {
 	cleaner.calls++
 	return nil
 }
 
-type phaseNineWorkspaceDiscarder struct{}
+type phaseNineWorkspaceDiscarder struct {
+	captureErr error
+	captures   *int
+}
 
-func (phaseNineWorkspaceDiscarder) DiscardWorkspace(string) error { return nil }
+func (workspace phaseNineWorkspaceDiscarder) Capture(_ context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	if workspace.captures != nil {
+		*workspace.captures++
+	}
+	if workspace.captureErr != nil {
+		return execution.CaptureRef{}, workspace.captureErr
+	}
+	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
+}
 
-func (phaseNineWorkspaceDiscarder) DiscardWorkspaceFenced(ctx context.Context, _ string, _ int64, fence workspace.WorkspaceFence) error {
+func (phaseNineWorkspaceDiscarder) Discard(ctx context.Context, _ execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
 	return fence(ctx, func(context.Context) error { return nil })
 }
 
@@ -879,7 +922,7 @@ func newPhaseNineBlockingRetentionCleaner() *phaseNineBlockingRetentionCleaner {
 	return &phaseNineBlockingRetentionCleaner{deleted: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (cleaner *phaseNineBlockingRetentionCleaner) EnsureAbsent(ctx context.Context, _, _ string) error {
+func (cleaner *phaseNineBlockingRetentionCleaner) CollectParticipant(ctx context.Context, _ string) error {
 	cleaner.once.Do(func() { close(cleaner.deleted) })
 	select {
 	case <-cleaner.release:

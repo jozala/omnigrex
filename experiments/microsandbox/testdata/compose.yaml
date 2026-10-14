@@ -1,0 +1,12 @@
+services:
+  web:
+    image: docker.io/library/busybox@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+    command: ["sh", "-ec", "mkdir /www; printf 'sandbox-compose-ok' > /www/index.html; exec httpd -f -p 8080 -h /www"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  client:
+    image: docker.io/library/alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+    command: ["sh", "-ec", "test \"$$(wget -q -O - http://web:8080/)\" = sandbox-compose-ok"]

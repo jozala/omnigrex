@@ -9,6 +9,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/repoenvironment"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
@@ -221,7 +222,7 @@ func (worker *Worker) classify(err error) (bool, time.Duration) {
 }
 
 func isPermanentWorkerError(err error) bool {
-	return errors.Is(err, turnconfig.ErrInvalid) || errors.Is(err, ErrDependencyNil) || errors.Is(err, ErrInvalidRequest) ||
+	return errors.Is(err, repoenvironment.ErrInvalid) || errors.Is(err, turnconfig.ErrInvalid) || errors.Is(err, ErrDependencyNil) || errors.Is(err, ErrInvalidRequest) ||
 		errors.Is(err, ErrInvalidRuntimeProfileReference) || errors.Is(err, ErrRuntimeProfileReferenceMismatch) ||
 		errors.Is(err, ErrChangeProposalVerificationFailed) ||
 		errors.Is(err, agentprofile.ErrInvalidCommitSHA) || errors.Is(err, agentprofile.ErrMissingSource) ||

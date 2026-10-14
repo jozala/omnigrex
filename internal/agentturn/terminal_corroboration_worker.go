@@ -8,11 +8,10 @@ import (
 	"time"
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 type terminalCorroborationStore interface {
@@ -43,23 +42,19 @@ type TerminalCorroborationWorker struct {
 	developer    RepositoryCredentialProvider
 	reviewer     RepositoryCredentialProvider
 	pullRequests ChangeProposalVerifier
-	workspace    interface {
-		Paths(string) (workspace.Paths, error)
-	}
-	config TerminalCorroborationWorkerConfig
+	workspace    ExecutionWorkspace
+	config       TerminalCorroborationWorkerConfig
 }
 
 func NewTerminalCorroborationWorker(database terminalCorroborationStore, outcomes *OutcomeReconciler,
-	developer, reviewer RepositoryCredentialProvider, paths interface {
-		Paths(string) (workspace.Paths, error)
-	},
+	developer, reviewer RepositoryCredentialProvider, captures ExecutionWorkspace,
 	config TerminalCorroborationWorkerConfig) (*TerminalCorroborationWorker, error) {
-	if database == nil || outcomes == nil || developer == nil || reviewer == nil || paths == nil ||
+	if nilDependency(database) || outcomes == nil || nilDependency(developer) || nilDependency(reviewer) || nilDependency(captures) ||
 		config.ClaimOwner == "" || config.Window <= 0 || config.PollInterval <= 0 || config.LeaseDuration < 3*time.Second {
 		return nil, errors.New("invalid terminal corroboration Worker configuration")
 	}
 	return &TerminalCorroborationWorker{store: database, outcomes: outcomes, developer: developer,
-		reviewer: reviewer, workspace: paths, config: config}, nil
+		reviewer: reviewer, workspace: captures, config: config}, nil
 }
 
 // WithChangeProposalVerifier adds authoritative GitHub verification for
@@ -131,6 +126,9 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		telemetry.SetOutcome(ctx, telemetry.Cancelled, "fence_lost")
 		return true, nil // Closure or another fenced transition won.
 	}
+	if errors.Is(err, store.ErrTerminalCorroborationConflict) {
+		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "terminal_evidence_conflict")
+	}
 	if errors.Is(err, store.ErrAgentTurnSettlementRejected) && lease.Kind == store.RevalidateTerminalIntentJobKind {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
@@ -150,6 +148,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	// Changed-head revalidation verification keeps its own current credential;
 	// final outcome observations acquire operation-scoped credentials inside
 	// the reconciler immediately before each GitHub read.
+	var verificationCredential string
 	if lease.Kind == store.RevalidateTerminalIntentJobKind && worker.pullRequests != nil && pending.Execution.ChangeProposal != nil {
 		var credential string
 		switch role {
@@ -179,29 +178,39 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		if redirected {
 			return true, nil
 		}
-	}
-	paths, err := worker.workspace.Paths(pending.Execution.Assignment.ID)
-	if err != nil {
-		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining,
-			TerminalCorroborationFailure{Code: "workspace_observation_unavailable", Retryable: true})
+		verificationCredential = credential
 	}
 	turn := pending.Execution.Turn
 	request := OutcomeReconciliation{
-		Lease:     store.AgentTurnLease{AgentTurn: turn, JobLease: store.JobLease{Job: store.Job{WorkflowID: pending.Checkpoint.WorkflowID}}},
-		Execution: pending.Execution, Paths: paths,
+		Lease:                     store.AgentTurnLease{AgentTurn: turn, JobLease: store.JobLease{Job: store.Job{WorkflowID: pending.Checkpoint.WorkflowID}}},
+		Execution:                 pending.Execution,
 		PriorPublicationMutations: pending.PriorPublicationMutations,
+	}
+	// Retain the verifier token only as diagnostic redaction material, since
+	// reconciliation may rotate it before its own independent observations.
+	if role == workflow.RoleReviewer {
+		request.ReviewerRepositoryCredential = verificationCredential
+	} else {
+		request.RepositoryCredential = verificationCredential
+	}
+	// Resolve the original Turn/epoch's sealed evidence, never a replacement
+	// checkout. Missing evidence is classified only if the outcome needs it.
+	if capture, captureErr := worker.workspace.TerminalCapture(ctx, runtimeKey(pending.Execution)); captureErr == nil {
+		request.Capture = capture
 	}
 	if pending.Checkpoint.PromptError != "" {
 		request.PromptError = PromptErrorClassification(pending.Checkpoint.PromptError)
-		request.PromptDiagnostic = "the ACP response was unavailable before corroboration"
+		request.PromptDiagnostic = "the agent response was unavailable before corroboration"
 	} else {
 		var outcome struct {
-			StopReason acp.StopReason `json:"stop_reason"`
+			Admitted     bool         `json:"admitted"`
+			Status       agent.Status `json:"status"`
+			LimitReached bool         `json:"limit_reached,omitempty"`
 		}
-		if json.Unmarshal(pending.Checkpoint.PromptOutcome, &outcome) != nil || outcome.StopReason != acp.StopReasonEndTurn {
+		if json.Unmarshal(pending.Checkpoint.PromptOutcome, &outcome) != nil || !outcome.Admitted || outcome.Status != agent.Completed || outcome.LimitReached {
 			return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 		}
-		request.PromptResponse = &acp.PromptResponse{StopReason: outcome.StopReason}
+		request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Completed}
 	}
 	var failure *TerminalCorroborationFailure
 	request.OnCorroborationFailure = func(observed TerminalCorroborationFailure) { failure = &observed }

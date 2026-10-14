@@ -161,7 +161,30 @@ func TestPhaseSevenMigrationPreservesRetryLineagesAndScopesCallerKeys(t *testing
 		}
 	}
 
-	fixture := seedAgentSession(t, pool, 35)
+	// This pre-runtime-identity schema needs a historical SQL fixture.
+	fixture := agentFixture{
+		workflowID:   "40000000-0000-4000-8000-000000000351",
+		attemptID:    "40000000-0000-4000-8000-000000000352",
+		assignmentID: "40000000-0000-4000-8000-000000000353",
+		sessionID:    "40000000-0000-4000-8000-000000000354",
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
+VALUES ('40000000-0000-4000-8000-000000000351', 35, 'owner', 'repo', 35, 35, 'ACTIVE');
+INSERT INTO workflow_attempts (id, workflow_id, attempt_number, status)
+VALUES ('40000000-0000-4000-8000-000000000352', '40000000-0000-4000-8000-000000000351', 1, 'ACTIVE');
+INSERT INTO agent_assignments (id, workflow_id, role, status, agent_profile_name,
+    runtime_profile_name, runtime_profile_version, runtime_image_digest, runtime_state_path)
+VALUES ('40000000-0000-4000-8000-000000000353', '40000000-0000-4000-8000-000000000351',
+        'DEVELOPER', 'ACTIVE', 'developer', 'pi-rpc', 'v1', 'sha256:test',
+        'assignment-40000000-0000-4000-8000-000000000353/runtime-state');
+INSERT INTO agent_sessions (id, agent_assignment_id, session_number, acp_session_id,
+    runtime_profile_name, runtime_profile_version, runtime_image_digest, runtime_state_path, status)
+VALUES ('40000000-0000-4000-8000-000000000354', '40000000-0000-4000-8000-000000000353',
+        1, 'historical-session', 'pi-rpc', 'v1', 'sha256:test',
+        'assignment-40000000-0000-4000-8000-000000000353/runtime-state', 'ACTIVE')`); err != nil {
+		t.Fatalf("seed version-6 Session: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
 	INSERT INTO agent_turns (
 	    id, workflow_id, agent_session_id, workflow_attempt_id, turn_number, execution_epoch,
@@ -2222,8 +2245,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 29 {
-		t.Errorf("schema_migrations rows = %d, want 29", count)
+	if count != 36 {
+		t.Errorf("schema_migrations rows = %d, want 36", count)
 	}
 	for version, filename := range map[int]string{
 		1:  "000001_bootstrap.sql",
@@ -2255,6 +2278,10 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		27: "000027_prompt_outcome_checkpoint.sql",
 		28: "000028_proposed_publication_tip.sql",
 		29: "000029_deferred_webhook_retry.sql",
+		30: "000030_execution_reservations.sql",
+		31: "000031_workspace_captures.sql",
+		32: "000032_retained_state_bindings.sql",
+		33: "000033_repository_environment_contracts.sql",
 	} {
 		contents, err := migrations.Files.ReadFile(filename)
 		if err != nil {
@@ -2294,6 +2321,7 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 		"assignment_retention_generations",
 		"assignment_retention_targets",
 		"runtime_profile_compatibility_results",
+		"runtime_profile_contracts",
 	} {
 		var exists bool
 		err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists)
@@ -2335,8 +2363,8 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("query migrations applied by Open(): %v", err)
 	}
-	if migrationCount != 29 {
-		t.Errorf("migrations applied by Open() = %d, want 29", migrationCount)
+	if migrationCount != 36 {
+		t.Errorf("migrations applied by Open() = %d, want 36", migrationCount)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {

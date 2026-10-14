@@ -12,9 +12,28 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0002: Use current-deployment agent instructions](0002-use-current-deployment-agent-instructions.md) | Accepted | 2026-10-04 |
 | [0003: Separate personality from platform and Workflow guidance](0003-separate-personality-from-platform-and-workflow-guidance.md) | Accepted | 2026-10-04 |
 | [0004: Publish handoff summaries before continuing](0004-publish-handoff-summaries-before-continuing.md) | Accepted | 2026-10-04 |
-| [0005: Activate from the current Change Proposal](0005-activate-from-current-change-proposal.md) | Accepted | 2026-10-04 |
-| [0006: Track heads without resuming work](0006-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
-| [0007: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0007-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
+| [0005: Separate execution backends from coordination](0005-separate-execution-backends-from-coordination.md) | Accepted | 2026-10-07 |
+| [0006: Use Pi through an agent-specific adapter](0006-use-pi-through-an-agent-specific-adapter.md) | Accepted | 2026-10-07 |
+| [0007: Supply provider API keys through disposable files](0007-supply-provider-api-keys-through-disposable-files.md) | Accepted | 2026-10-07 |
+| [0008: Keep workspace capture separate from publication policy](0008-keep-workspace-capture-separate-from-publication-policy.md) | Accepted | 2026-10-07 |
+| [0009: Pin Participant images and use working-revision tools](0009-pin-participant-images-and-use-working-revision-tools.md) | Accepted | 2026-10-07 |
+| [0010: Seal portable workspace evidence before publication](0010-seal-portable-workspace-evidence-before-publication.md) | Accepted | 2026-10-08 |
+| [0011: Bind retained state and validate offline Session archives](0011-bind-retained-state-and-validate-offline-session-archives.md) | Accepted | 2026-10-08 |
+| [0012: Qualify repository environments without rebinding Sessions](0012-qualify-repository-environments-without-rebinding-sessions.md) | Accepted | 2026-10-08 |
+| [0013: Use the Microsandbox Go SDK and POSIX-faithful local bindings](0013-use-the-microsandbox-go-sdk-and-posix-bindings.md) | Accepted | 2026-10-09 |
+| [0014: Own Pi resource loading with a pinned runner](0014-own-pi-resource-loading-with-a-pinned-runner.md) | Accepted | 2026-10-09 |
+| [0015: Reserve exact Pi Sessions and replay bounded append-order history](0015-reserve-exact-pi-sessions-and-replay-bounded-history.md) | Accepted | 2026-10-09 |
+| [0016: Qualify Pi Agent Turns with existing settlement policy](0016-qualify-pi-turns-with-existing-settlement-policy.md) | Accepted | 2026-10-10 |
+| [0017: Bind Pi qualification to backend contracts](0017-bind-pi-qualification-to-backend-contracts.md) | Accepted | 2026-10-10 |
+| [0018: Gate Pi publication on both backend deployments](0018-gate-pi-publication-on-both-backend-deployments.md) | Superseded by 0020; publication gates retained | 2026-10-11 |
+| [0019: Separate Pi startup readiness from ordinary RPC deadlines](0019-separate-pi-startup-readiness-from-rpc-deadlines.md) | Proposed | 2026-10-12 |
+| [0020: Finish Pi-only runtime selection and neutral outcome evidence](0020-finish-pi-only-runtime-and-neutral-outcome-evidence.md) | Accepted | 2026-10-13 |
+| [0021: Activate from the current Change Proposal](0021-activate-from-current-change-proposal.md) | Accepted | 2026-10-04 |
+| [0022: Track heads without resuming work](0022-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
+| [0023: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0023-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
+
+Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
+Their original filename links remain available as pointers to the uniquely numbered canonical records.
 
 ## Existing architectural decisions
 
@@ -22,14 +41,14 @@ Existing ADR identifiers and paths remain valid; new decisions use this log.
 Do not copy an existing ADR into a second record.
 
 - [ADR 0001: Separate visible Workflow and execution state](../adr/0001-separate-visible-workflow-and-execution-state.md)
-- [ADR 0002: Use ACP as the agent runtime boundary](../adr/0002-use-acp-as-the-agent-runtime-boundary.md)
+- [ADR 0002: Use ACP as the agent runtime boundary](../adr/0002-use-acp-as-the-agent-runtime-boundary.md) - Superseded by [decision 0006](0006-use-pi-through-an-agent-specific-adapter.md).
 - [ADR 0003: Orchestrator owns session control](../adr/0003-orchestrator-owns-session-control.md)
 - [ADR 0004: Mediate agent capabilities through MCP](../adr/0004-mediate-agent-capabilities-through-mcp.md)
 - [ADR 0005: Use separate Developer and Reviewer GitHub Apps](../adr/0005-use-separate-developer-and-reviewer-github-apps.md)
-- [ADR 0006: Control Docker directly from the orchestrator](../adr/0006-control-docker-directly-from-the-orchestrator.md)
+- [ADR 0006: Control Docker directly from the orchestrator](../adr/0006-control-docker-directly-from-the-orchestrator.md) - Superseded by [decision 0005](0005-separate-execution-backends-from-coordination.md).
 - [ADR 0007: Use code-defined Workflow Definitions and durable Attempt Stages](../adr/0007-use-code-defined-workflow-definitions-and-durable-attempt-stages.md)
 - [ADR 0008: Separate Stage Assignments from Agent Participants](../adr/0008-separate-stage-assignments-from-agent-participants.md)
 - [ADR 0009: Select GitHub App credentials by operation](../adr/0009-select-github-app-credentials-by-operation.md)
-- [ADR 0010: Use one provider credential bundle before proxy mediation](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md)
+- [ADR 0010: Use one provider credential bundle before proxy mediation](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md) - Superseded by [decision 0007](0007-supply-provider-api-keys-through-disposable-files.md).
 - [ADR 0011: Discover repository Agent Profiles and select separately](../adr/0011-discover-repository-agent-profiles-and-select-separately.md)
 - [ADR 0012: Load repository skills from the current checkout](../adr/0012-load-repository-skills-from-the-current-checkout.md)

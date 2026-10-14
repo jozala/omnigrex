@@ -11,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/repoenvironment"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
@@ -158,7 +159,7 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	if !ok {
 		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, agentprofile.ErrUnknownProfile)
 	}
-	preparation, selectedRuntime, err := preparer.prepareRole(profile, snapshot.CommitSHA(), bindings.Participant)
+	preparation, selectedRuntime, err := preparer.prepareRole(profile, snapshot.CommitSHA(), bindings.Participant, snapshot.Environment())
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, err)
 	}
@@ -229,7 +230,7 @@ func (preparer *Preparer) verifyChangeProposal(ctx context.Context, request Requ
 	return head, observed.ID, int64(observed.Number), nil
 }
 
-func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding) (store.RolePreparation, runtimeprofile.Profile, error) {
+func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding, environment *repoenvironment.Definition) (store.RolePreparation, runtimeprofile.Profile, error) {
 	name, version, ok := strings.Cut(profile.Runtime(), "/")
 	if !ok || name == "" || version == "" || strings.Contains(version, "/") {
 		return store.RolePreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
@@ -247,6 +248,20 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 		})
 	} else {
 		resolved, err = preparer.registry.Resolve(name, version)
+		if err == nil {
+			contract := resolved.Contract()
+			image, platform := contract.Image, contract.Platform
+			var requirements []string
+			if environment != nil {
+				image = environment.Image
+				os, arch, _ := strings.Cut(environment.Platform, "/")
+				platform = runtimeprofile.Platform{OS: os, Arch: arch}
+				for _, requirement := range environment.Requirements {
+					requirements = append(requirements, string(requirement))
+				}
+			}
+			resolved, err = resolved.WithEnvironment(image, platform, requirements)
+		}
 	}
 	if err != nil {
 		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
@@ -257,7 +272,8 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 	}
 	hash := profile.ContentSHA256()
 	return store.RolePreparation{
-		ProfilePath: profile.Path(),
+		RuntimeContract: mustEncodeContract(contract),
+		ProfilePath:     profile.Path(),
 		Binding: store.AssignmentRuntimeBinding{
 			AgentProfileName:            string(profile.Name()),
 			RuntimeProfileName:          contract.Name,
@@ -275,6 +291,11 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 			Config:        profile.CanonicalJSON(),
 		},
 	}, resolved, nil
+}
+
+func mustEncodeContract(contract runtimeprofile.Contract) json.RawMessage {
+	content, _ := json.Marshal(contract)
+	return content
 }
 
 type credentialSafeError struct {

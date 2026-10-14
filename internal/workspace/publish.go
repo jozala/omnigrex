@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,7 @@ type Publication struct {
 	Branch            string
 	DefaultBranch     string
 	RecordProposedTip func(context.Context, string) error
+	Capture           execution.CaptureRequest
 }
 
 type PublicationResult struct {
@@ -51,11 +53,41 @@ func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication
 	if err != nil {
 		return PublicationResult{}, err
 	}
+	if err := ensureAssignmentDirectory(lifecycle.publicationRoot, filepath.Dir(paths.Publication)); err != nil {
+		return PublicationResult{}, err
+	}
+	if _, err := inspectOwnedDirectory(paths.Publication); err != nil {
+		return PublicationResult{}, err
+	}
+	if lifecycle.captureSource == nil {
+		return PublicationResult{}, execution.ErrUnsupportedRequirement
+	}
+	if publication.Capture.Workspace.Key.AssignmentID != publication.AssignmentID || publication.Capture.Purpose != execution.PublicationCapture {
+		return PublicationResult{}, ErrInvalidCapture
+	}
+	ref, err := lifecycle.Capture(ctx, publication.Capture)
+	if err != nil {
+		return PublicationResult{}, err
+	}
+	var result PublicationResult
+	err = lifecycle.withCapture(ctx, ref, func(directory string) error {
+		paths.Workspace = directory
+		var err error
+		result, err = lifecycle.publishFromPaths(ctx, publication, paths)
+		return err
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) publishFromPaths(ctx context.Context, publication Publication, paths Paths) (PublicationResult, error) {
 	baseRevision, expectedOldHead, err := validatePublication(publication)
 	if err != nil {
 		return PublicationResult{}, err
 	}
-	release := lifecycle.acquirePublicationLock(publication.AssignmentID)
+	release, err := lifecycle.acquirePublicationLockContext(ctx, publication.AssignmentID)
+	if err != nil {
+		return PublicationResult{}, err
+	}
 	defer release()
 
 	if err := lifecycle.preparePublication(ctx, paths.Publication, publication, baseRevision); err != nil {

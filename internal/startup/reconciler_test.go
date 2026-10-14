@@ -23,8 +23,8 @@ func TestReconcilerRecoversExpiredTurnsBeforeLeavingTheirProcessesForRecoveryWor
 	})
 	runtimes := newFakeRuntimes(
 		[]startup.ManagedRuntimeProcess{
-			{Identity: expiredWithProcess, ContainerID: "expired"},
-			{Identity: live, ContainerID: "live"},
+			{Identity: expiredWithProcess, Resource: "expired"},
+			{Identity: live, Resource: "live"},
 		}, nil, nil,
 	)
 	reconciler := newReconciler(t, turns, runtimes)
@@ -58,12 +58,12 @@ func TestReconcilerRemovesTerminalUnknownActiveDuplicateAndMalformedProcesses(t 
 	})
 	runtimes := newFakeRuntimes(
 		[]startup.ManagedRuntimeProcess{
-			{Identity: terminal, ContainerID: "terminal"},
-			{Identity: active, ContainerID: "active"},
-			{Identity: unknown, ContainerID: "unknown"},
+			{Identity: terminal, Resource: "terminal"},
+			{Identity: active, Resource: "active"},
+			{Identity: unknown, Resource: "unknown"},
 		},
-		[]startup.DuplicateManagedRuntimeProcess{{Identity: duplicate, ContainerIDs: []string{"duplicate-a", "duplicate-b"}}},
-		[]startup.MalformedManagedRuntimeProcess{{ContainerID: "malformed", Reason: "invalid_execution_epoch"}},
+		[]startup.DuplicateManagedRuntimeProcess{{Identity: duplicate, Resources: []string{"duplicate-a", "duplicate-b"}}},
+		[]startup.MalformedManagedRuntimeProcess{{Resource: "malformed", Reason: "invalid_execution_epoch"}},
 	)
 	reconciler := newReconciler(t, turns, runtimes)
 
@@ -87,7 +87,7 @@ func TestReconcilerIdempotentRerunDoesNotAdoptOrCleanRecoveryProcess(t *testing.
 	turns := newFakeTurnStore(map[store.AgentTurnRuntimeIdentity]store.AgentTurnRuntimeDisposition{
 		identity: store.AgentTurnRuntimeRecovery,
 	})
-	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{{Identity: identity, ContainerID: "stale"}}, nil, nil)
+	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{{Identity: identity, Resource: "stale"}}, nil, nil)
 	reconciler := newReconciler(t, turns, runtimes)
 
 	for attempt := range 2 {
@@ -107,7 +107,7 @@ func TestReconcilerFencesLiveDuplicatesBeforeCleanupAndConverges(t *testing.T) {
 		identity: store.AgentTurnRuntimeLive,
 	})
 	runtimes := newFakeRuntimes(nil, []startup.DuplicateManagedRuntimeProcess{{
-		Identity: identity, ContainerIDs: []string{"live-a", "live-b"},
+		Identity: identity, Resources: []string{"live-a", "live-b"},
 	}}, nil)
 	reconciler := newReconciler(t, turns, runtimes)
 
@@ -128,7 +128,7 @@ func TestReconcilerCleansEveryDuplicateUnderExistingRecoveryBarrier(t *testing.T
 		identity: store.AgentTurnRuntimeRecovery,
 	})
 	runtimes := newFakeRuntimes(nil, []startup.DuplicateManagedRuntimeProcess{{
-		Identity: identity, ContainerIDs: []string{"recovery-a", "recovery-b"},
+		Identity: identity, Resources: []string{"recovery-a", "recovery-b"},
 	}}, nil)
 	reconciler := newReconciler(t, turns, runtimes)
 
@@ -148,8 +148,8 @@ func TestReconcilerCleanupKeepsLiveIdentityThatDiffersOnlyByRuntimeProfile(t *te
 		live: store.AgentTurnRuntimeLive,
 	})
 	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{
-		{Identity: live, ContainerID: "live"},
-		{Identity: staleProfile, ContainerID: "stale-profile"},
+		{Identity: live, Resource: "live"},
+		{Identity: staleProfile, Resource: "stale-profile"},
 	}, nil, nil)
 	reconciler := newReconciler(t, turns, runtimes)
 
@@ -169,8 +169,8 @@ func TestConcurrentReconcilersConvergeWithoutCleaningLiveOrRecoveryProcesses(t *
 		live:    store.AgentTurnRuntimeLive,
 	})
 	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{
-		{Identity: expired, ContainerID: "expired"},
-		{Identity: live, ContainerID: "live"},
+		{Identity: expired, Resource: "expired"},
+		{Identity: live, Resource: "live"},
 	}, nil, nil)
 	reconcilers := []*startup.Reconciler{newReconciler(t, turns, runtimes), newReconciler(t, turns, runtimes)}
 	start := make(chan struct{})
@@ -208,8 +208,8 @@ func TestConcurrentReconcilersCleanRecoveryDuplicatesWithoutRemovingValidLivePro
 		duplicate: store.AgentTurnRuntimeRecovery,
 		live:      store.AgentTurnRuntimeLive,
 	})
-	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{{Identity: live, ContainerID: "live"}},
-		[]startup.DuplicateManagedRuntimeProcess{{Identity: duplicate, ContainerIDs: []string{"recovery-a", "recovery-b"}}}, nil)
+	runtimes := newFakeRuntimes([]startup.ManagedRuntimeProcess{{Identity: live, Resource: "live"}},
+		[]startup.DuplicateManagedRuntimeProcess{{Identity: duplicate, Resources: []string{"recovery-a", "recovery-b"}}}, nil)
 	reconcilers := []*startup.Reconciler{newReconciler(t, turns, runtimes), newReconciler(t, turns, runtimes)}
 	start := make(chan struct{})
 	errorsFound := make(chan error, len(reconcilers))
@@ -248,7 +248,7 @@ func TestReconcilerHonorsCancellationAndBoundsPersistentChurn(t *testing.T) {
 		t.Fatalf("Reconcile() canceled error = %v", err)
 	}
 
-	malformed := startup.MalformedManagedRuntimeProcess{ContainerID: "persistent", Reason: "incomplete_identity"}
+	malformed := startup.MalformedManagedRuntimeProcess{Resource: "persistent", Reason: "incomplete_identity"}
 	churning := &persistentMalformedRuntimes{malformed: malformed}
 	bounded, err := startup.NewReconciler(turns, churning, churning, churning, startup.ReconcilerOptions{
 		MaxPasses: 2, MaxRuntimeProcesses: 10, MaxRecoveries: 10,
@@ -379,7 +379,7 @@ func runtimeIdentity(number int) store.AgentTurnRuntimeIdentity {
 		AgentSessionID:        fmt.Sprintf("20000000-0000-4000-8000-%012d", number),
 		AgentTurnID:           fmt.Sprintf("30000000-0000-4000-8000-%012d", number),
 		ExecutionEpoch:        int64(number + 1),
-		RuntimeProfileName:    "opencode-acp",
+		RuntimeProfileName:    "pi-rpc",
 		RuntimeProfileVersion: "v1",
 	}
 }
@@ -498,6 +498,10 @@ func (runtimes *fakeRuntimes) List(context.Context) (startup.RuntimeInventorySna
 	}, nil
 }
 
+func (runtimes *fakeRuntimes) EnsureOrphansAbsent(ctx context.Context, identity store.AgentTurnRuntimeIdentity, _ []string) error {
+	return runtimes.EnsureAbsent(ctx, identity)
+}
+
 func (runtimes *fakeRuntimes) EnsureAbsent(_ context.Context, identity store.AgentTurnRuntimeIdentity) error {
 	runtimes.mu.Lock()
 	defer runtimes.mu.Unlock()
@@ -554,6 +558,9 @@ func (runtimes *persistentMalformedRuntimes) List(context.Context) (startup.Runt
 }
 
 func (*persistentMalformedRuntimes) EnsureAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
+	return nil
+}
+func (*persistentMalformedRuntimes) EnsureOrphansAbsent(context.Context, store.AgentTurnRuntimeIdentity, []string) error {
 	return nil
 }
 

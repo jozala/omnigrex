@@ -10,14 +10,15 @@ import (
 	"time"
 
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	profile, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -34,25 +35,19 @@ func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
 	if target != workspace.TurnPathMount || target == contract.Workspace || strings.HasPrefix(target, contract.Workspace+"/") {
 		t.Fatalf("tool data mount %q must be the Runtime Profile's path outside workspace %q", target, contract.Workspace)
 	}
-	image := environmentOrDefault("OMNIGREX_OPENCODE_IMAGE", "omnigrex/opencode:1.18.29")
+	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
 	volume := fmt.Sprintf("omnigrex-tool-paths-%d", time.Now().UnixNano())
 	dockerCommand(t, "volume", "create", volume)
 	t.Cleanup(func() { dockerCleanup(t, "volume", "rm", "--force", volume) })
-	rendered, err := opencode.Render(opencode.RoleDeveloper, opencode.Profile{
-		Instructions: "Keep tool caches outside the workspace.", Model: "fake/fake-model", Steps: 1,
-		Permissions: opencode.PermissionPolicy{"bash": opencode.PermissionAllow},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, spec, err := opencode.BuildProcess(profile, rendered, opencode.ProviderCredentials{Role: opencode.RoleDeveloper, Content: []byte(`{}`)}, opencode.ProcessOptions{
-		Name: "omnigrex-tool-path-test", Network: "none", AssignmentID: "a", AgentSessionID: "session", AgentTurnID: "turn-a", ExecutionEpoch: 1, MemoryBytes: 512 << 20,
-		VolumeBindings:     map[string]string{"mise": volume, "state": "state-volume", "tool-data": volume, "workspace": "workspace-volume"},
-		AssignmentSubpaths: map[string]string{"mise": "assignment-a/mise", "state": "assignment-a/runtime-state", "tool-data": "assignment-a/tool-data", "workspace": "assignment-a/workspace"},
-		Environment:        map[string]string{"TMPDIR": target + "/turn/turn-a/build"},
-	})
+	request, err := (pi.TurnAdapter{}).BuildProcess(profile,
+		execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}, "", 512<<20,
+		map[string]string{"TMPDIR": target + "/turn/turn-a/build"})
 	if err != nil {
 		t.Fatalf("compile Runtime Process tool-data mount: %v", err)
+	}
+	_, spec, err := (dockerruntime.ExecutionFactory{Network: "none", WorkspaceVolume: "workspace-volume", RuntimeStateVolume: "state-volume", MiseVolume: volume}).Compile(request)
+	if err != nil {
+		t.Fatal(err)
 	}
 	var toolData dockerruntime.VolumeMount
 	for _, mount := range spec.Volumes {
@@ -60,7 +55,7 @@ func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
 			toolData = mount
 		}
 	}
-	if toolData.Name != volume || toolData.Subpath != "assignment-a/tool-data" || toolData.Target != target {
+	if toolData.Name != volume || toolData.Subpath != "assignment-"+request.Key.AssignmentID+"/tool-data" || toolData.Target != target {
 		t.Fatalf("compiled tool-data mount = %#v", toolData)
 	}
 	if !slices.Contains(spec.Environment, "TMPDIR="+target+"/turn/turn-a/build") {
@@ -68,9 +63,9 @@ func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
 	}
 	dockerCommand(t, "run", "--rm", "--user", "0:0", "--network", "none",
 		"--mount", "type=volume,src="+volume+",dst=/data", "--entrypoint", "sh", image,
-		"-ec", "mkdir -p /data/assignment-a/mise /data/assignment-a/tool-data/turn/turn-a/build /data/assignment-b/tool-data && chown -R 10001:10001 /data/assignment-a /data/assignment-b")
+		"-ec", "mkdir -p /data/assignment-"+request.Key.AssignmentID+"/mise /data/assignment-"+request.Key.AssignmentID+"/tool-data/turn/turn-a/build /data/assignment-b/tool-data && chown -R 10001:10001 /data")
 	dockerCommand(t, "run", "--rm", "--user", "10001:10001", "--read-only", "--network", "none",
-		"--cap-drop", "ALL", "--tmpfs", "/tmp/opencode:rw,size=64m,uid=10001,gid=10001",
+		"--cap-drop", "ALL", "--tmpfs", "/tmp:rw,size=64m,uid=10001,gid=10001",
 		"--mount", "type=volume,src="+toolData.Name+",dst="+toolData.Target+",volume-subpath="+toolData.Subpath,
 		"--env", "TMPDIR="+target+"/turn/turn-a/build", "--entrypoint", "sh", image,
 		"-ec", "dd if=/dev/zero of=\"$TMPDIR/work\" bs=1M count=65 2>/dev/null && test -s \"$TMPDIR/work\"")

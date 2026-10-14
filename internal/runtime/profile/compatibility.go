@@ -12,24 +12,29 @@ import (
 )
 
 const (
-	CompatibilityResultsSchemaVersion = "omnigrex.runtime-profile-compatibility-results/v1"
-	CompatibilityQualificationSuite   = "opencode-controlled-state-upgrade"
-	CompatibilityQualificationVersion = "1"
-	StateContractVersion              = "opencode-acp-state/v1"
-	StableWorkspacePath               = "/workspace"
+	CompatibilityResultsSchemaVersion   = PiCompatibilityResultsSchemaVersion
+	PiCompatibilityResultsSchemaVersion = "omnigrex.runtime-profile-compatibility-results/v2"
+	PiCompatibilityQualificationSuite   = "pi-controlled-state-upgrade"
+	PiStateContractVersion              = "pi-session/v3"
+	CompatibilityQualificationSuite     = PiCompatibilityQualificationSuite
+	CompatibilityQualificationVersion   = "1"
+	StateContractVersion                = PiStateContractVersion
+	StableWorkspacePath                 = "/workspace"
 )
 
 // CompatibilityResult is one successful qualification of an exact source-to-target upgrade.
 type CompatibilityResult struct {
-	Source               Binding  `json:"source"`
-	Target               Binding  `json:"target"`
-	Platform             Platform `json:"platform"`
-	StateContractVersion string   `json:"state_contract_version"`
-	WorkspacePath        string   `json:"workspace_path"`
-	QualificationSuite   string   `json:"qualification_suite"`
-	QualificationVersion string   `json:"qualification_version"`
-	QualifiedAt          string   `json:"qualified_at"`
-	Outcome              string   `json:"outcome"`
+	Source                 Binding  `json:"source"`
+	Target                 Binding  `json:"target"`
+	Platform               Platform `json:"platform"`
+	StateContractVersion   string   `json:"state_contract_version"`
+	WorkspacePath          string   `json:"workspace_path"`
+	QualificationSuite     string   `json:"qualification_suite"`
+	QualificationVersion   string   `json:"qualification_version"`
+	QualifiedAt            string   `json:"qualified_at"`
+	Outcome                string   `json:"outcome"`
+	BackendFamily          string   `json:"backend_family,omitempty"`
+	BackendContractVersion int      `json:"backend_contract_version,omitempty"`
 }
 
 // CompatibilityResultsFile is the machine-readable release artifact accepted at startup.
@@ -60,7 +65,7 @@ func DecodeCompatibilityResultsFile(reader io.Reader) (CompatibilityResultsFile,
 
 // Validate rejects results that do not describe the supported exact compatibility contract.
 func (file CompatibilityResultsFile) Validate() error {
-	if file.SchemaVersion != CompatibilityResultsSchemaVersion {
+	if file.SchemaVersion != PiCompatibilityResultsSchemaVersion {
 		return fmt.Errorf("invalid Runtime Profile compatibility results: unsupported schema version %q", file.SchemaVersion)
 	}
 	if len(file.Results) == 0 {
@@ -97,6 +102,29 @@ func (file CompatibilityResultsFile) ValidateTarget(target Profile) error {
 	return nil
 }
 
+// ValidateDeployment checks exact configured targets and the selected backend.
+// Namespace is deliberately excluded: qualification is portable between compatible hosts.
+func (file CompatibilityResultsFile) ValidateDeployment(family string, version int, targets ...Profile) error {
+	if err := file.Validate(); err != nil {
+		return err
+	}
+	for _, result := range file.Results {
+		matched := false
+		for _, target := range targets {
+			if result.Target == target.Binding() && result.Platform == target.Contract().Platform {
+				matched = true
+			}
+		}
+		if !matched {
+			return errors.New("compatibility result does not target a configured exact Runtime Profile")
+		}
+		if result.BackendFamily != family || result.BackendContractVersion != version {
+			return errors.New("compatibility result backend contract mismatch")
+		}
+	}
+	return nil
+}
+
 // Validate checks all immutable qualification axes and permits only successful results.
 func (result CompatibilityResult) Validate() error {
 	if err := result.Source.Validate(); err != nil {
@@ -111,13 +139,19 @@ func (result CompatibilityResult) Validate() error {
 	if result.Platform.OS != "linux" || result.Platform.Arch != "amd64" && result.Platform.Arch != "arm64" {
 		return fmt.Errorf("unsupported platform %q/%q", result.Platform.OS, result.Platform.Arch)
 	}
-	if result.StateContractVersion != StateContractVersion {
+	if result.Source.Name != "pi-rpc" || result.Target.Name != "pi-rpc" || result.Source.Version != "v1" || result.Target.Version != "v1" {
+		return errors.New("Pi qualification requires Pi-to-Pi v1 bindings")
+	}
+	if (result.BackendFamily != "docker" && result.BackendFamily != "microsandbox") || result.BackendContractVersion != 1 {
+		return errors.New("unsupported Pi qualification backend contract")
+	}
+	if result.StateContractVersion != PiStateContractVersion {
 		return fmt.Errorf("unsupported state contract version %q", result.StateContractVersion)
 	}
 	if result.WorkspacePath != StableWorkspacePath {
 		return fmt.Errorf("unsupported workspace path %q", result.WorkspacePath)
 	}
-	if result.QualificationSuite != CompatibilityQualificationSuite || result.QualificationVersion != CompatibilityQualificationVersion {
+	if result.QualificationSuite != PiCompatibilityQualificationSuite || result.QualificationVersion != CompatibilityQualificationVersion {
 		return fmt.Errorf("unsupported qualification suite %q version %q", result.QualificationSuite, result.QualificationVersion)
 	}
 	qualifiedAt, err := time.Parse(time.RFC3339, result.QualifiedAt)
@@ -154,17 +188,20 @@ func (result CompatibilityResult) QualificationKey() (string, error) {
 		return "", err
 	}
 	value := struct {
-		Source               Binding  `json:"source"`
-		Target               Binding  `json:"target"`
-		Platform             Platform `json:"platform"`
-		StateContractVersion string   `json:"state_contract_version"`
-		WorkspacePath        string   `json:"workspace_path"`
-		QualificationSuite   string   `json:"qualification_suite"`
-		QualificationVersion string   `json:"qualification_version"`
+		Source                 Binding  `json:"source"`
+		Target                 Binding  `json:"target"`
+		Platform               Platform `json:"platform"`
+		StateContractVersion   string   `json:"state_contract_version"`
+		WorkspacePath          string   `json:"workspace_path"`
+		QualificationSuite     string   `json:"qualification_suite"`
+		QualificationVersion   string   `json:"qualification_version"`
+		BackendFamily          string   `json:"backend_family,omitempty"`
+		BackendContractVersion int      `json:"backend_contract_version,omitempty"`
 	}{
 		Source: result.Source, Target: result.Target, Platform: result.Platform,
 		StateContractVersion: result.StateContractVersion, WorkspacePath: result.WorkspacePath,
 		QualificationSuite: result.QualificationSuite, QualificationVersion: result.QualificationVersion,
+		BackendFamily: result.BackendFamily, BackendContractVersion: result.BackendContractVersion,
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {

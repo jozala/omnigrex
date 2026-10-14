@@ -1,19 +1,24 @@
 package workspace_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -392,12 +397,17 @@ type gitFixture struct {
 
 func newGitFixture(t *testing.T) gitFixture {
 	t.Helper()
+	return newGitFixtureWithObjectFormat(t, "sha1")
+}
+
+func newGitFixtureWithObjectFormat(t *testing.T, objectFormat string) gitFixture {
+	t.Helper()
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
 	if err := os.Mkdir(source, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	gitRun(t, source, "init", "--initial-branch=main")
+	gitRun(t, source, "init", "--initial-branch=main", "--object-format="+objectFormat)
 	gitRun(t, source, "config", "user.name", "Fixture")
 	gitRun(t, source, "config", "user.email", "fixture@example.test")
 	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("first\n"), 0o644); err != nil {
@@ -422,16 +432,107 @@ func newGitFixture(t *testing.T) gitFixture {
 	return gitFixture{remote: remote, first: first, second: second}
 }
 
-func newLifecycle(t *testing.T) *workspace.Lifecycle {
+func newLifecycle(t *testing.T) *publicationTestLifecycle {
 	t.Helper()
 	root := t.TempDir()
-	lifecycle, err := workspace.New(workspace.Options{
+	return newPublicationTestLifecycle(t, workspace.Options{
 		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "mise"),
 	})
+}
+
+// publicationTestLifecycle snapshots the test checkout before each new operation.
+// The production service receives only the immutable tar through WorkspaceSource.
+// Explicit capture requests preserve sealed retry semantics.
+type publicationTestLifecycle struct {
+	*workspace.Lifecycle
+	source *publicationTestCaptureSource
+	next   atomic.Uint64
+}
+
+func newPublicationTestLifecycle(t *testing.T, options workspace.Options) *publicationTestLifecycle {
+	t.Helper()
+	if err := os.MkdirAll(options.PublicationRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := &publicationTestCaptureSource{archives: make(map[execution.CaptureRequest][]byte)}
+	options.CaptureSource = source
+	lifecycle, err := workspace.New(options)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	return lifecycle
+	return &publicationTestLifecycle{Lifecycle: lifecycle, source: source}
+}
+
+func (fixture *publicationTestLifecycle) Publish(ctx context.Context, publication workspace.Publication) (workspace.PublicationResult, error) {
+	if publication.Capture == (execution.CaptureRequest{}) {
+		publication.Capture = fixture.freshCaptureRequest(publication.AssignmentID, execution.PublicationCapture)
+	}
+	if err := fixture.freezeCapture(publication.Capture); err != nil {
+		return workspace.PublicationResult{}, err
+	}
+	return fixture.Lifecycle.Publish(ctx, publication)
+}
+
+func (fixture *publicationTestLifecycle) CaptureCurrentTreesEqual(ctx context.Context, assignmentID string, observation workspace.PublicationObservation) (bool, error) {
+	request := fixture.freshCaptureRequest(assignmentID, execution.TerminalCapture)
+	if err := fixture.freezeCapture(request); err != nil {
+		return false, err
+	}
+	ref, err := fixture.Lifecycle.Capture(ctx, request)
+	if err != nil {
+		return false, err
+	}
+	return fixture.Lifecycle.CaptureTreesEqual(ctx, ref, observation)
+}
+
+func (fixture *publicationTestLifecycle) freshCaptureRequest(assignmentID string, purpose execution.CapturePurpose) execution.CaptureRequest {
+	return execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: execution.Key{
+			AssignmentID: assignmentID, AgentSessionID: "12345678-1234-4234-8234-123456789abd",
+			AgentTurnID: "12345678-1234-4234-8234-123456789abe", ExecutionEpoch: 1,
+			RuntimeProfileName: "test", RuntimeProfileVersion: "v1",
+		}}, OperationID: fmt.Sprintf("%s-%d", purpose, fixture.next.Add(1)), Purpose: purpose,
+	}
+}
+
+func (fixture *publicationTestLifecycle) freezeCapture(request execution.CaptureRequest) error {
+	paths, err := fixture.Paths(request.Workspace.Key.AssignmentID)
+	if err != nil {
+		return err
+	}
+	fixture.source.mu.Lock()
+	_, frozen := fixture.source.archives[request]
+	fixture.source.mu.Unlock()
+	if !frozen {
+		content, err := freezeCaptureDirectory(paths.Workspace)
+		if err != nil {
+			return err
+		}
+		fixture.source.mu.Lock()
+		if _, exists := fixture.source.archives[request]; !exists {
+			fixture.source.archives[request] = content
+		}
+		fixture.source.mu.Unlock()
+	}
+	return nil
+}
+
+type publicationTestCaptureSource struct {
+	mu       sync.Mutex
+	archives map[execution.CaptureRequest][]byte
+}
+
+func (source *publicationTestCaptureSource) ReadWorkspace(ctx context.Context, request execution.CaptureRequest, consume func(io.Reader) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	content, exists := source.archives[request]
+	if !exists {
+		return execution.ErrConflict
+	}
+	return consume(bytes.NewReader(content))
 }
 
 func gitRun(t *testing.T, directory string, arguments ...string) {

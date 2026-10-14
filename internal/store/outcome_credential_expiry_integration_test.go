@@ -13,8 +13,8 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
-	runtimesession "github.com/jozala/omnigrex/internal/runtime/session"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -105,17 +105,18 @@ func TestStaleSnapshotReconcilesWithCurrentCredentialExactlyOnce(t *testing.T) {
 	}}
 	developer := &integrationCredentialProvider{credential: "installation-token"}
 	reviewer := &integrationCredentialProvider{credential: "installation-token"}
+	workspaces, capture := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), head, "installation-token")
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: github,
+		Store: database, GitHub: github, Workspace: workspaces,
 		DeveloperCredentials: developer, ReviewerCredentials: reviewer,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := agentturn.OutcomeReconciliation{
-		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
 		// The expired Turn-start snapshot must never reach GitHub.
-		RepositoryCredential: "stale-developer-token", Paths: committedPublicationPaths(t),
+		RepositoryCredential: "stale-developer-token", Capture: capture,
 	}
 	var failure *agentturn.TerminalCorroborationFailure
 	request.OnCorroborationFailure = func(observed agentturn.TerminalCorroborationFailure) { failure = &observed }
@@ -322,12 +323,14 @@ func (workerExpiringPublisher) Publish(context.Context, workspace.Publication) (
 }
 
 type expiryWorkerPrompter struct {
-	prompt func(context.Context, runtimesession.PromptRequest) (acp.PromptResponse, error)
+	prompt func(context.Context, store.AgentTurnLease) (agent.Outcome, error)
 }
 
-func (prompter *expiryWorkerPrompter) Prompt(ctx context.Context, request runtimesession.PromptRequest) (acp.PromptResponse, error) {
-	return prompter.prompt(ctx, request)
+func (prompter *expiryWorkerPrompter) Prompt(ctx context.Context, lease store.AgentTurnLease, _ store.AgentSession, _ string, _ agentevent.Sink) (agent.Outcome, error) {
+	return prompter.prompt(ctx, lease)
 }
+
+func (*expiryWorkerPrompter) Close() error { return nil }
 
 // TestExecutionWorkerSettlesReviewerTurnWithRefreshedCredential runs the real
 // execution worker against the real Store while the Turn outlives its
@@ -392,7 +395,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			spec.Purpose = workflow.TurnPurposeReview
 			spec.ChangeProposalID = proposalRowID
 			spec.ExpectedHeadSHA = test.head
-			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "runtime/1", "provider/test", "", 10, "Review test instructions.", nil)
+			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 10, "Review test instructions.", nil)
 			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 			if err != nil {
 				t.Fatalf("PrepareAgentTurn() error = %v", err)
@@ -401,14 +404,6 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			if err := prioritizeFixtureJob(pool, ctx, job.ID, store.AgentTurnQueue, store.RunAgentTurnJobKind); err != nil {
 				t.Fatal(err)
 			}
-			// The seed leaves the session ACTIVE with a seeded ACP binding,
-			// which would conflict with the launcher's bind. Reset it to
-			// unbound CREATING so launch binds exactly once, following the
-			// established phase-nine fixture pattern.
-			if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING', acp_session_id = NULL WHERE id = $1`, fixture.sessionID); err != nil {
-				t.Fatal(err)
-			}
-
 			clock := &integrationExpiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
 			requester := &integrationExpiringRequester{clock: clock, prefix: "reviewer", first: 5 * time.Minute, rest: time.Hour}
 			reviewerCache := githubapi.NewInstallationTokenCache(integrationExpiryJWT{}, requester, clock)
@@ -434,28 +429,32 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			if err != nil {
 				t.Fatal(err)
 			}
+			workspaces, _ := integrationTerminalWorkspace(t, pool, store.AgentTurnLease{
+				ID: turn.ID, AgentSessionID: fixture.sessionID, AgentAssignmentID: fixture.assignmentID,
+				ExecutionEpoch: turn.ExecutionEpoch, JobLease: store.JobLease{WorkflowID: fixture.workflowID},
+			}, committedPublicationPaths(t), test.head, "installation-token")
 			outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-				Store: database, GitHub: github,
+				Store: database, GitHub: github, Workspace: workspaces,
 				DeveloperCredentials: developer, ReviewerCredentials: reviewer,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			operationID := "expiry-submit-1"
-			prompter := &expiryWorkerPrompter{prompt: func(ctx context.Context, request runtimesession.PromptRequest) (acp.PromptResponse, error) {
-				execution, err := database.GetAgentTurnExecutionContext(ctx, request.Lease)
+			prompter := &expiryWorkerPrompter{prompt: func(ctx context.Context, lease store.AgentTurnLease) (agent.Outcome, error) {
+				execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
 				if err != nil {
 					t.Fatalf("prompt execution context = %v", err)
 				}
 				// The prompt outlives the Turn-start token before submitting.
 				clock.Advance(6 * time.Minute)
 				scope := mcp.TokenScope{
-					Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: workflow.RoleReviewer,
+					Lease: lease, WorkflowID: execution.WorkflowID, Role: workflow.RoleReviewer,
 					Repository:  mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 					Issue:       mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number},
 					PullRequest: &mcp.PullRequestScope{ID: proposal.PullRequestID, Number: proposal.PullRequestNumber},
 					Branch:      proposal.HeadRef, DefaultBranch: proposal.BaseRef, HeadSHA: proposal.HeadSHA,
-					ExpiresAt: request.Lease.LeaseExpiresAt.Add(-time.Second),
+					ExpiresAt: lease.LeaseExpiresAt.Add(-time.Second),
 				}
 				gateway, registration := openReplayGateway(t, database, backend, scope)
 				callReplayGatewayTool(t, gateway, registration, mcp.ToolSubmitReview, map[string]any{
@@ -464,14 +463,13 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 				if err := gateway.CloseAndDrain(ctx, registration); err != nil {
 					t.Fatalf("drain MCP authority = %v", err)
 				}
-				return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+				return agent.Outcome{Admitted: true, Status: agent.Completed}, nil
 			}}
 			workflowConfig := builtinStoreConfig(t)
 			worker, err := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
 				Store: database, DeveloperCredentials: developer, ReviewerCredentials: reviewer,
-				DefaultBranch: phaseNineDefaultBranch{}, Launcher: &phaseNineExecutionLauncher{store: database, acpSessionID: "expiry-worker"},
-				Sessions: prompter, Outcomes: outcomes,
-				Workspace: phaseNineWorkspace{paths: committedPublicationPaths(t)},
+				DefaultBranch: phaseNineDefaultBranch{}, Launcher: &phaseNineExecutionLauncher{store: database, client: prompter},
+				Outcomes: outcomes, Workspace: workspaces,
 				PublicationRecovery: phaseNinePublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
 					return nil
 				}),

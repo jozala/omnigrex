@@ -6,18 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 )
 
 const (
 	maximumClosureWorkerDuration = 365 * 24 * time.Hour
-	runtimeProfileLabel          = "io.omnigrex.runtime-profile"
 )
 
 var (
@@ -29,7 +28,7 @@ var (
 
 // ClosureRuntimeCleaner removes every Runtime Process with one complete exact identity.
 type ClosureRuntimeCleaner interface {
-	EnsureAbsent(context.Context, map[string]string) error
+	EnsureKeyAbsent(context.Context, execution.Key) error
 }
 
 // ClosureStopStore is the durable boundary for STOP_AGENT_TURN work.
@@ -148,11 +147,11 @@ func (worker *ClosureStopWorker) stop(ctx context.Context, lease store.JobLease)
 	if err != nil {
 		return fmt.Errorf("read closure Runtime Process identity: %w", err)
 	}
-	labels, err := closureRuntimeLabels(lease, identity)
+	err = validateClosureRuntimeIdentity(lease, identity)
 	if err != nil {
 		return err
 	}
-	if err := worker.cleaner.EnsureAbsent(ctx, labels); err != nil {
+	if err := worker.cleaner.EnsureKeyAbsent(ctx, identity); err != nil {
 		return fmt.Errorf("ensure closure Runtime Process absent: %w", err)
 	}
 	if _, err := worker.store.AcknowledgeClosureTurnStopped(ctx, lease); err != nil {
@@ -254,22 +253,16 @@ func validateClosureReconciliation(result mcp.MutationReconciliationResult) erro
 	return nil
 }
 
-func closureRuntimeLabels(lease store.JobLease, identity store.AgentTurnRuntimeIdentity) (map[string]string, error) {
+func validateClosureRuntimeIdentity(lease store.JobLease, identity store.AgentTurnRuntimeIdentity) error {
 	if lease.Queue != store.WorkflowActionQueue || lease.Kind != store.StopAgentTurnJobKind ||
 		identity.AssignmentID != lease.AgentAssignmentID || identity.AgentSessionID != lease.AgentSessionID ||
 		identity.AgentTurnID != lease.AgentTurnID || identity.ExecutionEpoch != lease.ExecutionEpoch ||
 		!uuidtext.ValidCanonicalNonNil(identity.AssignmentID) || !uuidtext.ValidCanonicalNonNil(identity.AgentSessionID) ||
 		!uuidtext.ValidCanonicalNonNil(identity.AgentTurnID) || identity.ExecutionEpoch <= 0 ||
 		!validRuntimeProfilePart(identity.RuntimeProfileName) || !validRuntimeProfilePart(identity.RuntimeProfileVersion) {
-		return nil, ErrInvalidClosureRuntimeIdentity
+		return ErrInvalidClosureRuntimeIdentity
 	}
-	return map[string]string{
-		store.RuntimeLabelAssignmentID: identity.AssignmentID,
-		store.RuntimeLabelSessionID:    identity.AgentSessionID,
-		store.RuntimeLabelTurnID:       identity.AgentTurnID,
-		store.RuntimeLabelEpoch:        strconv.FormatInt(identity.ExecutionEpoch, 10),
-		runtimeProfileLabel:            identity.RuntimeProfileName + "/" + identity.RuntimeProfileVersion,
-	}, nil
+	return nil
 }
 
 func (worker *ClosureStopWorker) Run(ctx context.Context) error {

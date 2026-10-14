@@ -56,7 +56,7 @@ type AgentTurnSettlementChangeProposal struct {
 	HeadSHA           string `json:"head_sha"`
 }
 
-// AgentTurnSettlementObservation is structured orchestration evidence. ACP response text is not accepted here.
+// AgentTurnSettlementObservation is structured orchestration evidence. Agent response text is not accepted here.
 type AgentTurnSettlementObservation struct {
 	ObservedAt                time.Time                          `json:"observed_at"`
 	Outcome                   workflow.TurnOutcome               `json:"outcome"`
@@ -297,7 +297,7 @@ func settleAgentTurnRecoveryTx(ctx context.Context, tx pgx.Tx, reducer workflow.
 	if err := tx.QueryRow(ctx, `
 SELECT turn.stop_runtime_job_id::text, COALESCE(turn.reconcile_mutations_job_id::text, ''),
        turn.recovery_continuation, turn.recovery_started_at,
-        turn.recovery_settled_at IS NOT NULL, turn.runtime_oom_container_id IS NOT NULL,
+        turn.recovery_settled_at IS NOT NULL, turn.runtime_oom_resource_ref IS NOT NULL,
         COALESCE(turn.recovery_original_owner_id, ''),
        COALESCE(turn.recovery_original_owner_token_sha256, ''::bytea),
        (SELECT status FROM jobs WHERE id = turn.stop_runtime_job_id),
@@ -431,10 +431,18 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	if err != nil {
 		return false, err
 	}
+	var recordedOutcome json.RawMessage
+	var recordedDiagnostic string
+	if err := tx.QueryRow(ctx, `SELECT outcome, COALESCE(last_error, '') FROM agent_turns WHERE id = $1`, turn.ID).Scan(&recordedOutcome, &recordedDiagnostic); err != nil {
+		return false, err
+	}
+	if strings.HasPrefix(recordedDiagnostic, "Agent prompt was cancelled") || strings.HasPrefix(recordedDiagnostic, "Agent prompt returned an invalid outcome") {
+		diagnostic = recordedDiagnostic
+	}
 	observation, observationJSON, observationHash, err := canonicalizeAgentTurnSettlementObservation(AgentTurnSettlementObservation{
 		ObservedAt: recoveryStartedAt, Outcome: workflow.TurnOutcomeInfrastructureFailed,
 		Diagnostic: diagnostic,
-		Completion: AgentTurnCompletion{Status: AgentTurnInterrupted, LastError: diagnostic},
+		Completion: AgentTurnCompletion{Status: AgentTurnInterrupted, Outcome: recordedOutcome, LastError: diagnostic},
 	})
 	if err != nil {
 		return false, err
@@ -473,14 +481,14 @@ INSERT INTO agent_turn_settlements (
     workflow_revision, change_proposal_id
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NULL, $24, $25,
-        $26, $27, $28, $29, $30, $31)`, settlementID, authority.WorkflowID,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+        $27, $28, $29, $30, $31, $32)`, settlementID, authority.WorkflowID,
 		authority.WorkflowAttemptID, authority.AgentAssignmentID, authority.AgentSessionID,
 		turn.ID, turn.ExecutionEpoch, turn.ControlRevision, identity.ExecutionJobID,
 		executionAttempt, executionLeaseOwner, executionLeaseToken, originalOwnerID,
 		originalOwnerHash, authority.ID, authority.Kind, authority.AttemptCount,
 		authority.LeaseOwner, authority.LeaseToken, observationJSON, observationHash[:],
-		workflow.TurnOutcomeInfrastructureFailed, AgentTurnInterrupted,
+		workflow.TurnOutcomeInfrastructureFailed, AgentTurnInterrupted, nullableJSON(observation.TerminalOutcome),
 		diagnostic, int64(pending.Count), nullableString(pending.LatestObservedHeadSHA),
 		decision.Disposition, decision.Reason, decision.Snapshot.State,
 		int64(decision.Snapshot.Revision), nullableString(turn.ChangeProposalID))
@@ -512,7 +520,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 	}
 	turnResult, err := tx.Exec(ctx, `
 UPDATE agent_turns AS turn
-SET status = 'INTERRUPTED', outcome = NULL, last_error = $3,
+SET status = 'INTERRUPTED', last_error = $3,
     completed_at = COALESCE(completed_at, $4), recovery_settled_at = $4,
     recovery_continuation = 'INFRASTRUCTURE_FAILURE_APPLIED', recovery_settlement_id = $5
 WHERE turn.id = $1 AND turn.execution_epoch = $2

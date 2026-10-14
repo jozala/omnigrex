@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -25,14 +26,18 @@ type exactLabelCleanupAPI interface {
 
 // ExactLabelCleanerOptions controls graceful Runtime Process termination.
 type ExactLabelCleanerOptions struct {
-	StopTimeout time.Duration
+	StopTimeout         time.Duration
+	Ledger              execution.Ledger
+	DiagnosticNamespace string
 }
 
 // ExactLabelCleaner removes containers carrying one complete, exact Runtime Process identity.
 type ExactLabelCleaner struct {
-	api                exactLabelCleanupAPI
-	stopTimeoutSeconds int
-	close              func() error
+	api                 exactLabelCleanupAPI
+	stopTimeoutSeconds  int
+	close               func() error
+	ledger              execution.Ledger
+	diagnosticNamespace string
 }
 
 // NewExactLabelCleaner creates a cleanup client from the Docker environment.
@@ -49,7 +54,7 @@ func NewExactLabelCleaner(options ExactLabelCleanerOptions) (*ExactLabelCleaner,
 
 func newExactLabelCleaner(api exactLabelCleanupAPI, close func() error, options ExactLabelCleanerOptions) *ExactLabelCleaner {
 	seconds := int((options.StopTimeout + time.Second - 1) / time.Second)
-	return &ExactLabelCleaner{api: api, stopTimeoutSeconds: seconds, close: close}
+	return &ExactLabelCleaner{api: api, stopTimeoutSeconds: seconds, close: close, ledger: options.Ledger, diagnosticNamespace: options.DiagnosticNamespace}
 }
 
 func validateExactLabelCleanerOptions(options ExactLabelCleanerOptions) error {
@@ -86,6 +91,9 @@ func (cleaner *ExactLabelCleaner) ObserveExactExit(ctx context.Context, labels m
 		return ExitObservation{}, errors.New("Docker returned a container outside the exact Runtime Process identity")
 	}
 	if !runtimeProcessCandidateLabels(candidate.Labels) {
+		return ExitObservation{}, nil
+	}
+	if candidate.Labels["io.omnigrex.assignment-subpath-initializer"] == "true" {
 		return ExitObservation{}, nil
 	}
 	return observeExit(ctx, cleaner.api, candidate.ID, labels)
@@ -141,6 +149,45 @@ func (cleaner *ExactLabelCleaner) EnsureAbsent(ctx context.Context, labels map[s
 	}
 }
 
+// EnsureOrphansAbsent uses only immutable IDs observed by inventory. Unlike
+// EnsureKeyAbsent it has no authority to change the execution ledger, even when
+// an orphan shares a Turn/epoch with an authorized execution.
+func (cleaner *ExactLabelCleaner) EnsureOrphansAbsent(ctx context.Context, key execution.Key, resources []execution.Ref) error {
+	labels := keyLabels(key)
+	if key.RuntimeProfileName == "" || key.RuntimeProfileVersion == "" || len(resources) == 0 {
+		return ErrInvalidExactLabelCleanup
+	}
+	if err := validateExactRuntimeLabels(labels); err != nil {
+		return err
+	}
+	for _, resource := range resources {
+		if resource == "" || strings.TrimSpace(resource) != resource {
+			return ErrInvalidExactLabelCleanup
+		}
+		for {
+			inspected, err := cleaner.api.ContainerInspect(ctx, resource, mobyclient.ContainerInspectOptions{})
+			if errdefs.IsNotFound(err) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("inspect orphan Runtime Process: %w", err)
+			}
+			actual := inspected.Container
+			if actual.ID != resource || actual.Config == nil || !runtimeProcessCandidateLabels(actual.Config.Labels) || !hasExactRuntimeLabels(actual.Config.Labels, labels) {
+				return fmt.Errorf("%w: orphan ownership or full identity changed", ErrInvalidExactLabelCleanup)
+			}
+			timeout := cleaner.stopTimeoutSeconds
+			if _, err := cleaner.api.ContainerStop(ctx, resource, mobyclient.ContainerStopOptions{Timeout: &timeout}); err != nil && !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
+				return fmt.Errorf("stop orphan Runtime Process: %w", err)
+			}
+			if _, err := cleaner.api.ContainerRemove(ctx, resource, mobyclient.ContainerRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+				return fmt.Errorf("remove orphan Runtime Process: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 // EnsureManagedContainerAbsent removes one malformed marked container only after revalidating its exact Docker ID.
 func (cleaner *ExactLabelCleaner) EnsureManagedContainerAbsent(ctx context.Context, containerID string) error {
 	if strings.TrimSpace(containerID) == "" || strings.TrimSpace(containerID) != containerID {
@@ -157,10 +204,14 @@ func (cleaner *ExactLabelCleaner) EnsureManagedContainerAbsent(ctx context.Conte
 		if inspected.Container.ID != containerID {
 			return fmt.Errorf("%w: inspected container ID does not match", ErrInvalidExactLabelCleanup)
 		}
-		if inspected.Container.Config == nil || inspected.Container.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue {
+		if inspected.Container.Config != nil && inspected.Container.Config.Labels[diagnosticMarkerLabel] == "true" && !diagnosticOwned(inspected.Container.Config.Labels, cleaner.diagnosticNamespace) {
+			return fmt.Errorf("%w: diagnostic belongs to another installation", ErrInvalidExactLabelCleanup)
+		}
+		if inspected.Container.Config == nil || inspected.Container.Config.Labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue &&
+			!diagnosticCleanupEligible(inspected.Container.Config.Labels, time.Now()) {
 			return fmt.Errorf("%w: container does not have the managed Runtime Process marker", ErrInvalidExactLabelCleanup)
 		}
-		if _, reason := parseRuntimeProcessIdentity(containerID, inspected.Container.Config.Labels); reason == "" {
+		if _, reason := parseRuntimeProcessIdentity(containerID, inspected.Container.Config.Labels); reason == "" && !diagnosticCleanupEligible(inspected.Container.Config.Labels, time.Now()) {
 			return fmt.Errorf("%w: container is no longer malformed", ErrInvalidExactLabelCleanup)
 		}
 

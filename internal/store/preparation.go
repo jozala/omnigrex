@@ -33,13 +33,11 @@ var (
 	ErrAgentParticipantNotFound = errors.New("agent participant not found")
 	// ErrAgentAssignmentNotFound is retained for non-store callers using the former name.
 	ErrAgentAssignmentNotFound = ErrAgentParticipantNotFound
-	// ErrAgentSessionACPConflict means an ACP identifier or capability binding disagrees with durable state.
-	ErrAgentSessionACPConflict = errors.New("agent session ACP binding conflict")
 	// ErrAgentSessionControlFenceLost means a control transfer used a stale revision or identity.
 	ErrAgentSessionControlFenceLost = errors.New("agent session control fence lost")
 	// ErrHumanPromptLeaseActive means a durable human prompt token already owns Session admission.
 	ErrHumanPromptLeaseActive = errors.New("human prompt lease already active")
-	// ErrHumanPromptAdmissionUncertain means an expired durable token may still represent running ACP work.
+	// ErrHumanPromptAdmissionUncertain means an expired durable token may still represent running agent work.
 	ErrHumanPromptAdmissionUncertain = errors.New("human prompt admission outcome is uncertain")
 	// ErrHumanPromptLeaseLost means a human prompt operation no longer owns its durable fence.
 	ErrHumanPromptLeaseLost = errors.New("human prompt lease lost")
@@ -107,6 +105,7 @@ type AgentProfileSnapshot struct {
 type ParticipantPreparation struct {
 	Binding              ParticipantRuntimeBinding
 	RuntimeCompatibility RuntimeCompatibilityRequirement
+	RuntimeContract      json.RawMessage
 	Profile              AgentProfileSnapshot
 	ProfilePath          string
 	TurnConfiguration    json.RawMessage
@@ -185,13 +184,13 @@ type AgentSession struct {
 	AgentParticipantID          string
 	AgentAssignmentID           string
 	SessionNumber               int
-	ACPSessionID                string
+	RuntimeSessionID            string
+	RuntimeCapabilities         json.RawMessage
 	RuntimeProfileName          string
 	RuntimeProfileVersion       string
 	RuntimeProfileContentSHA256 string
 	RuntimeImageDigest          string
 	RuntimeStatePath            string
-	Capabilities                json.RawMessage
 	Status                      AgentSessionStatus
 	ControlOwner                SessionControlOwner
 	ControlRevision             int64
@@ -210,14 +209,14 @@ type AgentSession struct {
 	StateDeletedAt              *time.Time
 }
 
-// HumanPromptLease is the durable fence authorizing one human ACP prompt lifecycle.
+// HumanPromptLease is the durable fence authorizing one human prompt lifecycle.
 type HumanPromptLease struct {
-	AgentSessionID  string
-	ControlRevision int64
-	ACPSessionID    string
-	Token           string
-	LeasedAt        time.Time
-	LeaseExpiresAt  time.Time
+	AgentSessionID   string
+	ControlRevision  int64
+	RuntimeSessionID string
+	Token            string
+	LeasedAt         time.Time
+	LeaseExpiresAt   time.Time
 }
 
 // AgentTurnPreparation is the fenced identity returned while a preparation job is live.
@@ -307,6 +306,15 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if err := validateParticipantPreparation(payload.Role, participantPreparation); err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
+	if len(participantPreparation.RuntimeContract) != 0 {
+		binding := runtimeBinding(participantPreparation.Binding)
+		if _, err := runtimeprofile.DecodeContract(participantPreparation.RuntimeContract, binding); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO runtime_profile_contracts (content_sha256, contract) VALUES ($1, $2) ON CONFLICT (content_sha256) DO NOTHING`, binding.ContentSHA256, participantPreparation.RuntimeContract); err != nil {
+			return AgentTurnPreparationCommit{}, fmt.Errorf("persist Runtime Profile contract: %w", err)
+		}
+	}
 	profile := participantPreparation.Profile
 	changeProposalID, verifiedHead, err := store.lockPreparationWorkflowVerified(ctx, tx, job, payload, spec)
 	if err != nil {
@@ -326,13 +334,13 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if session.Status == AgentSessionRetained {
 		if _, err := tx.Exec(ctx, `
 UPDATE agent_sessions
-SET status = CASE WHEN acp_session_id IS NULL THEN 'CREATING' ELSE 'ACTIVE' END,
+SET status = CASE WHEN runtime_capabilities IS NULL THEN 'CREATING' ELSE 'ACTIVE' END,
     retained_at = NULL, updated_at = clock_timestamp()
 WHERE id = $1 AND status = 'RETAINED'`, session.ID); err != nil {
 			return AgentTurnPreparationCommit{}, fmt.Errorf("reactivate retained agent session: %w", err)
 		}
 		session.Status = AgentSessionCreating
-		if session.ACPSessionID != "" {
+		if len(session.RuntimeCapabilities) != 0 {
 			session.Status = AgentSessionActive
 		}
 		session.RetainedAt = nil
@@ -693,45 +701,6 @@ SELECT EXISTS (
 	return acknowledgement, nil
 }
 
-// BindAgentSessionACP persists the opaque ACP identity under a live Agent Turn lease.
-func (store *Store) BindAgentSessionACP(ctx context.Context, lease AgentTurnLease, acpSessionID string, capabilities json.RawMessage) (AgentSession, error) {
-	if strings.TrimSpace(acpSessionID) == "" {
-		return AgentSession{}, errors.New("bind Agent Session ACP: session ID is empty")
-	}
-	canonicalCapabilities, err := canonicalJSON(capabilities)
-	if err != nil {
-		return AgentSession{}, fmt.Errorf("bind Agent Session ACP: capabilities: %w", err)
-	}
-	var bound AgentSession
-	err = store.withLockedAgentTurnLeaseStatus(ctx, lease, "bind Agent Session ACP", true, func(tx pgx.Tx, turn lockedTurn) error {
-		if turn.Status != AgentTurnRunning {
-			return ErrAgentTurnFenceLost
-		}
-		session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1 FOR UPDATE`, lease.AgentSessionID))
-		if err != nil {
-			return err
-		}
-		if session.Status == AgentSessionCreating && session.ACPSessionID == "" {
-			result, err := tx.Exec(ctx, `
-UPDATE agent_sessions
-SET acp_session_id = $2, capabilities = $3, status = 'ACTIVE',
-    activated_at = COALESCE(activated_at, clock_timestamp()), updated_at = clock_timestamp()
-WHERE id = $1 AND status = 'CREATING' AND acp_session_id IS NULL`, session.ID, acpSessionID, canonicalCapabilities)
-			if err != nil {
-				return fmt.Errorf("bind Agent Session ACP: %w", err)
-			}
-			if result.RowsAffected() != 1 {
-				return ErrAgentSessionACPConflict
-			}
-		} else if session.Status != AgentSessionActive || session.ACPSessionID != acpSessionID || !bytes.Equal(session.Capabilities, canonicalCapabilities) {
-			return ErrAgentSessionACPConflict
-		}
-		bound, err = scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1`, session.ID))
-		return err
-	})
-	return bound, err
-}
-
 // GetActiveChangeProposal returns the durable current Change Proposal for
 // authoritative GitHub verification, or nil when the Workflow has no Change
 // Proposal yet (initial development). It performs no locking; the caller must
@@ -976,8 +945,8 @@ WHERE id = $1 AND control_revision = $2`, sessionID, expectedRevision, owner, co
 }
 
 // AcquireHumanPromptLease atomically admits one human prompt under the exact durable Session fence.
-func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID string, expectedRevision int64, acpSessionID string, duration time.Duration) (HumanPromptLease, error) {
-	if !validUUID(sessionID) || expectedRevision <= 0 || strings.TrimSpace(acpSessionID) == "" {
+func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID string, expectedRevision int64, runtimeSessionID string, duration time.Duration) (HumanPromptLease, error) {
+	if !validUUID(sessionID) || expectedRevision <= 0 || strings.TrimSpace(runtimeSessionID) == "" {
 		return HumanPromptLease{}, ErrAgentSessionControlFenceLost
 	}
 	if err := validatePositiveDuration("human prompt lease", duration); err != nil {
@@ -997,8 +966,8 @@ func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID strin
 		session.Status != AgentSessionActive && session.Status != AgentSessionRetained {
 		return HumanPromptLease{}, ErrAgentSessionControlFenceLost
 	}
-	if session.ACPSessionID != acpSessionID {
-		return HumanPromptLease{}, ErrAgentSessionACPConflict
+	if session.RuntimeSessionID == "" || session.RuntimeSessionID != runtimeSessionID {
+		return HumanPromptLease{}, ErrAgentSessionRuntimeConflict
 	}
 	var active bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_turns WHERE workflow_id = $1 AND active)`, workflowID).Scan(&active); err != nil {
@@ -1010,7 +979,7 @@ func (store *Store) AcquireHumanPromptLease(ctx context.Context, sessionID strin
 	if session.HumanPromptToken != "" {
 		return HumanPromptLease{}, existingHumanPromptAdmissionError(ctx, tx, sessionID)
 	}
-	lease := HumanPromptLease{AgentSessionID: sessionID, ControlRevision: expectedRevision, ACPSessionID: acpSessionID, Token: token}
+	lease := HumanPromptLease{AgentSessionID: sessionID, ControlRevision: expectedRevision, RuntimeSessionID: runtimeSessionID, Token: token}
 	err = tx.QueryRow(ctx, `
 WITH lease_time AS (SELECT clock_timestamp() AS now)
 UPDATE agent_sessions AS session
@@ -1032,7 +1001,7 @@ RETURNING session.human_prompt_leased_at, session.human_prompt_lease_expires_at`
 
 // HeartbeatHumanPromptLease extends a live lease while revalidating its complete durable fence.
 func (store *Store) HeartbeatHumanPromptLease(ctx context.Context, lease HumanPromptLease, extension time.Duration) error {
-	if !validUUID(lease.AgentSessionID) || !validUUID(lease.Token) || lease.ControlRevision <= 0 || strings.TrimSpace(lease.ACPSessionID) == "" {
+	if !validUUID(lease.AgentSessionID) || !validUUID(lease.Token) || lease.ControlRevision <= 0 || strings.TrimSpace(lease.RuntimeSessionID) == "" {
 		return ErrHumanPromptLeaseLost
 	}
 	if err := validatePositiveDuration("human prompt lease heartbeat", extension); err != nil {
@@ -1045,7 +1014,7 @@ func (store *Store) HeartbeatHumanPromptLease(ctx context.Context, lease HumanPr
 	defer func() { _ = tx.Rollback(ctx) }()
 	workflowID, _, session, err := lockHumanPromptSession(ctx, tx, lease.AgentSessionID)
 	if err != nil || session.ControlOwner != SessionControlHuman || session.ControlRevision != lease.ControlRevision ||
-		session.ACPSessionID != lease.ACPSessionID || session.HumanPromptToken != lease.Token ||
+		session.RuntimeSessionID != lease.RuntimeSessionID || session.HumanPromptToken != lease.Token ||
 		session.Status != AgentSessionActive && session.Status != AgentSessionRetained {
 		return ErrHumanPromptLeaseLost
 	}
@@ -1436,8 +1405,7 @@ type agentProfileConfig struct {
 	Role         workflow.Role                            `json:"role"`
 	Runtime      string                                   `json:"runtime"`
 	Model        string                                   `json:"model"`
-	Variant      json.RawMessage                          `json:"variant,omitempty"`
-	Steps        int                                      `json:"steps"`
+	Thinking     string                                   `json:"thinking,omitempty"`
 	Permissions  map[string]agentprofile.PermissionAction `json:"permissions"`
 	Instructions string                                   `json:"instructions"`
 }
@@ -1473,24 +1441,21 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 		return nil, errors.New("prepare Agent Turn: Agent Profile Role does not match preparation")
 	}
 	runtimeParts := strings.Split(snapshot.Runtime, "/")
-	if len(runtimeParts) != 2 || runtimeParts[0] == "" || runtimeParts[1] == "" || containsWhitespaceOrControl(snapshot.Runtime) ||
+	if snapshot.Runtime != "pi-rpc/v1" || len(runtimeParts) != 2 ||
 		runtimeParts[0] != preparation.Assignment.RuntimeProfileName || runtimeParts[1] != preparation.Assignment.RuntimeProfileVersion {
 		return nil, errors.New("prepare Agent Turn: Agent Profile runtime does not match Assignment")
 	}
 	if !validProfileReference(snapshot.Model) {
 		return nil, errors.New("prepare Agent Turn: Agent Profile model must use provider/model syntax")
 	}
-	if err := agentprofile.ValidateRolePolicy(policy, snapshot.Steps, snapshot.Permissions); err != nil {
+	if snapshot.Thinking != "" && !agentprofile.ValidThinking(snapshot.Thinking) {
+		return nil, fmt.Errorf("%w: prepare Agent Turn: unsupported Pi Profile configuration", agentprofile.ErrInvalidProfile)
+	}
+	if err := agentprofile.ValidatePiPermissions(policy, snapshot.Permissions); err != nil {
 		return nil, fmt.Errorf("prepare Agent Turn: Agent Profile policy: %w", err)
 	}
 	if strings.TrimSpace(snapshot.Instructions) == "" {
 		return nil, errors.New("prepare Agent Turn: Agent Profile instructions are blank")
-	}
-	if snapshot.Variant != nil {
-		var variant string
-		if err := json.Unmarshal(snapshot.Variant, &variant); err != nil || strings.TrimSpace(variant) == "" || containsWhitespaceOrControl(variant) {
-			return nil, errors.New("prepare Agent Turn: Agent Profile variant is invalid")
-		}
 	}
 	var decoded any
 	if err := json.Unmarshal(config, &decoded); err != nil {
@@ -1583,14 +1548,6 @@ LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload
  WHERE workflow_id = $1 AND generation = $2 AND agent_profile_name = $3 FOR UPDATE`,
 		workflowID, generation, preparation.Binding.AgentProfileName))
 	if errors.Is(err, pgx.ErrNoRows) {
-		target := runtimeBinding(preparation.Binding)
-		missing, compatibilityErr := runtimeProfileCompatibilityMissingForParticipant(ctx, tx, payload.Role, target, preparation.RuntimeCompatibility)
-		if compatibilityErr != nil {
-			return AgentParticipant{}, StageAssignment{}, compatibilityErr
-		}
-		if missing {
-			return AgentParticipant{}, StageAssignment{}, errors.Join(ErrAssignmentConfigurationConflict, ErrRuntimeProfileCompatibilityQualificationMissing)
-		}
 		participant, err = insertAgentParticipant(ctx, tx, preparationJobID, workflowID, generation, payload.Role, preparation.Binding)
 	}
 	if err != nil {
@@ -1809,7 +1766,7 @@ LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
-	return runtimeProfileCompatibilityMissingForParticipant(ctx, tx, payload.Role, runtimeBinding(preparation.Binding), preparation.RuntimeCompatibility)
+	return false, nil
 }
 
 func participantSessionBindingConflict(ctx context.Context, tx pgx.Tx, participant AgentParticipant) (bool, error) {
@@ -1886,34 +1843,36 @@ func scanAgentAssignment(row rowScanner) (AgentAssignment, error) {
 }
 
 const agentSessionSelect = `
-SELECT id::text, agent_assignment_id::text, session_number, COALESCE(acp_session_id, ''),
+SELECT id::text, agent_assignment_id::text, session_number,
        runtime_profile_name, runtime_profile_version, COALESCE(runtime_profile_content_sha256, ''),
        runtime_image_digest, runtime_state_path,
-	       capabilities, status, control_owner, control_revision, COALESCE(controller_id, ''),
+	       status, control_owner, control_revision, COALESCE(controller_id, ''),
 	       control_acquired_at, COALESCE(human_prompt_token::text, ''), human_prompt_leased_at,
 	       human_prompt_lease_expires_at, human_prompt_heartbeat_at,
 	       next_turn_number, next_execution_epoch, created_at, updated_at,
-       activated_at, retained_at, state_deleted_at
+        activated_at, retained_at, state_deleted_at, COALESCE(runtime_session_id, ''), runtime_capabilities
 FROM agent_sessions`
 
 func scanAgentSession(row rowScanner) (AgentSession, error) {
 	var session AgentSession
-	var capabilities []byte
+	var runtimeCapabilities []byte
 	err := row.Scan(&session.ID, &session.AgentAssignmentID, &session.SessionNumber,
-		&session.ACPSessionID, &session.RuntimeProfileName, &session.RuntimeProfileVersion,
+		&session.RuntimeProfileName, &session.RuntimeProfileVersion,
 		&session.RuntimeProfileContentSHA256, &session.RuntimeImageDigest,
-		&session.RuntimeStatePath, &capabilities, &session.Status,
+		&session.RuntimeStatePath, &session.Status,
 		&session.ControlOwner, &session.ControlRevision, &session.ControllerID,
 		&session.ControlAcquiredAt, &session.HumanPromptToken, &session.HumanPromptLeasedAt,
 		&session.HumanPromptLeaseExpiresAt, &session.HumanPromptHeartbeatAt,
 		&session.NextTurnNumber, &session.NextExecutionEpoch,
 		&session.CreatedAt, &session.UpdatedAt, &session.ActivatedAt, &session.RetainedAt,
-		&session.StateDeletedAt)
+		&session.StateDeletedAt, &session.RuntimeSessionID, &runtimeCapabilities)
 	if err != nil {
 		return AgentSession{}, err
 	}
 	session.AgentParticipantID = session.AgentAssignmentID
-	session.Capabilities, err = canonicalJSON(capabilities)
+	if runtimeCapabilities != nil {
+		session.RuntimeCapabilities, err = canonicalJSON(runtimeCapabilities)
+	}
 	return session, err
 }
 

@@ -1,35 +1,28 @@
 package agentturn
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentinstructions"
-	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
-	"github.com/jozala/omnigrex/internal/runtime/agentevent"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
-
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 )
 
 var (
@@ -39,28 +32,31 @@ var (
 )
 
 const (
-	runtimeMisePath       = "/home/opencode/.local/share/mise"
 	defaultCleanupTimeout = 10 * time.Second
 	defaultStopTimeout    = 10 * time.Second
 )
 
 // LauncherStore supplies launch context only under an already-acquired Agent Turn fence.
 type LauncherStore interface {
+	AgentTurnState(context.Context, store.AgentTurnLease) (execution.StateRef, error)
+	MarkAgentTurnStateInitialized(context.Context, store.AgentTurnLease, execution.StateRef) error
+	ExecutionLedger(store.AgentTurnLease) execution.Ledger
 	ValidateTurnFence(context.Context, store.AgentTurnLease) error
 	RefreshAgentTurnLease(context.Context, store.AgentTurnLease, time.Duration) (store.AgentTurnLease, error)
 	GetAgentTurnExecutionContext(context.Context, store.AgentTurnLease) (store.AgentTurnExecutionContext, error)
 	WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 	WithAgentTurnCleanupFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
 	RecordAgentTurnRuntimeOOM(context.Context, store.AgentTurnLease, string, int) error
+	RecordAgentTurnUnpromptedCleanup(context.Context, store.AgentTurnLease) error
 }
 
 // RuntimeWorkspace prepares assignment-isolated checkout and trusted tool state.
 type RuntimeWorkspace interface {
-	PrepareWorkspace(context.Context, workspace.Checkout) (workspace.Paths, error)
-	ProvisionMise(context.Context, workspace.MiseProvision) (workspace.MiseActivation, error)
+	Prepare(context.Context, workspace.Preparation) (execution.WorkspaceRef, error)
+	Capture(context.Context, execution.CaptureRequest) (execution.CaptureRef, error)
 	PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error)
 	CleanupTurnPaths(context.Context, string, string, workspace.WorkspaceFence) error
-	DiscardWorkspaceFenced(context.Context, string, int64, workspace.WorkspaceFence) error
+	Discard(context.Context, execution.WorkspaceRef, workspace.WorkspaceFence) error
 }
 
 // MCPRegistrar issues, drains, and revokes exact per-turn MCP authority.
@@ -72,77 +68,42 @@ type MCPRegistrar interface {
 }
 
 // RuntimeProcess is the restricted process resource owned by a launch.
-type RuntimeProcess interface {
-	Start(context.Context) error
-	Transport() io.ReadWriteCloser
-	ObserveExit(context.Context) (dockerruntime.ExitObservation, error)
-	Stop(context.Context, time.Duration) error
-	Remove(context.Context) error
-}
+type RuntimeProcess = execution.Process
 
 // RuntimeEngine creates one stopped process under a compiled Runtime Policy.
-type RuntimeEngine interface {
-	Create(context.Context, dockerruntime.Spec, io.Writer) (RuntimeProcess, error)
-	Close() error
-}
+type RuntimeEngine = execution.Engine
 
 // RuntimeEngineFactory binds an engine to the exact policy compiled for a launch.
-type RuntimeEngineFactory interface {
-	New(dockerruntime.EngineOptions) (RuntimeEngine, error)
-}
+type RuntimeEngineFactory = execution.Factory
 
 // RuntimeBindingResolver resolves the complete immutable binding persisted for a generation.
 type RuntimeBindingResolver interface {
 	ResolveBinding(runtimeprofile.Binding) (runtimeprofile.Profile, error)
 }
 
-// RuntimeACPClient is the ACP capability retained for Phase 8 after launch preparation.
-type RuntimeACPClient interface {
-	session.AgentClient
-	session.PromptClient
-	Close() error
-}
-
-// RuntimeACPFactory attaches ACP to a Runtime Process transport.
-type RuntimeACPFactory interface {
-	New(io.ReadWriteCloser, acp.ClientOptions) RuntimeACPClient
-}
-
-// RuntimeSessionPreparer creates or continues and configures a Session without prompting it.
-type RuntimeSessionPreparer interface {
-	Prepare(context.Context, session.PrepareRequest) (session.Result, error)
-}
-
 var (
-	_ LauncherStore          = (*store.Store)(nil)
-	_ RuntimeWorkspace       = (*workspace.Lifecycle)(nil)
-	_ MCPRegistrar           = (*mcp.Gateway)(nil)
-	_ RuntimeACPClient       = (*acp.Client)(nil)
-	_ RuntimeSessionPreparer = (*session.Coordinator)(nil)
+	_ LauncherStore    = (*store.Store)(nil)
+	_ RuntimeWorkspace = (*workspace.Lifecycle)(nil)
+	_ MCPRegistrar     = (*mcp.Gateway)(nil)
 )
 
-// LauncherConfig supplies stable deployment dependencies and named Docker resources.
+// LauncherConfig supplies stable deployment dependencies.
 type LauncherConfig struct {
 	Store                    LauncherStore
 	Registry                 RuntimeBindingResolver
 	Workspace                RuntimeWorkspace
 	Gateway                  MCPRegistrar
-	Docker                   RuntimeEngineFactory
-	ACP                      RuntimeACPFactory
-	Sessions                 RuntimeSessionPreparer
+	Execution                RuntimeEngineFactory
+	States                   execution.RetainedState
 	DeveloperCredentials     RepositoryCredentialProvider
 	ReviewerCredentials      RepositoryCredentialProvider
-	Network                  string
-	WorkspaceVolume          string
-	RuntimeStateVolume       string
-	MiseVolume               string
 	MemoryBytes              int64
-	ACPOptions               acp.ClientOptions
 	StopTimeout              time.Duration
 	Policies                 role.PolicyCatalog
 	PathEnvironmentAllowlist []string
 	Definition               workflow.Definition
 	OperatorInstructions     agentinstructions.Operator
+	AgentAdapters            map[string]session.TurnAdapter
 }
 
 // MCPRenewal can only extend the authority of the registration captured by its launcher.
@@ -171,75 +132,69 @@ type Launcher struct {
 	registry                 RuntimeBindingResolver
 	workspace                RuntimeWorkspace
 	gateway                  MCPRegistrar
-	docker                   RuntimeEngineFactory
-	acp                      RuntimeACPFactory
-	sessions                 RuntimeSessionPreparer
+	execution                RuntimeEngineFactory
+	states                   execution.RetainedState
 	developerCredentials     RepositoryCredentialProvider
 	reviewerCredentials      RepositoryCredentialProvider
-	network                  string
-	workspaceVolume          string
-	runtimeStateVolume       string
-	miseVolume               string
 	memoryBytes              int64
-	acpOptions               acp.ClientOptions
 	stopTimeout              time.Duration
 	policies                 role.PolicyCatalog
 	pathEnvironmentAllowlist []string
 	definition               workflow.Definition
 	operatorInstructions     agentinstructions.Operator
+	agentAdapters            map[string]session.TurnAdapter
 }
 
-// RuntimeHandle retains the attached ACP client and owns deterministic launch cleanup.
+// RuntimeHandle retains the attached agent connection and owns deterministic launch cleanup.
 type RuntimeHandle struct {
-	Client  RuntimeACPClient
-	Session session.Result
-	lease   store.AgentTurnLease
+	agent session.TurnConnection
+	lease store.AgentTurnLease
 
-	gateway            MCPRegistrar
-	registration       mcp.Registration
-	registered         bool
-	workspace          RuntimeWorkspace
-	store              LauncherStore
-	assignmentID       string
-	engine             RuntimeEngine
-	process            RuntimeProcess
-	exitObservation    *dockerruntime.ExitObservation
-	oomRecorded        bool
-	observeExit        bool
-	stopTimeout        time.Duration
-	secrets            []string
-	mcpMutex           sync.Mutex
-	mcpClosed          bool
-	mcpDrained         bool
-	cleanupMutex       sync.Mutex
-	acpClosed          bool
-	processStopped     bool
-	processRemoved     bool
-	workspaceDiscarded bool
-	scratchCleaned     bool
-	scratchPrepared    bool
-	discardWorkspace   bool
-	engineClosed       bool
+	gateway                     MCPRegistrar
+	registration                mcp.Registration
+	registered                  bool
+	workspace                   RuntimeWorkspace
+	workspaceRef                execution.WorkspaceRef
+	sessionPrepared             bool
+	sessionPreparationAttempted bool
+	creationAttempted           bool
+	terminalCapture             *execution.CaptureRef
+	store                       LauncherStore
+	assignmentID                string
+	engine                      RuntimeEngine
+	process                     RuntimeProcess
+	exitObservation             *execution.ExitObservation
+	oomRecorded                 bool
+	observeExit                 bool
+	stopTimeout                 time.Duration
+	secrets                     []string
+	mcpMutex                    sync.Mutex
+	mcpClosed                   bool
+	mcpDrained                  bool
+	cleanupMutex                sync.Mutex
+	processStopped              bool
+	processRemoved              bool
+	workspaceDiscarded          bool
+	scratchCleaned              bool
+	scratchPrepared             bool
+	discardWorkspace            bool
+	engineClosed                bool
 }
 
 // NewLauncher validates deployment dependencies before any turn is launched.
 func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	if nilInterface(config.Store) || nilInterface(config.Registry) || nilInterface(config.Workspace) ||
-		nilInterface(config.Gateway) || nilInterface(config.Docker) || nilInterface(config.ACP) || nilInterface(config.Sessions) {
+		nilInterface(config.Gateway) || nilInterface(config.Execution) || nilInterface(config.States) ||
+		nilInterface(config.DeveloperCredentials) || nilInterface(config.ReviewerCredentials) || len(config.AgentAdapters) == 0 {
 		return nil, fmt.Errorf("%w: dependency is nil", ErrInvalidLauncher)
-	}
-	for _, field := range []struct{ name, value string }{
-		{name: "network", value: config.Network},
-		{name: "workspace volume", value: config.WorkspaceVolume},
-		{name: "runtime state volume", value: config.RuntimeStateVolume},
-		{name: "mise volume", value: config.MiseVolume},
-	} {
-		if strings.TrimSpace(field.value) == "" || strings.TrimSpace(field.value) != field.value {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidLauncher, field.name)
-		}
 	}
 	if config.MemoryBytes <= 0 {
 		return nil, fmt.Errorf("%w: Agent Turn memory must be positive", ErrInvalidLauncher)
+	}
+	for reference, adapter := range config.AgentAdapters {
+		if strings.TrimSpace(reference) == "" || nilInterface(adapter) {
+			return nil, fmt.Errorf("%w: invalid agent adapter", ErrInvalidLauncher)
+		}
 	}
 	if config.StopTimeout < 0 {
 		return nil, fmt.Errorf("%w: stop timeout", ErrInvalidLauncher)
@@ -259,33 +214,30 @@ func NewLauncher(config LauncherConfig) (*Launcher, error) {
 	}
 	return &Launcher{
 		store: config.Store, registry: config.Registry, workspace: config.Workspace,
-		gateway: config.Gateway, docker: config.Docker, acp: config.ACP, sessions: config.Sessions,
+		gateway: config.Gateway, execution: config.Execution,
+		states:               config.States,
 		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
-		network: config.Network, workspaceVolume: config.WorkspaceVolume,
-		runtimeStateVolume: config.RuntimeStateVolume, miseVolume: config.MiseVolume,
 		memoryBytes: config.MemoryBytes,
-		acpOptions:  config.ACPOptions, stopTimeout: config.StopTimeout, policies: config.Policies,
+		stopTimeout: config.StopTimeout, policies: config.Policies,
 		pathEnvironmentAllowlist: append([]string(nil), config.PathEnvironmentAllowlist...),
 		definition:               config.Definition, operatorInstructions: config.OperatorInstructions,
+		agentAdapters: cloneAdapters(config.AgentAdapters),
 	}, nil
 }
 
-// provisionCredential selects the launch credential authority for trusted-tool
-// provisioning, mirroring execution-time authority selection. It reports false
-// when no provider is configured, preserving the legacy request-credential
-// path for callers without providers.
-func (launcher *Launcher) provisionCredential(policy role.Policy) (RepositoryCredentialProvider, bool) {
+// launchCredentialProvider selects the authority for trusted repository preparation.
+func (launcher *Launcher) launchCredentialProvider(policy role.Policy) (RepositoryCredentialProvider, error) {
 	switch policy.RepositoryCredentialAuthority {
 	case role.OrchestratorAuthority:
-		return launcher.developerCredentials, !nilInterface(launcher.developerCredentials)
+		return launcher.developerCredentials, nil
 	case role.ReviewerAuthority:
-		return launcher.reviewerCredentials, !nilInterface(launcher.reviewerCredentials)
+		return launcher.reviewerCredentials, nil
 	default:
-		return nil, false
+		return nil, fmt.Errorf("%w: repository credential authority", ErrRuntimeBinding)
 	}
 }
 
-// Launch starts and attaches one Runtime Process without submitting an ACP prompt.
+// Launch starts and attaches one Runtime Process without submitting a prompt.
 // ValidateTurnFence is always its first dependency action.
 func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (handle *RuntimeHandle, err error) {
 	secrets := launchSecrets(request)
@@ -303,6 +255,8 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := launcher.store.ValidateTurnFence(ctx, request.Lease); err != nil {
 		return nil, fmt.Errorf("validate Agent Turn fence before launch: %w", err)
 	}
+	var stateRef execution.StateRef
+	var spec execution.Request
 	execution, err := launcher.store.GetAgentTurnExecutionContext(ctx, request.Lease)
 	if err != nil {
 		return nil, fmt.Errorf("get fenced Agent Turn execution context: %w", err)
@@ -326,22 +280,26 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := validateRuntimeProfileBinding(runtimeProfile, execution); err != nil {
 		return nil, err
 	}
-	rendered, roleID, err := launcher.renderTurnProfile(execution, rolePolicy)
-	if err != nil {
-		return nil, err
+	if err := launcher.execution.CheckRequirements(runtimeRequirements(runtimeProfile)); err != nil {
+		return nil, fmt.Errorf("validate repository environment capabilities: %w", err)
+	}
+	adapter := launcher.agentAdapters[runtimeProfile.Contract().Name+"/"+runtimeProfile.Contract().Version]
+	if adapter == nil {
+		return nil, fmt.Errorf("%w: agent adapter is unavailable", ErrRuntimeBinding)
 	}
 	revision, branch, headSHA, pullRequest, err := checkoutSelection(execution, request, rolePolicy)
 	if err != nil {
 		return nil, err
 	}
 
-	paths, err := launcher.workspace.PrepareWorkspace(ctx, workspace.Checkout{
+	key := runtimeKey(execution)
+	workspaceRef, err := launcher.workspace.Prepare(ctx, workspace.Preparation{Key: key, Checkout: workspace.Checkout{
 		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
 		Credential: request.RepositoryCredential, Revision: revision, ExecutionEpoch: request.Lease.ExecutionEpoch,
 		Fence: func(ctx context.Context, operation func(context.Context) error) error {
 			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
 		},
-	})
+	}})
 	if err != nil {
 		return nil, fmt.Errorf("prepare isolated Agent workspace: %w", err)
 	}
@@ -351,15 +309,31 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		secrets: append([]string(nil), secrets...),
 	}
 	resources.workspace = launcher.workspace
+	resources.workspaceRef = workspaceRef
+	resources.workspaceRef.Key = key
 	resources.store = launcher.store
 	resources.assignmentID = execution.Assignment.ID
 	resources.discardWorkspace = rolePolicy.DiscardWorkspace
+	// A failed or ambiguously acknowledged create/start may still have dispatched
+	// the main environment for an existing Session. Establish its capture need
+	// before either operation can fail, not only after Start acknowledges success.
+	resources.sessionPrepared = execution.Session.Status != store.AgentSessionCreating || len(execution.Session.RuntimeCapabilities) != 0
 	defer func() {
 		if err == nil {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCleanupTimeout)
 		defer cancel()
+		if resources.process != nil && resources.sessionPreparationAttempted && !resources.sessionPrepared {
+			// Session binding may have committed before continuation/configuration
+			// failed. Match recovery's durable requirement before removing its
+			// only source of terminal evidence; an unreadable binding is unknown.
+			current, bindingErr := launcher.store.GetAgentTurnExecutionContext(cleanupCtx, resources.lease)
+			resources.sessionPrepared = bindingErr != nil || current.Session.Status != store.AgentSessionCreating || len(current.Session.RuntimeCapabilities) != 0
+			if bindingErr != nil {
+				err = errors.Join(err, fmt.Errorf("inspect failed Agent Session preparation: %w", bindingErr))
+			}
+		}
 		if resources.process != nil {
 			_, observeErr := resources.ObserveOOM(cleanupCtx)
 			if observeErr != nil {
@@ -379,43 +353,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 			handle = nil
 		}
 	}()
-	miseRevision := revision
-	if rolePolicy.TrustedToolsRevision == role.DefaultBranchTrustedTools {
-		miseRevision = request.DefaultBranchSHA
+	if workspaceRef.Key != key || workspaceRef.Seed != strings.ToLower(revision) {
+		return nil, fmt.Errorf("%w: prepared workspace identity", ErrRuntimeBinding)
 	}
-	// The checkout above performs unbounded Git I/O; re-acquire a current
-	// credential for provisioning instead of reusing a token that may have
-	// expired during preparation. Callers without configured providers keep
-	// the legacy request credential.
-	miseCredential := request.RepositoryCredential
-	if provider, ok := launcher.provisionCredential(rolePolicy); ok {
-		fresh, err := provider.RepositoryCredential(ctx, execution.Repository.Owner, execution.Repository.Name)
-		if err != nil {
-			return nil, fmt.Errorf("provision trusted repository tools: %w", err)
-		}
-		if strings.TrimSpace(fresh) == "" {
-			return nil, fmt.Errorf("provision trusted repository tools: %w", errors.New("repository credential is empty"))
-		}
-		miseCredential = fresh
-		secrets = append(secrets, fresh)
-	}
-	activation, err := launcher.workspace.ProvisionMise(ctx, workspace.MiseProvision{
-		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
-		Credential: miseCredential, Revision: miseRevision, ExecutionEpoch: request.Lease.ExecutionEpoch,
-		Fence: func(ctx context.Context, operation func(context.Context) error) error {
-			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("provision trusted repository tools: %w", err)
-	}
-	if paths.Workspace == "" || paths.Mise == "" || activation.DataDir != paths.Mise || activation.SourceRevision != miseRevision {
-		return nil, fmt.Errorf("%w: trusted mise source", ErrRuntimeBinding)
-	}
-	environment, err := runtimeMiseEnvironment(activation)
-	if err != nil {
-		return nil, err
-	}
+	toolEnvironment := make(map[string]string)
 	var turnConfiguration turnconfig.Configuration
 	if len(execution.Turn.TurnConfiguration) > 0 {
 		if err := json.Unmarshal(execution.Turn.TurnConfiguration, &turnConfiguration); err != nil {
@@ -434,7 +375,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("prepare Agent Turn paths: %w", err)
 	}
 	for name, value := range pathEnvironment {
-		environment[name] = value
+		toolEnvironment[name] = value
 	}
 	refreshedLease, err := launcher.store.RefreshAgentTurnLease(ctx, request.Lease, request.LeaseDuration)
 	if err != nil {
@@ -444,6 +385,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	resources.lease = refreshedLease
 
 	registration, err := launcher.gateway.Register(mcp.TokenScope{
+		RuntimeProfileName: execution.Assignment.RuntimeProfileName, RuntimeProfileVersion: execution.Assignment.RuntimeProfileVersion,
 		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number}, PullRequest: pullRequest,
@@ -463,49 +405,75 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		request.PublishMCPRenewal(resources.renewMCP)
 	}
 
-	assignmentRoot := "assignment-" + execution.Assignment.ID
-	statePath := assignmentRoot + "/runtime-state"
-	if execution.Assignment.RuntimeStatePath != statePath || execution.Session.RuntimeStatePath != statePath {
-		return nil, fmt.Errorf("%w: runtime state path", ErrRuntimeBinding)
+	stateRef, err = launcher.store.AgentTurnState(ctx, request.Lease)
+	if err != nil {
+		return nil, err
 	}
-	policy, spec, err := opencode.BuildProcess(runtimeProfile, rendered, opencode.ProviderCredentials{
-		Role: roleID, Content: append([]byte(nil), request.ProviderCredentialJSON...),
-	}, opencode.ProcessOptions{
-		Name:        "omnigrex-turn-" + execution.Turn.ID + "-epoch-" + strconv.FormatInt(execution.Turn.ExecutionEpoch, 10),
-		MemoryBytes: launcher.memoryBytes,
-		Network:     launcher.network, AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
-		AgentTurnID: execution.Turn.ID, ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch),
-		VolumeBindings:     map[string]string{"workspace": launcher.workspaceVolume, "state": launcher.runtimeStateVolume, "mise": launcher.miseVolume, "tool-data": launcher.miseVolume},
-		AssignmentSubpaths: map[string]string{"workspace": assignmentRoot + "/workspace", "state": statePath, "mise": assignmentRoot + "/mise", "tool-data": assignmentRoot + "/tool-data"},
-		Environment:        environment, Labels: map[string]string{"io.omnigrex.workflow": execution.WorkflowID},
-	})
+	if stateRef.ParticipantID != key.AssignmentID || stateRef.SessionID != key.AgentSessionID {
+		return nil, ErrRuntimeBinding
+	}
+	if err := launcher.states.Ensure(ctx, stateRef); err != nil {
+		return nil, err
+	}
+	if err := launcher.store.MarkAgentTurnStateInitialized(ctx, request.Lease, stateRef); err != nil {
+		return nil, err
+	}
+	spec, err = adapter.BuildProcess(runtimeProfile, runtimeKey(execution), execution.WorkflowID, launcher.memoryBytes, toolEnvironment)
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
-	engine, err := launcher.docker.New(dockerruntime.EngineOptions{AgentNetwork: launcher.network, RuntimePolicy: policy})
+	spec.Workspace = resources.workspaceRef
+	spec.State = stateRef
+	spec.Command = append([]string{environment.Executable, "run"}, runtimeProfile.Contract().Command...)
+	spec.GoldenResources = true
+	spec.Environment = environment.BindEnvironment(spec.Environment)
+	spec.Requirements = runtimeRequirements(runtimeProfile)
+	// Workspace preparation performs unbounded trusted Git I/O. Reacquire
+	// current repository authority immediately before dispatch, rather than
+	// accepting a token that expired during checkout. Pi installs tools from
+	// the working checkout in the Execution Environment; this prerequisite
+	// token remains control-plane-only and never enters the adapter or spec.
+	provider, err := launcher.launchCredentialProvider(rolePolicy)
+	if err != nil {
+		return nil, err
+	}
+	fresh, credentialErr := provider.RepositoryCredential(ctx, execution.Repository.Owner, execution.Repository.Name)
+	if fresh != "" {
+		secrets = append(secrets, fresh)
+		resources.secrets = append(resources.secrets, fresh)
+	}
+	if credentialErr != nil {
+		return nil, fmt.Errorf("refresh repository credential before Runtime Process launch: %w", credentialErr)
+	}
+	if strings.TrimSpace(fresh) == "" {
+		return nil, errors.New("refresh repository credential before Runtime Process launch: repository credential is empty")
+	}
+	engine, err := launcher.execution.New(spec, launcher.store.ExecutionLedger(request.Lease))
 	if !nilInterface(engine) {
 		resources.engine = engine
 	}
 	if err != nil {
-		return nil, fmt.Errorf("create restricted Docker Engine: %w", err)
+		return nil, fmt.Errorf("create restricted execution engine: %w", err)
 	}
 	if nilInterface(engine) {
-		return nil, errors.New("create restricted Docker Engine: factory returned nil")
+		return nil, errors.New("create restricted execution engine: factory returned nil")
 	}
-	var process RuntimeProcess
+	// The lease-bound ledger commits admission before dispatch. Provisioning must
+	// not run inside WithAgentTurnFence: its durable evidence operations need the
+	// same pool, and lease heartbeats must remain possible during external calls.
+	resources.creationAttempted = true
+	process, createErr := engine.Create(ctx, spec, request.Stderr)
+	if !nilInterface(process) {
+		resources.process = process
+	}
+	if createErr != nil {
+		return nil, fmt.Errorf("create restricted Runtime Process: %w", createErr)
+	}
+	if nilInterface(process) {
+		return nil, errors.New("create restricted Runtime Process: engine returned no process")
+	}
 	err = launcher.store.WithAgentTurnFence(ctx, request.Lease, func(fenceCtx context.Context) error {
-		created, createErr := engine.Create(fenceCtx, spec, request.Stderr)
-		process = created
-		if !nilInterface(created) {
-			resources.process = created
-		}
-		if createErr != nil {
-			return fmt.Errorf("create restricted Runtime Process: %w", createErr)
-		}
-		if nilInterface(created) {
-			return errors.New("create restricted Runtime Process: engine returned no process")
-		}
-		if startErr := created.Start(fenceCtx); startErr != nil {
+		if startErr := process.Start(fenceCtx); startErr != nil {
 			return fmt.Errorf("start restricted Runtime Process: %w", startErr)
 		}
 		return nil
@@ -520,41 +488,27 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if transport == nil {
 		return nil, errors.New("start restricted Runtime Process: engine returned no transport")
 	}
-	clientOptions := launcher.acpOptions
-	if clientOptions.Logger == nil {
-		clientOptions.Logger = slog.Default()
+	stage, ok := launcher.definition.Stage(execution.Turn.Stage)
+	if !ok || stage.Role != rolePolicy.Role || !launcher.definition.AcceptsPurpose(stage.ID, execution.Turn.Purpose) {
+		return nil, ErrRuntimeBinding
 	}
-	clientOptions.Logger = clientOptions.Logger.With("workflow_id", execution.WorkflowID)
-	clientOptions.DiagnosticContext = agentevent.Context{
-		AssignmentID: execution.Assignment.ID, AgentSessionID: execution.Session.ID,
-		ACPSessionID: execution.Session.ACPSessionID, TurnID: execution.Turn.ID,
-		ExecutionEpoch: uint64(execution.Turn.ExecutionEpoch), ControlRevision: uint64(execution.Session.ControlRevision),
+	resources.sessionPreparationAttempted = true
+	prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Assignment.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
+	resources.agent = prepared
+	if prepareErr != nil {
+		return nil, fmt.Errorf("prepare Agent Session: %w", prepareErr)
 	}
-	clientOptions.RequiredCapabilities = requiredACPCapabilities(runtimeProfile)
-	// The rendered profile is the sole ACP permission authority for this assignment.
-	clientOptions.DecidePermission = func(_ context.Context, request acp.PermissionRequest) acp.PermissionDecision {
-		return rendered.DecidePermission(request)
+	if prepared == nil {
+		return nil, agent.ErrNotReady
 	}
-	client := launcher.acp.New(transport, clientOptions)
-	if nilInterface(client) {
-		return nil, errors.New("attach ACP client: factory returned nil")
-	}
-	resources.Client = client
-	prepared, err := launcher.sessions.Prepare(ctx, session.PrepareRequest{
-		Lease: request.Lease, Session: execution.Session, Client: client, StatePath: statePath,
-		MCPServers: []acp.MCPServer{registration.Server}, Configuration: rendered.SessionConfiguration(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("prepare Agent Session: %w", err)
-	}
-	resources.Session = prepared
+	resources.sessionPrepared = true
 	return resources, nil
 }
 
-// ErrRuntimeOOMKilled is attached only to a Docker-confirmed and durably recorded OOM exit.
+// ErrRuntimeOOMKilled is attached only to a backend-confirmed and durably recorded OOM exit.
 var ErrRuntimeOOMKilled = errors.New("Runtime Process was OOM-killed")
 
-// ObserveOOM saves a stopped Runtime Process's OOM state while Docker still retains it.
+// ObserveOOM saves a stopped Runtime Process's OOM state before resource removal.
 // A missing or running process cannot establish an OOM cause.
 func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	if handle == nil || handle.process == nil {
@@ -575,7 +529,7 @@ func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	}
 	if !handle.oomRecorded {
 		observation := handle.exitObservation
-		if err := handle.store.RecordAgentTurnRuntimeOOM(ctx, handle.lease, observation.ContainerID, observation.ExitCode); err != nil {
+		if err := handle.store.RecordAgentTurnRuntimeOOM(ctx, handle.lease, string(observation.Resource), observation.ExitCode); err != nil {
 			return false, fmt.Errorf("persist Runtime Process OOM before removal: %w", err)
 		}
 		handle.oomRecorded = true
@@ -583,7 +537,7 @@ func (handle *RuntimeHandle) ObserveOOM(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ConfirmedOOM reports whether Docker's OOM exit state was durably recorded before cleanup.
+// ConfirmedOOM reports whether backend OOM exit evidence was recorded before cleanup.
 func (handle *RuntimeHandle) ConfirmedOOM() bool {
 	return handle != nil && handle.oomRecorded
 }
@@ -640,15 +594,22 @@ func (handle *RuntimeHandle) CurrentLease() store.AgentTurnLease {
 	return handle.lease
 }
 
-// PromptClient exposes only the prompt capability retained by the execution worker.
-func (handle *RuntimeHandle) PromptClient() session.PromptClient {
+func (handle *RuntimeHandle) AgentConnection() session.TurnConnection {
 	if handle == nil {
 		return nil
 	}
-	return handle.Client
+	return handle.agent
 }
 
-// Cleanup drains MCP authority, closes ACP, stops and removes the process, discards Reviewer changes, and closes Docker resources.
+func cloneAdapters(adapters map[string]session.TurnAdapter) map[string]session.TurnAdapter {
+	result := make(map[string]session.TurnAdapter, len(adapters))
+	for key, value := range adapters {
+		result[key] = value
+	}
+	return result
+}
+
+// Cleanup drains MCP authority, stops execution, seals terminal evidence, and then removes resources.
 func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	if handle == nil {
 		return nil
@@ -673,12 +634,11 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	if err := handle.CloseMCP(ctx); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("close and drain MCP authority: %w", err))
 	}
-	if handle.Client != nil && !handle.acpClosed {
-		if err := handle.Client.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("close ACP client: %w", err))
+	if handle.agent != nil {
+		if err := handle.agent.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("close agent transport: %w", err))
 		} else {
-			handle.acpClosed = true
-			handle.Client = nil
+			handle.agent = nil
 		}
 	}
 	if handle.process != nil && !handle.processRemoved {
@@ -692,16 +652,62 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 				handle.processStopped = true
 			}
 		}
-		removeCtx, cancelRemove := handle.teardownContext(ctx)
-		err := handle.process.Remove(removeCtx)
-		cancelRemove()
-		if err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-		} else {
-			handle.processRemoved = true
+		// A drain timeout or an unconfirmed stop cannot authorize destruction of
+		// the environment needed to retry the terminal observation.
+		if handle.processStopped && (!handle.registered || handle.mcpDrained) {
+			captureReady := handle.terminalCapture != nil
+			if !handle.sessionPrepared {
+				proofCtx, cancelProof := handle.teardownContext(ctx)
+				proofErr := handle.store.RecordAgentTurnUnpromptedCleanup(proofCtx, handle.lease)
+				cancelProof()
+				if proofErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("record preparation-only Runtime Process cleanup: %w", proofErr))
+				} else {
+					captureReady = true
+				}
+			} else if !captureReady {
+				captureCtx, cancelCapture := handle.teardownContext(ctx)
+				fence := func(ctx context.Context, operation func(context.Context) error) error {
+					return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
+				}
+				ref, captureErr := captureTerminalWorkspace(captureCtx, handle.workspaceRef.Key, handle.workspace.Capture, fence)
+				cancelCapture()
+				if captureErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("capture stopped Agent Turn workspace: %w", captureErr))
+				} else {
+					handle.terminalCapture = &ref
+					captureReady = true
+				}
+			}
+			if captureReady {
+				removeCtx, cancelRemove := handle.teardownContext(ctx)
+				err := handle.process.Remove(removeCtx)
+				cancelRemove()
+				if err != nil {
+					cleanupErrors = append(cleanupErrors, err)
+				} else {
+					handle.processRemoved = true
+				}
+			}
 		}
 	}
-	processRemoved := handle.process == nil || handle.processRemoved
+	if handle.process == nil && handle.engine != nil && !handle.processRemoved {
+		if handle.creationAttempted {
+			// A missing process handle is not no-dispatch evidence. Exact-key
+			// recovery must stop and capture any ambiguously created environment.
+			cleanupErrors = append(cleanupErrors, errors.New("terminal capture unavailable after ambiguous Runtime Process creation; exact-key recovery required"))
+		} else {
+			removeCtx, cancel := handle.teardownContext(ctx)
+			err := handle.engine.EnsureAbsent(removeCtx)
+			cancel()
+			if err != nil {
+				cleanupErrors = append(cleanupErrors, err)
+			} else {
+				handle.processRemoved = true
+			}
+		}
+	}
+	processRemoved := handle.processRemoved || handle.process == nil && handle.engine == nil
 	if processRemoved && handle.scratchPrepared && handle.workspace != nil && !handle.scratchCleaned {
 		fence := func(ctx context.Context, operation func(context.Context) error) error {
 			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
@@ -716,7 +722,7 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 		fence := func(ctx context.Context, operation func(context.Context) error) error {
 			return handle.store.WithAgentTurnCleanupFence(ctx, handle.lease, operation)
 		}
-		if err := handle.workspace.DiscardWorkspaceFenced(ctx, handle.assignmentID, handle.lease.ExecutionEpoch, fence); err != nil {
+		if err := handle.workspace.Discard(ctx, handle.workspaceRef, fence); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("discard Reviewer workspace: %w", err))
 		} else {
 			handle.workspaceDiscarded = true
@@ -724,12 +730,41 @@ func (handle *RuntimeHandle) Cleanup(ctx context.Context) (err error) {
 	}
 	if processRemoved && handle.engine != nil && !handle.engineClosed {
 		if err := handle.engine.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("close Docker Engine: %w", err))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("close execution engine: %w", err))
 		} else {
 			handle.engineClosed = true
 		}
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func terminalCaptureRequest(key execution.Key) execution.CaptureRequest {
+	return execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture,
+	}
+}
+
+// Capture transfer and sealing run outside database transactions so heartbeats
+// and recovery can progress. Both admission and adoption require a short fence.
+func captureTerminalWorkspace(ctx context.Context, key execution.Key,
+	capture func(context.Context, execution.CaptureRequest) (execution.CaptureRef, error),
+	fence workspace.WorkspaceFence) (execution.CaptureRef, error) {
+	validate := func(context.Context) error { return nil }
+	if err := fence(ctx, validate); err != nil {
+		return execution.CaptureRef{}, fmt.Errorf("admit terminal workspace capture: %w", err)
+	}
+	request := terminalCaptureRequest(key)
+	ref, err := capture(ctx, request)
+	if err != nil {
+		return execution.CaptureRef{}, err
+	}
+	if ref.Request != request || len(ref.SHA256) != 64 {
+		return execution.CaptureRef{}, fmt.Errorf("%w: terminal capture identity", ErrRuntimeBinding)
+	}
+	if err := fence(ctx, validate); err != nil {
+		return execution.CaptureRef{}, fmt.Errorf("adopt sealed terminal workspace capture: %w", err)
+	}
+	return ref, nil
 }
 
 func (handle *RuntimeHandle) teardownContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -791,50 +826,6 @@ func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execut
 	return nil
 }
 
-func (launcher *Launcher) renderTurnProfile(execution store.AgentTurnExecutionContext, policy role.Policy) (*opencode.RenderedProfile, opencode.Role, error) {
-	var snapshot struct {
-		Name         string            `json:"name"`
-		Path         string            `json:"path"`
-		Role         workflow.Role     `json:"role"`
-		Runtime      string            `json:"runtime"`
-		Model        string            `json:"model"`
-		Variant      string            `json:"variant,omitempty"`
-		Steps        uint              `json:"steps"`
-		Permissions  map[string]string `json:"permissions"`
-		Instructions string            `json:"instructions"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(execution.Turn.AgentProfileConfig))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&snapshot); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return nil, "", fmt.Errorf("%w: Agent Profile snapshot", ErrRuntimeBinding)
-	}
-	if policy.Role != execution.Assignment.Role || snapshot.Name != execution.Assignment.AgentProfileName ||
-		!agentprofile.ValidPath(snapshot.Path) || snapshot.Role != execution.Assignment.Role ||
-		snapshot.Runtime != execution.Assignment.RuntimeProfileName+"/"+execution.Assignment.RuntimeProfileVersion {
-		return nil, "", ErrRuntimeBinding
-	}
-	permissions := make(opencode.PermissionPolicy, len(snapshot.Permissions))
-	stage, ok := launcher.definition.Stage(execution.Turn.Stage)
-	if !ok || stage.Role != policy.Role || !launcher.definition.AcceptsPurpose(stage.ID, execution.Turn.Purpose) {
-		return nil, "", fmt.Errorf("%w: Stage instruction binding", ErrRuntimeBinding)
-	}
-	for name, value := range snapshot.Permissions {
-		permissions[name] = opencode.Permission(value)
-	}
-	runtimeTools := make([]string, len(policy.MCPTools))
-	for index, capability := range policy.MCPTools {
-		runtimeTools[index] = mcp.ServerName + "_" + capability
-	}
-	rendered, err := opencode.RenderWithPolicy(policy, opencode.Profile{
-		Instructions: launcher.operatorInstructions.Compose(policy, stage, execution.Turn.Purpose, snapshot.Instructions), Model: snapshot.Model, Variant: snapshot.Variant,
-		Steps: snapshot.Steps, Permissions: permissions, RuntimeTools: runtimeTools,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("render assigned Agent Profile: %w", err)
-	}
-	return rendered, opencode.Role(policy.Role), nil
-}
-
 func checkoutSelection(execution store.AgentTurnExecutionContext, request LaunchRequest, policy role.Policy) (string, string, string, *mcp.PullRequestScope, error) {
 	if execution.ChangeProposal == nil {
 		if policy.Role != execution.Assignment.Role || policy.RequiresChangeProposal {
@@ -864,33 +855,16 @@ func checkoutSelection(execution store.AgentTurnExecutionContext, request Launch
 		&mcp.PullRequestScope{ID: proposal.PullRequestID, Number: proposal.PullRequestNumber}, nil
 }
 
-func runtimeMiseEnvironment(activation workspace.MiseActivation) (map[string]string, error) {
-	if activation.DataDir == "" || !filepath.IsAbs(activation.DataDir) || filepath.Clean(activation.DataDir) != activation.DataDir {
-		return nil, fmt.Errorf("%w: mise data directory", ErrRuntimeBinding)
-	}
-	environment := make(map[string]string, len(activation.Environment))
-	for name, value := range activation.Environment {
-		if name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(value, '\x00') {
-			return nil, fmt.Errorf("%w: mise environment", ErrRuntimeBinding)
-		}
-		environment[name] = strings.ReplaceAll(value, activation.DataDir, runtimeMisePath)
-	}
-	return environment, nil
-}
-
-func requiredACPCapabilities(runtimeProfile runtimeprofile.Profile) acp.RequiredCapabilities {
-	var required acp.RequiredCapabilities
-	for _, capability := range runtimeProfile.Contract().Capabilities {
-		switch capability {
-		case "session/list":
-			required.SessionList = true
-		case "session/resume":
-			required.SessionResume = true
-		case "session/load":
-			required.SessionLoad = true
+func runtimeRequirements(profile runtimeprofile.Profile) []execution.Requirement {
+	requirements := []execution.Requirement{execution.ToolInstallation}
+	if environment := profile.Contract().RepositoryEnvironment; environment != nil {
+		for _, requirement := range environment.Requirements {
+			if requirement != string(execution.ToolInstallation) {
+				requirements = append(requirements, execution.Requirement(requirement))
+			}
 		}
 	}
-	return required
+	return requirements
 }
 
 func launchSecrets(request LaunchRequest) []string {
@@ -959,28 +933,10 @@ func nilInterface(value any) bool {
 	}
 }
 
-// ProductionDockerFactory creates Docker engines constrained by the launcher's compiled policy.
-type ProductionDockerFactory struct{}
-
-func (ProductionDockerFactory) New(options dockerruntime.EngineOptions) (RuntimeEngine, error) {
-	engine, err := dockerruntime.NewEngine(options)
-	if err != nil {
-		return nil, err
+func runtimeKey(context store.AgentTurnExecutionContext) execution.Key {
+	return execution.Key{
+		AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
+		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion,
 	}
-	return productionDockerEngine{engine: engine}, nil
-}
-
-type productionDockerEngine struct{ engine *dockerruntime.Engine }
-
-func (engine productionDockerEngine) Create(ctx context.Context, spec dockerruntime.Spec, stderr io.Writer) (RuntimeProcess, error) {
-	return engine.engine.Create(ctx, spec, stderr)
-}
-
-func (engine productionDockerEngine) Close() error { return engine.engine.Close() }
-
-// ProductionACPFactory creates the protocol client attached to Docker's stream transport.
-type ProductionACPFactory struct{}
-
-func (ProductionACPFactory) New(transport io.ReadWriteCloser, options acp.ClientOptions) RuntimeACPClient {
-	return acp.NewClient(transport, options)
 }

@@ -19,7 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
@@ -232,7 +232,7 @@ func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) 
 	preparation.Developer.Binding.AgentProfileName = "alternate-developer"
 	preparation.Developer.ProfilePath = ".omnigrex/team/alternate-developer.md"
 	preparation.Developer.Profile.Config = agentProfileConfig("alternate-developer", workflow.RoleDeveloper,
-		"opencode-acp/1", "openai/shared", "", 40, "Perform development.", nil)
+		"pi-rpc/v1", "openai/shared", "", 40, "Perform development.", nil)
 	preparation.Stages = map[workflow.StageID]store.ParticipantPreparation{
 		workflow.StageImplementation: preparation.Developer,
 		followup:                     preparation.Developer,
@@ -305,7 +305,7 @@ INSERT INTO agent_assignments (
     runtime_image_digest, runtime_state_path
 )
 VALUES ('60000000-0000-4000-8000-000000000094', $1, 'REVIEWER', 2, 'ACTIVE',
-        'alternate-developer', 'opencode-acp', '1', $2, 'sha256:reviewer',
+        'alternate-developer', 'pi-rpc', 'v1', $2, 'sha256:reviewer',
         'assignment-60000000-0000-4000-8000-000000000094/runtime-state')`,
 		application.WorkflowID, strings.Repeat("d", 64)); err == nil {
 		t.Fatal("cross-Role Agent Profile sharing succeeded")
@@ -320,7 +320,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		Role:     architect,
 		MCPTools: []string{"get_issue", "request_review", "submit_review", "comment_on_issue", "report_blocked"}, RepositoryCredentialAuthority: role.OrchestratorAuthority,
 		ToolCredentialAuthorities: map[string]role.CredentialAuthority{"submit_review": role.ReviewerAuthority},
-		TrustedToolsRevision:      role.TurnRevisionTrustedTools, AllowHumanSessionControl: true,
+		AllowHumanSessionControl:  true,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	architectPreparation := preparation.Developer
 	architectPreparation.Binding.AgentProfileName = "architect"
 	architectPreparation.ProfilePath = ".omnigrex/team/architect.md"
-	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "opencode-acp/1", "openai/architect", "", 40, "Design the change.", nil)
+	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "pi-rpc/v1", "openai/architect", "", 40, "Design the change.", nil)
 	preparation = store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{architecture: architectPreparation}}
 
 	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
@@ -397,9 +397,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.BindAgentSessionACP(ctx, lease, "architect-acp-session", json.RawMessage(`{}`)); err != nil {
-		t.Fatal(err)
-	}
+	bindPreparedRuntime(t, database, ctx, lease)
 	if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +493,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	}
 }
 
-func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.T) {
+func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedRuntimeBind(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -508,16 +506,15 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	}
 	spec := preparationSpec("atomic-profile", "openai/gpt-5.2")
 	spec.Developer.Profile.Config = json.RawMessage(`{
-  "steps": 40,
-  "runtime": "opencode-acp/1",
   "role": "DEVELOPER",
   "permissions": {"read": "allow", "edit": "deny"},
   "path": ".omnigrex/team/developer.md",
   "name": "developer",
+  "runtime": "pi-rpc/v1",
   "model": "openai/gpt-5.2",
   "instructions": "Perform development."
 }`)
-	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", "openai/gpt-5.2", "", 40, "Perform development.", nil)
+	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "openai/gpt-5.2", "", 40, "Perform development.", nil)
 	spec.Developer.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn"},"environment":{"GOTMPDIR":"build"}}`)
 	spec.Reviewer.Profile = store.AgentProfileSnapshot{}
 	prepared, err := database.PrepareAgentTurn(ctx, preparationJob, spec)
@@ -525,7 +522,7 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 		t.Fatalf("PrepareAgentTurn() with unselected empty Reviewer profile error = %v", err)
 	}
 	if prepared.Assignment.WorkflowID != application.WorkflowID || prepared.Session.AgentAssignmentID != prepared.Assignment.ID ||
-		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.ACPSessionID != "" ||
+		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.RuntimeSessionID != "" || len(prepared.Session.RuntimeCapabilities) != 0 ||
 		prepared.Assignment.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 ||
 		prepared.Session.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 ||
 		prepared.Turn.AgentSessionID != prepared.Session.ID || prepared.Turn.ExecutionEpoch != 1 ||
@@ -565,20 +562,32 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedACPBind(t *testing.
 	if err != nil || json.Unmarshal(execution.Turn.TurnConfiguration, &saved) != nil || saved.Directories["build"] != "turn" || saved.Environment["GOTMPDIR"] != "build" {
 		t.Fatalf("turn configuration survived preparation and acquisition = (%s, %v)", execution.Turn.TurnConfiguration, err)
 	}
-	bound, err := database.BindAgentSessionACP(ctx, turnLease, "opaque-acp-session", json.RawMessage(`{"z":true,"resume":true}`))
+	reserved, err := database.ReserveAgentSessionRuntime(ctx, turnLease)
 	if err != nil {
-		t.Fatalf("BindAgentSessionACP() error = %v", err)
+		t.Fatalf("ReserveAgentSessionRuntime() error = %v", err)
 	}
-	if bound.Status != store.AgentSessionActive || bound.ACPSessionID != "opaque-acp-session" || string(bound.Capabilities) != `{"resume":true,"z":true}` {
+	if reserved.Status != store.AgentSessionCreating || reserved.RuntimeSessionID != prepared.Session.ID || len(reserved.RuntimeCapabilities) != 0 {
+		t.Fatalf("reserved Session = %#v, want exact identity without activation", reserved)
+	}
+	ready := preparedRuntimeReady(reserved.RuntimeSessionID)
+	bound, err := database.BindAgentSessionRuntime(ctx, turnLease, ready)
+	if err != nil {
+		t.Fatalf("BindAgentSessionRuntime() error = %v", err)
+	}
+	if bound.Status != store.AgentSessionActive || bound.RuntimeSessionID != reserved.RuntimeSessionID || string(bound.RuntimeCapabilities) != string(ready.Capabilities) {
 		t.Fatalf("bound Session = %#v", bound)
 	}
 	stale := turnLease
 	stale.OwnerToken = "65000000-0000-4000-8000-000000000006"
-	if _, err := database.BindAgentSessionACP(ctx, stale, "opaque-acp-session", bound.Capabilities); !errors.Is(err, store.ErrAgentTurnFenceLost) {
-		t.Fatalf("BindAgentSessionACP() with stale owner error = %v, want ErrAgentTurnFenceLost", err)
+	if _, err := database.ReserveAgentSessionRuntime(ctx, stale); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("ReserveAgentSessionRuntime() with stale owner error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if _, err := database.BindAgentSessionACP(ctx, turnLease, "different-acp-session", bound.Capabilities); !errors.Is(err, store.ErrAgentSessionACPConflict) {
-		t.Fatalf("BindAgentSessionACP() conflicting identity error = %v, want ErrAgentSessionACPConflict", err)
+	if _, err := database.BindAgentSessionRuntime(ctx, stale, ready); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("BindAgentSessionRuntime() with stale owner error = %v, want ErrAgentTurnFenceLost", err)
+	}
+	ready.RuntimeSessionID = "different-runtime-session"
+	if _, err := database.BindAgentSessionRuntime(ctx, turnLease, ready); !errors.Is(err, store.ErrAgentSessionRuntimeConflict) {
+		t.Fatalf("BindAgentSessionRuntime() conflicting identity error = %v, want ErrAgentSessionRuntimeConflict", err)
 	}
 }
 
@@ -762,7 +771,8 @@ INSERT INTO agent_assignments (
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
 VALUES ('65000000-0000-4000-8000-0000000000a1', $1, 'DEVELOPER', 'ACTIVE',
-        'developer', 'opencode-acp', '1', repeat('a', 64), 'sha256:developer-runtime', 'deferred/developer')`, application.WorkflowID); err != nil {
+        'developer', 'pi-rpc', 'v1', repeat('a', 64), 'sha256:developer-runtime',
+        'assignment-65000000-0000-4000-8000-0000000000a1/runtime-state')`, application.WorkflowID); err != nil {
 		t.Fatalf("seed Developer Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -1232,7 +1242,7 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000007", "62000000-0000-4000-8000-000000000007")
 	lease := claimPreparationJob(t, database, ctx)
-	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
+	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
 	for name, invalidate := range map[string]func(*store.AgentTurnPreparationSpec){
 		"Developer binding":            func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeImageDigest = "" },
 		"missing Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeProfileContentSHA256 = "" },
@@ -1260,12 +1270,14 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 		"mismatched path":    func(config map[string]any) { config["path"] = ".omnigrex/team/reviewer.md" },
 		"mismatched name":    func(config map[string]any) { config["name"] = "reviewer" },
 		"mismatched role":    func(config map[string]any) { config["role"] = workflow.RoleReviewer },
-		"mismatched runtime": func(config map[string]any) { config["runtime"] = "opencode-acp/2" },
+		"missing runtime":    func(config map[string]any) { delete(config, "runtime") },
+		"removed runtime":    func(config map[string]any) { config["runtime"] = "opencode/v1" },
 		"invalid model":      func(config map[string]any) { config["model"] = "gpt-5.2" },
-		"invalid steps":      func(config map[string]any) { config["steps"] = 0 },
+		"removed steps":      func(config map[string]any) { config["steps"] = 0 },
 		"empty permissions":  func(config map[string]any) { config["permissions"] = map[string]string{} },
 		"blank instructions": func(config map[string]any) { config["instructions"] = " " },
-		"invalid variant":    func(config map[string]any) { config["variant"] = " " },
+		"removed variant":    func(config map[string]any) { config["variant"] = "high" },
+		"invalid thinking":   func(config map[string]any) { config["thinking"] = " " },
 		"unknown field":      func(config map[string]any) { config["extra"] = true },
 		"credential":         func(config map[string]any) { config["permissions"] = map[string]string{"api_token": "allow"} },
 	}
@@ -1320,14 +1332,14 @@ func TestPrepareAgentTurnRejectsUnsafePersistedProfileBeforeAllocatingTurn(t *te
 	tests := []struct {
 		name        string
 		role        workflow.Role
-		steps       int
+		thinking    string
 		permissions map[string]string
 	}{
-		{name: "steps above maximum", role: workflow.RoleDeveloper, steps: 1001, permissions: map[string]string{"read": "allow"}},
-		{name: "unknown permission tool", role: workflow.RoleDeveloper, steps: 40, permissions: map[string]string{"execute": "allow"}},
-		{name: "unknown permission action", role: workflow.RoleDeveloper, steps: 40, permissions: map[string]string{"read": "ask"}},
-		{name: "Reviewer edit allowance", role: workflow.RoleReviewer, steps: 40, permissions: map[string]string{"edit": "allow"}},
-		{name: "Reviewer patch allowance", role: workflow.RoleReviewer, steps: 40, permissions: map[string]string{"patch": "allow"}},
+		{name: "unsupported thinking", role: workflow.RoleDeveloper, thinking: "unsupported", permissions: map[string]string{"read": "allow"}},
+		{name: "unknown permission tool", role: workflow.RoleDeveloper, permissions: map[string]string{"execute": "allow"}},
+		{name: "unknown permission action", role: workflow.RoleDeveloper, permissions: map[string]string{"read": "ask"}},
+		{name: "Reviewer edit allowance", role: workflow.RoleReviewer, permissions: map[string]string{"edit": "allow"}},
+		{name: "Reviewer write allowance", role: workflow.RoleReviewer, permissions: map[string]string{"write": "allow"}},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1378,7 +1390,7 @@ VALUES ($1, $2, 9123, 'owner', 'repo', $3, $3, 'OPEN', 'main', 'base', 'feature'
 				profile = &spec.Reviewer.Profile
 				name, role, model, instructions = "reviewer", workflow.RoleReviewer, "anthropic/reviewer", "Perform review."
 			}
-			profile.Config = agentProfileConfig(name, role, "opencode-acp/1", model, "", test.steps, instructions, test.permissions)
+			profile.Config = agentProfileConfig(name, role, "pi-rpc/v1", model, test.thinking, 0, instructions, test.permissions)
 
 			if _, err := database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, agentprofile.ErrInvalidProfile) {
 				t.Fatalf("PrepareAgentTurn() error = %v, want Agent Profile policy rejection", err)
@@ -1442,7 +1454,7 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000019", "62000000-0000-4000-8000-000000000019")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-1", "openai/one")
-	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "developer-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "developer-runtime")
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
 		t.Fatalf("GetAgentSession() error = %v", err)
@@ -1460,11 +1472,12 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 		t.Fatalf("StartMutation() error = %v", err)
 	}
 	client := newFakeHumanControllerClient()
+	client.ready = preparedRuntimeReady(active.RuntimeSessionID)
 	automationCtx, cancelAutomation := context.WithCancel(ctx)
 	automationDone := make(chan error, 1)
 	go func() {
-		_, promptErr := session.NewCoordinator(database).Prompt(automationCtx, session.PromptRequest{
-			Lease: lease, Session: active, Client: client, Content: []acp.ContentBlock{acp.TextContent("automation prompt")},
+		_, promptErr := session.NewRuntimeCoordinator(database).Prompt(automationCtx, session.RuntimePromptRequest{
+			Lease: lease, Session: active, Connection: client, Text: "automation prompt", Sink: agentevent.NoopSink{},
 		})
 		automationDone <- promptErr
 	}()
@@ -1490,8 +1503,8 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 	if err != nil {
 		t.Fatalf("TransferAgentSessionControl() to human error = %v", err)
 	}
-	if _, err := session.NewCoordinator(database).Prompt(ctx, session.PromptRequest{
-		Lease: lease, Session: active, Client: client, Content: []acp.ContentBlock{acp.TextContent("stale automation")},
+	if _, err := session.NewRuntimeCoordinator(database).Prompt(ctx, session.RuntimePromptRequest{
+		Lease: lease, Session: active, Connection: client, Text: "stale automation", Sink: agentevent.NoopSink{},
 	}); !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("stale automation Prompt() error = %v, want ErrAgentTurnFenceLost", err)
 	}
@@ -1499,25 +1512,25 @@ func TestFakeHumanControllerFencesAutomationDrainsMutationsAndReturnsControl(t *
 		human.ControllerID != "human-1" || human.ControlAcquiredAt == nil {
 		t.Fatalf("human control = %#v", human)
 	}
-	coordinator := session.NewCoordinator(database)
+	coordinator := session.NewRuntimeCoordinator(database)
 	staleRevision := human
 	staleRevision.ControlRevision--
-	if _, err := coordinator.HumanPrompt(ctx, session.HumanPromptRequest{
-		Session: staleRevision, Client: client, Content: []acp.ContentBlock{acp.TextContent("stale human revision")},
+	if _, err := coordinator.HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+		Session: staleRevision, Connect: humanRuntimeConnect(human, client), Text: "stale human revision", Sink: agentevent.NoopSink{},
 	}); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
 		t.Fatalf("HumanPrompt() stale revision error = %v, want ErrAgentSessionControlFenceLost", err)
 	}
-	staleACP := human
-	staleACP.ACPSessionID = "stale-acp-session"
-	if _, err := coordinator.HumanPrompt(ctx, session.HumanPromptRequest{
-		Session: staleACP, Client: client, Content: []acp.ContentBlock{acp.TextContent("stale human ACP identity")},
-	}); !errors.Is(err, store.ErrAgentSessionACPConflict) {
-		t.Fatalf("HumanPrompt() stale ACP identity error = %v, want ErrAgentSessionACPConflict", err)
+	staleRuntime := human
+	staleRuntime.RuntimeSessionID = "stale-runtime-session"
+	if _, err := coordinator.HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+		Session: staleRuntime, Connect: humanRuntimeConnect(human, client), Text: "stale human runtime identity", Sink: agentevent.NoopSink{},
+	}); !errors.Is(err, store.ErrAgentSessionRuntimeConflict) {
+		t.Fatalf("HumanPrompt() stale runtime identity error = %v, want ErrAgentSessionRuntimeConflict", err)
 	}
 	humanDone := make(chan error, 1)
 	go func() {
-		_, promptErr := coordinator.HumanPrompt(ctx, session.HumanPromptRequest{
-			Session: human, Client: client, Content: []acp.ContentBlock{acp.TextContent("human follow-up")},
+		_, promptErr := coordinator.HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+			Session: human, Connect: humanRuntimeConnect(human, client), Text: "human follow-up", Sink: agentevent.NoopSink{},
 			LeaseDuration: 80 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond,
 		})
 		humanDone <- promptErr
@@ -1573,18 +1586,18 @@ INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_image_digest, runtime_state_path
 )
-SELECT $2, workflow_id, 'REVIEWER', 'ACTIVE', 'reviewer', 'runtime', '1',
+SELECT $2, workflow_id, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v1',
        'sha256:test', $3
 FROM agent_sessions WHERE id = $1`, human.ID, participantID, "assignment-"+participantID+"/runtime-state"); err != nil {
 		t.Fatalf("insert second Agent Participant: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status
+    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, 'reviewer-acp', 'runtime', '1', 'sha256:test', $3, 'ACTIVE')`,
-		sessionID, participantID, "assignment-"+participantID+"/runtime-state"); err != nil {
+VALUES ($1::uuid, $2, 1, ($1::uuid)::text, 'pi-rpc', 'v1', 'sha256:test', $3, 'ACTIVE', $4)`,
+		sessionID, participantID, "assignment-"+participantID+"/runtime-state", preparedRuntimeReady(sessionID).Capabilities); err != nil {
 		t.Fatalf("insert second Agent Session: %v", err)
 	}
 
@@ -1630,7 +1643,7 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 	triggerPreparationWorkflow(t, database, ctx,
 		"61000000-0000-4000-8000-000000000094", "62000000-0000-4000-8000-000000000094")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "policy-profile", "openai/policy")
-	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "policy-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "policy-runtime")
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
@@ -1648,18 +1661,18 @@ func TestHumanPromptAdmissionLeaseEnforcesFencesAndFailsClosedAfterExpiry(t *tes
 	human := prepareHumanControlledSession(t, databases[0], pool, ctx,
 		"61000000-0000-4000-8000-000000000020", "62000000-0000-4000-8000-000000000020")
 
-	if _, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision-1, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
+	if _, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision-1, human.RuntimeSessionID, time.Second); !errors.Is(err, store.ErrAgentSessionControlFenceLost) {
 		t.Fatalf("AcquireHumanPromptLease() stale revision error = %v, want ErrAgentSessionControlFenceLost", err)
 	}
-	if _, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, "stale-acp", time.Second); !errors.Is(err, store.ErrAgentSessionACPConflict) {
-		t.Fatalf("AcquireHumanPromptLease() stale ACP ID error = %v, want ErrAgentSessionACPConflict", err)
+	if _, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, "stale-runtime", time.Second); !errors.Is(err, store.ErrAgentSessionRuntimeConflict) {
+		t.Fatalf("AcquireHumanPromptLease() stale runtime ID error = %v, want ErrAgentSessionRuntimeConflict", err)
 	}
 
-	first, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, 80*time.Millisecond)
+	first, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, 80*time.Millisecond)
 	if err != nil {
 		t.Fatalf("AcquireHumanPromptLease() error = %v", err)
 	}
-	if _, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrHumanPromptLeaseActive) {
+	if _, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, time.Second); !errors.Is(err, store.ErrHumanPromptLeaseActive) {
 		t.Fatalf("duplicate AcquireHumanPromptLease() error = %v, want ErrHumanPromptLeaseActive", err)
 	}
 	if err := databases[0].HeartbeatHumanPromptLease(ctx, first, 180*time.Millisecond); err != nil {
@@ -1673,12 +1686,12 @@ func TestHumanPromptAdmissionLeaseEnforcesFencesAndFailsClosedAfterExpiry(t *tes
 		t.Fatalf("ReleaseHumanPromptLease() error = %v", err)
 	}
 
-	expiring, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, 40*time.Millisecond)
+	expiring, err := databases[0].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, 40*time.Millisecond)
 	if err != nil {
 		t.Fatalf("AcquireHumanPromptLease() for expiry error = %v", err)
 	}
 	time.Sleep(80 * time.Millisecond)
-	if _, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, time.Second); !errors.Is(err, store.ErrHumanPromptAdmissionUncertain) {
+	if _, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, time.Second); !errors.Is(err, store.ErrHumanPromptAdmissionUncertain) {
 		t.Fatalf("AcquireHumanPromptLease() after expiry error = %v, want ErrHumanPromptAdmissionUncertain", err)
 	}
 	if err := databases[0].HeartbeatHumanPromptLease(ctx, expiring, time.Second); !errors.Is(err, store.ErrHumanPromptLeaseLost) {
@@ -1691,7 +1704,7 @@ func TestHumanPromptAdmissionLeaseEnforcesFencesAndFailsClosedAfterExpiry(t *tes
 		t.Fatalf("ReleaseHumanPromptLease() for exact expired token error = %v", err)
 	}
 
-	afterRelease, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.ACPSessionID, time.Second)
+	afterRelease, err := databases[1].AcquireHumanPromptLease(ctx, human.ID, human.ControlRevision, human.RuntimeSessionID, time.Second)
 	if err != nil {
 		t.Fatalf("AcquireHumanPromptLease() after exact release error = %v", err)
 	}
@@ -1706,7 +1719,7 @@ func TestHumanPromptAdmissionLeaseEnforcesFencesAndFailsClosedAfterExpiry(t *tes
 	}
 }
 
-func TestHumanPromptCoordinatorReleasesLeaseAfterACPError(t *testing.T) {
+func TestHumanPromptCoordinatorReleasesLeaseAfterRuntimeError(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1715,8 +1728,8 @@ func TestHumanPromptCoordinatorReleasesLeaseAfterACPError(t *testing.T) {
 	replayClient := newBlockingReplayHumanPromptClient()
 	replayDone := make(chan error, 1)
 	go func() {
-		_, err := session.NewCoordinator(databases[0]).HumanPrompt(ctx, session.HumanPromptRequest{
-			Session: human, Client: replayClient, Content: []acp.ContentBlock{acp.TextContent("after replay")},
+		_, err := session.NewRuntimeCoordinator(databases[0]).HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+			Session: human, Connect: humanRuntimeConnect(human, replayClient), Text: "after replay", Sink: agentevent.NoopSink{},
 			LeaseDuration: 80 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond,
 		})
 		replayDone <- err
@@ -1731,21 +1744,21 @@ func TestHumanPromptCoordinatorReleasesLeaseAfterACPError(t *testing.T) {
 		t.Fatalf("HumanPrompt() after blocked replay error = %v", err)
 	}
 
-	want := errors.New("ACP prompt failed")
+	want := errors.New("runtime prompt failed")
 	client := &failingHumanPromptClient{promptErr: want}
 
-	if _, err := session.NewCoordinator(databases[0]).HumanPrompt(ctx, session.HumanPromptRequest{
-		Session: human, Client: client, Content: []acp.ContentBlock{acp.TextContent("fail")},
+	if _, err := session.NewRuntimeCoordinator(databases[0]).HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+		Session: human, Connect: humanRuntimeConnect(human, client), Text: "fail", Sink: agentevent.NoopSink{},
 	}); !errors.Is(err, want) {
-		t.Fatalf("HumanPrompt() error = %v, want ACP error", err)
+		t.Fatalf("HumanPrompt() error = %v, want runtime error", err)
 	}
 	var promptLeaseCleared bool
 	if err := pool.QueryRow(ctx, `SELECT human_prompt_token IS NULL FROM agent_sessions WHERE id = $1`, human.ID).Scan(&promptLeaseCleared); err != nil || !promptLeaseCleared {
-		t.Fatalf("human prompt lease after ACP error = (%t, %v), want cleared", promptLeaseCleared, err)
+		t.Fatalf("human prompt lease after runtime error = (%t, %v), want cleared", promptLeaseCleared, err)
 	}
 }
 
-func TestHumanPromptCoordinatorCancelsACPWhenHeartbeatLosesFence(t *testing.T) {
+func TestHumanPromptCoordinatorCancelsRuntimeWhenHeartbeatLosesFence(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1754,8 +1767,8 @@ func TestHumanPromptCoordinatorCancelsACPWhenHeartbeatLosesFence(t *testing.T) {
 	client := newFakeHumanControllerClient()
 	done := make(chan error, 1)
 	go func() {
-		_, err := session.NewCoordinator(databases[0]).HumanPrompt(ctx, session.HumanPromptRequest{
-			Session: human, Client: client, Content: []acp.ContentBlock{acp.TextContent("human follow-up")},
+		_, err := session.NewRuntimeCoordinator(databases[0]).HumanPrompt(ctx, session.RuntimeHumanPromptRequest{
+			Session: human, Connect: humanRuntimeConnect(human, client), Text: "human follow-up", Sink: agentevent.NoopSink{},
 			LeaseDuration: 150 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond,
 		})
 		done <- err
@@ -1773,11 +1786,16 @@ WHERE id = $1`, human.ID); err != nil {
 			t.Fatalf("HumanPrompt() after heartbeat fence loss error = %v, want lease loss and uncertain outcome", err)
 		}
 	case <-ctx.Done():
-		t.Fatal("HumanPrompt() did not cancel ACP after heartbeat fence loss")
+		t.Fatal("HumanPrompt() did not cancel runtime after heartbeat fence loss")
+	}
+	var retainedToken string
+	if err := pool.QueryRow(ctx, `SELECT human_prompt_token::text FROM agent_sessions WHERE id = $1`, human.ID).Scan(&retainedToken); err != nil || retainedToken != "69000000-0000-4000-8000-000000000001" {
+		t.Fatalf("uncertain prompt admission token = (%q, %v), want retained replacement fence", retainedToken, err)
 	}
 }
 
 type fakeHumanControllerClient struct {
+	runtimeControlConnection
 	mutex                sync.Mutex
 	historyReplayed      bool
 	prompts              int
@@ -1789,10 +1807,12 @@ type fakeHumanControllerClient struct {
 }
 
 type failingHumanPromptClient struct {
+	runtimeControlConnection
 	promptErr error
 }
 
 type blockingReplayHumanPromptClient struct {
+	runtimeControlConnection
 	replayStarted chan struct{}
 	releaseReplay chan struct{}
 }
@@ -1801,30 +1821,22 @@ func newBlockingReplayHumanPromptClient() *blockingReplayHumanPromptClient {
 	return &blockingReplayHumanPromptClient{replayStarted: make(chan struct{}), releaseReplay: make(chan struct{})}
 }
 
-func (client *blockingReplayHumanPromptClient) ReplayHistory(ctx context.Context, _ acp.ContinueSessionRequest) error {
+func (client *blockingReplayHumanPromptClient) Replay(ctx context.Context, cursor agent.HistoryCursor, _ agentevent.Sink) (agent.HistoryCursor, error) {
 	close(client.replayStarted)
 	select {
 	case <-client.releaseReplay:
-		return nil
+		return cursor, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return cursor, ctx.Err()
 	}
 }
 
-func (*blockingReplayHumanPromptClient) SetAgentEventContext(agentevent.Context) {}
-
-func (*blockingReplayHumanPromptClient) Prompt(context.Context, string, []acp.ContentBlock) (acp.PromptResponse, error) {
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+func (*blockingReplayHumanPromptClient) Prompt(context.Context, string, agentevent.Sink) (agent.Outcome, error) {
+	return agent.Outcome{Admitted: true, Status: agent.Completed}, nil
 }
 
-func (*failingHumanPromptClient) ReplayHistory(context.Context, acp.ContinueSessionRequest) error {
-	return nil
-}
-
-func (*failingHumanPromptClient) SetAgentEventContext(agentevent.Context) {}
-
-func (client *failingHumanPromptClient) Prompt(context.Context, string, []acp.ContentBlock) (acp.PromptResponse, error) {
-	return acp.PromptResponse{}, client.promptErr
+func (client *failingHumanPromptClient) Prompt(context.Context, string, agentevent.Sink) (agent.Outcome, error) {
+	return agent.Outcome{Admitted: true, Status: agent.Failed}, client.promptErr
 }
 
 func newFakeHumanControllerClient() *fakeHumanControllerClient {
@@ -1833,27 +1845,25 @@ func newFakeHumanControllerClient() *fakeHumanControllerClient {
 	}
 }
 
-func (client *fakeHumanControllerClient) ReplayHistory(_ context.Context, _ acp.ContinueSessionRequest) error {
+func (client *fakeHumanControllerClient) Replay(_ context.Context, cursor agent.HistoryCursor, _ agentevent.Sink) (agent.HistoryCursor, error) {
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
 	client.historyReplayed = true
-	return nil
+	return cursor, nil
 }
 
-func (client *fakeHumanControllerClient) SetAgentEventContext(agentevent.Context) {}
-
-func (client *fakeHumanControllerClient) Prompt(ctx context.Context, _ string, content []acp.ContentBlock) (acp.PromptResponse, error) {
+func (client *fakeHumanControllerClient) Prompt(ctx context.Context, text string, _ agentevent.Sink) (agent.Outcome, error) {
 	client.mutex.Lock()
 	client.activePrompts++
 	if client.activePrompts > client.maxConcurrentPrompts {
 		client.maxConcurrentPrompts = client.activePrompts
 	}
 	client.prompts++
-	human := len(content) == 1 && content[0].Text == "human follow-up"
+	human := text == "human follow-up"
 	if human && !client.historyReplayed {
 		client.activePrompts--
 		client.mutex.Unlock()
-		return acp.PromptResponse{}, errors.New("history was not replayed")
+		return agent.Outcome{Status: agent.Rejected}, errors.New("history was not replayed")
 	}
 	client.mutex.Unlock()
 	if human {
@@ -1870,9 +1880,40 @@ func (client *fakeHumanControllerClient) Prompt(ctx context.Context, _ string, c
 	client.activePrompts--
 	client.mutex.Unlock()
 	if err := ctx.Err(); err != nil {
-		return acp.PromptResponse{}, err
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, err
 	}
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	return agent.Outcome{Admitted: true, Status: agent.Completed}, nil
+}
+
+type runtimeControlConnection struct {
+	ready agent.Ready
+}
+
+func (connection *runtimeControlConnection) Prepare(context.Context) (agent.Ready, error) {
+	return connection.ready, nil
+}
+func (connection *runtimeControlConnection) PreparedSessionID() string {
+	return connection.ready.RuntimeSessionID
+}
+func (connection *runtimeControlConnection) setReady(ready agent.Ready)   { connection.ready = ready }
+func (*runtimeControlConnection) SetAgentEventContext(agentevent.Context) {}
+func (*runtimeControlConnection) Replay(_ context.Context, cursor agent.HistoryCursor, _ agentevent.Sink) (agent.HistoryCursor, error) {
+	return cursor, nil
+}
+func (*runtimeControlConnection) Cancel(context.Context) error { return nil }
+func (*runtimeControlConnection) Close() error                 { return nil }
+
+func humanRuntimeConnect(s store.AgentSession, connection interface {
+	agent.Connection
+	setReady(agent.Ready)
+}) session.RuntimeConnect {
+	return func(_ context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
+		if identity.AgentSessionID != s.ID || identity.RuntimeSessionID != s.RuntimeSessionID || !identity.MustExist {
+			return nil, agent.ErrSession
+		}
+		connection.setReady(agent.Ready{RuntimeSessionID: identity.RuntimeSessionID, Capabilities: s.RuntimeCapabilities, Disposition: "continued"})
+		return connection, nil
+	}
 }
 
 func TestPrepareAgentTurnReusesReturningAndRetainedSessionsAndReplacesNewGeneration(t *testing.T) {
@@ -1883,7 +1924,7 @@ func TestPrepareAgentTurnReusesReturningAndRetainedSessionsAndReplacesNewGenerat
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000008", "62000000-0000-4000-8000-000000000008")
 	first := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-1", "openai/one")
-	firstLease := acquireAndBindTurn(t, database, pool, ctx, first, "developer-acp")
+	firstLease := acquireAndBindTurn(t, database, pool, ctx, first, "developer-runtime")
 	settleAcquiredTurn(t, database, ctx, firstLease, store.AgentTurnSucceeded)
 
 	setWorkflowRevision(t, pool, application.WorkflowID, 2)
@@ -1905,10 +1946,10 @@ UPDATE agent_sessions SET runtime_profile_content_sha256 = $2 WHERE id = $1`,
 	}
 	returning := prepareTurn(t, database, ctx, returningJob, "profile-2", "openai/two")
 	if returning.Assignment.ID != first.Assignment.ID || returning.Session.ID != first.Session.ID ||
-		returning.Session.ACPSessionID != "developer-acp" || returning.Turn.ExecutionEpoch != 2 {
+		returning.Session.RuntimeSessionID != first.Session.ID || len(returning.Session.RuntimeCapabilities) == 0 || returning.Turn.ExecutionEpoch != 2 {
 		t.Fatalf("returning preparation = %#v, want reused identity and epoch 2", returning)
 	}
-	returningLease := acquireAndBindTurn(t, database, pool, ctx, returning, "developer-acp")
+	returningLease := acquireAndBindTurn(t, database, pool, ctx, returning, "developer-runtime")
 	settleAcquiredTurn(t, database, ctx, returningLease, store.AgentTurnSucceeded)
 
 	if _, err := pool.Exec(ctx, `
@@ -1924,10 +1965,10 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 		workflow.AssignmentGenerationRetained, workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, "", "")
 	retained := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-3", "openai/three")
 	if retained.Assignment.ID != first.Assignment.ID || retained.Session.ID != first.Session.ID ||
-		retained.Session.Status != store.AgentSessionActive || retained.Session.ACPSessionID != "developer-acp" {
+		retained.Session.Status != store.AgentSessionActive || retained.Session.RuntimeSessionID != first.Session.ID || len(retained.Session.RuntimeCapabilities) == 0 {
 		t.Fatalf("retained preparation = %#v, want reactivated durable identity", retained)
 	}
-	retainedLease := acquireAndBindTurn(t, database, pool, ctx, retained, "developer-acp")
+	retainedLease := acquireAndBindTurn(t, database, pool, ctx, retained, "developer-runtime")
 	settleAcquiredTurn(t, database, ctx, retainedLease, store.AgentTurnSucceeded)
 
 	setWorkflowRevision(t, pool, application.WorkflowID, 4)
@@ -1992,12 +2033,12 @@ func TestRuntimeProfilePlatformDriftCreatesConfigurationConflictAndHumanHandoff(
 	defer cancel()
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000011", "62000000-0000-4000-8000-000000000011")
-	const image = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	amd64Profile, err := runtimeprofile.NewOpenCodeV1(image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
+	const image = "registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	amd64Profile, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	arm64Profile, err := runtimeprofile.NewOpenCodeV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	arm64Profile, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2284,9 +2325,9 @@ INSERT INTO agent_assignments (
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
 VALUES ('63000000-0000-4000-8000-000000000021', $1, 'DEVELOPER', 'ACTIVE',
-        'developer', 'opencode-acp', '1', repeat('a', 64), 'sha256:developer', 'failure/developer'),
+        'developer', 'pi-rpc', 'v1', repeat('a', 64), 'sha256:developer', 'failure/developer'),
        ('63000000-0000-4000-8000-000000000022', $1, 'REVIEWER', 'ACTIVE',
-        'reviewer', 'opencode-acp', '1', repeat('b', 64), 'sha256:reviewer', 'failure/reviewer')`, application.WorkflowID); err != nil {
+        'reviewer', 'pi-rpc', 'v1', repeat('b', 64), 'sha256:reviewer', 'failure/reviewer')`, application.WorkflowID); err != nil {
 		t.Fatalf("seed relevant Assignments: %v", err)
 	}
 	lease := claimPreparationJob(t, database, ctx)
@@ -2465,7 +2506,7 @@ func TestInfrastructureHandoffRetriggerReactivatesCurrentParticipant(t *testing.
 		"61000000-0000-4000-8000-000000000050", "62000000-0000-4000-8000-000000000050")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "infrastructure-profile", "openai/test")
 	for attempt := 0; attempt < 2; attempt++ {
-		lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "infrastructure-acp")
+		lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "infrastructure-runtime")
 		if err := database.OpenMutationAdmission(ctx, lease); err != nil {
 			t.Fatal(err)
 		}
@@ -2774,7 +2815,7 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 			Binding:     bindings[workflow.RoleDeveloper],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA, ContentSHA256: developerHash[:],
-				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "opencode-acp/1", developerModel, "", 40, "Perform development.", nil),
+				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", developerModel, "", 40, "Perform development.", nil),
 			},
 		},
 		Reviewer: store.RolePreparation{
@@ -2782,31 +2823,46 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 			Binding:     bindings[workflow.RoleReviewer],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA + "-reviewer", ContentSHA256: reviewerHash[:],
-				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "opencode-acp/1", "anthropic/reviewer", "", 40, "Perform review.", nil),
+				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "anthropic/reviewer", "", 40, "Perform review.", nil),
 			},
 		},
 	}
 	return spec
 }
 
-func acquireAndBindTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, prepared store.AgentTurnPreparationCommit, acpSessionID string) store.AgentTurnLease {
+func acquireAndBindTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, prepared store.AgentTurnPreparationCommit, _ string) store.AgentTurnLease {
 	t.Helper()
 	job := agentTurnExecutionJob(t, pool, ctx, prepared.Turn)
 	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, prepared.Turn.ControlRevision, "runtime", time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimAndAcquireAgentTurn() error = %v", err)
 	}
-	if _, err := database.BindAgentSessionACP(ctx, lease, acpSessionID, json.RawMessage(`{"resume":true}`)); err != nil {
-		t.Fatalf("BindAgentSessionACP() error = %v", err)
-	}
+	bindPreparedRuntime(t, database, ctx, lease)
 	return lease
+}
+
+func preparedRuntimeReady(runtimeSessionID string) agent.Ready {
+	return agent.Ready{RuntimeSessionID: runtimeSessionID, Disposition: "created", Capabilities: json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)}
+}
+
+func bindPreparedRuntime(t *testing.T, database *store.Store, ctx context.Context, lease store.AgentTurnLease) store.AgentSession {
+	t.Helper()
+	reserved, err := database.ReserveAgentSessionRuntime(ctx, lease)
+	if err != nil {
+		t.Fatalf("ReserveAgentSessionRuntime() error = %v", err)
+	}
+	bound, err := database.BindAgentSessionRuntime(ctx, lease, preparedRuntimeReady(reserved.RuntimeSessionID))
+	if err != nil {
+		t.Fatalf("BindAgentSessionRuntime() error = %v", err)
+	}
+	return bound
 }
 
 func prepareHumanControlledSession(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, deliveryID, eventID string) store.AgentSession {
 	t.Helper()
 	triggerPreparationWorkflow(t, database, ctx, deliveryID, eventID)
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "human-profile", "openai/human")
-	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "human-acp")
+	lease := acquireAndBindTurn(t, database, pool, ctx, prepared, "human-runtime")
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)
 	active, err := database.GetAgentSession(ctx, prepared.Session.ID)
 	if err != nil {
@@ -2841,29 +2897,29 @@ func settleAcquiredTurn(t *testing.T, database *store.Store, ctx context.Context
 func preparationBindings() map[workflow.Role]store.AssignmentRuntimeBinding {
 	return map[workflow.Role]store.AssignmentRuntimeBinding{
 		workflow.RoleDeveloper: {
-			AgentProfileName: "developer", RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "1",
+			AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 			RuntimeProfileContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			RuntimeImageDigest:          "sha256:developer-runtime",
 		},
 		workflow.RoleReviewer: {
-			AgentProfileName: "reviewer", RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "1",
+			AgentProfileName: "reviewer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 			RuntimeProfileContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			RuntimeImageDigest:          "sha256:reviewer-runtime",
 		},
 	}
 }
 
-func agentProfileConfig(name string, role workflow.Role, runtime, model, variant string, steps int, instructions string, permissions map[string]string) json.RawMessage {
+func agentProfileConfig(name string, role workflow.Role, _ string, model, thinking string, _ int, instructions string, permissions map[string]string) json.RawMessage {
 	if permissions == nil {
 		permissions = map[string]string{"edit": "deny", "read": "allow"}
 	}
 	profile := map[string]any{
 		"name": name, "path": ".omnigrex/team/" + name + ".md", "role": role,
-		"runtime": runtime, "model": model, "steps": steps,
+		"runtime": "pi-rpc/v1", "model": model,
 		"permissions": permissions, "instructions": instructions,
 	}
-	if variant != "" {
-		profile["variant"] = variant
+	if thinking != "" {
+		profile["thinking"] = thinking
 	}
 	encoded, _ := json.Marshal(profile)
 	return encoded

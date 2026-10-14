@@ -19,7 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -58,7 +58,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	if err := database.CloseMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.FinalizeAgentTurn(ctx, rootLease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "ACP prompt failed"}); err != nil {
+	if err := database.FinalizeAgentTurn(ctx, rootLease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "Agent prompt failed"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,13 +106,14 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	}
 
 	paths := committedPublicationPaths(t)
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, retryLease, paths, finalHead, "developer-token")
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: retryLease, Execution: retryExecution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: paths,
+		Lease: retryLease, Execution: retryExecution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
+		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -483,14 +484,13 @@ func TestGatewaySignedReviewerReviewReconcilesToWorkflowOutcome(t *testing.T) {
 	if !strings.Contains(string(ledger[0].Request), "_By Omnigrex:") {
 		t.Fatalf("persisted signature footer is missing participant identity: %s", ledger[0].Request)
 	}
-	paths := workspace.Paths{Workspace: t.TempDir(), Publication: t.TempDir()}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: newIntegrationOutcomeWorkspace(t), DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: lease, Execution: execution, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token", Paths: paths,
+		Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
+		RepositoryCredential: "developer-token", ReviewerRepositoryCredential: "reviewer-token",
 	})
 	if err != nil {
 		t.Fatal(err)

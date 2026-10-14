@@ -6,35 +6,23 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 )
 
 var ErrReconciliationUnstable = errors.New("startup reconciliation did not reach a stable point")
 
 // ManagedRuntimeProcess is one discovered Runtime Process with a complete label identity.
-type ManagedRuntimeProcess struct {
-	Identity    store.AgentTurnRuntimeIdentity
-	ContainerID string
-}
+type ManagedRuntimeProcess = execution.ManagedProcess
 
 // DuplicateManagedRuntimeProcess groups every discovered Runtime Process carrying one exact identity.
-type DuplicateManagedRuntimeProcess struct {
-	Identity     store.AgentTurnRuntimeIdentity
-	ContainerIDs []string
-}
+type DuplicateManagedRuntimeProcess = execution.DuplicateProcesses
 
 // MalformedManagedRuntimeProcess is marked as managed but cannot be assigned a trusted identity.
-type MalformedManagedRuntimeProcess struct {
-	ContainerID string
-	Reason      string
-}
+type MalformedManagedRuntimeProcess = execution.MalformedProcess
 
 // RuntimeInventorySnapshot is one complete observation of managed Runtime Processes.
-type RuntimeInventorySnapshot struct {
-	Processes  []ManagedRuntimeProcess
-	Duplicates []DuplicateManagedRuntimeProcess
-	Malformed  []MalformedManagedRuntimeProcess
-}
+type RuntimeInventorySnapshot = execution.Snapshot
 
 type TurnStore interface {
 	ClaimAndRecoverExpiredAgentTurn(context.Context) (store.AgentTurnRecovery, bool, error)
@@ -51,6 +39,7 @@ type RuntimeInventory interface {
 // RuntimeCleaner must remove every Runtime Process carrying the supplied exact label identity.
 type RuntimeCleaner interface {
 	EnsureAbsent(context.Context, store.AgentTurnRuntimeIdentity) error
+	execution.OrphanCleaner
 }
 
 // MalformedRuntimeCleaner must revalidate that a container is managed before removing it by ID.
@@ -134,21 +123,30 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (ReconciliationResu
 		}
 		processCount := len(snapshot.Processes) + len(snapshot.Malformed)
 		for _, duplicate := range snapshot.Duplicates {
-			processCount += len(duplicate.ContainerIDs)
+			processCount += len(duplicate.Resources)
 		}
 		if processCount > reconciler.options.MaxRuntimeProcesses {
 			return result, fmt.Errorf("%w: Runtime Process limit reached", ErrReconciliationUnstable)
 		}
 
-		identities := make(map[store.AgentTurnRuntimeIdentity]bool, len(snapshot.Processes)+len(snapshot.Duplicates))
+		type discoveredIdentity struct {
+			duplicate bool
+			resources []execution.Ref
+		}
+		identities := make(map[store.AgentTurnRuntimeIdentity]discoveredIdentity, len(snapshot.Processes)+len(snapshot.Duplicates))
 		for _, process := range snapshot.Processes {
-			identities[process.Identity] = false
+			observed := identities[process.Identity]
+			observed.resources = append(observed.resources, process.Resource)
+			identities[process.Identity] = observed
 		}
 		for _, duplicate := range snapshot.Duplicates {
-			identities[duplicate.Identity] = true
+			observed := identities[duplicate.Identity]
+			observed.duplicate = true
+			observed.resources = append(observed.resources, duplicate.Resources...)
+			identities[duplicate.Identity] = observed
 		}
-		for identity, duplicate := range identities {
-			acted, removed, err := reconciler.reconcileIdentity(ctx, identity, duplicate)
+		for identity, observed := range identities {
+			acted, removed, err := reconciler.reconcileIdentity(ctx, identity, observed.duplicate, observed.resources)
 			if err != nil {
 				return result, err
 			}
@@ -164,7 +162,7 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (ReconciliationResu
 				return result, err
 			}
 			if err := reconciler.malformedCleaner.EnsureMalformedAbsent(ctx, malformed); err != nil {
-				return result, fmt.Errorf("remove malformed managed Runtime Process %q: %w", malformed.ContainerID, err)
+				return result, fmt.Errorf("remove malformed managed Runtime Process %q: %w", malformed.Resource, err)
 			}
 			actions++
 			result.RemovedMalformedProcesses++
@@ -182,13 +180,22 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (ReconciliationResu
 	return result, ErrReconciliationUnstable
 }
 
-func (reconciler *Reconciler) reconcileIdentity(ctx context.Context, identity store.AgentTurnRuntimeIdentity, duplicate bool) (bool, bool, error) {
+func (reconciler *Reconciler) reconcileIdentity(ctx context.Context, identity store.AgentTurnRuntimeIdentity, duplicate bool, resources []execution.Ref) (bool, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, false, err
 	}
 	state, found, err := reconciler.turns.ClassifyAgentTurnRuntime(ctx, identity)
 	if err != nil {
 		return false, false, fmt.Errorf("classify managed Runtime Process: %w", err)
+	}
+	if !found {
+		// The same Turn/epoch may belong to a legitimate execution with another
+		// full identity. Physical orphan removal must not create or change its
+		// reservation or revocation barrier.
+		if err := reconciler.cleaner.EnsureOrphansAbsent(ctx, identity, resources); err != nil {
+			return false, false, fmt.Errorf("remove orphan Runtime Process resources: %w", err)
+		}
+		return true, true, nil
 	}
 	if found {
 		switch state.Disposition {

@@ -1,0 +1,20 @@
+services:
+  orchestrator:
+    platform: linux/amd64
+    group_add:
+      - "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the host KVM group}"
+    devices:
+      - /dev/kvm:/dev/kvm
+    environment:
+      OMNIGREX_EXECUTION_BACKEND: microsandbox
+      OMNIGREX_MICROSANDBOX_HOME: /var/lib/omnigrex/msb
+      OMNIGREX_MICROSANDBOX_NAMESPACE: "${OMNIGREX_MICROSANDBOX_NAMESPACE:-omnigrex}"
+      OMNIGREX_MICROSANDBOX_CPUS: "${OMNIGREX_MICROSANDBOX_CPUS:-2}"
+      OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB: "${OMNIGREX_MICROSANDBOX_ROOT_DISK_MIB:-20480}"
+      MSB_HOME: /var/lib/omnigrex/msb
+      TMPDIR: /var/lib/omnigrex/msb/tmp
+    volumes:
+      - microsandbox-home:/var/lib/omnigrex/msb
+volumes:
+  microsandbox-home:
+    name: omnigrex-microsandbox

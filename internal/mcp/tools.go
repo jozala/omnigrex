@@ -114,12 +114,6 @@ var toolCatalog = []ToolDefinition{
 	}, "operation_id", "source_invocation_id"), Class: MutationTool},
 }
 
-// CapabilitiesForRole returns the stable credential-free MCP capability names available to a Role.
-// New code should use the startup-injected catalog at its trust boundary.
-func CapabilitiesForRole(roleID workflow.Role) ([]string, error) {
-	return capabilitiesForRole(role.BuiltinPolicyCatalog(), roleID)
-}
-
 func capabilitiesForRole(policies role.PolicyCatalog, roleID workflow.Role) ([]string, error) {
 	policy, ok := policies.Lookup(roleID)
 	if !ok {

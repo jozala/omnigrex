@@ -16,12 +16,12 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
 	rolepkg "github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
-	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 const (
@@ -40,10 +40,10 @@ func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.
 		t.Fatalf("ProcessNext() = (%t, %v), want processed success", processed, err)
 	}
 	want := []string{
-		"claim", "heartbeat", "execution", "paths", "developer-credential", "default-branch",
+		"claim", "heartbeat", "execution", "developer-credential", "default-branch",
 		"developer-credential", "developer-credential", "launch",
 		"execution", "open-admission", "prompt", "close-admission", "mcp-drain",
-		"list-unsettled", "cleanup", "reconcile", "settle",
+		"list-unsettled", "cleanup", "terminal-capture", "reconcile", "settle",
 	}
 	if got := fixture.operations.values(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("operations = %v, want %v", got, want)
@@ -54,15 +54,24 @@ func TestExecutionWorkerSuccessSequenceAndDelegatedBlockedSettlement(t *testing.
 	if fixture.outcomes.request.PromptResponse == nil || fixture.outcomes.request.PromptError != "" {
 		t.Fatal("outcome reconciliation did not receive the prompt response")
 	}
-	content := fixture.prompter.request.Content
-	if len(content) != 1 || content[0].Type != "text" || !json.Valid([]byte(content[0].Text)) {
-		t.Fatalf("prompt content = %#v, want one JSON event envelope", content)
+	execution := fixture.store.execution
+	wantKey := executionKeyForTest(execution)
+	if fixture.workspace.key != wantKey || fixture.outcomes.request.Capture.Request.Workspace.Key != wantKey {
+		t.Fatalf("terminal evidence is not bound to the full execution key: %#v", fixture.outcomes.request.Capture)
+	}
+	content := fixture.prompter.request.Text
+	if !json.Valid([]byte(content)) {
+		t.Fatalf("prompt content = %#v, want a JSON event envelope", content)
+	}
+	if fixture.prompter.request.Lease.ID != fixture.store.lease.ID || fixture.prompter.request.Lease.ExecutionEpoch != fixture.store.lease.ExecutionEpoch ||
+		fixture.prompter.request.Session.ID != execution.Session.ID {
+		t.Fatalf("prompt identity = %#v, want current fenced Turn and Session", fixture.prompter.request)
 	}
 }
 
 func TestExecutionWorkerDelegatesInfrastructureSettlementObservation(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	promptErr := errors.New("ACP transport unavailable")
+	promptErr := errors.New("agent transport unavailable")
 	fixture.prompter.err = promptErr
 	fixture.outcomes.observation = executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
 	worker := fixture.worker(t)
@@ -99,7 +108,7 @@ func TestExecutionWorkerHandsOffUnprovenPublicationBeforeLaunchingAgent(t *testi
 
 func TestExecutionWorkerSettlesCorroboratedHandoffAfterPromptEOF(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	promptErr := errors.New("submit ACP prompt: EOF")
+	promptErr := errors.New("submit agent prompt: EOF")
 	fixture.prompter.err = promptErr
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		if request.PromptError != agentturn.PromptErrorFailure || request.PromptResponse != nil {
@@ -123,9 +132,9 @@ func TestExecutionWorkerHeartbeatLossCancelsPromptAndOnlyCleansRuntime(t *testin
 	fixture.store.heartbeatErrAt = 2
 	fixture.store.heartbeatErr = store.ErrAgentTurnFenceLost
 	fixture.config.HeartbeatInterval = time.Millisecond
-	fixture.prompter.prompt = func(ctx context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(ctx context.Context) (agent.Outcome, error) {
 		<-ctx.Done()
-		return acp.PromptResponse{}, ctx.Err()
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, ctx.Err()
 	}
 	worker := fixture.worker(t)
 
@@ -316,9 +325,101 @@ func TestExecutionWorkerCleanupFailureHandsZeroMutationTurnToStopRecovery(t *tes
 		!containsInOrder(operations, "list-unsettled", "cleanup", "cleanup", "recover", "recover") {
 		t.Fatalf("cleanup recovery operations = %v", operations)
 	}
-	if contains(operations, "reconcile") || contains(operations, "settle") {
+	if contains(operations, "reconcile") || contains(operations, "settle") || contains(operations, "terminal-capture") {
 		t.Fatalf("cleanup failure directly reconciled or settled: %v", operations)
 	}
+}
+
+func TestExecutionWorkerMissingCaptureStillReconcilesOutcomesWithoutWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		role    workflow.Role
+		outcome workflow.TurnOutcome
+	}{
+		{workflow.RoleDeveloper, workflow.TurnOutcomeBlocked}, {workflow.RoleReviewer, workflow.TurnOutcomeApproved},
+	} {
+		t.Run(string(test.role), func(t *testing.T) {
+			fixture := newExecutionWorkerFixture(t, test.role)
+			fixture.workspace.err = errors.New("capture unavailable " + executionDeveloperRepositoryCredential)
+			fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+				if request.Capture != (execution.CaptureRef{}) || request.PromptResponse == nil {
+					t.Fatalf("missing capture changed prompt evidence")
+				}
+				return executionObservation(test.outcome, store.AgentTurnSucceeded)
+			}
+			processed, err := fixture.worker(t).ProcessNext(context.Background())
+			if !processed || err != nil || fixture.store.settled.Outcome != test.outcome {
+				t.Fatalf("missing capture outcome = %t, %v, %#v", processed, err, fixture.store.settled)
+			}
+			if !containsInOrder(fixture.operations.values(), "cleanup", "terminal-capture", "reconcile", "settle") {
+				t.Fatalf("capture lookup before cleanup: %v", fixture.operations.values())
+			}
+		})
+	}
+}
+
+func TestExecutionWorkerMissingCaptureCanDeferTerminalCorroboration(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.workspace.err = errors.New("capture unavailable " + executionDeveloperRepositoryCredential)
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.Capture != (execution.CaptureRef{}) {
+			t.Fatal("failed lookup supplied capture evidence")
+		}
+		request.OnCorroborationFailure(agentturn.TerminalCorroborationFailure{SourceInvocationID: "request-review", Code: "workspace_observation_unavailable", Retryable: true})
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
+	}
+	checkpointStore := &executionCaptureCheckpointStore{executionStore: fixture.store}
+	dependencies := fixture.dependencies()
+	dependencies.Store = checkpointStore
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(context.Background())
+	var promptOutcome struct {
+		Admitted     bool         `json:"admitted"`
+		Status       agent.Status `json:"status"`
+		LimitReached bool         `json:"limit_reached"`
+	}
+	decodeErr := json.Unmarshal(checkpointStore.promptOutcome, &promptOutcome)
+	if !processed || err != nil || checkpointStore.sourceID != "request-review" || checkpointStore.code != "workspace_observation_unavailable" || checkpointStore.promptError != "" ||
+		decodeErr != nil || !promptOutcome.Admitted || promptOutcome.Status != agent.Completed || promptOutcome.LimitReached || !reflect.DeepEqual(checkpointStore.lease, fixture.store.lease) {
+		t.Fatalf("missing capture checkpoint = processed %t, error %v, source %q, code %q, prompt %s", processed, err, checkpointStore.sourceID, checkpointStore.code, checkpointStore.promptOutcome)
+	}
+	if contains(fixture.operations.values(), "settle") || contains(fixture.operations.values(), "recover") {
+		t.Fatalf("deferred capture directly settled: %v", fixture.operations.values())
+	}
+}
+
+func TestExecutionWorkerCaptureLookupFenceLossPreventsReconciliation(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.workspace.err = store.ErrAgentTurnFenceLost
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || !errors.Is(err, store.ErrAgentTurnFenceLost) {
+		t.Fatalf("capture lookup fence loss = %t, %v", processed, err)
+	}
+	operations := fixture.operations.values()
+	if !containsInOrder(operations, "cleanup", "terminal-capture") || contains(operations, "reconcile") || contains(operations, "settle") || contains(operations, "recover") {
+		t.Fatalf("capture lookup ignored fence loss: %v", operations)
+	}
+}
+
+type executionCaptureCheckpointStore struct {
+	*executionStore
+	lease                       store.AgentTurnLease
+	sourceID, code, promptError string
+	promptOutcome               json.RawMessage
+}
+
+func (database *executionCaptureCheckpointStore) BeginTerminalCorroboration(_ context.Context, lease store.AgentTurnLease, sourceID string, promptOutcome json.RawMessage, promptError, code string) (store.TerminalCorroboration, error) {
+	database.lease, database.sourceID, database.code, database.promptError = lease, sourceID, code, promptError
+	database.promptOutcome = append(json.RawMessage(nil), promptOutcome...)
+	return store.TerminalCorroboration{VerificationJobID: "verification-job"}, nil
+}
+
+func executionKeyForTest(context store.AgentTurnExecutionContext) execution.Key {
+	return execution.Key{AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
+		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion}
 }
 
 func TestExecutionWorkerCleanupRetryCanProveAbsenceAndSettle(t *testing.T) {
@@ -379,8 +480,8 @@ func TestExecutionWorkerMapsPromptDeadlineAndCancellation(t *testing.T) {
 		{
 			name: "cancellation", wantError: context.Canceled, wantClass: agentturn.PromptErrorCancellation, wantStatus: store.AgentTurnInterrupted,
 			configure: func(fixture *executionWorkerFixture) {
-				fixture.prompter.prompt = func(ctx context.Context) (acp.PromptResponse, error) {
-					return acp.PromptResponse{}, context.Canceled
+				fixture.prompter.prompt = func(ctx context.Context) (agent.Outcome, error) {
+					return agent.Outcome{Admitted: true, Status: agent.Unknown}, context.Canceled
 				}
 			},
 		},
@@ -405,16 +506,32 @@ func TestExecutionWorkerMapsPromptDeadlineAndCancellation(t *testing.T) {
 	}
 }
 
-func TestExecutionWorkerTreatsCancelledACPResponseAfterTurnDeadlineAsDeadline(t *testing.T) {
+func TestExecutionWorkerTurnDeadlineIncludesLaunchAndDoesNotAdmitPrompt(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.config.TurnTimeout = 40 * time.Millisecond
+	fixture.launcher.delay = 100 * time.Millisecond
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, mapPromptClassToStatus(request.PromptError))
+	}
+	processed, err := fixture.worker(t).ProcessNext(t.Context())
+	if !processed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("launch exceeded Turn deadline: processed=%t err=%v", processed, err)
+	}
+	if contains(fixture.operations.values(), "prompt") || fixture.store.settled.Completion.Status != store.AgentTurnTimedOut {
+		t.Fatalf("deadline admitted prompt or did not settle timeout: operations=%v settlement=%+v", fixture.operations.values(), fixture.store.settled)
+	}
+}
+
+func TestExecutionWorkerTreatsAbortedOutcomeAfterTurnDeadlineAsDeadline(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.config.TurnTimeout = time.Millisecond
-	fixture.prompter.prompt = func(ctx context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(ctx context.Context) (agent.Outcome, error) {
 		<-ctx.Done()
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+		return agent.Outcome{Admitted: true, Status: agent.Aborted}, nil
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		if request.PromptError != agentturn.PromptErrorDeadline || request.PromptResponse != nil {
-			t.Fatalf("deadline-induced ACP cancellation = %#v, want deadline error", request)
+			t.Fatalf("deadline-induced agent abort = %#v, want deadline error", request)
 		}
 		return executionObservation(workflow.TurnOutcomeChangeProposalReady, store.AgentTurnSucceeded)
 	}
@@ -428,17 +545,17 @@ func TestExecutionWorkerTreatsCancelledACPResponseAfterTurnDeadlineAsDeadline(t 
 	}
 }
 
-func TestExecutionWorkerKeepsExplicitACPResponseCancellationInterrupted(t *testing.T) {
+func TestExecutionWorkerKeepsExplicitAbortedOutcomeInterrupted(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	ctx, cancel := context.WithCancel(context.Background())
-	fixture.prompter.prompt = func(promptCtx context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(promptCtx context.Context) (agent.Outcome, error) {
 		cancel()
 		<-promptCtx.Done()
-		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+		return agent.Outcome{Admitted: true, Status: agent.Aborted}, nil
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
-		if request.PromptResponse == nil || request.PromptResponse.StopReason != acp.StopReasonCancelled || request.PromptError != "" {
-			t.Fatalf("explicit ACP cancellation = %#v, want cancelled stop reason", request)
+		if request.PromptResponse == nil || *request.PromptResponse != (agent.Outcome{Admitted: true, Status: agent.Aborted}) || request.PromptError != "" {
+			t.Fatalf("explicit agent abort = %#v, want admitted aborted outcome", request)
 		}
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
 	}
@@ -452,30 +569,30 @@ func TestExecutionWorkerKeepsExplicitACPResponseCancellationInterrupted(t *testi
 	}
 }
 
-func TestExecutionWorkerFailedAtomicPromptFenceDoesNotSettleKnownRefusal(t *testing.T) {
+func TestExecutionWorkerFailedAtomicPromptFenceDoesNotSettleKnownFailure(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
-		return acp.PromptResponse{StopReason: acp.StopReasonRefusal}, nil
+	fixture.prompter.prompt = func(context.Context) (agent.Outcome, error) {
+		return agent.Outcome{Admitted: true, Status: agent.Failed}, nil
 	}
 	fixture.store.promptEvidenceErr = errors.New("temporary PostgreSQL failure")
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
-		t.Fatalf("unfenced known refusal reached reconciliation: %#v", request)
+		t.Fatalf("unfenced known failure reached reconciliation: %#v", request)
 		return store.AgentTurnSettlementObservation{}
 	}
 	processed, err := fixture.worker(t).ProcessNext(context.Background())
 	if err == nil || fixture.store.settled.Outcome != "" {
-		t.Fatalf("known refusal after failed checkpoint = processed %t, error %v, observation %#v",
+		t.Fatalf("known failure after failed checkpoint = processed %t, error %v, observation %#v",
 			processed, err, fixture.store.settled)
 	}
 }
 
-func TestExecutionWorkerOOMObservationDeadlineDoesNotReclassifyACPCancellation(t *testing.T) {
+func TestExecutionWorkerOOMObservationDeadlineDoesNotReclassifyPromptCancellation(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.prompter.err = context.Canceled
 	fixture.runtime.oomObserveErr = context.DeadlineExceeded
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
-			t.Fatalf("cancelled ACP prompt was reclassified by Docker observation: %#v", request)
+			t.Fatalf("cancelled agent prompt was reclassified by Docker observation: %#v", request)
 		}
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
 	}
@@ -488,13 +605,13 @@ func TestExecutionWorkerOOMObservationDeadlineDoesNotReclassifyACPCancellation(t
 	}
 }
 
-func TestExecutionWorkerConfirmedOOMDoesNotAcceptExplicitACPCancellation(t *testing.T) {
+func TestExecutionWorkerConfirmedOOMDoesNotAcceptExplicitPromptCancellation(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.prompter.err = context.Canceled
 	fixture.runtime.oomKilled = true
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		if request.PromptError != agentturn.PromptErrorCancellation || request.PromptResponse != nil {
-			t.Fatalf("confirmed OOM overrode explicit ACP cancellation: %#v", request)
+			t.Fatalf("confirmed OOM overrode explicit prompt cancellation: %#v", request)
 		}
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
 	}
@@ -507,19 +624,19 @@ func TestExecutionWorkerConfirmedOOMDoesNotAcceptExplicitACPCancellation(t *test
 	}
 }
 
-func TestExecutionWorkerRejectsUnknownACPStopReasonAfterTerminalIntent(t *testing.T) {
+func TestExecutionWorkerRejectsProtocolFailureAfterTerminalIntent(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	fixture.prompter.err = fmt.Errorf("submit ACP prompt: %w", acp.ErrUnknownStopReason)
+	fixture.prompter.err = fmt.Errorf("submit agent prompt: %w", agent.ErrProtocol)
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		if request.PromptError != agentturn.PromptErrorInvalidResponse || request.PromptResponse != nil {
-			t.Fatalf("unknown ACP stop reason = %#v, want invalid response", request)
+			t.Fatalf("protocol failure = %#v, want invalid response", request)
 		}
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
 	}
 
 	processed, err := fixture.worker(t).ProcessNext(context.Background())
-	if !processed || !errors.Is(err, acp.ErrUnknownStopReason) {
-		t.Fatalf("ProcessNext() = (%t, %v), want rejected ACP response", processed, err)
+	if !processed || !errors.Is(err, agent.ErrProtocol) {
+		t.Fatalf("ProcessNext() = (%t, %v), want rejected protocol response", processed, err)
 	}
 	if fixture.store.settled.Outcome != workflow.TurnOutcomeInfrastructureFailed || fixture.store.settled.Completion.Status != store.AgentTurnFailed {
 		t.Fatalf("invalid response settlement = %#v", fixture.store.settled)
@@ -529,8 +646,8 @@ func TestExecutionWorkerRejectsUnknownACPStopReasonAfterTerminalIntent(t *testin
 func TestExecutionWorkerReportsConfirmedOOMWithoutChangingSettlementBarriers(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.runtime.oomKilled = true
-	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
-		return acp.PromptResponse{}, io.EOF
+	fixture.prompter.prompt = func(context.Context) (agent.Outcome, error) {
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, io.EOF
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
@@ -550,8 +667,8 @@ func TestExecutionWorkerReportsConfirmedOOMWithoutChangingSettlementBarriers(t *
 func TestExecutionWorkerUsesOOMDiscoveredDuringCleanup(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.runtime.oomAfterCleanup = true
-	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
-		return acp.PromptResponse{}, io.EOF
+	fixture.prompter.prompt = func(context.Context) (agent.Outcome, error) {
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, io.EOF
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnFailed)
@@ -566,10 +683,10 @@ func TestExecutionWorkerUsesOOMDiscoveredDuringCleanup(t *testing.T) {
 func TestExecutionWorkerSettlesParentCancellationWhileHeartbeatRemainsLive(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	ctx, cancel := context.WithCancel(context.Background())
-	fixture.prompter.prompt = func(promptCtx context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(promptCtx context.Context) (agent.Outcome, error) {
 		cancel()
 		<-promptCtx.Done()
-		return acp.PromptResponse{}, promptCtx.Err()
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, promptCtx.Err()
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, mapPromptClassToStatus(request.PromptError))
@@ -594,10 +711,10 @@ func TestExecutionWorkerParentCancellationStillDrainsBeforeSettlement(t *testing
 	fixture.config.CleanupTimeout = time.Millisecond
 	fixture.config.HeartbeatInterval = 100 * time.Microsecond
 	fixture.runtime.drainWaits = 1
-	fixture.prompter.prompt = func(promptCtx context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(promptCtx context.Context) (agent.Outcome, error) {
 		cancel()
 		<-promptCtx.Done()
-		return acp.PromptResponse{}, promptCtx.Err()
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, promptCtx.Err()
 	}
 	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
 		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, mapPromptClassToStatus(request.PromptError))
@@ -876,9 +993,9 @@ func TestExecutionWorkerRepairsAmbiguousReservationAndReleasesConcurrencySlot(t 
 func TestExecutionWorkerPersistentResidualRepairStopsOnlyAfterFenceLoss(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	parent, cancelParent := context.WithCancel(context.Background())
-	fixture.prompter.prompt = func(context.Context) (acp.PromptResponse, error) {
+	fixture.prompter.prompt = func(context.Context) (agent.Outcome, error) {
 		cancelParent()
-		return acp.PromptResponse{}, context.Canceled
+		return agent.Outcome{Admitted: true, Status: agent.Unknown}, context.Canceled
 	}
 	fixture.runtime.drainResults = []error{mcp.ErrMutationDrainUnresolved}
 	fixture.store.unsettled = []store.MutationReservation{{ID: "in-flight", State: store.MutationInFlight}}
@@ -937,7 +1054,7 @@ func TestExecutionWorkerUsesPolicyCredentialsAndDeterministicRepositoryInputs(t 
 			var envelope struct {
 				CurrentHeadSHA string `json:"current_head_sha"`
 			}
-			if err := json.Unmarshal([]byte(fixture.prompter.request.Content[0].Text), &envelope); err != nil || envelope.CurrentHeadSHA != test.wantCurrentHead {
+			if err := json.Unmarshal([]byte(fixture.prompter.request.Text), &envelope); err != nil || envelope.CurrentHeadSHA != test.wantCurrentHead {
 				t.Fatalf("event envelope current head = %q, error = %v", envelope.CurrentHeadSHA, err)
 			}
 			// Each launch phase (default-branch resolution, publication
@@ -973,7 +1090,7 @@ func TestExecutionWorkerFailsReviewerTurnBeforeLaunchWithoutReviewerAccess(t *te
 	if fixture.launcher.request.RepositoryURL != "" {
 		t.Fatalf("launch repository URL = %q, want no launch before Reviewer validation", fixture.launcher.request.RepositoryURL)
 	}
-	if len(fixture.prompter.request.Content) != 0 {
+	if fixture.prompter.request.Text != "" {
 		t.Fatal("prompt ran despite unavailable Reviewer credentials")
 	}
 	// The turn still finalizes so the prerequisite failure is settled, but it
@@ -1249,7 +1366,7 @@ type executionWorkerFixture struct {
 	defaultBranch        *executionDefaultBranch
 	launcher             *executionLauncher
 	runtime              *executionRuntime
-	prompter             *executionPrompter
+	prompter             *executionTurnConnection
 	outcomes             *executionOutcomes
 	workspace            *executionWorkspace
 	definition           workflow.Definition
@@ -1270,14 +1387,16 @@ func newExecutionWorkerFixture(t *testing.T, role workflow.Role) *executionWorke
 	}
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, role, proposal)
 	execution.Session.Status = store.AgentSessionActive
-	execution.Session.ACPSessionID = "acp-session"
+	execution.Session.RuntimeSessionID = execution.Session.ID
+	execution.Session.RuntimeCapabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
 	execution.Turn.Purpose = workflow.TurnPurposeInitialDevelopment
 	if role == workflow.RoleReviewer {
 		execution.Turn.Purpose = workflow.TurnPurposeReview
 	}
 	lease.AgentTurn = execution.Turn
 	lease.LeaseExpiresAt = time.Now().Add(2 * time.Hour)
-	runtime := &executionRuntime{operations: operations, lease: lease, client: &executionPromptClient{}}
+	connection := &executionTurnConnection{operations: operations, response: agent.Outcome{Admitted: true, Status: agent.Completed}}
+	runtime := &executionRuntime{operations: operations, lease: lease, agent: connection}
 	fixture := &executionWorkerFixture{
 		operations:           operations,
 		store:                &executionStore{operations: operations, lease: lease, acquired: true, execution: execution, slotActive: true},
@@ -1286,9 +1405,9 @@ func newExecutionWorkerFixture(t *testing.T, role workflow.Role) *executionWorke
 		defaultBranch:        &executionDefaultBranch{operations: operations, branch: githubapi.DefaultBranch{Name: "trunk", CommitSHA: runtimeTestDefaultSHA}},
 		launcher:             &executionLauncher{operations: operations, runtime: runtime},
 		runtime:              runtime,
-		prompter:             &executionPrompter{operations: operations, response: acp.PromptResponse{StopReason: acp.StopReasonEndTurn}},
+		prompter:             connection,
 		outcomes:             &executionOutcomes{operations: operations, observation: executionObservation(workflow.TurnOutcomeBlocked, store.AgentTurnSucceeded)},
-		workspace:            &executionWorkspace{operations: operations, paths: workspace.Paths{Workspace: "/workspace", Publication: "/publication", Mise: "/mise"}},
+		workspace:            &executionWorkspace{operations: operations},
 		definition:           builtinDefinition(t),
 		policies:             rolepkg.BuiltinPolicyCatalog(),
 		config: agentturn.ExecutionWorkerConfig{
@@ -1306,7 +1425,7 @@ func (fixture *executionWorkerFixture) dependencies() agentturn.ExecutionWorkerD
 	return agentturn.ExecutionWorkerDependencies{
 		Store: fixture.store, DeveloperCredentials: fixture.developerCredentials,
 		ReviewerCredentials: fixture.reviewerCredentials, DefaultBranch: fixture.defaultBranch,
-		Launcher: fixture.launcher, Sessions: fixture.prompter, Outcomes: fixture.outcomes, Workspace: fixture.workspace,
+		Launcher: fixture.launcher, Outcomes: fixture.outcomes, Workspace: fixture.workspace,
 		Definition: fixture.definition, Policies: fixture.policies,
 		PublicationRecovery: executionPublicationRecoveryFunc(func(context.Context, store.AgentTurnLease, store.AgentTurnExecutionContext, string, string, string) error {
 			return nil
@@ -1831,6 +1950,7 @@ func TestExecutionWorkerReacquiresLaunchCredentialPerPhase(t *testing.T) {
 		// an expired token and refreshes, and so on for each phase.
 		2: 6 * time.Minute,
 		3: 61 * time.Minute,
+		4: 61 * time.Minute,
 	}}
 	primed, err := provider.RepositoryCredential(context.Background(), "acme", "widgets")
 	if err != nil || primed != "launch-token-A" {
@@ -1858,10 +1978,46 @@ func TestExecutionWorkerReacquiresLaunchCredentialPerPhase(t *testing.T) {
 	if fixture.defaultBranch.credential != "launch-token-B" {
 		t.Fatalf("default-branch credential = %q, want refreshed token B", fixture.defaultBranch.credential)
 	}
-	if recoveryCredential != "launch-token-C" || fixture.launcher.request.RepositoryCredential != "launch-token-C" {
-		t.Fatalf("recovery credential = %q, launch credential = %q, want refreshed token C for both",
+	if recoveryCredential != "launch-token-C" || fixture.launcher.request.RepositoryCredential != "launch-token-D" {
+		t.Fatalf("recovery credential = %q, launch credential = %q, want refreshed tokens C and D",
 			recoveryCredential, fixture.launcher.request.RepositoryCredential)
 	}
+	if fixture.outcomes.request.RepositoryCredential != "launch-token-D" || fixture.outcomes.request.ReviewerRepositoryCredential != "" {
+		t.Fatal("reconciliation retained credentials beyond the diagnostic-only launch snapshot")
+	}
+}
+
+func TestExecutionWorkerRedactsEveryLaunchPhaseCredentialFromSettlementDiagnostic(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleReviewer)
+	credentials := []string{"branch-phase-token", "recovery-phase-token", "launch-phase-token"}
+	provider := &executionPhaseCredentialProvider{credentials: credentials}
+	dependencies := fixture.dependencies()
+	dependencies.DeveloperCredentials = provider
+	fixture.prompter.err = errors.New(strings.Join(append(credentials, executionReviewerRepositoryCredential), " "))
+	worker, err := agentturn.NewExecutionWorker(dependencies, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.ProcessNext(t.Context())
+	if !processed || err == nil || provider.calls != 3 {
+		t.Fatalf("phase failure = %t, %v, acquisitions %d", processed, err, provider.calls)
+	}
+	for _, credential := range append(credentials, executionReviewerRepositoryCredential) {
+		if strings.Contains(err.Error(), credential) || strings.Contains(fixture.outcomes.request.PromptDiagnostic, credential) {
+			t.Fatalf("launch credential leaked into a failure diagnostic: %q", credential)
+		}
+	}
+}
+
+type executionPhaseCredentialProvider struct {
+	credentials []string
+	calls       int
+}
+
+func (provider *executionPhaseCredentialProvider) RepositoryCredential(context.Context, string, string) (string, error) {
+	credential := provider.credentials[provider.calls]
+	provider.calls++
+	return credential, nil
 }
 
 type executionDefaultBranch struct {
@@ -1881,6 +2037,7 @@ type executionLauncher struct {
 	runtime               *executionRuntime
 	request               agentturn.LaunchRequest
 	err                   error
+	delay                 time.Duration
 	launchStarted         chan struct{}
 	registrationRelease   chan struct{}
 	registrationPublished chan struct{}
@@ -1893,12 +2050,19 @@ func (recover executionPublicationRecoveryFunc) Recover(ctx context.Context, lea
 	return recover(ctx, lease, execution, url, credential, base)
 }
 
-func (launcher *executionLauncher) LaunchExecution(_ context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
+func (launcher *executionLauncher) LaunchExecution(ctx context.Context, request agentturn.LaunchRequest) (agentturn.ExecutionRuntime, error) {
 	launcher.operations.add("launch")
 	launcher.request = request
 	launcher.request.ProviderCredentialJSON = append(json.RawMessage(nil), request.ProviderCredentialJSON...)
 	if launcher.launchStarted != nil {
 		close(launcher.launchStarted)
+	}
+	if launcher.delay > 0 {
+		select {
+		case <-time.After(launcher.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if launcher.registrationRelease != nil {
 		<-launcher.registrationRelease
@@ -1919,7 +2083,7 @@ type executionRuntime struct {
 	mutex           sync.Mutex
 	operations      *executionOperations
 	lease           store.AgentTurnLease
-	client          session.PromptClient
+	agent           session.TurnConnection
 	drainResults    []error
 	drainWaits      int
 	cleanupResults  []error
@@ -1942,8 +2106,8 @@ func (runtime *executionRuntime) ObserveOOM(context.Context) (bool, error) {
 
 func (runtime *executionRuntime) ConfirmedOOM() bool { return runtime.oomKilled }
 
-func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease { return runtime.lease }
-func (runtime *executionRuntime) PromptClient() session.PromptClient { return runtime.client }
+func (runtime *executionRuntime) CurrentLease() store.AgentTurnLease      { return runtime.lease }
+func (runtime *executionRuntime) AgentConnection() session.TurnConnection { return runtime.agent }
 func (runtime *executionRuntime) RenewMCP(expiresAt time.Time) bool {
 	runtime.mutex.Lock()
 	defer runtime.mutex.Unlock()
@@ -2013,29 +2177,31 @@ func (runtime *executionRuntime) drainCallCount() int {
 	return count
 }
 
-type executionPromptClient struct{}
-
-func (*executionPromptClient) SetAgentEventContext(agentevent.Context) {}
-func (*executionPromptClient) Prompt(context.Context, string, []acp.ContentBlock) (acp.PromptResponse, error) {
-	return acp.PromptResponse{}, errors.New("unexpected direct prompt")
-}
-
-type executionPrompter struct {
+type executionTurnConnection struct {
 	operations *executionOperations
-	request    session.PromptRequest
-	response   acp.PromptResponse
+	request    executionPromptRequest
+	response   agent.Outcome
 	err        error
-	prompt     func(context.Context) (acp.PromptResponse, error)
+	prompt     func(context.Context) (agent.Outcome, error)
 }
 
-func (prompter *executionPrompter) Prompt(ctx context.Context, request session.PromptRequest) (acp.PromptResponse, error) {
+type executionPromptRequest struct {
+	Lease   store.AgentTurnLease
+	Session store.AgentSession
+	Text    string
+	Sink    agentevent.Sink
+}
+
+func (prompter *executionTurnConnection) Prompt(ctx context.Context, lease store.AgentTurnLease, durable store.AgentSession, text string, sink agentevent.Sink) (agent.Outcome, error) {
 	prompter.operations.add("prompt")
-	prompter.request = request
+	prompter.request = executionPromptRequest{Lease: lease, Session: durable, Text: text, Sink: sink}
 	if prompter.prompt != nil {
 		return prompter.prompt(ctx)
 	}
 	return prompter.response, prompter.err
 }
+
+func (*executionTurnConnection) Close() error { return nil }
 
 type executionOutcomes struct {
 	operations   *executionOperations
@@ -2064,13 +2230,18 @@ func (outcomes *executionOutcomes) Reconcile(ctx context.Context, request agentt
 }
 
 type executionWorkspace struct {
+	mutex      sync.Mutex
 	operations *executionOperations
-	paths      workspace.Paths
+	key        execution.Key
+	err        error
 }
 
-func (resolver *executionWorkspace) Paths(string) (workspace.Paths, error) {
-	resolver.operations.add("paths")
-	return resolver.paths, nil
+func (resolver *executionWorkspace) TerminalCapture(_ context.Context, key execution.Key) (execution.CaptureRef, error) {
+	resolver.mutex.Lock()
+	defer resolver.mutex.Unlock()
+	resolver.operations.add("terminal-capture")
+	resolver.key = key
+	return execution.CaptureRef{Request: execution.CaptureRequest{Workspace: execution.WorkspaceRef{Key: key}, OperationID: key.AgentTurnID, Purpose: execution.TerminalCapture}, SHA256: strings.Repeat("a", 64)}, resolver.err
 }
 
 func executionObservation(outcome workflow.TurnOutcome, status store.AgentTurnStatus) store.AgentTurnSettlementObservation {
@@ -2080,9 +2251,9 @@ func executionObservation(outcome workflow.TurnOutcome, status store.AgentTurnSt
 	}
 }
 
-func waitForPromptCancellation(ctx context.Context) (acp.PromptResponse, error) {
+func waitForPromptCancellation(ctx context.Context) (agent.Outcome, error) {
 	<-ctx.Done()
-	return acp.PromptResponse{}, ctx.Err()
+	return agent.Outcome{Admitted: true, Status: agent.Unknown}, ctx.Err()
 }
 
 func mapPromptClassToStatus(classification agentturn.PromptErrorClassification) store.AgentTurnStatus {

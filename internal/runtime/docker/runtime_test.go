@@ -14,17 +14,18 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
 
-const testImage = "omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const testImage = "omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestValidImageDigestUsesDistributionGrammar(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	for _, image := range []string{
 		"sha256:" + digest,
-		"omnigrex/opencode@sha256:" + digest,
+		"omnigrex/pi@sha256:" + digest,
 		"alpine:3.24@sha256:" + digest,
 		"registry.example:5000/namespace/image__name@sha256:" + digest,
 	} {
@@ -55,9 +56,9 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 		Platform:   Platform{OS: "linux", Architecture: "arm64"},
 		User:       "10001:10001",
 		WorkingDir: "/workspace",
-		Command:    []string{"acp"},
+		Command:    []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
 		Environment: []string{
-			"HOME=/home/opencode",
+			"HOME=/tmp",
 		},
 		Labels: map[string]string{
 			"io.omnigrex.assignment": "assignment-1",
@@ -65,10 +66,10 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 		ExtraHosts: []string{"host.docker.internal:host-gateway"},
 		Volumes: []VolumeMount{
 			{Name: "omnigrex-workspaces", Subpath: "assignment-1/workspace", Target: "/workspace"},
-			{Name: "omnigrex-runtime-state", Subpath: "assignment-1/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+			{Name: "omnigrex-runtime-state", Subpath: "assignment-1/runtime-state", Target: "/state"},
 		},
 		Tmpfs: []TmpfsMount{
-			{Target: "/tmp/opencode", SizeBytes: 64 << 20},
+			{Target: "/tmp", SizeBytes: 64 << 20},
 		},
 		MemoryBytes: 1024 << 20,
 		PIDsLimit:   128,
@@ -116,7 +117,7 @@ func TestBuildCreateOptionsAppliesRuntimeIsolation(t *testing.T) {
 	if options.HostConfig.Mounts[0].VolumeOptions == nil || options.HostConfig.Mounts[0].VolumeOptions.Subpath != "assignment-1/workspace" {
 		t.Errorf("workspace volume options = %+v", options.HostConfig.Mounts[0].VolumeOptions)
 	}
-	tmpfsOptions := options.HostConfig.Tmpfs["/tmp/opencode"]
+	tmpfsOptions := options.HostConfig.Tmpfs["/tmp"]
 	for _, required := range []string{"rw", "nosuid", "nodev", "noexec", "uid=10001", "gid=10001", "mode=0700", "size=67108864"} {
 		if !strings.Contains(tmpfsOptions, required) {
 			t.Errorf("tmpfs options = %q, missing %q", tmpfsOptions, required)
@@ -132,7 +133,7 @@ func TestBuildSubpathCreateOptionsUsesAssignmentIdentityAndVolumeRoots(t *testin
 		WorkingDir: testWorkspacePath,
 		Volumes: []VolumeMount{
 			{Name: "omnigrex-workspaces", Subpath: "assignment-1/workspace", Target: testWorkspacePath},
-			{Name: "omnigrex-runtime-state", Subpath: "assignment-1/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+			{Name: "omnigrex-runtime-state", Subpath: "assignment-1/runtime-state", Target: "/state"},
 		},
 	})
 	if err != nil {
@@ -223,13 +224,13 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 			User:       "10001:10001",
 			WorkingDir: testWorkspacePath,
 			VolumeBindings: map[string]string{
-				testWorkspacePath:                      "workspaces",
-				"/home/opencode/.local/share/opencode": "runtime-state",
+				testWorkspacePath: "workspaces",
+				"/state":          "runtime-state",
 			},
-			RequiredVolumeTargets:         []string{testWorkspacePath, "/home/opencode/.local/share/opencode"},
-			RequiredWritableVolumeTargets: []string{testWorkspacePath, "/home/opencode/.local/share/opencode"},
+			RequiredVolumeTargets:         []string{testWorkspacePath, "/state"},
+			RequiredWritableVolumeTargets: []string{testWorkspacePath, "/state"},
 			RequireVolumeSubpaths:         true,
-			RequiredEnvironment:           map[string]string{"OPENCODE_AUTH_CONTENT": "{}"},
+			RequiredEnvironment:           map[string]string{"PI_CODING_AGENT_DIR": "/run/pi-agent"},
 			MaxMemoryBytes:                512 << 20,
 			MaxPIDsLimit:                  128,
 		},
@@ -239,10 +240,10 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 		User:        "10001:10001",
 		WorkingDir:  testWorkspacePath,
 		Network:     "omnigrex-agent",
-		Environment: []string{"OPENCODE_AUTH_CONTENT={}"},
+		Environment: []string{"PI_CODING_AGENT_DIR=/run/pi-agent"},
 		Volumes: []VolumeMount{
 			{Name: "workspaces", Subpath: "assignment/workspace", Target: testWorkspacePath},
-			{Name: "runtime-state", Subpath: "assignment/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+			{Name: "runtime-state", Subpath: "assignment/runtime-state", Target: "/state"},
 		},
 	}
 	if err := validateResources(options, base); err != nil {
@@ -254,11 +255,11 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: "bridge", Volumes: base.Volumes},
 		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: []VolumeMount{
 			{Name: "workspaces", Subpath: "assignment/workspace", Target: testWorkspacePath},
-			{Name: "workspaces", Subpath: "assignment/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+			{Name: "workspaces", Subpath: "assignment/runtime-state", Target: "/state"},
 		}},
 		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: []VolumeMount{
 			{Name: "workspaces", Subpath: "assignment/workspace", Target: testWorkspacePath},
-			{Name: "unknown", Subpath: "assignment/runtime-state", Target: "/home/opencode/.local/share/opencode"},
+			{Name: "unknown", Subpath: "assignment/runtime-state", Target: "/state"},
 		}},
 		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: base.Volumes, MemoryBytes: 513 << 20},
 		{User: base.User, WorkingDir: base.WorkingDir, Environment: base.Environment, Network: base.Network, Volumes: base.Volumes, PIDsLimit: 129},
@@ -272,8 +273,8 @@ func TestValidateResourcesRejectsUnconfiguredIsolation(t *testing.T) {
 
 func TestValidateResourcesEnforcesExactProcessPolicy(t *testing.T) {
 	wantVolumes := []VolumeMount{{Name: "workspaces", Subpath: "assignment-1/workspace", Target: testWorkspacePath}}
-	wantTmpfs := []TmpfsMount{{Target: "/tmp/opencode", SizeBytes: 64 << 20, Executable: true}}
-	wantEnvironment := map[string]string{"HOME": "/home/opencode", "OPENCODE_CONFIG_CONTENT": "{}"}
+	wantTmpfs := []TmpfsMount{{Target: "/tmp", SizeBytes: 64 << 20, Executable: true}}
+	wantEnvironment := map[string]string{"HOME": "/tmp", "PI_CODING_AGENT_DIR": "/run/pi-agent"}
 	wantLabels := map[string]string{"io.omnigrex.assignment": "assignment-1"}
 	options := EngineOptions{
 		AgentNetwork: "omnigrex-agent",
@@ -282,7 +283,7 @@ func TestValidateResourcesEnforcesExactProcessPolicy(t *testing.T) {
 			Platform:    Platform{OS: "linux", Architecture: "arm64"},
 			User:        "10001:10001",
 			WorkingDir:  testWorkspacePath,
-			Command:     []string{"acp"},
+			Command:     []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
 			Volumes:     wantVolumes,
 			Tmpfs:       wantTmpfs,
 			Environment: wantEnvironment,
@@ -297,8 +298,8 @@ func TestValidateResourcesEnforcesExactProcessPolicy(t *testing.T) {
 		Platform:    Platform{OS: "linux", Architecture: "arm64"},
 		User:        "10001:10001",
 		WorkingDir:  testWorkspacePath,
-		Command:     []string{"acp"},
-		Environment: []string{"HOME=/home/opencode", "OPENCODE_CONFIG_CONTENT={}"},
+		Command:     []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
+		Environment: []string{"HOME=/tmp", "PI_CODING_AGENT_DIR=/run/pi-agent"},
 		Labels:      maps.Clone(wantLabels),
 		Volumes:     slices.Clone(wantVolumes),
 		Tmpfs:       slices.Clone(wantTmpfs),
@@ -326,7 +327,7 @@ func TestValidateResourcesEnforcesExactProcessPolicy(t *testing.T) {
 		{name: "tmpfs executable", mutate: func(spec *Spec) { spec.Tmpfs[0].Executable = false }},
 		{name: "missing tmpfs", mutate: func(spec *Spec) { spec.Tmpfs = nil }},
 		{name: "extra tmpfs", mutate: func(spec *Spec) { spec.Tmpfs = append(spec.Tmpfs, TmpfsMount{Target: "/other", SizeBytes: 1}) }},
-		{name: "duplicate same environment", mutate: func(spec *Spec) { spec.Environment = append(spec.Environment, "HOME=/home/opencode") }},
+		{name: "duplicate same environment", mutate: func(spec *Spec) { spec.Environment = append(spec.Environment, "HOME=/tmp") }},
 		{name: "duplicate conflicting environment", mutate: func(spec *Spec) { spec.Environment = append(spec.Environment, "HOME=/root") }},
 		{name: "missing environment", mutate: func(spec *Spec) { spec.Environment = spec.Environment[1:] }},
 		{name: "changed environment", mutate: func(spec *Spec) { spec.Environment[0] = "HOME=/root" }},
@@ -441,8 +442,11 @@ func TestProcessObservesOnlyDockerConfirmedOOMBeforeRemoval(t *testing.T) {
 		wantOOM    bool
 		wantExit   bool
 	}{
-		{name: "oom", state: &container.State{OOMKilled: true, ExitCode: 137}, wantOOM: true, wantExit: true},
-		{name: "exit 137 without oom", state: &container.State{ExitCode: 137}, wantExit: true},
+		{name: "oom", state: &container.State{Status: container.StateExited, OOMKilled: true, ExitCode: 137}, wantOOM: true, wantExit: true},
+		{name: "exit 137 without oom", state: &container.State{Status: container.StateExited, ExitCode: 137}, wantExit: true},
+		{name: "not started", state: &container.State{Status: container.StateCreated}},
+		{name: "missing state"},
+		{name: "unknown state", state: &container.State{}},
 		{name: "container removed", inspectErr: errdefs.ErrNotFound},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -467,6 +471,59 @@ func TestProcessObservesOnlyDockerConfirmedOOMBeforeRemoval(t *testing.T) {
 	process := &Process{ID: "runtime-container", api: api, labels: map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}}
 	if _, err := process.ObserveExit(context.Background()); err == nil {
 		t.Fatal("replacement container was accepted as OOM evidence")
+	}
+}
+
+func TestLostStartAcknowledgementRequiresEnvironmentStop(t *testing.T) {
+	api := newRuntimeAPIFake()
+	api.startErr = context.DeadlineExceeded
+	process, err := create(context.Background(), api, runtimeProcessSpec(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Remove(context.Background())
+	if err := process.Start(context.Background()); !errors.Is(err, execution.ErrUnknownEffect) {
+		t.Fatalf("ambiguous start = %v", err)
+	}
+	if err := process.Stop(context.Background(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if api.stopCalls != 1 {
+		t.Fatal("failed start was treated as proof that execution never started")
+	}
+}
+
+func TestProcessNeverStartedRequiresPositiveNativeEvidence(t *testing.T) {
+	zero := "0001-01-01T00:00:00Z"
+	for _, test := range []struct {
+		name  string
+		state container.State
+		want  bool
+	}{
+		{name: "created with explicit zero start", state: container.State{Status: container.StateCreated, StartedAt: zero}, want: true},
+		{name: "failed start with explicit zero start", state: container.State{Status: container.StateCreated, StartedAt: zero, Error: "exec unavailable"}, want: true},
+		{name: "missing start timestamp", state: container.State{Status: container.StateCreated}},
+		{name: "malformed start timestamp", state: container.State{Status: container.StateCreated, StartedAt: "unavailable"}},
+		{name: "prior start timestamp", state: container.State{Status: container.StateCreated, StartedAt: "2026-10-08T10:00:00Z"}},
+		{name: "running", state: container.State{Status: container.StateRunning, Running: true, StartedAt: zero}},
+		{name: "unexpected process", state: container.State{Status: container.StateCreated, StartedAt: zero, Pid: 100}},
+		{name: "paused", state: container.State{Status: container.StateCreated, StartedAt: zero, Paused: true}},
+		{name: "restarting", state: container.State{Status: container.StateCreated, StartedAt: zero, Restarting: true}},
+		{name: "dead", state: container.State{Status: container.StateCreated, StartedAt: zero, Dead: true}},
+		{name: "contradictory OOM", state: container.State{Status: container.StateCreated, StartedAt: zero, OOMKilled: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			labels := map[string]string{RuntimeProcessMarkerLabel: RuntimeProcessMarkerValue}
+			api := newRuntimeAPIFake()
+			api.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{ID: "exact-main", Config: &container.Config{Labels: labels}, State: &test.state}}
+			observation, err := observeExit(t.Context(), api, "exact-main", labels)
+			if err != nil || observation.NeverStarted != test.want || observation.Exited || observation.OOMKilled {
+				t.Fatalf("no-start evidence = (%#v,%v), want never-started %t without exit/OOM", observation, err, test.want)
+			}
+			if test.want && observation.Resource != "exact-main" {
+				t.Fatal("no-start evidence lost immutable resource identity")
+			}
+		})
 	}
 }
 
@@ -579,7 +636,7 @@ func (api *runtimeAPIFake) ContainerRemove(context.Context, string, mobyclient.C
 func runtimeProcessSpec() Spec {
 	return Spec{
 		Name: "runtime", Image: testImage, Platform: Platform{OS: "linux", Architecture: "arm64"},
-		User: "10001:10001", WorkingDir: testWorkspacePath, Command: []string{"acp"},
+		User: "10001:10001", WorkingDir: testWorkspacePath, Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
 	}
 }
 

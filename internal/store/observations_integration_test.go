@@ -213,10 +213,10 @@ func TestDurableObservationsExposeScheduledCorroborationAsActiveNotPending(t *te
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"outcome":"REVIEW_REQUESTED"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "end_turn", ""); err != nil {
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 		t.Fatal(err)
 	}
-	checkpoint, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID, json.RawMessage(`{"stop_reason":"end_turn"}`), "", "transient_transport")
+	checkpoint, err := database.BeginTerminalCorroboration(ctx, lease, mutation.ID, json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport")
 	if err != nil {
 		t.Fatal(err)
 	}

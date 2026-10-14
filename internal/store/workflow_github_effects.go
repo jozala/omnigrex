@@ -87,7 +87,7 @@ func (store *Store) ClaimWorkflowGitHubEffectJob(ctx context.Context, kind, owne
 	if err != nil {
 		return nil, fmt.Errorf("claim Workflow GitHub effect job: %w", err)
 	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("begin Workflow GitHub effect job claim: %w", err)
 	}
@@ -96,9 +96,14 @@ func (store *Store) ClaimWorkflowGitHubEffectJob(ctx context.Context, kind, owne
 		return nil, fmt.Errorf("reclaim before Workflow GitHub effect job claim: %w", err)
 	}
 
-	var jobID string
-	err = tx.QueryRow(ctx, `
-SELECT candidate.id::text
+	blockedWorkflows := make([]string, 0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var jobID, workflowID string
+		err = tx.QueryRow(ctx, `
+SELECT candidate.id::text, candidate.workflow_id::text
 FROM jobs AS candidate
 JOIN workflows AS workflow ON workflow.id = candidate.workflow_id
 WHERE candidate.queue = $1
@@ -106,34 +111,51 @@ WHERE candidate.queue = $1
   AND candidate.status = 'AVAILABLE'
   AND candidate.available_at <= clock_timestamp()
   AND candidate.attempt_count < candidate.max_attempts
+  AND candidate.workflow_id::text <> ALL($3::text[])
   AND NOT EXISTS (
       SELECT 1
       FROM jobs AS live
       WHERE live.workflow_id = candidate.workflow_id
-        AND live.kind = candidate.kind
-        AND live.status = 'LEASED'
-        AND live.lease_expires_at > clock_timestamp()
+         AND live.kind = candidate.kind
+         AND live.status = 'LEASED'
   )
 ORDER BY candidate.priority DESC, candidate.available_at, candidate.id
 FOR UPDATE OF candidate, workflow SKIP LOCKED
-LIMIT 1`, WorkflowActionQueue, kind).Scan(&jobID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit empty Workflow GitHub effect job claim: %w", err)
+LIMIT 1`, WorkflowActionQueue, kind, blockedWorkflows).Scan(&jobID, &workflowID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit empty Workflow GitHub effect job claim: %w", err)
+			}
+			return nil, nil
 		}
-		return nil, nil
+		if err != nil {
+			return nil, fmt.Errorf("select claimable Workflow GitHub effect job: %w", err)
+		}
+		// The candidate statement's snapshot predates its Workflow lock. A
+		// competing claimant may have committed a different job meanwhile.
+		// Recheck with a fresh READ COMMITTED snapshot while retaining both locks.
+		// An expired LEASED row may be locked by an uncommitted renewal. Admission
+		// stays blocked until a job-lock-protected transition leaves LEASED.
+		var blocked bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE workflow_id = $1 AND kind = $2 AND status = 'LEASED'
+)`, workflowID, kind).Scan(&blocked); err != nil {
+			return nil, fmt.Errorf("recheck Workflow GitHub effect claim serialization: %w", err)
+		}
+		if blocked {
+			blockedWorkflows = append(blockedWorkflows, workflowID)
+			continue
+		}
+		claimed, err := leaseJobTx(ctx, tx, jobID, owner, token, lease)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit Workflow GitHub effect job claim: %w", err)
+		}
+		return claimed, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("select claimable Workflow GitHub effect job: %w", err)
-	}
-	claimed, err := leaseJobTx(ctx, tx, jobID, owner, token, lease)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit Workflow GitHub effect job claim: %w", err)
-	}
-	return claimed, nil
 }
 
 // GetWorkflowGitHubEffectContext reads current visible-effect inputs while proving the job lease is live.

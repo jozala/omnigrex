@@ -1,0 +1,17 @@
+services:
+  orchestrator:
+    group_add:
+      - "${OMNIGREX_DOCKER_GID:?set the Docker socket group}"
+    environment:
+      OMNIGREX_EXECUTION_BACKEND: docker
+      OMNIGREX_DOCKER_AGENT_NETWORK: omnigrex-agent
+      OMNIGREX_WORKSPACE_VOLUME: omnigrex-workspaces
+      OMNIGREX_RUNTIME_STATE_VOLUME: omnigrex-runtime-state
+      OMNIGREX_MISE_VOLUME: omnigrex-mise
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false

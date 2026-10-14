@@ -19,6 +19,7 @@ import (
 	"github.com/jozala/omnigrex/internal/doctor"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/startup"
 	"github.com/jozala/omnigrex/internal/store"
@@ -96,8 +97,8 @@ func TestDoctorCommandSucceedsWhenEveryCheckPasses(t *testing.T) {
 
 func doctorTestEnvironment(name string) string {
 	values := map[string]string{
-		"OMNIGREX_OPENCODE_ACP_V1_IMAGE":             "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("a", 64),
-		"OMNIGREX_OPENCODE_ACP_V1_PLATFORM":          "linux/amd64",
+		"OMNIGREX_PI_RPC_V1_IMAGE":                   "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64),
+		"OMNIGREX_PI_RPC_V1_PLATFORM":                "linux/amd64",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "1",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "2",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/run/secrets/developer.pem",
@@ -130,7 +131,7 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	logged := output.String()
-	for _, want := range []string{"ACP MCP tool failed", "omnigrex_request_review", "mutation_not_admitted"} {
+	for _, want := range []string{"Agent MCP tool failed", "omnigrex_request_review", "mutation_not_admitted"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("operational logs do not contain %q: %s", want, logged)
 		}
@@ -142,7 +143,7 @@ func TestOperationalLogAdaptersExposeSafeAgentTurnEvidence(t *testing.T) {
 		t.Fatalf("INFO operational logs contain Agent-controlled diagnostic: %s", logged)
 	}
 	if strings.Contains(logged, "successful-call") {
-		t.Fatalf("INFO operational logs contain successful ACP lifecycle noise: %s", logged)
+		t.Fatalf("INFO operational logs contain successful agent lifecycle noise: %s", logged)
 	}
 }
 
@@ -168,7 +169,7 @@ func TestAgentEventLogFallbackDoesNotChangeMetadataOrSuccessfulUpdates(t *testin
 			if logged["failure_class"] != test.want || event.Metadata.FailureClass != "" || strings.Contains(output.String(), "credential-sentinel") {
 				t.Fatalf("fallback changed metadata or leaked output: %s", &output)
 			}
-			if test.status == "completed" && logged["msg"] != "ACP tool update" {
+			if test.status == "completed" && logged["msg"] != "Agent tool update" {
 				t.Fatalf("successful update labeled failure: %s", &output)
 			}
 		})
@@ -218,7 +219,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 	if err := os.WriteFile(malformed, []byte(`{"schema_version":"wrong","results":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, malformed, target); err == nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, malformed, "docker", target); err == nil {
 		t.Fatal("malformed compatibility result startup import error = nil")
 	}
 	if importer.calls != 0 {
@@ -239,7 +240,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 	if err := os.WriteFile(mismatched, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, mismatched, target); err == nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, mismatched, "docker", target); err == nil {
 		t.Fatal("mismatched compatibility result startup import error = nil")
 	}
 	if importer.calls != 0 {
@@ -250,7 +251,7 @@ func TestImportRuntimeProfileCompatibilityResultsRejectsMalformedAndMismatchedFi
 func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional(t *testing.T) {
 	target := mainTestRuntimeProfile(t, "b")
 	importer := &compatibilityImporterFake{}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, "", target); err != nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, "", "docker", target); err != nil {
 		t.Fatalf("optional compatibility result import error = %v", err)
 	}
 	if importer.calls != 0 {
@@ -270,7 +271,7 @@ func TestImportRuntimeProfileCompatibilityResultsImportsExactTargetAndIsOptional
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, path, target); err != nil {
+	if err := importRuntimeProfileCompatibilityResults(context.Background(), importer, path, "docker", target); err != nil {
 		t.Fatalf("exact compatibility result import error = %v", err)
 	}
 	if importer.calls != 1 || len(importer.file.Results) != 1 || importer.file.Results[0] != result {
@@ -284,6 +285,46 @@ func mainTestCompatibilityResult(source, target runtimeprofile.Binding, platform
 		StateContractVersion: runtimeprofile.StateContractVersion, WorkspacePath: runtimeprofile.StableWorkspacePath,
 		QualificationSuite: runtimeprofile.CompatibilityQualificationSuite, QualificationVersion: runtimeprofile.CompatibilityQualificationVersion,
 		QualifiedAt: qualifiedAt.UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success",
+		BackendFamily: "docker", BackendContractVersion: 1,
+	}
+}
+
+func TestImportPiCompatibilityResultsRequiresConfiguredTargetAndBackend(t *testing.T) {
+	platform := runtimeprofile.Platform{OS: "linux", Arch: "amd64"}
+	source, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runtimeprofile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: runtimeprofile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: runtimeprofile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z", Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	encoded, err := json.Marshal(runtimeprofile.CompatibilityResultsFile{SchemaVersion: runtimeprofile.PiCompatibilityResultsSchemaVersion, Results: []runtimeprofile.CompatibilityResult{result}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "compatibility.json")
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	importer := &compatibilityImporterFake{}
+	for _, tc := range []struct {
+		backend string
+		target  runtimeprofile.Profile
+	}{{"microsandbox", target}, {"docker", source}} {
+		if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, tc.backend, tc.target); err == nil {
+			t.Fatal("unqualified Pi configuration accepted")
+		}
+	}
+	if importer.calls != 0 {
+		t.Fatal("mismatched Pi evidence imported")
+	}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, "docker", target); err != nil {
+		t.Fatal(err)
+	}
+	if importer.calls != 1 {
+		t.Fatal("Pi evidence was not imported")
 	}
 }
 
@@ -291,7 +332,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	identity := dockerruntime.RuntimeProcessIdentity{
 		AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001",
 		AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9,
-		RuntimeProfile: dockerruntime.RuntimeProfileIdentity{Name: "opencode-acp", Version: "v1"},
+		RuntimeProfile: dockerruntime.RuntimeProfileIdentity{Name: "pi-rpc", Version: "v1"},
 	}
 	overflow := identity
 	overflow.ExecutionEpoch = math.MaxUint64
@@ -305,7 +346,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 		}},
 	}}
 	cleaner := &startupCleanerFake{}
-	adapter := startupDockerAdapter{inventory: inventory, cleaner: cleaner}
+	adapter := dockerruntime.NewRecovery(inventory, cleaner)
 
 	snapshot, err := adapter.List(context.Background())
 	if err != nil {
@@ -314,12 +355,12 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	wantIdentity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: identity.AssignmentID, AgentSessionID: identity.AgentSessionID,
 		AgentTurnID: identity.AgentTurnID, ExecutionEpoch: 9,
-		RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
 	}
 	if len(snapshot.Processes) != 1 || snapshot.Processes[0].Identity != wantIdentity || len(snapshot.Duplicates) != 0 {
 		t.Fatalf("translated Runtime Processes = %#v, duplicates %#v", snapshot.Processes, snapshot.Duplicates)
 	}
-	if got := []string{snapshot.Malformed[0].ContainerID, snapshot.Malformed[1].ContainerID, snapshot.Malformed[2].ContainerID}; !slices.Equal(got, []string{"overflow-a", "overflow-b", "malformed"}) {
+	if got := []string{string(snapshot.Malformed[0].Resource), string(snapshot.Malformed[1].Resource), string(snapshot.Malformed[2].Resource)}; !slices.Equal(got, []string{"overflow-a", "overflow-b", "malformed"}) {
 		t.Fatalf("translated malformed containers = %v", got)
 	}
 
@@ -331,12 +372,12 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 		dockerruntime.RuntimeProcessSessionLabel:    identity.AgentSessionID,
 		dockerruntime.RuntimeProcessTurnLabel:       identity.AgentTurnID,
 		dockerruntime.RuntimeProcessEpochLabel:      "9",
-		dockerruntime.RuntimeProfileIdentityLabel:   "opencode-acp/v1",
+		dockerruntime.RuntimeProfileIdentityLabel:   "pi-rpc/v1",
 	}
 	if !maps.Equal(cleaner.labels, wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labels, wantLabels)
 	}
-	if err := adapter.EnsureMalformedAbsent(context.Background(), startup.MalformedManagedRuntimeProcess{ContainerID: "malformed"}); err != nil {
+	if err := adapter.EnsureMalformedAbsent(context.Background(), startup.MalformedManagedRuntimeProcess{Resource: "malformed"}); err != nil {
 		t.Fatalf("EnsureMalformedAbsent() error = %v", err)
 	}
 	if cleaner.malformedContainerID != "malformed" {
@@ -408,8 +449,8 @@ func (importer *compatibilityImporterFake) ImportRuntimeProfileCompatibilityResu
 
 func mainTestRuntimeProfile(t *testing.T, digestDigit string) runtimeprofile.Profile {
 	t.Helper()
-	value, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat(digestDigit, 64),
+	value, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat(digestDigit, 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -427,8 +468,16 @@ type startupCleanerFake struct {
 	malformedContainerID string
 }
 
-func (cleaner *startupCleanerFake) EnsureAbsent(_ context.Context, labels map[string]string) error {
-	cleaner.labels = maps.Clone(labels)
+func (*startupCleanerFake) EnsureOrphansAbsent(context.Context, execution.Key, []string) error {
+	return nil
+}
+
+func (cleaner *startupCleanerFake) EnsureKeyAbsent(_ context.Context, key execution.Key) error {
+	cleaner.labels = map[string]string{
+		dockerruntime.RuntimeProcessAssignmentLabel: key.AssignmentID, dockerruntime.RuntimeProcessSessionLabel: key.AgentSessionID,
+		dockerruntime.RuntimeProcessTurnLabel: key.AgentTurnID, dockerruntime.RuntimeProcessEpochLabel: "9",
+		dockerruntime.RuntimeProfileIdentityLabel: key.RuntimeProfileName + "/" + key.RuntimeProfileVersion,
+	}
 	return nil
 }
 

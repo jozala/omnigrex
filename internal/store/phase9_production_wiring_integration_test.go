@@ -24,8 +24,8 @@ func TestPhaseNineProductionWiringRecoversBeforeExecutionAndConsumesClosureReten
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	profile, err := runtimeprofile.NewOpenCodeV1(
-		"registry.example/omnigrex/opencode@sha256:"+strings.Repeat("a", 64),
+	profile, err := runtimeprofile.NewPiV1(
+		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
@@ -184,6 +184,9 @@ func (emptyStartupRuntimes) List(context.Context) (startup.RuntimeInventorySnaps
 func (emptyStartupRuntimes) EnsureAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
 	return nil
 }
+func (emptyStartupRuntimes) EnsureOrphansAbsent(context.Context, store.AgentTurnRuntimeIdentity, []string) error {
+	return nil
+}
 
 func (emptyStartupRuntimes) EnsureMalformedAbsent(context.Context, startup.MalformedManagedRuntimeProcess) error {
 	return nil
@@ -193,7 +196,7 @@ type wiringClosureCleaner struct {
 	calls int
 }
 
-func (cleaner *wiringClosureCleaner) EnsureAbsent(context.Context, map[string]string) error {
+func (cleaner *wiringClosureCleaner) EnsureKeyAbsent(context.Context, store.AgentTurnRuntimeIdentity) error {
 	cleaner.calls++
 	return nil
 }
@@ -219,7 +222,8 @@ type wiringRetentionCleaner struct {
 	path         string
 }
 
-func (cleaner *wiringRetentionCleaner) EnsureAbsent(_ context.Context, assignmentID, path string) error {
+func (cleaner *wiringRetentionCleaner) CollectParticipant(_ context.Context, assignmentID string) error {
+	path := "assignment-" + assignmentID + "/runtime-state"
 	cleaner.assignmentID = assignmentID
 	cleaner.path = path
 	return nil

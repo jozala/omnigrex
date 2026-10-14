@@ -119,6 +119,9 @@ func TestPublicationRecoveryReacquiresCredentialAfterPreparingCheckout(t *testin
 	if len(github.seen) != 2 || github.seen[0] != primed || github.seen[1] != "recovery-token-B" {
 		t.Fatalf("PR observations = %q, want pre-clone primed token then refreshed token B", github.seen)
 	}
+	if len(remote.seen) != 2 || remote.seen[0] != primed || remote.seen[1] != "recovery-token-B" {
+		t.Fatalf("branch observations = %q, want pre-clone primed token then refreshed token B", remote.seen)
+	}
 }
 
 // TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification covers
@@ -332,9 +335,11 @@ type publicationRecoveryRemote struct {
 	observeErrs        []error
 	onPrepare          func()
 	request            workspace.PublicationReconciliation
+	seen               []string
 }
 
-func (remote *publicationRecoveryRemote) ObserveRemoteBranch(context.Context, string, string, string) (string, error) {
+func (remote *publicationRecoveryRemote) ObserveRemoteBranch(_ context.Context, _, credential, _ string) (string, error) {
+	remote.seen = append(remote.seen, credential)
 	remote.observeCalls++
 	if len(remote.observeErrs) >= remote.observeCalls && remote.observeErrs[remote.observeCalls-1] != nil {
 		return "", remote.observeErrs[remote.observeCalls-1]

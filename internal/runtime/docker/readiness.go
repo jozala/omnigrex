@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/runtime/profile"
+
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	mobyclient "github.com/moby/moby/client"
@@ -29,6 +31,7 @@ type ReadinessProbeOptions struct {
 	RuntimeStateVolume string
 	MiseVolume         string
 	AgentImage         string
+	RuntimeProfile     profile.Profile
 }
 
 type readinessAPI interface {
@@ -168,14 +171,41 @@ done`
 }
 
 func (probe *ReadinessProbe) runtimeContainer(subpath string) mobyclient.ContainerCreateOptions {
+	if contract := probe.options.RuntimeProfile.Contract(); contract.Name != "" {
+		var mounts []mount.Mount
+		var paths []string
+		for _, binding := range contract.Mounts {
+			volume := probe.options.MiseVolume
+			switch binding.Name {
+			case "workspace":
+				volume = probe.options.WorkspaceVolume
+			case "state":
+				volume = probe.options.RuntimeStateVolume
+			}
+			mounts = append(mounts, volumeMount(volume, binding.Path, subpath))
+			paths = append(paths, binding.Path)
+		}
+		tmpfs := map[string]string{}
+		for _, binding := range contract.Tmpfs {
+			tmpfs[binding.Path] = probeTmpfs(binding.SizeBytes)
+			paths = append(paths, binding.Path)
+		}
+		script := `set -eu
+for path do
+  printf writable > "$path/.omnigrex-write-probe"
+  rm "$path/.omnigrex-write-probe"
+done
+if touch /omnigrex-root-write-probe 2>/dev/null; then exit 1; fi`
+		return hardenedProbeContainer(contract.Image, probe.options.AgentNetwork, script, append([]string{"sh"}, paths...), mounts, tmpfs)
+	}
 	script := `set -eu
-for path in /workspace /home/opencode/.local/share/opencode /home/opencode/.local/share/mise; do
+for path in /workspace /state /home/opencode/.local/share/mise; do
   IFS= read -r marker < "$path/.omnigrex-readiness" || test -n "$marker"
   test "$marker" = initialized
   printf writable > "$path/.omnigrex-write-probe"
   rm "$path/.omnigrex-write-probe"
 done
-for path in /home/opencode/.cache /home/opencode/.config /home/opencode/.local/state /home/opencode/.opencode /tmp/opencode; do
+for path in /tmp /run/pi-agent; do
   printf writable > "$path/.omnigrex-write-probe"
   rm "$path/.omnigrex-write-probe"
 done
@@ -184,14 +214,11 @@ if touch /omnigrex-root-write-probe 2>/dev/null; then
 fi`
 	return hardenedProbeContainer(probe.options.AgentImage, probe.options.AgentNetwork, script, []string{"sh"}, []mount.Mount{
 		volumeMount(probe.options.WorkspaceVolume, "/workspace", subpath),
-		volumeMount(probe.options.RuntimeStateVolume, "/home/opencode/.local/share/opencode", subpath),
+		volumeMount(probe.options.RuntimeStateVolume, "/state", subpath),
 		volumeMount(probe.options.MiseVolume, "/home/opencode/.local/share/mise", subpath),
 	}, map[string]string{
-		"/home/opencode/.cache":       probeTmpfs(16 << 20),
-		"/home/opencode/.config":      probeTmpfs(8 << 20),
-		"/home/opencode/.local/state": probeTmpfs(8 << 20),
-		"/home/opencode/.opencode":    probeTmpfs(8 << 20),
-		"/tmp/opencode":               probeTmpfs(16 << 20),
+		"/tmp":          probeTmpfs(64 << 20),
+		"/run/pi-agent": probeTmpfs(16 << 20),
 	})
 }
 

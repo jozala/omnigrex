@@ -31,6 +31,7 @@ type diagnosticMCPServer struct {
 	mutex        sync.Mutex
 	initializing bool
 	initialized  bool
+	tools        []any
 }
 
 type diagnosticRPCRequest struct {
@@ -40,7 +41,7 @@ type diagnosticRPCRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-func startDiagnosticMCP(host string) (*diagnosticMCPServer, error) {
+func startDiagnosticMCP(host string, tools ...any) (*diagnosticMCPServer, error) {
 	if host == "" {
 		return nil, errors.New("diagnostic MCP host is empty")
 	}
@@ -57,6 +58,7 @@ func startDiagnosticMCP(host string) (*diagnosticMCPServer, error) {
 		token:    base64.RawURLEncoding.EncodeToString(tokenBytes),
 		host:     host,
 		ready:    make(chan struct{}),
+		tools:    tools,
 	}
 	server.server = &http.Server{Handler: server}
 	go func() {
@@ -222,7 +224,11 @@ func (server *diagnosticMCPServer) listTools(response http.ResponseWriter, reque
 		http.Error(response, "MCP client is not initialized", http.StatusBadRequest)
 		return
 	}
-	writeDiagnosticRPC(response, rpc.ID, map[string]any{"tools": []any{}}, nil)
+	tools := server.tools
+	if tools == nil {
+		tools = []any{}
+	}
+	writeDiagnosticRPC(response, rpc.ID, map[string]any{"tools": tools}, nil)
 	server.readyOnce.Do(func() { close(server.ready) })
 }
 

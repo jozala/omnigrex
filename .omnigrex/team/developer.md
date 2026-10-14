@@ -1,17 +1,16 @@
 ---
 name: developer
 role: DEVELOPER
-runtime: opencode-acp/v1
+runtime: pi-rpc/v1
 model: opencode-go/muse-spark-1.3-contributor
-variant: xhigh
-steps: 100
+thinking: xhigh
 permissions:
   read: allow
   edit: allow
-  glob: allow
+  find: allow
   grep: allow
-  list: allow
-  patch: allow
+  ls: allow
+  write: allow
   bash: allow
   skill: allow
 ---

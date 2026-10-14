@@ -1,38 +1,45 @@
 package agentturn_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 const (
-	outcomeWorkflowID   = "10000000-0000-4000-8000-000000000001"
-	outcomeAssignmentID = "20000000-0000-4000-8000-000000000001"
-	outcomeSessionID    = "30000000-0000-4000-8000-000000000001"
-	outcomeTurnID       = "40000000-0000-4000-8000-000000000001"
-	outcomeJobID        = "50000000-0000-4000-8000-000000000001"
-	outcomeHead         = "1111111111111111111111111111111111111111"
-	outcomeNewHead      = "2222222222222222222222222222222222222222"
-	outcomeBaseSHA      = "3333333333333333333333333333333333333333"
-	outcomeCredential   = "installation-secret"
+	outcomeWorkflowID     = "10000000-0000-4000-8000-000000000001"
+	outcomeAssignmentID   = "20000000-0000-4000-8000-000000000001"
+	outcomeSessionID      = "30000000-0000-4000-8000-000000000001"
+	outcomeTurnID         = "40000000-0000-4000-8000-000000000001"
+	outcomeJobID          = "50000000-0000-4000-8000-000000000001"
+	outcomeHead           = "1111111111111111111111111111111111111111"
+	outcomeNewHead        = "2222222222222222222222222222222222222222"
+	outcomeBaseSHA        = "3333333333333333333333333333333333333333"
+	outcomeCredential     = "installation-secret"
+	outcomeProfileName    = "pi-rpc"
+	outcomeProfileVersion = "v1"
 )
 
 var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
@@ -44,6 +51,178 @@ func TestOutcomeReconcilerConfigFormattingDoesNotExposeProviderCredentials(t *te
 	}
 	if rendered := fmt.Sprintf("%#v", config); rendered != "agentturn.OutcomeReconcilerConfig{<credentials redacted>}" {
 		t.Fatalf("Go-formatted Outcome reconciler config = %q", rendered)
+	}
+}
+
+type outcomeInspectionFunc func(context.Context, execution.CaptureRef, workspace.PublicationObservation) (bool, error)
+
+func (inspect outcomeInspectionFunc) CaptureTreesEqual(ctx context.Context, ref execution.CaptureRef, observation workspace.PublicationObservation) (bool, error) {
+	return inspect(ctx, ref, observation)
+}
+
+func TestOutcomeReconcilerAuthorizesExactPinnedPublicationObservation(t *testing.T) {
+	for _, test := range []struct{ name, base, wantURL string }{
+		{"default", "", "https://github.com/acme/widgets.git"},
+		{"configured", "https://git.example.test:8443/repos/", "https://git.example.test:8443/repos/acme/widgets.git"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, true)
+			request.Execution.ChangeProposal.HeadSHA = outcomeNewHead
+			called := false
+			inspector := outcomeInspectionFunc(func(ctx context.Context, ref execution.CaptureRef, observation workspace.PublicationObservation) (bool, error) {
+				called = true
+				if observation.RepositoryURL != test.wantURL || observation.Credential != outcomeCredential || observation.Revision != outcomeHead {
+					t.Fatal("inspector received a repository, credential, or revision outside the terminal intent scope")
+				}
+				return (outcomeCaptureInspector{repositoryURL: test.wantURL}).CaptureTreesEqual(ctx, ref, observation)
+			})
+			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store:  &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+				GitHub: &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}, Workspace: inspector, GitRemoteBaseURL: test.base,
+				DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+				ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || !called {
+				t.Fatalf("pinned observation = %#v, %v; called %t", observation, err, called)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerRejectsUnsafeGitRemoteBase(t *testing.T) {
+	for _, base := range []string{"http://github.com", "file:///fixture", "https://token@github.com", "https://github.com?token=secret", "https://github.com/a/../b"} {
+		_, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+			Store: &outcomeStore{}, GitHub: &outcomeGitHub{}, Workspace: outcomeCaptureInspector{}, GitRemoteBaseURL: base,
+			DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+			ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
+		})
+		if !errors.Is(err, agentturn.ErrInvalidOutcomeReconciler) {
+			t.Fatalf("unsafe Git remote base error = %v", err)
+		}
+	}
+}
+
+func TestOutcomeReconcilerRequiresBothOperationCredentialProviders(t *testing.T) {
+	var typedNil *outcomeCredentialProvider
+	for _, test := range []struct {
+		name                string
+		developer, reviewer agentturn.RepositoryCredentialProvider
+	}{
+		{"missing Developer", nil, &outcomeCredentialProvider{credential: outcomeCredential}},
+		{"missing Reviewer", &outcomeCredentialProvider{credential: outcomeCredential}, nil},
+		{"nil Developer", typedNil, &outcomeCredentialProvider{credential: outcomeCredential}},
+		{"nil Reviewer", &outcomeCredentialProvider{credential: outcomeCredential}, typedNil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store: &outcomeStore{}, GitHub: &outcomeGitHub{}, Workspace: outcomeCaptureInspector{},
+				DeveloperCredentials: test.developer, ReviewerCredentials: test.reviewer,
+			})
+			if !errors.Is(err, agentturn.ErrInvalidOutcomeReconciler) {
+				t.Fatalf("missing operation credential provider = %v", err)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerKeepsAuthoritativePublicationFailureCredentialSafe(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, true)
+	var failure *agentturn.TerminalCorroborationFailure
+	request.OnCorroborationFailure = func(observed agentturn.TerminalCorroborationFailure) { failure = &observed }
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store:                &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+		GitHub:               &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)},
+		DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
+		ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
+		Workspace: outcomeInspectionFunc(func(_ context.Context, _ execution.CaptureRef, observation workspace.PublicationObservation) (bool, error) {
+			return false, errors.New("fetch failed with " + observation.Credential + " and provider-secret")
+		}),
+		ProviderCredentialJSON: []json.RawMessage{json.RawMessage(`{"token":"provider-secret"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := reconciler.Reconcile(context.Background(), request)
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "workspace observation failed")
+	assertNoOutcomeCredential(t, observation, err)
+	if failure == nil || failure.Code != "workspace_observation_unavailable" || !failure.Retryable || strings.Contains(observation.Diagnostic, "provider-secret") {
+		t.Fatalf("publication failure lost safe classification: %#v, %#v", observation, failure)
+	}
+}
+
+func TestOutcomeReconcilerUsesPinnedRemoteAfterWorkspaceAndPublicationCacheLoss(t *testing.T) {
+	for _, test := range []struct {
+		name                                string
+		replace, unpublished, advanceRemote bool
+	}{
+		{name: "deleted caches"}, {name: "replaced caches", replace: true}, {name: "remote head advanced", advanceRemote: true}, {name: "late unpublished commit", replace: true, unpublished: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, true)
+			if test.unpublished {
+				request.Capture = outcomeCaptureWithEdit(t, func(directory string) {
+					if err := os.WriteFile(filepath.Join(directory, "tracked.txt"), []byte("unpublished\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					for _, arguments := range [][]string{{"add", "tracked.txt"}, {"commit", "-m", "Late unpublished change"}} {
+						command := exec.Command("git", arguments...)
+						command.Dir = directory
+						if output, err := command.CombinedOutput(); err != nil {
+							t.Fatalf("git %v: %v: %s", arguments, err, output)
+						}
+					}
+				})
+			}
+			value, _ := outcomeCaptureOwners.Load(request.Capture.SHA256)
+			owner := value.(*outcomeCaptureOwner)
+			if test.advanceRemote {
+				checkout := filepath.Join(t.TempDir(), "remote-writer")
+				command := exec.Command("git", "clone", owner.repositoryURL, checkout)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("clone remote writer: %v: %s", err, output)
+				}
+				if err := os.WriteFile(filepath.Join(checkout, "tracked.txt"), []byte("new remote tip\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				for _, arguments := range [][]string{{"add", "tracked.txt"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Later remote revision"}, {"push", "origin", "HEAD"}} {
+					command := exec.Command("git", arguments...)
+					command.Dir = checkout
+					if output, err := command.CombinedOutput(); err != nil {
+						t.Fatalf("advance authoritative fixture: %v: %s", err, output)
+					}
+				}
+			}
+			for _, path := range []string{owner.paths.Workspace, owner.paths.Publication} {
+				if err := os.RemoveAll(path); err != nil {
+					t.Fatal(err)
+				}
+				if test.replace {
+					if err := os.MkdirAll(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(path, "replacement.txt"), []byte("unrelated execution"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			restored, err := workspace.New(workspace.Options{WorkspaceRoot: filepath.Dir(filepath.Dir(owner.paths.Workspace)),
+				PublicationRoot: filepath.Dir(filepath.Dir(owner.paths.Publication)), MiseRoot: filepath.Join(filepath.Dir(owner.captureRoot), "mise"), CaptureRoot: owner.captureRoot})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner.lifecycle = restored
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+				&outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}).Reconcile(context.Background(), request)
+			if test.unpublished {
+				assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "unpublished")
+			} else if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady {
+				t.Fatalf("restored terminal outcome = %#v, %v", observation, err)
+			}
+		})
 	}
 }
 
@@ -234,11 +413,11 @@ func TestOutcomeReconcilerBlocksRecoveredBranchOnDefinitePublishConflict(t *test
 	}
 }
 
-func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterACPPromptEOF(t *testing.T) {
+func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterPromptEOF(t *testing.T) {
 	request := outcomeRequest(t, workflow.RoleDeveloper, true)
 	request.PromptResponse = nil
 	request.PromptError = agentturn.PromptErrorFailure
-	request.PromptDiagnostic = "submit ACP prompt: EOF"
+	request.PromptDiagnostic = "submit agent prompt: EOF"
 	request.Execution.ChangeProposal.HeadSHA = outcomeNewHead
 	request.Execution.Turn.ExpectedHeadSHA = outcomeNewHead
 	request.Lease.ExpectedHeadSHA = outcomeNewHead
@@ -258,7 +437,7 @@ func TestOutcomeReconcilerAcceptsPublishedDeveloperHandoffAfterACPPromptEOF(t *t
 	if observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded ||
 		observation.Completion.LastError != "" || len(observation.Completion.Outcome) != 0 ||
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != outcomeHead ||
-		!strings.Contains(observation.Diagnostic, "submit ACP prompt: EOF") {
+		!strings.Contains(observation.Diagnostic, "submit agent prompt: EOF") {
 		t.Fatalf("corroborated Developer handoff after EOF = %#v", observation)
 	}
 }
@@ -281,7 +460,7 @@ func TestOutcomeReconcilerAcceptsCorroboratedTerminalIntentsAfterPromptLoss(t *t
 			request := outcomeRequest(t, test.role, true)
 			request.PromptResponse = nil
 			request.PromptError = test.promptError
-			request.PromptDiagnostic = "submit ACP prompt: EOF"
+			request.PromptDiagnostic = "submit agent prompt: EOF"
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{test.mutation}}, github).Reconcile(context.Background(), request)
 			if err != nil || observation.Outcome != test.want || observation.Completion.Status != store.AgentTurnSucceeded || observation.Completion.LastError != "" {
@@ -291,7 +470,7 @@ func TestOutcomeReconcilerAcceptsCorroboratedTerminalIntentsAfterPromptLoss(t *t
 				if observation.Diagnostic != test.wantBlockedDiagnostic || github.getCalls != 0 {
 					t.Fatalf("blocked handoff = %#v, GitHub gets %d", observation, github.getCalls)
 				}
-			} else if !strings.Contains(observation.Diagnostic, "submit ACP prompt: EOF") {
+			} else if !strings.Contains(observation.Diagnostic, "submit agent prompt: EOF") {
 				t.Fatalf("successful handoff lost transport diagnostic: %#v", observation)
 			}
 		})
@@ -303,19 +482,25 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 		name        string
 		mutations   []store.MutationReservation
 		promptError agentturn.PromptErrorClassification
-		stopReason  acp.StopReason
+		response    *agent.Outcome
 		head        string
 		wantStatus  store.AgentTurnStatus
 		wantDetail  string
 	}{
-		{name: "published without handoff", mutations: []store.MutationReservation{outcomeSucceededMutation(1, mcp.ToolPublishChanges, "publish-1", `{"operation_id":"publish-1"}`, `{"head":"`+outcomeHead+`"}`, "git", "41:feature/work", outcomeNewHead)}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "ACP prompt failed"},
+		{name: "published without handoff", mutations: []store.MutationReservation{outcomeSucceededMutation(1, mcp.ToolPublishChanges, "publish-1", `{"operation_id":"publish-1"}`, `{"head":"`+outcomeHead+`"}`, "git", "41:feature/work", outcomeNewHead)}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "prompt failed"},
 		{name: "stale head", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorFailure, head: outcomeNewHead, wantStatus: store.AgentTurnFailed, wantDetail: "does not match"},
 		{name: "deadline and stale head", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorDeadline, head: outcomeNewHead, wantStatus: store.AgentTurnTimedOut, wantDetail: "does not match"},
 		{name: "conflicting intents", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1), outcomeBlockedMutation(2, "blocked", "")}, promptError: agentturn.PromptErrorFailure, wantStatus: store.AgentTurnFailed, wantDetail: "duplicate or conflicting"},
 		{name: "cancelled prompt", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorCancellation, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
-		{name: "unknown stop reason", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorInvalidResponse, wantStatus: store.AgentTurnFailed, wantDetail: "invalid stop reason"},
-		{name: "cancelled stop", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonCancelled, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
-		{name: "token limit", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, stopReason: acp.StopReasonMaxTokens, wantStatus: store.AgentTurnFailed, wantDetail: "token limit"},
+		{name: "protocol failure", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, promptError: agentturn.PromptErrorInvalidResponse, wantStatus: store.AgentTurnFailed, wantDetail: "invalid"},
+		{name: "aborted outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Aborted}, wantStatus: store.AgentTurnInterrupted, wantDetail: "cancelled"},
+		{name: "runtime limit", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, wantStatus: store.AgentTurnFailed, wantDetail: "limit"},
+		{name: "completion without admission", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Completed}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "abort without admission", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Aborted}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "failed outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Failed}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "unknown outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: agent.Unknown}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "rejected outcome", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Status: agent.Rejected}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
+		{name: "invalid outcome status", mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, response: &agent.Outcome{Admitted: true, Status: "unrecognized"}, wantStatus: store.AgentTurnFailed, wantDetail: "prompt"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -324,7 +509,7 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 			if test.promptError != "" {
 				request.PromptResponse = nil
 			} else {
-				request.PromptResponse = &acp.PromptResponse{StopReason: test.stopReason}
+				request.PromptResponse = test.response
 			}
 			github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}
 			if test.head != "" {
@@ -332,8 +517,8 @@ func TestOutcomeReconcilerDoesNotAcceptUncorroboratedOrCancelledTerminalIntent(t
 			}
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: test.mutations}, github).Reconcile(context.Background(), request)
 			assertOutcomeInfrastructureFailure(t, observation, err, test.wantStatus, test.wantDetail)
-			if test.promptError == agentturn.PromptErrorInvalidResponse && github.getCalls != 0 {
-				t.Fatalf("invalid ACP stop reason triggered %d GitHub observations", github.getCalls)
+			if (test.promptError == agentturn.PromptErrorInvalidResponse || test.response != nil) && github.getCalls != 0 {
+				t.Fatalf("inadmissible prompt evidence triggered %d GitHub observations", github.getCalls)
 			}
 		})
 	}
@@ -343,12 +528,90 @@ func TestOutcomeReconcilerRejectsDirtyDeveloperWorkspaceAfterPromptEOF(t *testin
 	request := outcomeRequest(t, workflow.RoleDeveloper, true)
 	request.PromptResponse = nil
 	request.PromptError = agentturn.PromptErrorFailure
-	if err := os.WriteFile(filepath.Join(request.Paths.Workspace, "unpublished.txt"), []byte("unpublished"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	request.Capture = outcomeCapture(t, true)
 	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
 		&outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}).Reconcile(context.Background(), request)
 	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "unpublished")
+}
+
+func TestOutcomeReconcilerRequiresExactIntactTerminalCapture(t *testing.T) {
+	for _, name := range []string{"missing", "missing artifact", "corrupt artifact", "stale epoch", "other turn", "other session", "other Participant", "other profile", "other profile version", "publication capture", "other operation", "digest mismatch"} {
+		t.Run(name, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, true)
+			ownerValue, _ := outcomeCaptureOwners.Load(request.Capture.SHA256)
+			owner := ownerValue.(*outcomeCaptureOwner)
+			artifacts, err := filepath.Glob(filepath.Join(owner.captureRoot, "*", "*", "*", "workspace.tar"))
+			if err != nil || len(artifacts) != 1 {
+				t.Fatalf("locate sealed fixture artifact = %v, %v; want exactly one", artifacts, err)
+			}
+			artifact := artifacts[0]
+			switch name {
+			case "missing":
+				request.Capture = execution.CaptureRef{}
+			case "missing artifact":
+				if err := os.Remove(artifact); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt artifact":
+				if err := os.WriteFile(artifact, []byte("corrupted "+outcomeCredential), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "stale epoch":
+				request.Capture.Request.Workspace.Key.ExecutionEpoch--
+			case "other turn":
+				request.Capture.Request.Workspace.Key.AgentTurnID = outcomeJobID
+			case "other session":
+				request.Capture.Request.Workspace.Key.AgentSessionID = outcomeJobID
+			case "other Participant":
+				request.Capture.Request.Workspace.Key.AssignmentID = outcomeJobID
+			case "other profile":
+				request.Capture.Request.Workspace.Key.RuntimeProfileName = "different"
+			case "other profile version":
+				request.Capture.Request.Workspace.Key.RuntimeProfileVersion = "different"
+			case "publication capture":
+				request.Capture.Request.Purpose = execution.PublicationCapture
+			case "other operation":
+				request.Capture.Request.OperationID = outcomeJobID
+			case "digest mismatch":
+				request.Capture.SHA256 = strings.Repeat("0", 64)
+			}
+			var failure *agentturn.TerminalCorroborationFailure
+			request.OnCorroborationFailure = func(observed agentturn.TerminalCorroborationFailure) { failure = &observed }
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}},
+				&outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}).Reconcile(context.Background(), request)
+			assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "workspace")
+			assertNoOutcomeCredential(t, observation, err)
+			if failure == nil || failure.Code != "workspace_observation_unavailable" || !failure.Retryable || failure.SourceInvocationID != "mutation-1" {
+				t.Fatalf("unavailable capture classification = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestOutcomeReconcilerDoesNotRequireCaptureForOtherOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		role     workflow.Role
+		mutation store.MutationReservation
+		want     workflow.TurnOutcome
+	}{
+		{"Reviewer", workflow.RoleReviewer, outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701), workflow.TurnOutcomeApproved},
+		{"blocked Developer", workflow.RoleDeveloper, outcomeBlockedMutation(1, "Needs input", ""), workflow.TurnOutcomeBlocked},
+		{"missing intent", workflow.RoleDeveloper, outcomeFailedMutation(1, mcp.ToolPublishChanges), workflow.TurnOutcomeInfrastructureFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := outcomeRequest(t, test.role, true)
+			request.Capture = execution.CaptureRef{}
+			request.OnCorroborationFailure = func(failure agentturn.TerminalCorroborationFailure) {
+				t.Fatalf("unnecessary capture failure: %#v", failure)
+			}
+			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{test.mutation}},
+				&outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}).Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != test.want {
+				t.Fatalf("outcome without capture = %#v, %v", observation, err)
+			}
+		})
+	}
 }
 
 func TestOutcomeReconcilerRedactsRecoveredPromptFailureDiagnostic(t *testing.T) {
@@ -385,9 +648,7 @@ func TestOutcomeReconcilerRejectsDeveloperPullRequestMismatchAndDirtyTree(t *tes
 			github.pullRequest.Base.Label = "acme:release"
 		}, want: "does not match"},
 		{name: "dirty normalized tree", mutate: func(request *agentturn.OutcomeReconciliation, _ *outcomeGitHub) {
-			if err := os.WriteFile(filepath.Join(request.Paths.Workspace, "unpublished.txt"), []byte("dirty"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			request.Capture = outcomeCapture(t, true)
 		}, want: "unpublished"},
 	}
 	for _, test := range tests {
@@ -733,19 +994,18 @@ func TestOutcomeReconcilerDoesNotTreatProviderNonStringScalarsAsStandaloneSecret
 	}
 }
 
-func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *testing.T) {
-	endTurn := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+func TestOutcomeReconcilerMapsMissingIntentAndPromptFailuresToTerminalStatuses(t *testing.T) {
+	completed := agent.Outcome{Admitted: true, Status: agent.Completed}
 	tests := []struct {
 		name     string
-		response *acp.PromptResponse
+		response *agent.Outcome
 		failure  agentturn.PromptErrorClassification
 		status   store.AgentTurnStatus
 	}{
-		{name: "end turn without intent", response: &endTurn, status: store.AgentTurnFailed},
-		{name: "refusal", response: &acp.PromptResponse{StopReason: acp.StopReasonRefusal}, status: store.AgentTurnFailed},
-		{name: "max tokens", response: &acp.PromptResponse{StopReason: acp.StopReasonMaxTokens}, status: store.AgentTurnFailed},
-		{name: "max requests", response: &acp.PromptResponse{StopReason: acp.StopReasonMaxTurnRequests}, status: store.AgentTurnFailed},
-		{name: "ACP cancellation", response: &acp.PromptResponse{StopReason: acp.StopReasonCancelled}, status: store.AgentTurnInterrupted},
+		{name: "completed without intent", response: &completed, status: store.AgentTurnFailed},
+		{name: "failed prompt", failure: agentturn.PromptErrorFailure, status: store.AgentTurnFailed},
+		{name: "runtime limit", response: &agent.Outcome{Admitted: true, Status: agent.Completed, LimitReached: true}, status: store.AgentTurnFailed},
+		{name: "agent abort", response: &agent.Outcome{Admitted: true, Status: agent.Aborted}, status: store.AgentTurnInterrupted},
 		{name: "deadline error", failure: agentturn.PromptErrorDeadline, status: store.AgentTurnTimedOut},
 		{name: "cancellation error", failure: agentturn.PromptErrorCancellation, status: store.AgentTurnInterrupted},
 		{name: "invalid response error", failure: agentturn.PromptErrorInvalidResponse, status: store.AgentTurnFailed},
@@ -757,21 +1017,21 @@ func TestOutcomeReconcilerMapsMissingIntentAndACPFailuresToTerminalStatuses(t *t
 			request.PromptResponse = test.response
 			request.PromptError = test.failure
 			observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(context.Background(), request)
-			assertOutcomeInfrastructureFailure(t, observation, err, test.status, "ACP prompt")
+			assertOutcomeInfrastructureFailure(t, observation, err, test.status, "prompt")
 		})
 	}
 	if agentturn.ClassifyPromptError(context.DeadlineExceeded) != agentturn.PromptErrorDeadline ||
 		agentturn.ClassifyPromptError(context.Canceled) != agentturn.PromptErrorCancellation ||
-		agentturn.ClassifyPromptError(fmt.Errorf("ACP prompt: %w", acp.ErrUnknownStopReason)) != agentturn.PromptErrorInvalidResponse ||
+		agentturn.ClassifyPromptError(fmt.Errorf("agent prompt: %w", agent.ErrProtocol)) != agentturn.PromptErrorInvalidResponse ||
 		agentturn.ClassifyPromptError(errors.New("transport")) != agentturn.PromptErrorFailure ||
 		agentturn.ClassifyPromptError(errors.Join(context.DeadlineExceeded, agentturn.ErrRuntimeOOMKilled)) != agentturn.PromptErrorFailure {
 		t.Fatal("ClassifyPromptError() returned an incorrect classification")
 	}
 
 	request := outcomeRequest(t, workflow.RoleDeveloper, true)
-	request.PromptResponse = &acp.PromptResponse{StopReason: acp.StopReasonRefusal}
+	request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Failed}
 	observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}}, &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}).Reconcile(context.Background(), request)
-	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "refused")
+	assertOutcomeInfrastructureFailure(t, observation, err, store.AgentTurnFailed, "prompt")
 }
 
 func TestOutcomeReconcilerRejectsMalformedAndUnsettledLedgers(t *testing.T) {
@@ -914,6 +1174,7 @@ func TestOutcomeReconcilerLogsSafeGitHubObservationFailure(t *testing.T) {
 			}
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
+				Workspace:            outcomeCaptureInspector{},
 				DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
 				ReviewerCredentials:  &outcomeCredentialProvider{credential: "reviewer-repository-secret"},
 				Clock:                outcomeClock{}, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), ProviderCredentialJSON: providers,
@@ -1151,6 +1412,7 @@ func newOutcomeReconcilerWithProviders(t *testing.T, storeAPI agentturn.OutcomeR
 	t.Helper()
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: storeAPI, GitHub: github, Clock: outcomeClock{}, ProviderCredentialJSON: providers,
+		Workspace:            outcomeCaptureInspector{},
 		DeveloperCredentials: &outcomeCredentialProvider{credential: outcomeCredential},
 		ReviewerCredentials:  &outcomeCredentialProvider{credential: outcomeCredential},
 	})
@@ -1164,6 +1426,7 @@ func newOutcomeReconcilerWithCredentials(t *testing.T, storeAPI agentturn.Outcom
 	t.Helper()
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: storeAPI, GitHub: github, Clock: outcomeClock{},
+		Workspace:            outcomeCaptureInspector{credential: developerCredential},
 		DeveloperCredentials: &outcomeCredentialProvider{credential: developerCredential},
 		ReviewerCredentials:  &outcomeCredentialProvider{credential: reviewerCredential},
 	})
@@ -1175,7 +1438,6 @@ func newOutcomeReconcilerWithCredentials(t *testing.T, storeAPI agentturn.Outcom
 
 func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) agentturn.OutcomeReconciliation {
 	t.Helper()
-	paths := outcomeCleanPaths(t)
 	lease := store.AgentTurnLease{
 		AgentTurn: store.AgentTurn{
 			AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: outcomeSessionID, WorkflowAttemptID: "60000000-0000-4000-8000-000000000001", ControlRevision: 5},
@@ -1187,9 +1449,11 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 		WorkflowID: outcomeWorkflowID,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 61},
-		Assignment: store.AgentAssignment{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role},
-		Session:    store.AgentSession{ID: outcomeSessionID, AgentAssignmentID: outcomeAssignmentID},
-		Turn:       lease.AgentTurn,
+		Assignment: store.AgentAssignment{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role,
+			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},
+		Session: store.AgentSession{ID: outcomeSessionID, AgentAssignmentID: outcomeAssignmentID,
+			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},
+		Turn: lease.AgentTurn,
 	}
 	if existingProposal {
 		proposal := &store.AgentTurnChangeProposal{
@@ -1202,24 +1466,136 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 		lease.ChangeProposalID = proposal.ID
 		lease.ExpectedHeadSHA = outcomeHead
 	}
-	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+	response := agent.Outcome{Admitted: true, Status: agent.Completed}
 	return agentturn.OutcomeReconciliation{
 		Lease: lease, Execution: execution, PromptResponse: &response,
-		RepositoryCredential: outcomeCredential, ReviewerRepositoryCredential: outcomeCredential, Paths: paths,
+		RepositoryCredential: outcomeCredential, ReviewerRepositoryCredential: outcomeCredential, Capture: outcomeCapture(t, false),
 	}
 }
 
-func outcomeCleanPaths(t *testing.T) workspace.Paths {
+var outcomeCaptureOwners sync.Map
+
+type outcomeCaptureInspector struct {
+	repositoryURL string
+	credential    string
+}
+
+type outcomeCaptureOwner struct {
+	lifecycle     *workspace.Lifecycle
+	paths         workspace.Paths
+	captureRoot   string
+	repositoryURL string
+	revisions     map[string]string
+}
+
+func (inspector outcomeCaptureInspector) CaptureTreesEqual(ctx context.Context, ref execution.CaptureRef, observation workspace.PublicationObservation) (bool, error) {
+	owner, ok := outcomeCaptureOwners.Load(ref.SHA256)
+	if !ok {
+		return false, workspace.ErrInvalidCapture
+	}
+	fixture := owner.(*outcomeCaptureOwner)
+	wantURL, wantCredential := inspector.repositoryURL, inspector.credential
+	if wantURL == "" {
+		wantURL = "https://github.com/acme/widgets.git"
+	}
+	if wantCredential == "" {
+		wantCredential = outcomeCredential
+	}
+	revision, known := fixture.revisions[observation.Revision]
+	if observation.RepositoryURL != wantURL || observation.Credential != wantCredential || !known {
+		return false, errors.New("unexpected authoritative publication observation")
+	}
+	// GitHub fixtures use synthetic SHAs. Resolve their fixed mapping only at
+	// this boundary; actual tree inspection fetches the immutable Git fixture.
+	observation.RepositoryURL, observation.Revision = fixture.repositoryURL, revision
+	return fixture.lifecycle.CaptureTreesEqual(ctx, ref, observation)
+}
+
+// The source is a stopped fixture with no concurrent writers. Production
+// consistency is provided by the Execution Backend, not by tar itself.
+type outcomeCaptureSource struct{ directory string }
+
+func (source *outcomeCaptureSource) ReadWorkspace(ctx context.Context, _ execution.CaptureRequest, consume func(io.Reader) error) error {
+	var content bytes.Buffer
+	writer := tar.NewWriter(&content)
+	if err := writer.WriteHeader(&tar.Header{Name: "workspace/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		return err
+	}
+	err := filepath.WalkDir(source.directory, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || ctx.Err() != nil {
+			return errors.Join(err, ctx.Err())
+		}
+		if path == source.directory {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name, err = filepath.Rel(source.directory, path)
+		if err != nil {
+			return err
+		}
+		header.Name = "workspace/" + filepath.ToSlash(header.Name)
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(writer, file)
+			return errors.Join(copyErr, file.Close())
+		}
+		return nil
+	})
+	if err := errors.Join(err, writer.Close()); err != nil {
+		return err
+	}
+	return consume(bytes.NewReader(content.Bytes()))
+}
+
+func outcomeCapture(t *testing.T, dirty bool) execution.CaptureRef {
+	t.Helper()
+	return outcomeCaptureWithEdit(t, func(directory string) {
+		if dirty {
+			if err := os.WriteFile(filepath.Join(directory, "unpublished.txt"), []byte("dirty"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+func outcomeCaptureWithEdit(t *testing.T, edit func(string)) execution.CaptureRef {
 	t.Helper()
 	root := t.TempDir()
-	paths := workspace.Paths{Workspace: filepath.Join(root, "workspace"), Publication: filepath.Join(root, "publication")}
-	runGit := func(directory string, arguments ...string) {
+	source := &outcomeCaptureSource{}
+	lifecycle, err := workspace.New(workspace.Options{
+		WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "publications"),
+		MiseRoot: filepath.Join(root, "mise"), CaptureRoot: filepath.Join(root, "captures"), CaptureSource: source,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := lifecycle.Paths(outcomeAssignmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.directory = paths.Workspace
+	runGit := func(directory string, arguments ...string) string {
 		t.Helper()
 		command := exec.Command("git", arguments...)
 		command.Dir = directory
-		if output, err := command.CombinedOutput(); err != nil {
+		output, err := command.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %v: %v: %s", arguments, err, output)
 		}
+		return strings.TrimSpace(string(output))
 	}
 	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
 		t.Fatal(err)
@@ -1232,14 +1608,35 @@ func outcomeCleanPaths(t *testing.T) workspace.Paths {
 	}
 	runGit(paths.Workspace, "add", "tracked.txt")
 	runGit(paths.Workspace, "commit", "-m", "Published tree")
+	if err := os.MkdirAll(filepath.Dir(paths.Publication), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runGit(root, "clone", paths.Workspace, paths.Publication)
-	if err := os.WriteFile(filepath.Join(paths.Workspace, ".git", "workspace-only"), []byte("ignored"), 0o644); err != nil {
+	publishedRevision := runGit(paths.Publication, "rev-parse", "HEAD")
+	remote := filepath.Join(root, "authoritative.git")
+	runGit(root, "clone", "--bare", "--no-hardlinks", paths.Publication, remote)
+	// Distinct fixture digests prevent registry collisions without changing trees.
+	if err := os.WriteFile(filepath.Join(paths.Workspace, ".git", "workspace-only"), []byte(root), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(paths.Publication, ".git", "publication-only"), []byte("also ignored"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return paths
+	if edit != nil {
+		edit(paths.Workspace)
+	}
+	ref, err := lifecycle.Capture(context.Background(), execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: execution.Key{AssignmentID: outcomeAssignmentID, AgentSessionID: outcomeSessionID, AgentTurnID: outcomeTurnID, ExecutionEpoch: 7,
+			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion}},
+		OperationID: outcomeTurnID, Purpose: execution.TerminalCapture,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeCaptureOwners.Store(ref.SHA256, &outcomeCaptureOwner{lifecycle: lifecycle, paths: paths, captureRoot: filepath.Join(root, "captures"),
+		repositoryURL: remote, revisions: map[string]string{outcomeHead: publishedRevision, outcomeNewHead: publishedRevision}})
+	t.Cleanup(func() { outcomeCaptureOwners.Delete(ref.SHA256) })
+	return ref
 }
 
 func outcomeSucceededMutation(number int64, tool, operationID, request, result, service, resource, expectedSHA string) store.MutationReservation {

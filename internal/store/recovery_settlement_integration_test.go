@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -123,7 +123,7 @@ func TestRecoveredOOMSurvivesContainerRemovalAndRetainsSingleRetry(t *testing.T)
 	}
 	var diagnostic, containerID string
 	if err := pool.QueryRow(ctx, `
-SELECT settlement.terminal_last_error, turn.runtime_oom_container_id
+SELECT settlement.terminal_last_error, turn.runtime_oom_resource_ref
 FROM agent_turn_settlements AS settlement
 JOIN agent_turns AS turn ON turn.id = settlement.agent_turn_id
 WHERE turn.id = $1`, lease.ID).Scan(&diagnostic, &containerID); err != nil {
@@ -196,7 +196,7 @@ func TestLiveOOMObservationRequiresCurrentTurnFence(t *testing.T) {
 		t.Fatalf("stale epoch accepted OOM evidence: %v", err)
 	}
 	var containerID string
-	if err := pool.QueryRow(ctx, `SELECT runtime_oom_container_id FROM agent_turns WHERE id = $1`, lease.ID).Scan(&containerID); err != nil || containerID != "container-939" {
+	if err := pool.QueryRow(ctx, `SELECT runtime_oom_resource_ref FROM agent_turns WHERE id = $1`, lease.ID).Scan(&containerID); err != nil || containerID != "container-939" {
 		t.Fatalf("durable live evidence = (%q, %v)", containerID, err)
 	}
 }
@@ -676,11 +676,11 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	if err := database.CloseMutationAdmission(ctx, retryLease); err != nil {
 		t.Fatal(err)
 	}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, Workspace: newIntegrationOutcomeWorkspace(t), DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
+	response := agent.Outcome{Admitted: true, Status: agent.Completed}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
 		Lease: retryLease, Execution: execution, PromptResponse: &response,
 	})

@@ -109,6 +109,7 @@ type expiringGitHub struct {
 	listCalls   int
 	getErrs     []error
 	listErrs    []error
+	onGet       func()
 }
 
 func (github *expiringGitHub) GetPullRequest(_ context.Context, credential, _, _ string, _ int) (githubapi.PullRequest, error) {
@@ -125,6 +126,9 @@ func (github *expiringGitHub) GetPullRequest(_ context.Context, credential, _, _
 	}
 	if github.expired[credential] {
 		return githubapi.PullRequest{}, &githubapi.APIError{StatusCode: 401, Message: "bad credentials"}
+	}
+	if github.onGet != nil {
+		github.onGet()
 	}
 	return github.pullRequest, nil
 }
@@ -219,7 +223,8 @@ func TestOutcomeReconcilerUsesCurrentReviewerCredentialAfterExpiry(t *testing.T)
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
 				DeveloperCredentials: developer, ReviewerCredentials: reviewer,
-				Clock: outcomeClock{},
+				Workspace: outcomeCaptureInspector{},
+				Clock:     outcomeClock{},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -235,6 +240,7 @@ func TestOutcomeReconcilerUsesCurrentReviewerCredentialAfterExpiry(t *testing.T)
 			if failure != nil {
 				t.Fatalf("successful intent took recovery detour: %#v", failure)
 			}
+			assertNeutralOutcomeCompletion(t, observation, true)
 			if github.saw(expiredSnapshot) {
 				t.Fatalf("final observations used expired snapshot %q; seen %q", expiredSnapshot, github.seen)
 			}
@@ -297,7 +303,8 @@ func TestOutcomeReconcilerUsesCurrentDeveloperCredentialAfterExpiry(t *testing.T
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: ledger}, GitHub: github,
 		DeveloperCredentials: developer, ReviewerCredentials: reviewer,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{credential: "developer-token-B"},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -311,6 +318,7 @@ func TestOutcomeReconcilerUsesCurrentDeveloperCredentialAfterExpiry(t *testing.T
 	if failure != nil {
 		t.Fatalf("developer handoff took recovery detour: %#v", failure)
 	}
+	assertNeutralOutcomeCompletion(t, observation, true)
 	if github.saw(expiredSnapshot) {
 		t.Fatalf("developer observation used expired snapshot; seen %q", github.seen)
 	}
@@ -321,7 +329,7 @@ func TestOutcomeReconcilerUsesCurrentDeveloperCredentialAfterExpiry(t *testing.T
 
 func TestOutcomeReconcilerReacquiresCredentialOnTransientRetry(t *testing.T) {
 	calls := 0
-	provider := &stubRotatingProvider{tokens: []string{"retry-token-A", "retry-token-B"}, calls: &calls}
+	provider := &stubRotatingProvider{tokens: []string{"retry-token-A", "retry-token-B", "publication-token-C"}, calls: &calls}
 	github := &expiringGitHub{
 		pullRequest: outcomePullRequest(outcomeHead),
 		getErrs:     []error{&githubapi.APIError{StatusCode: 503}},
@@ -334,7 +342,8 @@ func TestOutcomeReconcilerReacquiresCredentialOnTransientRetry(t *testing.T) {
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: ledger}, GitHub: github,
 		DeveloperCredentials: provider, ReviewerCredentials: provider,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{credential: "publication-token-C"},
+		Clock:     outcomeClock{},
 		RetryWait: func(_ context.Context, delay time.Duration) error {
 			waits = append(waits, delay)
 			return nil
@@ -347,7 +356,7 @@ func TestOutcomeReconcilerReacquiresCredentialOnTransientRetry(t *testing.T) {
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady {
 		t.Fatalf("retry reacquire = (%#v, %v)", observation, err)
 	}
-	if calls != 2 || github.getCalls != 2 {
+	if calls != 3 || github.getCalls != 2 {
 		t.Fatalf("retry did not reacquire per attempt: provider %d GitHub %d", calls, github.getCalls)
 	}
 	if github.seen[0] != "retry-token-A" || github.seen[1] != "retry-token-B" {
@@ -356,6 +365,31 @@ func TestOutcomeReconcilerReacquiresCredentialOnTransientRetry(t *testing.T) {
 	// Retry timing is driven by the injected hook, with no real-time waiting.
 	if len(waits) != 1 || waits[0] != 200*time.Millisecond {
 		t.Fatalf("retry waits = %v, want [200ms]", waits)
+	}
+}
+
+func TestOutcomeReconcilerRefreshesCredentialForSealedInspectionAfterPRRead(t *testing.T) {
+	clock := &expiryClock{now: outcomeObservedAt}
+	cache, _ := newExpiryCache(t, clock, "inspection", 5*time.Minute, time.Hour)
+	developer := &cacheProvider{cache: cache, id: 93}
+	reviewer := &outcomeCredentialProvider{credential: "unused-reviewer-token"}
+	request := outcomeRequest(t, workflow.RoleDeveloper, true)
+	request.RepositoryCredential = "expired-startup-token"
+	github := &expiringGitHub{pullRequest: outcomePullRequest(outcomeHead), onGet: func() { clock.Advance(6 * time.Minute) }}
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+		Store: &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}}, GitHub: github,
+		DeveloperCredentials: developer, ReviewerCredentials: reviewer,
+		Workspace: outcomeCaptureInspector{credential: "inspection-token-B"}, Clock: outcomeClock{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {
+		t.Fatalf("PR-to-inspection expiry = %#v, %v", observation, err)
+	}
+	if len(github.seen) != 1 || github.seen[0] != "inspection-token-A" || developer.Calls() != 2 || reviewer.calls != 0 {
+		t.Fatalf("publication acquisition scope = GitHub %q, Developer %d, Reviewer %d", github.seen, developer.Calls(), reviewer.calls)
 	}
 }
 
@@ -381,7 +415,8 @@ func TestOutcomeReconcilerPreservesSafeFailureForAcquisitionAndAuthorization(t *
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
 		DeveloperCredentials: transientProvider, ReviewerCredentials: transientProvider,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +447,8 @@ func TestOutcomeReconcilerPreservesSafeFailureForAcquisitionAndAuthorization(t *
 	reconciler2, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: genuine,
 		DeveloperCredentials: fresh, ReviewerCredentials: fresh,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -459,7 +495,8 @@ func TestOutcomeReconcilerPreservesRetryAdviceForSanitizedAcquisitionRateLimit(t
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
 		DeveloperCredentials: provider, ReviewerCredentials: provider,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -502,7 +539,8 @@ func TestOutcomeReconcilerRedactsFreshCredentialAcrossTruncationBoundary(t *test
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
 		DeveloperCredentials: provider, ReviewerCredentials: provider,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -518,6 +556,53 @@ func TestOutcomeReconcilerRedactsFreshCredentialAcrossTruncationBoundary(t *test
 		if strings.Contains(diagnostic, "stale-startup-token") {
 			t.Fatalf("settlement diagnostic discloses the startup snapshot: %q", diagnostic)
 		}
+	}
+}
+
+func TestOutcomeReconcilerRedactsEveryStartupAndRetryTokenBeforeTruncation(t *testing.T) {
+	secrets := []string{"developer-start-0123456789abcdef", "reviewer-start-0123456789abcdef", "reviewer-retry-A-0123456789abcdef", "reviewer-retry-B-0123456789abcdef", "reviewer-list-C-0123456789abcdef"}
+	for _, secret := range secrets {
+		t.Run(secret, func(t *testing.T) {
+			calls := 0
+			provider := &stubRotatingProvider{tokens: secrets[2:], calls: &calls}
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			request.RepositoryCredential, request.ReviewerRepositoryCredential = secrets[0], secrets[1]
+			request.PromptResponse, request.PromptError = nil, agentturn.PromptErrorFailure
+			request.PromptDiagnostic = strings.Repeat("x", 4060) + secret + strings.Repeat("y", 100)
+			github := &expiringGitHub{
+				pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)},
+				getErrs: []error{&githubapi.APIError{StatusCode: 503}},
+			}
+			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
+				Store: &outcomeStore{mutations: []store.MutationReservation{outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)}}, GitHub: github,
+				DeveloperCredentials: &outcomeCredentialProvider{credential: "unused-developer-token"}, ReviewerCredentials: provider,
+				Workspace: outcomeCaptureInspector{}, Clock: outcomeClock{}, RetryWait: func(context.Context, time.Duration) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := reconciler.Reconcile(t.Context(), request)
+			if err != nil || observation.Outcome != workflow.TurnOutcomeApproved || observation.Completion.Status != store.AgentTurnSucceeded || calls != 3 {
+				t.Fatalf("credential-safe retry settlement = %#v, %v, acquisitions %d", observation, err, calls)
+			}
+			if !strings.Contains(observation.Diagnostic, "[REDACTED]") || len([]rune(observation.Diagnostic)) > 4096 || strings.Contains(observation.Diagnostic, secret[:16]) || strings.Contains(observation.Diagnostic, secret[len(secret)-8:]) {
+				t.Fatalf("redaction/truncation preserved a credential fragment: %q", observation.Diagnostic)
+			}
+			assertNeutralOutcomeCompletion(t, observation, false)
+		})
+	}
+}
+
+func assertNeutralOutcomeCompletion(t *testing.T, observation store.AgentTurnSettlementObservation, hasResponse bool) {
+	t.Helper()
+	// A lost prompt response is deliberately represented by absent outcome
+	// evidence; successful prompt evidence is the neutral admitted completion.
+	want := ""
+	if hasResponse {
+		want = `{"admitted":true,"status":"completed"}`
+	}
+	if string(observation.Completion.Outcome) != want {
+		t.Fatalf("completion contains runtime-specific or fabricated outcome evidence: %s", observation.Completion.Outcome)
 	}
 }
 
@@ -742,7 +827,8 @@ func TestMCPSubmitReviewRefreshesCacheForDirectReconciliation(t *testing.T) {
 			reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 				Store: &outcomeStore{mutations: []store.MutationReservation{mutation}}, GitHub: github,
 				DeveloperCredentials: developer, ReviewerCredentials: reviewer,
-				Clock: outcomeClock{},
+				Workspace: outcomeCaptureInspector{},
+				Clock:     outcomeClock{},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -758,6 +844,7 @@ func TestMCPSubmitReviewRefreshesCacheForDirectReconciliation(t *testing.T) {
 			if failure != nil {
 				t.Fatalf("MCP-refreshed intent took a recovery detour: %#v", failure)
 			}
+			assertNeutralOutcomeCompletion(t, observation, true)
 			if len(github.seen) != 2 || github.seen[0] != "reviewer-token-B" || github.seen[1] != "reviewer-token-B" {
 				t.Fatalf("final observations did not reuse the MCP-refreshed credential; seen %q", github.seen)
 			}
@@ -775,7 +862,8 @@ func TestOutcomeReconcilerSkipsAcquisitionWithoutGitHubObservation(t *testing.T)
 	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
 		Store: &outcomeStore{mutations: []store.MutationReservation{blocked}}, GitHub: github,
 		DeveloperCredentials: provider, ReviewerCredentials: provider,
-		Clock: outcomeClock{},
+		Workspace: outcomeCaptureInspector{},
+		Clock:     outcomeClock{},
 	})
 	if err != nil {
 		t.Fatal(err)

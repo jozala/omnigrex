@@ -68,7 +68,7 @@ func TestReadinessDockerClientsDoNotTrace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = availability.Close() }()
-	image := "registry.example/opencode@sha256:" + strings.Repeat("a", 64)
+	image := "registry.example/pi@sha256:" + strings.Repeat("a", 64)
 	if err := availability.Available(context.Background(), image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"}); err != nil {
 		t.Fatal(err)
 	}

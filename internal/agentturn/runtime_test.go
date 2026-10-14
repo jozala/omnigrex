@@ -1,15 +1,11 @@
 package agentturn_test
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,10 +19,12 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
@@ -36,7 +34,7 @@ import (
 )
 
 const (
-	runtimeTestImage       = "registry.example/omnigrex/opencode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	runtimeTestImage       = "registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	runtimeTestDefaultSHA  = "1111111111111111111111111111111111111111"
 	runtimeTestPRHeadSHA   = "2222222222222222222222222222222222222222"
 	runtimeTestAssignment  = "10000000-0000-4000-8000-000000000001"
@@ -48,7 +46,6 @@ const (
 )
 
 func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *testing.T) {
-	var protocolLogs bytes.Buffer
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
@@ -61,34 +58,45 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	profileConfig["path"] = ".omnigrex/team/arbitrary profile filename.md"
 	execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 	database := &runtimeStore{operations: &operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir:        "/srv/mise/assignment-" + runtimeTestAssignment + "/mise",
-		SourceRevision: runtimeTestDefaultSHA,
-		Environment: map[string]string{
-			"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise",
-			"PATH":          "/srv/mise/assignment-" + runtimeTestAssignment + "/mise/shims:/usr/bin",
-			"PROJECT_MODE":  "development",
-		},
-	}}
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	workspaces := &runtimeWorkspace{operations: &operations}
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
-	client := &runtimeACPClient{operations: &operations}
-	clientFactory := &runtimeACPFactory{operations: &operations, client: client}
-	sessions := &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}}
+	client := &runtimeTurnConnection{operations: &operations}
+	adapter := &runtimeTurnAdapter{operations: &operations, connection: client}
+	states := &runtimeRetainedState{}
+	credentials := &runtimeCredentialProvider{operations: &operations, credential: "fresh-repository-secret"}
 	launcherConfig := agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: clientFactory, Sessions: sessions,
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: workspaces, Gateway: gateway, Execution: engineFactory,
+		States: states, AgentAdapters: runtimeAdapters(adapter),
+		DeveloperCredentials: credentials, ReviewerCredentials: credentials,
 		MemoryBytes: 1024 << 20,
-		ACPOptions:  acp.ClientOptions{Logger: slog.New(slog.NewJSONHandler(&protocolLogs, nil))},
 	}
 	withoutMemory := launcherConfig
 	withoutMemory.MemoryBytes = 0
 	if _, err := agentturn.NewLauncher(withoutMemory); !errors.Is(err, agentturn.ErrInvalidLauncher) {
 		t.Fatalf("NewLauncher() with no memory error = %v, want ErrInvalidLauncher", err)
+	}
+	for _, missing := range []string{"retained state", "agent adapters", "nil adapter", "Developer credentials", "Reviewer credentials"} {
+		invalid := launcherConfig
+		switch missing {
+		case "retained state":
+			invalid.States = nil
+		case "agent adapters":
+			invalid.AgentAdapters = nil
+		case "nil adapter":
+			invalid.AgentAdapters = runtimeAdapters(nil)
+		case "Developer credentials":
+			invalid.DeveloperCredentials = nil
+		case "Reviewer credentials":
+			invalid.ReviewerCredentials = nil
+		}
+		if _, err := agentturn.NewLauncher(invalid); !errors.Is(err, agentturn.ErrInvalidLauncher) {
+			t.Fatalf("NewLauncher() with missing %s error = %v, want ErrInvalidLauncher", missing, err)
+		}
 	}
 	launcher := runtimeLauncher(t, launcherConfig)
 	var renewal agentturn.MCPRenewal
@@ -109,55 +117,22 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	}
 	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
 
-	// Exercise the real ACP logger with the options emitted at the launch boundary.
-	// Initialization failures must be correlated even before Session preparation.
-	transport, agent := net.Pipe()
-	protocolClient := acp.NewClient(transport, clientFactory.options)
-	t.Cleanup(func() { _ = protocolClient.Close(); _ = agent.Close() })
-	initializeDone := make(chan error, 1)
-	go func() { _, err := protocolClient.Initialize(context.Background()); initializeDone <- err }()
-	requestLine, err := bufio.NewReader(agent).ReadBytes('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	var request struct {
-		ID int `json:"id"`
-	}
-	if err := json.Unmarshal(requestLine, &request); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fmt.Fprintf(agent, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}\n", request.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-initializeDone; err == nil {
-		t.Fatal("Initialize unexpectedly succeeded")
-	}
-	var protocolLog map[string]any
-	if err := json.Unmarshal(protocolLogs.Bytes(), &protocolLog); err != nil {
-		t.Fatalf("missing ACP diagnostic log: %v", err)
-	}
-	for key, want := range map[string]any{
-		"workflow_id": runtimeTestWorkflow, "assignment_id": runtimeTestAssignment,
-		"agent_session_id": runtimeTestSession, "agent_turn_id": runtimeTestTurn,
-		"execution_epoch": float64(7), "method": "initialize",
-	} {
-		if protocolLog[key] != want {
-			t.Errorf("ACP log[%s] = %v, want %v", key, protocolLog[key], want)
-		}
-	}
-
 	if len(operations) == 0 || operations[0] != "fence" {
 		t.Fatalf("dependency operations = %v, want fence first", operations)
 	}
-	wantPrefix := []string{"fence", "execution", "profile", "workspace", "mise", "refresh", "mcp-register", "docker-new", "turn-fence", "docker-create", "process-start", "fence", "acp-new", "session-prepare"}
+	wantPrefix := []string{"fence", "execution", "profile", "workspace", "refresh", "mcp-register", "repository-credential", "docker-new", "docker-create", "turn-fence", "process-start", "fence", "session-prepare"}
 	if !reflect.DeepEqual(operations, wantPrefix) {
 		t.Fatalf("dependency operations = %v, want %v", operations, wantPrefix)
 	}
-	if workspaces.checkout.Revision != runtimeTestDefaultSHA || workspaces.mise.Revision != runtimeTestDefaultSHA {
-		t.Errorf("workspace revision = %q and mise revision = %q, want default SHA", workspaces.checkout.Revision, workspaces.mise.Revision)
+	if workspaces.checkout.Revision != runtimeTestDefaultSHA {
+		t.Errorf("workspace revision = %q, want default SHA", workspaces.checkout.Revision)
 	}
 	if workspaces.checkout.AssignmentID != runtimeTestAssignment || workspaces.checkout.Credential != runtimeTestCredential {
 		t.Errorf("workspace checkout = %#v", workspaces.checkout)
+	}
+	if key := workspaces.preparationKey; key.AssignmentID != runtimeTestAssignment || key.AgentSessionID != runtimeTestSession ||
+		key.AgentTurnID != runtimeTestTurn || key.ExecutionEpoch != 7 || key.RuntimeProfileName != "pi-rpc" || key.RuntimeProfileVersion != "v1" {
+		t.Fatalf("workspace preparation lost full execution identity: %#v", key)
 	}
 	if gateway.scope.WorkflowID != runtimeTestWorkflow || gateway.scope.Role != workflow.RoleDeveloper ||
 		gateway.scope.Branch != "omnigrex/issue-17" || gateway.scope.DefaultBranch != "trunk" || gateway.scope.HeadSHA != runtimeTestDefaultSHA ||
@@ -196,43 +171,37 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if spec.MemoryBytes != 1073741824 || engineFactory.options.RuntimePolicy.MemoryBytes != spec.MemoryBytes {
 		t.Errorf("Agent Turn policy/spec memory = %d/%d, want 1073741824", engineFactory.options.RuntimePolicy.MemoryBytes, spec.MemoryBytes)
 	}
-	for _, label := range []struct{ got, want string }{
-		{store.RuntimeLabelAssignmentID, "io.omnigrex.assignment"},
-		{store.RuntimeLabelSessionID, "io.omnigrex.agent-session"},
-		{store.RuntimeLabelTurnID, "io.omnigrex.agent-turn"},
-		{store.RuntimeLabelEpoch, "io.omnigrex.execution-epoch"},
-	} {
-		if label.got != label.want {
-			t.Errorf("cleanup label constant = %q, want %q", label.got, label.want)
-		}
-	}
 	wantLabels := map[string]string{
-		store.RuntimeLabelSessionID:    runtimeTestSession,
-		store.RuntimeLabelTurnID:       runtimeTestTurn,
-		store.RuntimeLabelAssignmentID: runtimeTestAssignment,
-		store.RuntimeLabelEpoch:        "7",
-		"io.omnigrex.runtime-profile":  "opencode-acp/v1",
-		"io.omnigrex.workflow":         runtimeTestWorkflow,
+		dockerruntime.RuntimeProcessSessionLabel:    runtimeTestSession,
+		dockerruntime.RuntimeProcessTurnLabel:       runtimeTestTurn,
+		dockerruntime.RuntimeProcessAssignmentLabel: runtimeTestAssignment,
+		dockerruntime.RuntimeProcessEpochLabel:      "7",
+		"io.omnigrex.runtime-profile":               "pi-rpc/v1",
+		"io.omnigrex.workflow":                      runtimeTestWorkflow,
+		"io.omnigrex.execution-specification":       spec.Labels["io.omnigrex.execution-specification"],
+	}
+	if len(spec.Labels["io.omnigrex.execution-specification"]) != 64 {
+		t.Fatal("execution specification digest is missing")
 	}
 	if !reflect.DeepEqual(spec.Labels, wantLabels) {
 		t.Errorf("Docker labels = %#v, want %#v", spec.Labels, wantLabels)
 	}
 	wantVolumes := []dockerruntime.VolumeMount{
-		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/mise", Target: "/home/opencode/.local/share/mise"},
-		{Name: "runtime-state", Subpath: "assignment-" + runtimeTestAssignment + "/runtime-state", Target: "/home/opencode/.local/share/opencode"},
-		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/tool-data", Target: "/home/opencode/.local/share/omnigrex-tool-data"},
+		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/mise", Target: environment.DataDirectory},
+		{Name: "runtime-state", Subpath: "assignment-" + runtimeTestAssignment + "/runtime-state", Target: "/state"},
+		{Name: "mise", Subpath: "assignment-" + runtimeTestAssignment + "/tool-data", Target: filepath.Join(filepath.Dir(environment.DataDirectory), "omnigrex-tool-data")},
 		{Name: "workspaces", Subpath: "assignment-" + runtimeTestAssignment + "/workspace", Target: "/workspace"},
 	}
 	if !reflect.DeepEqual(spec.Volumes, wantVolumes) {
 		t.Errorf("Docker volumes = %#v, want %#v", spec.Volumes, wantVolumes)
 	}
-	assertRuntimeEnvironment(t, spec.Environment, map[string]string{
-		"MISE_DATA_DIR": "/home/opencode/.local/share/mise",
-		"PATH":          "/home/opencode/.local/share/mise/shims:/usr/bin",
-		"PROJECT_MODE":  "development",
-	})
-	assertRuntimeMCPPermissions(t, spec.Environment, workflow.RoleDeveloper)
-	for _, secret := range []string{runtimeTestCredential, "mcp-secret"} {
+	if !slices.Equal(spec.Command, append([]string{"/usr/local/bin/omnigrex-environment", "run"}, runtimeProfile.Contract().Command...)) {
+		t.Fatalf("runtime did not bootstrap in-environment: %v", spec.Command)
+	}
+	if credentials.calls != 1 || credentials.owner != "acme" || credentials.repository != "widgets" {
+		t.Fatalf("post-checkout credential refresh = %#v, want one request for the bound repository", credentials)
+	}
+	for _, secret := range []string{runtimeTestCredential, credentials.credential, "mcp-secret"} {
 		if strings.Contains(strings.Join(spec.Environment, "\n"), secret) || strings.Contains(stringMap(spec.Labels), secret) {
 			t.Errorf("Docker contract contains non-provider credential %q", secret)
 		}
@@ -240,23 +209,22 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	if engineFactory.options.AgentNetwork != "omnigrex-agent" || !reflect.DeepEqual(engineFactory.options.RuntimePolicy.Labels, spec.Labels) {
 		t.Errorf("Docker Engine options = %#v", engineFactory.options)
 	}
-	if clientFactory.transport != engineFactory.engine.process.transport {
-		t.Error("ACP client did not attach to Runtime Process transport")
+	if !reflect.DeepEqual(adapter.request.MCP, gateway.registration.Server) {
+		t.Errorf("Session MCP endpoint = %#v, want registered descriptor", adapter.request.MCP)
 	}
-	if required := clientFactory.options.RequiredCapabilities; !required.SessionList || !required.SessionResume || !required.SessionLoad {
-		t.Errorf("ACP required capabilities = %#v", required)
+	if strings.Contains(string(adapter.request.Credentials), credentials.credential) {
+		t.Fatal("agent adapter received GitHub credentials")
 	}
-	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "allow")
-	assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "reject")
-	assertRuntimePermissionDecision(t, clientFactory.options, "write file", "edit", "allow")
-	if len(sessions.request.MCPServers) != 1 || !reflect.DeepEqual(sessions.request.MCPServers[0], gateway.registration.Server) {
-		t.Errorf("Session MCP servers = %#v, want registered descriptor", sessions.request.MCPServers)
+	if adapter.request.Lease.ExecutionEpoch != 7 || adapter.request.Session.ID != runtimeTestSession ||
+		adapter.request.State.ParticipantID != runtimeTestAssignment || adapter.request.Transport != engineFactory.engine.process.transport ||
+		adapter.request.ProfileName != "implementation-specialist" || !slices.Equal(adapter.request.Profile, execution.Turn.AgentProfileConfig) {
+		t.Errorf("Session Prepare request = %#v", adapter.request)
 	}
-	if sessions.request.Lease.ExecutionEpoch != 7 || sessions.request.Session.ID != runtimeTestSession ||
-		sessions.request.StatePath != "assignment-"+runtimeTestAssignment+"/runtime-state" || sessions.request.Client != client {
-		t.Errorf("Session Prepare request = %#v", sessions.request)
+	if len(states.ensured) != 1 || states.ensured[0] != adapter.request.State || adapter.request.State != engineFactory.request.State ||
+		adapter.request.State.RuntimeProfileSHA256 != runtimeProfile.ContentSHA256() || adapter.request.State.Image != runtimeTestImage {
+		t.Fatal("retained state attachment lost the Session's exact Runtime Profile binding")
 	}
-	if handle.Client != client || handle.Session.ACPSessionID != "acp-session" || client.prompts != 0 {
+	if handle.AgentConnection() != client || client.prompts != 0 {
 		t.Errorf("Runtime handle = %#v", handle)
 	}
 }
@@ -267,17 +235,13 @@ func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
 	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn","go-cache":"assignment"},"environment":{"TMPDIR":"build","GOTMPDIR":"build","GOCACHE":"go-cache"}}`)
 	database := &runtimeStore{operations: &operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestDefaultSHA,
-		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
-	}}
+	workspaces := &runtimeWorkspace{operations: &operations}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
-		Docker: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+		Workspace: workspaces, Gateway: &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{Name: "omnigrex", URL: "http://mcp:8080/mcp"}}},
+		Execution:                engineFactory,
+		MemoryBytes:              1024 << 20,
 		PathEnvironmentAllowlist: []string{"TMPDIR", "GOTMPDIR", "GOCACHE"},
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -288,10 +252,10 @@ func TestLauncherInjectsApprovedDiskBackedPathsIntoTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantScratch := "/home/opencode/.local/share/omnigrex-tool-data/turn/" + runtimeTestTurn + "/build"
+	wantScratch := filepath.Join(filepath.Dir(environment.DataDirectory), "omnigrex-tool-data/turn", runtimeTestTurn, "build")
 	assertRuntimeEnvironment(t, engineFactory.engine.spec.Environment, map[string]string{
 		"TMPDIR": wantScratch, "GOTMPDIR": wantScratch,
-		"GOCACHE": "/home/opencode/.local/share/omnigrex-tool-data/assignment/go-cache",
+		"GOCACHE": filepath.Join(filepath.Dir(environment.DataDirectory), "omnigrex-tool-data/assignment/go-cache"),
 	})
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
@@ -311,21 +275,16 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 		SourcePublishMutationID: "10000000-0000-4000-8000-000000000001",
 		SourceOpenPRMutationID:  "10000000-0000-4000-8000-000000000002",
 	}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir: "/srv/mise/assignment-" + runtimeTestAssignment + "/mise", SourceRevision: runtimeTestPRHeadSHA,
-		Environment: map[string]string{"MISE_DATA_DIR": "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"},
-	}}
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	workspaces := &runtimeWorkspace{operations: &operations}
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store:     &runtimeStore{operations: &operations, execution: execution},
 		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: profile},
-		Workspace: workspaces, Gateway: gateway, Docker: &runtimeEngineFactory{operations: &operations},
-		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations, result: session.Result{AgentSessionID: runtimeTestSession, ACPSessionID: "acp-session"}},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise", MemoryBytes: 1024 << 20,
+		Workspace: workspaces, Gateway: gateway, Execution: &runtimeEngineFactory{operations: &operations},
+		MemoryBytes: 1024 << 20,
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
 		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
@@ -338,34 +297,27 @@ func TestLauncherLaunchesRecoveredDeveloperAtPublishedHeadWithoutReadyChangeProp
 	t.Cleanup(func() { _ = handle.Cleanup(context.Background()) })
 	if workspaces.checkout.Revision != runtimeTestPRHeadSHA || gateway.scope.HeadSHA != runtimeTestPRHeadSHA ||
 		gateway.scope.PullRequest == nil || gateway.scope.PullRequest.Number != 18 || !gateway.scope.BranchExists || !gateway.scope.RecoveredPublication ||
-		gateway.scope.Branch != "omnigrex/issue-17" || workspaces.mise.Revision != runtimeTestPRHeadSHA {
-		t.Fatalf("recovered checkout %#v, scope %#v, mise %#v", workspaces.checkout, gateway.scope, workspaces.mise)
+		gateway.scope.Branch != "omnigrex/issue-17" {
+		t.Fatalf("recovered checkout %#v, scope %#v", workspaces.checkout, gateway.scope)
 	}
 }
 
-func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *testing.T) {
+func TestLauncherUsesWorkingRevisionForBothRolesAndInEnvironmentTooling(t *testing.T) {
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
 		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
 	}
 	for _, testCase := range []struct {
-		name             string
-		role             workflow.Role
-		wantMiseRevision string
+		name string
+		role workflow.Role
 	}{
-		{name: "returning Developer", role: workflow.RoleDeveloper, wantMiseRevision: runtimeTestPRHeadSHA},
-		{name: "Reviewer", role: workflow.RoleReviewer, wantMiseRevision: runtimeTestDefaultSHA},
+		{name: "returning Developer", role: workflow.RoleDeveloper},
+		{name: "Reviewer", role: workflow.RoleReviewer},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			operations := []string{}
 			runtimeProfile := runtimeLauncherProfile(t)
 			execution, lease := runtimeExecutionContext(t, runtimeProfile, testCase.role, proposal)
-			var profileConfig map[string]any
-			if err := json.Unmarshal(execution.Turn.AgentProfileConfig, &profileConfig); err != nil {
-				t.Fatal(err)
-			}
-			profileConfig["permissions"].(map[string]any)["skill"] = "allow"
-			execution.Turn.AgentProfileConfig, _ = json.Marshal(profileConfig)
 			instructionsDir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(instructionsDir, "common.md"), []byte("CURRENT_OPERATOR_GUIDANCE"), 0o600); err != nil {
 				t.Fatal(err)
@@ -374,25 +326,18 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
-			workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-				DataDir: miseDir, SourceRevision: testCase.wantMiseRevision,
-				Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-			}}
-			gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-				Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
+			workspaces := &runtimeWorkspace{operations: &operations}
+			gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+				Name: "omnigrex", URL: "http://mcp:8080/mcp",
 			}}}
 			engineFactory := &runtimeEngineFactory{operations: &operations}
-			client := &runtimeACPClient{operations: &operations}
-			clientFactory := &runtimeACPFactory{operations: &operations, client: client}
-			sessions := &runtimeSessionPreparer{operations: &operations}
+			adapter := &runtimeTurnAdapter{operations: &operations}
 			launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 				Store:     &runtimeStore{operations: &operations, execution: execution},
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-				Workspace: workspaces, Gateway: gateway, Docker: engineFactory,
-				ACP: clientFactory, Sessions: sessions,
+				Workspace: workspaces, Gateway: gateway, Execution: engineFactory,
+				AgentAdapters:        runtimeAdapters(adapter),
 				OperatorInstructions: operator,
-				Network:              "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 			})
 
 			handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -407,53 +352,17 @@ func TestLauncherUsesPullRequestRevisionAndReviewerTrustedDefaultBranchTools(t *
 			if workspaces.checkout.Revision != runtimeTestPRHeadSHA {
 				t.Errorf("workspace revision = %q, want Pull Request head", workspaces.checkout.Revision)
 			}
-			if workspaces.mise.Revision != testCase.wantMiseRevision {
-				t.Errorf("mise revision = %q, want %q", workspaces.mise.Revision, testCase.wantMiseRevision)
+			if !slices.Equal(engineFactory.engine.spec.Command, append([]string{"/usr/local/bin/omnigrex-environment", "run"}, runtimeProfile.Contract().Command...)) {
+				t.Fatal("tool setup was not delegated to the working checkout's environment")
 			}
 			if gateway.scope.PullRequest == nil || gateway.scope.PullRequest.ID != 61 || gateway.scope.PullRequest.Number != 23 ||
 				gateway.scope.Branch != proposal.HeadRef || gateway.scope.HeadSHA != proposal.HeadSHA {
 				t.Errorf("MCP Pull Request scope = %#v", gateway.scope)
 			}
-			if testCase.role == workflow.RoleReviewer {
-				assertRuntimeEnvironment(t, engineFactory.engine.spec.Environment, map[string]string{
-					"OPENCODE_DISABLE_PROJECT_CONFIG":  "true",
-					"OPENCODE_DISABLE_DEFAULT_PLUGINS": "true",
-					"OPENCODE_DISABLE_EXTERNAL_SKILLS": "true",
-					"OPENCODE_PURE":                    "true",
-				})
-			}
-			assertRuntimeMCPPermissions(t, engineFactory.engine.spec.Environment, testCase.role)
-			var config struct {
-				Agent map[string]struct {
-					Prompt string `json:"prompt"`
-				} `json:"agent"`
-				Skills struct {
-					Paths []string `json:"paths"`
-				} `json:"skills"`
-			}
-			var configJSON string
-			for _, entry := range engineFactory.engine.spec.Environment {
-				if value, found := strings.CutPrefix(entry, "OPENCODE_CONFIG_CONTENT="); found {
-					configJSON = value
-					break
-				}
-			}
-			if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(config.Skills.Paths, []string{"/workspace/.agents/skills"}) {
-				t.Fatalf("launched skill paths = %v, want prepared checkout", config.Skills.Paths)
-			}
-			prompt := config.Agent["omnigrex-"+strings.ToLower(string(testCase.role))].Prompt
-			if !strings.Contains(prompt, "CURRENT_OPERATOR_GUIDANCE") || !strings.Contains(prompt, "Current Stage: "+string(execution.Turn.Stage)) || !strings.Contains(prompt, "Omnigrex platform instructions") {
-				t.Fatal("launch omitted current deployment or Stage instructions")
-			}
-			assertRuntimePermissionDecision(t, clientFactory.options, "skill", "other", "allow")
-			assertRuntimePermissionDecision(t, clientFactory.options, "task", "think", "reject")
-			if testCase.role == workflow.RoleReviewer {
-				assertRuntimePermissionDecision(t, clientFactory.options, "edit", "edit", "reject")
-				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_submit_review", "other", "allow")
-				assertRuntimePermissionDecision(t, clientFactory.options, "omnigrex_request_review", "other", "reject")
+			if adapter.request.Stage.ID != execution.Turn.Stage || adapter.request.Purpose != execution.Turn.Purpose ||
+				adapter.request.Policy.Role != testCase.role || !reflect.DeepEqual(adapter.request.Operator, operator) ||
+				!slices.Equal(adapter.request.Profile, execution.Turn.AgentProfileConfig) {
+				t.Fatal("launch omitted current deployment, Role, Profile, or Stage instructions")
 			}
 		})
 	}
@@ -467,10 +376,7 @@ func TestLauncherFenceFailureHasNoOtherDependencyAction(t *testing.T) {
 		Store:     &runtimeStore{operations: &operations, execution: execution, fenceErr: store.ErrAgentTurnFenceLost},
 		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 		Workspace: &runtimeWorkspace{operations: &operations}, Gateway: &runtimeGateway{operations: &operations},
-		Docker:   &runtimeEngineFactory{operations: &operations},
-		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Execution: &runtimeEngineFactory{operations: &operations},
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -490,16 +396,11 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, fenceErrors: []error{nil, store.ErrAgentTurnFenceLost}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: &runtimeEngineFactory{operations: &operations},
-		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: &runtimeEngineFactory{operations: &operations},
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -510,7 +411,7 @@ func TestLauncherRechecksFenceAfterWorkspaceProvisioningBeforeRuntimeSideEffects
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	want := []string{"fence", "execution", "profile", "workspace", "mise", "refresh"}
+	want := []string{"fence", "execution", "profile", "workspace", "refresh"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("dependency operations = %v, want %v", operations, want)
 	}
@@ -520,17 +421,12 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, withFenceAttempted: make(chan struct{})}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
-		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 	})
 
 	database.turnFence.Lock()
@@ -561,8 +457,8 @@ func TestLauncherDoesNotStartRuntimeProcessWhenLeaseBecomesStaleBeforeFenceAcqui
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if slices.Contains(operations, "docker-create") || slices.Contains(operations, "process-start") || slices.Contains(operations, "acp-new") {
-		t.Fatalf("dependency operations = %v, want no create, start, or ACP attach", operations)
+	if engineFactory.engine.process.started != 0 || engineFactory.engine.process.removed != 0 || slices.Contains(operations, "session-prepare") {
+		t.Fatalf("dependency operations = %v, want stopped resources retained after proof fence loss", operations)
 	}
 }
 
@@ -570,7 +466,6 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	startEntered := make(chan struct{})
@@ -579,12 +474,8 @@ func TestLauncherHoldsAgentTurnFenceUntilRuntimeProcessStartFinishes(t *testing.
 	engineFactory.engine.process.releaseStart = releaseStart
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
-		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 	})
 
 	launchResult := make(chan error, 1)
@@ -630,18 +521,13 @@ func TestLauncherCleansCreatedProcessWhenStartCannotCrossRecoveryFence(t *testin
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	engineFactory.engine.process.startErr = store.ErrAgentTurnFenceLost
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
-		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -652,7 +538,7 @@ func TestLauncherCleansCreatedProcessWhenStartCannotCrossRecoveryFence(t *testin
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if engineFactory.engine.process.started != 1 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "acp-new") {
+	if engineFactory.engine.process.started != 1 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "session-prepare") {
 		t.Fatalf("process lifecycle = started %d, removed %d, operations %v", engineFactory.engine.process.started, engineFactory.engine.process.removed, operations)
 	}
 }
@@ -661,17 +547,12 @@ func TestLauncherRevalidatesFenceImmediatelyAfterStartAndCleansBeforeReturn(t *t
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution, fenceErrors: []error{nil, nil, store.ErrAgentTurnFenceLost}}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-		}},
-		Gateway: &runtimeGateway{operations: &operations}, Docker: engineFactory,
-		ACP: &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}}, Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   &runtimeGateway{operations: &operations}, Execution: engineFactory,
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -682,7 +563,7 @@ func TestLauncherRevalidatesFenceImmediatelyAfterStartAndCleansBeforeReturn(t *t
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) {
 		t.Fatalf("Launch() error = %v, want ErrAgentTurnFenceLost", err)
 	}
-	if engineFactory.engine.process.started != 1 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "acp-new") {
+	if engineFactory.engine.process.started != 1 || engineFactory.engine.process.removed != 1 || slices.Contains(operations, "session-prepare") {
 		t.Fatalf("process lifecycle = started %d, removed %d, operations %v", engineFactory.engine.process.started, engineFactory.engine.process.removed, operations)
 	}
 	startIndex := slices.Index(operations, "process-start")
@@ -702,7 +583,7 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 			execution.Assignment.RuntimeProfileContentSHA256 = strings.Repeat("b", 64)
 		}},
 		{name: "Assignment image", mutate: func(execution *store.AgentTurnExecutionContext) {
-			execution.Assignment.RuntimeImageDigest = "registry.example/omnigrex/opencode@sha256:" + strings.Repeat("b", 64)
+			execution.Assignment.RuntimeImageDigest = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("b", 64)
 		}},
 		{name: "Session binding", mutate: func(execution *store.AgentTurnExecutionContext) {
 			execution.Session.RuntimeProfileVersion = "different"
@@ -717,10 +598,7 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 				Store:     &runtimeStore{operations: &operations, execution: execution},
 				Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
 				Workspace: &runtimeWorkspace{operations: &operations}, Gateway: &runtimeGateway{operations: &operations},
-				Docker:   &runtimeEngineFactory{operations: &operations},
-				ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-				Sessions: &runtimeSessionPreparer{operations: &operations},
-				Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+				Execution: &runtimeEngineFactory{operations: &operations},
 			})
 
 			_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -738,7 +616,7 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 	}
 }
 
-func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *testing.T) {
+func TestLauncherRejectsReviewerControlPathOverrideBeforeStartingDocker(t *testing.T) {
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	proposal := &store.AgentTurnChangeProposal{
@@ -746,19 +624,13 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 		BaseRef: "trunk", HeadRef: "feature", HeadSHA: runtimeTestPRHeadSHA,
 	}
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleReviewer, proposal)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{Type: "http", Name: "omnigrex", URL: "http://mcp/mcp"}}}
+	execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"cache":"turn"},"environment":{"PI_CODING_AGENT_DIR":"cache"}}`)
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{Name: "omnigrex", URL: "http://mcp/mcp"}}}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
-		Store:    &runtimeStore{operations: &operations, execution: execution},
-		Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-			DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA,
-			Environment: map[string]string{"MISE_DATA_DIR": miseDir, "OPENCODE_DISABLE_PROJECT_CONFIG": "false"},
-		}},
-		Gateway: gateway, Docker: &runtimeEngineFactory{operations: &operations},
-		ACP:      &runtimeACPFactory{operations: &operations, client: &runtimeACPClient{operations: &operations}},
-		Sessions: &runtimeSessionPreparer{operations: &operations},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Store:     &runtimeStore{operations: &operations, execution: execution},
+		Registry:  &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
+		Workspace: &runtimeWorkspace{operations: &operations},
+		Gateway:   gateway, Execution: &runtimeEngineFactory{operations: &operations},
 	})
 
 	_, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
@@ -766,10 +638,10 @@ func TestLauncherRejectsReviewerMiseEnvironmentOverrideBeforeStartingDocker(t *t
 		DefaultBranchName: "trunk", DefaultBranchSHA: runtimeTestDefaultSHA, InitialFeatureBranch: "unused",
 		RepositoryCredential: runtimeTestCredential, ProviderCredentialJSON: json.RawMessage(`{"openai":{"apiKey":"provider-secret"}}`),
 	})
-	if !errors.Is(err, opencode.ErrInvalidProcess) {
-		t.Fatalf("Launch() error = %v, want ErrInvalidProcess", err)
+	if !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Launch() error = %v, want ErrRuntimeBinding", err)
 	}
-	if gateway.drained != 1 || slices.Contains(operations, "docker-new") {
+	if gateway.drained != 0 || slices.Contains(operations, "docker-new") {
 		t.Fatalf("dependency operations = %v and drains = %d", operations, gateway.drained)
 	}
 }
@@ -790,7 +662,7 @@ func TestRuntimeHandleCleanupIsOrderedAndIdempotent(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() second error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -819,12 +691,247 @@ func TestRuntimeHandleCloseMCPIsIdempotentAcrossCleanup(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("close and cleanup operations = %v, want %v", operations, want)
 	}
 	if resources.gateway.drained != 1 {
 		t.Fatalf("CloseAndDrain calls = %d, want one", resources.gateway.drained)
+	}
+}
+
+func TestRuntimeHandleCaptureFailureRetainsEvidenceAndRetriesBeforeReviewerDiscard(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleReviewer, proposal, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.store.execution.Turn.TurnConfiguration = json.RawMessage(`{"directories":{"scratch":"turn"},"environment":{"TMPDIR":"scratch"}}`)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("terminal capture unavailable")
+	resources.workspace.captureErr = failure
+	operations = operations[:0]
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("Cleanup() = %v, want capture failure", err)
+	}
+	process := &resources.engineFactory.engine.process
+	if process.removed != 0 || resources.engineFactory.engine.closed != 0 || resources.workspace.discardedAssignmentID != "" ||
+		resources.workspace.cleanedTurnID != "" {
+		t.Fatalf("capture failure destroyed retry evidence: %v", operations)
+	}
+	wantRequest := execution.CaptureRequest{
+		Workspace: execution.WorkspaceRef{Key: execution.Key{
+			AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
+			ExecutionEpoch: 7, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		}}, OperationID: runtimeTestTurn, Purpose: execution.TerminalCapture,
+	}
+	if !slices.Equal(resources.workspace.captureRequests, []execution.CaptureRequest{wantRequest}) {
+		t.Fatalf("terminal capture identity = %#v, want %#v", resources.workspace.captureRequests, wantRequest)
+	}
+	resources.workspace.captureErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if process.stopped != 1 || process.removed != 1 || len(resources.workspace.captureRequests) != 2 ||
+		resources.workspace.captureRequests[1] != wantRequest || resources.workspace.cleanedTurnID != runtimeTestTurn ||
+		resources.workspace.discardedRef.Key != wantRequest.Workspace.Key {
+		t.Fatalf("capture retry did not finish exactly once: %v", operations)
+	}
+	if !containsInOrder(operations, "mcp-close-and-drain", "process-stop", "workspace-capture", "process-remove", "workspace-discard") {
+		t.Fatalf("invalid capture/remove/discard ordering: %v", operations)
+	}
+}
+
+func TestRuntimeHandleRejectsMismatchedTerminalCaptureWithoutRemoval(t *testing.T) {
+	operations := []string{}
+	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+	resources.workspace.captureRef = execution.CaptureRef{
+		Request: execution.CaptureRequest{Purpose: execution.PublicationCapture}, SHA256: strings.Repeat("a", 64),
+	}
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Cleanup() = %v, want invalid capture binding", err)
+	}
+	if resources.engineFactory.engine.process.removed != 0 || resources.engineFactory.engine.closed != 0 {
+		t.Fatal("mismatched terminal evidence authorized destruction")
+	}
+	resources.workspace.captureRef = execution.CaptureRef{}
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeHandleFencesCaptureAdmissionAndAdoptionOutsideTransfer(t *testing.T) {
+	for _, loseDuringCapture := range []bool{false, true} {
+		t.Run(fmt.Sprint(loseDuringCapture), func(t *testing.T) {
+			operations := []string{}
+			handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
+			if loseDuringCapture {
+				resources.workspace.captureHook = func(context.Context) error {
+					if resources.store.inCleanupFence {
+						t.Fatal("capture transfer ran inside the cleanup transaction")
+					}
+					resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+					return nil
+				}
+			} else {
+				resources.store.withFenceErr = store.ErrAgentTurnFenceLost
+			}
+			if err := handle.Cleanup(context.Background()); !errors.Is(err, store.ErrAgentTurnFenceLost) {
+				t.Fatalf("Cleanup() = %v, want capture fence loss", err)
+			}
+			if resources.engineFactory.engine.process.removed != 0 || resources.engineFactory.engine.closed != 0 {
+				t.Fatal("stale capture admission or adoption destroyed recovery evidence")
+			}
+			wantCaptures := 0
+			if loseDuringCapture {
+				wantCaptures = 1
+			}
+			if len(resources.workspace.captureRequests) != wantCaptures {
+				t.Fatalf("capture calls = %d, want %d", len(resources.workspace.captureRequests), wantCaptures)
+			}
+			resources.store.withFenceErr = nil
+			resources.workspace.captureHook = nil
+			if err := handle.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(resources.workspace.captureRequests) != wantCaptures+1 {
+				t.Fatal("failed adoption retained an unfenced capture on the handle")
+			}
+		})
+	}
+}
+
+func TestLauncherPreparationOnlyFailureDoesNotRequireTerminalCapture(t *testing.T) {
+	operations := []string{}
+	proposal := &store.AgentTurnChangeProposal{
+		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
+		BaseRef: "trunk", BaseSHA: runtimeTestDefaultSHA, HeadRef: "omnigrex/issue-17", HeadSHA: runtimeTestPRHeadSHA,
+	}
+	failure := errors.New("Agent Session was never prepared")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleReviewer, proposal, failure,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.captureErr = errors.New("no useful Turn exists to capture")
+		})
+	if handle != nil || !errors.Is(err, failure) || len(resources.workspace.captureRequests) != 0 ||
+		resources.engineFactory.engine.process.removed != 1 || resources.workspace.discardedAssignmentID != runtimeTestAssignment {
+		t.Fatalf("preparation-only cleanup = (%v, %v), operations %v", handle, err, operations)
+	}
+}
+
+func TestLauncherPreparationFailureAfterDurableBindingRetainsCaptureSource(t *testing.T) {
+	operations := []string{}
+	prepareErr := errors.New("configuration failed after binding the Session")
+	captureErr := errors.New("capture transport unavailable")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, prepareErr,
+		func(resources *runtimeLaunchResources) {
+			resources.adapter.prepareHook = func() {
+				resources.store.execution.Session.RuntimeCapabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
+			}
+			resources.workspace.captureErr = captureErr
+		})
+	if handle == nil || !errors.Is(err, prepareErr) || !errors.Is(err, captureErr) || resources.engineFactory.engine.process.removed != 0 {
+		t.Fatalf("partially bound preparation = (%v, %v), operations %v", handle, err, operations)
+	}
+	if len(resources.workspace.captureRequests) != 1 {
+		t.Fatal("partially bound Session was incorrectly exempted from terminal capture")
+	}
+	resources.workspace.captureErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if resources.engineFactory.engine.process.removed != 1 {
+		t.Fatal("capture retry did not release the partially prepared execution")
+	}
+}
+
+func TestLauncherExistingSessionRetainsEvidenceAfterCreateOrStartFailure(t *testing.T) {
+	for _, failCreate := range []bool{false, true} {
+		t.Run(fmt.Sprint(failCreate), func(t *testing.T) {
+			operations := []string{}
+			captureErr := errors.New("stopped workspace capture unavailable")
+			handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+				func(resources *runtimeLaunchResources) {
+					resources.store.execution.Session.Status = store.AgentSessionActive
+					resources.store.execution.Session.RuntimeCapabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
+					resources.workspace.captureErr = captureErr
+					if failCreate {
+						resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+					} else {
+						resources.engineFactory.engine.process.startErr = execution.ErrUnknownEffect
+					}
+				})
+			if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || !errors.Is(err, captureErr) {
+				t.Fatalf("ambiguous existing-Session launch = (%v, %v)", handle, err)
+			}
+			process := &resources.engineFactory.engine.process
+			if process.removed != 0 || resources.engineFactory.engine.closed != 0 || len(resources.workspace.captureRequests) != 1 {
+				t.Fatalf("failed creation/start destroyed terminal evidence: %v", operations)
+			}
+			resources.workspace.captureErr = nil
+			if err := handle.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if process.stopped != 1 || process.removed != 1 || len(resources.workspace.captureRequests) != 2 {
+				t.Fatalf("capture retry repeated teardown or missed evidence: %v", operations)
+			}
+		})
+	}
+}
+
+func TestLauncherExistingSessionAmbiguousCreateWithoutHandleRequiresExactRecovery(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.store.execution.Session.Status = store.AgentSessionActive
+			resources.store.execution.Session.RuntimeCapabilities = json.RawMessage(`{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}`)
+			resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+			resources.engineFactory.engine.createWithoutProcess = true
+		})
+	if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || resources.engineFactory.engine.absenceCalls != 0 || resources.engineFactory.engine.closed != 0 {
+		t.Fatalf("ambiguous creation without handle = (%v, %v), operations %v", handle, err, operations)
+	}
+	if err := handle.Cleanup(context.Background()); err == nil || resources.engineFactory.engine.absenceCalls != 0 {
+		t.Fatal("missing process handle authorized destruction without exact-key stop/capture")
+	}
+}
+
+func TestLauncherCreatingSessionRetainsResourceUntilCleanupProofCommits(t *testing.T) {
+	operations := []string{}
+	proofErr := errors.New("preparation-only proof could not be committed")
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.process.startErr = execution.ErrUnknownEffect
+			resources.store.unpromptedCleanupErr = proofErr
+		})
+	if handle == nil || !errors.Is(err, proofErr) || resources.engineFactory.engine.process.removed != 0 || resources.store.unpromptedCleanupCalls != 1 {
+		t.Fatalf("unprompted cleanup without durable proof = (%v, %v), operations %v", handle, err, operations)
+	}
+	resources.store.unpromptedCleanupErr = nil
+	if err := handle.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if resources.engineFactory.engine.process.removed != 1 || resources.store.unpromptedCleanupCalls != 2 || len(resources.workspace.captureRequests) != 0 {
+		t.Fatalf("preparation-only cleanup did not retry proof before removal: %v", operations)
+	}
+}
+
+func TestLauncherCreatingSessionAmbiguousCreateWithoutHandleCannotDeclareProof(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.engineFactory.engine.createErr = execution.ErrUnknownEffect
+			resources.engineFactory.engine.createWithoutProcess = true
+		})
+	if handle == nil || !errors.Is(err, execution.ErrUnknownEffect) || resources.engineFactory.engine.absenceCalls != 0 || resources.store.unpromptedCleanupCalls != 0 {
+		t.Fatalf("unknown first-Session creation declared absence/proof = (%v, %v), operations %v", handle, err, operations)
 	}
 }
 
@@ -844,7 +951,7 @@ func TestRuntimeHandleUnresolvedMCPDrainIsNotRetriedDuringCleanup(t *testing.T) 
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -868,7 +975,7 @@ func TestRuntimeHandleCleanupContinuesTeardownAndRetriesMCPDrain(t *testing.T) {
 	if !errors.Is(err, drainErr) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -877,13 +984,13 @@ func TestRuntimeHandleCleanupContinuesTeardownAndRetriesMCPDrain(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want = []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "mcp-close-and-drain"}
+	want = []string{"mcp-close-and-drain", "agent-close", "process-stop", "mcp-close-and-drain", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
 }
 
-func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError(t *testing.T) {
+func TestRuntimeHandleCleanupRetainsReviewerEvidenceUntilMCPDrainCompletes(t *testing.T) {
 	operations := []string{}
 	proposal := &store.AgentTurnChangeProposal{
 		ID: "60000000-0000-4000-8000-000000000001", PullRequestID: 61, PullRequestNumber: 23,
@@ -904,7 +1011,7 @@ func TestRuntimeHandleCleanupDiscardsReviewerAndClosesEngineDespiteMCPDrainError
 	if err := handle.Cleanup(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
 	}
@@ -952,57 +1059,69 @@ func TestLauncherRefusesToPromoteWorkspaceAfterTurnFenceLoss(t *testing.T) {
 	}
 }
 
-func TestLauncherRefusesToProvisionMiseAfterTurnFenceLoss(t *testing.T) {
+func TestLauncherRejectsWorkspaceReferenceForAnotherExecutionBeforeStartingRuntime(t *testing.T) {
 	operations := []string{}
 	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
 		func(resources *runtimeLaunchResources) {
-			resources.workspace.requireProvisionFence = true
+			resources.workspace.prepareRef = &execution.WorkspaceRef{Key: execution.Key{
+				AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
+				ExecutionEpoch: 8, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+			}, Seed: runtimeTestDefaultSHA}
+		})
+	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeBinding) {
+		t.Fatalf("Launch() = (%v, %v), want wrong execution binding", handle, err)
+	}
+	if slices.Contains(operations, "mise") || slices.Contains(operations, "docker-new") {
+		t.Fatalf("mismatched workspace progressed to execution: %v", operations)
+	}
+}
+
+func TestLauncherRefusesToStartRepositorySetupAfterTurnFenceLoss(t *testing.T) {
+	operations := []string{}
+	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) {
+			resources.workspace.requirePromotionFence = true
 			resources.store.withFenceErr = store.ErrAgentTurnFenceLost
 		})
 	if !errors.Is(err, store.ErrAgentTurnFenceLost) || handle != nil {
-		t.Fatalf("Launch() = (%v, %v), want lost fence before mise provisioning", handle, err)
+		t.Fatalf("Launch() = (%v, %v), want lost fence before repository setup", handle, err)
 	}
 	if slices.Contains(operations, "refresh") || slices.Contains(operations, "docker-new") {
 		t.Fatalf("stale mise provisioning progressed to Runtime Process: %v", operations)
 	}
 }
 
-// TestLauncherReacquiresCredentialForMiseProvisioningAfterCheckout covers the
-// delayed reuse of the launch credential between PrepareWorkspace and
-// ProvisionMise with fake time and the real installation-token cache: the
-// checkout observes the primed token, the clock advances past its expiry
-// during preparation, and provisioning must use the refreshed credential while
-// the launch still succeeds.
-func TestLauncherReacquiresCredentialForMiseProvisioningAfterCheckout(t *testing.T) {
+// A slow trusted checkout must not bypass the current-credential prelaunch gate.
+func TestLauncherReacquiresCredentialAfterCheckoutBeforeDispatch(t *testing.T) {
 	operations := []string{}
 	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
 	cache, _ := newExpiryCache(t, clock, "launch", 5*time.Minute, time.Hour)
-	provider := &cacheProvider{cache: cache, id: 78}
+	provider := &phaseAdvancingCacheProvider{cache: cache, id: 78, clock: clock}
 	primed, err := provider.RepositoryCredential(context.Background(), "acme", "widgets")
 	if err != nil || primed != "launch-token-A" {
 		t.Fatalf("prime launch token = %q, %v", primed, err)
 	}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: &operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: &operations, activation: workspace.MiseActivation{
-		DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-	}}
+	workspaces := &runtimeWorkspace{operations: &operations}
 	// The checkout performs unbounded I/O; expire the primed token there.
 	workspaces.afterPrepare = func() { clock.Advance(6 * time.Minute) }
-	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	gateway := &runtimeGateway{operations: &operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: &operations}
-	client := &runtimeACPClient{operations: &operations}
+	adapter := &runtimeTurnAdapter{operations: &operations}
+	adapter.prepareHook = func() {
+		if provider.calls != 2 {
+			t.Fatalf("credential acquisitions at adapter preparation = %d, want prime plus post-checkout refresh", provider.calls)
+		}
+	}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: &operations, runtimeProfile: runtimeProfile},
-		Workspace: workspaces, Gateway: gateway, Docker: engineFactory, ACP: &runtimeACPFactory{operations: &operations, client: client},
-		Sessions:             &runtimeSessionPreparer{operations: &operations, result: session.Result{}},
+		Workspace: workspaces, Gateway: gateway, Execution: engineFactory, AgentAdapters: runtimeAdapters(adapter),
 		DeveloperCredentials: provider, ReviewerCredentials: provider,
-		Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
 	})
 	handle, err := launcher.Launch(context.Background(), agentturn.LaunchRequest{
 		Lease: lease, LeaseDuration: time.Minute, RepositoryURL: "https://github.example/acme/widgets.git",
@@ -1016,31 +1135,77 @@ func TestLauncherReacquiresCredentialForMiseProvisioningAfterCheckout(t *testing
 	if workspaces.checkout.Credential != "launch-token-A" {
 		t.Fatalf("workspace checkout credential = %q, want primed token A", workspaces.checkout.Credential)
 	}
-	if workspaces.mise.Credential != "launch-token-B" {
-		t.Fatalf("mise provisioning credential = %q, want refreshed token B", workspaces.mise.Credential)
+	fresh, err := cache.Token(context.Background(), 78)
+	if err != nil || fresh != "launch-token-B" || provider.calls != 2 {
+		t.Fatalf("prelaunch credential = %q, %v, acquisitions %d, want refreshed token B", fresh, err, provider.calls)
+	}
+	for _, credential := range []string{primed, fresh} {
+		if strings.Contains(strings.Join(engineFactory.request.Environment, "\n"), credential) || strings.Contains(string(adapter.request.Credentials), credential) {
+			t.Fatal("GitHub credential entered the Runtime Process or adapter")
+		}
 	}
 }
 
-// TestLauncherFailsSafeWhenMiseProvisioningLosesCredentialAfterCheckout covers
-// the delayed reuse of the launch credential between PrepareWorkspace and
-// ProvisionMise: provisioning fails with an authentication error after a
-// successful checkout. Launch must surface the provisioning failure without a
-// handle, never a partially provisioned Runtime Process.
-func TestLauncherFailsSafeWhenMiseProvisioningLosesCredentialAfterCheckout(t *testing.T) {
+func TestLauncherFailsSafeWhenCredentialRefreshFailsAfterCheckout(t *testing.T) {
 	operations := []string{}
 	authErr := errors.New("git: authentication failed: credentials expired")
 	handle, _, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
 		func(resources *runtimeLaunchResources) {
-			resources.workspace.miseErr = authErr
+			resources.credentials.err = authErr
 		})
-	if err == nil || !strings.Contains(err.Error(), "provision trusted repository tools") || handle != nil {
-		t.Fatalf("Launch() = (%v, %v), want provisioning failure without a handle", handle, err)
+	if !errors.Is(err, authErr) || !strings.Contains(err.Error(), "refresh repository credential") || handle != nil {
+		t.Fatalf("Launch() = (%v, %v), want credential refresh failure without a handle", handle, err)
 	}
-	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "refresh") {
-		t.Fatalf("expired provisioning progressed to Runtime Process: %v", operations)
+	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "session-prepare") {
+		t.Fatalf("failed credential refresh progressed to Runtime Process: %v", operations)
 	}
-	if !slices.Contains(operations, "workspace") || !slices.Contains(operations, "mise") {
-		t.Fatalf("launch operations = %v, want checkout followed by failed provisioning", operations)
+	if !containsInOrder(operations, "workspace", "repository-credential", "mcp-close-and-drain") {
+		t.Fatalf("launch operations = %v, want checkout, refresh, and authority cleanup", operations)
+	}
+}
+
+func TestLauncherRequiresNonemptyFreshCredentialBeforeDispatch(t *testing.T) {
+	operations := []string{}
+	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+		func(resources *runtimeLaunchResources) { resources.credentials.credential = " \t" })
+	if err == nil || !strings.Contains(err.Error(), "repository credential is empty") || handle != nil || resources.credentials.calls != 1 {
+		t.Fatalf("empty prelaunch credential = (%v, %v), acquisitions %d", handle, err, resources.credentials.calls)
+	}
+	if slices.Contains(operations, "docker-new") || slices.Contains(operations, "session-prepare") {
+		t.Fatalf("empty credential authorized dispatch: %v", operations)
+	}
+}
+
+func TestLauncherRedactsFreshCredentialsFromRefreshAndCleanupErrors(t *testing.T) {
+	const fresh = "refreshed-github-token"
+	for _, failRefresh := range []bool{false, true} {
+		t.Run(fmt.Sprint(failRefresh), func(t *testing.T) {
+			operations := []string{}
+			handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, nil,
+				func(resources *runtimeLaunchResources) {
+					resources.credentials.credential = fresh
+					if failRefresh {
+						resources.credentials.err = errors.New("refresh exposed " + fresh)
+					}
+				})
+			if failRefresh {
+				if err == nil || handle != nil || strings.Contains(err.Error(), fresh) || !strings.Contains(err.Error(), "[REDACTED]") {
+					t.Fatalf("credential acquisition error = (%v, %v)", handle, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			resources.engineFactory.engine.process.stopErr = errors.New("stop exposed " + fresh)
+			if err := handle.Cleanup(t.Context()); err == nil || strings.Contains(err.Error(), fresh) || !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Fatalf("cleanup error = %v", err)
+			}
+			resources.engineFactory.engine.process.stopErr = nil
+			if err := handle.Cleanup(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -1059,7 +1224,7 @@ func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t
 	if err := handle.Cleanup(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cleanup() error = %v, want drain timeout", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup operations = %v, want %v", operations, want)
 	}
@@ -1068,10 +1233,10 @@ func TestRuntimeHandleCleanupUsesFreshBoundedContextAfterDrainConsumesDeadline(t
 	}
 }
 
-func TestRuntimeHandleCleanupRetriesACPClosureWithoutRepeatingSuccessfulSteps(t *testing.T) {
+func TestRuntimeHandleCleanupRetriesAgentClosureWithoutRepeatingSuccessfulSteps(t *testing.T) {
 	operations := []string{}
 	handle, resources := launchRuntimeForCleanupTest(t, &operations, nil)
-	closeErr := errors.New("ACP close failed")
+	closeErr := errors.New("agent close failed")
 	resources.client.closeErr = closeErr
 	operations = operations[:0]
 	resources.gateway.operations = &operations
@@ -1080,13 +1245,13 @@ func TestRuntimeHandleCleanupRetriesACPClosureWithoutRepeatingSuccessfulSteps(t 
 	resources.client.operations = &operations
 
 	if err := handle.Cleanup(context.Background()); !errors.Is(err, closeErr) {
-		t.Fatalf("Cleanup() error = %v, want ACP close failure", err)
+		t.Fatalf("Cleanup() error = %v, want agent close failure", err)
 	}
 	resources.client.closeErr = nil
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "acp-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close", "agent-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1105,8 +1270,11 @@ func TestRuntimeHandleCleanupRetriesProcessStopAndRemovalBeforeClosingEngine(t *
 	resources.engineFactory.engine.process.operations = &operations
 	resources.client.operations = &operations
 
-	if err := handle.Cleanup(context.Background()); !errors.Is(err, stopErr) || !errors.Is(err, removeErr) {
-		t.Fatalf("Cleanup() error = %v, want stop and removal failures", err)
+	if err := handle.Cleanup(context.Background()); !errors.Is(err, stopErr) {
+		t.Fatalf("Cleanup() error = %v, want stop failure", err)
+	}
+	if resources.engineFactory.engine.process.removed != 0 || len(resources.workspace.captureRequests) != 0 {
+		t.Fatal("unconfirmed stop must retain the environment without taking a terminal capture")
 	}
 	if slices.Contains(operations, "docker-close") {
 		t.Fatalf("Docker Engine closed while process remains: %v", operations)
@@ -1116,7 +1284,7 @@ func TestRuntimeHandleCleanupRetriesProcessStopAndRemovalBeforeClosingEngine(t *
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1148,7 +1316,7 @@ func TestRuntimeHandleCleanupRetriesReviewerWorkspaceDiscard(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close", "turn-fence", "workspace-discard"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "turn-fence", "workspace-discard", "docker-close", "turn-fence", "workspace-discard"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1172,7 +1340,7 @@ func TestRuntimeHandleCleanupRetriesDockerEngineClosure(t *testing.T) {
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1201,7 +1369,7 @@ func TestRuntimeHandleCleanupSerializesConcurrentCalls(t *testing.T) {
 			t.Errorf("concurrent Cleanup() error = %v", err)
 		}
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("concurrent cleanup operations = %v, want %v", operations, want)
 	}
@@ -1227,7 +1395,7 @@ func TestRuntimeHandleCleanupDiscardsReviewerWorkspaceAfterProcessRemoval(t *tes
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup operations = %v, want %v", operations, want)
 	}
@@ -1268,7 +1436,7 @@ func TestRuntimeHandleCleanupKeepsReviewerWorkspaceWhenProcessRemovalFails(t *te
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatalf("Cleanup() retry error = %v", err)
 	}
-	want := []string{"mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
+	want := []string{"mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "workspace-capture", "turn-fence", "process-remove", "process-remove", "turn-fence", "workspace-discard", "docker-close"}
 	if !reflect.DeepEqual(operations, want) {
 		t.Fatalf("Reviewer cleanup retry operations = %v, want %v", operations, want)
 	}
@@ -1289,7 +1457,7 @@ func TestLauncherFailureCleansResourcesAndRedactsEveryCredential(t *testing.T) {
 			t.Errorf("Launch() error exposes credential %q: %v", secret, err)
 		}
 	}
-	wantSuffix := []string{"session-prepare", "mcp-close-and-drain", "acp-close", "process-stop", "process-remove", "docker-close"}
+	wantSuffix := []string{"session-prepare", "execution", "mcp-close-and-drain", "agent-close", "process-stop", "turn-fence", "unprompted-cleanup", "process-remove", "docker-close"}
 	if len(operations) < len(wantSuffix) || !reflect.DeepEqual(operations[len(operations)-len(wantSuffix):], wantSuffix) {
 		t.Fatalf("failure operations = %v, want suffix %v", operations, wantSuffix)
 	}
@@ -1310,7 +1478,7 @@ func TestLauncherFailureReturnsRecoverableHandleWhenCleanupCannotProveRemoval(t 
 	if err == nil || handle == nil {
 		t.Fatalf("Launch() = (%#v, %v), want recoverable handle and failure", handle, err)
 	}
-	if handle.PromptClient() != nil {
+	if handle.AgentConnection() != nil {
 		t.Fatal("failed launch returned a stale prompt capability")
 	}
 	for _, secret := range []string{runtimeTestCredential, runtimeTestProviderKey, "mcp-secret"} {
@@ -1336,7 +1504,7 @@ func TestLauncherPreservesOOMBeforeRemovingProcessAfterSessionResumeFails(t *tes
 	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
-				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+				Exited: true, OOMKilled: true, ExitCode: 137, Resource: "container-oom",
 			}
 		})
 	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) {
@@ -1357,7 +1525,7 @@ func TestLauncherReportsOOMFirstConfirmedDuringCleanup(t *testing.T) {
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.observeResults = []dockerruntime.ExitObservation{
 				{Running: true},
-				{Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "late-oom"},
+				{Exited: true, OOMKilled: true, ExitCode: 137, Resource: "late-oom"},
 			}
 		})
 	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeOOMKilled) || resources.store.oomContainerID != "late-oom" {
@@ -1373,7 +1541,7 @@ func TestLauncherDoesNotRemoveOOMContainerIfEvidenceCannotBePersisted(t *testing
 	handle, resources, err := launchRuntimeForRoleCleanupFailureConfigured(t, &operations, workflow.RoleDeveloper, nil, io.EOF,
 		func(resources *runtimeLaunchResources) {
 			resources.engineFactory.engine.process.exitObservation = dockerruntime.ExitObservation{
-				Exited: true, OOMKilled: true, ExitCode: 137, ContainerID: "container-oom",
+				Exited: true, OOMKilled: true, ExitCode: 137, Resource: "container-oom",
 			}
 			resources.store.oomRecordErr = errors.New("database temporarily unavailable")
 		})
@@ -1394,7 +1562,9 @@ type runtimeLaunchResources struct {
 	workspace     *runtimeWorkspace
 	gateway       *runtimeGateway
 	engineFactory *runtimeEngineFactory
-	client        *runtimeACPClient
+	client        *runtimeTurnConnection
+	adapter       *runtimeTurnAdapter
+	credentials   *runtimeCredentialProvider
 }
 
 func launchRuntimeForCleanupTest(t *testing.T, operations *[]string, sessionErr error) (*agentturn.RuntimeHandle, *runtimeLaunchResources) {
@@ -1418,25 +1588,25 @@ func launchRuntimeForRoleCleanupFailureConfigured(t *testing.T, operations *[]st
 	t.Helper()
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, role, proposal)
-	miseDir := "/srv/mise/assignment-" + runtimeTestAssignment + "/mise"
 	database := &runtimeStore{operations: operations, execution: execution}
-	workspaces := &runtimeWorkspace{operations: operations, activation: workspace.MiseActivation{
-		DataDir: miseDir, SourceRevision: runtimeTestDefaultSHA, Environment: map[string]string{"MISE_DATA_DIR": miseDir},
-	}}
-	gateway := &runtimeGateway{operations: operations, registration: mcp.Registration{Server: acp.MCPServer{
-		Type: "http", Name: "omnigrex", URL: "http://mcp:8080/mcp",
-		Headers: []acp.EnvironmentEntry{{Name: "Authorization", Value: "Bearer mcp-secret"}},
+	workspaces := &runtimeWorkspace{operations: operations}
+	gateway := &runtimeGateway{operations: operations, registration: mcp.Registration{Server: agent.MCPEndpoint{
+		Name: "omnigrex", URL: "http://mcp:8080/mcp",
+		Headers: []agent.Header{{Name: "Authorization", Value: "Bearer mcp-secret"}},
 	}}}
 	engineFactory := &runtimeEngineFactory{operations: operations}
-	client := &runtimeACPClient{operations: operations}
+	client := &runtimeTurnConnection{operations: operations}
+	adapter := &runtimeTurnAdapter{operations: operations, connection: client, err: sessionErr}
+	credentials := &runtimeCredentialProvider{operations: operations, credential: "fresh-repository-secret"}
 	launcher := runtimeLauncher(t, agentturn.LauncherConfig{
 		Store: database, Registry: &runtimeRegistry{operations: operations, runtimeProfile: runtimeProfile},
 		Workspace: workspaces,
-		Gateway:   gateway, Docker: engineFactory, ACP: &runtimeACPFactory{operations: operations, client: client},
-		Sessions: &runtimeSessionPreparer{operations: operations, err: sessionErr},
-		Network:  "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+		Gateway:   gateway, Execution: engineFactory,
+		DeveloperCredentials: credentials, ReviewerCredentials: credentials,
+		AgentAdapters:            runtimeAdapters(adapter),
+		PathEnvironmentAllowlist: []string{"TMPDIR"},
 	})
-	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client}
+	resources := &runtimeLaunchResources{store: database, workspace: workspaces, gateway: gateway, engineFactory: engineFactory, client: client, adapter: adapter, credentials: credentials}
 	if configure != nil {
 		configure(resources)
 	}
@@ -1453,6 +1623,18 @@ func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.L
 	if config.MemoryBytes == 0 {
 		config.MemoryBytes = 512 << 20
 	}
+	if config.States == nil {
+		config.States = &runtimeRetainedState{}
+	}
+	if config.AgentAdapters == nil {
+		config.AgentAdapters = runtimeAdapters(&runtimeTurnAdapter{operations: config.Store.(*runtimeStore).operations})
+	}
+	if config.DeveloperCredentials == nil {
+		config.DeveloperCredentials = &runtimeCredentialProvider{operations: config.Store.(*runtimeStore).operations, credential: "fresh-repository-secret"}
+	}
+	if config.ReviewerCredentials == nil {
+		config.ReviewerCredentials = &runtimeCredentialProvider{operations: config.Store.(*runtimeStore).operations, credential: "fresh-reviewer-secret"}
+	}
 	launcher, err := agentturn.NewLauncher(config)
 	if err != nil {
 		t.Fatalf("NewLauncher() error = %v", err)
@@ -1462,9 +1644,9 @@ func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.L
 
 func runtimeLauncherProfile(t *testing.T) profile.Profile {
 	t.Helper()
-	value, err := profile.NewOpenCodeV1(runtimeTestImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV1(runtimeTestImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewOpenCodeV1() error = %v", err)
+		t.Fatalf("NewPiV1() error = %v", err)
 	}
 	return value
 }
@@ -1472,11 +1654,11 @@ func runtimeLauncherProfile(t *testing.T) profile.Profile {
 func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role workflow.Role, proposal *store.AgentTurnChangeProposal) (store.AgentTurnExecutionContext, store.AgentTurnLease) {
 	t.Helper()
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	config := json.RawMessage(`{"instructions":"Work carefully.","model":"openai/gpt-5","name":"developer","path":".omnigrex/team/developer.md","permissions":{"bash":"allow","edit":"allow","read":"allow"},"role":"DEVELOPER","runtime":"opencode-acp/v1","steps":50}`)
+	config := json.RawMessage(`{"instructions":"Work carefully.","model":"openai/gpt-5","name":"developer","path":".omnigrex/team/developer.md","permissions":{"bash":"allow","edit":"allow","read":"allow"},"role":"DEVELOPER","runtime":"pi-rpc/v1"}`)
 	profileName := "developer"
 	if role == workflow.RoleReviewer {
 		profileName = "reviewer"
-		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"opencode-acp/v1","steps":50}`)
+		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"pi-rpc/v1"}`)
 	}
 	stage := workflow.StageImplementation
 	purpose := workflow.TurnPurposeInitialDevelopment
@@ -1488,8 +1670,8 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		purpose = workflow.TurnPurposeReview
 	}
 	binding := store.AssignmentRuntimeBinding{
-		AgentProfileName: profileName, RuntimeProfileName: "opencode-acp", RuntimeProfileVersion: "v1",
-		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeTestImage,
+		AgentProfileName: profileName, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
 	}
 	turn := store.AgentTurn{
 		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, Stage: stage, Purpose: purpose, ControlRevision: 9, AgentProfileConfig: config},
@@ -1515,25 +1697,49 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		Session: store.AgentSession{ID: runtimeTestSession, AgentAssignmentID: runtimeTestAssignment, RuntimeProfileName: binding.RuntimeProfileName,
 			RuntimeProfileVersion: binding.RuntimeProfileVersion, RuntimeProfileContentSHA256: binding.RuntimeProfileContentSHA256,
 			RuntimeImageDigest: binding.RuntimeImageDigest, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state",
-			Status: store.AgentSessionCreating, ControlRevision: 9, NextExecutionEpoch: 8},
+			Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 9, NextExecutionEpoch: 8},
 		Turn: turn,
 	}
 	return execution, lease
 }
 
 type runtimeStore struct {
-	operations         *[]string
-	execution          store.AgentTurnExecutionContext
-	fenceErr           error
-	fenceErrors        []error
-	fenceCalls         int
-	executionErr       error
-	turnFence          sync.Mutex
-	withFenceAttempted chan struct{}
-	withFenceErr       error
-	oomRecordErr       error
-	oomContainerID     string
-	oomExitCode        int
+	operations             *[]string
+	execution              store.AgentTurnExecutionContext
+	fenceErr               error
+	fenceErrors            []error
+	fenceCalls             int
+	executionErr           error
+	turnFence              sync.Mutex
+	withFenceAttempted     chan struct{}
+	withFenceAttemptOnce   sync.Once
+	withFenceErr           error
+	oomRecordErr           error
+	oomContainerID         string
+	oomExitCode            int
+	inCleanupFence         bool
+	unpromptedCleanupErr   error
+	unpromptedCleanupCalls int
+}
+
+func (database *runtimeStore) RecordAgentTurnUnpromptedCleanup(ctx context.Context, lease store.AgentTurnLease) error {
+	return database.WithAgentTurnCleanupFence(ctx, lease, func(context.Context) error {
+		*database.operations = append(*database.operations, "unprompted-cleanup")
+		database.unpromptedCleanupCalls++
+		return database.unpromptedCleanupErr
+	})
+}
+
+func (*runtimeStore) ExecutionLedger(store.AgentTurnLease) execution.Ledger { return nil }
+
+func (database *runtimeStore) AgentTurnState(context.Context, store.AgentTurnLease) (execution.StateRef, error) {
+	s := database.execution.Session
+	return execution.StateRef{ID: s.AgentAssignmentID, ParticipantID: s.AgentAssignmentID, SessionID: s.ID,
+		Backend: execution.BackendBinding{Family: "docker", Version: 1, Namespace: "runtime-test"}, Format: "pi-session/v3",
+		RuntimeProfileSHA256: s.RuntimeProfileContentSHA256, Image: s.RuntimeImageDigest}, nil
+}
+func (*runtimeStore) MarkAgentTurnStateInitialized(context.Context, store.AgentTurnLease, execution.StateRef) error {
+	return nil
 }
 
 func (database *runtimeStore) RecordAgentTurnRuntimeOOM(_ context.Context, _ store.AgentTurnLease, id string, code int) error {
@@ -1581,7 +1787,7 @@ func (database *runtimeStore) GetAgentTurnExecutionContext(context.Context, stor
 func (database *runtimeStore) WithAgentTurnFence(ctx context.Context, _ store.AgentTurnLease, operation func(context.Context) error) error {
 	*database.operations = append(*database.operations, "turn-fence")
 	if database.withFenceAttempted != nil {
-		close(database.withFenceAttempted)
+		database.withFenceAttemptOnce.Do(func() { close(database.withFenceAttempted) })
 	}
 	database.turnFence.Lock()
 	defer database.turnFence.Unlock()
@@ -1592,6 +1798,8 @@ func (database *runtimeStore) WithAgentTurnFence(ctx context.Context, _ store.Ag
 }
 
 func (database *runtimeStore) WithAgentTurnCleanupFence(ctx context.Context, lease store.AgentTurnLease, operation func(context.Context) error) error {
+	database.inCleanupFence = true
+	defer func() { database.inCleanupFence = false }()
 	return database.WithAgentTurnFence(ctx, lease, operation)
 }
 
@@ -1600,6 +1808,21 @@ func (database *runtimeStore) acquireRecoveryLock(attempted, acquired chan<- str
 	database.turnFence.Lock()
 	close(acquired)
 	database.turnFence.Unlock()
+}
+
+type runtimeCredentialProvider struct {
+	operations        *[]string
+	credential        string
+	err               error
+	calls             int
+	owner, repository string
+}
+
+func (provider *runtimeCredentialProvider) RepositoryCredential(_ context.Context, owner, repository string) (string, error) {
+	*provider.operations = append(*provider.operations, "repository-credential")
+	provider.calls++
+	provider.owner, provider.repository = owner, repository
+	return provider.credential, provider.err
 }
 
 type runtimeRegistry struct {
@@ -1617,46 +1840,57 @@ type runtimeWorkspace struct {
 	operations            *[]string
 	checkout              workspace.Checkout
 	requirePromotionFence bool
-	requireProvisionFence bool
-	mise                  workspace.MiseProvision
-	activation            workspace.MiseActivation
 	cleanedTurnID         string
 	workspaceErr          error
-	miseErr               error
 	discardedAssignmentID string
 	discardErr            error
+	captureErr            error
+	captureRequests       []execution.CaptureRequest
+	captureRef            execution.CaptureRef
+	discardedRef          execution.WorkspaceRef
+	preparationKey        execution.Key
+	prepareRef            *execution.WorkspaceRef
+	captureHook           func(context.Context) error
 	afterPrepare          func()
 }
 
-func (lifecycle *runtimeWorkspace) PrepareWorkspace(ctx context.Context, checkout workspace.Checkout) (workspace.Paths, error) {
+func (lifecycle *runtimeWorkspace) Prepare(ctx context.Context, request workspace.Preparation) (execution.WorkspaceRef, error) {
+	checkout := request.Checkout
 	*lifecycle.operations = append(*lifecycle.operations, "workspace")
 	lifecycle.checkout = checkout
+	lifecycle.preparationKey = request.Key
 	if lifecycle.afterPrepare != nil {
 		lifecycle.afterPrepare()
 	}
 	if lifecycle.requirePromotionFence {
 		if checkout.Fence == nil {
-			return workspace.Paths{}, errors.New("workspace promotion is not fenced")
+			return execution.WorkspaceRef{}, errors.New("workspace promotion is not fenced")
 		}
 		if err := checkout.Fence(ctx, func(context.Context) error { return nil }); err != nil {
-			return workspace.Paths{}, err
+			return execution.WorkspaceRef{}, err
 		}
 	}
-	return workspace.Paths{Workspace: "/srv/workspace", Mise: lifecycle.activation.DataDir}, lifecycle.workspaceErr
+	if lifecycle.prepareRef != nil {
+		return *lifecycle.prepareRef, lifecycle.workspaceErr
+	}
+	return execution.WorkspaceRef{Key: request.Key, Seed: checkout.Revision}, lifecycle.workspaceErr
 }
 
-func (lifecycle *runtimeWorkspace) ProvisionMise(ctx context.Context, provision workspace.MiseProvision) (workspace.MiseActivation, error) {
-	*lifecycle.operations = append(*lifecycle.operations, "mise")
-	lifecycle.mise = provision
-	if lifecycle.requireProvisionFence {
-		if provision.Fence == nil {
-			return workspace.MiseActivation{}, errors.New("mise provisioning is not fenced")
-		}
-		if err := provision.Fence(ctx, func(context.Context) error { return nil }); err != nil {
-			return workspace.MiseActivation{}, err
+func (lifecycle *runtimeWorkspace) Capture(ctx context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+	*lifecycle.operations = append(*lifecycle.operations, "workspace-capture")
+	lifecycle.captureRequests = append(lifecycle.captureRequests, request)
+	if lifecycle.captureHook != nil {
+		if err := lifecycle.captureHook(ctx); err != nil {
+			return execution.CaptureRef{}, err
 		}
 	}
-	return lifecycle.activation, lifecycle.miseErr
+	if lifecycle.captureErr != nil {
+		return execution.CaptureRef{}, lifecycle.captureErr
+	}
+	if lifecycle.captureRef != (execution.CaptureRef{}) {
+		return lifecycle.captureRef, nil
+	}
+	return execution.CaptureRef{Request: request, SHA256: strings.Repeat("a", 64)}, nil
 }
 
 func (lifecycle *runtimeWorkspace) PrepareTurnPaths(ctx context.Context, _, turnID string, configuration turnconfig.Configuration, fence workspace.WorkspaceFence) (map[string]string, error) {
@@ -1667,7 +1901,7 @@ func (lifecycle *runtimeWorkspace) PrepareTurnPaths(ctx context.Context, _, turn
 	}
 	values := make(map[string]string)
 	for name, directory := range configuration.Environment {
-		prefix := "/home/opencode/.local/share/omnigrex-tool-data/" + string(configuration.Directories[directory]) + "/"
+		prefix := filepath.Join(filepath.Dir(environment.DataDirectory), "omnigrex-tool-data", string(configuration.Directories[directory])) + "/"
 		if configuration.Directories[directory] == turnconfig.Turn {
 			prefix += turnID + "/"
 		}
@@ -1690,11 +1924,12 @@ func (lifecycle *runtimeWorkspace) DiscardWorkspace(assignmentID string) error {
 	return lifecycle.discardErr
 }
 
-func (lifecycle *runtimeWorkspace) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, _ int64, fence workspace.WorkspaceFence) error {
+func (lifecycle *runtimeWorkspace) Discard(ctx context.Context, ref execution.WorkspaceRef, fence workspace.WorkspaceFence) error {
+	lifecycle.discardedRef = ref
 	if fence == nil {
-		return lifecycle.DiscardWorkspace(assignmentID)
+		return lifecycle.DiscardWorkspace(ref.Key.AssignmentID)
 	}
-	return fence(ctx, func(context.Context) error { return lifecycle.DiscardWorkspace(assignmentID) })
+	return fence(ctx, func(context.Context) error { return lifecycle.DiscardWorkspace(ref.Key.AssignmentID) })
 }
 
 type runtimeGateway struct {
@@ -1749,16 +1984,30 @@ func (gateway *runtimeGateway) CloseAndDrain(ctx context.Context, _ mcp.Registra
 	return gateway.drainErr
 }
 
+var testDockerFactory = dockerruntime.ExecutionFactory{
+	Network: "omnigrex-agent", WorkspaceVolume: "workspaces", RuntimeStateVolume: "runtime-state", MiseVolume: "mise",
+}
+
 type runtimeEngineFactory struct {
+	request    execution.Request
 	operations *[]string
 	options    dockerruntime.EngineOptions
 	engine     runtimeEngine
 	err        error
 }
 
-func (factory *runtimeEngineFactory) New(options dockerruntime.EngineOptions) (agentturn.RuntimeEngine, error) {
+func (factory *runtimeEngineFactory) CheckRequirements(requirements []execution.Requirement) error {
+	return testDockerFactory.CheckRequirements(requirements)
+}
+
+func (factory *runtimeEngineFactory) New(request execution.Request, _ execution.Ledger) (agentturn.RuntimeEngine, error) {
+	factory.request = request
 	*factory.operations = append(*factory.operations, "docker-new")
-	factory.options = options
+	policy, _, err := testDockerFactory.Compile(request)
+	if err != nil {
+		return nil, err
+	}
+	factory.options = dockerruntime.EngineOptions{AgentNetwork: testDockerFactory.Network, RuntimePolicy: policy}
 	factory.engine.operations = factory.operations
 	if factory.engine.process.transport == nil {
 		factory.engine.process.transport = &runtimeTransport{}
@@ -1766,19 +2015,33 @@ func (factory *runtimeEngineFactory) New(options dockerruntime.EngineOptions) (a
 	return &factory.engine, factory.err
 }
 
-type runtimeEngine struct {
-	operations *[]string
-	spec       dockerruntime.Spec
-	process    runtimeProcess
-	createErr  error
-	closed     int
-	closeErr   error
+func (engine *runtimeEngine) EnsureAbsent(context.Context) error {
+	engine.absenceCalls++
+	return nil
 }
 
-func (engine *runtimeEngine) Create(_ context.Context, spec dockerruntime.Spec, _ io.Writer) (agentturn.RuntimeProcess, error) {
+type runtimeEngine struct {
+	operations           *[]string
+	spec                 dockerruntime.Spec
+	process              runtimeProcess
+	createErr            error
+	closed               int
+	closeErr             error
+	createWithoutProcess bool
+	absenceCalls         int
+}
+
+func (engine *runtimeEngine) Create(_ context.Context, request execution.Request, _ io.Writer) (agentturn.RuntimeProcess, error) {
 	*engine.operations = append(*engine.operations, "docker-create")
+	_, spec, err := testDockerFactory.Compile(request)
+	if err != nil {
+		return nil, err
+	}
 	engine.spec = spec
 	engine.process.operations = engine.operations
+	if engine.createWithoutProcess {
+		return nil, engine.createErr
+	}
 	return &engine.process, engine.createErr
 }
 
@@ -1846,68 +2109,66 @@ func (*runtimeTransport) Read([]byte) (int, error)       { return 0, io.EOF }
 func (*runtimeTransport) Write(data []byte) (int, error) { return len(data), nil }
 func (*runtimeTransport) Close() error                   { return nil }
 
-type runtimeACPFactory struct {
-	operations *[]string
-	transport  io.ReadWriteCloser
-	options    acp.ClientOptions
-	client     agentturn.RuntimeACPClient
-}
-
-func (factory *runtimeACPFactory) New(transport io.ReadWriteCloser, options acp.ClientOptions) agentturn.RuntimeACPClient {
-	*factory.operations = append(*factory.operations, "acp-new")
-	factory.transport = transport
-	factory.options = options
-	return factory.client
-}
-
-type runtimeACPClient struct {
+type runtimeTurnConnection struct {
 	operations *[]string
 	closed     int
 	prompts    int
 	closeErr   error
 }
 
-func (*runtimeACPClient) SetAgentEventContext(agentevent.Context) {}
-func (*runtimeACPClient) Initialize(context.Context) (acp.InitializeResponse, error) {
-	return acp.InitializeResponse{}, nil
-}
-func (*runtimeACPClient) RecoverCreatedSession(context.Context, string) (acp.SessionInfo, error) {
-	return acp.SessionInfo{}, nil
-}
-func (*runtimeACPClient) CreateSession(context.Context, acp.CreateSessionRequest) (acp.Session, error) {
-	return acp.Session{}, nil
-}
-func (*runtimeACPClient) ContinueSessionWithOptions(context.Context, acp.ContinueSessionRequest) ([]json.RawMessage, error) {
-	return nil, nil
-}
-func (*runtimeACPClient) SetConfigOption(context.Context, string, string, any) ([]json.RawMessage, error) {
-	return nil, nil
-}
-
-func (client *runtimeACPClient) Prompt(context.Context, string, []acp.ContentBlock) (acp.PromptResponse, error) {
+func (client *runtimeTurnConnection) Prompt(context.Context, store.AgentTurnLease, store.AgentSession, string, agentevent.Sink) (agent.Outcome, error) {
 	client.prompts++
-	return acp.PromptResponse{}, nil
+	return agent.Outcome{Status: agent.Completed}, nil
 }
-func (client *runtimeACPClient) Close() error {
+func (client *runtimeTurnConnection) Close() error {
 	if client.operations != nil {
-		*client.operations = append(*client.operations, "acp-close")
+		*client.operations = append(*client.operations, "agent-close")
 	}
 	client.closed++
 	return client.closeErr
 }
 
-type runtimeSessionPreparer struct {
-	operations *[]string
-	request    session.PrepareRequest
-	result     session.Result
-	err        error
+type runtimeTurnAdapter struct {
+	operations  *[]string
+	request     session.TurnPreparation
+	connection  *runtimeTurnConnection
+	err         error
+	prepareHook func()
 }
 
-func (preparer *runtimeSessionPreparer) Prepare(_ context.Context, request session.PrepareRequest) (session.Result, error) {
+func (*runtimeTurnAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID string, memory int64, tools map[string]string) (execution.Request, error) {
+	return (pi.TurnAdapter{}).BuildProcess(p, key, workflowID, memory, tools)
+}
+
+func (preparer *runtimeTurnAdapter) Prepare(_ context.Context, request session.TurnPreparation) (session.TurnConnection, error) {
 	*preparer.operations = append(*preparer.operations, "session-prepare")
 	preparer.request = request
-	return preparer.result, preparer.err
+	if preparer.prepareHook != nil {
+		preparer.prepareHook()
+	}
+	if preparer.connection == nil {
+		preparer.connection = &runtimeTurnConnection{operations: preparer.operations}
+	}
+	return preparer.connection, preparer.err
 }
+
+func runtimeAdapters(adapter session.TurnAdapter) map[string]session.TurnAdapter {
+	return map[string]session.TurnAdapter{"pi-rpc/v1": adapter}
+}
+
+type runtimeRetainedState struct {
+	ensured []execution.StateRef
+}
+
+func (states *runtimeRetainedState) Ensure(_ context.Context, ref execution.StateRef) error {
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	states.ensured = append(states.ensured, ref)
+	return nil
+}
+func (*runtimeRetainedState) Inspect(context.Context, execution.StateRef) error { return nil }
+func (*runtimeRetainedState) Collect(context.Context, execution.StateRef) error { return nil }
 
 func assertRuntimeEnvironment(t *testing.T, entries []string, wanted map[string]string) {
 	t.Helper()
@@ -1923,73 +2184,6 @@ func assertRuntimeEnvironment(t *testing.T, entries []string, wanted map[string]
 		if actual[name] != value {
 			t.Errorf("environment %s = %q, want %q", name, actual[name], value)
 		}
-	}
-}
-
-func assertRuntimeMCPPermissions(t *testing.T, entries []string, role workflow.Role) {
-	t.Helper()
-	var configJSON string
-	for _, entry := range entries {
-		if name, value, found := strings.Cut(entry, "="); found && name == "OPENCODE_CONFIG_CONTENT" {
-			configJSON = value
-			break
-		}
-	}
-	var config struct {
-		Permission map[string]string `json:"permission"`
-		Agent      map[string]struct {
-			Permission map[string]string `json:"permission"`
-		} `json:"agent"`
-	}
-	if configJSON == "" || json.Unmarshal([]byte(configJSON), &config) != nil {
-		t.Fatalf("runtime has no valid OpenCode configuration: %q", configJSON)
-	}
-	capabilities, err := mcp.CapabilitiesForRole(role)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentID := "omnigrex-developer"
-	forbidden := []string{mcp.ServerName + "_" + mcp.ToolSubmitReview}
-	if role == workflow.RoleReviewer {
-		agentID = "omnigrex-reviewer"
-		forbidden = []string{
-			mcp.ServerName + "_" + mcp.ToolPublishChanges,
-			mcp.ServerName + "_" + mcp.ToolOpenPR,
-			mcp.ServerName + "_" + mcp.ToolRequestReview,
-		}
-	}
-	for _, permissions := range []map[string]string{config.Permission, config.Agent[agentID].Permission} {
-		if permissions["*"] != "deny" {
-			t.Errorf("OpenCode wildcard permission = %q, want deny", permissions["*"])
-		}
-		for _, capability := range capabilities {
-			name := mcp.ServerName + "_" + capability
-			if permissions[name] != "allow" {
-				t.Errorf("OpenCode permission %s = %q, want allow", name, permissions[name])
-			}
-		}
-		for _, name := range forbidden {
-			if _, exposed := permissions[name]; exposed {
-				t.Errorf("OpenCode permissions expose Role-forbidden tool %s", name)
-			}
-		}
-	}
-}
-
-func assertRuntimePermissionDecision(t *testing.T, options acp.ClientOptions, title, kind, want string) {
-	t.Helper()
-	if options.DecidePermission == nil {
-		t.Fatal("ACP permission decision callback is nil")
-	}
-	decision := options.DecidePermission(context.Background(), acp.PermissionRequest{
-		ToolCall: json.RawMessage(fmt.Sprintf(`{"toolCallId":"tool-1","title":%q,"kind":%q}`, title, kind)),
-		Options: []acp.PermissionOption{
-			{ID: "allow", Name: "Allow once", Kind: "allow_once"},
-			{ID: "reject", Name: "Reject", Kind: "reject_once"},
-		},
-	})
-	if decision.OptionID != want {
-		t.Errorf("ACP permission decision for %s/%s = %#v, want %s", title, kind, decision, want)
 	}
 }
 

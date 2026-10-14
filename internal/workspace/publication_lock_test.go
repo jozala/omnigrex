@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
 func TestPublicationLockEntriesReturnToBaselineAfterSuccessAndErrors(t *testing.T) {
@@ -66,16 +68,9 @@ done
 	lifecycle.gitExecutable = fakeGit
 
 	publishAssignment := "00000000-0000-4000-8000-000000000001"
-	paths, err := lifecycle.Paths(publishAssignment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(paths.Workspace, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := lifecycle.Publish(context.Background(), Publication{
 		AssignmentID: publishAssignment, RepositoryURL: repository, BaseRevision: baseRevision,
-		Branch: "feature",
+		Branch: "feature", Capture: publicationLockCaptureRequest(publishAssignment),
 	}); err != nil {
 		t.Fatalf("Publish() success-path error = %v", err)
 	}
@@ -101,7 +96,7 @@ done
 		if index%2 == 0 {
 			_, operationErr = lifecycle.Publish(context.Background(), Publication{
 				AssignmentID: assignmentID, RepositoryURL: repository, BaseRevision: baseRevision,
-				Branch: "feature",
+				Branch: "feature", Capture: publicationLockCaptureRequest(assignmentID),
 			})
 		} else {
 			_, operationErr = lifecycle.ReconcilePublication(context.Background(), PublicationReconciliation{
@@ -221,14 +216,26 @@ func TestPublicationLockMaintainsMutualExclusionDuringConcurrentChurn(t *testing
 func newPublicationLockTestLifecycle(t *testing.T) *Lifecycle {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "publication"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	lifecycle, err := New(Options{
 		WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"),
 		MiseRoot: filepath.Join(root, "mise"), GitExecutable: filepath.Join(root, "git-does-not-exist"),
+		CaptureSource: &storedCaptureSource{content: encodeCaptureTar(t, true, captureInventory())},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return lifecycle
+}
+
+func publicationLockCaptureRequest(assignmentID string) execution.CaptureRequest {
+	return execution.CaptureRequest{Workspace: execution.WorkspaceRef{Key: execution.Key{
+		AssignmentID: assignmentID, AgentSessionID: "12345678-1234-4234-8234-123456789abd",
+		AgentTurnID: "12345678-1234-4234-8234-123456789abe", ExecutionEpoch: 1,
+		RuntimeProfileName: "test", RuntimeProfileVersion: "v1",
+	}}, OperationID: "publication-" + assignmentID, Purpose: execution.PublicationCapture}
 }
 
 func publicationLockCount(lifecycle *Lifecycle) int {

@@ -11,7 +11,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
-	"github.com/jozala/omnigrex/internal/runtime/acp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -52,11 +52,11 @@ func TestFailedTurnPublicationBindsNewSessionOfSameParticipant(t *testing.T) {
 	const replacementSession = "20000000-0000-4000-8000-000000000196"
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name, runtime_profile_version,
-    runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
+    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name, runtime_profile_version,
+    runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-SELECT $1, agent_assignment_id, session_number + 1, 'new-acp-session', runtime_profile_name, runtime_profile_version,
-       runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, 'ACTIVE'
+SELECT $1::uuid, agent_assignment_id, session_number + 1, $1::text, runtime_profile_name, runtime_profile_version,
+       runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, 'ACTIVE', runtime_capabilities
 FROM agent_sessions WHERE id = $2`, replacementSession, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
@@ -157,13 +157,14 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	if err := database.CloseMutationAdmission(ctx, nextLease); err != nil {
 		t.Fatal(err)
 	}
-	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, DeveloperCredentials: &integrationCredentialProvider{credential: "installation-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
+	workspaces, capture := integrationTerminalWorkspace(t, pool, nextLease, committedPublicationPaths(t), head, "developer-token")
+	reconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: github, Workspace: workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "installation-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := reconciler.Reconcile(ctx, agentturn.OutcomeReconciliation{
-		Lease: nextLease, Execution: bound, PromptResponse: &acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
-		RepositoryCredential: "developer-token", Paths: committedPublicationPaths(t),
+		Lease: nextLease, Execution: bound, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed},
+		RepositoryCredential: "developer-token", Capture: capture,
 	})
 	if err != nil || observation.Outcome != workflow.TurnOutcomeChangeProposalReady || observation.Completion.Status != store.AgentTurnSucceeded {
 		t.Fatalf("recovered PR handoff = %#v, error %v", observation, err)

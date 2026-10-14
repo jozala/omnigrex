@@ -606,23 +606,16 @@ WHERE workflow.id = $1`, application.WorkflowID, preparation.ID, preparation.Att
 	}
 }
 
-func TestClosureRetainsAndCollectsPreparedCreatingSessionWithoutFabricatingACPIdentity(t *testing.T) {
+func TestClosureRetainsAndCollectsPreparedCreatingSessionWithoutFabricatingRuntimeIdentity(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	contentSHA := strings.Repeat("a", 64)
 	image := "registry.example/runtime@sha256:" + strings.Repeat("b", 64)
-	binding := runtimeprofile.Binding{Name: "runtime", Version: "1", ContentSHA256: contentSHA, Image: image}
-	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 35, workflow.RoleDeveloper, binding, binding)
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: contentSHA, Image: image}
+	fixture := seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, 35, workflow.RoleDeveloper, binding, binding, store.AgentSessionCreating)
 	prepareClosableFixture(t, pool, fixture)
-	if _, err := pool.Exec(ctx, `
-UPDATE agent_sessions
-SET status = 'CREATING', acp_session_id = NULL,
-    runtime_profile_content_sha256 = $2, runtime_image_digest = $3
-WHERE id = $1`, fixture.sessionID, contentSHA, image); err != nil {
-		t.Fatalf("prepare CREATING Agent Session: %v", err)
-	}
 
 	observedAt := time.Now().UTC().Add(-2 * time.Hour)
 	closeAndSettleWithoutTurn(t, database, pool, ctx, fixture, 35,
@@ -633,14 +626,14 @@ WHERE id = $1`, fixture.sessionID, contentSHA, image); err != nil {
 		t.Fatalf("ListProtectedRuntimeBindings() before collection = (%#v, %v)", bindings, err)
 	}
 	var sessionStatus string
-	var acpSessionID *string
+	var runtimeSessionID *string
 	var retainedAt *time.Time
-	if err := pool.QueryRow(ctx, `SELECT status, acp_session_id, retained_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(
-		&sessionStatus, &acpSessionID, &retainedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, runtime_session_id, retained_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(
+		&sessionStatus, &runtimeSessionID, &retainedAt); err != nil {
 		t.Fatal(err)
 	}
-	if sessionStatus != "RETAINED" || acpSessionID != nil || retainedAt == nil {
-		t.Fatalf("retained prepared Session = status %s, ACP %v, retained %v", sessionStatus, acpSessionID, retainedAt)
+	if sessionStatus != "RETAINED" || runtimeSessionID != nil || retainedAt == nil {
+		t.Fatalf("retained prepared Session = status %s, runtime identity %v, retained %v", sessionStatus, runtimeSessionID, retainedAt)
 	}
 
 	lease, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.CollectAssignmentsJobKind, "creating-session-collector", time.Minute)
@@ -661,20 +654,20 @@ WHERE id = $1`, fixture.sessionID, contentSHA, image); err != nil {
 	var sessionDeletedAt *time.Time
 	var sessions, attempts int
 	if err := pool.QueryRow(ctx, `
-SELECT session.status, session.acp_session_id, session.state_deleted_at,
+SELECT session.status, session.runtime_session_id, session.state_deleted_at,
        (SELECT count(*) FROM agent_sessions WHERE agent_assignment_id = $2),
        (SELECT count(*) FROM workflow_attempts WHERE workflow_id = $3)
 FROM agent_sessions AS session WHERE session.id = $1`, fixture.sessionID, fixture.assignmentID, fixture.workflowID).Scan(
-		&sessionStatus, &acpSessionID, &sessionDeletedAt, &sessions, &attempts); err != nil {
+		&sessionStatus, &runtimeSessionID, &sessionDeletedAt, &sessions, &attempts); err != nil {
 		t.Fatal(err)
 	}
-	if sessionStatus != "DELETED" || acpSessionID != nil || sessionDeletedAt == nil || sessions != 1 || attempts != 1 {
-		t.Fatalf("collected prepared Session history = status %s, ACP %v, deleted %v, rows %d/%d",
-			sessionStatus, acpSessionID, sessionDeletedAt, sessions, attempts)
+	if sessionStatus != "DELETED" || runtimeSessionID != nil || sessionDeletedAt == nil || sessions != 1 || attempts != 1 {
+		t.Fatalf("collected prepared Session history = status %s, runtime identity %v, deleted %v, rows %d/%d",
+			sessionStatus, runtimeSessionID, sessionDeletedAt, sessions, attempts)
 	}
 }
 
-func TestReopenBeforeCollectionReusesPreparedCreatingSessionAndBindsACPOnLaunch(t *testing.T) {
+func TestReopenBeforeCollectionReusesPreparedCreatingSessionAndBindsRuntimeOnLaunch(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -685,7 +678,7 @@ func TestReopenBeforeCollectionReusesPreparedCreatingSessionAndBindsACPOnLaunch(
 		Name: developerBinding.RuntimeProfileName, Version: developerBinding.RuntimeProfileVersion,
 		ContentSHA256: developerBinding.RuntimeProfileContentSHA256, Image: developerBinding.RuntimeImageDigest,
 	}
-	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 73, workflow.RoleDeveloper, pinnedDeveloperBinding, pinnedDeveloperBinding)
+	fixture := seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, 73, workflow.RoleDeveloper, pinnedDeveloperBinding, pinnedDeveloperBinding, store.AgentSessionCreating)
 	reviewerBinding := bindings[workflow.RoleReviewer]
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_assignments (
@@ -698,13 +691,6 @@ VALUES ('40000000-0000-4000-8000-000000000735', $1, 'REVIEWER', 'ACTIVE',
 		reviewerBinding.RuntimeProfileVersion, reviewerBinding.RuntimeProfileContentSHA256,
 		reviewerBinding.RuntimeImageDigest); err != nil {
 		t.Fatalf("seed Reviewer Assignment: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-UPDATE agent_sessions
-SET status = 'CREATING', acp_session_id = NULL, capabilities = '{}'::jsonb,
-    activated_at = NULL
-WHERE id = $1`, fixture.sessionID); err != nil {
-		t.Fatalf("prepare never-started Agent Session: %v", err)
 	}
 	prepareClosableFixture(t, pool, fixture)
 
@@ -720,7 +706,7 @@ WHERE id = $1`, fixture.sessionID); err != nil {
 		"prepared-reactivation", "openai/reactivated")
 	if prepared.Assignment.ID != fixture.assignmentID || prepared.Session.ID != fixture.sessionID ||
 		prepared.Assignment.AssignmentRuntimeBinding != developerBinding ||
-		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.ACPSessionID != "" ||
+		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.RuntimeSessionID != "" ||
 		prepared.Session.RetainedAt != nil {
 		t.Fatalf("reactivated prepared Session = %#v / %#v", prepared.Assignment, prepared.Session)
 	}
@@ -737,7 +723,7 @@ WHERE id = $1`, fixture.sessionID); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound.Status != store.AgentSessionActive || bound.ACPSessionID != "created-after-reactivation" {
+	if bound.Status != store.AgentSessionActive || bound.RuntimeSessionID != prepared.Session.ID {
 		t.Fatalf("Agent Session after launch binding = %#v", bound)
 	}
 	settleAcquiredTurn(t, database, ctx, lease, store.AgentTurnSucceeded)

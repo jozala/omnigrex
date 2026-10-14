@@ -16,8 +16,8 @@ func NewToolPathCleaner(runtime Cleaner, paths AssignmentToolPathCleaner) Cleane
 	return toolPathCleaner{runtime: runtime, paths: paths}
 }
 
-func (cleaner toolPathCleaner) EnsureAbsent(ctx context.Context, assignmentID, runtimeStatePath string) error {
-	if err := cleaner.runtime.EnsureAbsent(ctx, assignmentID, runtimeStatePath); err != nil {
+func (cleaner toolPathCleaner) CollectParticipant(ctx context.Context, assignmentID string) error {
+	if err := cleaner.runtime.CollectParticipant(ctx, assignmentID); err != nil {
 		return err
 	}
 	return cleaner.paths.CleanupAssignmentToolPaths(ctx, assignmentID)

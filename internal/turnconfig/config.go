@@ -42,13 +42,13 @@ func SafeVariable(name string) bool {
 	if name == "TMPDIR" {
 		return true
 	}
-	for _, prefix := range []string{"OPENCODE_", "OMNIGREX_", "MISE_", "XDG_", "LD_", "DYLD_", "GIT_"} {
+	for _, prefix := range []string{"PI_", "OMNIGREX_", "MISE_", "XDG_", "LD_", "DYLD_", "GIT_"} {
 		if strings.HasPrefix(name, prefix) {
 			return false
 		}
 	}
 	switch name {
-	case "PATH", "HOME", "ENV", "BASH_ENV", "SHELLOPTS", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "JAVA_TOOL_OPTIONS", "SSL_CERT_FILE":
+	case "PATH", "HOME", "ENV", "BASH_ENV", "SHELLOPTS", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "BUN_OPTIONS", "JAVA_TOOL_OPTIONS", "SSL_CERT_FILE":
 		return false
 	}
 	return true

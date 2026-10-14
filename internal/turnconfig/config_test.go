@@ -33,14 +33,14 @@ environment-paths:
 func TestRepositoryCannotConfigureUnapprovedOrUnsupportedPaths(t *testing.T) {
 	for _, test := range []struct{ name, text string }{
 		{"unapproved", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn}\n  environment:\n    - {name: GOPATH, directory: tmp}\n"},
-		{"reserved", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn}\n  environment:\n    - {name: OPENCODE_CONFIG_CONTENT, directory: tmp}\n"},
+		{"reserved", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn}\n  environment:\n    - {name: PI_CODING_AGENT_DIR, directory: tmp}\n"},
 		{"future field", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn, size: 128MiB}\n  environment:\n    - {name: TMPDIR, directory: tmp}\n"},
 		{"duplicate binding", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn}\n  environment:\n    - {name: TMPDIR, directory: tmp}\n    - {name: TMPDIR, directory: tmp}\n"},
 		{"unknown directory", "version: 1\nenvironment-paths:\n  directories:\n    tmp: {lifecycle: turn}\n  environment:\n    - {name: TMPDIR, directory: other}\n"},
 		{"unsafe directory", "version: 1\nenvironment-paths:\n  directories:\n    ../tmp: {lifecycle: turn}\n  environment:\n    - {name: TMPDIR, directory: ../tmp}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := turnconfig.Parse([]byte(test.text), []string{"TMPDIR", "OPENCODE_CONFIG_CONTENT"}); err == nil {
+			if _, err := turnconfig.Parse([]byte(test.text), []string{"TMPDIR", "PI_CODING_AGENT_DIR"}); err == nil {
 				t.Fatal("unsafe repository configuration was accepted")
 			}
 		})
@@ -48,7 +48,7 @@ func TestRepositoryCannotConfigureUnapprovedOrUnsupportedPaths(t *testing.T) {
 }
 
 func TestOperatorAllowlistRejectsRuntimeControlVariables(t *testing.T) {
-	for _, text := range []string{"OPENCODE_CONFIG_CONTENT", "HOME", "PATH", "TMPDIR,TMPDIR", "GOCACHE, GOPATH"} {
+	for _, text := range []string{"PI_CODING_AGENT_DIR", "HOME", "PATH", "TMPDIR,TMPDIR", "GOCACHE, GOPATH"} {
 		if _, err := turnconfig.Allowlist(text); err == nil {
 			t.Fatalf("allowlist %q accepted", text)
 		}

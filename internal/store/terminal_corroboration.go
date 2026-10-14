@@ -126,6 +126,9 @@ WHERE agent_turn_id = $1 AND state = 'HANDED_OFF'`
 		checkpoint.WorkflowID != lease.WorkflowID || !reactivation && checkpoint.WorkflowAttemptID != lease.WorkflowAttemptID {
 		return TerminalCorroborationContext{}, ErrJobLeaseLost
 	}
+	if !validCorroborationPrompt(checkpoint.PromptOutcome, checkpoint.PromptError) {
+		return TerminalCorroborationContext{}, ErrTerminalCorroborationConflict
+	}
 	if reactivation {
 		var payload struct {
 			SourceTurnID string `json:"source_turn_id"`
@@ -321,8 +324,8 @@ func (store *Store) BeginTerminalCorroboration(ctx context.Context, lease AgentT
 		return TerminalCorroboration{}, ErrTerminalCorroborationConflict
 	}
 	if promptError == "" {
-		// Persist only the allowlisted ACP stop reason, never caller-supplied text.
-		promptOutcome = json.RawMessage(`{"stop_reason":"end_turn"}`)
+		// Persist only the admitted completion, never caller-supplied text.
+		promptOutcome = json.RawMessage(`{"admitted":true,"status":"completed"}`)
 	}
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -374,7 +377,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		return TerminalCorroboration{}, err
 	}
 	if !recorded || recordedError != promptError ||
-		(promptError == "" && recordedStop != "end_turn") ||
+		(promptError == "" && recordedStop != "completed") ||
 		(promptError != "" && recordedStop != "") {
 		return TerminalCorroboration{}, ErrTerminalCorroborationConflict
 	}
@@ -433,11 +436,27 @@ func validCorroborationPrompt(outcome json.RawMessage, promptError string) bool 
 		return false
 	}
 	var response map[string]json.RawMessage
-	if json.Unmarshal(outcome, &response) != nil || len(response) != 1 {
+	if json.Unmarshal(outcome, &response) != nil || len(response) < 2 || len(response) > 3 {
 		return false
 	}
-	var stopReason string
-	return json.Unmarshal(response["stop_reason"], &stopReason) == nil && stopReason == "end_turn"
+	for key := range response {
+		if key != "admitted" && key != "status" && key != "limit_reached" {
+			return false
+		}
+	}
+	var admitted *bool
+	var status string
+	if json.Unmarshal(response["admitted"], &admitted) != nil || admitted == nil || !*admitted ||
+		json.Unmarshal(response["status"], &status) != nil || status != "completed" {
+		return false
+	}
+	if limit, present := response["limit_reached"]; present {
+		var limited *bool
+		if json.Unmarshal(limit, &limited) != nil || limited == nil || *limited {
+			return false
+		}
+	}
+	return true
 }
 
 func sameCorroborationPrompt(left, right json.RawMessage) bool {
@@ -491,11 +510,13 @@ FROM agent_turns AS source
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source.workflow_id = $2
-  AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'end_turn'
-       OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
-  AND (source.outcome IS NULL OR source.outcome->>'stop_reason' = 'end_turn')
-  AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'ACP prompt was cancelled%'
-       AND source.last_error NOT LIKE 'ACP prompt returned an invalid stop reason%'))`, sourceID, lease.JobLease.WorkflowID).Scan(
+   AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
+        OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+   AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
+        AND source.outcome->>'status' = 'completed'
+        AND COALESCE(source.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
+   AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'Agent prompt was cancelled%'
+        AND source.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))`, sourceID, lease.JobLease.WorkflowID).Scan(
 			&sourceTurnID, &sourceLineage, &sourceSessionID, &sourceAttemptID,
 			&sourceStatus, &sourceCompleted, &sourceSettled); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

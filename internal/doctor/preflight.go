@@ -16,10 +16,9 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
-	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
-	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
-	"github.com/jozala/omnigrex/internal/runtime/opencode"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/composition"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -30,6 +29,7 @@ type productionState struct {
 	repo     Repository
 
 	runtimeProfile             runtimeprofile.Profile
+	runtimeProfiles            []runtimeprofile.Profile
 	registry                   runtimeprofile.Registry
 	database                   *store.ReadOnlyStore
 	api                        *githubapi.APIClient
@@ -40,6 +40,7 @@ type productionState struct {
 	profiles                   agentprofile.Snapshot
 	profileSelection           agentprofile.Selection
 	profilesLoaded             bool
+	effectiveProfilesLoaded    bool
 	operatorInstructions       agentinstructions.Operator
 	operatorInstructionsLoaded bool
 }
@@ -60,15 +61,16 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		{Name: "github-app-role-separation", Run: state.checkRoleSeparation},
 		{Name: "postgres-connectivity", Run: state.checkDatabase},
 		{Name: "postgres-schema", Run: state.checkDatabaseSchema},
-		{Name: "docker-resources", Run: state.checkDockerResources},
+		{Name: backendResourcesName(settings), Run: state.checkDockerResources},
 		{Name: "runtime-profile-image", Run: state.checkRuntimeImage},
-		{Name: "acp-runtime", Run: state.checkACPRuntime},
+		{Name: "pi-runtime", Run: state.checkAgentRuntime},
 		{Name: "protected-runtime-profiles", Run: state.checkProtectedRuntimeProfiles},
 		{Name: "pending-runtime-profile-compatibility", Run: state.checkPendingRuntimeCompatibility},
 		{Name: "developer-github-installation", Run: state.checkDeveloperInstallation},
 		{Name: "reviewer-github-installation", Run: state.checkReviewerInstallation},
 		{Name: "agent-profiles", Run: state.checkAgentProfiles},
 		{Name: "effective-agent-profiles", Run: state.checkEffectiveProfiles},
+		{Name: "effective-agent-runtimes", Run: state.checkEffectiveRuntimes},
 		{Name: "mcp-endpoint", Run: state.checkMCPEndpoint},
 	}
 	runner, err := NewRunner(settings.ReadinessTimeout, checks)
@@ -76,6 +78,13 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		return nil, err
 	}
 	return runner.Run(ctx), nil
+}
+
+func backendResourcesName(settings config.Config) string {
+	if settings.ExecutionBackend == "microsandbox" {
+		return "microsandbox-kvm-resources"
+	}
+	return "docker-resources"
 }
 
 func (state *productionState) close() {
@@ -87,15 +96,16 @@ func (state *productionState) close() {
 }
 
 func (state *productionState) checkRuntimeProfile(context.Context) error {
-	profile, err := runtimeprofile.NewOpenCodeV1(state.settings.OpenCodeACPV1Image, state.settings.OpenCodeACPV1Platform)
+	profiles, err := state.settings.RuntimeProfiles()
 	if err != nil {
 		return err
 	}
-	registry, err := runtimeprofile.NewRegistry(profile)
+	registry, err := runtimeprofile.NewRegistry(profiles...)
 	if err != nil {
 		return err
 	}
-	state.runtimeProfile = profile
+	state.runtimeProfile = profiles[0]
+	state.runtimeProfiles = profiles
 	state.registry = registry
 	return nil
 }
@@ -148,11 +158,11 @@ func (state *productionState) checkDatabaseSchema(ctx context.Context) error {
 }
 
 func (state *productionState) checkDockerResources(ctx context.Context) error {
-	probe, err := dockerruntime.NewReadinessProbe(dockerruntime.ReadinessProbeOptions{
+	probe, err := composition.NewResourceProbe(composition.Resources{
 		AgentNetwork: state.settings.DockerAgentNetwork, WorkspaceVolume: state.settings.WorkspaceVolume,
 		RuntimeStateVolume: state.settings.RuntimeStateVolume, MiseVolume: state.settings.MiseVolume,
-		AgentImage: state.settings.AgentImageReference,
-	})
+		AgentImage: state.runtimeProfile.Contract().Image,
+	}, state.settings)
 	if err != nil {
 		return err
 	}
@@ -164,25 +174,43 @@ func (state *productionState) checkRuntimeImage(ctx context.Context) error {
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := dockerruntime.NewExactImageAvailability()
+	availability, err := composition.NewImageAvailability(state.settings)
 	if err != nil {
 		return err
 	}
 	defer availability.Close()
-	contract := state.runtimeProfile.Contract()
-	return availability.Available(ctx, contract.Image, contract.Platform)
+	for _, profile := range state.runtimeProfiles {
+		contract := profile.Contract()
+		if err := availability.Available(ctx, contract.Image, contract.Platform); err != nil {
+			return err
+		}
+		if err := composition.CheckRepositoryEnvironment(ctx, profile, state.settings); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (state *productionState) checkACPRuntime(ctx context.Context) error {
+func (state *productionState) checkAgentRuntime(ctx context.Context) error {
+	if len(state.runtimeProfiles) == 0 {
+		return errors.New("Runtime Profile contract check did not pass")
+	}
 	endpoint, err := url.Parse(state.settings.MCPEndpointURL)
 	if err != nil || endpoint.Hostname() == "" {
 		return errors.New("configured MCP endpoint does not have a host")
 	}
-	return checkACP(ctx, state.runtimeProfile, acpProbeOptions{
+	options := piProbeOptions{
+		Settings:    state.settings,
 		Network:     state.settings.DockerAgentNetwork,
 		MCPHost:     endpoint.Hostname(),
 		MemoryBytes: state.settings.AgentTurnMemoryBytes,
-	})
+	}
+	for _, profile := range state.runtimeProfiles {
+		if err := checkPi(ctx, profile, options); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (state *productionState) checkProtectedRuntimeProfiles(ctx context.Context) error {
@@ -192,12 +220,12 @@ func (state *productionState) checkProtectedRuntimeProfiles(ctx context.Context)
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	availability, err := dockerruntime.NewExactImageAvailability()
+	availability, err := composition.NewImageAvailability(state.settings)
 	if err != nil {
 		return err
 	}
 	defer availability.Close()
-	checker, err := runtimeprofile.NewAvailabilityChecker(state.database, state.registry.Catalog, availability)
+	checker, err := runtimeprofile.NewAvailabilityChecker(state.database, runtimeprofile.Resolver{Catalog: state.registry.Catalog, Source: state.database}, availability)
 	if err != nil {
 		return err
 	}
@@ -208,7 +236,7 @@ func (state *productionState) checkCompatibilityArtifact(context.Context) error 
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	return validateCompatibilityFile(state.settings.RuntimeProfileCompatibilityResultsFile, state.runtimeProfile)
+	return validateCompatibilityFile(state.settings.RuntimeProfileCompatibilityResultsFile, composition.StateBinding(state.settings).Family, state.runtimeProfiles...)
 }
 
 func (state *productionState) checkPendingRuntimeCompatibility(ctx context.Context) error {
@@ -218,7 +246,12 @@ func (state *productionState) checkPendingRuntimeCompatibility(ctx context.Conte
 	if state.runtimeProfile.Contract().Name == "" {
 		return errors.New("Runtime Profile contract check did not pass")
 	}
-	return state.database.CheckPendingRuntimeProfileCompatibility(ctx, state.runtimeProfile)
+	for _, profile := range state.runtimeProfiles {
+		if err := state.database.CheckPendingRuntimeProfileCompatibility(ctx, profile); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (state *productionState) githubAPI() (*githubapi.APIClient, error) {
@@ -395,8 +428,36 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	}
 	state.profiles = snapshot
 	state.profileSelection = selection
+	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+		name, _ := selection.Profile(roleID)
+		p, _ := snapshot.Profile(name)
+		selected, err := state.repositoryRuntime(p)
+		if err != nil {
+			return err
+		}
+		if err := composition.CheckRepositoryEnvironment(ctx, selected, state.settings); err != nil {
+			return err
+		}
+	}
 	state.profilesLoaded = true
 	return nil
+}
+
+func (state *productionState) repositoryRuntime(p agentprofile.Profile) (runtimeprofile.Profile, error) {
+	name, version, _ := strings.Cut(p.Runtime(), "/")
+	selected, err := state.registry.Resolve(name, version)
+	if err != nil {
+		return runtimeprofile.Profile{}, err
+	}
+	if definition := state.profiles.Environment(); definition != nil {
+		os, arch, _ := strings.Cut(definition.Platform, "/")
+		var requirements []string
+		for _, requirement := range definition.Requirements {
+			requirements = append(requirements, string(requirement))
+		}
+		return selected.WithEnvironment(definition.Image, runtimeprofile.Platform{OS: os, Arch: arch}, requirements)
+	}
+	return selected, nil
 }
 
 func (state *productionState) checkEffectiveProfiles(context.Context) error {
@@ -410,13 +471,41 @@ func (state *productionState) checkEffectiveProfiles(context.Context) error {
 	if err != nil {
 		return err
 	}
+	credentials, err := os.ReadFile(state.settings.ProviderCredentialsFile)
+	if err != nil {
+		return errors.New("provider credentials are unavailable")
+	}
+	defer zero(credentials)
 	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
 		name, selected := state.profileSelection.Profile(roleID)
 		profile, ok := state.profiles.Profile(name)
 		if !selected || !ok {
 			return fmt.Errorf("%s: Agent Profile is unavailable", roleID)
 		}
-		if err := validateEffectiveProfile(state.registry, roleID, profile, state.operatorInstructions, definition); err != nil {
+		if err := validateEffectiveProfile(state.registry, roleID, profile, state.operatorInstructions, definition, credentials); err != nil {
+			return fmt.Errorf("%s: %w", roleID, err)
+		}
+	}
+	state.effectiveProfilesLoaded = true
+	return nil
+}
+
+func (state *productionState) checkEffectiveRuntimes(ctx context.Context) error {
+	if !state.effectiveProfilesLoaded {
+		return errors.New("effective Agent Profile check did not pass")
+	}
+	endpoint, err := url.Parse(state.settings.MCPEndpointURL)
+	if err != nil || endpoint.Hostname() == "" {
+		return errors.New("configured MCP endpoint does not have a host")
+	}
+	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+		name, _ := state.profileSelection.Profile(roleID)
+		p, _ := state.profiles.Profile(name)
+		selected, err := state.repositoryRuntime(p)
+		if err != nil {
+			return err
+		}
+		if err := checkPi(ctx, selected, piProbeOptions{Settings: state.settings, Network: state.settings.DockerAgentNetwork, MCPHost: endpoint.Hostname(), MemoryBytes: state.settings.AgentTurnMemoryBytes}, agent.ModelSelection{Model: p.Model(), Thinking: p.Thinking()}); err != nil {
 			return fmt.Errorf("%s: %w", roleID, err)
 		}
 	}
@@ -480,7 +569,7 @@ func validateJSONObjectFile(path string) error {
 	return nil
 }
 
-func validateCompatibilityFile(path string, target runtimeprofile.Profile) error {
+func validateCompatibilityFile(path, backend string, targets ...runtimeprofile.Profile) error {
 	if path == "" {
 		return nil
 	}
@@ -493,10 +582,10 @@ func validateCompatibilityFile(path string, target runtimeprofile.Profile) error
 	if err != nil {
 		return err
 	}
-	return results.ValidateTarget(target)
+	return results.ValidateDeployment(backend, 1, targets...)
 }
 
-func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.Role, profile agentprofile.Profile, operator agentinstructions.Operator, definition workflow.Definition) error {
+func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.Role, profile agentprofile.Profile, operator agentinstructions.Operator, definition workflow.Definition, credentials ...[]byte) error {
 	name, version, found := strings.Cut(profile.Runtime(), "/")
 	if !found || name == "" || version == "" || strings.Contains(version, "/") {
 		return errors.New("invalid Runtime Profile reference")
@@ -509,18 +598,6 @@ func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.
 	if contract.Name != name || contract.Version != version {
 		return errors.New("resolved Runtime Profile does not match the requested reference")
 	}
-	permissions := make(opencode.PermissionPolicy, len(profile.Permissions()))
-	for name, action := range profile.Permissions() {
-		permissions[name] = opencode.Permission(action)
-	}
-	capabilities, err := mcp.CapabilitiesForRole(roleID)
-	if err != nil {
-		return err
-	}
-	runtimeTools := make([]string, len(capabilities))
-	for index, capability := range capabilities {
-		runtimeTools[index] = mcp.ServerName + "_" + capability
-	}
 	policy, _ := role.BuiltinPolicyCatalog().Lookup(roleID)
 	for _, stageID := range definition.StageIDs() {
 		stage, _ := definition.Stage(stageID)
@@ -528,11 +605,11 @@ func validateEffectiveProfile(registry runtimeprofile.Registry, roleID workflow.
 			continue
 		}
 		for _, purpose := range stage.AcceptedPurposes {
-			_, err = opencode.Render(roleID, opencode.Profile{
-				Instructions: operator.Compose(policy, stage, purpose, profile.Instructions()),
-				Model:        profile.Model(), Variant: profile.Variant(), Steps: uint(profile.Steps()),
-				Permissions: permissions, RuntimeTools: runtimeTools,
-			})
+			var auth []byte
+			if len(credentials) > 0 {
+				auth = credentials[0]
+			}
+			err := composition.ValidatePiProfile(profile, policy, operator, stage, purpose, agent.MCPEndpoint{Name: "omnigrex", URL: "http://diagnostic.invalid/mcp", Headers: []agent.Header{{Name: "Authorization", Value: "Bearer fixture-only"}}}, auth)
 			if err != nil {
 				return fmt.Errorf("%s/%s: %w", stageID, purpose, err)
 			}
