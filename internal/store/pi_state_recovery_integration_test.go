@@ -19,7 +19,6 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	mobyclient "github.com/moby/moby/client"
-	imageplatform "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func TestPiProtectedStateRecovery(t *testing.T) {
@@ -190,6 +189,14 @@ func (images *piRecoveryImages) Available(ctx context.Context, image string, pla
 		return err
 	}
 	defer api.Close()
-	_, err = api.ImageInspect(ctx, images.local, mobyclient.ImageInspectWithPlatform(&imageplatform.Platform{OS: platform.OS, Architecture: platform.Arch}))
-	return err
+	// A local content ID already selects one image, so platform selection is
+	// unnecessary and would require API 1.49 on otherwise supported daemons.
+	inspected, err := api.ImageInspect(ctx, images.local)
+	if err != nil {
+		return err
+	}
+	if inspected.Os != platform.OS || inspected.Architecture != platform.Arch {
+		return execution.ErrBindingMismatch
+	}
+	return nil
 }

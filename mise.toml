@@ -57,9 +57,9 @@ run = "OMNIGREX_MICROSANDBOX_FEASIBILITY=1 go test -race -tags=integration -time
 
 [tasks.test-microsandbox-integration]
 description = "Qualify the SDK-backed adapter, captures, state, golden resources, and nested Docker on Linux/KVM"
-shell = "bash -c"
+shell = "bash -ec"
 run = '''
-: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the Docker host's /dev/kvm group}"
+: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
 docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/microsandbox-golden-fixture:step08 .
 docker build --file Dockerfile.microsandbox --target qualification --tag omnigrex/microsandbox-qualification:step08 .
 set -o pipefail
@@ -115,10 +115,10 @@ run = "OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^Test
 
 [tasks.test-pi-microsandbox-integration]
 description = "Run the same Pi adapter scenarios through the Linux/KVM SDK backend"
-shell = "bash -c"
+shell = "bash -ec"
 depends = ["pi-diagnostic-image"]
 run = '''
-: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the Docker host's /dev/kvm group}"
+: "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
 docker build --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-qualification:step09 .
 set -o pipefail
 docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
