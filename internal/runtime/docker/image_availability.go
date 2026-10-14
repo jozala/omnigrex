@@ -14,6 +14,8 @@ import (
 var ErrInvalidExactImageAvailability = errors.New("invalid exact image availability request")
 
 type imageAvailabilityAPI interface {
+	Ping(context.Context, mobyclient.PingOptions) (mobyclient.PingResult, error)
+	ClientVersion() string
 	ImageInspect(context.Context, string, ...mobyclient.ImageInspectOption) (mobyclient.ImageInspectResult, error)
 }
 
@@ -41,10 +43,25 @@ func (availability *ExactImageAvailability) Available(ctx context.Context, image
 		platform.OS != "linux" || platform.Arch != "amd64" && platform.Arch != "arm64" {
 		return ErrInvalidExactImageAvailability
 	}
-	_, err := availability.api.ImageInspect(ctx, image, mobyclient.ImageInspectWithPlatform(&v1.Platform{
-		OS: platform.OS, Architecture: platform.Arch,
-	}))
-	return err
+	if _, err := availability.api.Ping(ctx, mobyclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
+		return fmt.Errorf("negotiate Docker image inspection API: %w", err)
+	}
+	var options []mobyclient.ImageInspectOption
+	// Platform selection requires API 1.49. Older APIs can still inspect the
+	// exact digest; validate the returned platform rather than accepting a default.
+	if compareAPIVersion(availability.api.ClientVersion(), "1.49") >= 0 {
+		options = append(options, mobyclient.ImageInspectWithPlatform(&v1.Platform{
+			OS: platform.OS, Architecture: platform.Arch,
+		}))
+	}
+	inspected, err := availability.api.ImageInspect(ctx, image, options...)
+	if err != nil {
+		return err
+	}
+	if inspected.Os != platform.OS || inspected.Architecture != platform.Arch {
+		return fmt.Errorf("%w: image platform does not match %s/%s", ErrInvalidExactImageAvailability, platform.OS, platform.Arch)
+	}
+	return nil
 }
 
 func (availability *ExactImageAvailability) Close() error {

@@ -96,15 +96,26 @@ openssl genrsa -out "$directory/secrets/github-developer-private-key.pem" 2048 2
 openssl genrsa -out "$directory/secrets/github-reviewer-private-key.pem" 2048 2>/dev/null
 printf '%s\n' '{"openai":{"type":"api_key","key":"smoke-fixture-only"}}' > "$directory/secrets/provider-credentials.json"
 chmod 0640 "$directory"/secrets/*
+docker_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || printf 0)"
+kvm_gid="${OMNIGREX_MICROSANDBOX_KVM_GID:-0}"
+# Keep fixture secrets separate from either backend's host authority, even
+# when CI assigns /dev/kvm to the invoking user's group.
+secret_gid=10001
+while [ "$secret_gid" = "$docker_gid" ] || [ "$secret_gid" = "$kvm_gid" ]; do
+  secret_gid=$((secret_gid + 1))
+done
+docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
+  --mount "type=bind,src=$directory/secrets,dst=/secrets" "$pi" \
+  -ec 'chgrp "$1" /secrets/*' sh "$secret_gid"
 cat > "$directory/.env" <<EOF
 COMPOSE_PROJECT_NAME=$namespace
 COMPOSE_FILE=compose.pi.yaml:compose.pi-$backend.yaml:smoke.yaml
 OMNIGREX_ORCHESTRATOR_IMAGE=$orchestrator
 OMNIGREX_PI_RPC_V1_IMAGE=$pi
 OMNIGREX_PI_RPC_V1_PLATFORM=linux/$arch
-OMNIGREX_SECRET_GID=$(id -g)
-OMNIGREX_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || printf 0)
-OMNIGREX_MICROSANDBOX_KVM_GID=${OMNIGREX_MICROSANDBOX_KVM_GID:-0}
+OMNIGREX_SECRET_GID=$secret_gid
+OMNIGREX_DOCKER_GID=$docker_gid
+OMNIGREX_MICROSANDBOX_KVM_GID=$kvm_gid
 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1
 OMNIGREX_GITHUB_REVIEWER_APP_ID=2
 OMNIGREX_DATABASE_PASSWORD_FILE=./secrets/database-password

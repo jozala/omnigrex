@@ -36,7 +36,8 @@ case "$1 $2" in
   'inspect --format') printf '172.30.0.2\n';;
   'compose stop') touch "$root/stopped";;
   'compose start') rm -f "$root/stopped";;
-  'run --rm') if [ MODE = reachable-postgres ]; then exit 42; fi;;
+  'run --rm')
+    case "$*" in *'require("net").connect'*) if [ MODE = reachable-postgres ]; then exit 42; fi;; esac;;
 esac
 `
 			curl := `#!/bin/sh
