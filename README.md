@@ -46,7 +46,8 @@ The [Pi deployment bundles](./docs/operator-guide.md#pi-operational-deployment) 
 Docker supports trusted-repository execution; Microsandbox additionally supports hardware isolation and guest Docker, Compose, and Testcontainers.
 Select one backend per installation, without fallback or cross-backend state migration.
 See the [operator guide](./docs/operator-guide.md#one-time-opencode-to-pi-cutover) for the explicit OpenCode reset, Pi Profile and credential changes, coordinated recovery, and rollback limits.
-The source implementation is preparatory until the matching release passes publication and exact-digest smoke on both backends.
+The [published Pi release evidence](./docs/plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) records successful publication and exact-digest smoke on both backends for commit `3125265f30f5cbc97096babde01cbd8dae7388e5`.
+The [live Pi/Microsandbox exercise](./docs/dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) records operator cutover, Compose-backed repository tests, and a Developer-to-Reviewer Workflow with a subsequent human-requested correction cycle.
 
 ## Development
 

@@ -7,9 +7,9 @@ Read the trust model before installing credentials or granting Docker access.
 
 The Pi deployment consists of one Docker Compose control-plane stack running the orchestrator and PostgreSQL, with disposable Pi Runtime Processes on the selected Docker or Microsandbox Execution Backend.
 Pi is the only supported coding-agent runtime in the current source and deployment artifacts.
-The [final source qualification](./plans/2026-10-13-pi-only-final-qualification.md) records both-backend evidence and the remaining published-release, live dogfooding, and production cutover gates.
+The [release qualification](./plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) records both-backend CI, published exact-digest smoke, and the operator-confirmed Pi/Microsandbox cutover.
 Historical OpenCode installations use the [clean-cutover procedure](#one-time-opencode-to-pi-cutover), never a conversation or populated-ledger migration.
-These source changes do not establish release publication, exact-digest smoke success, or production cutover; require the matching release evidence before deployment.
+Select a commit with matching publication and both-backend exact-digest smoke evidence; a source build alone does not establish release qualification.
 Docker Engine API 1.45 or newer and Docker Compose v2 are required.
 The operator must provide public DNS and HTTPS ingress for GitHub webhooks.
 Production hosts deploy without cloning the repository by using published `linux/amd64` images from `ghcr.io/jozala/omnigrex/` and the [Pi deployment files](#pi-operational-deployment) for one qualified commit.
@@ -290,6 +290,17 @@ There are no build contexts or source-checkout dependencies in these files.
 Resolve the matching published tags to registry digests as described in [Published Images And Deployment Files](#published-images-and-deployment-files), set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend's control-plane digest, and set `OMNIGREX_PI_RPC_V1_IMAGE` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64`.
 Keep all exact retained Participant images available according to [Repository Environments](#repository-environments).
 
+The backend overlay selects execution authority and settings; it does not replace the configured control-plane image.
+Docker requires the `ghcr.io/jozala/omnigrex/orchestrator` image, while Microsandbox requires `ghcr.io/jozala/omnigrex/orchestrator-microsandbox`, which includes `/usr/local/bin/msb` and the native SDK.
+The `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` variables select images only for qualification scripts; normal deployment uses `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_RPC_V1_IMAGE`.
+Exported shell variables take precedence over deployment `.env` values.
+Before provisioning images or starting the stack, inspect the effective selection without printing deployment secrets:
+
+```sh
+docker compose config --format json |
+  jq '.services.orchestrator | {image, backend: .environment.OMNIGREX_EXECUTION_BACKEND}'
+```
+
 Use the existing [GitHub Apps](#github-apps), [secret-file placement](#secrets), and [HTTPS ingress](#supported-deployment) procedures.
 For Pi, the provider file must use literal Pi-native API keys, for example `{"openai":{"type":"api_key","key":"REPLACE_WITH_SECRET"}}`, rather than OpenCode's `type: api` shape.
 Only API keys are supported; executable key references, environment references, OAuth entries, and missing selected providers fail preflight.
@@ -369,7 +380,8 @@ CI runs the shared suites on Docker and on an ephemeral `ubuntu-24.04` KVM runne
 
 This is one explicit reset of OpenCode operational state and conversations, followed by a fresh Pi installation.
 It implements [decision 0006](./decisions/0006-use-pi-through-an-agent-specific-adapter.md), not an in-place runtime upgrade.
-The current source is Pi-only; operator-controlled production cutover still requires the selected published release and isolated rehearsal evidence.
+The current source is Pi-only.
+The first operator-confirmed Pi/Microsandbox cutover and its [evidence boundaries](./plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) are recorded separately from the full reset/recovery qualification procedure below.
 
 ### Preparation and shutdown
 

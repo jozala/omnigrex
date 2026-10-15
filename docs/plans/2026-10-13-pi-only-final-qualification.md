@@ -7,11 +7,40 @@ Pi is the only supported coding-agent runtime in the application, repository Pro
 Docker and Microsandbox remain separately supported Execution Backends.
 The [operator guide](../operator-guide.md#one-time-opencode-to-pi-cutover) remains authoritative for release selection, clean disposal, coordinated recovery, and production cutover.
 
-Source qualification is complete; the full Step 17 completion gate is still open.
-No release was committed, pushed, or published during this implementation.
-Exact published-image smoke and historical-source clean-cutover rehearsal therefore remain pending.
-The earlier [live Microsandbox Work Item](2026-10-11-pi-operator-documentation-and-cutover.md#live-candidate-workflow-validation-between-steps-16-and-17) is candidate evidence, not live dogfooding of the final Pi-only release.
-Final-release isolated dogfooding and operator-controlled production cutover remain pending.
+Source qualification, merged-release publication, and both published-image deployment smokes are complete.
+The operator confirmed the Pi/Microsandbox cutover and a live Compose-backed Work Item on the published Pi-only release.
+The full Step 17 completion gate remains open for the published historical-release reset/recovery rehearsal, which the operator chose to skip for this installation.
+The earlier [live Microsandbox Work Item](2026-10-11-pi-operator-documentation-and-cutover.md#live-candidate-workflow-validation-between-steps-16-and-17) remains candidate evidence; the [published-release exercise](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) supplies the later live evidence.
+
+## Published release and operator cutover
+
+### Release publication (2026-10-14)
+
+The Pi-only implementation merged in [Pull Request 93](https://github.com/jozala/omnigrex/pull/93) as commit `3125265f30f5cbc97096babde01cbd8dae7388e5`.
+[Main CI run 38643789132](https://github.com/jozala/omnigrex/actions/runs/38643789132) completed successfully with `check`, `microsandbox`, `publish`, `deploy-smoke`, and `deploy-smoke-microsandbox` all passing.
+The publication logs identify these exact `linux/amd64` images:
+
+| Artifact | Published reference |
+| --- | --- |
+| Pi 1.0.4 / Node 24.14.1 golden environment | `ghcr.io/jozala/omnigrex/pi@sha256:035cf160003cfa2940f529c244244147f1d7eac383fb06174b134f145e68f216` |
+| Docker control plane | `ghcr.io/jozala/omnigrex/orchestrator@sha256:203bbcb59fc161fe45c5e087dce8a348efa7b5d75dcdfe687e8fbced52109b74` |
+| Microsandbox control plane | `ghcr.io/jozala/omnigrex/orchestrator-microsandbox@sha256:8d177ccfeba0de5540548b113ba8cd6f84e1049772080e87f592ae2b6b52ca4c` |
+
+The post-publication smoke jobs used those published image digests on Docker and Linux/amd64 KVM respectively.
+Anonymous GHCR manifest requests for all three published tags succeeded and resolved to the same digests; CI's authenticated image pulls alone are not the evidence for anonymous registry access.
+Later releases still require their own matching publication and smoke evidence.
+
+### Operator installation and live Workflow (2026-10-15)
+
+The operator selected the published Microsandbox control plane and Pi golden image above, completed a fresh Pi installation, and confirmed successful guest Docker Compose use in [Change Proposal 20](https://github.com/jozala/omnigrex-testrun/pull/20).
+The [dogfooding record](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) preserves public Work Item, head, review, and Participant evidence, including the subsequent correction cycle.
+Deployment success and guest Compose execution are operator-confirmed; repository test results are attributed to the Developer handoffs rather than presented as independently rerun tests.
+
+The operator explicitly chose to omit the old-installation backup and historical-release reset/recovery rehearsal because the previous state was disposable and downtime was acceptable.
+The attempted rehearsal stopped at the source-bundle isolation validator before stack startup, so it supplies no successful reset or restore evidence.
+No production Pi backup/restore drill was reported.
+These installation-specific omissions do not replace the accepted recovery contract or turn an unperformed release gate into a pass.
+The separate [Omnigrex repository gate](../dogfooding.md#omnigrex-repository-gate), including live restart and exact Session Continuation evidence, remains outside this disposable-repository exercise.
 
 ## Pi-only implementation
 
@@ -115,8 +144,8 @@ Independent read-only core and deployment/backend reviews confirmed their origin
 Source checksums were unchanged across the final remote execution, and the original host services and storage inventories were preserved.
 
 Fixture GitHub installation failures in deployment doctor output are expected; independent operational checks pass without granting external mutation authority.
-These source-fixture results do not qualify production credentials, public package pulls, a published release, or a final live dogfooding Work Item.
-Complete the remaining release, historical-source rehearsal, isolated dogfooding, and operator-controlled cutover gates using the operator guide before closing Step 17 or its original Work Items.
+These source-fixture results alone do not qualify production credentials, public package pulls, a published release, or a final live dogfooding Work Item.
+The published-release and operator evidence above addresses the later publication, live Work Item, and cutover boundaries; the unperformed historical-release reset/recovery gate remains explicit before claiming the full Step 17 gate or its original Work Items complete.
 
 ## Subsequent external review corrections
 
