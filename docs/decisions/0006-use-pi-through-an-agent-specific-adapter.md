@@ -7,8 +7,8 @@ decision-makers: [Mariusz]
 
 ## Context
 
-The planned runtime replacement removes OpenCode, but session-control and Workflow behavior must survive that change.
-Pi RPC differs from ACP in session identity, prompt completion, replay, and configuration semantics.
+Session control and Workflow behavior must remain independent of Pi's protocol mechanics.
+Pi RPC has runtime-specific session identity, prompt completion, replay, and configuration semantics.
 The feasibility experiment proves exact session reopening and persisted-entry replay, and demonstrates that successful configuration commands can still clamp unsupported values.
 
 ## Decision
@@ -24,22 +24,18 @@ Reject unsupported model/thinking requests without fallback and verify effective
 ## Rationale
 
 A narrow semantic contract isolates useful behavior without pretending different agents have interchangeable conversations or completion rules.
-Keeping ACP-shaped types would obscure Pi's admission-versus-settlement distinction.
+Protocol-specific types in coordination would obscure Pi's admission-versus-settlement distinction.
 Native Pi MCP is a credible alternative, but its presence alone does not qualify the required authority, resource-exclusion, and tool-selection behavior.
 
 ## Consequences
 
-This supersedes ADR 0002's ACP protocol choice, not its separation of Session Continuation and History Replay or its immutable Runtime Profile principle.
-The initial cutover resets OpenCode operational/runtime state; it does not convert conversations.
-The [operator cutover procedure](../operator-guide.md#one-time-opencode-to-pi-cutover) requires coordinated pre-reset recovery, explicit storage disposal, and fresh Pi admission.
-An OpenCode rollback after fresh Pi work cannot merge the two ledgers or undo published GitHub effects.
+Session Continuation and History Replay remain separate capabilities, and Runtime Profiles remain immutable.
 Pi-to-Pi qualification and retained-image availability remain required.
 An interface does not promise cross-agent conversation migration.
 
 ## Links
 
 - [Contract design](../plans/2026-10-07-runtime-boundary-contracts.md)
-- [Superseded ADR 0002](../adr/0002-use-acp-as-the-agent-runtime-boundary.md)
+- [Superseded ADR 0002](../plans/runtime-history/adr-0002.md)
 - [Pi evidence](../experiments/pi.md)
-- [Replace OpenCode with Pi RPC](https://github.com/jozala/omnigrex/issues/33)
-- [Step 16 documentation and rehearsal evidence](../plans/2026-10-11-pi-operator-documentation-and-cutover.md)
+- [Pi runtime Work Item](https://github.com/jozala/omnigrex/issues/33)

@@ -1,10 +1,13 @@
 # Diagnosing ACP failures
 
-ACP connects the orchestrator to the Runtime Process. MCP connects the agent to
-Omnigrex capabilities. MCP tool failure logs do not cover ACP requests.
+These are archived diagnostics for the historical transport; current operational procedures are in the [operator guide](../../operator-guide.md).
 
-ACP operational logs use the orchestrator's logger. In deployments that collect
-it under `service_name="omnigrex"`, search for:
+ACP connects the orchestrator to the Runtime Process.
+MCP connects the agent to Omnigrex capabilities.
+MCP tool failure logs do not cover ACP requests.
+
+ACP operational logs use the orchestrator's logger.
+In deployments that collect it under `service_name="omnigrex"`, search for:
 
 ```logql
 {service_name="omnigrex"} | json | msg="ACP request failed"
@@ -74,4 +77,4 @@ These logs cannot diagnose an internal Runtime Process connection that never
 crosses the orchestrator's ACP transport. If runtime stderr reports an error
 without a corresponding ACP entry, inspect runtime-side diagnostics too.
 
-For deployment and recovery procedures, see the [operator guide](../operator-guide.md).
+For deployment and recovery procedures, see the [operator guide](../../operator-guide.md).

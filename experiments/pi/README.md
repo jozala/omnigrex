@@ -130,7 +130,7 @@ The Microsandbox wrapper is limited to two CPUs, 3 GiB memory without additional
 Run the two backend suites sequentially on a shared qualification host.
 
 The regular `mise run check` remains required.
-The experiment is opt-in and does not change the deployed OpenCode runtime or the regular Docker integration suite.
+The experiment is opt-in and uses disposable resources independently of the deployed installation and regular Docker integration suite.
 
 ## Mid-prompt workspace capture
 

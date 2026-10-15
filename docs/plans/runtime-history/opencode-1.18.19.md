@@ -1,5 +1,7 @@
 # OpenCode 1.18.19 Compatibility Result
 
+Historical qualification evidence; commands and resource contracts below apply to the recorded implementation.
+
 ## Candidate
 
 This bootstrap result covers OpenCode `1.18.19` on `linux/arm64` with ACP SDK `0.21.0` and protocol version `1`.
@@ -18,7 +20,7 @@ Every Runtime Process uses `/workspace` as its working directory.
 The entire `/home/opencode/.local/share/opencode` directory is persistent per Agent Assignment because it contains `opencode.db` and its possible `-wal` and `-shm` sidecars.
 The workspace, OpenCode state, and assignment-local mise tools use separate persistent Docker volume subpaths.
 The root filesystem is read-only, and all writable HOME, XDG, mise, and temporary paths are explicitly mounted.
-The full writable-path contract is documented in [`agent/opencode/README.md`](../../agent/opencode/README.md).
+The full writable-path contract is documented in the [historical agent image README](https://github.com/jozala/omnigrex/blob/558bee231032528e208be8531cd0203bdc553362/agent/opencode/README.md).
 
 ## Automated Results
 

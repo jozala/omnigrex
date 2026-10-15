@@ -11,4 +11,4 @@ This boundary keeps workflow authority deterministic while letting Agent Profile
 
 Tool calls execute during an Agent Turn and may occur multiple times; mutation calls are scoped, authorized, serialized, and idempotently recorded.
 Partial external effects cannot be rolled back when a later operation fails, so retries must reconcile current GitHub state before continuing.
-The same gateway can later add memory and controlled agent-to-agent tools without changing the ACP runtime interface.
+The same gateway can later add memory and controlled agent-to-agent tools without changing the agent adapter contract.

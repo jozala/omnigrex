@@ -33,7 +33,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Pi failure recovery and boundary independence](./docs/plans/2026-10-10-pi-failure-recovery.md)
 - [Pi upgrades and state recovery](./docs/plans/2026-10-10-pi-upgrades-and-state-recovery.md)
 - [Pi operational integration and backend CI](./docs/plans/2026-10-11-pi-operational-integration.md)
-- [Pi operator documentation and cutover rehearsal](./docs/plans/2026-10-11-pi-operator-documentation-and-cutover.md)
+- [Pi deployment documentation evidence](./docs/plans/2026-10-11-pi-operator-documentation-and-cutover.md)
 - [Pi-only source and final backend qualification](./docs/plans/2026-10-13-pi-only-final-qualification.md)
 
 The implementation is written in Go and deployable with Docker Compose.
@@ -45,9 +45,8 @@ Follow the authoritative procedure in the [operator guide](./docs/operator-guide
 The [Pi deployment bundles](./docs/operator-guide.md#pi-operational-deployment) support Docker and Linux/amd64 Microsandbox with KVM using image-only deployment files.
 Docker supports trusted-repository execution; Microsandbox additionally supports hardware isolation and guest Docker, Compose, and Testcontainers.
 Select one backend per installation, without fallback or cross-backend state migration.
-See the [operator guide](./docs/operator-guide.md#one-time-opencode-to-pi-cutover) for the explicit OpenCode reset, Pi Profile and credential changes, coordinated recovery, and rollback limits.
 The [published Pi release evidence](./docs/plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) records successful publication and exact-digest smoke on both backends for commit `3125265f30f5cbc97096babde01cbd8dae7388e5`.
-The [live Pi/Microsandbox exercise](./docs/dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) records operator cutover, Compose-backed repository tests, and a Developer-to-Reviewer Workflow with a subsequent human-requested correction cycle.
+The [live Pi/Microsandbox exercise](./docs/dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) records installation validation, Compose-backed repository tests, and a Developer-to-Reviewer Workflow with a subsequent human-requested correction cycle.
 
 ## Development
 
@@ -124,18 +123,6 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
 
 Image-only deployment smoke uses `mise run test-pi-deployment` or `mise run test-pi-microsandbox-deployment` on the Docker daemon's host, with isolated fixture secrets and resources.
 See the [operator guide](./docs/operator-guide.md#diagnostics-and-backend-gates) for remote-host and published-image qualification.
-
-Rehearse the historical OpenCode reset and Pi coordinated recovery on the daemon host with an externally selected old-release Compose bundle and both exact published source images:
-
-```sh
-OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE=/private/old-release/compose.yaml \
-OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE=REGISTRY/ORCHESTRATOR@sha256:SOURCE_DIGEST \
-OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE=REGISTRY/AGENT@sha256:SOURCE_DIGEST \
-mise run test-pi-cutover
-# Select test-pi-microsandbox-cutover with the same source inputs and the host KVM group for Microsandbox.
-```
-
-See the [rehearsal procedure and evidence boundaries](./docs/operator-guide.md#isolated-cutover-rehearsal) before running these fixture-only gates.
 
 The live GitHub gate checks the Developer App's repository-ID read and uses a pre-existing Developer App-authored Pull Request to submit both Reviewer App outcomes.
 Set the `OMNIGREX_LIVE_GITHUB_*` variables listed by the skipped test, then run:

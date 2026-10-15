@@ -1,5 +1,7 @@
 # OpenCode 1.18.29 Compatibility Result
 
+Historical qualification evidence; commands and resource contracts below apply to the recorded implementation.
+
 ## Candidate
 
 This result covers OpenCode `1.18.29` on `linux/arm64` and `linux/amd64` with ACP SDK `0.21.0` and protocol version `1`.

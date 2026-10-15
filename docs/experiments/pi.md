@@ -28,15 +28,15 @@ The old `@mariozechner/pi-coding-agent` package remains at 0.73.1; its older doc
 | Resource exclusion | Poisoned project configuration and automatic context do not affect model input; only the explicitly configured skill is listed |
 | Tool selection | The provider sees only `read` and the explicitly registered fixture MCP tool |
 | Credentials | Raw retained files are scanned for the injected credential and MCP token; neither is present in the exercised paths |
-| Live providers | API-key requests completed using OpenCode Go `muse-spark-1.3-contributor` and OpenAI `o4-mini` on both backends |
+| Live providers | API-key requests completed using `opencode-go/muse-spark-1.3-contributor` and `openai/o4-mini` on both backends |
 
 The controlled provider and MCP service are real HTTP services outside the agent's container or microVM.
 They do not replace the future acceptance test against Omnigrex's actual fenced MCP gateway.
 The experiment supplies no GitHub credentials and makes no GitHub mutations.
 
 Both primary live models passed on Docker and Microsandbox.
-One final Docker rerun received an upstream `503 service_overloaded` from OpenCode Go; a single rerun of that check passed without changing the model.
-The approved alternatives are OpenAI `gpt-6-luna` and OpenCode Go `deepseek-v4-flash`, selectable explicitly through the documented environment overrides.
+One final Docker rerun received an upstream `503 service_overloaded` from `opencode-go`; a single rerun of that check passed without changing the model.
+The approved alternatives are `openai/gpt-6-luna` and `opencode-go/deepseek-v4-flash`, selectable explicitly through the documented environment overrides.
 They were not needed for this milestone and have not been qualified by these runs.
 
 ## Verification commands

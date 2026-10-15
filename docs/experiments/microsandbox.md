@@ -21,7 +21,7 @@ No host configuration or KVM module policy was changed.
 | Guest resources | The nested engine reported two CPUs and approximately 3.94 GiB available memory for the configured 4 GiB guest |
 | Compose | Compose 5.5.0 started a healthy HTTP service and a separate client reached it by service name |
 | Testcontainers | Testcontainers-Go 0.44.0 started Ryuk and an HTTP fixture; the published-port request returned the expected body |
-| Existing Omnigrex integration | The guest built OpenCode 1.18.29 and passed `TestReadinessProbeExercisesRealDockerResources` with the race detector |
+| Omnigrex integration | The guest passed `TestReadinessProbeExercisesRealDockerResources` with the race detector |
 | Resource cleanup | After the run, the host had no wrapper containers carrying the experiment label |
 
 The first complete successful run took approximately four minutes.

@@ -11,7 +11,7 @@ The source-fixture rehearsal evidence in this document remains valid for its rec
 ## Prerequisite and delivery boundary
 
 This delivers the documentation and source-fixture rehearsal work for Step 16 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following the [Step 15 operational integration](2026-10-11-pi-operational-integration.md).
-The [operator guide](../operator-guide.md#one-time-opencode-to-pi-cutover) is authoritative for operational procedures.
+The [operator guide](../operator-guide.md) is authoritative for current operational procedures; the historical reset and rehearsal procedures are in the [OpenCode-to-Pi migration guide](../migrations/opencode-to-pi.md).
 Existing decisions [0005](../decisions/0005-separate-execution-backends-from-coordination.md), [0006](../decisions/0006-use-pi-through-an-agent-specific-adapter.md), [0007](../decisions/0007-supply-provider-api-keys-through-disposable-files.md), [0009](../decisions/0009-pin-participant-images-and-use-working-revision-tools.md), [0011](../decisions/0011-bind-retained-state-and-validate-offline-session-archives.md), [0017](../decisions/0017-bind-pi-qualification-to-backend-contracts.md), and [0018](../decisions/0018-gate-pi-publication-on-both-backend-deployments.md) supply the policy; this step adds no new runtime or migration policy.
 
 Source-host qualification is not published-release evidence.
