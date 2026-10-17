@@ -33,6 +33,10 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0023: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0023-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
 | [0024: Establish a clean supported release baseline](0024-establish-a-clean-supported-release-baseline.md) | Accepted | 2026-10-16 |
 | [0025: Require current Docker management ownership](0025-require-current-docker-management-ownership.md) | Accepted | 2026-10-17 |
+| [0026: Use an image-local Go module source for the development environment](0026-use-an-image-local-go-module-source.md) | Accepted | 2026-10-16 |
+| [0027: Use native guest scratch for development Go tests](0027-use-native-scratch-for-development-go-tests.md) | Accepted | 2026-10-16 |
+| [0028: Keep an empty domain parent for guest workloads and nested containers](0028-keep-a-domain-parent-for-nested-containers.md) | Accepted | 2026-10-16 |
+| [0029: Preserve historical PID budgets and size new Pi Participants for development](0029-preserve-historical-pid-budgets-and-size-new-participants.md) | Accepted | 2026-10-16 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

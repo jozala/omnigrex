@@ -76,6 +76,13 @@ jobs:
       - name: Compile live GitHub App gate
         run: go test -tags=live ./internal/github -run '^$'
 
+      - name: Build the development environment and qualify its module source
+        run: |
+          docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
+            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
+          sh scripts/test-development-image-cache.sh
+          sh scripts/test-development-image-unit.sh
+
   microsandbox:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -108,6 +115,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      development_image: ${{ steps.images.outputs.development_image }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,7 +124,8 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Publish pinned Pi golden and both orchestrator images
+      - name: Publish pinned Pi golden, orchestrators, and development environment
+        id: images
         env:
           OMNIGREX_RELEASE_COMMIT: "${{ github.sha }}"
         run: sh scripts/publish-pi-images.sh
@@ -169,3 +179,43 @@ jobs:
           OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
           OMNIGREX_PI_DEPLOY_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
           OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh
+
+  development-smoke-microsandbox:
+    needs: [publish, deploy-smoke, deploy-smoke-microsandbox]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    permissions:
+      contents: read
+      packages: read
+    env:
+      OMNIGREX_DEVELOPMENT_IMAGE: ${{ needs.publish.outputs.development_image }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require KVM
+        run: |
+          test "$(uname -m)" = x86_64
+          test -c /dev/kvm
+          sudo chgrp "$(id -g)" /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Qualify the exact published module source
+        run: |
+          docker pull "$OMNIGREX_DEVELOPMENT_IMAGE"
+          sh scripts/test-development-image-cache.sh
+      - name: Qualify the exact published environment on Microsandbox
+        run: sh scripts/test-development-image-microsandbox.sh
+      - name: Prepare qualified repository environment configuration
+        run: |
+          sh scripts/write-development-environment.sh "$OMNIGREX_DEVELOPMENT_IMAGE" > development-environment.yaml
+          printf '## Qualified development environment\n\nImage: `%s`\n\nPromote the `development-environment` artifact to `.omnigrex/environment.yaml` after provisioning.\n' "$OMNIGREX_DEVELOPMENT_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload qualified repository environment configuration
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: development-environment
+          path: development-environment.yaml
+          if-no-files-found: error

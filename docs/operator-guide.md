@@ -59,6 +59,10 @@ Backend selection does not change Workflow, Role, MCP, or trusted publication po
 
 The Linux/amd64 KVM implementation pins Microsandbox and Go SDK 0.7.6.
 Its implementation and qualification boundaries are recorded in the [backend evidence](./plans/2026-10-09-microsandbox-backend.md).
+The native control-plane image also packages the repository's small, source-pinned 0.7.6 guest-agent patch through `MSB_AGENTD_PATH`.
+It places exec processes in `/microsandbox-workload/agent` while keeping the parent empty for Docker memory-controller delegation, the aggregate PID budget, and workload freezing.
+The SDK, CLI, firmware, and Session format retain their existing pins; see [decision 0028](./decisions/0028-keep-a-domain-parent-for-nested-containers.md).
+Source builds compile this static guest agent with a pinned Rust builder and locked dependencies; image-only deployments need no additional host toolchain.
 The [Pi operational deployment](#pi-operational-deployment) section describes the backend-selected image-only bundles and KVM CI gates.
 
 Build the native orchestrator from a source checkout on a Linux/amd64 builder:
@@ -435,13 +439,14 @@ OMNIGREX_PI_UPGRADE_SOURCE_IMAGE='REGISTRY/PI@sha256:SOURCE_DIGEST' \
 OMNIGREX_PI_UPGRADE_TARGET_IMAGE='REGISTRY/PI@sha256:CANDIDATE_DIGEST' \
 OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.3 \
 OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.0.4 \
+OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE='/private/absolute/source-runtime-contract.json' \
 OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE='/private/absolute/pi-compatibility.json' \
 mise run test-pi-upgrade
 ```
 
 Use the actual package versions and select `test-pi-microsandbox-upgrade` with its KVM prerequisites for native qualification.
 The candidate must satisfy the deployment's owned Pi golden-resource contract; a different resource/Node contract needs an explicit implementation and qualification change.
-For a historical source whose bundle differs from the included Pi 1.0.3 fixture, set `OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE` to its trusted canonical Runtime Profile contract from the source release or recovery set.
+For historical release qualification within the supported `pi-rpc/v2` baseline, set `OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE` to the trusted canonical Runtime Profile contract from the source release or recovery set whenever any immutable field differs from today's fixture defaults, including the earlier 128-PID budget even when the image and golden-resource bundle match.
 That definition must bind the supplied source image/platform and include its approved golden-resource inventory.
 Source, candidate, and restored-source launches undergo production resource validation against their respective immutable inventories before prompting.
 The test injects only its controlled-provider fixture over the execution request, so the artifact identifies the actual source and candidate images rather than fixture-overlay images.
@@ -1045,6 +1050,72 @@ Approved control-plane directory bindings such as `GOCACHE` and `GOPATH` take pr
 The existing trusted-repository credential model still applies to repository scripts and development images.
 See the [implementation and qualification evidence](./plans/2026-10-08-repository-environments.md).
 
+#### Omnigrex Development Environment
+
+For agents developing Omnigrex itself, `agent/environments/omnigrex/Dockerfile` extends the Pi golden image with checksum-locked Docker Engine 29.8.1, Compose 5.6.0, Buildx 0.38.0, and the Debian Bookworm/amd64 iptables and jq dependency closures.
+The golden image already supplies GCC and Make.
+The derived image preserves its Pi resources, entrypoint, workspace, and UID/GID 10001, and declares `org.opencontainers.image.source=https://github.com/jozala/omnigrex` in the Dockerfile.
+It requires a Microsandbox deployment with Linux/amd64 KVM and the `hardware-isolation`, `nested-containers`, and `tool-installation` capabilities.
+Use the matching release's native control-plane image with the patched guest agent; updating only the repository image does not repair memory-controller delegation in older control-plane images.
+New Pi Participants use a 512-PID aggregate workload ceiling, while retained canonical 128-PID contracts keep their exact budgets and identities.
+Older controllers do not accept newly stored 512-PID contracts; preserve a compatible controller for rollback and recovery, as described in [decision 0029](./decisions/0029-preserve-historical-pid-budgets-and-size-new-participants.md).
+
+Build and exercise the local module source from a source checkout:
+
+```sh
+mise run development-image
+mise run test-development-image-cache
+mise run test-development-image-unit
+```
+
+The local mise task first builds `omnigrex/development-golden:dev` from the same checkout on Linux/amd64, so its bootstrap and neutral storage paths match the supported contract even before that checkout has a published golden image.
+Release CI always supplies the same release's exact published golden digest instead of the local development-only tag.
+For an externally qualified base, build with `--platform linux/amd64 --target development --file agent/environments/omnigrex/Dockerfile --build-arg OMNIGREX_GOLDEN_IMAGE=<exact-golden-reference>`.
+The base must provide the supported `pi-rpc/v2` layout, including `/home/omnigrex/.local/share/mise` and `/home/omnigrex/.local/share/omnigrex-tool-data`; pre-baseline golden images are unsupported.
+Only the `development` target is published; `cache-qualification` and `repository-qualification` add disposable test resources that are excluded from the production image.
+The source-built image must pass its repository unit suite with its actual system tools before release publication, including the jq-based deployment validation fixtures.
+
+The image stores module download archives and metadata under `/opt/omnigrex/go-proxy`, outside workspace, state, and tool-data attachments.
+It includes the project dependency graph and dependencies downloaded while installing the Go-based tool pinned in `mise.toml`.
+`scripts/development-environment.sh`, sourced through working-revision mise configuration, prepends the file proxy only when that directory exists and retains an existing upstream proxy or Go's standard public-proxy/direct fallback.
+The script is idempotent and leaves ordinary developer machines unchanged when the directory is absent.
+Go populates the Participant's writable module cache on demand; no bootstrap cache-copy mechanism is required.
+Keep `GOPATH` and `GOCACHE` allowed as described under [Agent Profiles](#agent-profiles), and retain the repository's existing `.omnigrex/turn-configuration.yaml` cache declarations.
+New dependency versions fall back to upstream sources and are cached for later Turns; the working revision's module files remain authoritative.
+Normal checksum validation remains enabled, so missing checksum records can still cause network access even for locally stored archives.
+The Go distribution, startup installation data, compiled artifacts, and modules downloaded inside separate Docker builds are not made persistent by this image-local source.
+In this image, the ordinary mise unit and Docker-backed integration test tasks use `scripts/go-test.sh` to select native guest `/var/tmp` for test scratch and compiler temporary files.
+The shared tool-data filesystem can virtualize permission changes and cannot faithfully exercise restrictive-permission tests, while the Runtime Profile's `/tmp` is only 64 MiB.
+The override is local to the Go test command; persistent module and build caches and the parent environment's allocated paths are preserved.
+Go creates and cleans its normal private temporary directories there, and the disposable root disk removes any abnormal-termination leftovers when the Execution Environment is removed.
+This tests native scratch semantics, not permission fidelity of retained shared mounts; see [decision 0027](./decisions/0027-use-native-scratch-for-development-go-tests.md).
+
+Release CI publishes `ghcr.io/jozala/omnigrex/development:sha-<commit>` after the existing source qualification gates.
+The publication summary records the exact development reference and its golden base.
+The dedicated `development-smoke-microsandbox` job subsequently exercises that exact digest on Linux/KVM, including real checkout checks and Docker-backed integration tests across two fresh environments with the same Participant caches and Pi Session.
+Its guest Compose check starts a healthy service with a named volume, verifies service-to-service HTTP connectivity, and confirms removal of project containers, networks, and volumes.
+Before the full database suite, a focused integration check exercises concurrent orphan/sentinel containers and exact persistence of both historical and current PID contracts.
+It also verifies whole-environment termination with a nested background workload and the real Pi diagnostic MCP initialization.
+Only a successful job emits the `development-environment` artifact, containing a digest-pinned document suitable for `.omnigrex/environment.yaml`.
+
+For the first rollout, publish and qualify the image before promoting that artifact into the repository's default branch.
+The checked-in `.omnigrex/environment.yaml.example` shows the schema but contains no usable digest and is never loaded as configuration.
+Provision the qualified image in the selected backend and run repository `doctor` using the procedures above before accepting work.
+Ensure the exact registry artifact remains readable by the selected native backend, including when it materializes a flat root disk for nested containers.
+Subsequent promotions update the digest explicitly; retained Participants keep their original images and cache ownership.
+The environment document does not configure VM memory or disk capacity; size those using the deployment settings for the repository's build and test workloads.
+
+To repeat exact-digest qualification on a qualified Linux/amd64 Docker host with KVM:
+
+```sh
+OMNIGREX_DEVELOPMENT_IMAGE=ghcr.io/jozala/omnigrex/development@sha256:<qualified-digest> \
+OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> \
+mise run test-development-image-microsandbox
+```
+
+The disposable fixture allocates 4 GiB to the VM, a 40 GiB root disk, and 6 GiB to its wrapper, and uses only fixture credentials for Pi diagnostic initialization.
+It does not provide nested KVM; the repository's own native Microsandbox qualification remains a dedicated CI-host gate.
+
 ### Agent Turn Memory
 
 Set `OMNIGREX_AGENT_TURN_MEMORY_MIB` in `.env` to a positive integer number of MiB per Agent Turn Execution Environment.
@@ -1485,8 +1556,12 @@ Create a coordinated backup before every application, PostgreSQL, or Runtime Pro
 
 ### Orchestrator-Only Upgrade
 
-An orchestrator-only upgrade keeps the same configured agent digest/platform, protected historical images, and compatibility artifact.
-Record the current commit and image references, download the target commit's common Pi bundle, selected backend overlay, and environment example, keep `OMNIGREX_PI_IMAGE`, its platform, namespaces, and compatibility file unchanged, and update only the selected control-plane digest before validating Compose and deploying.
+An orchestrator-only upgrade keeps the same configured agent digest/platform, protected historical images, and namespaces, but can change the exact default contract selected for new Participants.
+Record the current commit and image references, download the target commit's common Pi bundle, selected backend overlay, and environment example, and update the selected control-plane digest.
+Preserve historical compatibility artifacts as recovery evidence, but keep `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` configured only when its results target the exact contract constructed by the new controller.
+For the 128-to-512 PID-default upgrade within `pi-rpc/v2`, an artifact targeting the earlier 128-PID contract is stale even if the configured image/platform are unchanged: clear this optional import setting or replace it with a separately qualified artifact targeting the new exact contract before validating and deploying.
+Clearing the import setting does not delete already imported ledger results or historical evidence, rebind retained Participants, or authorize a Session migration.
+For replacement qualification use the historical canonical source definition as described under [Pi upgrade qualification](#pi-upgrade-and-state-recovery-qualification); never edit an old artifact's target hash to make it match.
 
 ```sh
 docker compose config --quiet

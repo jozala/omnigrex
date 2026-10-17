@@ -1,0 +1,31 @@
+{
+  "name": "pi-rpc",
+  "version": "v2",
+  "image": "registry.example/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "platform": {"os": "linux", "arch": "amd64"},
+  "user": {"uid": 10001, "gid": 10001},
+  "command": ["/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"],
+  "environment": [
+    {"name": "HOME", "value": "/tmp"},
+    {"name": "PATH", "value": "/usr/local/bin:/usr/bin:/bin"},
+    {"name": "PI_CODING_AGENT_DIR", "value": "/run/pi-agent"},
+    {"name": "PI_OFFLINE", "value": "1"},
+    {"name": "PI_SKIP_VERSION_CHECK", "value": "1"},
+    {"name": "PI_TELEMETRY", "value": "0"},
+    {"name": "TMPDIR", "value": "/tmp"}
+  ],
+  "mounts": [
+    {"name": "mise", "path": "/home/omnigrex/.local/share/mise"},
+    {"name": "state", "path": "/state"},
+    {"name": "tool-data", "path": "/home/omnigrex/.local/share/omnigrex-tool-data"},
+    {"name": "workspace", "path": "/workspace"}
+  ],
+  "capabilities": ["authenticated-mcp", "checked-configuration", "exact-session", "history-replay"],
+  "tmpfs": [
+    {"path": "/run/pi-agent", "size_bytes": 16777216, "executable": false},
+    {"path": "/tmp", "size_bytes": 67108864, "executable": true}
+  ],
+  "workspace": "/workspace",
+  "pids_limit": 128,
+  "repository_environment": {"version": 1, "requirements": null}
+}

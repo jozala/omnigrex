@@ -75,7 +75,7 @@ func TestNewPiV2ReturnsQualifiedContract(t *testing.T) {
 			{Path: "/tmp", SizeBytes: 64 << 20, Executable: true},
 		},
 		Workspace:              "/workspace",
-		PIDsLimit:              128,
+		PIDsLimit:              512,
 		RepositoryEnvironment:  &profile.RepositoryEnvironment{Version: 1},
 		GoldenResourceContract: piresources.CurrentContract("arm64"),
 	}

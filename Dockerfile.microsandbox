@@ -1,5 +1,25 @@
 FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS toolchain
 
+# SDK 0.7.6 supports an external agentd payload. Keep execs in a leaf while
+# retaining the original domain root as the aggregate freezer and PID budget.
+FROM toolchain AS agentd-source
+WORKDIR /src
+RUN curl --fail --silent --show-error --location \
+      https://codeload.github.com/superradcompany/microsandbox/tar.gz/09df3d4b9d832adaede1fb9a198cfc660bfab8cd -o /tmp/microsandbox.tar.gz && \
+    echo '3d076d83211e9755b17c0a1b93fadb3f201fcc4073e311ca139636ebebf827bb  /tmp/microsandbox.tar.gz' | sha256sum -c - && \
+    tar -xzf /tmp/microsandbox.tar.gz --strip-components=1 -C /src && rm /tmp/microsandbox.tar.gz
+COPY agent/microsandbox/agentd-domain-cgroups.patch /tmp/agentd.patch
+RUN git apply --check /tmp/agentd.patch && git apply /tmp/agentd.patch
+
+FROM rust:1.99.0-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627 AS agentd-build
+ARG TARGETARCH
+WORKDIR /src
+COPY --from=agentd-source /src/ ./
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+RUN test "$TARGETARCH" = amd64 && \
+    cargo test --locked --jobs 2 --target x86_64-unknown-linux-musl -p microsandbox-agentd --lib workload::tests && \
+    cargo build --locked --jobs 2 --target x86_64-unknown-linux-musl --release -p microsandbox-agentd
+
 # Download packages only; Debian build-stage executables never enter Ubuntu.
 FROM toolchain AS git-download
 ARG TARGETARCH
@@ -45,8 +65,11 @@ RUN --network=none --mount=type=bind,from=git-download,source=/debs,target=/tmp/
 
 FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
+COPY --from=agentd-build /src/target/x86_64-unknown-linux-musl/release/agentd /usr/local/lib/omnigrex/agentd
+COPY --from=agentd-source /src/LICENSE /usr/share/licenses/omnigrex/microsandbox-agentd/LICENSE
 RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise && chown -R 10001:10001 /var/lib/omnigrex
 ENV OMNIGREX_EXECUTION_BACKEND=microsandbox
+ENV MSB_AGENTD_PATH=/usr/local/lib/omnigrex/agentd
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/omnigrex"]
 
@@ -56,6 +79,12 @@ COPY internal/runtime/microsandbox/testdata/nested /fixtures
 ENV HOME=/tmp OMNIGREX_MICROSANDBOX_INTEGRATION=1
 ENTRYPOINT ["/usr/local/bin/microsandbox.test"]
 CMD ["-test.v", "-test.timeout", "30m"]
+
+FROM qualification AS development-qualification
+COPY . /fixtures/development
+# The normal context excludes docs; only this public guide is needed by tests.
+COPY --from=development-docs /operator-guide.md /fixtures/development/docs/operator-guide.md
+ENTRYPOINT ["/usr/local/bin/microsandbox.test"]
 
 FROM runtime AS pi-qualification
 COPY --from=pi-test-build /out/pi.test /usr/local/bin/pi.test

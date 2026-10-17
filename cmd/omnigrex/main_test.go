@@ -328,6 +328,52 @@ func TestImportPiCompatibilityResultsRequiresConfiguredTargetAndBackend(t *testi
 	}
 }
 
+func TestPIDBudgetUpgradeRequiresClearingOrReplacingStaleCompatibilityFile(t *testing.T) {
+	current := mainTestRuntimeProfile(t, "b")
+	contract := current.Contract()
+	contract.PIDsLimit = 128
+	legacy, err := runtimeprofile.New(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runtimeprofile.CompatibilityResult{Source: mainTestRuntimeProfile(t, "a").Binding(), Target: legacy.Binding(),
+		Platform: contract.Platform, StateContractVersion: runtimeprofile.PiStateContractVersion, WorkspacePath: "/workspace",
+		QualificationSuite: runtimeprofile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: "2026-10-10T12:00:00Z",
+		Outcome: "success", BackendFamily: "docker", BackendContractVersion: 1}
+	encoded, _ := json.Marshal(runtimeprofile.CompatibilityResultsFile{SchemaVersion: runtimeprofile.PiCompatibilityResultsSchemaVersion, Results: []runtimeprofile.CompatibilityResult{result}})
+	path := filepath.Join(t.TempDir(), "historical-compatibility.json")
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	importer := &compatibilityImporterFake{}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, "docker", legacy); err != nil {
+		t.Fatalf("historical artifact was invalid before the upgrade: %v", err)
+	}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, path, "docker", current); err == nil {
+		t.Fatal("same-image PID upgrade reused evidence for another exact target")
+	}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, "", "docker", current); err != nil {
+		t.Fatalf("explicitly clearing optional import configuration blocked startup: %v", err)
+	}
+	if importer.calls != 1 {
+		t.Fatal("stale or cleared artifact was imported for the new budget")
+	}
+	if preserved, err := os.ReadFile(path); err != nil || string(preserved) != string(encoded) {
+		t.Fatal("historical evidence was rewritten during controller upgrade")
+	}
+	// A separately supplied result must identify the newly qualified exact
+	// source/target contracts, even when the image itself is unchanged.
+	result.Source, result.Target = legacy.Binding(), current.Binding()
+	replacement, _ := json.Marshal(runtimeprofile.CompatibilityResultsFile{SchemaVersion: runtimeprofile.PiCompatibilityResultsSchemaVersion, Results: []runtimeprofile.CompatibilityResult{result}})
+	replacementPath := filepath.Join(t.TempDir(), "current-compatibility.json")
+	if err := os.WriteFile(replacementPath, replacement, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := importRuntimeProfileCompatibilityResults(t.Context(), importer, replacementPath, "docker", current); err != nil || importer.calls != 2 {
+		t.Fatalf("qualified replacement artifact import = %v, calls %d", err, importer.calls)
+	}
+}
+
 func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.T) {
 	identity := dockerruntime.RuntimeProcessIdentity{
 		AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001",

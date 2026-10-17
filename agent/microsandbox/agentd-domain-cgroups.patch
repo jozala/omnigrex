@@ -1,0 +1,48 @@
+diff --git a/crates/agentd/lib/workload.rs b/crates/agentd/lib/workload.rs
+--- a/crates/agentd/lib/workload.rs
++++ b/crates/agentd/lib/workload.rs
+@@ -234,6 +234,10 @@ impl CgroupFreezer {
+     fn open(root: &Path) -> io::Result<Self> {
+         std::fs::create_dir_all(root)?;
++        // Keep the freezer/budget domain empty so sibling container cgroups
++        // can enable domain controllers such as memory without threading it.
++        let agent = root.join("agent");
++        std::fs::create_dir_all(&agent)?;
+         let freeze = root.join("cgroup.freeze");
+         let events = root.join("cgroup.events");
+         if !freeze.is_file() || !events.is_file() {
+             return Err(io::Error::new(
+@@ -247,7 +251,7 @@ impl CgroupFreezer {
+         let cgroup_procs = OpenOptions::new()
+             .write(true)
+-            .open(root.join("cgroup.procs"))?;
++            .open(agent.join("cgroup.procs"))?;
+         Ok(Self {
+             root: root.to_path_buf(),
+             cgroup_procs,
+             cgroup_events: File::open(events)?,
+@@ -451,3 +455,24 @@ mod tests {
++    #[test]
++    fn placement_uses_agent_leaf_and_freeze_uses_domain_root() {
++        let nonce = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
++        let root = std::env::temp_dir().join(format!(
++            "omnigrex-agentd-workload-{}-{nonce}", std::process::id()));
++        std::fs::create_dir_all(root.join("agent")).unwrap();
++        std::fs::write(root.join("cgroup.procs"), b"parent").unwrap();
++        std::fs::write(root.join("cgroup.freeze"), b"0").unwrap();
++        std::fs::write(root.join("cgroup.events"), b"frozen 0\n").unwrap();
++        std::fs::write(root.join("agent/cgroup.procs"), b"").unwrap();
++        let freezer = CgroupFreezer::open(&root).unwrap();
++        freezer.placement().unwrap().place_current().unwrap();
++        assert_eq!(std::fs::read(root.join("cgroup.procs")).unwrap(), b"parent");
++        assert_eq!(std::fs::read(root.join("agent/cgroup.procs")).unwrap(), b"0");
++        freezer.set_frozen(false).unwrap();
++        assert_eq!(std::fs::read(root.join("cgroup.freeze")).unwrap(), b"0");
++        assert!(!root.join("agent/cgroup.freeze").exists());
++        std::fs::remove_dir_all(&root).unwrap();
++    }
++
+     #[test]
+     fn completed_freezer_transition_does_not_wait() {
+         let start = Instant::now();

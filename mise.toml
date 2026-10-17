@@ -2,6 +2,9 @@
 go = "1.27.0"
 "go:golang.org/x/tools/cmd/deadcode" = "v0.50.0"
 
+[env]
+_.source = "scripts/development-environment.sh"
+
 [tasks.format]
 description = "Format Go source files"
 run = "gofmt -w ."
@@ -36,12 +39,12 @@ fi
 
 [tasks.test]
 description = "Run unit tests"
-run = "go test -race ./..."
+run = "sh scripts/go-test.sh -race ./..."
 
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
 depends = ["pi-image"]
-run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment"
+run = "sh scripts/go-test.sh -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment"
 
 [tasks.test-compose]
 description = "Run disposable Pi full-stack deployment, persistence, webhook, and readiness gates"
@@ -75,6 +78,27 @@ run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diag
 [tasks.pi-image]
 description = "Build the pinned Pi repository environment"
 run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
+
+[tasks.development-golden-image]
+description = "Build the current Linux/amd64 Pi golden image for local development-image qualification"
+run = "docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/development-golden:dev ."
+
+[tasks.development-image]
+description = "Build the Linux/amd64 development environment from this checkout's Pi golden image"
+depends = ["development-golden-image"]
+run = "docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --tag omnigrex/development:dev ."
+
+[tasks.test-development-image-cache]
+description = "Qualify image-local module downloads, fallback, and writable cache reuse without external network"
+run = "sh scripts/test-development-image-cache.sh"
+
+[tasks.test-development-image-unit]
+description = "Run repository unit tests with the development image's actual system tools"
+run = "sh scripts/test-development-image-unit.sh"
+
+[tasks.test-development-image-microsandbox]
+description = "Qualify an exact published development image on Linux/amd64 KVM"
+run = "sh scripts/test-development-image-microsandbox.sh"
 
 [tasks.test-pi-integration]
 description = "Qualify the Pi adapter with a controlled provider on Docker"

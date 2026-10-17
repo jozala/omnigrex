@@ -1,0 +1,12 @@
+# Debian Bookworm/amd64 iptables and jq dependency closures added to the golden image.
+2928d3ca6ca8a3dc3f423f6752822b1f3614a5ba609ff7806bcba4449ffe90e1 pool/main/i/iptables/iptables_1.8.9-2_amd64.deb
+f2c48b367f9ec13f9aa577e7ccf81b371ce5d5fe22dddf9d7aa99f1e0bb7cfc4 pool/main/i/iptables/libip4tc2_1.8.9-2_amd64.deb
+be88db3dfa2fe3345ea343207f7c75345602686121e579023d021c348b9b4f4d pool/main/i/iptables/libip6tc2_1.8.9-2_amd64.deb
+cb841d66950a43af4a398625313d2f3da9065299c9738538de6c2c3495857040 pool/main/i/iptables/libxtables12_1.8.9-2_amd64.deb
+4581f42e3373cb72f9ea4e88163b17873afca614a6c6f54637e95aa75983ea7c pool/main/libm/libmnl/libmnl0_1.0.4-3_amd64.deb
+ae5cbba417ea48f34c1f72c27e8146a81f20614c1296bca2cd7234c8215fddcc pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-2_amd64.deb
+65f1539238f60fcc85d115acd640474f45c77bfddcf402eb7d75965a783c2bc8 pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.0.9-3_amd64.deb
+9e619e1470a1915264e906020f3bfc046fd8458043b1342686d997b5078213af pool/main/libn/libnftnl/libnftnl11_1.2.4-2_amd64.deb
+f2303584378ac85f6d3a9ae8e46412196061681e81610d3b020abe4b5d389eb0 pool/main/j/jq/jq_1.6-2.1+deb12u2_amd64.deb
+f501b6349a3c2462af59e7a598ebd71e7889de46c9ddf852eb12ebeba7df21a2 pool/main/j/jq/libjq1_1.6-2.1+deb12u2_amd64.deb
+59ecfce6d88c7c4b09496ce182b3b8303e8e8477664e009b16ae83a09cd12be7 pool/main/libo/libonig/libonig5_6.9.8-1_amd64.deb
