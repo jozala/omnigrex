@@ -96,7 +96,7 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: reconciliation.WorkflowID, AgentAssignmentID: reconciliation.Turn.AgentAssignmentID, OperationID: mutation.ID,
+		WorkflowID: reconciliation.WorkflowID, AgentParticipantID: reconciliation.Turn.AgentParticipantID, OperationID: mutation.ID,
 	})
 	if err != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -140,7 +140,7 @@ func (reconciler *ProductionReconciler) reconcilePublication(ctx context.Context
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	observed, err := reconciler.publications.ReconcilePublication(ctx, workspace.PublicationReconciliation{
-		AssignmentID:  reconciliation.Turn.AgentAssignmentID,
+		AssignmentID:  reconciliation.Turn.AgentParticipantID,
 		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: mutation.ExpectedSHA, ExpectedOldHead: expectedOldHead,
 		ProposedRevision:   mutation.ProposedSHA,
@@ -205,7 +205,7 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 	matches := make([]githubapi.PullRequest, 0, 1)
 	conflict := false
 	for _, pullRequest := range pullRequests {
-		marked := hasExactOperationMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID)
+		marked := hasExactOperationMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentParticipantID, mutation.ID)
 		if !marked {
 			continue
 		}
@@ -269,7 +269,7 @@ func (reconciler *ProductionReconciler) reconcileComment(ctx context.Context, re
 	matches := make([]githubapi.IssueComment, 0, 1)
 	conflict := false
 	for _, comment := range comments {
-		if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
+		if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentParticipantID, mutation.ID) {
 			continue
 		}
 		if comment.Body != expectedBody {
@@ -317,7 +317,7 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 		visibleBody = githubapi.AppendSignature(request.Body, request.Signature)
 	}
 	expectedBody, err := githubapi.EnsureMarker(visibleBody, githubapi.Marker{
-		WorkflowID: reconciliation.WorkflowID, AgentAssignmentID: reconciliation.Turn.AgentAssignmentID, OperationID: mutation.ID,
+		WorkflowID: reconciliation.WorkflowID, AgentParticipantID: reconciliation.Turn.AgentParticipantID, OperationID: mutation.ID,
 	})
 	if err != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -333,7 +333,7 @@ func (reconciler *ProductionReconciler) reconcileReview(ctx context.Context, rec
 	matches := make([]githubapi.Review, 0, 1)
 	conflict := false
 	for _, review := range reviews {
-		if !hasExactOperationMarker(review.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
+		if !hasExactOperationMarker(review.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentParticipantID, mutation.ID) {
 			continue
 		}
 		if review.Body != expectedBody {
@@ -480,7 +480,7 @@ func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Conte
 		matches := make([]githubapi.PullRequest, 0, 1)
 		for _, pullRequest := range pullRequests {
 			if pullRequest.Head.Ref == branch &&
-				hasAssignmentMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID) &&
+				hasAssignmentMarker(pullRequest.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentParticipantID) &&
 				strings.Contains(pullRequest.Body, fmt.Sprintf("Closes #%d", reconciliation.Issue.Number)) {
 				matches = append(matches, pullRequest)
 			}
@@ -498,7 +498,7 @@ func (reconciler *ProductionReconciler) reconcileRequestReview(ctx context.Conte
 		expected := githubapi.JoinBodyParts(githubapi.AppendSignature(reviewHandoffBody(request.Summary, mutation.ExpectedSHA), request.Signature), marker)
 		matches := 0
 		for _, comment := range comments {
-			if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentAssignmentID, mutation.ID) {
+			if !hasExactOperationMarker(comment.Body, reconciliation.WorkflowID, reconciliation.Turn.AgentParticipantID, mutation.ID) {
 				continue
 			}
 			if _, err := encodeCommentResult(comment); err != nil || comment.Body != expected {
@@ -615,7 +615,7 @@ func (reconciler *ProductionReconciler) validReconciliationScope(reconciliation 
 	}
 	valid := reconciliation.WorkflowID != "" && granted &&
 		reconciliation.Repository.ID > 0 && validRepositoryPart(reconciliation.Repository.Owner) && validRepositoryPart(reconciliation.Repository.Name) &&
-		reconciliation.Issue.ID > 0 && reconciliation.Issue.Number > 0 && reconciliation.Turn.ID != "" && reconciliation.Turn.AgentAssignmentID != "" && reconciliation.Turn.ExecutionEpoch > 0 &&
+		reconciliation.Issue.ID > 0 && reconciliation.Issue.Number > 0 && reconciliation.Turn.ID != "" && reconciliation.Turn.AgentParticipantID != "" && reconciliation.Turn.ExecutionEpoch > 0 &&
 		validArtifactOperationID(mutation.ID) && mutation.AgentTurnID == reconciliation.Turn.ID && mutation.ExecutionEpoch == reconciliation.Turn.ExecutionEpoch && mutation.InvocationNumber > 0 &&
 		(mutation.State == store.MutationUnknown || mutation.State == store.MutationReconciling || mutation.State == store.MutationSucceeded) &&
 		mutation.OperationID != "" && len(mutation.Request) != 0
@@ -695,7 +695,7 @@ func validBranchResourceName(branch string) bool {
 }
 
 func hasExactOperationMarker(body, workflowID, assignmentID, operationID string) bool {
-	wanted := githubapi.Marker{WorkflowID: workflowID, AgentAssignmentID: assignmentID, OperationID: operationID}
+	wanted := githubapi.Marker{WorkflowID: workflowID, AgentParticipantID: assignmentID, OperationID: operationID}
 	count := 0
 	for _, marker := range githubapi.ParseMarkers(body) {
 		if marker == wanted {
@@ -708,7 +708,7 @@ func hasExactOperationMarker(body, workflowID, assignmentID, operationID string)
 func hasAssignmentMarker(body, workflowID, assignmentID string) bool {
 	count := 0
 	for _, marker := range githubapi.ParseMarkers(body) {
-		if marker.WorkflowID == workflowID && marker.AgentAssignmentID == assignmentID && validArtifactOperationID(marker.OperationID) {
+		if marker.WorkflowID == workflowID && marker.AgentParticipantID == assignmentID && validArtifactOperationID(marker.OperationID) {
 			count++
 		}
 	}

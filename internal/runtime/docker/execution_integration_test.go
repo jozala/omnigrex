@@ -51,7 +51,7 @@ func TestExecutionPiUsesNeutralFactoryAndTransport(t *testing.T) {
 	if len(fields) != 2 {
 		t.Fatal("fixture image identity is incomplete")
 	}
-	profile, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@"+fields[0], runtimeprofile.Platform{OS: "linux", Arch: fields[1]})
+	profile, err := runtimeprofile.NewPiV2("registry.example/omnigrex/pi@"+fields[0], runtimeprofile.Platform{OS: "linux", Arch: fields[1]})
 	if err != nil {
 		t.Fatal(err)
 	}

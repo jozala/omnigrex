@@ -21,8 +21,6 @@ type AgentTurnPreparationRuntimeBindings struct {
 	Stage       workflow.StageID
 	Role        workflow.Role
 	Participant *ParticipantRuntimeBinding
-	Developer   *AssignmentRuntimeBinding
-	Reviewer    *AssignmentRuntimeBinding
 }
 
 // ListProtectedRuntimeBindings returns distinct launchable immutable bindings for every generation
@@ -38,40 +36,28 @@ func (store *ReadOnlyStore) ListProtectedRuntimeBindings(ctx context.Context) ([
 
 func listProtectedRuntimeBindings(ctx context.Context, pool *pgxpool.Pool) ([]runtimeprofile.Binding, error) {
 	rows, err := pool.Query(ctx, `
-SELECT id::text, status, runtime_profile_name, runtime_profile_version,
+SELECT id::text, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest
-FROM agent_assignments
+FROM agent_participants
 WHERE state_deleted_at IS NULL
 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("query protected Assignments: %w", err)
 	}
-	type protectedAssignment struct {
-		binding runtimeprofile.Binding
-		legacy  bool
-	}
-	assignments := make(map[string]protectedAssignment)
+	assignments := make(map[string]runtimeprofile.Binding)
 	protected := make(map[runtimeprofile.Binding]struct{})
 	for rows.Next() {
 		var id string
-		var status AgentAssignmentStatus
 		var binding runtimeprofile.Binding
-		var contentSHA256 *string
-		if err := rows.Scan(&id, &status, &binding.Name, &binding.Version, &contentSHA256, &binding.Image); err != nil {
+		if err := rows.Scan(&id, &binding.Name, &binding.Version, &binding.ContentSHA256, &binding.Image); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan protected Assignment: %w", err)
 		}
-		if contentSHA256 == nil {
-			// Phase 6 deliberately left this marker when legacy profile content was unreconstructable.
-			assignments[id] = protectedAssignment{legacy: true}
-			continue
-		}
-		binding.ContentSHA256 = *contentSHA256
 		if binding.Validate() != nil {
 			rows.Close()
 			return nil, fmt.Errorf("%w: invalid Assignment binding", ErrProtectedRuntimeConfigurationConflict)
 		}
-		assignments[id] = protectedAssignment{binding: binding}
+		assignments[id] = binding
 		protected[binding] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
@@ -81,7 +67,7 @@ ORDER BY id`)
 	rows.Close()
 
 	rows, err = pool.Query(ctx, `
-SELECT session.agent_assignment_id::text, session.status,
+SELECT session.agent_participant_id::text, session.status,
        session.runtime_profile_name, session.runtime_profile_version,
        session.runtime_profile_content_sha256, session.runtime_image_digest
 FROM agent_sessions AS session
@@ -95,19 +81,14 @@ ORDER BY session.id`)
 		var assignmentID string
 		var status AgentSessionStatus
 		var binding runtimeprofile.Binding
-		var contentSHA256 *string
-		if err := rows.Scan(&assignmentID, &status, &binding.Name, &binding.Version, &contentSHA256, &binding.Image); err != nil {
+		if err := rows.Scan(&assignmentID, &status, &binding.Name, &binding.Version, &binding.ContentSHA256, &binding.Image); err != nil {
 			return nil, fmt.Errorf("scan protected Agent Session: %w", err)
 		}
 		assignment, ok := assignments[assignmentID]
-		if !ok || assignment.legacy != (contentSHA256 == nil) {
+		if !ok {
 			return nil, fmt.Errorf("%w: Assignment and Agent Session bindings differ", ErrProtectedRuntimeConfigurationConflict)
 		}
-		if assignment.legacy {
-			continue
-		}
-		binding.ContentSHA256 = *contentSHA256
-		if status == AgentSessionDeleted || binding.Validate() != nil || binding != assignment.binding {
+		if status == AgentSessionDeleted || binding.Validate() != nil || binding != assignment {
 			return nil, fmt.Errorf("%w: Assignment and Agent Session bindings differ", ErrProtectedRuntimeConfigurationConflict)
 		}
 		protected[binding] = struct{}{}
@@ -168,10 +149,10 @@ SELECT participant.agent_profile_name, participant.runtime_profile_name,
        participant.runtime_profile_version, participant.runtime_profile_content_sha256,
        participant.runtime_image_digest
 FROM stage_assignments AS stage_assignment
-JOIN agent_assignments AS participant ON participant.id = stage_assignment.agent_participant_id
+JOIN agent_participants AS participant ON participant.id = stage_assignment.agent_participant_id
 WHERE stage_assignment.workflow_id = $1
   AND stage_assignment.assignment_generation = (
-      SELECT MAX(generation) FROM agent_assignments
+      SELECT MAX(generation) FROM agent_participants
       WHERE workflow_id = $1 AND state_deleted_at IS NULL
   )
   AND stage_assignment.stage_id = $2`, lease.WorkflowID, payload.Stage).Scan(
@@ -184,11 +165,5 @@ WHERE stage_assignment.workflow_id = $1
 		return AgentTurnPreparationRuntimeBindings{}, fmt.Errorf("read Stage Participant Runtime binding: %w", err)
 	}
 	result.Participant = &binding
-	switch payload.Role {
-	case workflow.RoleDeveloper:
-		result.Developer = (*AssignmentRuntimeBinding)(&binding)
-	case workflow.RoleReviewer:
-		result.Reviewer = (*AssignmentRuntimeBinding)(&binding)
-	}
 	return result, nil
 }

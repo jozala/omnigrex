@@ -56,14 +56,14 @@ func TestCompatibilityResultsRejectMutableImagesAndMalformedContracts(t *testing
 }
 
 func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
-	target, err := profile.NewPiV1(
+	target, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := profile.NewPiV1(
+	source, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
@@ -75,7 +75,7 @@ func TestCompatibilityResultsValidateConfiguredTarget(t *testing.T) {
 	if err := file.ValidateTarget(target); err != nil {
 		t.Fatalf("ValidateTarget() error = %v", err)
 	}
-	other, err := profile.NewPiV1(
+	other, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("c", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
@@ -101,11 +101,11 @@ func TestDecodeCompatibilityResultsFileIsStrict(t *testing.T) {
 
 func TestPiCompatibilityResultsBindExactRuntimePlatformAndBackend(t *testing.T) {
 	platform := profile.Platform{OS: "linux", Arch: "amd64"}
-	source, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	source, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	target, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,11 +128,11 @@ func TestPiCompatibilityResultsBindExactRuntimePlatformAndBackend(t *testing.T) 
 		}
 	}
 	for _, mutate := range []func(*profile.CompatibilityResult){
-		func(r *profile.CompatibilityResult) { r.StateContractVersion = "opencode-acp-state/v1" },
-		func(r *profile.CompatibilityResult) { r.Source.Name = "opencode-acp" },
+		func(r *profile.CompatibilityResult) { r.StateContractVersion = "unsupported-state/v1" },
+		func(r *profile.CompatibilityResult) { r.Source.Name = "unsupported-runtime" },
 		func(r *profile.CompatibilityResult) { r.BackendFamily = "" },
 		func(r *profile.CompatibilityResult) { r.BackendContractVersion = 2 },
-		func(r *profile.CompatibilityResult) { r.QualificationSuite = "opencode-controlled-state-upgrade" },
+		func(r *profile.CompatibilityResult) { r.QualificationSuite = "unsupported-upgrade-suite" },
 	} {
 		bad := result
 		mutate(&bad)
@@ -155,14 +155,14 @@ func TestPiCompatibilityResultsBindExactRuntimePlatformAndBackend(t *testing.T) 
 
 func compatibilityResult(t *testing.T) profile.CompatibilityResult {
 	t.Helper()
-	source, err := profile.NewPiV1(
+	source, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV1(
+	target, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64),
 		profile.Platform{OS: "linux", Arch: "amd64"},
 	)

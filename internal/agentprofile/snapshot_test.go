@@ -12,7 +12,7 @@ import (
 
 func TestSnapshotRoundTripPreservesEscapedInstructions(t *testing.T) {
 	for _, instructions := range []string{strings.Repeat("<", 50000), strings.Repeat("<>&", 80000)} {
-		source := []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v1\nmodel: controlled/workflow\npermissions:\n  read: allow\n---\n" + instructions)
+		source := []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v2\nmodel: controlled/workflow\npermissions:\n  read: allow\n---\n" + instructions)
 		p, err := agentprofile.Parse(".omnigrex/team/developer.md", source, role.BuiltinPolicyCatalog())
 		if err != nil {
 			t.Fatal(err)
@@ -25,19 +25,19 @@ func TestSnapshotRoundTripPreservesEscapedInstructions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("valid source (%d bytes), snapshot (%d bytes) rejected: %v", len(source), len(snapshot), err)
 		}
-		if decoded.Runtime() != "pi-rpc/v1" || decoded.Instructions() != instructions || !bytes.Equal(decoded.CanonicalJSON(), snapshot) {
+		if decoded.Runtime() != "pi-rpc/v2" || decoded.Instructions() != instructions || !bytes.Equal(decoded.CanonicalJSON(), snapshot) {
 			t.Fatal("snapshot changed validated Profile values")
 		}
 	}
 }
 
 func TestSnapshotRetainsBoundsAndPresenceSensitivePiSchema(t *testing.T) {
-	source := []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v1\nmodel: controlled/workflow\npermissions:\n  read: allow\n---\nInstructions")
+	source := []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v2\nmodel: controlled/workflow\npermissions:\n  read: allow\n---\nInstructions")
 	p, err := agentprofile.Parse(".omnigrex/team/developer.md", source, role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, patch := range []map[string]any{{"instructions": strings.Repeat("x", agentprofile.MaxContentSize+1)}, {"runtime": "opencode-acp/v1"}, {"runtime": "pi-rpc/v2"}, {"runtime": "other/v1"}, {"runtime": ""}, {"runtime": nil}, {"steps": 0}, {"variant": ""}, {"STEPS": 0}, {"unexpected": "value"}} {
+	for _, patch := range []map[string]any{{"instructions": strings.Repeat("x", agentprofile.MaxContentSize+1)}, {"runtime": "pi-rpc/v1"}, {"runtime": "pi-rpc/v3"}, {"runtime": "other/v1"}, {"runtime": ""}, {"runtime": nil}, {"steps": 0}, {"variant": ""}, {"STEPS": 0}, {"unexpected": "value"}} {
 		var fields map[string]any
 		_ = json.Unmarshal(p.CanonicalJSON(), &fields)
 		for key, value := range patch {

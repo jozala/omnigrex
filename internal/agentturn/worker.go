@@ -25,7 +25,7 @@ type WorkerStore interface {
 	GetWorkflowRepository(context.Context, string) (store.WorkflowRepository, error)
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
 	AcknowledgeAgentTurnPreparationFailure(context.Context, store.JobLease, error, bool, time.Duration) (store.AgentTurnPreparationFailureAcknowledgement, error)
-	AcknowledgeAssignmentConfigurationConflict(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.AssignmentConfigurationHandoff, error)
+	AcknowledgeParticipantConfigurationConflict(context.Context, store.JobLease, store.AgentTurnPreparationSpec) (store.ParticipantConfigurationHandoff, error)
 }
 
 // RepositoryCredentialProvider supplies a short-lived Role credential for repository access.
@@ -142,12 +142,12 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 				attribute.String("role", string(result.Commit.Participant.Role)), attribute.String("stage", string(result.Commit.Turn.Stage)))
 			return nil
 		}
-		if errors.Is(err, ErrAssignmentConfigurationConflict) {
-			var conflict *AssignmentConfigurationConflictError
+		if errors.Is(err, ErrParticipantConfigurationConflict) {
+			var conflict *ParticipantConfigurationConflictError
 			if !errors.As(err, &conflict) {
 				return permanentError{cause: fmt.Errorf("Agent Assignment configuration conflict has no preparation: %w", err)}
 			}
-			if _, acknowledgeErr := worker.store.AcknowledgeAssignmentConfigurationConflict(workCtx, *lease, conflict.Preparation); acknowledgeErr != nil {
+			if _, acknowledgeErr := worker.store.AcknowledgeParticipantConfigurationConflict(workCtx, *lease, conflict.Preparation); acknowledgeErr != nil {
 				return errors.Join(err, fmt.Errorf("acknowledge Agent Assignment configuration conflict: %w", acknowledgeErr))
 			}
 			telemetry.SetOutcome(ctx, telemetry.DomainOutcome, "")

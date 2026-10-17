@@ -39,7 +39,7 @@ const (
 	outcomeBaseSHA        = "3333333333333333333333333333333333333333"
 	outcomeCredential     = "installation-secret"
 	outcomeProfileName    = "pi-rpc"
-	outcomeProfileVersion = "v1"
+	outcomeProfileVersion = "v2"
 )
 
 var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
@@ -241,7 +241,7 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	storeAPI := &outcomeStore{mutations: ledger}
 	github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead)}
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: ledger[0].ID,
+		WorkflowID: outcomeWorkflowID, AgentParticipantID: outcomeAssignmentID, OperationID: ledger[0].ID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestOutcomeReconcilerAcceptsReviewAfterPublishingAgainOnNewlyOpenedPR(t *te
 		`{"outcome":"REVIEW_REQUESTED","pull_request_id":901,"pull_request_number":23,"head_sha":"`+outcomeNewHead+`"}`,
 		"omnigrex", "41:feature/work", outcomeNewHead)
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: opened.ID,
+		WorkflowID: outcomeWorkflowID, AgentParticipantID: outcomeAssignmentID, OperationID: opened.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +311,7 @@ func TestOutcomeReconcilerAcceptsReviewAfterPublishingAgainOnNewlyOpenedPR(t *te
 func TestOutcomeReconcilerRequiresRecoveredPRMarkerAtReviewHandoff(t *testing.T) {
 	const sourceOpenPR = "10000000-0000-4000-8000-000000000003"
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: sourceOpenPR,
+		WorkflowID: outcomeWorkflowID, AgentParticipantID: outcomeAssignmentID, OperationID: sourceOpenPR,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1441,7 +1441,7 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 	lease := store.AgentTurnLease{
 		AgentTurn: store.AgentTurn{
 			AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: outcomeSessionID, WorkflowAttemptID: "60000000-0000-4000-8000-000000000001", ControlRevision: 5},
-			ID:            outcomeTurnID, AgentAssignmentID: outcomeAssignmentID, ExecutionEpoch: 7,
+			ID:            outcomeTurnID, AgentParticipantID: outcomeAssignmentID, ExecutionEpoch: 7,
 		},
 		JobLease: store.JobLease{ID: outcomeJobID, WorkflowID: outcomeWorkflowID},
 	}
@@ -1449,9 +1449,9 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 		WorkflowID: outcomeWorkflowID,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 61},
-		Assignment: store.AgentAssignment{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role,
+		Participant: store.AgentParticipant{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role,
 			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},
-		Session: store.AgentSession{ID: outcomeSessionID, AgentAssignmentID: outcomeAssignmentID,
+		Session: store.AgentSession{ID: outcomeSessionID, AgentParticipantID: outcomeAssignmentID,
 			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},
 		Turn: lease.AgentTurn,
 	}

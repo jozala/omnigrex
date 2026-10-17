@@ -16,7 +16,7 @@ import (
 
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/store/migrations"
+
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -162,19 +162,19 @@ func TestPiQualificationPersistsEveryExactAxis(t *testing.T) {
 	}
 }
 
-func TestPiCompatibilityImportRejectsLegacyAndUnsupportedEvidenceAtomically(t *testing.T) {
+func TestPiCompatibilityImportRejectsUnsupportedEvidenceAtomically(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database, ctx := databases[0], t.Context()
 	source, target := compatibilityProfile(t, "a", "amd64"), compatibilityProfile(t, "b", "amd64")
 	baseline := newRuntimeProfileCompatibilityResult(source.Binding(), target.Binding(), target.Contract().Platform, time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC))
 	for _, mutate := range []func(*runtimeprofile.CompatibilityResult){
-		func(r *runtimeprofile.CompatibilityResult) { r.Source.Name = "opencode-acp" },
-		func(r *runtimeprofile.CompatibilityResult) { r.Source.Version = "v2" },
+		func(r *runtimeprofile.CompatibilityResult) { r.Source.Name = "unsupported-runtime" },
+		func(r *runtimeprofile.CompatibilityResult) { r.Source.Version = "v3" },
 		func(r *runtimeprofile.CompatibilityResult) { r.Target.Name = "other-runtime" },
-		func(r *runtimeprofile.CompatibilityResult) { r.Target.Version = "v2" },
-		func(r *runtimeprofile.CompatibilityResult) { r.StateContractVersion = "opencode-acp-state/v1" },
+		func(r *runtimeprofile.CompatibilityResult) { r.Target.Version = "v3" },
+		func(r *runtimeprofile.CompatibilityResult) { r.StateContractVersion = "unsupported-state/v1" },
 		func(r *runtimeprofile.CompatibilityResult) {
-			r.QualificationSuite = "opencode-controlled-state-upgrade"
+			r.QualificationSuite = "unsupported-upgrade-suite"
 		},
 		func(r *runtimeprofile.CompatibilityResult) { r.BackendFamily = "" },
 		func(r *runtimeprofile.CompatibilityResult) { r.BackendContractVersion = 2 },
@@ -233,64 +233,25 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 	}
 }
 
-func TestMigrationTwelveAppliesFromCurrentSchema(t *testing.T) {
-	postgres := startPostgres(t)
-	pool := openPool(t, postgres.databaseURL(true))
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	applyRecordedLegacyMigrations(t, pool, ctx)
-	for version, migration := range []struct{ filename, name string }{
-		{"000006_agent_turn_preparation.sql", "agent_turn_preparation"},
-		{"000007_scoped_mutation_operations.sql", "scoped_mutation_operations"},
-		{"000008_agent_turn_settlements.sql", "agent_turn_settlements"},
-		{"000009_workflow_action_exhaustion.sql", "workflow_action_exhaustion"},
-		{"000010_workflow_action_failure_barriers.sql", "workflow_action_failure_barriers"},
-		{"000011_durable_closure_retention.sql", "durable_closure_retention"},
-	} {
-		contents, err := migrations.Files.ReadFile(migration.filename)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, string(contents)); err != nil {
-			t.Fatalf("apply current-schema migration %s: %v", migration.filename, err)
-		}
-		checksum := sha256.Sum256(contents)
-		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)`, version+6, migration.name, checksum[:]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := migrations.Run(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	var version, tables int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT max(version) FROM schema_migrations),
-       (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('runtime_profile_compatibility_results', 'pi_runtime_profile_compatibility_results'))`).Scan(&version, &tables); err != nil {
-		t.Fatal(err)
-	}
-	if version != 36 || tables != 2 {
-		t.Fatalf("forward-only schema = version %d, compatibility tables %d", version, tables)
-	}
-}
-
 func compatibilityPreparationSpec(commitSHA string, profile runtimeprofile.Profile) store.AgentTurnPreparationSpec {
 	binding := profile.Binding()
 	contract, _ := json.Marshal(profile.Contract())
-	participant := func(name string, role workflow.Role, model string) store.RolePreparation {
+	participant := func(name string, role workflow.Role, model string) store.ParticipantPreparation {
 		content, _ := json.Marshal(map[string]any{"name": name, "role": role, "path": ".omnigrex/team/" + name + ".md", "runtime": binding.Name + "/" + binding.Version, "model": model, "permissions": map[string]string{"read": "allow"}, "instructions": "Perform the assigned Work Item."})
 		hash := sha256.Sum256(content)
-		return store.RolePreparation{
+		return store.ParticipantPreparation{
 			ProfilePath:     ".omnigrex/team/" + name + ".md",
-			Binding:         store.AssignmentRuntimeBinding{AgentProfileName: name, RuntimeProfileName: binding.Name, RuntimeProfileVersion: binding.Version, RuntimeProfileContentSHA256: binding.ContentSHA256, RuntimeImageDigest: binding.Image},
+			Binding:         store.ParticipantRuntimeBinding{AgentProfileName: name, RuntimeProfileName: binding.Name, RuntimeProfileVersion: binding.Version, RuntimeProfileContentSHA256: binding.ContentSHA256, RuntimeImageDigest: binding.Image},
 			RuntimeContract: contract,
 			Profile:         store.AgentProfileSnapshot{CommitSHA: commitSHA, ContentSHA256: hash[:], Config: content},
 		}
 	}
-	return store.AgentTurnPreparationSpec{Developer: participant("developer", workflow.RoleDeveloper, "openai/compatibility"), Reviewer: participant("reviewer", workflow.RoleReviewer, "anthropic/compatibility")}
+	return store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{workflow.StageImplementation: participant("developer", workflow.RoleDeveloper, "openai/compatibility"), workflow.StageReview: participant("reviewer", workflow.RoleReviewer, "anthropic/compatibility")}}
 }
 
 func compatibilityProfile(t *testing.T, digit, architecture string) runtimeprofile.Profile {
 	t.Helper()
-	profile, err := runtimeprofile.NewPiV1(compatibilityImage(digit), runtimeprofile.Platform{OS: "linux", Arch: architecture})
+	profile, err := runtimeprofile.NewPiV2(compatibilityImage(digit), runtimeprofile.Platform{OS: "linux", Arch: architecture})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-09
-decision-makers: [OpenCode implementation agent]
+decision-makers: [Implementation agent]
 ---
 # Use the Microsandbox Go SDK and POSIX-faithful local bindings
 
@@ -41,7 +41,6 @@ Backend-owned durable dispatch records supplement Store admission and prevent re
 Transport detachment is separate from confirmed whole-environment stop.
 Guest PID budgets apply to the SDK workload cgroup and nested-container descendants, not host VMM thread counts.
 Guest-root access through the private Docker daemon can alter guest controls and read supplied provider credentials; hardware isolation does not mediate those credentials.
-Production rollout, CI runner registration, and Pi cutover remain later plan steps.
 
 ## Links
 

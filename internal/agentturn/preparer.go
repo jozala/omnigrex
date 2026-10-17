@@ -20,11 +20,11 @@ import (
 )
 
 var (
-	ErrDependencyNil                   = errors.New("Agent Turn Preparer dependency is nil")
-	ErrInvalidRequest                  = errors.New("invalid Agent Turn preparation request")
-	ErrInvalidRuntimeProfileReference  = errors.New("invalid Runtime Profile reference")
-	ErrRuntimeProfileReferenceMismatch = errors.New("resolved Runtime Profile reference does not match Agent Profile")
-	ErrAssignmentConfigurationConflict = errors.New("Agent Assignment configuration conflict")
+	ErrDependencyNil                    = errors.New("Agent Turn Preparer dependency is nil")
+	ErrInvalidRequest                   = errors.New("invalid Agent Turn preparation request")
+	ErrInvalidRuntimeProfileReference   = errors.New("invalid Runtime Profile reference")
+	ErrRuntimeProfileReferenceMismatch  = errors.New("resolved Runtime Profile reference does not match Agent Profile")
+	ErrParticipantConfigurationConflict = errors.New("Agent Participant configuration conflict")
 	// ErrChangeProposalVerificationFailed marks a permanent authoritative
 	// verification failure (closed PR, identity change, branch/base change).
 	// The worker must not retry the GitHub observation; it must create an
@@ -32,18 +32,18 @@ var (
 	ErrChangeProposalVerificationFailed = errors.New("Change Proposal verification failed")
 )
 
-// AssignmentConfigurationConflictError carries the credential-free preparation used to detect binding drift.
-type AssignmentConfigurationConflictError struct {
+// ParticipantConfigurationConflictError carries the credential-free preparation used to detect binding drift.
+type ParticipantConfigurationConflictError struct {
 	Preparation store.AgentTurnPreparationSpec
 	Cause       error
 }
 
-func (err *AssignmentConfigurationConflictError) Error() string {
-	return fmt.Sprintf("%v: %v", ErrAssignmentConfigurationConflict, err.Cause)
+func (err *ParticipantConfigurationConflictError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrParticipantConfigurationConflict, err.Cause)
 }
 
-func (err *AssignmentConfigurationConflictError) Unwrap() []error {
-	return []error{ErrAssignmentConfigurationConflict, err.Cause}
+func (err *ParticipantConfigurationConflictError) Unwrap() []error {
+	return []error{ErrParticipantConfigurationConflict, err.Cause}
 }
 
 // ProfileLoader discovers all Agent Profiles from one repository snapshot.
@@ -170,12 +170,6 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	}
 	preparation.TurnConfiguration = encoded
 	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
-	switch bindings.Role {
-	case workflow.RoleDeveloper:
-		spec.Developer = preparation
-	case workflow.RoleReviewer:
-		spec.Reviewer = preparation
-	}
 	if head, prID, prNumber, verifyErr := preparer.verifyChangeProposal(ctx, request); verifyErr != nil {
 		return Result{}, verifyErr
 	} else if head != "" {
@@ -186,8 +180,8 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 
 	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
 	if err != nil {
-		if errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-			return Result{}, &AssignmentConfigurationConflictError{
+		if errors.Is(err, store.ErrParticipantConfigurationConflict) {
+			return Result{}, &ParticipantConfigurationConflictError{
 				Preparation: spec,
 				Cause:       err,
 			}
@@ -230,17 +224,17 @@ func (preparer *Preparer) verifyChangeProposal(ctx context.Context, request Requ
 	return head, observed.ID, int64(observed.Number), nil
 }
 
-func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding, environment *repoenvironment.Definition) (store.RolePreparation, runtimeprofile.Profile, error) {
+func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.ParticipantRuntimeBinding, environment *repoenvironment.Definition) (store.ParticipantPreparation, runtimeprofile.Profile, error) {
 	name, version, ok := strings.Cut(profile.Runtime(), "/")
 	if !ok || name == "" || version == "" || strings.Contains(version, "/") {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
 	}
 	var resolved runtimeprofile.Profile
 	var err error
 	if pinned != nil && pinned.RuntimeProfileName == name && pinned.RuntimeProfileVersion == version {
 		resolver, ok := preparer.registry.(runtimeBindingResolver)
 		if !ok {
-			return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
+			return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
 		}
 		resolved, err = resolver.ResolveBinding(runtimeprofile.Binding{
 			Name: pinned.RuntimeProfileName, Version: pinned.RuntimeProfileVersion,
@@ -264,26 +258,22 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 		}
 	}
 	if err != nil {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
 	}
 	contract := resolved.Contract()
 	if contract.Name != name || contract.Version != version {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("%w: requested %s/%s, resolved %s/%s", ErrRuntimeProfileReferenceMismatch, name, version, contract.Name, contract.Version)
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("%w: requested %s/%s, resolved %s/%s", ErrRuntimeProfileReferenceMismatch, name, version, contract.Name, contract.Version)
 	}
 	hash := profile.ContentSHA256()
-	return store.RolePreparation{
+	return store.ParticipantPreparation{
 		RuntimeContract: mustEncodeContract(contract),
 		ProfilePath:     profile.Path(),
-		Binding: store.AssignmentRuntimeBinding{
+		Binding: store.ParticipantRuntimeBinding{
 			AgentProfileName:            string(profile.Name()),
 			RuntimeProfileName:          contract.Name,
 			RuntimeProfileVersion:       contract.Version,
 			RuntimeProfileContentSHA256: resolved.ContentSHA256(),
 			RuntimeImageDigest:          contract.Image,
-		},
-		RuntimeCompatibility: store.RuntimeCompatibilityRequirement{
-			Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
-			WorkspacePath: runtimeprofile.StableWorkspacePath,
 		},
 		Profile: store.AgentProfileSnapshot{
 			CommitSHA:     commitSHA,
@@ -309,11 +299,11 @@ func (err credentialSafeError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
 }
 
 func sanitizePreparationError(err error, credential string) error {
-	var conflict *AssignmentConfigurationConflictError
+	var conflict *ParticipantConfigurationConflictError
 	if errors.As(err, &conflict) {
-		return &AssignmentConfigurationConflictError{
+		return &ParticipantConfigurationConflictError{
 			Preparation: conflict.Preparation,
-			Cause:       ErrAssignmentConfigurationConflict,
+			Cause:       ErrParticipantConfigurationConflict,
 		}
 	}
 	if errors.Is(err, ErrChangeProposalVerificationFailed) {

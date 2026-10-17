@@ -1,5 +1,12 @@
 # Pi operational integration and backend CI
 
+## Published-release status
+
+The release boundary described below was passed by [main CI run 38643789132](https://github.com/jozala/omnigrex/actions/runs/38643789132) for commit `3125265f30f5cbc97096babde01cbd8dae7388e5` on 2026-10-14.
+Docker qualification, Linux/KVM qualification, publication, and both published-image deployment smokes succeeded.
+The [Step 17 release record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) contains the exact public image references and subsequent operator evidence.
+The implementation narrative below describes the historical Step 15 milestone; Step 17 removed its transitional OpenCode paths.
+
 ## Prerequisite and scope
 
 This implements the source and qualification work for Step 15 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md).
@@ -92,13 +99,13 @@ One concurrent Docker Desktop deployment smoke reported an unhealthy control pla
 The earlier unhealthy result has no established failure cause and is not presented as a diagnosed resource-exhaustion incident.
 Connection values, fixture digests, private keys, temporary files, and deployment metadata are excluded from this record.
 
-## Release boundary and next step
+## Release boundary at implementation time
 
 Source implementation and both-backend host qualification are complete.
-The new GitHub-hosted KVM job, GHCR publication, package visibility, and post-publication exact-digest smoke must still pass on the merged release commit; local source qualification does not claim that those release operations have happened.
+At this milestone, the new GitHub-hosted KVM job, GHCR publication, package visibility, and post-publication exact-digest smoke still required merged-release evidence.
 The source-native smoke's imported fixture alias is test evidence only and cannot substitute for a published exact registry image.
-The retained OpenCode implementation, legacy image hint, image publication, and old deployment bundle remain transitional until Step 17.
-Step 16 owns the full operator-controlled clean-cutover and coordinated production restore rehearsal, including reconciliation of the original Work Items.
+The retained OpenCode implementation, legacy image hint, image publication, and old deployment bundle were transitional until Step 17 removed them.
+Step 16 supplied the operator procedures and source-fixture rehearsal, including reconciliation of the original Work Items.
 
 ## Independent review corrections
 

@@ -78,7 +78,7 @@ FOR UPDATE`, lease.ID, lease.LeaseToken, lease.Attempt, lease.Kind).Scan(&jobLiv
 	if job.Kind != lease.Kind || job.Queue != "agent-turn-recovery" ||
 		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
 		job.AttemptCount != lease.Attempt || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch {
 		return TerminalCorroborationContext{}, ErrJobLeaseLost
@@ -163,8 +163,7 @@ ORDER BY attempt_number DESC LIMIT 1`, job.ID, job.AttemptCount).Scan(&latestFai
 		turn.AgentSessionID != lease.AgentSessionID {
 		return TerminalCorroborationContext{}, ErrJobLeaseLost
 	}
-	turn.AgentAssignmentID = lease.AgentAssignmentID
-	turn.AgentParticipantID = lease.AgentAssignmentID
+	turn.AgentParticipantID = lease.AgentParticipantID
 	var workflowState string
 	var activeAttempt bool
 	if err := tx.QueryRow(ctx, `
@@ -205,7 +204,7 @@ FROM workflows WHERE id = $1`, checkpoint.WorkflowID).Scan(
 		&execution.Repository.Name, &execution.Issue.ID, &execution.Issue.Number); err != nil {
 		return TerminalCorroborationContext{}, err
 	}
-	participant, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+	participant, err := scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, lease.AgentParticipantID))
 	if err != nil {
 		return TerminalCorroborationContext{}, err
 	}
@@ -213,11 +212,11 @@ FROM workflows WHERE id = $1`, checkpoint.WorkflowID).Scan(
 	if err != nil {
 		return TerminalCorroborationContext{}, err
 	}
-	if participant.WorkflowID != checkpoint.WorkflowID || session.AgentAssignmentID != participant.ID ||
+	if participant.WorkflowID != checkpoint.WorkflowID || session.AgentParticipantID != participant.ID ||
 		session.ControlOwner != SessionControlAutomation {
 		return TerminalCorroborationContext{}, ErrJobLeaseLost
 	}
-	execution.Participant, execution.Assignment, execution.Session, execution.Turn = participant, participant, session, turn.AgentTurn
+	execution.Participant, execution.Session, execution.Turn = participant, session, turn.AgentTurn
 	if turn.ChangeProposalID != "" {
 		proposal := &AgentTurnChangeProposal{}
 		if err := tx.QueryRow(ctx, `
@@ -279,12 +278,12 @@ SELECT mutation.id::text, mutation.agent_turn_id::text, mutation.execution_epoch
 FROM tool_invocations AS mutation
 JOIN agent_turns AS source_turn ON source_turn.id = mutation.agent_turn_id
 JOIN agent_sessions AS source_session ON source_session.id = source_turn.agent_session_id
-WHERE source_turn.workflow_id = $1 AND source_session.agent_assignment_id = $2
+WHERE source_turn.workflow_id = $1 AND source_session.agent_participant_id = $2
   AND source_turn.id <> $3 AND source_turn.created_at <= $4
   AND source_turn.completed_at IS NOT NULL AND mutation.kind = 'MUTATION'
   AND mutation.tool_name IN ('publish_changes', 'open_pr') AND mutation.state = 'SUCCEEDED'
 ORDER BY source_turn.created_at, mutation.invocation_number`,
-			checkpoint.WorkflowID, lease.AgentAssignmentID, checkpoint.TurnID, turn.CreatedAt)
+			checkpoint.WorkflowID, lease.AgentParticipantID, checkpoint.TurnID, turn.CreatedAt)
 		if err != nil {
 			return TerminalCorroborationContext{}, err
 		}
@@ -632,7 +631,7 @@ func (store *Store) RetryTerminalCorroboration(ctx context.Context, lease JobLea
 	if job.Kind != lease.Kind || job.Queue != "agent-turn-recovery" ||
 		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
 		job.AttemptCount != lease.Attempt || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch {
 		return ErrJobLeaseLost

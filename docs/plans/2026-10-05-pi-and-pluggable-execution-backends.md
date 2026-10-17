@@ -1,5 +1,11 @@
 # Pi runtime and pluggable execution backends
 
+## Subsequent supported baseline
+
+[Decision 0024](../decisions/0024-establish-a-clean-supported-release-baseline.md) and the [clean-baseline implementation plan](2026-10-16-clean-runtime-baseline.md) establish the subsequent supported release with fresh state and `pi-rpc/v2`.
+The delivery milestones below describe the original implementation sequence and its recorded qualification.
+The historical reset rehearsal is retired; current deployment smoke independently verifies Pi recovery, and future backend-scoped Pi upgrade qualification remains supported.
+
 ## Objective
 
 Replace OpenCode with Pi while introducing a backend-independent execution boundary with retained Docker and Microsandbox implementations.
@@ -34,11 +40,23 @@ When implementation begins, update their descriptions to link this plan and iden
 | 12 | Candidate Pi Runtime Profile, common complete Agent Turns, and controlled Developer-to-Reviewer Workflows on both backends | [Complete Pi Agent Turn implementation and evidence](2026-10-09-complete-pi-agent-turns.md) |
 | 13 | Shared eleven-scenario Pi recovery qualification and cross-target production dependency enforcement | [Pi failure recovery and boundary independence](2026-10-10-pi-failure-recovery.md) |
 | 14 | Backend-scoped Pi qualification artifacts, isolated source-to-candidate continuation/replay, and protected-state recovery | [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md) |
-| 15 | Backend-selected Pi diagnostics/readiness, qualified image-only bundles, and required KVM CI/publication wiring; release execution pending | [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md) |
-| 16 | Pi operator procedures, original Work Item reconciliation, and isolated source-fixture reset/recovery on both backends; published-release rehearsal pending | [Pi operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md) |
-| 17 | Pi-only source, neutral settlement, clean-ledger admission, and final both-backend source qualification; released rehearsal, final live dogfooding, and operator cutover pending | [Pi-only implementation and final qualification](2026-10-13-pi-only-final-qualification.md) |
+| 15 | Backend-selected Pi diagnostics/readiness, image-only bundles, required KVM CI, published images, and exact-digest smoke passed on both backends | [Pi operational integration and backend CI](2026-10-11-pi-operational-integration.md) |
+| 16 | Pi operator procedures and both-backend source-fixture reset/recovery complete; operator skipped the published-release reset/recovery rehearsal | [Pi operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md) |
+| 17 | Pi-only source, both-backend CI, publication, and deployment smoke complete; operator-confirmed Microsandbox cutover and live Compose-backed Work Item recorded; full reset/recovery gate remains unverified | [Pi-only implementation and final qualification](2026-10-13-pi-only-final-qualification.md) |
 
 The contract document and its linked decisions refine this plan's architectural outline for Steps 04 onward.
+
+### Release and operator status (2026-10-16)
+
+Commit `3125265f30f5cbc97096babde01cbd8dae7388e5` passed Docker and Linux/KVM CI, published the Pi golden image and both control planes, and passed both published-image deployment smokes.
+The [release qualification record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) identifies the public artifacts and evidence boundaries.
+The operator confirmed a fresh Pi/Microsandbox replacement and guest Docker Compose use in [Work Item 19 and Change Proposal 20](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
+That Workflow reached an approved head and subsequently exercised human-requested corrections with the same Developer and Reviewer Participants.
+
+The operator chose to skip the historical-release reset/recovery rehearsal because preserving the old installation and avoiding downtime were unnecessary for this installation.
+No completed published-release reset/recovery rehearsal or production backup/restore drill is claimed.
+The full operational qualification gate remains unverified in that respect; this installation's successful cutover does not change the documented recovery contract.
+The separate [Omnigrex repository dogfooding gate](../dogfooding.md#omnigrex-repository-gate) is not established by the disposable-repository exercise.
 
 ## 1. Agreed scope
 

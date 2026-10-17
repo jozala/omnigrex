@@ -255,7 +255,7 @@ func validateClosureReconciliation(result mcp.MutationReconciliationResult) erro
 
 func validateClosureRuntimeIdentity(lease store.JobLease, identity store.AgentTurnRuntimeIdentity) error {
 	if lease.Queue != store.WorkflowActionQueue || lease.Kind != store.StopAgentTurnJobKind ||
-		identity.AssignmentID != lease.AgentAssignmentID || identity.AgentSessionID != lease.AgentSessionID ||
+		identity.AssignmentID != lease.AgentParticipantID || identity.AgentSessionID != lease.AgentSessionID ||
 		identity.AgentTurnID != lease.AgentTurnID || identity.ExecutionEpoch != lease.ExecutionEpoch ||
 		!uuidtext.ValidCanonicalNonNil(identity.AssignmentID) || !uuidtext.ValidCanonicalNonNil(identity.AgentSessionID) ||
 		!uuidtext.ValidCanonicalNonNil(identity.AgentTurnID) || identity.ExecutionEpoch <= 0 ||

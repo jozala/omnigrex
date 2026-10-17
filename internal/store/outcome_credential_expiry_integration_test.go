@@ -373,7 +373,7 @@ UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 			}
 			actorID := int64(test.number*100 + 2)
 			if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
+UPDATE agent_participants SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
 				t.Fatal(err)
 			}
 			proposalRowID := fmt.Sprintf("79%04d00-0000-4000-8000-000000000001", test.number)
@@ -395,7 +395,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			spec.Purpose = workflow.TurnPurposeReview
 			spec.ChangeProposalID = proposalRowID
 			spec.ExpectedHeadSHA = test.head
-			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 10, "Review test instructions.", nil)
+			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 10, "Review test instructions.", nil)
 			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 			if err != nil {
 				t.Fatalf("PrepareAgentTurn() error = %v", err)
@@ -430,7 +430,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 				t.Fatal(err)
 			}
 			workspaces, _ := integrationTerminalWorkspace(t, pool, store.AgentTurnLease{
-				ID: turn.ID, AgentSessionID: fixture.sessionID, AgentAssignmentID: fixture.assignmentID,
+				ID: turn.ID, AgentSessionID: fixture.sessionID, AgentParticipantID: fixture.assignmentID,
 				ExecutionEpoch: turn.ExecutionEpoch, JobLease: store.JobLease{WorkflowID: fixture.workflowID},
 			}, committedPublicationPaths(t), test.head, "installation-token")
 			outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{

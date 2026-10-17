@@ -22,18 +22,11 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(api.options) != 3 || !api.options[0].All || !api.options[1].All || !api.options[2].All {
+	if len(api.options) != 2 || !api.options[0].All || !api.options[1].All {
 		t.Fatalf("ContainerList() options = %#v", api.options)
 	}
 	wantFilters := []mobyclient.Filters{
 		make(mobyclient.Filters).Add("label", RuntimeProcessMarkerLabel+"="+RuntimeProcessMarkerValue),
-		make(mobyclient.Filters).Add("label",
-			RuntimeProcessAssignmentLabel,
-			RuntimeProcessSessionLabel,
-			RuntimeProcessTurnLabel,
-			RuntimeProcessEpochLabel,
-			RuntimeProfileIdentityLabel,
-		),
 		make(mobyclient.Filters).Add("label", diagnosticMarkerLabel+"=true"),
 	}
 	for index, want := range wantFilters {
@@ -50,13 +43,13 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 		AgentSessionID: "20000000-0000-4000-8000-000000000001",
 		AgentTurnID:    "30000000-0000-4000-8000-000000000001",
 		ExecutionEpoch: 9,
-		RuntimeProfile: RuntimeProfileIdentity{Name: "pi-rpc", Version: "v1"},
+		RuntimeProfile: RuntimeProfileIdentity{Name: "pi-rpc", Version: "v2"},
 	}) {
 		t.Fatalf("managed process = %#v", process)
 	}
 }
 
-func TestRuntimeProcessInventoryDiscoversCompleteLegacyIdentityAndIgnoresUnrelatedContainers(t *testing.T) {
+func TestRuntimeProcessInventoryIgnoresUnmarkedCompleteIdentityAndUnrelatedContainers(t *testing.T) {
 	legacy := managedRuntimeLabels()
 	delete(legacy, RuntimeProcessMarkerLabel)
 	api := &runtimeProcessInventoryFake{result: mobyclient.ContainerListResult{Items: []container.Summary{
@@ -69,9 +62,9 @@ func TestRuntimeProcessInventoryDiscoversCompleteLegacyIdentityAndIgnoresUnrelat
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Processes) != 1 || snapshot.Processes[0].ContainerID != "legacy" ||
+	if len(snapshot.Processes) != 0 ||
 		len(snapshot.Duplicates) != 0 || len(snapshot.Malformed) != 0 {
-		t.Fatalf("legacy snapshot = %#v", snapshot)
+		t.Fatalf("unmarked container entered managed inventory: %#v", snapshot)
 	}
 }
 
@@ -89,7 +82,7 @@ func TestRuntimeProcessInventoryIgnoresUnprovenOwnership(t *testing.T) {
 		{ID: "session-only", Labels: map[string]string{RuntimeProcessSessionLabel: "20000000-0000-4000-8000-000000000001"}},
 		{ID: "turn-only", Labels: map[string]string{RuntimeProcessTurnLabel: "30000000-0000-4000-8000-000000000001"}},
 		{ID: "epoch-only", Labels: map[string]string{RuntimeProcessEpochLabel: "9"}},
-		{ID: "profile-only", Labels: map[string]string{RuntimeProfileIdentityLabel: "pi-rpc/v1"}},
+		{ID: "profile-only", Labels: map[string]string{RuntimeProfileIdentityLabel: "pi-rpc/v2"}},
 		{ID: "marker-false", Labels: markerFalse},
 		{ID: "partial-legacy", Labels: partialLegacy},
 		{ID: "invalid-legacy", Labels: invalidLegacy},
@@ -123,7 +116,7 @@ func TestRuntimeProcessInventoryQuarantinesMalformedManagedContainers(t *testing
 		{name: "epoch zero", id: "zero", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "0" }, reason: MalformedExecutionEpoch},
 		{name: "epoch noncanonical", id: "epoch", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "09" }, reason: MalformedExecutionEpoch},
 		{name: "epoch overflow", id: "overflow", mutate: func(labels map[string]string) { labels[RuntimeProcessEpochLabel] = "9223372036854775808" }, reason: MalformedExecutionEpoch},
-		{name: "profile", id: "profile", mutate: func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "pi-rpc/v1/extra" }, reason: MalformedRuntimeProfile},
+		{name: "profile", id: "profile", mutate: func(labels map[string]string) { labels[RuntimeProfileIdentityLabel] = "pi-rpc/v2/extra" }, reason: MalformedRuntimeProfile},
 	}
 
 	items := make([]container.Summary, 0, len(tests))
@@ -209,7 +202,7 @@ func managedRuntimeLabels() map[string]string {
 		RuntimeProcessSessionLabel:    "20000000-0000-4000-8000-000000000001",
 		RuntimeProcessTurnLabel:       "30000000-0000-4000-8000-000000000001",
 		RuntimeProcessEpochLabel:      "9",
-		RuntimeProfileIdentityLabel:   "pi-rpc/v1",
+		RuntimeProfileIdentityLabel:   "pi-rpc/v2",
 	}
 }
 

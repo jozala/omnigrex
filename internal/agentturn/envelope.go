@@ -64,7 +64,7 @@ type eventEnvelope struct {
 
 // BuildEventEnvelope projects a Turn using the deployment's Workflow Definition and Role policies.
 func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policies role.PolicyCatalog) (string, error) {
-	policy, ok := policies.Lookup(execution.Assignment.Role)
+	policy, ok := policies.Lookup(execution.Participant.Role)
 	if !ok {
 		return "", fmt.Errorf("%w: Role policy", ErrInvalidEventEnvelope)
 	}
@@ -78,9 +78,9 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	envelope := eventEnvelope{
 		SchemaVersion: EventEnvelopeSchemaVersion,
 		WorkflowID:    execution.WorkflowID, IssueNumber: execution.Issue.Number, RepositoryID: execution.Repository.ID,
-		AgentParticipantID: execution.Assignment.ID, AssignmentGeneration: execution.Assignment.Generation,
+		AgentParticipantID: execution.Participant.ID, AssignmentGeneration: execution.Participant.Generation,
 		AgentSessionID: execution.Session.ID, AgentTurnID: execution.Turn.ID,
-		TriggeringEvent: triggeringEvent{Stage: execution.Turn.Stage, Role: execution.Assignment.Role, TurnPurpose: execution.Turn.Purpose},
+		TriggeringEvent: triggeringEvent{Stage: execution.Turn.Stage, Role: execution.Participant.Role, TurnPurpose: execution.Turn.Purpose},
 		CurrentHeadSHA:  currentHeadSHA, ExpectedHeadSHA: execution.Turn.ExpectedHeadSHA,
 		ExpectedOutcomes: expectedOutcomes, AllowedOutcomes: allowedOutcomes, MCPCapabilities: capabilities,
 	}
@@ -119,14 +119,14 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 }
 
 func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, currentHeadSHA string, definition workflow.Definition, policy role.Policy) error {
-	assignment := execution.Assignment
+	assignment := execution.Participant
 	session := execution.Session
 	turn := execution.Turn
 	stage, stageExists := definition.Stage(turn.Stage)
 	if !validEnvelopeString(execution.WorkflowID) || execution.Repository.ID <= 0 || execution.Issue.ID <= 0 || execution.Issue.Number <= 0 ||
 		!validEnvelopeString(assignment.ID) || assignment.WorkflowID != execution.WorkflowID || assignment.Generation <= 0 ||
-		!validEnvelopeString(session.ID) || session.AgentAssignmentID != assignment.ID ||
-		!validEnvelopeString(turn.ID) || turn.AgentAssignmentID != assignment.ID || turn.AgentSessionID != session.ID ||
+		!validEnvelopeString(session.ID) || session.AgentParticipantID != assignment.ID ||
+		!validEnvelopeString(turn.ID) || turn.AgentParticipantID != assignment.ID || turn.AgentSessionID != session.ID ||
 		!validEnvelopeString(currentHeadSHA) || policy.Role != assignment.Role || !stageExists || stage.Role != assignment.Role || !definition.AcceptsPurpose(turn.Stage, turn.Purpose) {
 		return ErrInvalidEventEnvelope
 	}

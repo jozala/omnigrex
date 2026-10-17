@@ -237,8 +237,8 @@ func validateYAMLNode(node *yaml.Node) error {
 }
 
 func validateConfiguration(policy role.Policy, configuration frontMatter, instructions []byte) error {
-	if configuration.Runtime != "pi-rpc/v1" {
-		return fmt.Errorf("%w: runtime must be pi-rpc/v1", ErrInvalidProfile)
+	if configuration.Runtime != "pi-rpc/v2" {
+		return fmt.Errorf("%w: runtime must be pi-rpc/v2", ErrInvalidProfile)
 	}
 	provider, model, found := strings.Cut(configuration.Model, "/")
 	if !found || provider == "" || model == "" || containsWhitespaceOrControl(configuration.Model) {

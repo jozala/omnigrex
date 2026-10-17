@@ -26,9 +26,13 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 		t.Fatal(err)
 	}
 	spec := compatibilityPreparationSpec("repository-default-snapshot", bound)
-	spec.Developer.RuntimeContract, _ = json.Marshal(bound.Contract())
+	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.RuntimeContract, _ = json.Marshal(bound.Contract())
+	})
 	tampered := spec
-	tampered.Developer.RuntimeContract = json.RawMessage(`{"name":"invalid"}`)
+	updateStagePreparation(&tampered, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.RuntimeContract = json.RawMessage(`{"name":"invalid"}`)
+	})
 	if _, err := database.PrepareAgentTurn(ctx, lease, tampered); err == nil {
 		t.Fatal("invalid contract was committed")
 	}
@@ -76,7 +80,9 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 		t.Fatal(err)
 	}
 	secondSpec := compatibilityPreparationSpec("new-repository-snapshot", newImage)
-	secondSpec.Developer.RuntimeContract, _ = json.Marshal(newImage.Contract())
+	updateStagePreparation(&secondSpec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.RuntimeContract, _ = json.Marshal(newImage.Contract())
+	})
 	if err := database.CheckPendingRuntimeProfileCompatibility(ctx, newImage); err != nil {
 		t.Fatalf("fresh Participant admission required migration: %v", err)
 	}
@@ -88,7 +94,7 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 		t.Fatal("new image reused an existing Participant or Session")
 	}
 	var originalImage string
-	if err := pool.QueryRow(ctx, `SELECT runtime_image_digest FROM agent_assignments WHERE id = $1`, prepared.Participant.ID).Scan(&originalImage); err != nil || originalImage != bound.Contract().Image {
+	if err := pool.QueryRow(ctx, `SELECT runtime_image_digest FROM agent_participants WHERE id = $1`, prepared.Participant.ID).Scan(&originalImage); err != nil || originalImage != bound.Contract().Image {
 		t.Fatalf("original Participant image changed: %s %v", originalImage, err)
 	}
 }

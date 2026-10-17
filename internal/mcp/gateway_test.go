@@ -444,7 +444,7 @@ func TestSameTurnMutationsCanShareCallerOperationIDAndUseLatestPublishedHead(t *
 			t.Errorf("reservation %d (%s) signature present = %t, want %t", index+1, spec.ToolName, got, want)
 		}
 	}
-	wantMarker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: testMutationID(3)})
+	wantMarker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: testMutationID(3)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestRevocationReleasesEachGrantExactlyOnceAfterAdmittedCallsDrain(t *testin
 	close(backend.executeRelease)
 	select {
 	case scope := <-backend.released:
-		if scope.AgentAssignmentID != "assignment-1" || scope.AgentTurnID != "turn-1" || scope.ExecutionEpoch != 4 {
+		if scope.AgentParticipantID != "assignment-1" || scope.AgentTurnID != "turn-1" || scope.ExecutionEpoch != 4 {
 			t.Fatalf("ReleaseTurn scope = %#v", scope)
 		}
 	case <-time.After(time.Second):
@@ -1982,9 +1982,9 @@ func validScope(now time.Time) mcp.TokenScope {
 		Lease: store.AgentTurnLease{
 			AgentTurn: store.AgentTurn{
 				AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "session-1", AgentProfileConfig: json.RawMessage(`{"role":"DEVELOPER","name":"implementation-specialist"}`)},
-				ID:            "turn-1", AgentAssignmentID: "assignment-1", ExecutionEpoch: 4, CreatedAt: now,
+				ID:            "turn-1", AgentParticipantID: "assignment-1", ExecutionEpoch: 4, CreatedAt: now,
 			},
-			JobLease: store.JobLease{Job: store.Job{JobSpec: store.JobSpec{WorkflowID: "workflow-1", AgentSessionID: "session-1", AgentTurnID: "turn-1", AgentAssignmentID: "assignment-1", ExecutionEpoch: 4}}},
+			JobLease: store.JobLease{Job: store.Job{JobSpec: store.JobSpec{WorkflowID: "workflow-1", AgentSessionID: "session-1", AgentTurnID: "turn-1", AgentParticipantID: "assignment-1", ExecutionEpoch: 4}}},
 			OwnerID:  "worker-1", OwnerToken: "lease-secret", LeaseExpiresAt: now.Add(time.Hour),
 		},
 		WorkflowID:    "workflow-1",

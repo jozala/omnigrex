@@ -48,10 +48,10 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2 AND session.id = $3`,
 	if !eligible {
 		return execution.ErrConflict
 	}
-	key := execution.Key{AssignmentID: job.AgentAssignmentID, AgentSessionID: job.AgentSessionID,
+	key := execution.Key{AssignmentID: job.AgentParticipantID, AgentSessionID: job.AgentSessionID,
 		AgentTurnID: job.AgentTurnID, ExecutionEpoch: job.ExecutionEpoch}
-	if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_assignments WHERE id = $1`,
-		job.AgentAssignmentID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_participants WHERE id = $1`,
+		job.AgentParticipantID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
 		return fmt.Errorf("read recovered never-started runtime identity: %w", err)
 	}
 	identity, err := json.Marshal(key)
@@ -100,10 +100,10 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2 AND session.id = $3`,
 		if !eligible {
 			return errors.New("unprompted runtime cleanup conflicts with durable Session or Turn activity")
 		}
-		key := execution.Key{AssignmentID: turn.AgentAssignmentID, AgentSessionID: turn.AgentSessionID,
+		key := execution.Key{AssignmentID: turn.AgentParticipantID, AgentSessionID: turn.AgentSessionID,
 			AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch}
-		if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_assignments WHERE id = $1`,
-			turn.AgentAssignmentID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_participants WHERE id = $1`,
+			turn.AgentParticipantID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
 			return fmt.Errorf("read unprompted runtime identity: %w", err)
 		}
 		identity, err := json.Marshal(key)
@@ -140,10 +140,10 @@ func (store *Store) AgentTurnTerminalCaptureRequired(ctx context.Context, lease 
 	// The recovery fence denies lease-bound dispatch. Also revoke the ledger
 	// under this transaction, serializing with first reservation and phase
 	// changes so a no-dispatch exemption cannot race delayed external creation.
-	key := execution.Key{AssignmentID: job.AgentAssignmentID, AgentSessionID: job.AgentSessionID,
+	key := execution.Key{AssignmentID: job.AgentParticipantID, AgentSessionID: job.AgentSessionID,
 		AgentTurnID: job.AgentTurnID, ExecutionEpoch: job.ExecutionEpoch}
-	if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_assignments WHERE id = $1`,
-		job.AgentAssignmentID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT runtime_profile_name, runtime_profile_version FROM agent_participants WHERE id = $1`,
+		job.AgentParticipantID).Scan(&key.RuntimeProfileName, &key.RuntimeProfileVersion); err != nil {
 		return true, fmt.Errorf("read terminal capture runtime identity: %w", err)
 	}
 	identity, err := json.Marshal(key)

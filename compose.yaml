@@ -38,8 +38,8 @@ services:
     restart: unless-stopped
 
   pi-image:
-    image: "${OMNIGREX_PI_RPC_V1_IMAGE:?set OMNIGREX_PI_RPC_V1_IMAGE to the exact registry digest}"
-    platform: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+    image: "${OMNIGREX_PI_IMAGE:?set OMNIGREX_PI_IMAGE to the exact registry digest}"
+    platform: "${OMNIGREX_PI_PLATFORM:?set the Pi platform}"
     user: "10001:10001"
     entrypoint: ["sh", "-c"]
     command:
@@ -51,7 +51,7 @@ services:
         test "$$(node -p 'JSON.parse(require("fs").readFileSync("/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json")).version')" = 1.0.4
         mise --version
         git --version
-        for path in /workspace /state /home/opencode/.local/share/mise; do
+        for path in /workspace /state /home/omnigrex/.local/share/mise; do
           touch "$$path/.omnigrex-volume-root"
           rm "$$path/.omnigrex-volume-root"
         done
@@ -64,7 +64,7 @@ services:
         target: /state
       - type: volume
         source: mise-data
-        target: /home/opencode/.local/share/mise
+        target: /home/omnigrex/.local/share/mise
     network_mode: none
     read_only: true
     cap_drop:
@@ -119,8 +119,8 @@ services:
 
       OMNIGREX_WORKSPACE_CAPTURE_ROOT: /var/lib/omnigrex/runtime-state/workspace-captures
       OMNIGREX_MISE_ROOT: /var/lib/omnigrex/mise
-      OMNIGREX_PI_RPC_V1_IMAGE: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi registry digest}"
-      OMNIGREX_PI_RPC_V1_PLATFORM: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+      OMNIGREX_PI_IMAGE: "${OMNIGREX_PI_IMAGE:?set the exact Pi registry digest}"
+      OMNIGREX_PI_PLATFORM: "${OMNIGREX_PI_PLATFORM:?set the Pi platform}"
       OMNIGREX_PI_STARTUP_TIMEOUT: "${OMNIGREX_PI_STARTUP_TIMEOUT:-10m}"
       OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE: "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:+/run/omnigrex/runtime-profile-compatibility-results.json}"
       OMNIGREX_GITHUB_API_URL: "${OMNIGREX_GITHUB_API_URL:-https://api.github.com}"

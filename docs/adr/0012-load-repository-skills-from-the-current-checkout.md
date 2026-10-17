@@ -12,7 +12,7 @@ This keeps procedures alongside the code they describe and avoids a separate def
 
 ## Consequences
 
-The OpenCode adapter explicitly registers the workspace skill path while retaining Reviewer project-configuration and external-discovery restrictions.
+The Pi runner explicitly selects authorized checkout-local skills while disabling uncontrolled project configuration and resource discovery.
 Skill loading remains subject to local-tool permission checks and does not grant sub-agent or additional MCP capabilities.
 Agent Profiles retain their default-branch provenance under [ADR 0011](./0011-discover-repository-agent-profiles-and-select-separately.md); skill content deliberately follows the prepared checkout instead.
 A Change Proposal can therefore alter guidance used during its own review.
@@ -20,4 +20,4 @@ A Change Proposal can therefore alter guidance used during its own review.
 
 Each new Runtime Process discovers the current skill files, including when continuing an Agent Session that previously loaded older content.
 The repository Profiles explicitly require loading their Role skill on each Agent Turn; edits during a running process are not guaranteed to hot-reload.
-The Reviewer instruction-isolation expectation now has an intentional repository-skill exception in addition to the previously documented runtime limitations.
+Checkout-local skills are explicitly authorized repository guidance; they do not enable project extensions or settings.

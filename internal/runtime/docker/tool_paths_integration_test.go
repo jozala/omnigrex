@@ -17,7 +17,7 @@ import (
 )
 
 func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
-	profile, err := runtimeprofile.NewPiV1(
+	profile, err := runtimeprofile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
@@ -40,7 +40,7 @@ func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
 	dockerCommand(t, "volume", "create", volume)
 	t.Cleanup(func() { dockerCleanup(t, "volume", "rm", "--force", volume) })
 	request, err := (pi.TurnAdapter{}).BuildProcess(profile,
-		execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}, "", 512<<20,
+		execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}, "", 512<<20,
 		map[string]string{"TMPDIR": target + "/turn/turn-a/build"})
 	if err != nil {
 		t.Fatalf("compile Runtime Process tool-data mount: %v", err)

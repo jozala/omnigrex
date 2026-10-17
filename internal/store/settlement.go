@@ -214,7 +214,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 	ownerHash := sha256.Sum256([]byte(lease.OwnerToken))
 	_, err = tx.Exec(ctx, `
 INSERT INTO agent_turn_settlements (
-    id, workflow_id, workflow_attempt_id, agent_assignment_id, agent_session_id,
+    id, workflow_id, workflow_attempt_id, agent_participant_id, agent_session_id,
     agent_turn_id, execution_epoch, control_revision, authority, execution_job_id,
     job_attempt_number, job_lease_owner, job_lease_token, owner_id, owner_token_sha256,
     observation, observation_sha256, workflow_outcome, terminal_turn_status,
@@ -224,7 +224,7 @@ INSERT INTO agent_turn_settlements (
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
-		settlementID, job.WorkflowID, job.WorkflowAttemptID, job.AgentAssignmentID,
+		settlementID, job.WorkflowID, job.WorkflowAttemptID, job.AgentParticipantID,
 		job.AgentSessionID, turn.ID, turn.ExecutionEpoch, turn.ControlRevision, job.ID,
 		job.AttemptCount, job.LeaseOwner, job.LeaseToken, lease.OwnerID, ownerHash[:],
 		observationJSON, observationHash[:], settlementObservation.Outcome,
@@ -345,7 +345,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`,
 		diagnostic = RuntimeOOMDiagnostic
 	}
 
-	if continuation == recoveryContinuationMutationHandoff || continuation == recoveryContinuationMigrationHandoff ||
+	if continuation == recoveryContinuationMutationHandoff ||
 		continuation == recoveryContinuationDefinitionHandoff {
 		result, err := tx.Exec(ctx, `
 UPDATE agent_turns
@@ -376,18 +376,18 @@ JOIN job_attempts AS attempt ON attempt.job_id = execution.id
     AND attempt.attempt_number = execution.attempt_count
 WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
   AND execution.workflow_id = $2 AND execution.workflow_attempt_id = $3
-  AND execution.agent_assignment_id = $4 AND execution.agent_session_id = $5
+  AND execution.agent_participant_id = $4 AND execution.agent_session_id = $5
   AND execution.agent_turn_id = $6 AND execution.execution_epoch = $7
   AND execution.status IN ('SUCCEEDED', 'FAILED')`, identity.ExecutionJobID,
-		authority.WorkflowID, authority.WorkflowAttemptID, authority.AgentAssignmentID,
+		authority.WorkflowID, authority.WorkflowAttemptID, authority.AgentParticipantID,
 		authority.AgentSessionID, authority.AgentTurnID, authority.ExecutionEpoch).Scan(
 		&executionAttempt, &executionLeaseOwner, &executionLeaseToken,
 	); err != nil {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`,
-		authority.AgentAssignmentID, authority.WorkflowID).Scan(&role); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1 AND workflow_id = $2`,
+		authority.AgentParticipantID, authority.WorkflowID).Scan(&role); err != nil {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
 	var changeProposalID int64
@@ -470,7 +470,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	}
 	_, err = tx.Exec(ctx, `
 INSERT INTO agent_turn_settlements (
-    id, workflow_id, workflow_attempt_id, agent_assignment_id, agent_session_id,
+    id, workflow_id, workflow_attempt_id, agent_participant_id, agent_session_id,
     agent_turn_id, execution_epoch, control_revision, authority, execution_job_id,
     job_attempt_number, job_lease_owner, job_lease_token, owner_id, owner_token_sha256,
     recovery_job_id, recovery_job_kind, recovery_job_attempt_number,
@@ -483,7 +483,7 @@ INSERT INTO agent_turn_settlements (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
         $27, $28, $29, $30, $31, $32)`, settlementID, authority.WorkflowID,
-		authority.WorkflowAttemptID, authority.AgentAssignmentID, authority.AgentSessionID,
+		authority.WorkflowAttemptID, authority.AgentParticipantID, authority.AgentSessionID,
 		turn.ID, turn.ExecutionEpoch, turn.ControlRevision, identity.ExecutionJobID,
 		executionAttempt, executionLeaseOwner, executionLeaseToken, originalOwnerID,
 		originalOwnerHash, authority.ID, authority.Kind, authority.AttemptCount,
@@ -624,7 +624,7 @@ func sanitizeAgentTurnDiagnostic(value string) string {
 }
 
 func validSettlementLease(lease AgentTurnLease) bool {
-	return validUUID(lease.ID) && validUUID(lease.AgentAssignmentID) && validUUID(lease.AgentSessionID) &&
+	return validUUID(lease.ID) && validUUID(lease.AgentParticipantID) && validUUID(lease.AgentSessionID) &&
 		validUUID(lease.JobLease.ID) && validUUID(lease.JobLease.LeaseToken) && validUUID(lease.OwnerToken) &&
 		lease.ExecutionEpoch > 0 && lease.ControlRevision > 0 && lease.JobLease.Attempt > 0 &&
 		strings.TrimSpace(lease.JobLease.LeaseOwner) != "" && strings.TrimSpace(lease.OwnerID) != ""
@@ -643,11 +643,10 @@ func lockLiveAgentTurnSettlement(ctx context.Context, tx pgx.Tx, lease AgentTurn
 	if err != nil {
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, err
 	}
-	turn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentAssignmentID = job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	if !hierarchy.allowsActiveTurn() || hierarchy.controlRevision != lease.ControlRevision ||
 		!turn.active || turn.Status != AgentTurnSettling || turn.MutationAdmissionOpen ||
-		turn.AgentAssignmentID != lease.AgentAssignmentID || turn.AgentSessionID != lease.AgentSessionID ||
+		turn.AgentParticipantID != lease.AgentParticipantID || turn.AgentSessionID != lease.AgentSessionID ||
 		turn.WorkflowAttemptID != lease.WorkflowAttemptID || turn.ExecutionEpoch != lease.ExecutionEpoch ||
 		turn.ControlRevision != lease.ControlRevision || turn.ownerID != lease.OwnerID ||
 		turn.ownerToken != lease.OwnerToken || !turn.leaseLive {
@@ -685,7 +684,7 @@ WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, fmt.Errorf("lock Agent Turn settlement slot: %w", err)
 	}
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1 AND workflow_id = $2`, job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 		return Job{}, lockedTurn{}, "", workflow.Snapshot{}, ErrAgentTurnFenceLost
 	}
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
@@ -828,9 +827,9 @@ func (store *Store) validateSettlementReviewerActor(ctx context.Context, tx pgx.
 	}
 	var actorID int64
 	err := tx.QueryRow(ctx, `
-SELECT COALESCE(github_app_actor_id, 0) FROM agent_assignments
+SELECT COALESCE(github_app_actor_id, 0) FROM agent_participants
 WHERE id = $1 AND workflow_id = $2 AND role = $3
-	  AND status = 'ACTIVE' AND state_deleted_at IS NULL`, job.AgentAssignmentID, job.WorkflowID, role).Scan(&actorID)
+	  AND status = 'ACTIVE' AND state_deleted_at IS NULL`, job.AgentParticipantID, job.WorkflowID, role).Scan(&actorID)
 	if err != nil || actorID <= 0 || actorID != observation.AuthorizedReviewerActorID || actorID != observation.Review.ActorID {
 		return ErrReviewerActorConflict
 	}
@@ -967,7 +966,7 @@ DELETE FROM agent_turn_slots WHERE agent_turn_id = $1 AND agent_session_id = $2
 func readPersistedAgentTurnSettlement(ctx context.Context, tx pgx.Tx, turnID string, epoch int64) (persistedAgentTurnSettlement, error) {
 	var persisted persistedAgentTurnSettlement
 	err := tx.QueryRow(ctx, `
-SELECT workflow_id::text, workflow_attempt_id::text, agent_assignment_id::text,
+SELECT workflow_id::text, workflow_attempt_id::text, agent_participant_id::text,
        agent_session_id::text, execution_job_id::text, job_attempt_number,
        job_lease_owner, job_lease_token::text, owner_id, owner_token_sha256,
        execution_epoch, control_revision, authority,
@@ -995,7 +994,7 @@ func verifyAgentTurnSettlementReplay(ctx context.Context, tx pgx.Tx, persisted p
 	ownerHash := sha256.Sum256([]byte(lease.OwnerToken))
 	if persisted.result.Authority != AgentTurnSettlementLive || persisted.result.AgentTurnID != lease.ID || persisted.executionEpoch != lease.ExecutionEpoch ||
 		persisted.controlRevision != lease.ControlRevision || persisted.workflowAttemptID != lease.WorkflowAttemptID ||
-		persisted.assignmentID != lease.AgentAssignmentID || persisted.sessionID != lease.AgentSessionID ||
+		persisted.assignmentID != lease.AgentParticipantID || persisted.sessionID != lease.AgentSessionID ||
 		persisted.executionJobID != lease.JobLease.ID || persisted.jobAttempt != lease.JobLease.Attempt ||
 		persisted.jobLeaseOwner != lease.JobLease.LeaseOwner || persisted.jobLeaseToken != lease.JobLease.LeaseToken ||
 		persisted.ownerID != lease.OwnerID || !bytes.Equal(persisted.ownerTokenSHA256, ownerHash[:]) {

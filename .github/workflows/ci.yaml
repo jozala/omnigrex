@@ -43,8 +43,8 @@ jobs:
           OMNIGREX_GITHUB_DEVELOPER_APP_ID: "1"
           OMNIGREX_GITHUB_REVIEWER_APP_ID: "2"
           OMNIGREX_ORCHESTRATOR_IMAGE: registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111
-          OMNIGREX_PI_RPC_V1_IMAGE: registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000
-          OMNIGREX_PI_RPC_V1_PLATFORM: linux/amd64
+          OMNIGREX_PI_IMAGE: registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          OMNIGREX_PI_PLATFORM: linux/amd64
           OMNIGREX_MICROSANDBOX_KVM_GID: "2"
           OMNIGREX_DATABASE_PASSWORD_FILE: /dev/null
           OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /dev/null
@@ -66,7 +66,7 @@ jobs:
         run: |
           docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
           docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
-          go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/deployment
+          go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
           OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 ./internal/runtime/pi
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh

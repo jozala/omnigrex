@@ -39,7 +39,7 @@ func (Configuration) GoString() string { return "pi.Configuration{<redacted>}" }
 // Render translates a trusted Profile snapshot and the running deployment's
 // instructions. The checkout supplies skills, never Profile or MCP authority.
 func Render(p agentprofile.Profile, policy role.Policy, operator agentinstructions.Operator, stage workflow.StageDefinition, purpose workflow.TurnPurpose, endpoint agent.MCPEndpoint, credentials []byte) (Configuration, error) {
-	if p.Runtime() != "pi-rpc/v1" || p.Role() != policy.Role || stage.Role != policy.Role || agentprofile.ValidatePiPermissions(policy, p.Permissions()) != nil {
+	if p.Runtime() != "pi-rpc/v2" || p.Role() != policy.Role || stage.Role != policy.Role || agentprofile.ValidatePiPermissions(policy, p.Permissions()) != nil {
 		return Configuration{}, ErrConfiguration
 	}
 	provider, _, ok := strings.Cut(p.Model(), "/")

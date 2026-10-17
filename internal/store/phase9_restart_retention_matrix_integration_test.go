@@ -455,7 +455,7 @@ func TestPhaseNineCollectionRetainsPostgreSQLHistoryAndProductionPreparationCrea
 	}
 	var assignments, sessions, turns, mutations, executionJobs, executionAttempts int
 	if err := pool.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM agent_assignments WHERE id = $1),
+SELECT (SELECT count(*) FROM agent_participants WHERE id = $1),
        (SELECT count(*) FROM agent_sessions WHERE id = $2),
        (SELECT count(*) FROM agent_turns WHERE id = $3),
        (SELECT count(*) FROM tool_invocations WHERE id = $4),
@@ -466,10 +466,10 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE id = $1),
 		t.Fatal(err)
 	}
 	if assignments != 1 || sessions != 1 || turns != 1 || mutations != 1 || executionJobs != 1 || executionAttempts != 1 ||
-		fresh.Assignment.ID == fixture.assignmentID || fresh.Assignment.Generation != 2 || fresh.Session.ID == fixture.sessionID {
+		fresh.Participant.ID == fixture.assignmentID || fresh.Participant.Generation != 2 || fresh.Session.ID == fixture.sessionID {
 		t.Fatalf("retained history = rows %d/%d/%d/%d/%d/%d, fresh Assignment %s generation %d Session %s",
 			assignments, sessions, turns, mutations, executionJobs, executionAttempts,
-			fresh.Assignment.ID, fresh.Assignment.Generation, fresh.Session.ID)
+			fresh.Participant.ID, fresh.Participant.Generation, fresh.Session.ID)
 	}
 }
 
@@ -478,7 +478,7 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	profile, err := runtimeprofile.NewPiV1(
+	profile, err := runtimeprofile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("7", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)
@@ -596,8 +596,8 @@ func assertPhaseNinePreparedOnce(t *testing.T, pool *pgxpool.Pool, ctx context.C
 	t.Helper()
 	var assignments, sessions, turns, executionJobs int
 	if err := pool.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
-       (SELECT count(*) FROM agent_sessions AS session JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id WHERE assignment.workflow_id = $1),
+SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id = $1),
+       (SELECT count(*) FROM agent_sessions AS session JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id WHERE assignment.workflow_id = $1),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1),
        (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RUN_AGENT_TURN')`, workflowID).Scan(
 		&assignments, &sessions, &turns, &executionJobs); err != nil {
@@ -635,9 +635,9 @@ func phaseNineMainExecution(ctx context.Context, database *store.Store, lease st
 	if err != nil {
 		return err
 	}
-	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+	key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
 		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
-		RuntimeProfileName: current.Assignment.RuntimeProfileName, RuntimeProfileVersion: current.Assignment.RuntimeProfileVersion}
+		RuntimeProfileName: current.Participant.RuntimeProfileName, RuntimeProfileVersion: current.Participant.RuntimeProfileVersion}
 	ledger := database.ExecutionLedger(lease)
 	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		return err
@@ -784,7 +784,7 @@ func openPhaseNineGateway(t *testing.T, database mcp.Store, backend mcp.Backend,
 
 func phaseNineGatewayScope(lease store.AgentTurnLease, execution store.AgentTurnExecutionContext) mcp.TokenScope {
 	return mcp.TokenScope{
-		Lease: lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
+		Lease: lease, WorkflowID: execution.WorkflowID, Role: execution.Participant.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number},
 		Branch:     "omnigrex/issue-12", DefaultBranch: "main", HeadSHA: strings.Repeat("1", 40),

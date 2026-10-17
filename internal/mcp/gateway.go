@@ -143,7 +143,7 @@ type ToolScope struct {
 	RuntimeProfileName    string            `json:"runtime_profile_name"`
 	RuntimeProfileVersion string            `json:"runtime_profile_version"`
 	WorkflowID            string            `json:"workflow_id"`
-	AgentAssignmentID     string            `json:"agent_assignment_id"`
+	AgentParticipantID    string            `json:"agent_participant_id"`
 	AgentSessionID        string            `json:"agent_session_id"`
 	AgentTurnID           string            `json:"agent_turn_id"`
 	ExecutionEpoch        int64             `json:"execution_epoch"`
@@ -531,8 +531,8 @@ func validateTokenScope(policy role.Policy, scope TokenScope) error {
 	}
 	if scope.WorkflowID == "" || scope.WorkflowID != lease.JobLease.WorkflowID ||
 		lease.ID == "" || lease.JobLease.AgentTurnID != lease.ID || lease.AgentSessionID == "" ||
-		lease.JobLease.AgentSessionID != lease.AgentSessionID || lease.AgentAssignmentID == "" ||
-		lease.JobLease.AgentAssignmentID != lease.AgentAssignmentID || lease.ExecutionEpoch <= 0 ||
+		lease.JobLease.AgentSessionID != lease.AgentSessionID || lease.AgentParticipantID == "" ||
+		lease.JobLease.AgentParticipantID != lease.AgentParticipantID || lease.ExecutionEpoch <= 0 ||
 		lease.JobLease.ExecutionEpoch != lease.ExecutionEpoch || lease.OwnerID == "" || lease.OwnerToken == "" ||
 		scope.Repository.ID <= 0 || strings.TrimSpace(scope.Repository.Owner) == "" || strings.TrimSpace(scope.Repository.Name) == "" ||
 		scope.Issue.ID <= 0 || scope.Issue.Number <= 0 || scope.ExpiresAt.IsZero() ||
@@ -1354,7 +1354,7 @@ func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessa
 		return nil, "invalid tool arguments"
 	}
 	markerIdentity := githubapi.Marker{
-		WorkflowID: scope.WorkflowID, AgentAssignmentID: scope.Lease.AgentAssignmentID, OperationID: placeholderMarkerOperationID,
+		WorkflowID: scope.WorkflowID, AgentParticipantID: scope.Lease.AgentParticipantID, OperationID: placeholderMarkerOperationID,
 	}
 	marker, err := githubapi.RenderMarker(markerIdentity)
 	if err != nil {
@@ -1450,7 +1450,7 @@ func (gateway *Gateway) backendScope(scope TokenScope) ToolScope {
 	profileName, displayName, _ := gateway.publicationIdentity(scope)
 	return ToolScope{
 		RuntimeProfileName: scope.RuntimeProfileName, RuntimeProfileVersion: scope.RuntimeProfileVersion,
-		WorkflowID: scope.WorkflowID, AgentAssignmentID: scope.Lease.AgentAssignmentID,
+		WorkflowID: scope.WorkflowID, AgentParticipantID: scope.Lease.AgentParticipantID,
 		AgentSessionID: scope.Lease.AgentSessionID, AgentTurnID: scope.Lease.ID,
 		ExecutionEpoch: scope.Lease.ExecutionEpoch, Role: scope.Role,
 		AgentProfileName: profileName, RoleDisplayName: displayName,

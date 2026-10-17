@@ -33,9 +33,9 @@ func TestStopWorkerClaimsOnlyStopJobsAndAcknowledgesExactRuntimeAbsence(t *testi
 		t.Fatalf("ClaimJobKind() = (%q, %q, %q, %s)", durable.claimQueue, durable.claimKind, durable.claimOwner, durable.claimDuration)
 	}
 	wantLabels := execution.Key{
-		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
 		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: 7,
-		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 	}
 	if cleaner.callCount() != 1 || !reflect.DeepEqual(cleaner.labelsAt(0), wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labelsAt(0), wantLabels)
@@ -97,7 +97,7 @@ func TestStopWorkerNeverStartedCleanupRequiresDurableProofAndRemoval(t *testing.
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			lease := staleRuntimeLease()
-			durable := &stopWorkerStore{lease: &lease, neverStartedErr: test.proofErr, cleanupContext: store.AgentTurnRuntimeCleanupContext{AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleDeveloper}}
+			durable := &stopWorkerStore{lease: &lease, neverStartedErr: test.proofErr, cleanupContext: store.AgentTurnRuntimeCleanupContext{AssignmentID: lease.AgentParticipantID, Role: workflow.RoleDeveloper}}
 			cleaner := &recordingRuntimeCleaner{exitObservation: test.observation, stopErr: test.stopErr}
 			if test.removeErr != nil {
 				cleaner.results = []error{test.removeErr}
@@ -132,7 +132,7 @@ func TestStopWorkerNeverStartedCleanupRequiresDurableProofAndRemoval(t *testing.
 func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *testing.T) {
 	lease := staleRuntimeLease()
 	cleanup := store.AgentTurnRuntimeCleanupContext{
-		AssignmentID:     lease.AgentAssignmentID,
+		AssignmentID:     lease.AgentParticipantID,
 		Role:             workflow.RoleReviewer,
 		DiscardWorkspace: true,
 	}
@@ -155,7 +155,7 @@ func TestStopWorkerDiscardsRecoveredReviewerWorkspaceBeforeAcknowledgement(t *te
 func TestStopWorkerCapturesAfterConfirmedStopBeforeRemovalAndReviewerDiscard(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+		AssignmentID: lease.AgentParticipantID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
 	}}
 	operations := []string{}
 	cleaner := &recordingRuntimeCleaner{operations: &operations}
@@ -168,8 +168,8 @@ func TestStopWorkerCapturesAfterConfirmedStopBeforeRemovalAndReviewerDiscard(t *
 		t.Fatalf("cleanup ordering = %v", operations)
 	}
 	wantKey := execution.Key{
-		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID, AgentTurnID: lease.AgentTurnID,
-		ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID, AgentTurnID: lease.AgentTurnID,
+		ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 	}
 	want := execution.CaptureRequest{
 		Workspace: execution.WorkspaceRef{Key: wantKey}, OperationID: lease.AgentTurnID, Purpose: execution.TerminalCapture,
@@ -184,7 +184,7 @@ func TestStopWorkerCapturesAfterConfirmedStopBeforeRemovalAndReviewerDiscard(t *
 func TestStopWorkerCaptureFailureRetainsEnvironmentAndReviewerWorkspaceForRetry(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+		AssignmentID: lease.AgentParticipantID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
 	}}
 	failure := errors.New("capture transport unavailable")
 	cleaner := &recordingRuntimeCleaner{}
@@ -281,7 +281,7 @@ func TestStopWorkerPreparationOnlyCleanupUsesDurableCaptureExemption(t *testing.
 	for _, fenceErr := range []error{nil, store.ErrAgentTurnRecoveryFenceLost} {
 		t.Run(fmt.Sprint(fenceErr), func(t *testing.T) {
 			durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-				AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+				AssignmentID: lease.AgentParticipantID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
 			}}
 			cleaner := &recordingRuntimeCleaner{}
 			workspaces := &recordingWorkspaceDiscarder{captureErr: errors.New("workspace was never materialized")}
@@ -322,7 +322,7 @@ func TestStopWorkerPreparationOnlyCleanupUsesDurableCaptureExemption(t *testing.
 func TestStopWorkerDoesNotDiscardReviewerWorkspaceAfterRecoveryFenceLoss(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: lease.AgentAssignmentID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
+		AssignmentID: lease.AgentParticipantID, Role: workflow.RoleReviewer, DiscardWorkspace: true,
 	}, cleanupFenceErr: store.ErrAgentTurnRecoveryFenceLost}
 	discarder := &recordingWorkspaceDiscarder{}
 	worker := newStopWorkerWithWorkspace(t, durable, &recordingRuntimeCleaner{}, discarder, 100*time.Millisecond, time.Millisecond, time.Millisecond)
@@ -339,7 +339,7 @@ func TestStopWorkerDoesNotDiscardReviewerWorkspaceAfterRecoveryFenceLoss(t *test
 func TestStopWorkerRetainsRecoveredDeveloperWorkspace(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID: lease.AgentAssignmentID,
+		AssignmentID: lease.AgentParticipantID,
 		Role:         workflow.RoleDeveloper,
 	}}
 	discarder := &recordingWorkspaceDiscarder{}
@@ -360,7 +360,7 @@ func TestStopWorkerRetainsRecoveredDeveloperWorkspace(t *testing.T) {
 func TestStopWorkerReviewerDiscardFailureConsumesOneClaimedAttempt(t *testing.T) {
 	lease := staleRuntimeLease()
 	durable := &stopWorkerStore{lease: &lease, cleanupContext: store.AgentTurnRuntimeCleanupContext{
-		AssignmentID:     lease.AgentAssignmentID,
+		AssignmentID:     lease.AgentParticipantID,
 		Role:             workflow.RoleReviewer,
 		DiscardWorkspace: true,
 	}}
@@ -385,7 +385,7 @@ func TestStopWorkerCleanupContextFailureConsumesOneClaimedAttempt(t *testing.T) 
 	durable := &stopWorkerStore{
 		lease: &lease,
 		cleanupContext: store.AgentTurnRuntimeCleanupContext{
-			AssignmentID: lease.AgentAssignmentID,
+			AssignmentID: lease.AgentParticipantID,
 			Role:         workflow.RoleDeveloper,
 		},
 		cleanupContextResults: []error{errors.New("database temporarily unavailable")},
@@ -616,7 +616,7 @@ func newStopWorkerWithWorkspace(t *testing.T, durable *stopWorkerStore, cleaner 
 	durable.workspaces = workspaces
 	if durable.cleanupContext.AssignmentID == "" && durable.lease != nil {
 		durable.cleanupContext = store.AgentTurnRuntimeCleanupContext{
-			AssignmentID: durable.lease.AgentAssignmentID,
+			AssignmentID: durable.lease.AgentParticipantID,
 			Role:         workflow.RoleDeveloper,
 		}
 	}
@@ -634,10 +634,10 @@ func staleRuntimeLease() store.JobLease {
 	return store.JobLease{Job: store.Job{
 		JobSpec: store.JobSpec{
 			Queue: store.AgentTurnRecoveryQueue, Kind: store.StopStaleRuntimeJobKind,
-			AgentAssignmentID: "10000000-0000-4000-8000-000000000001",
-			AgentSessionID:    "20000000-0000-4000-8000-000000000001",
-			AgentTurnID:       "30000000-0000-4000-8000-000000000001",
-			ExecutionEpoch:    7,
+			AgentParticipantID: "10000000-0000-4000-8000-000000000001",
+			AgentSessionID:     "20000000-0000-4000-8000-000000000001",
+			AgentTurnID:        "30000000-0000-4000-8000-000000000001",
+			ExecutionEpoch:     7,
 		},
 		ID: "40000000-0000-4000-8000-000000000001", Status: store.JobLeased,
 		AttemptCount: 1, LeaseOwner: "runtime-stop-worker", LeaseToken: "50000000-0000-4000-8000-000000000001",
@@ -731,7 +731,7 @@ func (durable *stopWorkerStore) GetAgentTurnRuntimeCleanupContext(_ context.Cont
 	cleanup := durable.cleanupContext
 	if cleanup.RuntimeProfileName == "" {
 		cleanup.RuntimeProfileName = "pi-rpc"
-		cleanup.RuntimeProfileVersion = "v1"
+		cleanup.RuntimeProfileVersion = "v2"
 	}
 	return cleanup, result
 }

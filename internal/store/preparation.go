@@ -27,12 +27,10 @@ var (
 	// The caller must fetch a fresh observation and retry within the existing
 	// preparation job budget; it must not create a Turn on the stale head.
 	ErrAgentTurnPreparationVerificationStale = errors.New("agent turn preparation verification is stale")
-	// ErrAssignmentConfigurationConflict means an existing Participant has a different immutable binding.
-	ErrAssignmentConfigurationConflict = errors.New("agent participant configuration conflict")
+	// ErrParticipantConfigurationConflict means an existing Participant has a different immutable binding.
+	ErrParticipantConfigurationConflict = errors.New("agent participant configuration conflict")
 	// ErrAgentParticipantNotFound means the requested Participant does not exist.
 	ErrAgentParticipantNotFound = errors.New("agent participant not found")
-	// ErrAgentAssignmentNotFound is retained for non-store callers using the former name.
-	ErrAgentAssignmentNotFound = ErrAgentParticipantNotFound
 	// ErrAgentSessionControlFenceLost means a control transfer used a stale revision or identity.
 	ErrAgentSessionControlFenceLost = errors.New("agent session control fence lost")
 	// ErrHumanPromptLeaseActive means a durable human prompt token already owns Session admission.
@@ -53,15 +51,7 @@ const (
 	AgentParticipantWaitingForHuman AgentParticipantStatus = "WAITING_FOR_HUMAN"
 	AgentParticipantCompleted       AgentParticipantStatus = "COMPLETED"
 	AgentParticipantSuperseded      AgentParticipantStatus = "SUPERSEDED"
-
-	AgentAssignmentActive          = AgentParticipantActive
-	AgentAssignmentWaitingForHuman = AgentParticipantWaitingForHuman
-	AgentAssignmentCompleted       = AgentParticipantCompleted
-	AgentAssignmentSuperseded      = AgentParticipantSuperseded
 )
-
-// AgentAssignmentStatus is retained for non-store callers using the former name.
-type AgentAssignmentStatus = AgentParticipantStatus
 
 // AgentSessionStatus is the durable lifecycle state of an Agent Session.
 type AgentSessionStatus string
@@ -91,9 +81,6 @@ type ParticipantRuntimeBinding struct {
 	RuntimeImageDigest          string
 }
 
-// AssignmentRuntimeBinding is retained for non-store callers using the former name.
-type AssignmentRuntimeBinding = ParticipantRuntimeBinding
-
 // AgentProfileSnapshot is the credential-free mutable Agent Profile content used for one turn.
 type AgentProfileSnapshot struct {
 	CommitSHA     string
@@ -103,19 +90,14 @@ type AgentProfileSnapshot struct {
 
 // ParticipantPreparation supplies one Stage's Participant binding and per-turn profile snapshot.
 type ParticipantPreparation struct {
-	Binding              ParticipantRuntimeBinding
-	RuntimeCompatibility RuntimeCompatibilityRequirement
-	RuntimeContract      json.RawMessage
-	Profile              AgentProfileSnapshot
-	ProfilePath          string
-	TurnConfiguration    json.RawMessage
+	Binding           ParticipantRuntimeBinding
+	RuntimeContract   json.RawMessage
+	Profile           AgentProfileSnapshot
+	ProfilePath       string
+	TurnConfiguration json.RawMessage
 }
 
-// RolePreparation is retained for non-store callers using the former name.
-type RolePreparation = ParticipantPreparation
-
-// AgentTurnPreparationSpec supplies Stage-scoped preparations. Developer and Reviewer are
-// compatibility fields for the built-in two-Stage caller and are not persisted eagerly.
+// AgentTurnPreparationSpec supplies preparations for exact Workflow Stages.
 //
 // VerifiedHeadSHA carries an authoritative GitHub Pull Request head observed
 // outside database locks for the durable current Change Proposal.
@@ -126,8 +108,6 @@ type RolePreparation = ParticipantPreparation
 // creation and scopes the new Turn to the verified head.
 type AgentTurnPreparationSpec struct {
 	Stages           map[workflow.StageID]ParticipantPreparation
-	Developer        RolePreparation
-	Reviewer         RolePreparation
 	VerifiedHeadSHA  string
 	VerifiedPRNumber int64
 	VerifiedPRID     int64
@@ -149,7 +129,7 @@ type ActiveChangeProposal struct {
 
 // AgentParticipant is the durable profile identity participating in one Workflow generation.
 type AgentParticipant struct {
-	AssignmentRuntimeBinding
+	ParticipantRuntimeBinding
 	ID                            string
 	createdByPreparationJobID     string
 	reactivatedByPreparationJobID string
@@ -165,9 +145,6 @@ type AgentParticipant struct {
 	StateDeletedAt                *time.Time
 }
 
-// AgentAssignment is retained for non-store callers using the former name.
-type AgentAssignment = AgentParticipant
-
 // StageAssignment is the immutable selection of a Participant for one Stage and generation.
 type StageAssignment struct {
 	WorkflowID           string
@@ -182,7 +159,6 @@ type StageAssignment struct {
 type AgentSession struct {
 	ID                          string
 	AgentParticipantID          string
-	AgentAssignmentID           string
 	SessionNumber               int
 	RuntimeSessionID            string
 	RuntimeCapabilities         json.RawMessage
@@ -234,7 +210,6 @@ type AgentTurnPreparation struct {
 	ChangeProposalID  string
 	Participant       AgentParticipant
 	StageAssignment   StageAssignment
-	Assignment        AgentAssignment
 	Session           AgentSession
 }
 
@@ -242,14 +217,13 @@ type AgentTurnPreparation struct {
 type AgentTurnPreparationCommit struct {
 	Participant     AgentParticipant
 	StageAssignment StageAssignment
-	Assignment      AgentAssignment
 	Session         AgentSession
 	Turn            AgentTurn
 	Job             Job
 }
 
-// AssignmentConfigurationHandoff is the durable outcome of acknowledging an immutable Assignment binding conflict.
-type AssignmentConfigurationHandoff struct {
+// ParticipantConfigurationHandoff is the durable outcome of acknowledging an immutable Participant binding conflict.
+type ParticipantConfigurationHandoff struct {
 	JobID             string
 	WorkflowID        string
 	WorkflowAttemptID string
@@ -299,7 +273,7 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if err != nil || !store.validAgentTurnPreparationPayload(payload, job) {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnPreparationFenceLost
 	}
-	participantPreparation, ok := preparationForStage(spec, payload.Stage, payload.Role)
+	participantPreparation, ok := spec.Stages[payload.Stage]
 	if !ok {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("prepare Agent Turn: no preparation for Stage %q", payload.Stage)
 	}
@@ -350,7 +324,7 @@ WHERE id = $1 AND status = 'RETAINED'`, session.ID); err != nil {
 		WorkflowRevision: payload.Revision, Mode: payload.Mode, Stage: payload.Stage, Role: payload.Role,
 		Purpose: payload.Purpose, ExpectedHeadSHA: payload.ExpectedHeadSHA, RetryOfTurnID: payload.RetryOfTurnID,
 		ChangeProposalID: changeProposalID, Participant: participant, StageAssignment: stageAssignment,
-		Assignment: participant, Session: session,
+		Session: session,
 	}
 	policy, ok := store.policies.Lookup(preparation.Role)
 	if !ok {
@@ -431,7 +405,7 @@ SELECT EXISTS (
 			AgentProfileContentSHA256: append([]byte(nil), profile.ContentSHA256...), AgentProfileConfig: profileConfig,
 			TurnConfiguration: turnConfiguration,
 		},
-		ID: turnID, AgentParticipantID: participant.ID, AgentAssignmentID: participant.ID, TurnNumber: turnNumber,
+		ID: turnID, AgentParticipantID: participant.ID, TurnNumber: turnNumber,
 		operationLineageID: operationLineageID,
 		ExecutionEpoch:     executionEpoch, Status: AgentTurnQueued,
 	}
@@ -471,7 +445,7 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 		maxAttempts: 1, idempotencyKey: "run-agent-turn:" + turn.ID,
 		scope: jobInsertScope{
 			workflowID: preparation.WorkflowID, workflowAttemptID: preparation.WorkflowAttemptID,
-			agentAssignmentID: participant.ID, agentSessionID: session.ID,
+			agentParticipantID: participant.ID, agentSessionID: session.ID,
 			agentTurnID: turn.ID, executionEpoch: turn.ExecutionEpoch,
 		},
 	})
@@ -484,7 +458,7 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 		}
 	}
 	jobResult, err := json.Marshal(map[string]any{
-		"agent_participant_id": participant.ID, "agent_assignment_id": participant.ID, "agent_session_id": session.ID,
+		"agent_participant_id": participant.ID, "agent_session_id": session.ID,
 		"agent_turn_id": turnID, "execution_job_id": executionJobID, "execution_epoch": executionEpoch,
 	})
 	if err != nil {
@@ -503,51 +477,51 @@ WHERE id = $1 AND control_owner = 'AUTOMATION' AND control_revision = $2
 	session.NextTurnNumber++
 	session.NextExecutionEpoch++
 	return AgentTurnPreparationCommit{
-		Participant: participant, StageAssignment: stageAssignment, Assignment: participant,
+		Participant: participant, StageAssignment: stageAssignment,
 		Session: session, Turn: turn, Job: executionJob,
 	}, nil
 }
 
-// AcknowledgeAssignmentConfigurationConflict revalidates immutable binding drift and atomically creates a Human Handoff.
-func (store *Store) AcknowledgeAssignmentConfigurationConflict(ctx context.Context, lease JobLease, spec AgentTurnPreparationSpec) (AssignmentConfigurationHandoff, error) {
+// AcknowledgeParticipantConfigurationConflict revalidates immutable binding drift and atomically creates a Human Handoff.
+func (store *Store) AcknowledgeParticipantConfigurationConflict(ctx context.Context, lease JobLease, spec AgentTurnPreparationSpec) (ParticipantConfigurationHandoff, error) {
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, fmt.Errorf("begin Assignment configuration conflict acknowledgement: %w", err)
+		return ParticipantConfigurationHandoff{}, fmt.Errorf("begin Participant configuration conflict acknowledgement: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 
 	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	payload, err := decodeAgentTurnPreparationPayload(job.Payload)
 	if err != nil || !store.validAgentTurnPreparationPayload(payload, job) {
-		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
+		return ParticipantConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
-	preparation, ok := preparationForStage(spec, payload.Stage, payload.Role)
+	preparation, ok := spec.Stages[payload.Stage]
 	if !ok {
-		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
+		return ParticipantConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	if err := validateParticipantPreparation(payload.Role, preparation); err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	if _, err := store.lockPreparationWorkflow(ctx, tx, job, payload); err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	conflict, err := revalidateParticipantConfigurationConflict(ctx, tx, job, payload, preparation)
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	if !conflict {
-		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
+		return ParticipantConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, fmt.Errorf("rehydrate Assignment configuration conflict Workflow: %w", err)
+		return ParticipantConfigurationHandoff{}, fmt.Errorf("rehydrate Participant configuration conflict Workflow: %w", err)
 	}
 	decision := store.reducer.Reduce(snapshot, workflow.AssignmentConfigurationConflictEvent{
 		EventMetadata: workflow.EventMetadata{
@@ -557,29 +531,29 @@ func (store *Store) AcknowledgeAssignmentConfigurationConflict(ctx context.Conte
 		Role: payload.Role,
 	})
 	if err := validateWorkflowDecision(snapshot, decision); err != nil || decision.Disposition != workflow.DispositionApplied || decision.Reason != workflow.ReasonAssignmentConfigurationConflict {
-		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
+		return ParticipantConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	normalizedEventID, settlementID, err := readWorkflowJobActionProvenance(ctx, tx, job.ID)
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
+		return ParticipantConfigurationHandoff{}, ErrAgentTurnPreparationFenceLost
 	}
 	actionNamespace := "prepare-agent-turn:" + job.ID
 	if err := persistAppliedDecisionWithProvenance(ctx, tx, normalizedEventID, settlementID, job.WorkflowID, snapshot, decision, actionNamespace); err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	jobResult, err := json.Marshal(map[string]any{
 		"reason": decision.Reason, "revision": decision.Snapshot.Revision,
 	})
 	if err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	if err := completeAcknowledgementJobTx(ctx, tx, job, jobResult, ErrAgentTurnPreparationFenceLost); err != nil {
-		return AssignmentConfigurationHandoff{}, err
+		return ParticipantConfigurationHandoff{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return AssignmentConfigurationHandoff{}, fmt.Errorf("commit Assignment configuration conflict acknowledgement: %w", err)
+		return ParticipantConfigurationHandoff{}, fmt.Errorf("commit Participant configuration conflict acknowledgement: %w", err)
 	}
-	return AssignmentConfigurationHandoff{
+	return ParticipantConfigurationHandoff{
 		JobID: job.ID, WorkflowID: job.WorkflowID, WorkflowAttemptID: job.WorkflowAttemptID,
 		Role: payload.Role, WorkflowRevision: decision.Snapshot.Revision,
 	}, nil
@@ -671,7 +645,7 @@ WHERE id = $1 AND lease_token = $2 AND attempt_count = $3 AND status = 'LEASED'`
 		var assignmentsExist bool
 		if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
-    SELECT 1 FROM agent_assignments
+    SELECT 1 FROM agent_participants
     WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL
 )`, job.WorkflowID).Scan(&assignmentsExist); err != nil {
 			return AgentTurnPreparationFailureAcknowledgement{}, fmt.Errorf("inspect preparation Assignments: %w", err)
@@ -731,7 +705,7 @@ func (store *Store) GetAgentParticipant(ctx context.Context, participantID strin
 	if !validUUID(participantID) {
 		return AgentParticipant{}, ErrAgentParticipantNotFound
 	}
-	participant, err := scanAgentAssignment(store.pool.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, participantID))
+	participant, err := scanAgentParticipant(store.pool.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, participantID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentParticipant{}, ErrAgentParticipantNotFound
 	}
@@ -741,35 +715,25 @@ func (store *Store) GetAgentParticipant(ctx context.Context, participantID strin
 	return participant, nil
 }
 
-// GetAgentAssignment retains the former API for non-store callers.
-func (store *Store) GetAgentAssignment(ctx context.Context, assignmentID string) (AgentAssignment, error) {
-	return store.GetAgentParticipant(ctx, assignmentID)
-}
-
 // ListAgentParticipants returns every Participant generation for a Workflow.
 func (store *Store) ListAgentParticipants(ctx context.Context, workflowID string) ([]AgentParticipant, error) {
 	if !validUUID(workflowID) {
 		return nil, ErrAgentParticipantNotFound
 	}
-	rows, err := store.pool.Query(ctx, agentAssignmentSelect+` WHERE workflow_id = $1 ORDER BY generation, agent_profile_name`, workflowID)
+	rows, err := store.pool.Query(ctx, agentParticipantSelect+` WHERE workflow_id = $1 ORDER BY generation, agent_profile_name`, workflowID)
 	if err != nil {
 		return nil, fmt.Errorf("list Agent Participants: %w", err)
 	}
 	defer rows.Close()
 	var participants []AgentParticipant
 	for rows.Next() {
-		participant, err := scanAgentAssignment(rows)
+		participant, err := scanAgentParticipant(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan Agent Participant: %w", err)
 		}
 		participants = append(participants, participant)
 	}
 	return participants, rows.Err()
-}
-
-// ListAgentAssignments retains the former API for non-store callers.
-func (store *Store) ListAgentAssignments(ctx context.Context, workflowID string) ([]AgentAssignment, error) {
-	return store.ListAgentParticipants(ctx, workflowID)
 }
 
 // ListStageAssignments returns immutable Stage bindings for a Workflow.
@@ -820,7 +784,7 @@ func (store *Store) GetAgentSessionForParticipant(ctx context.Context, participa
 		return AgentSession{}, ErrAgentSessionNotFound
 	}
 	session, err := scanAgentSession(store.pool.QueryRow(ctx, agentSessionSelect+`
-	 WHERE agent_assignment_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED')`, participantID))
+	 WHERE agent_participant_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED')`, participantID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentSession{}, ErrAgentSessionNotFound
 	}
@@ -828,11 +792,6 @@ func (store *Store) GetAgentSessionForParticipant(ctx context.Context, participa
 		return AgentSession{}, fmt.Errorf("get current Agent Session: %w", err)
 	}
 	return session, nil
-}
-
-// GetAgentSessionForAssignment retains the former API for non-store callers.
-func (store *Store) GetAgentSessionForAssignment(ctx context.Context, assignmentID string) (AgentSession, error) {
-	return store.GetAgentSessionForParticipant(ctx, assignmentID)
 }
 
 // TransferAgentSessionControl compare-and-sets session authority and advances its revision once.
@@ -851,7 +810,7 @@ func (store *Store) TransferAgentSessionControl(ctx context.Context, sessionID s
 	if err := tx.QueryRow(ctx, `
 SELECT assignment.workflow_id::text, assignment.id::text, assignment.role
 FROM agent_sessions AS session
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE session.id = $1`, sessionID).Scan(&workflowID, &assignmentID, &participantRole); err != nil {
 		return AgentSession{}, ErrAgentSessionControlFenceLost
 	}
@@ -859,12 +818,12 @@ WHERE session.id = $1`, sessionID).Scan(&workflowID, &assignmentID, &participant
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(&lockedWorkflowID); err != nil {
 		return AgentSession{}, ErrAgentSessionControlFenceLost
 	}
-	var assignmentStatus AgentAssignmentStatus
-	if err := tx.QueryRow(ctx, `SELECT status FROM agent_assignments WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, assignmentID, workflowID).Scan(&assignmentStatus); err != nil ||
-		assignmentStatus != AgentAssignmentActive && assignmentStatus != AgentAssignmentWaitingForHuman {
+	var assignmentStatus AgentParticipantStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM agent_participants WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, assignmentID, workflowID).Scan(&assignmentStatus); err != nil ||
+		assignmentStatus != AgentParticipantActive && assignmentStatus != AgentParticipantWaitingForHuman {
 		return AgentSession{}, ErrAgentSessionControlFenceLost
 	}
-	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1 AND agent_assignment_id = $2 FOR UPDATE`, sessionID, assignmentID))
+	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1 AND agent_participant_id = $2 FOR UPDATE`, sessionID, assignmentID))
 	if err != nil || session.ControlRevision != expectedRevision ||
 		session.Status != AgentSessionActive && session.Status != AgentSessionRetained {
 		return AgentSession{}, ErrAgentSessionControlFenceLost
@@ -1073,17 +1032,17 @@ func lockHumanPromptSession(ctx context.Context, tx pgx.Tx, sessionID string) (s
 	if err := tx.QueryRow(ctx, `
 SELECT assignment.workflow_id::text, assignment.id::text
 FROM agent_sessions AS session
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE session.id = $1`, sessionID).Scan(&workflowID, &assignmentID); err != nil {
 		return "", "", AgentSession{}, err
 	}
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(&lockedWorkflowID); err != nil {
 		return "", "", AgentSession{}, err
 	}
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM agent_assignments WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, assignmentID, workflowID).Scan(&lockedAssignmentID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM agent_participants WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, assignmentID, workflowID).Scan(&lockedAssignmentID); err != nil {
 		return "", "", AgentSession{}, err
 	}
-	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1 AND agent_assignment_id = $2 FOR UPDATE`, sessionID, assignmentID))
+	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1 AND agent_participant_id = $2 FOR UPDATE`, sessionID, assignmentID))
 	return workflowID, assignmentID, session, err
 }
 
@@ -1098,19 +1057,6 @@ FROM agent_sessions WHERE id = $1`, sessionID).Scan(&leaseLive); err != nil {
 		return ErrHumanPromptLeaseActive
 	}
 	return ErrHumanPromptAdmissionUncertain
-}
-
-func preparationForStage(spec AgentTurnPreparationSpec, stage workflow.StageID, role workflow.Role) (ParticipantPreparation, bool) {
-	if preparation, ok := spec.Stages[stage]; ok {
-		return preparation, true
-	}
-	if role == workflow.RoleDeveloper && spec.Developer.Binding.AgentProfileName != "" {
-		return spec.Developer, true
-	}
-	if role == workflow.RoleReviewer && spec.Reviewer.Binding.AgentProfileName != "" {
-		return spec.Reviewer, true
-	}
-	return ParticipantPreparation{}, false
 }
 
 func validateParticipantPreparation(role workflow.Role, preparation ParticipantPreparation) error {
@@ -1137,7 +1083,7 @@ func decodeAgentTurnPreparationPayload(value json.RawMessage) (agentTurnPreparat
 }
 
 func (store *Store) validAgentTurnPreparationPayload(payload agentTurnPreparationPayload, job Job) bool {
-	if job.WorkflowID == "" || job.WorkflowAttemptID == "" || job.AgentAssignmentID != "" ||
+	if job.WorkflowID == "" || job.WorkflowAttemptID == "" || job.AgentParticipantID != "" ||
 		job.AgentSessionID != "" || job.AgentTurnID != "" || job.ExecutionEpoch != 0 || payload.Revision <= 0 {
 		return false
 	}
@@ -1431,7 +1377,7 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("prepare Agent Turn: Agent Profile structure has trailing content")
 	}
-	if strings.TrimSpace(snapshot.Name) == "" || snapshot.Name != preparation.Assignment.AgentProfileName {
+	if strings.TrimSpace(snapshot.Name) == "" || snapshot.Name != preparation.Participant.AgentProfileName {
 		return nil, errors.New("prepare Agent Turn: Agent Profile name does not match Assignment")
 	}
 	if !agentprofile.ValidPath(snapshot.Path) || (expectedPath != "" && snapshot.Path != expectedPath) {
@@ -1441,8 +1387,8 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 		return nil, errors.New("prepare Agent Turn: Agent Profile Role does not match preparation")
 	}
 	runtimeParts := strings.Split(snapshot.Runtime, "/")
-	if snapshot.Runtime != "pi-rpc/v1" || len(runtimeParts) != 2 ||
-		runtimeParts[0] != preparation.Assignment.RuntimeProfileName || runtimeParts[1] != preparation.Assignment.RuntimeProfileVersion {
+	if snapshot.Runtime != runtimeprofile.PiRuntimeReference || len(runtimeParts) != 2 ||
+		runtimeParts[0] != preparation.Participant.RuntimeProfileName || runtimeParts[1] != preparation.Participant.RuntimeProfileVersion {
 		return nil, errors.New("prepare Agent Turn: Agent Profile runtime does not match Assignment")
 	}
 	if !validProfileReference(snapshot.Model) {
@@ -1518,8 +1464,8 @@ func ensurePreparationParticipant(ctx context.Context, tx pgx.Tx, preparationJob
 	stageAssignment, participant, err := readStageAssignment(ctx, tx, workflowID, generation, payload.Stage, true)
 	if err == nil {
 		if stageAssignment.Role != payload.Role || participant.Role != payload.Role ||
-			participant.AssignmentRuntimeBinding != preparation.Binding {
-			return AgentParticipant{}, StageAssignment{}, ErrAssignmentConfigurationConflict
+			participant.ParticipantRuntimeBinding != preparation.Binding {
+			return AgentParticipant{}, StageAssignment{}, ErrParticipantConfigurationConflict
 		}
 		participant, err = reactivatePreparationParticipant(ctx, tx, participant, preparationJobID, payload.Mode)
 		return participant, stageAssignment, err
@@ -1531,20 +1477,20 @@ func ensurePreparationParticipant(ctx context.Context, tx pgx.Tx, preparationJob
 	var conflictingRole workflow.Role
 	err = tx.QueryRow(ctx, `
 SELECT participant.role
-FROM agent_assignments AS participant
+FROM agent_participants AS participant
 JOIN workflows AS participant_workflow ON participant_workflow.id = participant.workflow_id
 JOIN workflows AS current_workflow ON current_workflow.id = $3
 WHERE participant.agent_profile_name = $1 AND participant.role <> $2
   AND participant_workflow.repository_id = current_workflow.repository_id
 LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload.Role, workflowID).Scan(&conflictingRole)
 	if err == nil {
-		return AgentParticipant{}, StageAssignment{}, ErrAssignmentConfigurationConflict
+		return AgentParticipant{}, StageAssignment{}, ErrParticipantConfigurationConflict
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return AgentParticipant{}, StageAssignment{}, err
 	}
 
-	participant, err = scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+`
+	participant, err = scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+`
  WHERE workflow_id = $1 AND generation = $2 AND agent_profile_name = $3 FOR UPDATE`,
 		workflowID, generation, preparation.Binding.AgentProfileName))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1553,8 +1499,8 @@ LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload
 	if err != nil {
 		return AgentParticipant{}, StageAssignment{}, err
 	}
-	if participant.Role != payload.Role || participant.AssignmentRuntimeBinding != preparation.Binding {
-		return AgentParticipant{}, StageAssignment{}, ErrAssignmentConfigurationConflict
+	if participant.Role != payload.Role || participant.ParticipantRuntimeBinding != preparation.Binding {
+		return AgentParticipant{}, StageAssignment{}, ErrParticipantConfigurationConflict
 	}
 	participant, err = reactivatePreparationParticipant(ctx, tx, participant, preparationJobID, payload.Mode)
 	if err != nil {
@@ -1587,7 +1533,7 @@ ORDER BY assignment_generation DESC LIMIT 1`, workflowID, preparationJobID).Scan
 			return 0, err
 		}
 		if err := tx.QueryRow(ctx, `
-SELECT COALESCE(MAX(generation), 0) + 1 FROM agent_assignments
+SELECT COALESCE(MAX(generation), 0) + 1 FROM agent_participants
 WHERE workflow_id = $1`, workflowID).Scan(&generation); err != nil {
 			return 0, err
 		}
@@ -1595,7 +1541,7 @@ WHERE workflow_id = $1`, workflowID).Scan(&generation); err != nil {
 	}
 	var generation int
 	if err := tx.QueryRow(ctx, `
-SELECT MAX(generation) FROM agent_assignments
+SELECT MAX(generation) FROM agent_participants
 WHERE workflow_id = $1 AND state_deleted_at IS NULL`, workflowID).Scan(&generation); err != nil || generation <= 0 {
 		return 0, ErrAgentTurnPreparationFenceLost
 	}
@@ -1611,7 +1557,7 @@ func readStageAssignment(ctx context.Context, tx pgx.Tx, workflowID string, gene
 		query += ` FOR SHARE OF stage_assignment, participant`
 	}
 	var assignment StageAssignment
-	participant, err := scanAgentAssignmentWithPrefix(tx.QueryRow(ctx, query, workflowID, generation, stage), &assignment)
+	participant, err := scanAgentParticipantWithPrefix(tx.QueryRow(ctx, query, workflowID, generation, stage), &assignment)
 	return assignment, participant, err
 }
 
@@ -1620,15 +1566,15 @@ SELECT participant.id::text, COALESCE(participant.created_by_preparation_job_id:
        COALESCE(participant.reactivated_by_preparation_job_id::text, ''), participant.workflow_id::text,
        participant.role, participant.generation, participant.status, participant.agent_profile_name,
        participant.runtime_profile_name, participant.runtime_profile_version,
-       COALESCE(participant.runtime_profile_content_sha256, ''), participant.runtime_image_digest,
+	       participant.runtime_profile_content_sha256, participant.runtime_image_digest,
        participant.runtime_state_path, participant.created_at, participant.updated_at,
        participant.completed_at, participant.retention_until, participant.state_deleted_at,
        stage_assignment.workflow_id::text, stage_assignment.assignment_generation,
        stage_assignment.stage_id, stage_assignment.role, stage_assignment.agent_participant_id::text,
        stage_assignment.created_at
-FROM agent_assignments AS participant`
+FROM agent_participants AS participant`
 
-func scanAgentAssignmentWithPrefix(row rowScanner, stage *StageAssignment) (AgentParticipant, error) {
+func scanAgentParticipantWithPrefix(row rowScanner, stage *StageAssignment) (AgentParticipant, error) {
 	var participant AgentParticipant
 	err := row.Scan(&participant.ID, &participant.createdByPreparationJobID, &participant.reactivatedByPreparationJobID,
 		&participant.WorkflowID, &participant.Role, &participant.Generation, &participant.Status,
@@ -1647,7 +1593,7 @@ func insertAgentParticipant(ctx context.Context, tx pgx.Tx, preparationJobID, wo
 	}
 	path := "assignment-" + id + "/runtime-state"
 	if _, err := tx.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, generation, status, agent_profile_name,
     runtime_profile_name, runtime_profile_version, runtime_profile_content_sha256,
     runtime_image_digest, runtime_state_path, created_by_preparation_job_id
@@ -1658,18 +1604,18 @@ VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6, $7, $8, $9, $10, $11)`, id, workflowID
 		binding.RuntimeImageDigest, path, preparationJobID); err != nil {
 		return AgentParticipant{}, fmt.Errorf("create Agent Participant: %w", err)
 	}
-	return scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, id))
+	return scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, id))
 }
 
 func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participant AgentParticipant, preparationJobID string, mode workflow.AssignmentGeneration) (AgentParticipant, error) {
-	if participant.StateDeletedAt != nil || participant.Status == AgentAssignmentSuperseded {
+	if participant.StateDeletedAt != nil || participant.Status == AgentParticipantSuperseded {
 		return AgentParticipant{}, ErrAgentTurnPreparationFenceLost
 	}
-	if participant.Status == AgentAssignmentActive {
+	if participant.Status == AgentParticipantActive {
 		return participant, nil
 	}
-	allowed := mode == workflow.AssignmentGenerationRetained && participant.Status == AgentAssignmentCompleted
-	if mode == workflow.AssignmentGenerationCurrent && participant.Status == AgentAssignmentWaitingForHuman {
+	allowed := mode == workflow.AssignmentGenerationRetained && participant.Status == AgentParticipantCompleted
+	if mode == workflow.AssignmentGenerationCurrent && participant.Status == AgentParticipantWaitingForHuman {
 		var err error
 		allowed, err = previousHandoffAllowsParticipantReactivation(ctx, tx, preparationJobID, participant.WorkflowID)
 		if err != nil {
@@ -1680,13 +1626,13 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 		return AgentParticipant{}, ErrAgentTurnPreparationFenceLost
 	}
 	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET status = 'ACTIVE', completed_at = NULL, retention_until = NULL,
     reactivated_by_preparation_job_id = $2, updated_at = clock_timestamp()
 WHERE id = $1`, participant.ID, preparationJobID); err != nil {
 		return AgentParticipant{}, err
 	}
-	participant.Status, participant.CompletedAt, participant.RetentionUntil = AgentAssignmentActive, nil, nil
+	participant.Status, participant.CompletedAt, participant.RetentionUntil = AgentParticipantActive, nil, nil
 	participant.reactivatedByPreparationJobID = preparationJobID
 	return participant, nil
 }
@@ -1730,7 +1676,7 @@ func revalidateParticipantConfigurationConflict(ctx context.Context, tx pgx.Tx, 
 	stageAssignment, participant, err := readStageAssignment(ctx, tx, job.WorkflowID, generation, payload.Stage, true)
 	if err == nil {
 		if stageAssignment.Role != payload.Role || participant.Role != payload.Role ||
-			participant.AssignmentRuntimeBinding != preparation.Binding {
+			participant.ParticipantRuntimeBinding != preparation.Binding {
 			return true, nil
 		}
 		return participantSessionBindingConflict(ctx, tx, participant)
@@ -1742,7 +1688,7 @@ func revalidateParticipantConfigurationConflict(ctx context.Context, tx pgx.Tx, 
 	var role workflow.Role
 	err = tx.QueryRow(ctx, `
 SELECT participant.role
-FROM agent_assignments AS participant
+FROM agent_participants AS participant
 JOIN workflows AS participant_workflow ON participant_workflow.id = participant.workflow_id
 JOIN workflows AS current_workflow ON current_workflow.id = $3
 WHERE participant.agent_profile_name = $1 AND participant.role <> $2
@@ -1754,11 +1700,11 @@ LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
-	participant, err = scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+`
+	participant, err = scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+`
  WHERE workflow_id = $1 AND generation = $2 AND agent_profile_name = $3 FOR UPDATE`,
 		job.WorkflowID, generation, preparation.Binding.AgentProfileName))
 	if err == nil {
-		if participant.Role != payload.Role || participant.AssignmentRuntimeBinding != preparation.Binding {
+		if participant.Role != payload.Role || participant.ParticipantRuntimeBinding != preparation.Binding {
 			return true, nil
 		}
 		return participantSessionBindingConflict(ctx, tx, participant)
@@ -1771,7 +1717,7 @@ LIMIT 1 FOR SHARE OF participant`, preparation.Binding.AgentProfileName, payload
 
 func participantSessionBindingConflict(ctx context.Context, tx pgx.Tx, participant AgentParticipant) (bool, error) {
 	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+`
- WHERE agent_assignment_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED') FOR UPDATE`, participant.ID))
+ WHERE agent_participant_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED') FOR UPDATE`, participant.ID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -1785,16 +1731,16 @@ func participantSessionBindingConflict(ctx context.Context, tx pgx.Tx, participa
 		session.RuntimeStatePath != participant.RuntimeStatePath, nil
 }
 
-func ensurePreparationSession(ctx context.Context, tx pgx.Tx, assignment AgentAssignment) (AgentSession, error) {
+func ensurePreparationSession(ctx context.Context, tx pgx.Tx, assignment AgentParticipant) (AgentSession, error) {
 	session, err := scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+`
- WHERE agent_assignment_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED') FOR UPDATE`, assignment.ID))
+ WHERE agent_participant_id = $1 AND status IN ('CREATING', 'ACTIVE', 'RETAINED') FOR UPDATE`, assignment.ID))
 	if err == nil {
 		if session.RuntimeProfileName != assignment.RuntimeProfileName ||
 			session.RuntimeProfileVersion != assignment.RuntimeProfileVersion ||
 			session.RuntimeProfileContentSHA256 != assignment.RuntimeProfileContentSHA256 ||
 			session.RuntimeImageDigest != assignment.RuntimeImageDigest ||
 			session.RuntimeStatePath != assignment.RuntimeStatePath {
-			return AgentSession{}, ErrAssignmentConfigurationConflict
+			return AgentSession{}, ErrParticipantConfigurationConflict
 		}
 		return session, nil
 	}
@@ -1806,12 +1752,12 @@ func ensurePreparationSession(ctx context.Context, tx pgx.Tx, assignment AgentAs
 		return AgentSession{}, err
 	}
 	var number int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(session_number), 0) + 1 FROM agent_sessions WHERE agent_assignment_id = $1`, assignment.ID).Scan(&number); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(session_number), 0) + 1 FROM agent_sessions WHERE agent_participant_id = $1`, assignment.ID).Scan(&number); err != nil {
 		return AgentSession{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, runtime_profile_name, runtime_profile_version,
+    id, agent_participant_id, session_number, runtime_profile_name, runtime_profile_version,
     runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status,
     control_owner, control_revision, controller_id, control_acquired_at
 )
@@ -1823,15 +1769,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'CREATING', 'AUTOMATION', 1, 'automation
 	return scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1`, id))
 }
 
-const agentAssignmentSelect = `
+const agentParticipantSelect = `
 SELECT id::text, COALESCE(created_by_preparation_job_id::text, ''),
        COALESCE(reactivated_by_preparation_job_id::text, ''), workflow_id::text, role, generation, status, agent_profile_name,
-       runtime_profile_name, runtime_profile_version, COALESCE(runtime_profile_content_sha256, ''), runtime_image_digest,
+       runtime_profile_name, runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest,
        runtime_state_path, created_at, updated_at, completed_at, retention_until, state_deleted_at
-FROM agent_assignments`
+FROM agent_participants`
 
-func scanAgentAssignment(row rowScanner) (AgentAssignment, error) {
-	var assignment AgentAssignment
+func scanAgentParticipant(row rowScanner) (AgentParticipant, error) {
+	var assignment AgentParticipant
 	err := row.Scan(&assignment.ID, &assignment.createdByPreparationJobID, &assignment.reactivatedByPreparationJobID,
 		&assignment.WorkflowID, &assignment.Role, &assignment.Generation,
 		&assignment.Status, &assignment.AgentProfileName, &assignment.RuntimeProfileName,
@@ -1843,8 +1789,8 @@ func scanAgentAssignment(row rowScanner) (AgentAssignment, error) {
 }
 
 const agentSessionSelect = `
-SELECT id::text, agent_assignment_id::text, session_number,
-       runtime_profile_name, runtime_profile_version, COALESCE(runtime_profile_content_sha256, ''),
+SELECT id::text, agent_participant_id::text, session_number,
+       runtime_profile_name, runtime_profile_version, runtime_profile_content_sha256,
        runtime_image_digest, runtime_state_path,
 	       status, control_owner, control_revision, COALESCE(controller_id, ''),
 	       control_acquired_at, COALESCE(human_prompt_token::text, ''), human_prompt_leased_at,
@@ -1856,7 +1802,7 @@ FROM agent_sessions`
 func scanAgentSession(row rowScanner) (AgentSession, error) {
 	var session AgentSession
 	var runtimeCapabilities []byte
-	err := row.Scan(&session.ID, &session.AgentAssignmentID, &session.SessionNumber,
+	err := row.Scan(&session.ID, &session.AgentParticipantID, &session.SessionNumber,
 		&session.RuntimeProfileName, &session.RuntimeProfileVersion,
 		&session.RuntimeProfileContentSHA256, &session.RuntimeImageDigest,
 		&session.RuntimeStatePath, &session.Status,
@@ -1869,7 +1815,6 @@ func scanAgentSession(row rowScanner) (AgentSession, error) {
 	if err != nil {
 		return AgentSession{}, err
 	}
-	session.AgentParticipantID = session.AgentAssignmentID
 	if runtimeCapabilities != nil {
 		session.RuntimeCapabilities, err = canonicalJSON(runtimeCapabilities)
 	}

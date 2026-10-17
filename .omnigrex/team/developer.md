@@ -1,7 +1,7 @@
 ---
 name: developer
 role: DEVELOPER
-runtime: pi-rpc/v1
+runtime: pi-rpc/v2
 model: opencode-go/muse-spark-1.3-contributor
 thinking: xhigh
 permissions:

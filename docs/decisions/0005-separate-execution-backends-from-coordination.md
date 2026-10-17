@@ -32,7 +32,6 @@ Future remote adapters still own their provider integration, artifact transport,
 ## Consequences
 
 This supersedes ADR 0006's Docker-only execution architecture, while preserving its warning about Docker management authority and prohibition on giving agents the host socket.
-The existing deployment remains Docker/OpenCode until the planned cutover.
 Backend replacement does not imply automatic cross-backend state migration.
 
 ## Links

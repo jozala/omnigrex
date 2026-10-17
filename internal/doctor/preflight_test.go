@@ -38,14 +38,14 @@ func TestValidateDeveloperWebhookURL(t *testing.T) {
 }
 
 func TestPiDoctorRegistryAndEffectiveCredentials(t *testing.T) {
-	state := productionState{settings: config.Config{PiRPCV1Image: "registry.example/pi@sha256:" + strings.Repeat("a", 64), PiRPCV1Platform: runtimeprofile.Platform{OS: "linux", Arch: "amd64"}}}
+	state := productionState{settings: config.Config{PiImage: "registry.example/pi@sha256:" + strings.Repeat("a", 64), PiPlatform: runtimeprofile.Platform{OS: "linux", Arch: "amd64"}}}
 	if err := state.checkRuntimeProfile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.registry.Resolve("opencode-acp", "v1"); err == nil {
+	if _, err := state.registry.Resolve("pi-rpc", "v1"); err == nil {
 		t.Fatal("unconfigured runtime was admitted")
 	}
-	p, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\nReview the Change Proposal.\n"), role.BuiltinPolicyCatalog())
+	p, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v2\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\nReview the Change Proposal.\n"), role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestPiDoctorRegistryAndEffectiveCredentials(t *testing.T) {
 }
 
 func TestEffectivePiProfileAcceptsComposedInstructionsWithinPiBudget(t *testing.T) {
-	runtime, err := runtimeprofile.NewPiV1(
+	runtime, err := runtimeprofile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
@@ -85,7 +85,7 @@ func TestEffectivePiProfileAcceptsComposedInstructionsWithinPiBudget(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v1\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
+	profile, err := agentprofile.Parse(".omnigrex/team/reviewer.md", []byte("---\nname: reviewer\nrole: REVIEWER\nruntime: pi-rpc/v2\nmodel: openai/gpt-4o-mini\npermissions:\n  read: allow\n---\n"+strings.Repeat("p", 75<<10)), policies)
 	if err != nil {
 		t.Fatal(err)
 	}

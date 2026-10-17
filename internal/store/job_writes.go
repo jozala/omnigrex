@@ -21,12 +21,12 @@ type jobInsert struct {
 }
 
 type jobInsertScope struct {
-	workflowID        string
-	workflowAttemptID string
-	agentAssignmentID string
-	agentSessionID    string
-	agentTurnID       string
-	executionEpoch    int64
+	workflowID         string
+	workflowAttemptID  string
+	agentParticipantID string
+	agentSessionID     string
+	agentTurnID        string
+	executionEpoch     int64
 }
 
 type jobInsertProvenance struct {
@@ -39,7 +39,7 @@ type jobInsertProvenance struct {
 const jobInsertSQL = `
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
+    idempotency_key, workflow_id, workflow_attempt_id, agent_participant_id,
     agent_session_id, agent_turn_id, execution_epoch, normalized_event_id,
     agent_turn_settlement_id, workflow_internal_event_id, action_key
 )
@@ -89,7 +89,7 @@ SELECT id::text,
        AND enqueue_delay_microseconds = 0
        AND workflow_id IS NOT DISTINCT FROM $7::uuid
        AND workflow_attempt_id IS NOT DISTINCT FROM $8::uuid
-       AND agent_assignment_id IS NOT DISTINCT FROM $9::uuid
+       AND agent_participant_id IS NOT DISTINCT FROM $9::uuid
        AND agent_session_id IS NOT DISTINCT FROM $10::uuid
        AND agent_turn_id IS NOT DISTINCT FROM $11::uuid
        AND execution_epoch IS NOT DISTINCT FROM $12::bigint
@@ -101,7 +101,7 @@ SELECT id::text,
 FROM jobs
 WHERE idempotency_key = $1`, job.idempotencyKey, job.queue, job.kind, job.payload,
 		job.priority, job.maxAttempts, nullableString(job.scope.workflowID),
-		nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
+		nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentParticipantID),
 		nullableString(job.scope.agentSessionID), nullableString(job.scope.agentTurnID),
 		nullableEpoch(job.scope.executionEpoch), nullableString(job.provenance.normalizedEventID),
 		nullableString(job.provenance.agentTurnSettlementID), nullableString(job.provenance.workflowInternalEventID),
@@ -129,7 +129,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 		return jobInsert{}, errors.New("insert job payload: not valid JSON")
 	}
 	ids := []string{
-		job.scope.workflowID, job.scope.workflowAttemptID, job.scope.agentAssignmentID,
+		job.scope.workflowID, job.scope.workflowAttemptID, job.scope.agentParticipantID,
 		job.scope.agentSessionID, job.scope.agentTurnID, job.provenance.normalizedEventID,
 		job.provenance.agentTurnSettlementID, job.provenance.workflowInternalEventID,
 	}
@@ -140,8 +140,8 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 	}
 	if job.scope.workflowID == "" && !isWorkflowlessProvisioningJob(job) ||
 		job.scope.workflowAttemptID != "" && job.scope.workflowID == "" ||
-		job.scope.agentAssignmentID != "" && job.scope.workflowID == "" ||
-		job.scope.agentSessionID != "" && job.scope.agentAssignmentID == "" ||
+		job.scope.agentParticipantID != "" && job.scope.workflowID == "" ||
+		job.scope.agentSessionID != "" && job.scope.agentParticipantID == "" ||
 		job.scope.agentTurnID != "" && job.scope.agentSessionID == "" ||
 		(job.scope.agentTurnID == "") != (job.scope.executionEpoch == 0) {
 		return jobInsert{}, errors.New("insert job: scope hierarchy is incomplete")
@@ -166,7 +166,7 @@ func validateJobInsert(job jobInsert) (jobInsert, error) {
 func jobInsertArgs(id string, job jobInsert) []any {
 	return []any{
 		id, job.queue, job.kind, job.payload, job.priority, job.maxAttempts, job.idempotencyKey,
-		nullableString(job.scope.workflowID), nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentAssignmentID),
+		nullableString(job.scope.workflowID), nullableString(job.scope.workflowAttemptID), nullableString(job.scope.agentParticipantID),
 		nullableString(job.scope.agentSessionID), nullableString(job.scope.agentTurnID), nullableEpoch(job.scope.executionEpoch),
 		nullableString(job.provenance.normalizedEventID), nullableString(job.provenance.agentTurnSettlementID),
 		nullableString(job.provenance.workflowInternalEventID), nullableString(job.provenance.actionKey),

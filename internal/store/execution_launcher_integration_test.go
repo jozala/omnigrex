@@ -25,6 +25,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
+	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -63,17 +64,19 @@ func testExecutionLauncherSingleConnectionPool(t *testing.T, capture, preparatio
 	}
 	defer database.Close()
 	pool := openPool(t, postgres.databaseURL(true))
-	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	triggerPreparationWorkflow(t, database, ctx, "60000000-0000-4000-8000-000000009920", "60000000-0000-4000-8000-000000009921")
 	spec := preparationSpec("single-connection-profile", "provider/test")
-	spec.Developer.Binding = store.AssignmentRuntimeBinding{
-		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
-		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
-	}
-	spec.Developer.RuntimeContract, _ = json.Marshal(runtimeProfile.Contract())
+	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding = store.ParticipantRuntimeBinding{
+			AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
+			RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
+		}
+		preparation.RuntimeContract, _ = json.Marshal(runtimeProfile.Contract())
+	})
 	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), spec)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +141,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 	if err := database.BindExecutionBackend(ctx, states.Binding()); err != nil {
 		t.Fatal(err)
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": adapter}, States: states, DeveloperCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, ReviewerCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, MemoryBytes: 512 << 20})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: registry, Workspace: workspaces, Gateway: singleConnectionGateway{}, Execution: factory, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v2": adapter}, States: states, DeveloperCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, ReviewerCredentials: &integrationCredentialProvider{credential: "fixture-credential"}, MemoryBytes: 512 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

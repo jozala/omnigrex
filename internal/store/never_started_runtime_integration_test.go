@@ -85,7 +85,7 @@ func TestNeverStartedRuntimeRecoveryCompletesWithRealDocker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+			key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
 				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
 				RuntimeProfileName: prepared.Participant.RuntimeProfileName, RuntimeProfileVersion: prepared.Participant.RuntimeProfileVersion}
 			digest := strings.Repeat("a", 64)
@@ -238,8 +238,8 @@ func TestRecoveredNeverStartedProofRejectsConflictingEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+			key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
+				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 			ledger := database.ExecutionLedger(lease)
 			if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 				t.Fatal(err)
@@ -410,8 +410,8 @@ func TestRecoveredNeverStartedProofRejectsMutationReplayWithNoCurrentInvocations
 	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET next_invocation_number = 1 WHERE id = $1`, lease.ID); err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
+		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	ledger := database.ExecutionLedger(lease)
 	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)

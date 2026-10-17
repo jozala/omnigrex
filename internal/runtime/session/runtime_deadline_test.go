@@ -40,10 +40,10 @@ func (b blockingDiagnosticBinding) BindAgentSessionRuntime(ctx context.Context, 
 
 func TestRuntimeCoordinatorRetainsAdapterDeadlineThroughDurableBinding(t *testing.T) {
 	id, participant, turnID := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	s := store.AgentSession{ID: id, AgentAssignmentID: participant, Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 1, NextExecutionEpoch: 2, RuntimeImageDigest: "diagnostic", RuntimeProfileContentSHA256: "diagnostic"}
-	lease := store.AgentTurnLease{AgentTurn: store.AgentTurn{ID: turnID, AgentSessionID: id, AgentAssignmentID: participant, ExecutionEpoch: 1}}
+	s := store.AgentSession{ID: id, AgentParticipantID: participant, Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 1, NextExecutionEpoch: 2, RuntimeImageDigest: "diagnostic", RuntimeProfileContentSHA256: "diagnostic"}
+	lease := store.AgentTurnLease{AgentTurn: store.AgentTurn{ID: turnID, AgentSessionID: id, AgentParticipantID: participant, ExecutionEpoch: 1}}
 	lease.ControlRevision = 1
-	lease.JobLease.AgentTurnID, lease.JobLease.AgentSessionID, lease.JobLease.AgentAssignmentID, lease.JobLease.ExecutionEpoch = turnID, id, participant, 1
+	lease.JobLease.AgentTurnID, lease.JobLease.AgentSessionID, lease.JobLease.AgentParticipantID, lease.JobLease.ExecutionEpoch = turnID, id, participant, 1
 	ref := execution.StateRef{ID: participant, ParticipantID: participant, SessionID: id, Backend: execution.BackendBinding{Family: "diagnostic", Version: 1, Namespace: uuid.NewString()}, Format: "pi-session/v3", RuntimeProfileSHA256: "diagnostic", Image: "diagnostic"}
 	connection := &timedDiagnosticConnection{deadline: time.Now().Add(50 * time.Millisecond)}
 	connection.Connection = diagnosticConnectionID{id: id}

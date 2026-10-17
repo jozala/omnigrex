@@ -52,10 +52,10 @@ func TestFailedTurnPublicationBindsNewSessionOfSameParticipant(t *testing.T) {
 	const replacementSession = "20000000-0000-4000-8000-000000000196"
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name, runtime_profile_version,
+    id, agent_participant_id, session_number, runtime_session_id, runtime_profile_name, runtime_profile_version,
     runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-SELECT $1::uuid, agent_assignment_id, session_number + 1, $1::text, runtime_profile_name, runtime_profile_version,
+SELECT $1::uuid, agent_participant_id, session_number + 1, $1::text, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, 'ACTIVE', runtime_capabilities
 FROM agent_sessions WHERE id = $2`, replacementSession, fixture.sessionID); err != nil {
 		t.Fatal(err)

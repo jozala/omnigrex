@@ -84,7 +84,7 @@ type runtimeProcessInventoryAPI interface {
 	ContainerList(context.Context, mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error)
 }
 
-// RuntimeProcessInventory lists current marked Runtime Processes and legacy processes carrying established identity labels.
+// RuntimeProcessInventory lists marked Runtime Processes and owned diagnostic resources.
 type RuntimeProcessInventory struct {
 	api                 runtimeProcessInventoryAPI
 	close               func() error
@@ -115,16 +115,8 @@ func (inventory *RuntimeProcessInventory) Close() error {
 
 // List returns a deterministic snapshot of Runtime Process candidates without classifying unrelated containers.
 func (inventory *RuntimeProcessInventory) List(ctx context.Context) (RuntimeProcessInventorySnapshot, error) {
-	identityLabels := []string{
-		RuntimeProcessAssignmentLabel,
-		RuntimeProcessSessionLabel,
-		RuntimeProcessTurnLabel,
-		RuntimeProcessEpochLabel,
-		RuntimeProfileIdentityLabel,
-	}
 	filters := []mobyclient.Filters{
 		make(mobyclient.Filters).Add("label", RuntimeProcessMarkerLabel+"="+RuntimeProcessMarkerValue),
-		make(mobyclient.Filters).Add("label", identityLabels...),
 		make(mobyclient.Filters).Add("label", diagnosticMarkerLabel+"=true"),
 	}
 	listedCandidates := make([]mobyclient.ContainerListResult, 0, len(filters))
@@ -197,7 +189,7 @@ func parseRuntimeProcessIdentity(containerID string, labels map[string]string) (
 	if containerID == "" {
 		return RuntimeProcessIdentity{}, MalformedMissingContainerID
 	}
-	if marker, present := labels[RuntimeProcessMarkerLabel]; present && marker != RuntimeProcessMarkerValue {
+	if labels[RuntimeProcessMarkerLabel] != RuntimeProcessMarkerValue {
 		return RuntimeProcessIdentity{}, MalformedRuntimeMarker
 	}
 	required := []string{
@@ -242,12 +234,7 @@ func parseRuntimeProcessIdentity(containerID string, labels map[string]string) (
 }
 
 func runtimeProcessCandidateLabels(labels map[string]string) bool {
-	marker, markerPresent := labels[RuntimeProcessMarkerLabel]
-	if markerPresent {
-		return marker == RuntimeProcessMarkerValue
-	}
-	_, reason := parseRuntimeProcessIdentity("legacy-runtime-process", labels)
-	return reason == ""
+	return labels[RuntimeProcessMarkerLabel] == RuntimeProcessMarkerValue
 }
 
 func validCanonicalRuntimeUUID(value string) bool {

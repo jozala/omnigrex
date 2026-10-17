@@ -1,15 +1,23 @@
 # Pi operator documentation and cutover rehearsal
 
+## Current delivery status
+
+The [Step 17 release record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) supersedes the historical pending-publication status below.
+The merged Pi-only release passed both-backend CI, image publication, and both exact published-image deployment smokes.
+The operator subsequently confirmed a fresh Pi/Microsandbox installation and a [live Compose-backed Work Item](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
+The historical-release rehearsal was attempted but stopped at source-bundle isolation validation before stack startup; the operator chose to skip it and did not report a completed production backup/restore drill.
+The source-fixture rehearsal evidence in this document remains valid for its recorded scope, but the full published-release reset/recovery gate is not claimed complete.
+
 ## Prerequisite and delivery boundary
 
 This delivers the documentation and source-fixture rehearsal work for Step 16 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following the [Step 15 operational integration](2026-10-11-pi-operational-integration.md).
-The [operator guide](../operator-guide.md#one-time-opencode-to-pi-cutover) is authoritative for operational procedures.
+The [operator guide](../operator-guide.md) is authoritative for current operational procedures; the historical reset and rehearsal procedures are in the [OpenCode-to-Pi migration guide](../migrations/opencode-to-pi.md).
 Existing decisions [0005](../decisions/0005-separate-execution-backends-from-coordination.md), [0006](../decisions/0006-use-pi-through-an-agent-specific-adapter.md), [0007](../decisions/0007-supply-provider-api-keys-through-disposable-files.md), [0009](../decisions/0009-pin-participant-images-and-use-working-revision-tools.md), [0011](../decisions/0011-bind-retained-state-and-validate-offline-session-archives.md), [0017](../decisions/0017-bind-pi-qualification-to-backend-contracts.md), and [0018](../decisions/0018-gate-pi-publication-on-both-backend-deployments.md) supply the policy; this step adds no new runtime or migration policy.
 
 Source-host qualification is not published-release evidence.
-At implementation time the latest successful main CI run, [38095244804](https://github.com/jozala/omnigrex/actions/runs/38095244804), publishes the older Docker/OpenCode pair and has no KVM or published-Pi smoke job.
-The full Step 16 completion gate remains blocked on Step 15's merged release publication, public package availability, and both-backend exact published-image rehearsal.
-Step 17 still owns OpenCode removal, Pi-only final qualification, isolated Microsandbox dogfooding, and the operator-controlled production cutover.
+At implementation time the latest successful main CI run, [38095244804](https://github.com/jozala/omnigrex/actions/runs/38095244804), published the older Docker/OpenCode pair and had no KVM or published-Pi smoke job.
+The full Step 16 completion gate then awaited Step 15's merged release publication, public package availability, and both-backend exact published-image rehearsal.
+Step 17 owned OpenCode removal, Pi-only final qualification, isolated Microsandbox dogfooding, and the operator-controlled production cutover.
 
 ## Documentation changes
 
@@ -128,7 +136,8 @@ These clean source-review results do not establish the outstanding published-rel
 ## Original Work Item reconciliation
 
 The combined plan governs the sequential delivery of [Replace OpenCode with Pi RPC as the sole agent runtime](https://github.com/jozala/omnigrex/issues/33) and [Migrate Agent Turn isolation from Docker containers to Microsandbox](https://app.clickup.com/t/124ckhdev73).
-Their descriptions preserve the original requirements and identify the superseding scope and remaining release boundary.
+Their descriptions were reconciled at this milestone to preserve the original requirements and identify the superseding scope and then-remaining release boundary.
+The current [Step 17 release record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) supersedes the delivery-status column below where publication or cutover was still outstanding.
 
 | Original requirement or assumption | Delivered scope and qualification |
 | --- | --- |
@@ -146,6 +155,6 @@ Their descriptions preserve the original requirements and identify the supersedi
 | Pi-only release, no-clone published deployment, dogfooding | Source bundles and fixtures are qualified; merged publication/public pulls/exact-digest rehearsal and Step 17 final cutover remain outstanding. |
 
 The original Work Items remain open until their remaining release/final-cutover requirements pass.
-The retained OpenCode implementation, legacy bundles, old Profile schema, and old image publication are transitional and removed in Step 17.
-The rehearsal's default legacy source-image build and copy of `deploy/compose.yaml` are also preparatory dependencies.
-Step 17 must remove that source-build fallback and use an externally selected old-release bundle and exact published source-image pair for any retained operator rehearsal, so Pi-only source does not depend on deleted OpenCode files.
+The retained OpenCode implementation, legacy bundles, old Profile schema, and old image publication were transitional and removed in Step 17.
+The rehearsal's default legacy source-image build and copy of `deploy/compose.yaml` were also preparatory dependencies.
+Step 17 removed that source-build fallback; the current operator rehearsal requires an externally selected old-release image-only bundle and exact published source-image pair, so Pi-only source does not depend on deleted OpenCode files.

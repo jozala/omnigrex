@@ -102,7 +102,7 @@ FROM agent_turn_settlements WHERE recovery_job_id = $1 AND settled_at IS NOT NUL
 		job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
 		job.AttemptCount != lease.Attempt || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID {
 		return AgentTurnSettlement{}, ErrJobLeaseLost
 	}
@@ -166,8 +166,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND verification_job_id = $3
 		turn.ExecutionEpoch != job.ExecutionEpoch {
 		return AgentTurnSettlement{}, ErrJobLeaseLost
 	}
-	turn.AgentAssignmentID = job.AgentAssignmentID
-	turn.AgentParticipantID = job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	var unsettled bool
 	if err := tx.QueryRow(ctx, unsettledMutationsForTurnSQL, turn.ID, turn.ExecutionEpoch).Scan(&unsettled); err != nil {
 		return AgentTurnSettlement{}, err
@@ -193,9 +192,9 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 		return AgentTurnSettlement{}, corroborationReadError(err)
 	}
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants
 WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
-		job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+		job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 		return AgentTurnSettlement{}, corroborationReadError(err)
 	}
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
@@ -266,7 +265,7 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 	}
 	_, err = tx.Exec(ctx, `
 INSERT INTO agent_turn_settlements (
-    id, workflow_id, workflow_attempt_id, agent_assignment_id, agent_session_id,
+    id, workflow_id, workflow_attempt_id, agent_participant_id, agent_session_id,
     agent_turn_id, execution_epoch, control_revision, authority, execution_job_id,
     job_attempt_number, job_lease_owner, job_lease_token, owner_id, owner_token_sha256,
     recovery_job_id, recovery_job_kind, recovery_job_attempt_number,
@@ -279,7 +278,7 @@ INSERT INTO agent_turn_settlements (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
         $26, $27, $28, $29, $30, $31, $32)`,
-		settlementID, job.WorkflowID, job.WorkflowAttemptID, job.AgentAssignmentID,
+		settlementID, job.WorkflowID, job.WorkflowAttemptID, job.AgentParticipantID,
 		job.AgentSessionID, turn.ID, turn.ExecutionEpoch, turn.ControlRevision,
 		executionJobID, executionAttempt, executionOwner, executionToken,
 		originalOwnerID, originalOwnerHash, job.ID, job.Kind, job.AttemptCount,

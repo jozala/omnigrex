@@ -20,7 +20,7 @@ func TestTurnPathsKeepAssignmentCacheAndRemoveOnlyTurnScratch(t *testing.T) {
 	turn := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	configuration := turnconfig.Configuration{Directories: map[string]turnconfig.Lifecycle{"build": turnconfig.Turn, "cache": turnconfig.Assignment}, Environment: map[string]string{"TMPDIR": "build", "GOCACHE": "cache"}}
 	values, err := lifecycle.PrepareTurnPaths(context.Background(), assignment, turn, configuration, nil)
-	if err != nil || values["TMPDIR"] != "/home/opencode/.local/share/omnigrex-tool-data/turn/"+turn+"/build" || values["GOCACHE"] != "/home/opencode/.local/share/omnigrex-tool-data/assignment/cache" {
+	if err != nil || values["TMPDIR"] != "/home/omnigrex/.local/share/omnigrex-tool-data/turn/"+turn+"/build" || values["GOCACHE"] != "/home/omnigrex/.local/share/omnigrex-tool-data/assignment/cache" {
 		t.Fatalf("paths = %#v, %v", values, err)
 	}
 	cache := filepath.Join(root, "mise", "assignment-"+assignment, "tool-data", "assignment", "cache")

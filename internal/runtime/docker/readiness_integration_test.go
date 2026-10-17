@@ -7,15 +7,23 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
 	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
+	image = readinessRegistryImage(t, image)
+	arch := strings.TrimSpace(dockerCommand(t, "image", "inspect", image, "--format", "{{.Architecture}}"))
+	bound, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: arch})
+	if err != nil {
+		t.Fatal(err)
+	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	network := "omnigrex-readiness-agent-" + suffix
 	workspace := "omnigrex-readiness-workspaces-" + suffix
@@ -37,6 +45,7 @@ func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
 		RuntimeStateVolume: runtimeState,
 		MiseVolume:         mise,
 		AgentImage:         image,
+		RuntimeProfile:     bound,
 	})
 	if err != nil {
 		t.Fatalf("NewReadinessProbe() error = %v", err)
@@ -55,6 +64,37 @@ func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
 	assertReadinessCleanup(t, image, workspace, runtimeState, mise)
 }
 
+func readinessRegistryImage(t *testing.T, image string) string {
+	t.Helper()
+	if profile.IsExactRegistryImage(image) {
+		return image
+	}
+	name := fmt.Sprintf("omnigrex-readiness-registry-%d", time.Now().UnixNano())
+	// Bind inside the daemon's network namespace, including Docker Desktop's VM.
+	dockerCommand(t, "run", "--detach", "--name", name, "--network", "host", "--env", "REGISTRY_HTTP_ADDR=127.0.0.1:0", "registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373")
+	t.Cleanup(func() { dockerCleanup(t, "rm", "--force", "--volumes", name) })
+	var address string
+	listener := regexp.MustCompile(`listening on (127\.0\.0\.1:[0-9]+)`)
+	for attempt := 0; ; attempt++ {
+		logs, _ := exec.Command("docker", "logs", name).CombinedOutput()
+		if match := listener.FindStringSubmatch(string(logs)); len(match) == 2 {
+			address = match[1]
+			if err := exec.Command("docker", "exec", name, "wget", "-q", "-O", "/dev/null", "http://"+address+"/v2/").Run(); err == nil {
+				break
+			}
+		}
+		if attempt >= 30 {
+			t.Fatal("readiness registry did not become available")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tag := address + "/omnigrex/pi:readiness"
+	dockerCommand(t, "tag", image, tag)
+	t.Cleanup(func() { dockerCleanup(t, "image", "rm", tag) })
+	dockerCommand(t, "push", tag)
+	return strings.TrimSpace(dockerCommand(t, "image", "inspect", tag, "--format", "{{index .RepoDigests 0}}"))
+}
+
 func initializeVolumeRoots(t *testing.T, image, workspace, runtimeState, mise string) {
 	t.Helper()
 	dockerCommand(t,
@@ -66,10 +106,10 @@ func initializeVolumeRoots(t *testing.T, image, workspace, runtimeState, mise st
 		"--network", "none",
 		"--mount", "type=volume,src="+workspace+",dst=/workspace",
 		"--mount", "type=volume,src="+runtimeState+",dst=/state",
-		"--mount", "type=volume,src="+mise+",dst=/home/opencode/.local/share/mise",
+		"--mount", "type=volume,src="+mise+",dst=/home/omnigrex/.local/share/mise",
 		"--entrypoint", "sh",
 		image,
-		"-c", "for path in /workspace /state /home/opencode/.local/share/mise; do touch \"$path/.volume-root-probe\" && rm \"$path/.volume-root-probe\"; done",
+		"-c", "for path in /workspace /state /home/omnigrex/.local/share/mise; do touch \"$path/.volume-root-probe\" && rm \"$path/.volume-root-probe\"; done",
 	)
 }
 
@@ -84,10 +124,10 @@ func assertReadinessCleanup(t *testing.T, image, workspace, runtimeState, mise s
 		"--network", "none",
 		"--mount", "type=volume,src="+workspace+",dst=/workspace",
 		"--mount", "type=volume,src="+runtimeState+",dst=/state",
-		"--mount", "type=volume,src="+mise+",dst=/home/opencode/.local/share/mise",
+		"--mount", "type=volume,src="+mise+",dst=/home/omnigrex/.local/share/mise",
 		"--entrypoint", "sh",
 		image,
-		"-c", "for root in /workspace /state /home/opencode/.local/share/mise; do set -- \"$root\"/readiness-*; test ! -e \"$1\"; done",
+		"-c", "for root in /workspace /state /home/omnigrex/.local/share/mise; do set -- \"$root\"/readiness-*; test ! -e \"$1\"; done",
 	)
 }
 

@@ -58,7 +58,7 @@ func TestAgentTurnTerminalCaptureRequiredUsesDurableSessionAndTurnEvidence(t *te
 				t.Fatal(err)
 			}
 			key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID,
-				AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+				AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 			setCreatingLifecycle := func() {
 				t.Helper()
 				if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET status = 'CREATING' WHERE id = $1`, fixture.sessionID); err != nil {
@@ -189,7 +189,7 @@ func TestExistingSessionRecoveryCapturesOnlyCurrentMainDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+			key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
 				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
 				RuntimeProfileName: current.Participant.RuntimeProfileName, RuntimeProfileVersion: current.Participant.RuntimeProfileVersion}
 			if test.mainDispatched {
@@ -266,8 +266,8 @@ func TestUnpromptedCleanupProofRejectsSessionAndTurnActivity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+			key := execution.Key{AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
+				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 			if evidence == "wrong runtime identity" {
 				key.RuntimeProfileVersion = "other"
 			}

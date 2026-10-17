@@ -50,7 +50,6 @@ type JobSpec struct {
 	WorkflowID         string
 	WorkflowAttemptID  string
 	AgentParticipantID string
-	AgentAssignmentID  string
 	AgentSessionID     string
 	AgentTurnID        string
 	ExecutionEpoch     int64
@@ -409,7 +408,7 @@ FOR UPDATE`, lease.ID, lease.LeaseToken, lease.Attempt).Scan(&kind, &live)
 const jobSelect = `
 SELECT id::text, queue, kind, payload, priority, enqueue_delay_microseconds,
        max_attempts, idempotency_key, COALESCE(workflow_id::text, ''),
-       COALESCE(workflow_attempt_id::text, ''), COALESCE(agent_assignment_id::text, ''),
+       COALESCE(workflow_attempt_id::text, ''), COALESCE(agent_participant_id::text, ''),
        COALESCE(agent_session_id::text, ''), COALESCE(agent_turn_id::text, ''),
        COALESCE(execution_epoch, 0), status, available_at, attempt_count,
        COALESCE(lease_owner, ''), COALESCE(lease_token::text, ''), leased_at,
@@ -428,7 +427,7 @@ func scanJob(row rowScanner) (Job, error) {
 	err := row.Scan(
 		&job.ID, &job.Queue, &job.Kind, &payload, &job.Priority, &delayMicroseconds,
 		&job.MaxAttempts, &job.IdempotencyKey, &job.WorkflowID, &job.WorkflowAttemptID,
-		&job.AgentAssignmentID, &job.AgentSessionID, &job.AgentTurnID, &job.ExecutionEpoch,
+		&job.AgentParticipantID, &job.AgentSessionID, &job.AgentTurnID, &job.ExecutionEpoch,
 		&job.Status, &job.AvailableAt, &job.AttemptCount, &job.LeaseOwner, &job.LeaseToken,
 		&job.LeasedAt, &job.LeaseExpiresAt, &job.HeartbeatAt, &job.CreatedAt, &job.UpdatedAt,
 		&job.CompletedAt, &result, &job.LastError,
@@ -436,7 +435,6 @@ func scanJob(row rowScanner) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	job.AgentParticipantID = job.AgentAssignmentID
 	job.Payload, err = canonicalJSON(payload)
 	if err != nil {
 		return Job{}, fmt.Errorf("decode job payload: %w", err)

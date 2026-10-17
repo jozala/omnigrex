@@ -428,7 +428,7 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	triggerPreparationWorkflow(t, database, ctx, "78350000-0000-4000-8000-000000000001", "78350000-0000-4000-8000-000000000002")
 	profile := preparationSpec("second-failure-profile", "openai/second-failure")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "second-failure-profile", "openai/second-failure")
-	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "second-failure-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "second-failure-runtime")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -496,9 +496,9 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 SELECT workflow.status, workflow.human_handoff_reason, attempt.human_handoff_reason,
        count(*) FILTER (WHERE job.kind = 'PUBLISH_HUMAN_HANDOFF'),
 	       count(*) FILTER (WHERE job.kind = 'RECONCILE_GITHUB_LABELS'),
-	       (SELECT count(*) FROM agent_assignments
+	       (SELECT count(*) FROM agent_participants
 	        WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL),
-	       (SELECT count(*) FROM agent_assignments
+	       (SELECT count(*) FROM agent_participants
 	        WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL)
 FROM workflows AS workflow
 JOIN workflow_attempts AS attempt ON attempt.id = $2
@@ -608,7 +608,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	triggerPreparationWorkflow(t, database, ctx, "78370000-0000-4000-8000-000000000001", "78370000-0000-4000-8000-000000000002")
 	profile := preparationSpec("recovery-replay-profile", "openai/recovery-replay")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovery-replay-profile", "openai/recovery-replay")
-	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "recovery-replay-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "recovery-replay-runtime")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}

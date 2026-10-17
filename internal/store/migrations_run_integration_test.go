@@ -4,321 +4,104 @@ package store_test
 
 import (
 	"context"
-	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/store/migrations"
 )
 
-const migrationHistoryDDL = `
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version BIGINT PRIMARY KEY CHECK (version > 0),
-    name TEXT NOT NULL CHECK (name <> ''),
-    checksum BYTEA NOT NULL CHECK (octet_length(checksum) = 32),
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-)`
-
-var migrationFilesThrough13 = []string{
-	"000001_bootstrap.sql",
-	"000002_normalized_events.sql",
-	"000003_durable_jobs_and_turn_fencing.sql",
-	"000004_phase_five_acknowledgement_barriers.sql",
-	"000005_single_live_workflow_successor.sql",
-	"000006_agent_turn_preparation.sql",
-	"000007_scoped_mutation_operations.sql",
-	"000008_agent_turn_settlements.sql",
-	"000009_workflow_action_exhaustion.sql",
-	"000010_workflow_action_failure_barriers.sql",
-	"000011_durable_closure_retention.sql",
-	"000012_runtime_profile_compatibility.sql",
-	"000013_tool_scoped_mutation_operations.sql",
+func TestRunRejectsIncompatibleHistoryBeforeApplyingSchema(t *testing.T) {
+	for _, recorded := range []string{"(1, 'previous_baseline', decode(repeat('ab', 32), 'hex'))", "(37, 'unknown_release', decode(repeat('ab', 32), 'hex'))"} {
+		t.Run(recorded[:2], func(t *testing.T) {
+			postgres := startPostgres(t)
+			pool := openPool(t, postgres.databaseURL(true))
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (version bigint PRIMARY KEY, name text NOT NULL, checksum bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT clock_timestamp());
+CREATE TABLE existing_deployment_marker (value text); INSERT INTO existing_deployment_marker VALUES ('preserve');
+INSERT INTO schema_migrations (version, name, checksum) VALUES `+recorded); err != nil {
+				t.Fatal(err)
+			}
+			if err := migrations.Run(ctx, pool); err == nil {
+				t.Fatal("incompatible deployment history was accepted")
+			}
+			var marker string
+			var created bool
+			if err := pool.QueryRow(ctx, `SELECT (SELECT value FROM existing_deployment_marker), to_regclass('public.agent_sessions') IS NOT NULL`).Scan(&marker, &created); err != nil {
+				t.Fatal(err)
+			}
+			if marker != "preserve" || created {
+				t.Fatal("rejected history changed application state")
+			}
+		})
+	}
 }
 
-func TestRunCommitsEachMigrationAndResumesAfterLateFailure(t *testing.T) {
+func TestRunRollsBackFailedBaselineAndRetries(t *testing.T) {
 	postgres := startPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	applyRecordedMigrations(t, ctx, pool, migrationFilesThrough13...)
-	if _, err := pool.Exec(ctx, `
-INSERT INTO webhook_deliveries (
-    delivery_id, event_name, repository_id, repository_owner, repository_name,
-    payload, status, attempt_count
-)
-VALUES ('15000000-0000-4000-8000-000000000001', 'push', 1, 'owner', 'repo', '{}'::bytea, 'PENDING', 7);
-
-CREATE FUNCTION reject_attempt_backfill() RETURNS trigger LANGUAGE plpgsql AS $$
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION fail_baseline_test() RETURNS event_trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'forced late migration failure';
-END
+    IF EXISTS (SELECT 1 FROM pg_event_trigger_ddl_commands() WHERE object_identity = 'public.workspace_captures') THEN
+        RAISE EXCEPTION 'controlled baseline failure';
+    END IF;
+END;
 $$;
-
-CREATE TRIGGER reject_attempt_backfill
-BEFORE UPDATE ON webhook_deliveries
-FOR EACH ROW EXECUTE FUNCTION reject_attempt_backfill()`); err != nil {
-		t.Fatalf("prepare late migration failure: %v", err)
-	}
-
-	err := migrations.Run(ctx, pool)
-	if err == nil || !strings.Contains(err.Error(), "apply migration 000015_backfill_webhook_delivery_attempts.sql") {
-		t.Fatalf("Run() error = %v, want migration 000015 failure", err)
-	}
-
-	var latestVersion, attemptLimit int
-	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil {
-		t.Fatalf("read migration history after failure: %v", err)
-	}
-	if latestVersion != 14 {
-		t.Errorf("latest migration after failure = %d, want committed migration 14", latestVersion)
-	}
-	if err := pool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000001'`).Scan(&attemptLimit); err != nil {
-		t.Fatalf("read delivery after failed backfill: %v", err)
-	}
-	if attemptLimit != 3 {
-		t.Errorf("max_attempts after failed backfill = %d, want rolled-back value 3", attemptLimit)
-	}
-	if _, err := pool.Exec(ctx, `DROP TRIGGER reject_attempt_backfill ON webhook_deliveries; DROP FUNCTION reject_attempt_backfill()`); err != nil {
-		t.Fatalf("remove forced migration failure: %v", err)
-	}
-
-	retryPool := openPool(t, postgres.databaseURL(true))
-	if err := migrations.Run(ctx, retryPool); err != nil {
-		t.Fatalf("Run() after repairing late failure: %v", err)
-	}
-	var migrationCount int
-	if err := retryPool.QueryRow(ctx, `SELECT max(version), count(*) FROM schema_migrations`).Scan(&latestVersion, &migrationCount); err != nil {
-		t.Fatalf("read migration history after retry: %v", err)
-	}
-	if latestVersion != 36 || migrationCount != 36 {
-		t.Errorf("migration history after retry = max %d, count %d; want max 36, count 36", latestVersion, migrationCount)
-	}
-	if err := retryPool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000001'`).Scan(&attemptLimit); err != nil {
-		t.Fatalf("read delivery after retry: %v", err)
-	}
-	if attemptLimit != 8 {
-		t.Errorf("max_attempts after retry = %d, want 8", attemptLimit)
-	}
-}
-
-func TestUpgradeFromSchema25PreservesExistingAcceptedReview(t *testing.T) {
-	postgres := startPostgres(t)
-	pool := openPool(t, postgres.databaseURL(true))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	entries, err := migrations.Files.ReadDir(".")
-	if err != nil {
+CREATE EVENT TRIGGER baseline_test_failure ON ddl_command_end WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION fail_baseline_test();`); err != nil {
 		t.Fatal(err)
 	}
-	var earlier []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() >= "000026_" {
-			continue
-		}
-		earlier = append(earlier, entry.Name())
+	if err := migrations.Run(ctx, pool); err == nil || !strings.Contains(err.Error(), "controlled baseline failure") {
+		t.Fatalf("baseline failure = %v", err)
 	}
-	if len(earlier) != 25 {
-		t.Fatalf("pre-upgrade migrations = %d, want 25", len(earlier))
-	}
-	applyRecordedMigrations(t, ctx, pool, earlier...)
-	fixture := agentFixture{workflowID: "40000000-0000-4000-8000-000000009901"}
-	if _, err := pool.Exec(ctx, `INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
-VALUES ($1, 990, 'owner', 'repo', 990, 990, 'ACTIVE')`, fixture.workflowID); err != nil {
+	var tables, history int
+	if err := pool.QueryRow(ctx, `SELECT
+    (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('agent_sessions', 'workflows', 'workspace_captures')),
+    (SELECT count(*) FROM schema_migrations)`).Scan(&tables, &history); err != nil {
 		t.Fatal(err)
 	}
-	const proposalID = "95000000-0000-4000-8000-000000000991"
-	const deliveryID = "95000000-0000-4000-8000-000000000992"
-	if _, err := pool.Exec(ctx, `
-INSERT INTO change_proposals (
-    id, workflow_id, repository_id, repository_owner, repository_name,
-    pull_request_id, pull_request_number, status, active,
-    base_ref, base_sha, head_ref, head_sha
-) VALUES ($1, $2, 990, 'owner', 'repo', 99000, 991, 'OPEN', TRUE,
-          'main', 'base-head', 'feature', 'review-head')`, proposalID, fixture.workflowID); err != nil {
-		t.Fatal(err)
+	if tables != 0 || history != 0 {
+		t.Fatalf("failed baseline left tables=%d history=%d", tables, history)
 	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO webhook_deliveries (
-    delivery_id, event_name, repository_id, repository_owner, repository_name,
-    issue_id, issue_number, payload
-) VALUES ($1, 'pull_request_review', 990, 'owner', 'repo', 990, 990, '{}'::bytea)`, deliveryID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO normalized_events (delivery_id, payload) VALUES ($1, '{}'::jsonb)`, deliveryID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO change_proposal_reviews (
-    repository_id, review_id, review_node_id, change_proposal_id,
-    actor_id, head_sha, accepted, normalized_event_id
-) VALUES (990, 99001, 'PRR_old', $1, 99002, 'review-head', TRUE, $2)`, proposalID, deliveryID); err != nil {
+	if _, err := pool.Exec(ctx, `DROP EVENT TRIGGER baseline_test_failure; DROP FUNCTION fail_baseline_test()`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrations.Run(ctx, pool); err != nil {
-		t.Fatalf("upgrade populated v25 to v26: %v", err)
+		t.Fatalf("retry failed: %v", err)
 	}
-	var version, reviews, checkpoints int
-	if err := pool.QueryRow(ctx, `
-SELECT (SELECT max(version) FROM schema_migrations),
-       (SELECT count(*) FROM change_proposal_reviews WHERE review_id = 99001 AND accepted
-           AND normalized_event_id = $1 AND workflow_internal_event_id IS NULL),
-       (SELECT count(*) FROM agent_turn_corroborations WHERE workflow_id = $2)`,
-		deliveryID, fixture.workflowID).Scan(&version, &reviews, &checkpoints); err != nil {
+	if err := migrations.Check(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if version != 36 || reviews != 1 || checkpoints != 0 {
-		t.Fatalf("upgraded history = v%d, preserved reviews %d, retroactive checkpoints %d", version, reviews, checkpoints)
-	}
 }
 
-func TestRunCancellationRollsBackCurrentMigrationAndReleasesLock(t *testing.T) {
+func TestRunCancellationReleasesMigrationLock(t *testing.T) {
 	postgres := startPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	applyRecordedMigrations(t, ctx, pool, migrationFilesThrough13...)
-	if _, err := pool.Exec(ctx, `
-INSERT INTO webhook_deliveries (
-    delivery_id, event_name, repository_id, repository_owner, repository_name,
-    payload, status, attempt_count
-)
-VALUES ('15000000-0000-4000-8000-000000000002', 'push', 1, 'owner', 'repo', '{}'::bytea, 'PENDING', 7);
-
-CREATE FUNCTION pause_attempt_backfill() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-    PERFORM pg_sleep(30);
-    RETURN NEW;
-END
-$$;
-
-CREATE TRIGGER pause_attempt_backfill
-BEFORE UPDATE ON webhook_deliveries
-FOR EACH ROW EXECUTE FUNCTION pause_attempt_backfill()`); err != nil {
-		t.Fatalf("prepare cancellable migration: %v", err)
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		result <- migrations.Run(runCtx, pool)
-	}()
-	waitForMigrationVersion(t, ctx, pool, 14)
-	cancelRun()
-	select {
-	case err := <-result:
-		if err == nil || !strings.Contains(err.Error(), "context canceled") {
-			t.Fatalf("canceled Run() error = %v, want context cancellation", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("canceled Run() did not return")
+	const lockID = int64(0x4f4d4e4947524558)
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockID); err != nil {
+		blocker.Release()
+		t.Fatal(err)
 	}
-
-	var latestVersion, attemptLimit int
-	if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil {
-		t.Fatalf("read migration history after cancellation: %v", err)
+	bounded, stop := context.WithTimeout(ctx, 100*time.Millisecond)
+	err = migrations.Run(bounded, pool)
+	stop()
+	if err == nil {
+		t.Fatal("migration lock wait ignored cancellation")
 	}
-	if latestVersion != 14 {
-		t.Errorf("latest migration after cancellation = %d, want committed migration 14", latestVersion)
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_unlock($1)`, lockID); err != nil {
+		blocker.Release()
+		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT max_attempts FROM webhook_deliveries WHERE delivery_id = '15000000-0000-4000-8000-000000000002'`).Scan(&attemptLimit); err != nil {
-		t.Fatalf("read delivery after cancellation: %v", err)
-	}
-	if attemptLimit != 3 {
-		t.Errorf("max_attempts after cancellation = %d, want rolled-back value 3", attemptLimit)
-	}
-	if _, err := pool.Exec(ctx, `DROP TRIGGER pause_attempt_backfill ON webhook_deliveries; DROP FUNCTION pause_attempt_backfill()`); err != nil {
-		t.Fatalf("remove migration pause: %v", err)
-	}
-
-	retryPool := openPool(t, postgres.databaseURL(true))
-	if err := migrations.Run(ctx, retryPool); err != nil {
-		t.Fatalf("Run() after cancellation: %v", err)
-	}
-}
-
-func TestRunSerializesConcurrentCallsAndReleasesLock(t *testing.T) {
-	postgres := startPostgres(t)
-	pool := openPool(t, postgres.databaseURL(true))
-
-	const callers = 8
-	start := make(chan struct{})
-	results := make(chan error, callers)
-	for range callers {
-		go func() {
-			<-start
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			results <- migrations.Run(ctx, pool)
-		}()
-	}
-	close(start)
-	for range callers {
-		if err := <-results; err != nil {
-			t.Fatalf("concurrent Run() error = %v", err)
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var migrationCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
-		t.Fatalf("read migration history: %v", err)
-	}
-	if migrationCount != 36 {
-		t.Errorf("migration history count = %d, want 36", migrationCount)
-	}
-
-	observerPool := openPool(t, postgres.databaseURL(true))
-	if err := migrations.Run(ctx, observerPool); err != nil {
-		t.Fatalf("Run() from fresh pool after concurrent calls: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET checksum = decode(repeat('00', 32), 'hex') WHERE version = 17`); err != nil {
-		t.Fatalf("tamper with migration history: %v", err)
-	}
-	if err := migrations.Run(ctx, observerPool); err == nil || !strings.Contains(err.Error(), "migration 000017_validate_normalized_event_failures.sql differs from recorded history") {
-		t.Errorf("Run() with changed migration history error = %v, want checksum mismatch", err)
-	}
-}
-
-func waitForMigrationVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version int) {
-	t.Helper()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		var exists bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, version).Scan(&exists); err != nil {
-			t.Fatalf("wait for migration %d: %v", version, err)
-		}
-		if exists {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("wait for migration %d: %v", version, ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-func applyRecordedMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, filenames ...string) {
-	t.Helper()
-	if _, err := pool.Exec(ctx, migrationHistoryDDL); err != nil {
-		t.Fatalf("create migration history: %v", err)
-	}
-	for version, filename := range filenames {
-		contents, err := migrations.Files.ReadFile(filename)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", filename, err)
-		}
-		if _, err := pool.Exec(ctx, string(contents)); err != nil {
-			t.Fatalf("apply migration %s: %v", filename, err)
-		}
-		checksum := sha256.Sum256(contents)
-		name := strings.TrimSuffix(strings.SplitN(filename, "_", 2)[1], ".sql")
-		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)`, version+1, name, checksum[:]); err != nil {
-			t.Fatalf("record migration %s: %v", filename, err)
-		}
+	blocker.Release()
+	if err := migrations.Run(ctx, pool); err != nil {
+		t.Fatalf("migration lock was not released: %v", err)
 	}
 }

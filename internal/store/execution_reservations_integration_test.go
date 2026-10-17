@@ -27,7 +27,7 @@ func TestExecutionReservationsSurviveRestartAndFenceExactEpochs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	digest := strings.Repeat("a", 64)
 	if _, fresh, err := database.ReserveExecution(ctx, key, digest); err != nil || !fresh {
 		t.Fatalf("reserve = %t, %v", fresh, err)
@@ -118,7 +118,7 @@ func TestExecutionRevocationFencesPreviouslyUnseenKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	if _, _, err := databases[0].RevokeExecution(ctx, key); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestExecutionFirstReservationRacingRevocationCannotDispatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	for sequence := 1; sequence <= 20; sequence++ {
-		key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: fmt.Sprintf("30000000-0000-4000-8000-%012d", sequence), ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: fmt.Sprintf("30000000-0000-4000-8000-%012d", sequence), ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 		start := make(chan struct{})
 		results := make(chan error, 2)
 		go func() {
@@ -168,7 +168,7 @@ func TestExecutionSetupIdentityAndPhaseSurviveStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	if _, _, err := database.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestExecutionAdmissionChecksLiveFenceBeforeEachPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: fixture.assignmentID, AgentSessionID: fixture.sessionID, AgentTurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	ledger := databases[0].ExecutionLedger(lease)
 	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)

@@ -143,7 +143,7 @@ func newNativeStopWorker(t *testing.T, backend *Backend, key execution.Key, work
 	durable := &nativeStopWorkerStore{key: key, workspaces: workspaces, lease: store.JobLease{Job: store.Job{
 		JobSpec: store.JobSpec{
 			Queue: store.AgentTurnRecoveryQueue, Kind: store.StopStaleRuntimeJobKind,
-			AgentAssignmentID: key.AssignmentID, AgentSessionID: key.AgentSessionID,
+			AgentParticipantID: key.AssignmentID, AgentSessionID: key.AgentSessionID,
 			AgentTurnID: key.AgentTurnID, ExecutionEpoch: key.ExecutionEpoch,
 		},
 		ID: "40000000-0000-4000-8000-000000000001", Status: store.JobLeased,

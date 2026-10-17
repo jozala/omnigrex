@@ -11,16 +11,16 @@ import (
 )
 
 func TestPiProcessPreservesApprovedDiskBackedPaths(t *testing.T) {
-	p, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	p, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+	key := execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 1, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	paths := map[string]string{
-		"TMPDIR":   "/home/opencode/.local/share/omnigrex-tool-data/turn/30000000-0000-4000-8000-000000000001/build-tmp",
-		"GOTMPDIR": "/home/opencode/.local/share/omnigrex-tool-data/turn/30000000-0000-4000-8000-000000000001/build-tmp",
-		"GOCACHE":  "/home/opencode/.local/share/omnigrex-tool-data/assignment/go-build-cache",
-		"GOPATH":   "/home/opencode/.local/share/omnigrex-tool-data/assignment/go-modules",
+		"TMPDIR":   "/home/omnigrex/.local/share/omnigrex-tool-data/turn/30000000-0000-4000-8000-000000000001/build-tmp",
+		"GOTMPDIR": "/home/omnigrex/.local/share/omnigrex-tool-data/turn/30000000-0000-4000-8000-000000000001/build-tmp",
+		"GOCACHE":  "/home/omnigrex/.local/share/omnigrex-tool-data/assignment/go-build-cache",
+		"GOPATH":   "/home/omnigrex/.local/share/omnigrex-tool-data/assignment/go-modules",
 	}
 	adapter := pi.TurnAdapter{}
 	request, err := adapter.BuildProcess(p, key, "workflow", 512<<20, paths)

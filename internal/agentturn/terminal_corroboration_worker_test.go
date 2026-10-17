@@ -137,12 +137,12 @@ func redirectTestPending() store.TerminalCorroborationContext {
 		Execution: store.AgentTurnExecutionContext{
 			WorkflowID: "workflow-1",
 			Repository: store.AgentTurnRepository{ID: 91, Owner: "acme", Name: "widgets"},
-			Assignment: store.AgentAssignment{ID: "participant-1", WorkflowID: "workflow-1", Status: store.AgentAssignmentActive, Role: workflow.RoleDeveloper,
-				RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"},
-			Session: store.AgentSession{ID: "session-1", AgentAssignmentID: "participant-1"},
+			Participant: store.AgentParticipant{ID: "participant-1", WorkflowID: "workflow-1", Status: store.AgentParticipantActive, Role: workflow.RoleDeveloper,
+				RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"},
+			Session: store.AgentSession{ID: "session-1", AgentParticipantID: "participant-1"},
 			Turn: store.AgentTurn{
 				AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "session-1", WorkflowAttemptID: "attempt-old", ExpectedHeadSHA: "head-a", ControlRevision: 1},
-				ID:            "turn-1", AgentAssignmentID: "participant-1", ExecutionEpoch: 1,
+				ID:            "turn-1", AgentParticipantID: "participant-1", ExecutionEpoch: 1,
 			},
 			ChangeProposal: &store.AgentTurnChangeProposal{
 				PullRequestID: 64, PullRequestNumber: 12, HeadRef: "feature", BaseRef: "main",
@@ -157,7 +157,7 @@ func redirectTestLease() *store.JobLease {
 	return &store.JobLease{
 		Job: store.Job{
 			JobSpec: store.JobSpec{Queue: "agent-turn-recovery", Kind: store.RevalidateTerminalIntentJobKind,
-				WorkflowID: "workflow-1", WorkflowAttemptID: "attempt-new", AgentAssignmentID: "participant-1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1},
+				WorkflowID: "workflow-1", WorkflowAttemptID: "attempt-new", AgentParticipantID: "participant-1", AgentSessionID: "session-1", AgentTurnID: "turn-1", ExecutionEpoch: 1},
 			ID: "job-1", LeaseToken: "verification-token", LeaseOwner: "redirect-test", AttemptCount: 1, Status: store.JobLeased,
 		},
 		Attempt: 1,
@@ -369,7 +369,7 @@ type contextErrorCorroborationStore struct {
 func newContextErrorCorroborationStore(kind string, contextErr error) *contextErrorCorroborationStore {
 	return &contextErrorCorroborationStore{
 		lease: store.JobLease{Job: store.Job{
-			JobSpec: store.JobSpec{Queue: "agent-turn-recovery", Kind: kind, WorkflowID: "workflow", WorkflowAttemptID: "attempt", AgentAssignmentID: "participant", AgentSessionID: "session", AgentTurnID: "source-turn", ExecutionEpoch: 7},
+			JobSpec: store.JobSpec{Queue: "agent-turn-recovery", Kind: kind, WorkflowID: "workflow", WorkflowAttemptID: "attempt", AgentParticipantID: "participant", AgentSessionID: "session", AgentTurnID: "source-turn", ExecutionEpoch: 7},
 			ID:      "verification-job", Status: store.JobLeased, LeaseOwner: "verifier", LeaseToken: "exact-token", AttemptCount: 2,
 		}, Attempt: 2},
 		checkpoint: store.TerminalCorroboration{TurnID: "source-turn", ExecutionEpoch: 7, SourceInvocationID: "original-terminal-mutation", PromptOutcome: json.RawMessage(`{"stop_reason":"end_turn"}`)},

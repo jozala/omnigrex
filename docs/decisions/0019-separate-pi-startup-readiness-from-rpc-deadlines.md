@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-10-12
-decision-makers: [OpenCode implementation agent]
+decision-makers: [Implementation agent]
 ---
 # Separate Pi startup readiness from ordinary RPC deadlines
 

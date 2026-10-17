@@ -82,12 +82,15 @@ func (store *Store) SealCapture(ctx context.Context, ref execution.CaptureRef) e
 SELECT turn.id::text
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS participant ON participant.id = session.agent_assignment_id
+JOIN agent_participants AS participant ON participant.id = session.agent_participant_id
 WHERE turn.id = $1 AND turn.execution_epoch = $2
   AND session.id = $3 AND participant.id = $4
   AND participant.runtime_profile_name = $5 AND participant.runtime_profile_version = $6
-  AND session.runtime_profile_name = participant.runtime_profile_name
-  AND session.runtime_profile_version = participant.runtime_profile_version
+   AND session.runtime_profile_name = participant.runtime_profile_name
+   AND session.runtime_profile_version = participant.runtime_profile_version
+   AND session.runtime_profile_content_sha256 = participant.runtime_profile_content_sha256
+   AND session.runtime_image_digest = participant.runtime_image_digest
+   AND session.runtime_state_path = participant.runtime_state_path
 FOR SHARE OF turn, session, participant`, key.AgentTurnID, key.ExecutionEpoch, key.AgentSessionID, key.AssignmentID,
 		key.RuntimeProfileName, key.RuntimeProfileVersion).Scan(&turnID)
 	if errors.Is(err, pgx.ErrNoRows) {

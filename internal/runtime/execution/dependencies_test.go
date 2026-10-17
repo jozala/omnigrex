@@ -124,10 +124,6 @@ func boundaryImportForbidden(owner, dependency string) bool {
 			return true
 		}
 	}
-	// Removed runtime families cannot return through any production dependency.
-	if packageFamily(dependency, internal+"runtime/acp") || packageFamily(dependency, internal+"runtime/opencode") {
-		return true
-	}
 	return false
 }
 
@@ -152,9 +148,6 @@ func TestBoundaryRulesRejectLeakageAndPermitOwnedComposition(t *testing.T) {
 		{"agentturn", "github.com/moby/moby/api/types/container", true},
 		{"runtime/pi", "github.com/superradcompany/microsandbox/sdk/go", true},
 		{"runtime/execution", "github.com/jozala/omnigrex/internal/store", true},
-		{"runtime/agent", "github.com/jozala/omnigrex/internal/runtime/acp", true},
-		{"agentturn", "github.com/jozala/omnigrex/internal/runtime/acp", true},
-		{"runtime/composition", "github.com/jozala/omnigrex/internal/runtime/opencode", true},
 		{"workflow", "github.com/jozala/omnigrex/internal/runtime/pi", true},
 		{"runtime/composition", "github.com/jozala/omnigrex/internal/runtime/pi", false},
 		{"runtime/docker", "github.com/moby/moby/client", false},

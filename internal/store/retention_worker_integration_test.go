@@ -55,13 +55,13 @@ func TestAssignmentRetentionWorkerWaitsForDeadlineAndLeavesNeighboringAssignment
 	if err := pool.QueryRow(ctx, `SELECT desired_runtime_state FROM workflows WHERE id = $1`, fixture.workflowID).Scan(&collectedRuntime); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus, &sessionDeletedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_assignments WHERE id = $1`, neighbor.assignmentID).Scan(&neighborDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_participants WHERE id = $1`, neighbor.assignmentID).Scan(&neighborDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if collectedRuntime != "COLLECTED" || assignmentStatus != "COMPLETED" || assignmentDeletedAt == nil ||
@@ -237,10 +237,10 @@ func TestAssignmentRetentionWorkerRetriesPartialCleanupIdempotentlyAcrossLeaseAt
 	if err := pool.QueryRow(ctx, `SELECT status FROM assignment_retention_generations WHERE workflow_id = $1`, fixture.workflowID).Scan(&generationStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&firstDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&firstDeletedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_assignments WHERE id = $1`, secondAssignmentID).Scan(&secondDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT state_deleted_at FROM agent_participants WHERE id = $1`, secondAssignmentID).Scan(&secondDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if jobStatus != "AVAILABLE" || generationStatus != "COLLECTING" || firstDeletedAt != nil || secondDeletedAt != nil {
@@ -266,8 +266,8 @@ func TestAssignmentRetentionWorkerRetriesPartialCleanupIdempotentlyAcrossLeaseAt
 	if err := pool.QueryRow(ctx, `
 SELECT (SELECT count(*) FROM job_attempts AS attempt JOIN jobs AS job ON job.id = attempt.job_id
         WHERE job.workflow_id = $1 AND job.kind = 'COLLECT_ASSIGNMENTS'),
-       (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
-       (SELECT count(*) FROM agent_sessions WHERE agent_assignment_id IN ($2, $3))`,
+       (SELECT count(*) FROM agent_participants WHERE workflow_id = $1),
+       (SELECT count(*) FROM agent_sessions WHERE agent_participant_id IN ($2, $3))`,
 		fixture.workflowID, fixture.assignmentID, secondAssignmentID).Scan(&attempts, &assignments, &sessions); err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestAssignmentRetentionWorkerExhaustionPublishesOnceAndContinuesUntilCollec
 	if err := pool.QueryRow(ctx, `SELECT status FROM assignment_retention_generations WHERE workflow_id = $1`, fixture.workflowID).Scan(&generationStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus, &sessionDeletedAt); err != nil {
@@ -435,20 +435,20 @@ func addRetainedFixtureAssignment(t *testing.T, pool *pgxpool.Pool, fixture agen
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v1', 'sha256:test', $3)`,
+VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v2', repeat('a', 64), 'sha256:test', $3)`,
 		assignmentID, fixture.workflowID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status, runtime_capabilities
+    id, agent_participant_id, session_number, runtime_session_id, runtime_profile_name,
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, $3, 'pi-rpc', 'v1', 'sha256:test', $4, 'ACTIVE', '{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}')`,
+VALUES ($1, $2, 1, $3, 'pi-rpc', 'v2', repeat('a', 64), 'sha256:test', $4, 'ACTIVE', '{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}')`,
 		sessionID, assignmentID, sessionID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Agent Session: %v", err)
 	}

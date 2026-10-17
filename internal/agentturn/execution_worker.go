@@ -255,7 +255,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	// credentials later, so launch credentials are never retained for
 	// finalization.
 	acquireLaunchCredential := func() error {
-		policy, ok := worker.policies.Lookup(execution.Assignment.Role)
+		policy, ok := worker.policies.Lookup(execution.Participant.Role)
 		if !ok {
 			return errors.New("Agent Turn has no Role policy")
 		}
@@ -286,7 +286,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		// gate before launch without keeping the token for later
 		// authorization.
 		if operationErr == nil {
-			policy, ok := worker.policies.Lookup(execution.Assignment.Role)
+			policy, ok := worker.policies.Lookup(execution.Participant.Role)
 			if !ok {
 				operationErr = errors.New("Agent Turn has no Role policy")
 			} else if authority, granted := policy.CredentialAuthorityForTool(mcp.ToolSubmitReview); granted && authority == role.ReviewerAuthority {
@@ -965,7 +965,7 @@ func zeroBytes(value []byte) {
 
 func sameExecutionLease(first, second store.AgentTurnLease) bool {
 	return first.ID == second.ID && first.ExecutionEpoch == second.ExecutionEpoch &&
-		first.ControlRevision == second.ControlRevision && first.AgentAssignmentID == second.AgentAssignmentID &&
+		first.ControlRevision == second.ControlRevision && first.AgentParticipantID == second.AgentParticipantID &&
 		first.AgentSessionID == second.AgentSessionID && first.OwnerID == second.OwnerID &&
 		first.OwnerToken == second.OwnerToken && first.JobLease.ID == second.JobLease.ID &&
 		first.JobLease.Attempt == second.JobLease.Attempt && first.JobLease.LeaseToken == second.JobLease.LeaseToken

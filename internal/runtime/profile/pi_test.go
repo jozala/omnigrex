@@ -10,12 +10,12 @@ import (
 )
 
 func TestPiRuntimeProfilePinsSeparateStateAndDisposableInputs(t *testing.T) {
-	p, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "arm64"})
+	p, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := p.Contract()
-	if c.Name != "pi-rpc" || c.Version != "v1" || c.RepositoryEnvironment == nil || c.Workspace != "/workspace" {
+	if c.Name != "pi-rpc" || c.Version != "v2" || c.RepositoryEnvironment == nil || c.Workspace != "/workspace" {
 		t.Fatalf("contract: %+v", c)
 	}
 	state, auth := "", ""
@@ -39,7 +39,7 @@ func TestPiRuntimeProfilePinsSeparateStateAndDisposableInputs(t *testing.T) {
 }
 
 func TestPiHistoricalResourceContractSurvivesCanonicalStoreResolution(t *testing.T) {
-	current, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	current, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestPiHistoricalResourceContractSurvivesCanonicalStoreResolution(t *testing
 func TestPiNewEnvironmentCapturesSelectedPlatformResources(t *testing.T) {
 	for _, pair := range [][2]string{{"amd64", "arm64"}, {"arm64", "amd64"}} {
 		t.Run(pair[0]+"-to-"+pair[1], func(t *testing.T) {
-			base, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: pair[0]})
+			base, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: pair[0]})
 			if err != nil {
 				t.Fatal(err)
 			}

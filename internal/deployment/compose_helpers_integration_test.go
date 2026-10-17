@@ -46,8 +46,8 @@ func composeEnvironment(secretFile, dockerGID, secretGID, httpPort string, addit
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":                     "2",
 		"OMNIGREX_READINESS_TIMEOUT":                          "60s",
 		"OMNIGREX_SHUTDOWN_TIMEOUT":                           "10s",
-		"OMNIGREX_PI_RPC_V1_IMAGE":                            testDeploymentImage,
-		"OMNIGREX_PI_RPC_V1_PLATFORM":                         "linux/amd64",
+		"OMNIGREX_PI_IMAGE":                                   testDeploymentImage,
+		"OMNIGREX_PI_PLATFORM":                                "linux/amd64",
 		"OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE": "",
 	}
 	for _, name := range composeSecretEnvironment {

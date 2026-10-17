@@ -283,7 +283,7 @@ func TestOwnedRunnerReportsSafeConfigurationFailure(t *testing.T) {
 }
 
 func TestRenderUsesCurrentDeploymentInstructionsAndLiteralAPIKeys(t *testing.T) {
-	p, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v1\nmodel: openai/o4-mini\npermissions:\n  read: allow\n  skill: allow\n---\nREPOSITORY_PERSONALITY\n"), role.BuiltinPolicyCatalog())
+	p, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v2\nmodel: openai/o4-mini\npermissions:\n  read: allow\n  skill: allow\n---\nREPOSITORY_PERSONALITY\n"), role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}

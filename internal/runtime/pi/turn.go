@@ -25,7 +25,7 @@ type TurnAdapter struct {
 
 func (TurnAdapter) BuildProcess(p profile.Profile, key execution.Key, workflowID string, memory int64, tools map[string]string) (execution.Request, error) {
 	c := p.Contract()
-	if c.Name != "pi-rpc" || c.Version != "v1" || key.RuntimeProfileName != c.Name || key.RuntimeProfileVersion != c.Version || memory <= 0 {
+	if c.Name != profile.PiRuntimeName || c.Version != profile.PiRuntimeVersion || key.RuntimeProfileName != c.Name || key.RuntimeProfileVersion != c.Version || memory <= 0 {
 		return execution.Request{}, execution.ErrInvalidSpec
 	}
 	values := map[string]string{}

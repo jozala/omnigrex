@@ -151,14 +151,14 @@ func (worker *StopWorker) ProcessNext(ctx context.Context) (processed bool, err 
 
 func recoveryRuntimeKey(lease store.JobLease) (execution.Key, error) {
 	if lease.Queue != store.AgentTurnRecoveryQueue || lease.Kind != store.StopStaleRuntimeJobKind ||
-		!uuidtext.Valid(lease.AgentAssignmentID) ||
+		!uuidtext.Valid(lease.AgentParticipantID) ||
 		!uuidtext.Valid(lease.AgentSessionID) ||
 		!uuidtext.Valid(lease.AgentTurnID) ||
 		lease.ExecutionEpoch <= 0 {
 		return execution.Key{}, errors.New("stale Runtime Process stop job has invalid identity")
 	}
 	return execution.Key{
-		AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
+		AssignmentID: lease.AgentParticipantID, AgentSessionID: lease.AgentSessionID,
 		AgentTurnID: lease.AgentTurnID, ExecutionEpoch: lease.ExecutionEpoch,
 	}, nil
 }

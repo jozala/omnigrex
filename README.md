@@ -18,9 +18,10 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Domain language](./CONTEXT.md)
 - [Architecture decisions](./docs/adr/)
 - [Project decision log](./docs/decisions/README.md)
-- [Microsandbox feasibility experiment](./experiments/microsandbox/README.md)
-- [Pi RPC feasibility experiment](./experiments/pi/README.md)
+- [Microsandbox feasibility evidence](./docs/experiments/microsandbox.md)
+- [Pi RPC feasibility evidence](./docs/experiments/pi.md)
 - [Pi and pluggable Execution Backend delivery plan](./docs/plans/2026-10-05-pi-and-pluggable-execution-backends.md)
+- [Clean supported release baseline](./docs/plans/2026-10-16-clean-runtime-baseline.md)
 - [Execution and agent boundary contracts](./docs/plans/2026-10-07-runtime-boundary-contracts.md)
 - [Location-independent workspace evidence](./docs/plans/2026-10-08-location-independent-workspaces.md)
 - [Retained-state bindings and recovery evidence](./docs/plans/2026-10-08-retained-state-bindings.md)
@@ -33,7 +34,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Pi failure recovery and boundary independence](./docs/plans/2026-10-10-pi-failure-recovery.md)
 - [Pi upgrades and state recovery](./docs/plans/2026-10-10-pi-upgrades-and-state-recovery.md)
 - [Pi operational integration and backend CI](./docs/plans/2026-10-11-pi-operational-integration.md)
-- [Pi operator documentation and cutover rehearsal](./docs/plans/2026-10-11-pi-operator-documentation-and-cutover.md)
+- [Pi deployment documentation evidence](./docs/plans/2026-10-11-pi-operator-documentation-and-cutover.md)
 - [Pi-only source and final backend qualification](./docs/plans/2026-10-13-pi-only-final-qualification.md)
 
 The implementation is written in Go and deployable with Docker Compose.
@@ -45,8 +46,9 @@ Follow the authoritative procedure in the [operator guide](./docs/operator-guide
 The [Pi deployment bundles](./docs/operator-guide.md#pi-operational-deployment) support Docker and Linux/amd64 Microsandbox with KVM using image-only deployment files.
 Docker supports trusted-repository execution; Microsandbox additionally supports hardware isolation and guest Docker, Compose, and Testcontainers.
 Select one backend per installation, without fallback or cross-backend state migration.
-See the [operator guide](./docs/operator-guide.md#one-time-opencode-to-pi-cutover) for the explicit OpenCode reset, Pi Profile and credential changes, coordinated recovery, and rollback limits.
-The source implementation is preparatory until the matching release passes publication and exact-digest smoke on both backends.
+The [supported baseline](./docs/decisions/0024-establish-a-clean-supported-release-baseline.md) uses `pi-rpc/v2` and a fresh database/storage installation.
+Deploy one commit whose matching images have passed publication and exact-digest smoke on both backends.
+The [dogfooding record](./docs/dogfooding.md#current-baseline-validation) tracks live validation of that baseline after publication and operator deployment.
 
 ## Development
 
@@ -60,7 +62,7 @@ mise run check
 Build Pi with `mise run pi-image` and the Docker control plane with `mise run image`, or build `Dockerfile.microsandbox` on a Linux/amd64 builder.
 Use the [Pi deployment procedure](./docs/operator-guide.md#pi-operational-deployment) with actual registry digests for a configured local stack.
 The root `compose.yaml` and `.env.example` provide the Pi-only Docker development stack, with a source-built orchestrator and an exact registry-pinned Pi image.
-Set `OMNIGREX_PI_RPC_V1_IMAGE` and its matching platform, provision that image, and run `docker compose up --build --wait` after configuring the required secrets.
+Set `OMNIGREX_PI_IMAGE` and its matching platform, provision that image, and run `docker compose up --build --wait` after configuring the required secrets.
 For a locally built Pi environment, publish it to a development registry and select its resolved digest using the image procedure in the operator guide.
 Secret placement, GitHub Apps, ingress, image provisioning, and recovery procedures are authoritative in the [operator guide](./docs/operator-guide.md).
 
@@ -113,6 +115,8 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-int
 
 Both use a disposable pinned Pi image and a controlled provider with fixture credentials.
 See the [operator guide](./docs/operator-guide.md#pi-protocol-diagnostic) for the standalone diagnostic command.
+Optional real-provider smoke uses `mise run test-pi-live` with an explicitly supplied API-key file through the production Pi runner and selected backend.
+See [live provider smoke](./docs/operator-guide.md#live-provider-smoke) for inputs and evidence boundaries.
 
 The complete backend gates, including shared conformance and Pi lifecycle qualification, are:
 
@@ -123,18 +127,6 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-microsandbox
 
 Image-only deployment smoke uses `mise run test-pi-deployment` or `mise run test-pi-microsandbox-deployment` on the Docker daemon's host, with isolated fixture secrets and resources.
 See the [operator guide](./docs/operator-guide.md#diagnostics-and-backend-gates) for remote-host and published-image qualification.
-
-Rehearse the historical OpenCode reset and Pi coordinated recovery on the daemon host with an externally selected old-release Compose bundle and both exact published source images:
-
-```sh
-OMNIGREX_PI_CUTOVER_SOURCE_COMPOSE_FILE=/private/old-release/compose.yaml \
-OMNIGREX_PI_CUTOVER_SOURCE_ORCHESTRATOR_IMAGE=REGISTRY/ORCHESTRATOR@sha256:SOURCE_DIGEST \
-OMNIGREX_PI_CUTOVER_SOURCE_AGENT_IMAGE=REGISTRY/AGENT@sha256:SOURCE_DIGEST \
-mise run test-pi-cutover
-# Select test-pi-microsandbox-cutover with the same source inputs and the host KVM group for Microsandbox.
-```
-
-See the [rehearsal procedure and evidence boundaries](./docs/operator-guide.md#isolated-cutover-rehearsal) before running these fixture-only gates.
 
 The live GitHub gate checks the Developer App's repository-ID read and uses a pre-existing Developer App-authored Pull Request to submit both Reviewer App outcomes.
 Set the `OMNIGREX_LIVE_GITHUB_*` variables listed by the skipped test, then run:

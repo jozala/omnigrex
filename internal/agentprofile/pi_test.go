@@ -9,12 +9,12 @@ import (
 )
 
 func TestPiProfileUsesNativeConfiguration(t *testing.T) {
-	content := "---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v1\nmodel: openai/o4-mini\nthinking: high\npermissions:\n  read: allow\n  write: allow\n  edit: allow\n  find: allow\n  ls: allow\n  skill: allow\n---\nImplement carefully.\n"
+	content := "---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v2\nmodel: openai/o4-mini\nthinking: high\npermissions:\n  read: allow\n  write: allow\n  edit: allow\n  find: allow\n  ls: allow\n  skill: allow\n---\nImplement carefully.\n"
 	p, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte(content), role.BuiltinPolicyCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Runtime() != "pi-rpc/v1" || p.Thinking() != "high" || !strings.Contains(string(p.CanonicalJSON()), `"runtime":"pi-rpc/v1"`) || strings.Contains(string(p.CanonicalJSON()), "steps") || strings.Contains(string(p.CanonicalJSON()), "variant") {
+	if p.Runtime() != "pi-rpc/v2" || p.Thinking() != "high" || !strings.Contains(string(p.CanonicalJSON()), `"runtime":"pi-rpc/v2"`) || strings.Contains(string(p.CanonicalJSON()), "steps") || strings.Contains(string(p.CanonicalJSON()), "variant") {
 		t.Fatalf("Pi configuration: %s", p.CanonicalJSON())
 	}
 	if _, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte(strings.Replace(content, "openai/o4-mini", "openrouter/openai/o4-mini", 1)), role.BuiltinPolicyCatalog()); err != nil {

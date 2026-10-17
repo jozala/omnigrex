@@ -66,7 +66,7 @@ func (store *Store) AcknowledgePendingEventReconciliationFailure(ctx context.Con
 	_ = json.Unmarshal(job.Payload, &payload)
 	role := payload.FallbackRole
 	if !store.policies.Contains(role) {
-		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1 AND workflow_id = $2`, job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 			return WorkflowActionFailureAcknowledgement{}, ErrPendingEventReconciliationFenceLost
 		}
 	}
@@ -136,11 +136,11 @@ SELECT assignment.workflow_id::text, turn.workflow_attempt_id::text,
 	       turn.control_revision, turn.active, turn.stage_id
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 		&workflowID, &attemptID, &assignmentID, &sessionID, &epoch, &controlRevision, &active, &sourceStage,
 	); err != nil || workflowID != job.WorkflowID || attemptID != job.WorkflowAttemptID ||
-		assignmentID != job.AgentAssignmentID || sessionID != job.AgentSessionID ||
+		assignmentID != job.AgentParticipantID || sessionID != job.AgentSessionID ||
 		epoch != job.ExecutionEpoch || controlRevision != payload.SourceControlRevision || sourceStage != payload.SourceStage || active {
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 	}
@@ -640,7 +640,7 @@ SELECT EXISTS (
     SELECT 1
     FROM agent_turns AS turn
     JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-    JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+    JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
     WHERE assignment.workflow_id = $1 AND turn.active
 ) OR EXISTS (
     SELECT 1 FROM jobs
@@ -688,7 +688,7 @@ func (store *Store) GetClosureTurnRuntimeIdentity(ctx context.Context, lease Job
 		return AgentTurnRuntimeIdentity{}, ErrClosureSettlementFenceLost
 	}
 	identity := AgentTurnRuntimeIdentity{
-		AssignmentID: job.AgentAssignmentID, AgentSessionID: job.AgentSessionID,
+		AssignmentID: job.AgentParticipantID, AgentSessionID: job.AgentSessionID,
 		AgentTurnID: job.AgentTurnID, ExecutionEpoch: job.ExecutionEpoch,
 	}
 	var assignmentProfileName, assignmentProfileVersion string
@@ -696,9 +696,9 @@ func (store *Store) GetClosureTurnRuntimeIdentity(ctx context.Context, lease Job
 SELECT session.runtime_profile_name, session.runtime_profile_version,
        assignment.runtime_profile_name, assignment.runtime_profile_version
 FROM agent_sessions AS session
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE assignment.id = $1 AND session.id = $2 AND assignment.workflow_id = $3`,
-		job.AgentAssignmentID, job.AgentSessionID, job.WorkflowID).Scan(
+		job.AgentParticipantID, job.AgentSessionID, job.WorkflowID).Scan(
 		&identity.RuntimeProfileName, &identity.RuntimeProfileVersion,
 		&assignmentProfileName, &assignmentProfileVersion,
 	); err != nil || identity.RuntimeProfileName != assignmentProfileName || identity.RuntimeProfileVersion != assignmentProfileVersion {
@@ -740,8 +740,7 @@ func (store *Store) GetClosureMutationReconciliationContext(ctx context.Context,
 		turn.ControlRevision != barrier.ControlRevision {
 		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
 	}
-	turn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentAssignmentID = job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	reconciliation := AgentTurnMutationReconciliationContext{WorkflowID: job.WorkflowID, Turn: turn.AgentTurn}
 	if err := tx.QueryRow(ctx, `
 SELECT repository_id, repository_owner, repository_name, issue_id, issue_number
@@ -756,7 +755,7 @@ FROM workflows WHERE id = $1`, job.WorkflowID).Scan(
 	if err := tx.QueryRow(ctx, `
 SELECT source.role, COALESCE((
 	SELECT reviewer.github_app_actor_id
-	FROM agent_assignments AS reviewer
+	FROM agent_participants AS reviewer
 	WHERE reviewer.workflow_id = source.workflow_id
 	  AND reviewer.role = ANY($3::text[])
 	  AND reviewer.status <> 'SUPERSEDED'
@@ -765,8 +764,8 @@ SELECT source.role, COALESCE((
 	ORDER BY reviewer.generation DESC, reviewer.created_at DESC
 	LIMIT 1
 ), 0)
-FROM agent_assignments AS source
-WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID, reviewerRoles).Scan(
+FROM agent_participants AS source
+WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentParticipantID, job.WorkflowID, reviewerRoles).Scan(
 		&reconciliation.Role, &reconciliation.ReviewerActorID,
 	); err != nil || !store.policies.Contains(reconciliation.Role) {
 		return AgentTurnMutationReconciliationContext{}, ErrClosureSettlementFenceLost
@@ -1038,7 +1037,7 @@ func (store *Store) CompleteClosureSettlement(ctx context.Context, lease JobLeas
 	var assignmentsExist bool
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
-    SELECT 1 FROM agent_assignments
+    SELECT 1 FROM agent_participants
     WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL
 )`, barrier.WorkflowID).Scan(&assignmentsExist); err != nil {
 		return ClosureSettlement{}, fmt.Errorf("inspect closure Assignments: %w", err)
@@ -1158,7 +1157,7 @@ func resolveCompletedClosureSettlement(ctx context.Context, tx pgx.Tx, lease Job
 	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.ID))
 	if err != nil || job.Kind != SettleClosureJobKind || job.Queue != WorkflowActionQueue ||
 		job.Status != JobSucceeded || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch || job.AttemptCount != lease.Attempt ||
 		!bytes.Equal(job.Payload, lease.Payload) {
@@ -1294,12 +1293,12 @@ SELECT assignment.workflow_id::text, turn.workflow_attempt_id::text, assignment.
        session.control_revision, turn.status, turn.mutation_admission_open
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE turn.id = $1 FOR UPDATE`, barrier.SourceTurnID).Scan(
 			&workflowID, &attemptID, &assignmentID, &sessionID, &epoch, &turnControlRevision,
 			&sessionControlRevision, &status, &admissionOpen,
 		); err != nil || workflowID != job.WorkflowID || attemptID != job.WorkflowAttemptID ||
-			assignmentID != job.AgentAssignmentID || sessionID != job.AgentSessionID ||
+			assignmentID != job.AgentParticipantID || sessionID != job.AgentSessionID ||
 			epoch != job.ExecutionEpoch || turnControlRevision != barrier.ControlRevision ||
 			sessionControlRevision != barrier.ControlRevision || status != string(AgentTurnCancelling) || admissionOpen {
 			return Job{}, closureJobPayload{}, lockedClosureBarrier{}, ErrClosureSettlementFenceLost
@@ -1429,7 +1428,7 @@ func lockFencedWorkflowJob(ctx context.Context, tx pgx.Tx, lease JobLease, expec
 		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner ||
 		job.LeaseToken != lease.LeaseToken || job.AttemptCount != lease.Attempt ||
 		job.WorkflowID != lease.WorkflowID || job.WorkflowAttemptID != lease.WorkflowAttemptID ||
-		job.AgentAssignmentID != lease.AgentAssignmentID || job.AgentSessionID != lease.AgentSessionID ||
+		job.AgentParticipantID != lease.AgentParticipantID || job.AgentSessionID != lease.AgentSessionID ||
 		job.AgentTurnID != lease.AgentTurnID || job.ExecutionEpoch != lease.ExecutionEpoch ||
 		!bytes.Equal(job.Payload, lease.Payload) {
 		return Job{}, fenceErr

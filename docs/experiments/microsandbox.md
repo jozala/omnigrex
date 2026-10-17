@@ -3,7 +3,9 @@
 ## Scope
 
 This record covers the initial Linux execution-environment proof from [Step 01 of the combined plan](../plans/2026-10-05-pi-and-pluggable-execution-backends.md).
-The executable experiment and reproduction instructions live in [experiments/microsandbox](../../experiments/microsandbox/README.md).
+The original executable experiment and reproduction instructions are preserved in [the historical source](https://github.com/jozala/omnigrex/tree/415ba6d/experiments/microsandbox).
+The CLI and standalone SDK prototype images and harnesses have been retired in favor of the production backend conformance suite.
+Compose and Testcontainers fixtures now belong to `internal/runtime/microsandbox/testdata/nested` and remain part of production Linux/KVM qualification.
 Deployment and secret procedures remain in the [operator guide](../operator-guide.md).
 
 ## Observed on 2026-10-05
@@ -21,7 +23,7 @@ No host configuration or KVM module policy was changed.
 | Guest resources | The nested engine reported two CPUs and approximately 3.94 GiB available memory for the configured 4 GiB guest |
 | Compose | Compose 5.5.0 started a healthy HTTP service and a separate client reached it by service name |
 | Testcontainers | Testcontainers-Go 0.44.0 started Ryuk and an HTTP fixture; the published-port request returned the expected body |
-| Existing Omnigrex integration | The guest built OpenCode 1.18.29 and passed `TestReadinessProbeExercisesRealDockerResources` with the race detector |
+| Omnigrex integration | The guest passed `TestReadinessProbeExercisesRealDockerResources` with the race detector |
 | Resource cleanup | After the run, the host had no wrapper containers carrying the experiment label |
 
 The first complete successful run took approximately four minutes.

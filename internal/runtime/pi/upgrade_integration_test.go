@@ -37,7 +37,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	sourceImage, targetImage, platform, settings := upgradeImages(t)
-	source, err := profile.NewPiV1(sourceImage, platform)
+	source, err := profile.NewPiV2(sourceImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV1(targetImage, platform)
+	target, err := profile.NewPiV2(targetImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 			t.Fatalf("foreign host archive does not match source/runtime/backend contract: archived=%+v expected=%+v backend=%s", ref, source.Binding(), settings.ExecutionBackend)
 		}
 	}
-	metadata := upgradeStateSource{ref: ref}
+	metadata := qualificationStateSource{ref: ref}
 	root := os.Getenv("OMNIGREX_PI_UPGRADE_ROOT")
 	states := func(name string) *dirstate.RetainedState {
 		t.Helper()
@@ -100,7 +100,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	}
 	start := func(storage string, p profile.Profile, version string, epoch int64, mustExist bool) (agent.Connection, func()) {
 		t.Helper()
-		key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 		request, err := (pi.TurnAdapter{}).BuildProcess(p, key, "", 512<<20, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -309,9 +309,9 @@ func upgradeArchiveIdentity(t *testing.T, archive []byte) (execution.StateRef, s
 	return ref, sessionID
 }
 
-type upgradeStateSource struct{ ref execution.StateRef }
+type qualificationStateSource struct{ ref execution.StateRef }
 
-func (s upgradeStateSource) StateMetadata(_ context.Context, ref execution.StateRef) (json.RawMessage, bool, error) {
+func (s qualificationStateSource) StateMetadata(_ context.Context, ref execution.StateRef) (json.RawMessage, bool, error) {
 	if ref != s.ref {
 		return nil, false, execution.ErrBindingMismatch
 	}

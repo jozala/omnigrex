@@ -38,15 +38,15 @@ func TestIsExactRegistryImageUsesCanonicalDistributionGrammar(t *testing.T) {
 	}
 }
 
-func TestNewPiV1ReturnsQualifiedContract(t *testing.T) {
-	got, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+func TestNewPiV2ReturnsQualifiedContract(t *testing.T) {
+	got, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewPiV1() error = %v", err)
+		t.Fatalf("NewPiV2() error = %v", err)
 	}
 
 	want := profile.Contract{
 		Name:    "pi-rpc",
-		Version: "v1",
+		Version: "v2",
 		Image:   testImage,
 		Platform: profile.Platform{
 			OS:   "linux",
@@ -64,9 +64,9 @@ func TestNewPiV1ReturnsQualifiedContract(t *testing.T) {
 			{Name: "TMPDIR", Value: "/tmp"},
 		},
 		Mounts: []profile.Mount{
-			{Name: "mise", Path: "/home/opencode/.local/share/mise"},
+			{Name: "mise", Path: "/home/omnigrex/.local/share/mise"},
 			{Name: "state", Path: "/state"},
-			{Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"},
+			{Name: "tool-data", Path: "/home/omnigrex/.local/share/omnigrex-tool-data"},
 			{Name: "workspace", Path: "/workspace"},
 		},
 		Capabilities: []string{"authenticated-mcp", "checked-configuration", "exact-session", "history-replay"},
@@ -102,8 +102,8 @@ func TestNewRejectsContractsOutsidePiV1(t *testing.T) {
 		mutate func(*profile.Contract)
 	}{
 		{name: "unknown profile", mutate: func(contract *profile.Contract) { contract.Name = "other" }},
-		{name: "legacy profile", mutate: func(contract *profile.Contract) { contract.Name = "opencode-acp" }},
-		{name: "unknown version", mutate: func(contract *profile.Contract) { contract.Version = "v2" }},
+		{name: "unsupported profile", mutate: func(contract *profile.Contract) { contract.Name = "unsupported-runtime" }},
+		{name: "unknown version", mutate: func(contract *profile.Contract) { contract.Version = "v3" }},
 		{name: "mutable image tag", mutate: func(contract *profile.Contract) { contract.Image = "registry.example/omnigrex/pi:latest" }},
 		{name: "bare local image ID", mutate: func(contract *profile.Contract) {
 			contract.Image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -260,13 +260,13 @@ func TestRegistryResolvesExactImmutableReference(t *testing.T) {
 		t.Fatalf("NewRegistry() error = %v", err)
 	}
 
-	resolved, err := registry.Resolve("pi-rpc", "v1")
+	resolved, err := registry.Resolve("pi-rpc", "v2")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	snapshot := resolved.Contract()
 	snapshot.Environment[0].Value = "changed"
-	again, err := registry.Resolve("pi-rpc", "v1")
+	again, err := registry.Resolve("pi-rpc", "v2")
 	if err != nil {
 		t.Fatalf("Resolve() again error = %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRegistryResolvesExactImmutableReference(t *testing.T) {
 		t.Fatal("mutating a resolved contract changed the Registry")
 	}
 
-	for _, reference := range [][2]string{{"pi-rpc", ""}, {"pi-rpc", "v2"}, {"other", "v1"}, {"opencode-acp", "v1"}} {
+	for _, reference := range [][2]string{{"pi-rpc", ""}, {"pi-rpc", "v1"}, {"pi-rpc", "v3"}, {"other", "v1"}} {
 		if _, err := registry.Resolve(reference[0], reference[1]); !errors.Is(err, profile.ErrNotFound) {
 			t.Errorf("Resolve(%q, %q) error = %v, want ErrNotFound", reference[0], reference[1], err)
 		}
@@ -319,7 +319,7 @@ func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 		t.Fatalf("NewCatalog() error = %v", err)
 	}
 
-	current, err := catalog.Resolve("pi-rpc", "v1")
+	current, err := catalog.Resolve("pi-rpc", "v2")
 	if err != nil || current.ContentSHA256() != candidateProfile.ContentSHA256() {
 		t.Fatalf("Resolve() current = (%s, %v), want candidate", current.ContentSHA256(), err)
 	}
@@ -343,9 +343,9 @@ func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 
 func validContract(t *testing.T) profile.Contract {
 	t.Helper()
-	value, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewPiV1() error = %v", err)
+		t.Fatalf("NewPiV2() error = %v", err)
 	}
 	return value.Contract()
 }

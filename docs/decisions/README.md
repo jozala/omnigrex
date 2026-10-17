@@ -31,17 +31,20 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0021: Activate from the current Change Proposal](0021-activate-from-current-change-proposal.md) | Accepted | 2026-10-04 |
 | [0022: Track heads without resuming work](0022-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
 | [0023: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0023-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
+| [0024: Establish a clean supported release baseline](0024-establish-a-clean-supported-release-baseline.md) | Accepted | 2026-10-16 |
+| [0025: Require current Docker management ownership](0025-require-current-docker-management-ownership.md) | Accepted | 2026-10-17 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.
 
 ## Existing architectural decisions
 
-Existing ADR identifiers and paths remain valid; new decisions use this log.
+ADR identifiers remain stable; the links below locate their authoritative current or archived records.
+New decisions use this log.
 Do not copy an existing ADR into a second record.
 
 - [ADR 0001: Separate visible Workflow and execution state](../adr/0001-separate-visible-workflow-and-execution-state.md)
-- [ADR 0002: Use ACP as the agent runtime boundary](../adr/0002-use-acp-as-the-agent-runtime-boundary.md) - Superseded by [decision 0006](0006-use-pi-through-an-agent-specific-adapter.md).
+- [ADR 0002: Runtime protocol boundary](../plans/runtime-history/adr-0002.md) - Superseded by [decision 0006](0006-use-pi-through-an-agent-specific-adapter.md).
 - [ADR 0003: Orchestrator owns session control](../adr/0003-orchestrator-owns-session-control.md)
 - [ADR 0004: Mediate agent capabilities through MCP](../adr/0004-mediate-agent-capabilities-through-mcp.md)
 - [ADR 0005: Use separate Developer and Reviewer GitHub Apps](../adr/0005-use-separate-developer-and-reviewer-github-apps.md)
@@ -49,6 +52,6 @@ Do not copy an existing ADR into a second record.
 - [ADR 0007: Use code-defined Workflow Definitions and durable Attempt Stages](../adr/0007-use-code-defined-workflow-definitions-and-durable-attempt-stages.md)
 - [ADR 0008: Separate Stage Assignments from Agent Participants](../adr/0008-separate-stage-assignments-from-agent-participants.md)
 - [ADR 0009: Select GitHub App credentials by operation](../adr/0009-select-github-app-credentials-by-operation.md)
-- [ADR 0010: Use one provider credential bundle before proxy mediation](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md) - Superseded by [decision 0007](0007-supply-provider-api-keys-through-disposable-files.md).
+- [ADR 0010: Use one provider credential bundle before proxy mediation](../plans/runtime-history/adr-0010.md) - Superseded by [decision 0007](0007-supply-provider-api-keys-through-disposable-files.md).
 - [ADR 0011: Discover repository Agent Profiles and select separately](../adr/0011-discover-repository-agent-profiles-and-select-separately.md)
 - [ADR 0012: Load repository skills from the current checkout](../adr/0012-load-repository-skills-from-the-current-checkout.md)

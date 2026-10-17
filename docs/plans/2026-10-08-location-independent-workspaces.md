@@ -24,7 +24,8 @@ Microsandbox stores guest uid/gid/mode/type in the 20-byte version-1 `user.msb.o
 The successful mechanism proof preserves that xattr and decodes guest-visible modes and link targets with explicit version/type rejection.
 The production Microsandbox adapter must repeat the proof and implement this translation in Step 08.
 
-Run against an approved host using the connection and KVM environment setup in the [Pi experiment instructions](../../experiments/pi/README.md):
+The following commands record the original prototype runs, whose [source and instructions](https://github.com/jozala/omnigrex/tree/415ba6d/experiments/pi) are preserved in Git history.
+The executable prototype is retired; current capture coverage runs through the production backend and Pi Workflow gates described in the [operator guide](../operator-guide.md#diagnostics-and-backend-gates).
 
 ```sh
 OMNIGREX_PI_FEASIBILITY=1 OMNIGREX_PI_BACKEND=docker \

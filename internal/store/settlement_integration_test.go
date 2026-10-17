@@ -24,7 +24,7 @@ func TestSettleAgentTurnDurableBoundary(t *testing.T) {
 	t.Run("Developer initial Pull Request transitions to Reviewing and is idempotent", func(t *testing.T) {
 		fixture, lease, proposal := prepareSettlementTurn(t, database, pool, ctx, 801, workflow.RoleDeveloper, "")
 		observation := successfulSettlementObservation(workflow.TurnOutcomeChangeProposalReady, proposal)
-		observation.Completion.Outcome = json.RawMessage(`{"acp_text":"BLOCKED"}`)
+		observation.Completion.Outcome = json.RawMessage(`{"unexpected_text":"BLOCKED"}`)
 		settled, err := database.SettleAgentTurn(ctx, lease, observation)
 		if err != nil {
 			t.Fatalf("SettleAgentTurn() error = %v", err)
@@ -237,7 +237,7 @@ SELECT workflow.human_handoff_reason, handoff.payload->>'diagnostic',
 	       handoff.agent_turn_settlement_id::text, assignment.status
 FROM workflows AS workflow
 JOIN jobs AS handoff ON handoff.workflow_id = workflow.id AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
-JOIN agent_assignments AS assignment ON assignment.id = $2
+JOIN agent_participants AS assignment ON assignment.id = $2
 WHERE workflow.id = $1`, fixture.workflowID, fixture.assignmentID).Scan(&reason, &diagnostic, &provenance, &assignmentStatus); err != nil {
 			t.Fatal(err)
 		}
@@ -1107,7 +1107,7 @@ UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 	if role == workflow.RoleReviewer {
 		actorID := int64(number*100 + 2)
 		if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
+UPDATE agent_participants SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
 			t.Fatal(err)
 		}
 		proposalRowID = fmt.Sprintf("79%04d00-0000-4000-8000-000000000001", number)
@@ -1133,7 +1133,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 		spec.Purpose = workflow.TurnPurposeReview
 		spec.ChangeProposalID = proposalRowID
 		spec.ExpectedHeadSHA = head
-		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
+		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
 	}
 	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {

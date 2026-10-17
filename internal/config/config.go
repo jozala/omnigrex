@@ -80,8 +80,8 @@ type Config struct {
 	MCPAddr                                string
 	MCPEndpointURL                         string
 	MCPMutationOperationTimeout            time.Duration
-	PiRPCV1Image                           string
-	PiRPCV1Platform                        profile.Platform
+	PiImage                                string
+	PiPlatform                             profile.Platform
 	PiStartupTimeout                       time.Duration
 	RuntimeProfileCompatibilityResultsFile string
 	GitHubAPIURL                           string
@@ -166,7 +166,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MCPAddr:                                valueOrDefault(getenv("OMNIGREX_MCP_ADDR"), defaultMCPAddr),
 		MCPEndpointURL:                         valueOrDefault(getenv("OMNIGREX_MCP_ENDPOINT_URL"), defaultMCPEndpointURL),
 		MCPMutationOperationTimeout:            defaultMCPMutationOperationTimeout,
-		PiRPCV1Image:                           getenv("OMNIGREX_PI_RPC_V1_IMAGE"),
+		PiImage:                                getenv("OMNIGREX_PI_IMAGE"),
 		PiStartupTimeout:                       defaultPiStartupTimeout,
 		RuntimeProfileCompatibilityResultsFile: getenv("OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"),
 		GitHubAPIURL:                           valueOrDefault(getenv("OMNIGREX_GITHUB_API_URL"), defaultGitHubAPIURL),
@@ -269,13 +269,13 @@ func Load(getenv func(string) string) (Config, error) {
 	if strings.TrimSpace(config.MCPAddr) == "" {
 		problems = append(problems, fmt.Errorf("OMNIGREX_MCP_ADDR must not be blank"))
 	}
-	if !profile.IsExactRegistryImage(config.PiRPCV1Image) {
-		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_IMAGE must be a registry name with an exact sha256 digest"))
+	if !profile.IsExactRegistryImage(config.PiImage) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_IMAGE must be a registry name with an exact sha256 digest"))
 	}
-	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_PI_RPC_V1_PLATFORM"), "/")
-	config.PiRPCV1Platform = profile.Platform{OS: platformOS, Arch: platformArch}
-	if !found || !profile.IsSupportedPlatform(config.PiRPCV1Platform) {
-		problems = append(problems, fmt.Errorf("OMNIGREX_PI_RPC_V1_PLATFORM must be a supported linux platform"))
+	platformOS, platformArch, found := strings.Cut(getenv("OMNIGREX_PI_PLATFORM"), "/")
+	config.PiPlatform = profile.Platform{OS: platformOS, Arch: platformArch}
+	if !found || !profile.IsSupportedPlatform(config.PiPlatform) {
+		problems = append(problems, fmt.Errorf("OMNIGREX_PI_PLATFORM must be a supported linux platform"))
 	}
 	if value := getenv("OMNIGREX_PI_STARTUP_TIMEOUT"); value != "" {
 		duration, err := time.ParseDuration(value)

@@ -237,7 +237,7 @@ func truncateInvalidEntries(invalid []string) []string {
 func isWorkflowlessProvisioningJob(job jobInsert) bool {
 	return job.kind == ProvisionManagedLabelsJobKind &&
 		job.scope.workflowID == "" && job.scope.workflowAttemptID == "" &&
-		job.scope.agentAssignmentID == "" && job.scope.agentSessionID == "" &&
+		job.scope.agentParticipantID == "" && job.scope.agentSessionID == "" &&
 		job.scope.agentTurnID == "" && job.scope.executionEpoch == 0 &&
 		job.provenance.normalizedEventID == "" &&
 		job.provenance.agentTurnSettlementID == "" &&

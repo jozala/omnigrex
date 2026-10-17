@@ -588,13 +588,13 @@ func TestProductionBackendPerformsMarkedGitHubMutationsAndCommitBoundReview(t *t
 		t.Fatalf("Execute(submit_review) = %s, %v", result, err)
 	}
 
-	wantOpenMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "open-1"})
+	wantOpenMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "open-1"})
 	if api.openCredential != "developer-secret" || api.openRequest.Title != "Implement it" || api.openRequest.Body != "Description" ||
 		api.openRequest.Head != initial.Branch || api.openRequest.Base != initial.DefaultBranch || api.openRequest.IssueNumber != 12 || api.openRequest.Marker != wantOpenMarker {
 		t.Fatalf("open Pull Request call = credential %q, request %#v", api.openCredential, api.openRequest)
 	}
-	wantIssueMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "issue-comment-1"})
-	wantPRMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "pr-comment-1"})
+	wantIssueMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "issue-comment-1"})
+	wantPRMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "pr-comment-1"})
 	if api.issueCommentNumber != 12 || api.issueCommentRequest.Marker != wantIssueMarker || api.issueCommentCredential != "developer-secret" ||
 		api.issueCommentRequest.Body != "Issue update\n\n"+productionSignature(workflow.RoleDeveloper) {
 		t.Fatalf("Issue comment call = number %d, credential %q, request %#v", api.issueCommentNumber, api.issueCommentCredential, api.issueCommentRequest)
@@ -603,7 +603,7 @@ func TestProductionBackendPerformsMarkedGitHubMutationsAndCommitBoundReview(t *t
 		api.pullRequestCommentRequest.Body != "PR update\n\n"+productionSignature(workflow.RoleDeveloper) {
 		t.Fatalf("Pull Request comment call = number %d, credential %q, request %#v", api.pullRequestCommentNumber, api.pullRequestCommentCredential, api.pullRequestCommentRequest)
 	}
-	wantReviewMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "review-1"})
+	wantReviewMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "review-1"})
 	if api.reviewCredential != "reviewer-secret" || api.reviewNumber != 23 || api.reviewRequest.CommitID != productionHeadSHA || api.reviewRequest.Body != "Fix this\n\n"+productionSignature(workflow.RoleReviewer)+"\n\n"+wantReviewMarker ||
 		api.reviewRequest.Event != githubapi.ReviewRequestChanges || len(api.reviewRequest.Comments) != 1 ||
 		api.reviewRequest.Comments[0] != (githubapi.ReviewCommentRequest{Path: "internal/mcp/backend.go", Body: "Validate this range\n\n" + productionSignature(workflow.RoleReviewer), Line: 53, Side: githubapi.ReviewSideRight, StartLine: 50, StartSide: githubapi.ReviewSideRight}) {
@@ -629,7 +629,7 @@ func TestProductionBackendSignsBodylessApproval(t *testing.T) {
 	if err != nil || !json.Valid(result) {
 		t.Fatalf("Execute(submit_review) = %s, %v", result, err)
 	}
-	wantMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "approve-1"})
+	wantMarker, _ := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "approve-1"})
 	if api.reviewRequest.Body != productionSignature(workflow.RoleReviewer)+"\n\n"+wantMarker {
 		t.Fatalf("bodyless approval body = %q", api.reviewRequest.Body)
 	}
@@ -1045,7 +1045,7 @@ func productionToolScope(role workflow.Role) mcp.ToolScope {
 		profile, display = "review-specialist", "Reviewer"
 	}
 	return mcp.ToolScope{
-		WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", AgentSessionID: "session-1",
+		WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", AgentSessionID: "session-1",
 		AgentTurnID: "turn-1", ExecutionEpoch: 4, Role: role,
 		AgentProfileName: profile, RoleDisplayName: display,
 		Repository: mcp.RepositoryScope{ID: 9123, Owner: "acme", Name: "widgets"},

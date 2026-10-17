@@ -409,7 +409,7 @@ It also identifies where the new experimental evidence belongs.
 | `Dockerfile`, `agent/opencode/`, `compose.yaml`, `deploy/compose.yaml`, both environment examples | Docker-only resources and agent distribution | Dual backend deployment and qualified Pi/environment artifacts in Steps 07 and 15; OpenCode removal in Step 17 |
 | `.github/workflows/ci.yaml`, `mise.toml`, integration tests under runtime/doctor/store/deployment | Docker-only image, qualification and test entry points | Shared conformance factories plus backend-specific jobs in Steps 04, 08, 13-15 |
 | `README.md`, `docs/operator-guide.md`, compatibility documentation | Docker-specific readiness, backups, restore, image retention and deployment procedures | Selected-backend operational procedures in Steps 15-16; link rather than duplicate secret procedures |
-| `experiments/microsandbox`, `experiments/pi` | CLI prototypes and controlled/live feasibility fixtures | Evidence and reusable scenarios, not production dependency exemptions |
+| `docs/experiments/` | Historical feasibility evidence; executable prototypes are retired | Current executable coverage belongs to the production adapter and backend suites |
 
 Historical migrations remain unchanged; add forward-only migrations.
 Existing Docker/ACP tests remain active while their production paths remain active.

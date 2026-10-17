@@ -6,23 +6,29 @@ import (
 	piresources "github.com/jozala/omnigrex/agent/pi"
 )
 
-func NewPiV1(image string, platform Platform) (Profile, error) {
+const (
+	PiRuntimeName      = "pi-rpc"
+	PiRuntimeVersion   = "v2"
+	PiRuntimeReference = PiRuntimeName + "/" + PiRuntimeVersion
+)
+
+func NewPiV2(image string, platform Platform) (Profile, error) {
 	return New(piContract(image, platform))
 }
 
-func NewBuiltinV1(name, image string, platform Platform) (Profile, error) {
+func NewBuiltinV2(name, image string, platform Platform) (Profile, error) {
 	switch name {
-	case "pi-rpc":
-		return NewPiV1(image, platform)
+	case PiRuntimeName:
+		return NewPiV2(image, platform)
 	default:
 		return Profile{}, ErrNotFound
 	}
 }
 
 func piContract(image string, platform Platform) Contract {
-	return Contract{Name: "pi-rpc", Version: "v1", Image: image, Platform: platform, User: User{UID: 10001, GID: 10001}, Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"}, Workspace: "/workspace", PIDsLimit: 128,
+	return Contract{Name: PiRuntimeName, Version: PiRuntimeVersion, Image: image, Platform: platform, User: User{UID: 10001, GID: 10001}, Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"}, Workspace: "/workspace", PIDsLimit: 128,
 		Environment:  []EnvironmentVariable{{Name: "HOME", Value: "/tmp"}, {Name: "PATH", Value: "/usr/local/bin:/usr/bin:/bin"}, {Name: "PI_CODING_AGENT_DIR", Value: "/run/pi-agent"}, {Name: "PI_OFFLINE", Value: "1"}, {Name: "PI_TELEMETRY", Value: "0"}, {Name: "PI_SKIP_VERSION_CHECK", Value: "1"}, {Name: "TMPDIR", Value: "/tmp"}},
-		Mounts:       []Mount{{Name: "workspace", Path: "/workspace"}, {Name: "state", Path: "/state"}, {Name: "mise", Path: "/home/opencode/.local/share/mise"}, {Name: "tool-data", Path: "/home/opencode/.local/share/omnigrex-tool-data"}},
+		Mounts:       []Mount{{Name: "workspace", Path: "/workspace"}, {Name: "state", Path: "/state"}, {Name: "mise", Path: "/home/omnigrex/.local/share/mise"}, {Name: "tool-data", Path: "/home/omnigrex/.local/share/omnigrex-tool-data"}},
 		Tmpfs:        []Tmpfs{{Path: "/tmp", SizeBytes: 64 << 20, Executable: true}, {Path: "/run/pi-agent", SizeBytes: 16 << 20}},
 		Capabilities: []string{"exact-session", "history-replay", "checked-configuration", "authenticated-mcp"}, RepositoryEnvironment: &RepositoryEnvironment{Version: 1}, GoldenResourceContract: piresources.CurrentContract(platform.Arch)}
 }

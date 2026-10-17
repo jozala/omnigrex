@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-08
-decision-makers: [OpenCode implementation agent]
+decision-makers: [Implementation agent]
 ---
 # Seal portable workspace evidence before publication
 

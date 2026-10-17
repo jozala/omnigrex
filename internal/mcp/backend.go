@@ -753,7 +753,7 @@ func (backend *ProductionBackend) submitReview(ctx context.Context, invocation I
 	}
 	signedBody := githubapi.AppendSignature(arguments.Body, footer)
 	reviewBody, err := githubapi.EnsureMarker(signedBody, githubapi.Marker{
-		WorkflowID: invocation.Scope.WorkflowID, AgentAssignmentID: invocation.Scope.AgentAssignmentID, OperationID: invocation.OperationID,
+		WorkflowID: invocation.Scope.WorkflowID, AgentParticipantID: invocation.Scope.AgentParticipantID, OperationID: invocation.OperationID,
 	})
 	if err != nil {
 		return nil, ErrInvalidInvocation
@@ -996,7 +996,7 @@ func validReviewDiffDecimal(value string) bool {
 
 func operationMarker(invocation Invocation) (string, error) {
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: invocation.Scope.WorkflowID, AgentAssignmentID: invocation.Scope.AgentAssignmentID, OperationID: invocation.OperationID,
+		WorkflowID: invocation.Scope.WorkflowID, AgentParticipantID: invocation.Scope.AgentParticipantID, OperationID: invocation.OperationID,
 	})
 	if err != nil {
 		return "", ErrInvalidInvocation
@@ -1124,7 +1124,7 @@ func (backend *ProductionBackend) recordOpenedPullRequest(scope ToolScope, pullR
 }
 
 func publicationTurnKey(scope ToolScope) publicationTurn {
-	return publicationTurn{assignmentID: scope.AgentAssignmentID, turnID: scope.AgentTurnID, epoch: scope.ExecutionEpoch}
+	return publicationTurn{assignmentID: scope.AgentParticipantID, turnID: scope.AgentTurnID, epoch: scope.ExecutionEpoch}
 }
 
 func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
@@ -1148,14 +1148,14 @@ func (backend *ProductionBackend) publishChanges(ctx context.Context, invocation
 		return nil, ErrInvalidInvocation
 	}
 	result, err := backend.publisher.Publish(ctx, workspace.Publication{
-		AssignmentID:  invocation.Scope.AgentAssignmentID,
+		AssignmentID:  invocation.Scope.AgentParticipantID,
 		RepositoryURL: repositoryURL,
 		Credential:    credential, BaseRevision: progress.head, ExpectedOldHead: expectedOldHead,
 		Branch: invocation.Scope.Branch, DefaultBranch: invocation.Scope.DefaultBranch,
 		RecordProposedTip: invocation.recordProposedTip,
 		Capture: execution.CaptureRequest{Workspace: execution.WorkspaceRef{Key: execution.Key{
 			RuntimeProfileName: invocation.Scope.RuntimeProfileName, RuntimeProfileVersion: invocation.Scope.RuntimeProfileVersion,
-			AssignmentID: invocation.Scope.AgentAssignmentID, AgentSessionID: invocation.Scope.AgentSessionID,
+			AssignmentID: invocation.Scope.AgentParticipantID, AgentSessionID: invocation.Scope.AgentSessionID,
 			AgentTurnID: invocation.Scope.AgentTurnID, ExecutionEpoch: invocation.Scope.ExecutionEpoch,
 		}, Seed: invocation.Scope.HeadSHA}, OperationID: invocation.OperationID, Purpose: execution.PublicationCapture},
 	})
@@ -1346,7 +1346,7 @@ func (backend *ProductionBackend) validateInvocation(invocation Invocation) (Too
 }
 
 func validToolScope(policy role.Policy, scope ToolScope) bool {
-	valid := scope.WorkflowID != "" && scope.AgentAssignmentID != "" && scope.AgentSessionID != "" && scope.AgentTurnID != "" &&
+	valid := scope.WorkflowID != "" && scope.AgentParticipantID != "" && scope.AgentSessionID != "" && scope.AgentTurnID != "" &&
 		scope.ExecutionEpoch > 0 && policy.Role == scope.Role &&
 		scope.Repository.ID > 0 && validRepositoryPart(scope.Repository.Owner) && validRepositoryPart(scope.Repository.Name) &&
 		scope.Issue.ID > 0 && scope.Issue.Number > 0 && scope.Issue.Number <= int64(^uint(0)>>1) &&

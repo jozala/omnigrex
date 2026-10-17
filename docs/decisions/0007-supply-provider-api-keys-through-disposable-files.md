@@ -7,8 +7,8 @@ decision-makers: [Mariusz]
 
 ## Context
 
-The existing implementation injects an OpenCode authentication bundle into each Runtime Process.
-Pi uses its own credential format, and Microsandbox offers a possible host-side secret mediation mechanism.
+Pi requires provider authentication inside each Runtime Process.
+Microsandbox offers a possible host-side secret mediation mechanism.
 Mariusz selected ephemeral real API keys on both initial backends and deferred credential mediation.
 Subscription/OAuth requests are distinct from operating durable, concurrent token refresh across disposable processes.
 
@@ -30,7 +30,7 @@ Microsandbox-native substitution may later implement stronger guarantees behind 
 
 ## Consequences
 
-This supersedes ADR 0010's OpenCode-specific credential format and injection mechanism.
+This supersedes ADR 0010's credential-delivery mechanism.
 The guest can read credentials intentionally supplied to it; stronger host isolation does not make those credentials inaccessible to repository code.
 State audits establish the normal runtime/configuration path, not prevention of deliberate guest exfiltration or copying into session content.
 Operational procedures remain in the operator guide.
@@ -38,6 +38,6 @@ Operational procedures remain in the operator guide.
 ## Links
 
 - [Contract design](../plans/2026-10-07-runtime-boundary-contracts.md)
-- [Superseded ADR 0010](../adr/0010-use-one-provider-credential-bundle-before-proxy-mediation.md)
+- [Superseded ADR 0010](../plans/runtime-history/adr-0010.md)
 - [Pi credential-path evidence](../experiments/pi.md)
 - [Operator guide](../operator-guide.md)

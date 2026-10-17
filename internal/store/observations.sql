@@ -38,12 +38,12 @@ WITH stages AS (
     JOIN agent_turns turn ON turn.id = job.agent_turn_id AND turn.execution_epoch = job.execution_epoch
     JOIN workflows workflow ON workflow.id = job.workflow_id
     JOIN workflow_attempts attempt ON attempt.id = job.workflow_attempt_id AND attempt.workflow_id = workflow.id
-    JOIN agent_assignments participant ON participant.id = job.agent_assignment_id AND participant.workflow_id = workflow.id
-    JOIN agent_sessions session ON session.id = job.agent_session_id AND session.agent_assignment_id = participant.id
+    JOIN agent_participants participant ON participant.id = job.agent_participant_id AND participant.workflow_id = workflow.id
+    JOIN agent_sessions session ON session.id = job.agent_session_id AND session.agent_participant_id = participant.id
     WHERE job.kind = 'RUN_AGENT_TURN'
       AND workflow.status IN ('DEVELOPING', 'REVIEWING') AND attempt.active
       AND participant.status = 'ACTIVE' AND session.control_owner = 'AUTOMATION'
-      AND (session.status = 'ACTIVE' OR (session.status = 'CREATING' AND session.acp_session_id IS NULL))
+      AND session.status IN ('ACTIVE', 'CREATING')
       AND turn.active AND turn.status IN ('QUEUED', 'STARTING')
       AND turn.agent_session_id = session.id AND turn.workflow_attempt_id = attempt.id
       AND turn.control_revision = session.control_revision
@@ -78,7 +78,7 @@ WITH stages AS (
     WHERE job.kind IN ('VERIFY_TERMINAL_INTENT', 'REVALIDATE_TERMINAL_INTENT')
       AND workflow.status IN ('DEVELOPING', 'REVIEWING') AND attempt.active
       AND NOT turn.mutation_admission_open AND session.control_owner = 'AUTOMATION'
-      AND turn.agent_session_id = session.id AND session.agent_assignment_id = job.agent_assignment_id
+      AND turn.agent_session_id = session.id AND session.agent_participant_id = job.agent_participant_id
       AND ((job.kind = 'VERIFY_TERMINAL_INTENT' AND checkpoint.state = 'PENDING'
             AND checkpoint.verification_job_id = job.id AND turn.active AND turn.status = 'CORROBORATING'
             AND checkpoint.workflow_attempt_id = attempt.id)

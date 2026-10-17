@@ -22,7 +22,7 @@ const (
 
 func TestProductionReconcilerFindsExactCommentArtifactUsingReservationIdentity(t *testing.T) {
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: reconciliationMutationID,
+		WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: reconciliationMutationID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestProductionReconcilerFindsExactCommentArtifactUsingReservationIdentity(t
 
 func TestProductionReconcilerFindsSignedCommentFromPersistedSignature(t *testing.T) {
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: reconciliationMutationID,
+		WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: reconciliationMutationID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -616,7 +616,7 @@ func TestProductionReconcilerDiscoversRequestReviewPullRequestWithoutChangePropo
 	reconciliation.ChangeProposal = nil
 	reconciliation.Turn.ChangeProposalID = ""
 	reconciliation.Turn.ExpectedHeadSHA = ""
-	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "10000000-0000-4000-8000-000000000099"})
+	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "10000000-0000-4000-8000-000000000099"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +657,7 @@ func reconciliationContext() store.AgentTurnMutationReconciliationContext {
 		},
 		Turn: store.AgentTurn{
 			AgentTurnSpec: store.AgentTurnSpec{ChangeProposalID: "proposal-1", ExpectedHeadSHA: productionHeadSHA},
-			ID:            "turn-1", AgentAssignmentID: "assignment-1", ExecutionEpoch: 4, CreatedAt: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+			ID:            "turn-1", AgentParticipantID: "assignment-1", ExecutionEpoch: 4, CreatedAt: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
 		},
 	}
 }
@@ -676,7 +676,7 @@ func reconciliationMutation(tool, request string) store.MutationReservation {
 
 func reconciliationMarker(t *testing.T, operationID string) string {
 	t.Helper()
-	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: operationID})
+	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: operationID})
 	if err != nil {
 		t.Fatal(err)
 	}
