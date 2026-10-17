@@ -89,7 +89,6 @@ type AgentTurn struct {
 	AgentTurnSpec
 	ID                    string
 	AgentParticipantID    string
-	AgentAssignmentID     string
 	operationLineageID    string
 	TurnNumber            int64
 	ExecutionEpoch        int64
@@ -157,7 +156,6 @@ type AgentTurnExecutionContext struct {
 	ChangeProposal           *AgentTurnChangeProposal
 	Publication              *AgentTurnPublication
 	Participant              AgentParticipant
-	Assignment               AgentParticipant
 	Session                  AgentSession
 	Turn                     AgentTurn
 	PriorTerminalIntent      *AgentTurnPriorTerminalIntent
@@ -410,8 +408,7 @@ WHERE id = $1 AND execution_epoch = $5 AND control_revision = $6 AND active
 	}
 	turn.AgentTurn.Status = AgentTurnRunning
 	turn.AgentTurn.MutationAdmissionOpen = false
-	turn.AgentTurn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentTurn.AgentAssignmentID = job.AgentAssignmentID
+	turn.AgentTurn.AgentParticipantID = job.AgentParticipantID
 	jobLease := JobLease{Job: job, Attempt: attempt}
 	return AgentTurnLease{
 		AgentTurn: turn.AgentTurn, JobLease: jobLease, OwnerID: ownerID,
@@ -460,7 +457,7 @@ func (store *Store) RefreshAgentTurnLease(ctx context.Context, lease AgentTurnLe
 // BeginAgentTurnRecovery transfers a live, MCP-drained Turn to durable recovery workers.
 // A retry with the exact original lease returns the live barrier.
 func (store *Store) BeginAgentTurnRecovery(ctx context.Context, lease AgentTurnLease) (AgentTurnRecovery, error) {
-	if !validUUID(lease.ID) || !validUUID(lease.AgentAssignmentID) || !validUUID(lease.AgentSessionID) ||
+	if !validUUID(lease.ID) || !validUUID(lease.AgentParticipantID) || !validUUID(lease.AgentSessionID) ||
 		!validUUID(lease.JobLease.ID) || !validUUID(lease.JobLease.LeaseToken) || !validUUID(lease.OwnerToken) ||
 		lease.ExecutionEpoch <= 0 || lease.ControlRevision <= 0 || lease.JobLease.Attempt <= 0 ||
 		strings.TrimSpace(lease.JobLease.LeaseOwner) == "" || strings.TrimSpace(lease.OwnerID) == "" {
@@ -531,10 +528,9 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	if err != nil {
 		return AgentTurnRecovery{}, err
 	}
-	turn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentAssignmentID = job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	if !turn.active || turn.Status != AgentTurnSettling && turn.Status != AgentTurnReconciling || turn.MutationAdmissionOpen || !turn.leaseLive ||
-		turn.AgentAssignmentID != lease.AgentAssignmentID || turn.AgentSessionID != lease.AgentSessionID ||
+		turn.AgentParticipantID != lease.AgentParticipantID || turn.AgentSessionID != lease.AgentSessionID ||
 		turn.WorkflowAttemptID != lease.WorkflowAttemptID || turn.ExecutionEpoch != lease.ExecutionEpoch ||
 		turn.ControlRevision != lease.ControlRevision || turn.ownerID != lease.OwnerID || turn.ownerToken != lease.OwnerToken {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
@@ -933,7 +929,7 @@ WHERE id = $1 AND agent_turn_id = $2 AND execution_epoch = $3 AND kind = 'MUTATI
 		return MutationReservation{}, fmt.Errorf("read reconciled mutation: %w", err)
 	}
 	if outcome.State == MutationSucceeded {
-		if err := store.bindReviewerActorForSubmitReview(ctx, tx, job.AgentAssignmentID, mutation.ToolName, result, true); err != nil {
+		if err := store.bindReviewerActorForSubmitReview(ctx, tx, job.AgentParticipantID, mutation.ToolName, result, true); err != nil {
 			return MutationReservation{}, err
 		}
 	}
@@ -1036,7 +1032,7 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		); err != nil {
 			return err
 		}
-		participant, err := scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+		participant, err := scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, lease.AgentParticipantID))
 		if err != nil {
 			return err
 		}
@@ -1045,7 +1041,6 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 			return err
 		}
 		execution.Participant = participant
-		execution.Assignment = participant
 		execution.Session = session
 		execution.Turn = turn.AgentTurn
 		if turn.RetryOfTurnID != "" {
@@ -1562,12 +1557,12 @@ func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, 
 	if err := tx.QueryRow(ctx, `SELECT active FROM workflow_attempts WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, attemptID, hierarchy.workflowID).Scan(&locked.attemptActive); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("workflow attempt", err)
 	}
-	if err := tx.QueryRow(ctx, `SELECT status FROM agent_assignments WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, hierarchy.assignmentID, hierarchy.workflowID).Scan(&locked.assignmentStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM agent_participants WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, hierarchy.assignmentID, hierarchy.workflowID).Scan(&locked.assignmentStatus); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent assignment", err)
 	}
 	if err := tx.QueryRow(ctx, `
 SELECT status, control_owner, control_revision
-FROM agent_sessions WHERE id = $1 AND agent_assignment_id = $2 FOR UPDATE`,
+FROM agent_sessions WHERE id = $1 AND agent_participant_id = $2 FOR UPDATE`,
 		hierarchy.sessionID, hierarchy.assignmentID).Scan(&locked.sessionStatus, &locked.controlOwner,
 		&locked.controlRevision); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent session", err)
@@ -1605,7 +1600,7 @@ func decodeAgentTurnJobPayload(value json.RawMessage) (agentTurnJobPayload, erro
 
 func validAgentTurnJobPayload(payload agentTurnJobPayload, job Job) bool {
 	return job.Queue == AgentTurnQueue && job.Kind == RunAgentTurnJobKind && job.MaxAttempts == 1 &&
-		job.WorkflowID != "" && job.WorkflowAttemptID != "" && job.AgentAssignmentID != "" &&
+		job.WorkflowID != "" && job.WorkflowAttemptID != "" && job.AgentParticipantID != "" &&
 		job.AgentSessionID != "" && job.AgentTurnID != "" && job.ExecutionEpoch > 0 &&
 		payload.AgentTurnID == job.AgentTurnID && payload.AgentSessionID == job.AgentSessionID &&
 		payload.ExecutionEpoch == job.ExecutionEpoch && payload.ControlRevision > 0
@@ -1681,7 +1676,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3
 func hierarchyFromJob(job Job) hierarchyIdentity {
 	return hierarchyIdentity{
 		workflowID: job.WorkflowID, attemptID: job.WorkflowAttemptID,
-		assignmentID: job.AgentAssignmentID, sessionID: job.AgentSessionID,
+		assignmentID: job.AgentParticipantID, sessionID: job.AgentSessionID,
 	}
 }
 
@@ -1690,10 +1685,10 @@ func sameAgentTurnExecutionIdentity(job Job, lease AgentTurnLease) bool {
 		job.MaxAttempts == 1 && job.AttemptCount == lease.JobLease.Attempt &&
 		job.IdempotencyKey == lease.JobLease.IdempotencyKey && job.WorkflowID == lease.JobLease.WorkflowID &&
 		job.WorkflowAttemptID == lease.JobLease.WorkflowAttemptID &&
-		job.AgentAssignmentID == lease.JobLease.AgentAssignmentID &&
+		job.AgentParticipantID == lease.JobLease.AgentParticipantID &&
 		job.AgentSessionID == lease.JobLease.AgentSessionID && job.AgentTurnID == lease.JobLease.AgentTurnID &&
 		job.ExecutionEpoch == lease.JobLease.ExecutionEpoch && bytes.Equal(job.Payload, lease.JobLease.Payload) &&
-		job.WorkflowAttemptID == lease.WorkflowAttemptID && job.AgentAssignmentID == lease.AgentAssignmentID &&
+		job.WorkflowAttemptID == lease.WorkflowAttemptID && job.AgentParticipantID == lease.AgentParticipantID &&
 		job.AgentSessionID == lease.AgentSessionID && job.AgentTurnID == lease.ID &&
 		job.ExecutionEpoch == lease.ExecutionEpoch
 }
@@ -1737,7 +1732,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	if err := tx.QueryRow(ctx, `SELECT payload FROM jobs WHERE id = $1 AND kind = $2`,
 		recovery.StopRuntimeJobID, StopStaleRuntimeJobKind).Scan(&payload); err != nil ||
 		json.Unmarshal(payload, &identity) != nil || identity.WorkflowID != job.WorkflowID ||
-		identity.WorkflowAttemptID != job.WorkflowAttemptID || identity.AgentAssignmentID != job.AgentAssignmentID ||
+		identity.WorkflowAttemptID != job.WorkflowAttemptID || identity.AgentParticipantID != job.AgentParticipantID ||
 		identity.AgentSessionID != job.AgentSessionID || identity.AgentTurnID != job.AgentTurnID ||
 		identity.ExecutionEpoch != job.ExecutionEpoch || identity.ControlRevision != lease.ControlRevision ||
 		identity.ExecutionJobID != job.ID || identity.OwnerID != lease.OwnerID ||
@@ -1760,22 +1755,22 @@ func ownerTokenProof(token string) string {
 }
 
 type recoveryJobIdentity struct {
-	WorkflowID        string `json:"workflow_id"`
-	WorkflowAttemptID string `json:"workflow_attempt_id"`
-	AgentAssignmentID string `json:"agent_assignment_id"`
-	AgentSessionID    string `json:"agent_session_id"`
-	AgentTurnID       string `json:"agent_turn_id"`
-	ExecutionEpoch    int64  `json:"execution_epoch"`
-	ControlRevision   int64  `json:"control_revision"`
-	ExecutionJobID    string `json:"execution_job_id"`
-	OwnerID           string `json:"owner_id,omitempty"`
-	OwnerTokenSHA256  string `json:"owner_token_sha256,omitempty"`
+	WorkflowID         string `json:"workflow_id"`
+	WorkflowAttemptID  string `json:"workflow_attempt_id"`
+	AgentParticipantID string `json:"agent_participant_id"`
+	AgentSessionID     string `json:"agent_session_id"`
+	AgentTurnID        string `json:"agent_turn_id"`
+	ExecutionEpoch     int64  `json:"execution_epoch"`
+	ControlRevision    int64  `json:"control_revision"`
+	ExecutionJobID     string `json:"execution_job_id"`
+	OwnerID            string `json:"owner_id,omitempty"`
+	OwnerTokenSHA256   string `json:"owner_token_sha256,omitempty"`
 }
 
 func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Job, turn lockedTurn, kind string, priority int) (string, error) {
 	identity := recoveryJobIdentity{
 		WorkflowID: executionJob.WorkflowID, WorkflowAttemptID: executionJob.WorkflowAttemptID,
-		AgentAssignmentID: executionJob.AgentAssignmentID, AgentSessionID: executionJob.AgentSessionID,
+		AgentParticipantID: executionJob.AgentParticipantID, AgentSessionID: executionJob.AgentSessionID,
 		AgentTurnID: executionJob.AgentTurnID, ExecutionEpoch: executionJob.ExecutionEpoch,
 		ControlRevision: turn.ControlRevision, ExecutionJobID: executionJob.ID,
 		OwnerID: turn.ownerID, OwnerTokenSHA256: ownerTokenProof(turn.ownerToken),
@@ -1790,7 +1785,7 @@ func enqueueAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, executionJob Jo
 		maxAttempts: agentTurnRecoveryJobMaxAttempts, idempotencyKey: idempotencyKey,
 		scope: jobInsertScope{
 			workflowID: executionJob.WorkflowID, workflowAttemptID: executionJob.WorkflowAttemptID,
-			agentAssignmentID: executionJob.AgentAssignmentID, agentSessionID: executionJob.AgentSessionID,
+			agentParticipantID: executionJob.AgentParticipantID, agentSessionID: executionJob.AgentSessionID,
 			agentTurnID: executionJob.AgentTurnID, executionEpoch: executionJob.ExecutionEpoch,
 		},
 	})
@@ -1811,7 +1806,7 @@ func lockAgentTurnRecoveryJob(ctx context.Context, tx pgx.Tx, lease JobLease, ex
 	if job.Kind != expectedKind || job.Queue != AgentTurnRecoveryQueue || job.Status != JobLeased ||
 		job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken || job.AttemptCount != lease.Attempt ||
 		job.WorkflowID != lease.WorkflowID || job.WorkflowAttemptID != lease.WorkflowAttemptID ||
-		job.AgentAssignmentID != lease.AgentAssignmentID || job.AgentSessionID != lease.AgentSessionID ||
+		job.AgentParticipantID != lease.AgentParticipantID || job.AgentSessionID != lease.AgentSessionID ||
 		job.AgentTurnID != lease.AgentTurnID || job.ExecutionEpoch != lease.ExecutionEpoch ||
 		!bytes.Equal(job.Payload, lease.Payload) {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
@@ -1837,7 +1832,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	var identity recoveryJobIdentity
 	if err := json.Unmarshal(job.Payload, &identity); err != nil ||
 		identity.WorkflowID != job.WorkflowID || identity.WorkflowAttemptID != job.WorkflowAttemptID ||
-		identity.AgentAssignmentID != job.AgentAssignmentID || identity.AgentSessionID != job.AgentSessionID ||
+		identity.AgentParticipantID != job.AgentParticipantID || identity.AgentSessionID != job.AgentSessionID ||
 		identity.AgentTurnID != job.AgentTurnID || identity.ExecutionEpoch != job.ExecutionEpoch ||
 		identity.ControlRevision != turn.ControlRevision || identity.ExecutionJobID == "" ||
 		turn.active || turn.Status != AgentTurnInterrupted && turn.Status != AgentTurnReconciling {
@@ -2005,9 +2000,8 @@ func (store *Store) withLockedAgentTurnLeaseOptions(ctx context.Context, lease A
 	if err != nil {
 		return err
 	}
-	turn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentAssignmentID = job.AgentAssignmentID
-	if requireExact && (turn.AgentAssignmentID != lease.AgentAssignmentID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
+	turn.AgentParticipantID = job.AgentParticipantID
+	if requireExact && (turn.AgentParticipantID != lease.AgentParticipantID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
 		return ErrAgentTurnFenceLost
 	}
 	if !lockedHierarchy.allowsActiveTurn() && !(allowCreating && lockedHierarchy.allowsAcquisition(turn.AgentTurn)) {
@@ -2070,7 +2064,7 @@ RETURNING tool_name`, mutationID, lease.ID, lease.ExecutionEpoch, to, resultValu
 			return err
 		}
 		if to == MutationSucceeded {
-			return store.bindReviewerActorForSubmitReview(ctx, tx, turn.AgentAssignmentID, toolName, result, false)
+			return store.bindReviewerActorForSubmitReview(ctx, tx, turn.AgentParticipantID, toolName, result, false)
 		}
 		return nil
 	})
@@ -2087,7 +2081,7 @@ func (store *Store) bindReviewerActorForSubmitReview(ctx context.Context, tx pgx
 		return errors.New("bind reviewer actor: submit_review result has no valid actor_id")
 	}
 	var assignmentRole workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, assignmentID).Scan(&assignmentRole); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1`, assignmentID).Scan(&assignmentRole); err != nil {
 		return ErrReviewerActorConflict
 	}
 	policy, ok := store.policies.Lookup(assignmentRole)
@@ -2099,7 +2093,7 @@ func (store *Store) bindReviewerActorForSubmitReview(ctx context.Context, tx pgx
 		return ErrReviewerActorConflict
 	}
 	updated, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET github_app_actor_id = COALESCE(github_app_actor_id, $2), updated_at = clock_timestamp()
 WHERE id = $1 AND (status = 'ACTIVE' OR ($3 AND status = 'WAITING_FOR_HUMAN'))
   AND state_deleted_at IS NULL

@@ -298,7 +298,7 @@ func (f *piWorkflowFixture) assertSuccessorAllowed(t *testing.T, lease store.Age
 	}
 	f.preparer = agentturn.NewPreparer(agentprofile.NewLoader(workflowQualificationProfiles{head: f.head}, builtinStoreConfig(t).Policies, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"), agentprofile.SingletonSelector{}, registry, f.database)
 	prepared := f.prepare(t)
-	if prepared.Commit.Participant.ID != lease.AgentAssignmentID || prepared.Commit.Session.ID != lease.AgentSessionID || prepared.Commit.Turn.ExecutionEpoch <= lease.ExecutionEpoch {
+	if prepared.Commit.Participant.ID != lease.AgentParticipantID || prepared.Commit.Session.ID != lease.AgentSessionID || prepared.Commit.Turn.ExecutionEpoch <= lease.ExecutionEpoch {
 		t.Fatal("successor changed retained ownership or reused stale epoch")
 	}
 	if _, _, err := f.database.ExecutionLedger(lease).ReserveExecution(f.ctx, f.fault.executions[0].key, strings.Repeat("a", 64)); !errors.Is(err, store.ErrAgentTurnFenceLost) {
@@ -430,7 +430,7 @@ func (f *piWorkflowFixture) testConcurrentTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.AgentSessionID == second.AgentSessionID || first.AgentAssignmentID == second.AgentAssignmentID || f.authority.tokens[0] == f.authority.tokens[1] {
+	if first.AgentSessionID == second.AgentSessionID || first.AgentParticipantID == second.AgentParticipantID || f.authority.tokens[0] == f.authority.tokens[1] {
 		t.Fatal("concurrent Turns shared Session, Participant or MCP authority")
 	}
 	admitted := make(chan struct{}, 2)
@@ -475,7 +475,7 @@ func (f *piWorkflowFixture) testConcurrentTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pair := range []struct{ own, other store.AgentTurnLease }{{first, second}, {second, first}} {
-		content, err := os.ReadFile(filepath.Join(f.settings.RuntimeStateRoot, "assignment-"+pair.own.AgentAssignmentID, "runtime-state", "sessions", pair.own.AgentSessionID, "session.jsonl"))
+		content, err := os.ReadFile(filepath.Join(f.settings.RuntimeStateRoot, "assignment-"+pair.own.AgentParticipantID, "runtime-state", "sessions", pair.own.AgentSessionID, "session.jsonl"))
 		if err != nil || !strings.Contains(string(content), pair.own.ID) || strings.Contains(string(content), pair.other.ID) {
 			t.Fatalf("concurrent retained Session isolation failed: %v", err)
 		}

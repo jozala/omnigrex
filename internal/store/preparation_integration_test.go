@@ -121,7 +121,7 @@ VALUES ($1, $2, 'owner', 'repo', $3, $3, 'ACTIVE')`, workflowSeed.id, workflowSe
 
 	insertParticipant := func(id, workflowID string, participantRole workflow.Role, statePath string) error {
 		_, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -174,7 +174,7 @@ WHERE id = '60000000-0000-4000-8000-000000000087'`)
 	var destinationRoles int
 	if err := pool.QueryRow(ctx, `
 SELECT count(DISTINCT participant.role)
-FROM agent_assignments AS participant
+FROM agent_participants AS participant
 JOIN workflows AS workflow ON workflow.id = participant.workflow_id
 WHERE workflow.repository_id = 81 AND participant.agent_profile_name = 'default'`).Scan(&destinationRoles); err != nil {
 		t.Fatal(err)
@@ -229,13 +229,14 @@ func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) 
 	application := triggerPreparationWorkflow(t, database, ctx,
 		"60000000-0000-4000-8000-000000000091", "60000000-0000-4000-8000-000000000092")
 	preparation := preparationSpec("shared-profile", "openai/shared")
-	preparation.Developer.Binding.AgentProfileName = "alternate-developer"
-	preparation.Developer.ProfilePath = ".omnigrex/team/alternate-developer.md"
-	preparation.Developer.Profile.Config = agentProfileConfig("alternate-developer", workflow.RoleDeveloper,
+	selected := preparation.Stages[workflow.StageImplementation]
+	selected.Binding.AgentProfileName = "alternate-developer"
+	selected.ProfilePath = ".omnigrex/team/alternate-developer.md"
+	selected.Profile.Config = agentProfileConfig("alternate-developer", workflow.RoleDeveloper,
 		"pi-rpc/v2", "openai/shared", "", 40, "Perform development.", nil)
 	preparation.Stages = map[workflow.StageID]store.ParticipantPreparation{
-		workflow.StageImplementation: preparation.Developer,
-		followup:                     preparation.Developer,
+		workflow.StageImplementation: selected,
+		followup:                     selected,
 	}
 	first, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
 	if err != nil {
@@ -295,11 +296,11 @@ VALUES ('60000000-0000-4000-8000-000000000093', $1, $2, $3, 'AVAILABLE',
 	if _, err := pool.Exec(ctx, `UPDATE stage_assignments SET role = 'REVIEWER' WHERE workflow_id = $1`, application.WorkflowID); err == nil {
 		t.Fatal("mutable Stage Assignment update succeeded")
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET runtime_image_digest = 'sha256:drift' WHERE id = $1`, first.Participant.ID); err == nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_participants SET runtime_image_digest = 'sha256:drift' WHERE id = $1`, first.Participant.ID); err == nil {
 		t.Fatal("assigned Participant Runtime binding update succeeded")
 	}
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, generation, status, agent_profile_name,
     runtime_profile_name, runtime_profile_version, runtime_profile_content_sha256,
     runtime_image_digest, runtime_state_path
@@ -375,7 +376,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	preparation := preparationSpec("architect-profile", "openai/architect")
-	architectPreparation := preparation.Developer
+	architectPreparation := preparation.Stages[workflow.StageImplementation]
 	architectPreparation.Binding.AgentProfileName = "architect"
 	architectPreparation.ProfilePath = ".omnigrex/team/architect.md"
 	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "pi-rpc/v2", "openai/architect", "", 40, "Design the change.", nil)
@@ -414,7 +415,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		t.Fatalf("custom Role submit_review completion error = %v", err)
 	}
 	var actorID int64
-	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_assignments WHERE id = $1`, prepared.Participant.ID).Scan(&actorID); err != nil || actorID != 9101 {
+	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_participants WHERE id = $1`, prepared.Participant.ID).Scan(&actorID); err != nil || actorID != 9101 {
 		t.Fatalf("custom Role reviewer actor = (%d, %v)", actorID, err)
 	}
 	unknown, err := database.ReserveMutation(ctx, lease, store.MutationSpec{
@@ -505,7 +506,8 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedRuntimeBind(t *test
 		t.Fatalf("CompleteJob() for preparation job error = %v, want fenced acknowledgement", err)
 	}
 	spec := preparationSpec("atomic-profile", "openai/gpt-5.2")
-	spec.Developer.Profile.Config = json.RawMessage(`{
+	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Profile.Config = json.RawMessage(`{
   "role": "DEVELOPER",
   "permissions": {"read": "allow", "edit": "deny"},
   "path": ".omnigrex/team/developer.md",
@@ -514,17 +516,18 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedRuntimeBind(t *test
   "model": "openai/gpt-5.2",
   "instructions": "Perform development."
 }`)
+		preparation.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn"},"environment":{"GOTMPDIR":"build"}}`)
+	})
 	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "openai/gpt-5.2", "", 40, "Perform development.", nil)
-	spec.Developer.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn"},"environment":{"GOTMPDIR":"build"}}`)
-	spec.Reviewer.Profile = store.AgentProfileSnapshot{}
+	updateStagePreparation(&spec, workflow.StageReview, func(preparation *store.ParticipantPreparation) { preparation.Profile = store.AgentProfileSnapshot{} })
 	prepared, err := database.PrepareAgentTurn(ctx, preparationJob, spec)
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() with unselected empty Reviewer profile error = %v", err)
 	}
-	if prepared.Assignment.WorkflowID != application.WorkflowID || prepared.Session.AgentAssignmentID != prepared.Assignment.ID ||
+	if prepared.Participant.WorkflowID != application.WorkflowID || prepared.Session.AgentParticipantID != prepared.Participant.ID ||
 		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.RuntimeSessionID != "" || len(prepared.Session.RuntimeCapabilities) != 0 ||
-		prepared.Assignment.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 ||
-		prepared.Session.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 ||
+		prepared.Participant.RuntimeProfileContentSHA256 != spec.Stages[workflow.StageImplementation].Binding.RuntimeProfileContentSHA256 ||
+		prepared.Session.RuntimeProfileContentSHA256 != spec.Stages[workflow.StageImplementation].Binding.RuntimeProfileContentSHA256 ||
 		prepared.Turn.AgentSessionID != prepared.Session.ID || prepared.Turn.ExecutionEpoch != 1 ||
 		prepared.Turn.Purpose != workflow.TurnPurposeInitialDevelopment ||
 		prepared.Turn.AgentProfileCommitSHA != "atomic-profile" ||
@@ -546,7 +549,7 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedRuntimeBind(t *test
 		t.Fatalf("ListStageAssignments() = (%#v, %v), want immutable implementation binding", stageAssignments, err)
 	}
 	storedSession, err := database.GetAgentSession(ctx, prepared.Session.ID)
-	if err != nil || storedSession.RuntimeProfileContentSHA256 != spec.Developer.Binding.RuntimeProfileContentSHA256 {
+	if err != nil || storedSession.RuntimeProfileContentSHA256 != spec.Stages[workflow.StageImplementation].Binding.RuntimeProfileContentSHA256 {
 		t.Fatalf("GetAgentSession() = (%#v, %v), want persisted Runtime Profile hash", storedSession, err)
 	}
 	runJob := agentTurnExecutionJob(t, pool, ctx, prepared.Turn)
@@ -631,7 +634,7 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() Reviewer error = %v", err)
 	}
-	if prepared.Assignment.Role != workflow.RoleReviewer || prepared.Assignment.AgentProfileName != "reviewer" ||
+	if prepared.Participant.Role != workflow.RoleReviewer || prepared.Participant.AgentProfileName != "reviewer" ||
 		prepared.Turn.AgentProfileCommitSHA != "profile-set-reviewer" ||
 		!json.Valid(prepared.Turn.AgentProfileConfig) {
 		t.Fatalf("Reviewer preparation selected wrong Role profile: %#v", prepared)
@@ -766,7 +769,7 @@ VALUES ('65000000-0000-4000-8000-0000000000a0', $1, 9123, 'jozala', 'omnigrex', 
 		t.Fatalf("seed Change Proposal: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -1220,8 +1223,8 @@ VALUES ($2, $1, 9123, 'owner', 'repo', 42, 42, 'OPEN', 'main', 'base', 'feature'
 	if err := pool.QueryRow(ctx, `
 SELECT count(session.id),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1 AND id <> $2)
-FROM agent_assignments AS assignment
-LEFT JOIN agent_sessions AS session ON session.agent_assignment_id = assignment.id
+FROM agent_participants AS assignment
+LEFT JOIN agent_sessions AS session ON session.agent_participant_id = assignment.id
 WHERE assignment.workflow_id = $1 AND assignment.role = 'REVIEWER'`,
 		application.WorkflowID, developer.Turn.ID).Scan(&reviewerSessions, &reviewerTurns); err != nil {
 		t.Fatal(err)
@@ -1243,19 +1246,19 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000007", "62000000-0000-4000-8000-000000000007")
 	lease := claimPreparationJob(t, database, ctx)
 	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
-	for name, invalidate := range map[string]func(*store.AgentTurnPreparationSpec){
-		"Developer binding":            func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeImageDigest = "" },
-		"missing Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeProfileContentSHA256 = "" },
-		"short Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) {
-			spec.Developer.Binding.RuntimeProfileContentSHA256 = "abcd"
+	for name, invalidate := range map[string]func(*store.ParticipantPreparation){
+		"Developer binding":            func(preparation *store.ParticipantPreparation) { preparation.Binding.RuntimeImageDigest = "" },
+		"missing Runtime Profile hash": func(preparation *store.ParticipantPreparation) { preparation.Binding.RuntimeProfileContentSHA256 = "" },
+		"short Runtime Profile hash": func(preparation *store.ParticipantPreparation) {
+			preparation.Binding.RuntimeProfileContentSHA256 = "abcd"
 		},
-		"uppercase Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) {
-			spec.Developer.Binding.RuntimeProfileContentSHA256 = strings.Repeat("A", 64)
+		"uppercase Runtime Profile hash": func(preparation *store.ParticipantPreparation) {
+			preparation.Binding.RuntimeProfileContentSHA256 = strings.Repeat("A", 64)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := preparationSpec("invalid-binding", "openai/gpt-5.2")
-			invalidate(&spec)
+			updateStagePreparation(&spec, workflow.StageImplementation, invalidate)
 			if _, err := database.PrepareAgentTurn(ctx, lease, spec); err == nil {
 				t.Fatalf("PrepareAgentTurn() with incomplete %s succeeded", name)
 			}
@@ -1294,7 +1297,9 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 			}
 			hash := sha256.Sum256([]byte(name))
 			spec := preparationSpec("invalid-profile", "openai/gpt-5.2")
-			spec.Developer.Profile = store.AgentProfileSnapshot{CommitSHA: "invalid-profile", ContentSHA256: hash[:], Config: encoded}
+			updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+				preparation.Profile = store.AgentProfileSnapshot{CommitSHA: "invalid-profile", ContentSHA256: hash[:], Config: encoded}
+			})
 			_, err = database.PrepareAgentTurn(ctx, lease, spec)
 			if err == nil {
 				t.Fatalf("PrepareAgentTurn() with %s succeeded", name)
@@ -1307,7 +1312,7 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := preparationSpec("invalid-profile", "openai/gpt-5.2")
-			spec.Developer.Profile = profile
+			updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) { preparation.Profile = profile })
 			if _, err := database.PrepareAgentTurn(ctx, lease, spec); err == nil {
 				t.Fatalf("PrepareAgentTurn() with %s succeeded", name)
 			}
@@ -1384,22 +1389,24 @@ VALUES ($1, $2, 9123, 'owner', 'repo', $3, $3, 'OPEN', 'main', 'base', 'feature'
 
 			lease := claimPreparationJob(t, database, ctx)
 			spec := preparationSpec("unsafe-persisted-profile", "openai/gpt-5.2")
-			profile := &spec.Developer.Profile
+			stage := workflow.StageImplementation
 			name, role, model, instructions := "developer", workflow.RoleDeveloper, "openai/gpt-5.2", "Perform development."
 			if test.role == workflow.RoleReviewer {
-				profile = &spec.Reviewer.Profile
+				stage = workflow.StageReview
 				name, role, model, instructions = "reviewer", workflow.RoleReviewer, "anthropic/reviewer", "Perform review."
 			}
-			profile.Config = agentProfileConfig(name, role, "pi-rpc/v2", model, test.thinking, 0, instructions, test.permissions)
+			updateStagePreparation(&spec, stage, func(preparation *store.ParticipantPreparation) {
+				preparation.Profile.Config = agentProfileConfig(name, role, "pi-rpc/v2", model, test.thinking, 0, instructions, test.permissions)
+			})
 
 			if _, err := database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, agentprofile.ErrInvalidProfile) {
 				t.Fatalf("PrepareAgentTurn() error = %v, want Agent Profile policy rejection", err)
 			}
 			var assignments, sessions, turns, executionJobs int
 			if err := pool.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
+SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id = $1),
        (SELECT count(*) FROM agent_sessions AS session
-        JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+        JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
         WHERE assignment.workflow_id = $1),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1),
        (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RUN_AGENT_TURN')`,
@@ -1582,7 +1589,7 @@ func TestHumanControlIsUniquePerWorkflow(t *testing.T) {
 	const participantID = "63000000-0000-4000-8000-000000000093"
 	const sessionID = "64000000-0000-4000-8000-000000000093"
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -1593,7 +1600,7 @@ FROM agent_sessions WHERE id = $1`, human.ID, participantID, "assignment-"+parti
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
+    id, agent_participant_id, session_number, runtime_session_id, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
 VALUES ($1::uuid, $2, 1, ($1::uuid)::text, 'pi-rpc', 'v2', $5, $6, $3, 'ACTIVE', $4)`,
@@ -1936,16 +1943,16 @@ UPDATE agent_sessions SET runtime_profile_content_sha256 = $2 WHERE id = $1`,
 		first.Session.ID, strings.Repeat("c", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.PrepareAgentTurn(ctx, returningJob, preparationSpec("profile-2", "openai/two")); !errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-		t.Fatalf("PrepareAgentTurn() with Session Runtime Profile hash drift error = %v, want ErrAssignmentConfigurationConflict", err)
+	if _, err := database.PrepareAgentTurn(ctx, returningJob, preparationSpec("profile-2", "openai/two")); !errors.Is(err, store.ErrParticipantConfigurationConflict) {
+		t.Fatalf("PrepareAgentTurn() with Session Runtime Profile hash drift error = %v, want ErrParticipantConfigurationConflict", err)
 	}
 	if _, err := pool.Exec(ctx, `
 UPDATE agent_sessions SET runtime_profile_content_sha256 = $2 WHERE id = $1`,
-		first.Session.ID, first.Assignment.RuntimeProfileContentSHA256); err != nil {
+		first.Session.ID, first.Participant.RuntimeProfileContentSHA256); err != nil {
 		t.Fatal(err)
 	}
 	returning := prepareTurn(t, database, ctx, returningJob, "profile-2", "openai/two")
-	if returning.Assignment.ID != first.Assignment.ID || returning.Session.ID != first.Session.ID ||
+	if returning.Participant.ID != first.Participant.ID || returning.Session.ID != first.Session.ID ||
 		returning.Session.RuntimeSessionID != first.Session.ID || len(returning.Session.RuntimeCapabilities) == 0 || returning.Turn.ExecutionEpoch != 2 {
 		t.Fatalf("returning preparation = %#v, want reused identity and epoch 2", returning)
 	}
@@ -1953,7 +1960,7 @@ UPDATE agent_sessions SET runtime_profile_content_sha256 = $2 WHERE id = $1`,
 	settleAcquiredTurn(t, database, ctx, returningLease, store.AgentTurnSucceeded)
 
 	if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET status = 'COMPLETED', completed_at = clock_timestamp(), retention_until = clock_timestamp() + interval '1 day'
+UPDATE agent_participants SET status = 'COMPLETED', completed_at = clock_timestamp(), retention_until = clock_timestamp() + interval '1 day'
 WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 		t.Fatal(err)
 	}
@@ -1964,7 +1971,7 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 	insertPreparationJob(t, pool, application.WorkflowID, first.Turn.WorkflowAttemptID, 3,
 		workflow.AssignmentGenerationRetained, workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, "", "")
 	retained := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-3", "openai/three")
-	if retained.Assignment.ID != first.Assignment.ID || retained.Session.ID != first.Session.ID ||
+	if retained.Participant.ID != first.Participant.ID || retained.Session.ID != first.Session.ID ||
 		retained.Session.Status != store.AgentSessionActive || retained.Session.RuntimeSessionID != first.Session.ID || len(retained.Session.RuntimeCapabilities) == 0 {
 		t.Fatalf("retained preparation = %#v, want reactivated durable identity", retained)
 	}
@@ -1975,8 +1982,8 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 	insertPreparationJob(t, pool, application.WorkflowID, first.Turn.WorkflowAttemptID, 4,
 		workflow.AssignmentGenerationNew, workflow.RoleDeveloper, workflow.TurnPurposeRequestedChanges, "", "")
 	newGeneration := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "profile-4", "openai/four")
-	if newGeneration.Assignment.ID == first.Assignment.ID || newGeneration.Session.ID == first.Session.ID ||
-		newGeneration.Assignment.Generation != 2 || newGeneration.Session.Status != store.AgentSessionCreating {
+	if newGeneration.Participant.ID == first.Participant.ID || newGeneration.Session.ID == first.Session.ID ||
+		newGeneration.Participant.Generation != 2 || newGeneration.Session.Status != store.AgentSessionCreating {
 		t.Fatalf("new-generation preparation = %#v", newGeneration)
 	}
 	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
@@ -2054,7 +2061,7 @@ func TestRuntimeProfilePlatformDriftCreatesConfigurationConflictAndHumanHandoff(
 		binding := bindings[role]
 		assignmentID := fmt.Sprintf("63000000-0000-4000-8000-%012d", 11+index)
 		if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2073,32 +2080,34 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	}
 	lease := claimPreparationJob(t, database, ctx)
 	matching := preparationSpec("matching-profile", "openai/matching")
-	matching.Developer.Binding = developerBinding
+	updateStagePreparation(&matching, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) { preparation.Binding = developerBinding })
 	conflicting := matching
-	conflicting.Developer.Binding.RuntimeProfileContentSHA256 = arm64Profile.ContentSHA256()
+	updateStagePreparation(&conflicting, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding.RuntimeProfileContentSHA256 = arm64Profile.ContentSHA256()
+	})
 
-	if _, err := database.PrepareAgentTurn(ctx, lease, conflicting); !errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-		t.Fatalf("PrepareAgentTurn() error = %v, want ErrAssignmentConfigurationConflict", err)
+	if _, err := database.PrepareAgentTurn(ctx, lease, conflicting); !errors.Is(err, store.ErrParticipantConfigurationConflict) {
+		t.Fatalf("PrepareAgentTurn() error = %v, want ErrParticipantConfigurationConflict", err)
 	}
-	if _, err := database.AcknowledgeAssignmentConfigurationConflict(ctx, lease, matching); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
+	if _, err := database.AcknowledgeParticipantConfigurationConflict(ctx, lease, matching); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
 		t.Fatalf("acknowledgement without a current conflict error = %v, want ErrAgentTurnPreparationFenceLost", err)
 	}
 	stale := lease
 	stale.LeaseOwner = "stale-preparation-worker"
-	if _, err := database.AcknowledgeAssignmentConfigurationConflict(ctx, stale, conflicting); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
+	if _, err := database.AcknowledgeParticipantConfigurationConflict(ctx, stale, conflicting); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
 		t.Fatalf("stale acknowledgement error = %v, want ErrAgentTurnPreparationFenceLost", err)
 	}
 
-	handoff, err := database.AcknowledgeAssignmentConfigurationConflict(ctx, lease, conflicting)
+	handoff, err := database.AcknowledgeParticipantConfigurationConflict(ctx, lease, conflicting)
 	if err != nil {
-		t.Fatalf("AcknowledgeAssignmentConfigurationConflict() error = %v", err)
+		t.Fatalf("AcknowledgeParticipantConfigurationConflict() error = %v", err)
 	}
 	if handoff.JobID != lease.ID || handoff.WorkflowID != application.WorkflowID ||
 		handoff.WorkflowAttemptID != lease.WorkflowAttemptID || handoff.Role != workflow.RoleDeveloper ||
 		handoff.WorkflowRevision != 2 {
 		t.Fatalf("configuration handoff = %#v", handoff)
 	}
-	if _, err := database.AcknowledgeAssignmentConfigurationConflict(ctx, lease, conflicting); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
+	if _, err := database.AcknowledgeParticipantConfigurationConflict(ctx, lease, conflicting); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
 		t.Fatalf("duplicate acknowledgement error = %v, want ErrAgentTurnPreparationFenceLost", err)
 	}
 
@@ -2132,7 +2141,7 @@ WHERE workflow.id = $1`, application.WorkflowID, lease.WorkflowAttemptID, lease.
 	if err := pool.QueryRow(ctx, `
 SELECT count(*) FILTER (WHERE status = 'WAITING_FOR_HUMAN'),
        count(*) FILTER (WHERE runtime_profile_content_sha256 <> $2)
-FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID, arm64Profile.ContentSHA256()).Scan(&waitingAssignments, &unchangedBindings); err != nil {
+FROM agent_participants WHERE workflow_id = $1`, application.WorkflowID, arm64Profile.ContentSHA256()).Scan(&waitingAssignments, &unchangedBindings); err != nil {
 		t.Fatalf("read acknowledged Assignments: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_turns WHERE workflow_id = $1`, application.WorkflowID).Scan(&turns); err != nil {
@@ -2198,7 +2207,7 @@ func TestPreparationWorkerPreservesConfigurationConflictHandoffAcrossUnresolvedR
 	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
 		binding := bindings[role]
 		if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2216,11 +2225,13 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	}
 
 	conflicting := preparationSpec("repeated-conflict-profile", "openai/repeated-conflict")
-	conflicting.Developer.Binding.RuntimeImageDigest = "sha256:unresolved-developer-runtime"
+	updateStagePreparation(&conflicting, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding.RuntimeImageDigest = "sha256:unresolved-developer-runtime"
+	})
 	preparer := integrationTurnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
-		return agentturn.Result{}, &agentturn.AssignmentConfigurationConflictError{
+		return agentturn.Result{}, &agentturn.ParticipantConfigurationConflictError{
 			Preparation: conflicting,
-			Cause:       store.ErrAssignmentConfigurationConflict,
+			Cause:       store.ErrParticipantConfigurationConflict,
 		}
 	})
 	worker, err := agentturn.NewWorker(database,
@@ -2320,7 +2331,7 @@ func TestPermanentAgentTurnPreparationFailureAtomicallyCreatesHumanHandoff(t *te
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000021", "62000000-0000-4000-8000-000000000021")
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2387,7 +2398,7 @@ WHERE workflow.id = $1`, application.WorkflowID, lease.WorkflowAttemptID, lease.
 		t.Errorf("terminal preparation failure created %d Agent Turns and %d execution Jobs", turns, executionJobs)
 	}
 	var waitingAssignments int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_assignments WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN'`, application.WorkflowID).Scan(&waitingAssignments); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_participants WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN'`, application.WorkflowID).Scan(&waitingAssignments); err != nil {
 		t.Fatal(err)
 	}
 	if waitingAssignments != 2 {
@@ -2424,7 +2435,7 @@ func TestPreparationFailureHandoffRetriggerReactivatesExistingAssignments(t *tes
 	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
 		binding := bindings[role]
 		if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2443,15 +2454,17 @@ VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, $7, $8, $9)`, assignmentIDs[role],
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000027", "62000000-0000-4000-8000-000000000028")
 	retriggered := claimPreparationJob(t, database, ctx)
 	drifted := preparationSpec("retriggered-profile", "openai/retriggered")
-	drifted.Developer.Binding.RuntimeImageDigest = "sha256:drifted-developer-runtime"
-	if _, err := database.PrepareAgentTurn(ctx, retriggered, drifted); !errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-		t.Fatalf("PrepareAgentTurn() with binding drift error = %v, want ErrAssignmentConfigurationConflict", err)
+	updateStagePreparation(&drifted, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding.RuntimeImageDigest = "sha256:drifted-developer-runtime"
+	})
+	if _, err := database.PrepareAgentTurn(ctx, retriggered, drifted); !errors.Is(err, store.ErrParticipantConfigurationConflict) {
+		t.Fatalf("PrepareAgentTurn() with binding drift error = %v, want ErrParticipantConfigurationConflict", err)
 	}
 	var waiting, reactivated int
 	if err := pool.QueryRow(ctx, `
 SELECT count(*) FILTER (WHERE status = 'WAITING_FOR_HUMAN'),
        count(*) FILTER (WHERE reactivated_by_preparation_job_id IS NOT NULL)
-FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID).Scan(&waiting, &reactivated); err != nil {
+FROM agent_participants WHERE workflow_id = $1`, application.WorkflowID).Scan(&waiting, &reactivated); err != nil {
 		t.Fatal(err)
 	}
 	if waiting != 2 || reactivated != 0 {
@@ -2459,8 +2472,8 @@ FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID).Scan(&wa
 	}
 
 	prepared := prepareTurn(t, database, ctx, retriggered, "retriggered-profile", "openai/retriggered")
-	if prepared.Assignment.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Assignment.Generation != 1 ||
-		prepared.Assignment.Status != store.AgentParticipantActive || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
+	if prepared.Participant.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Participant.Generation != 1 ||
+		prepared.Participant.Status != store.AgentParticipantActive || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
 		t.Fatalf("retriggered preparation = %#v", prepared)
 	}
 	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
@@ -2482,7 +2495,7 @@ SELECT count(*) FILTER (
            WHERE status = 'ACTIVE' AND reactivated_by_preparation_job_id = $2
        ),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1)
-FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID, retriggered.ID).Scan(&correctlyReactivated, &turns); err != nil {
+FROM agent_participants WHERE workflow_id = $1`, application.WorkflowID, retriggered.ID).Scan(&correctlyReactivated, &turns); err != nil {
 		t.Fatal(err)
 	}
 	if correctlyReactivated != 1 || turns != 1 {
@@ -2535,7 +2548,7 @@ func TestInfrastructureHandoffRetriggerReactivatesCurrentParticipant(t *testing.
 		t.Fatalf("infrastructure handoff reactivation = %#v, want same Participant and Session", reactivated)
 	}
 	var waiting int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_assignments WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN'`, application.WorkflowID).Scan(&waiting); err != nil || waiting != 0 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_participants WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN'`, application.WorkflowID).Scan(&waiting); err != nil || waiting != 0 {
 		t.Fatalf("waiting Participants after reactivation = %d, %v", waiting, err)
 	}
 }
@@ -2555,7 +2568,7 @@ func TestConfigurationConflictHandoffRetriggerReactivatesExistingAssignments(t *
 	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
 		binding := bindings[role]
 		if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2573,18 +2586,20 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	}
 	conflicted := claimPreparationJob(t, database, ctx)
 	conflicting := preparationSpec("conflicting-profile", "openai/conflicting")
-	conflicting.Developer.Binding.RuntimeImageDigest = "sha256:conflicting-developer-runtime"
-	if _, err := database.PrepareAgentTurn(ctx, conflicted, conflicting); !errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-		t.Fatalf("PrepareAgentTurn() error = %v, want ErrAssignmentConfigurationConflict", err)
+	updateStagePreparation(&conflicting, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding.RuntimeImageDigest = "sha256:conflicting-developer-runtime"
+	})
+	if _, err := database.PrepareAgentTurn(ctx, conflicted, conflicting); !errors.Is(err, store.ErrParticipantConfigurationConflict) {
+		t.Fatalf("PrepareAgentTurn() error = %v, want ErrParticipantConfigurationConflict", err)
 	}
-	if _, err := database.AcknowledgeAssignmentConfigurationConflict(ctx, conflicted, conflicting); err != nil {
-		t.Fatalf("AcknowledgeAssignmentConfigurationConflict() error = %v", err)
+	if _, err := database.AcknowledgeParticipantConfigurationConflict(ctx, conflicted, conflicting); err != nil {
+		t.Fatalf("AcknowledgeParticipantConfigurationConflict() error = %v", err)
 	}
 
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000029", "62000000-0000-4000-8000-000000000030")
 	retriggered := claimPreparationJob(t, database, ctx)
 	prepared := prepareTurn(t, database, ctx, retriggered, "resolved-profile", "openai/resolved")
-	if prepared.Assignment.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Assignment.Status != store.AgentParticipantActive {
+	if prepared.Participant.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Participant.Status != store.AgentParticipantActive {
 		t.Fatalf("retriggered preparation = %#v, want original Developer Assignment", prepared)
 	}
 	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
@@ -2602,7 +2617,7 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	}
 	var correctlyReactivated int
 	if err := pool.QueryRow(ctx, `
-SELECT count(*) FROM agent_assignments
+SELECT count(*) FROM agent_participants
 WHERE workflow_id = $1 AND status = 'ACTIVE' AND reactivated_by_preparation_job_id = $2`,
 		application.WorkflowID, retriggered.ID).Scan(&correctlyReactivated); err != nil {
 		t.Fatal(err)
@@ -2623,7 +2638,7 @@ func TestCurrentPreparationRejectsUnrelatedWaitingAssignments(t *testing.T) {
 	for index, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
 		binding := bindings[role]
 		if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2649,7 +2664,7 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 SELECT count(*) FILTER (WHERE status = 'WAITING_FOR_HUMAN'),
        count(*) FILTER (WHERE reactivated_by_preparation_job_id IS NOT NULL),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1)
-FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID).Scan(&waiting, &reactivated, &turns); err != nil {
+FROM agent_participants WHERE workflow_id = $1`, application.WorkflowID).Scan(&waiting, &reactivated, &turns); err != nil {
 		t.Fatal(err)
 	}
 	if waiting != 2 || reactivated != 0 || turns != 0 {
@@ -2749,7 +2764,7 @@ func TestInitialPreparationFailureRetriggersWithNewAssignments(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 SELECT count(assignment.id), workflow.status, workflow.desired_runtime_state
 FROM workflows AS workflow
-LEFT JOIN agent_assignments AS assignment ON assignment.workflow_id = workflow.id
+LEFT JOIN agent_participants AS assignment ON assignment.workflow_id = workflow.id
 WHERE workflow.id = $1
 GROUP BY workflow.id`, application.WorkflowID).Scan(&assignmentCount, &workflowStatus, &runtimeState); err != nil {
 		t.Fatal(err)
@@ -2761,7 +2776,7 @@ GROUP BY workflow.id`, application.WorkflowID).Scan(&assignmentCount, &workflowS
 
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000025", "62000000-0000-4000-8000-000000000025")
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovered-profile", "openai/recovered")
-	if prepared.Assignment.Role != workflow.RoleDeveloper || prepared.Assignment.Generation != 1 || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
+	if prepared.Participant.Role != workflow.RoleDeveloper || prepared.Participant.Generation != 1 || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
 		t.Fatalf("retriggered preparation = %#v, want first-generation Developer reactivation", prepared)
 	}
 	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
@@ -2810,24 +2825,37 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 	developerHash := sha256.Sum256([]byte(commitSHA))
 	reviewerHash := sha256.Sum256([]byte(commitSHA + "-reviewer"))
 	spec := store.AgentTurnPreparationSpec{
-		Developer: store.ParticipantPreparation{
-			ProfilePath: ".omnigrex/team/developer.md",
-			Binding:     bindings[workflow.RoleDeveloper],
-			Profile: store.AgentProfileSnapshot{
-				CommitSHA: commitSHA, ContentSHA256: developerHash[:],
-				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", developerModel, "", 40, "Perform development.", nil),
+		Stages: map[workflow.StageID]store.ParticipantPreparation{
+			workflow.StageImplementation: {
+				ProfilePath: ".omnigrex/team/developer.md",
+				Binding:     bindings[workflow.RoleDeveloper],
+				Profile: store.AgentProfileSnapshot{
+					CommitSHA: commitSHA, ContentSHA256: developerHash[:],
+					Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", developerModel, "", 40, "Perform development.", nil),
+				},
 			},
-		},
-		Reviewer: store.ParticipantPreparation{
-			ProfilePath: ".omnigrex/team/reviewer.md",
-			Binding:     bindings[workflow.RoleReviewer],
-			Profile: store.AgentProfileSnapshot{
-				CommitSHA: commitSHA + "-reviewer", ContentSHA256: reviewerHash[:],
-				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "anthropic/reviewer", "", 40, "Perform review.", nil),
+			workflow.StageReview: {
+				ProfilePath: ".omnigrex/team/reviewer.md",
+				Binding:     bindings[workflow.RoleReviewer],
+				Profile: store.AgentProfileSnapshot{
+					CommitSHA: commitSHA + "-reviewer", ContentSHA256: reviewerHash[:],
+					Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "anthropic/reviewer", "", 40, "Perform review.", nil),
+				},
 			},
 		},
 	}
 	return spec
+}
+
+func updateStagePreparation(spec *store.AgentTurnPreparationSpec, stage workflow.StageID, update func(*store.ParticipantPreparation)) {
+	stages := make(map[workflow.StageID]store.ParticipantPreparation, len(spec.Stages))
+	for id, preparation := range spec.Stages {
+		stages[id] = preparation
+	}
+	preparation := stages[stage]
+	update(&preparation)
+	stages[stage] = preparation
+	spec.Stages = stages
 }
 
 func acquireAndBindTurn(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, prepared store.AgentTurnPreparationCommit, _ string) store.AgentTurnLease {

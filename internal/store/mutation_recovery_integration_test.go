@@ -39,7 +39,7 @@ WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("prepare Workflow Attempt budget: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path,
     github_app_actor_id
@@ -287,7 +287,7 @@ WHERE workflow.id = $1`, fixture.workflowID).Scan(
 	}
 	var waitingAssignments int
 	if err := pool.QueryRow(ctx, `
-SELECT count(*) FROM agent_assignments
+SELECT count(*) FROM agent_participants
 WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL`, fixture.workflowID).Scan(&waitingAssignments); err != nil {
 		t.Fatalf("count waiting Assignments: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 		t.Fatalf("ReconcileRecoveredMutation() error = %v", err)
 	}
 	var actorID int64
-	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
 		t.Fatalf("read recovered Reviewer actor: %v", err)
 	}
 	if actorID != 9201 {
@@ -453,7 +453,7 @@ func TestRecoveredSubmitReviewBindsReviewerActor(t *testing.T) {
 		t.Fatalf("conflicting ReconcileRecoveredMutation() error = %v, want ErrReviewerActorConflict", err)
 	}
 	var mutationState string
-	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
 		t.Fatalf("read Reviewer actor after conflict: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT state FROM tool_invocations WHERE id = $1`, conflicting.ID).Scan(&mutationState); err != nil {

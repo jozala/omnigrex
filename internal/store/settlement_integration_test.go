@@ -237,7 +237,7 @@ SELECT workflow.human_handoff_reason, handoff.payload->>'diagnostic',
 	       handoff.agent_turn_settlement_id::text, assignment.status
 FROM workflows AS workflow
 JOIN jobs AS handoff ON handoff.workflow_id = workflow.id AND handoff.kind = 'PUBLISH_HUMAN_HANDOFF'
-JOIN agent_assignments AS assignment ON assignment.id = $2
+JOIN agent_participants AS assignment ON assignment.id = $2
 WHERE workflow.id = $1`, fixture.workflowID, fixture.assignmentID).Scan(&reason, &diagnostic, &provenance, &assignmentStatus); err != nil {
 			t.Fatal(err)
 		}
@@ -1107,7 +1107,7 @@ UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 	if role == workflow.RoleReviewer {
 		actorID := int64(number*100 + 2)
 		if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
+UPDATE agent_participants SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
 			t.Fatal(err)
 		}
 		proposalRowID = fmt.Sprintf("79%04d00-0000-4000-8000-000000000001", number)

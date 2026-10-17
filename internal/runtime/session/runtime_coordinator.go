@@ -75,7 +75,7 @@ func (c *RuntimeCoordinator) Prepare(ctx context.Context, request RuntimePrepare
 	if !runtimeTurnIdentity(s, lease) || s.NextExecutionEpoch-1 != lease.ExecutionEpoch || s.Status != store.AgentSessionCreating && s.Status != store.AgentSessionActive {
 		return RuntimeResult{}, ErrTurnIdentityMismatch
 	}
-	if ref.Validate() != nil || ref.ParticipantID != s.AgentAssignmentID || ref.SessionID != s.ID || ref.RuntimeProfileSHA256 != s.RuntimeProfileContentSHA256 || ref.Image != s.RuntimeImageDigest {
+	if ref.Validate() != nil || ref.ParticipantID != s.AgentParticipantID || ref.SessionID != s.ID || ref.RuntimeProfileSHA256 != s.RuntimeProfileContentSHA256 || ref.Image != s.RuntimeImageDigest {
 		return RuntimeResult{}, ErrStatePathMismatch
 	}
 	reserved, err := c.store.ReserveAgentSessionRuntime(ctx, lease)
@@ -200,7 +200,7 @@ func (c *RuntimeCoordinator) HumanPrompt(ctx context.Context, request RuntimeHum
 		operationErr = agent.ErrNotReady
 	}
 	if operationErr == nil {
-		connection.SetAgentEventContext(agentevent.Context{AssignmentID: s.AgentAssignmentID, AgentSessionID: s.ID, ControlRevision: uint64(s.ControlRevision)})
+		connection.SetAgentEventContext(agentevent.Context{AssignmentID: s.AgentParticipantID, AgentSessionID: s.ID, ControlRevision: uint64(s.ControlRevision)})
 		var ready agent.Ready
 		ready, operationErr = connection.Prepare(workCtx)
 		if operationErr == nil && ready.RuntimeSessionID != s.RuntimeSessionID {
@@ -240,9 +240,9 @@ func (c *RuntimeCoordinator) HumanPrompt(ctx context.Context, request RuntimeHum
 }
 
 func runtimeTurnIdentity(s store.AgentSession, lease store.AgentTurnLease) bool {
-	return s.ID != "" && s.ID == lease.AgentSessionID && s.AgentAssignmentID != "" && s.AgentAssignmentID == lease.AgentAssignmentID && s.ControlOwner == store.SessionControlAutomation && s.ControlRevision > 0 && s.ControlRevision == lease.ControlRevision && lease.ExecutionEpoch > 0 && lease.JobLease.AgentSessionID == s.ID && lease.JobLease.AgentAssignmentID == s.AgentAssignmentID && lease.JobLease.AgentTurnID == lease.ID && lease.JobLease.ExecutionEpoch == lease.ExecutionEpoch
+	return s.ID != "" && s.ID == lease.AgentSessionID && s.AgentParticipantID != "" && s.AgentParticipantID == lease.AgentParticipantID && s.ControlOwner == store.SessionControlAutomation && s.ControlRevision > 0 && s.ControlRevision == lease.ControlRevision && lease.ExecutionEpoch > 0 && lease.JobLease.AgentSessionID == s.ID && lease.JobLease.AgentParticipantID == s.AgentParticipantID && lease.JobLease.AgentTurnID == lease.ID && lease.JobLease.ExecutionEpoch == lease.ExecutionEpoch
 }
 
 func runtimeEventContext(lease store.AgentTurnLease, s store.AgentSession) agentevent.Context {
-	return agentevent.Context{AssignmentID: s.AgentAssignmentID, AgentSessionID: s.ID, TurnID: lease.ID, ExecutionEpoch: uint64(lease.ExecutionEpoch), ControlRevision: uint64(lease.ControlRevision)}
+	return agentevent.Context{AssignmentID: s.AgentParticipantID, AgentSessionID: s.ID, TurnID: lease.ID, ExecutionEpoch: uint64(lease.ExecutionEpoch), ControlRevision: uint64(lease.ControlRevision)}
 }

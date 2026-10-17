@@ -522,7 +522,7 @@ SELECT checkpoint.agent_turn_id::text, turn.stage_id, assignment.role, session.c
 FROM agent_turn_corroborations AS checkpoint
 JOIN agent_turns AS turn ON turn.id = checkpoint.agent_turn_id
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 JOIN workflows AS workflow ON workflow.id = checkpoint.workflow_id
 WHERE (checkpoint.workflow_attempt_id = $1 OR EXISTS (
     SELECT 1 FROM jobs AS prior_job
@@ -755,7 +755,7 @@ SELECT turn.id::text, turn.agent_session_id::text, turn.workflow_attempt_id::tex
        COALESCE(proposal.pull_request_id, 0), COALESCE(turn.expected_head_sha, '')
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 LEFT JOIN change_proposals AS proposal ON proposal.id = turn.change_proposal_id
 WHERE assignment.workflow_id = $1 AND turn.active`, workflowID).Scan(
 		&turn.ID, &turn.SessionID, &turn.AttemptID, &turn.Stage, &turn.Role, &turn.Epoch,
@@ -1075,12 +1075,12 @@ func persistWorkflowActionsWithInternalProvenance(ctx context.Context, tx pgx.Tx
 			}
 			updated, err := tx.Exec(ctx, `
 UPDATE jobs AS job SET queue = 'agent-turn-recovery', max_attempts = 1000000,
-    agent_assignment_id = assignment.id,
+    agent_participant_id = assignment.id,
     agent_session_id = session.id, agent_turn_id = source.id,
     execution_epoch = source.execution_epoch
 FROM agent_turns AS source
 JOIN agent_sessions AS session ON session.id = source.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 JOIN agent_turn_corroborations AS checkpoint ON checkpoint.agent_turn_id = source.id
 WHERE job.id = $1 AND source.id = $2 AND source.workflow_id = $3
   AND checkpoint.state = 'HANDED_OFF' AND source.status = 'FAILED'
@@ -1091,8 +1091,8 @@ WHERE job.id = $1 AND source.id = $2 AND source.workflow_id = $3
 				return ErrWorkflowDecisionInvalid
 			}
 			if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments SET status = 'ACTIVE', updated_at = clock_timestamp()
-WHERE id = (SELECT agent_assignment_id FROM jobs WHERE id = $1)
+UPDATE agent_participants SET status = 'ACTIVE', updated_at = clock_timestamp()
+WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
   AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL`, jobID); err != nil {
 				return err
 			}
@@ -1106,7 +1106,7 @@ WHERE id = (SELECT agent_assignment_id FROM jobs WHERE id = $1)
 			}
 		case workflow.MarkHumanHandoffAction:
 			if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
     updated_at = clock_timestamp()
 WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID); err != nil {
@@ -1212,12 +1212,12 @@ func enqueueReconcilePendingEventsJob(ctx context.Context, tx pgx.Tx, deliveryID
 	rows, err := tx.Query(ctx, `
 SELECT event.delivery_id::text, event.deferred_for_turn_id::text,
 	   turn.execution_epoch, turn.control_revision, turn.agent_session_id::text,
-	       turn.workflow_attempt_id::text, session.agent_assignment_id::text,
+	       turn.workflow_attempt_id::text, session.agent_participant_id::text,
 	       assignment.role, turn.stage_id
 FROM normalized_events AS event
 JOIN agent_turns AS turn ON turn.id = event.deferred_for_turn_id
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE event.workflow_id = $1 AND event.status = 'DEFERRED'
   AND event.deferred_for_turn_id = $2
 ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.TurnID)
@@ -1276,7 +1276,7 @@ ORDER BY event.created_at, event.delivery_id`, workflowID, action.SourceTurn.Tur
 		queue: WorkflowActionQueue, kind: ReconcilePendingEventsJobKind, payload: payloadJSON, maxAttempts: 3,
 		idempotencyKey: workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, "", "reconcile-pending-events"),
 		scope: jobInsertScope{
-			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: sourceAssignmentID,
+			workflowID: workflowID, workflowAttemptID: attemptID, agentParticipantID: sourceAssignmentID,
 			agentSessionID: sourceSessionID, agentTurnID: sourceTurnID, executionEpoch: sourceEpoch,
 		},
 		provenance: jobInsertProvenance{
@@ -1371,10 +1371,10 @@ UPDATE agent_turns AS turn
 SET mutation_admission_open = FALSE,
     mutation_admission_closed_at = COALESCE(mutation_admission_closed_at, clock_timestamp()),
     status = 'CANCELLING'
-FROM agent_sessions AS session, agent_assignments AS assignment
+FROM agent_sessions AS session, agent_participants AS assignment
 WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id = $3
   AND turn.execution_epoch = $4 AND turn.control_revision = $5 AND turn.active
-  AND session.id = turn.agent_session_id AND assignment.id = session.agent_assignment_id
+  AND session.id = turn.agent_session_id AND assignment.id = session.agent_participant_id
   AND assignment.role = $6`, guard.TurnID, guard.SessionID, guard.AttemptID,
 		int64(guard.Epoch), int64(guard.ControlRevision), guard.Role)
 	if err != nil {
@@ -1494,7 +1494,7 @@ WHERE id = $1 AND stop_runtime_job_id = $2
 func enqueueStopTurnJob(ctx context.Context, tx pgx.Tx, deliveryID, workflowID, closureID string, guard workflow.TurnGuard, revision uint64) (string, error) {
 	var assignmentID string
 	err := tx.QueryRow(ctx, `
-SELECT session.agent_assignment_id::text
+SELECT session.agent_participant_id::text
 FROM agent_turns AS turn JOIN agent_sessions AS session ON session.id = turn.agent_session_id
 WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id = $3
   AND turn.execution_epoch = $4 AND turn.control_revision = $5`, guard.TurnID, guard.SessionID,
@@ -1515,7 +1515,7 @@ WHERE turn.id = $1 AND turn.agent_session_id = $2 AND turn.workflow_attempt_id =
 		priority: stopAgentTurnJobPriority, maxAttempts: 3,
 		idempotencyKey: fmt.Sprintf("workflow:%s:delivery:%s:action:stop-agent-turn", workflowID, deliveryID),
 		scope: jobInsertScope{
-			workflowID: workflowID, workflowAttemptID: guard.AttemptID, agentAssignmentID: assignmentID,
+			workflowID: workflowID, workflowAttemptID: guard.AttemptID, agentParticipantID: assignmentID,
 			agentSessionID: guard.SessionID, agentTurnID: guard.TurnID, executionEpoch: int64(guard.Epoch),
 		},
 		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "stop-agent-turn"},
@@ -1549,7 +1549,7 @@ func enqueueClosureSettlementJob(ctx context.Context, tx pgx.Tx, deliveryID, wor
 		payload.ExecutionEpoch, payload.ControlRevision = int64(guard.Epoch), int64(guard.ControlRevision)
 		sessionID, turnID, epoch = guard.SessionID, guard.TurnID, int64(guard.Epoch)
 		if err := tx.QueryRow(ctx, `
-SELECT agent_assignment_id::text FROM agent_sessions WHERE id = $1`, guard.SessionID).Scan(&assignmentID); err != nil {
+SELECT agent_participant_id::text FROM agent_sessions WHERE id = $1`, guard.SessionID).Scan(&assignmentID); err != nil {
 			return "", fmt.Errorf("resolve closure settlement hierarchy: %w", err)
 		}
 	}
@@ -1562,7 +1562,7 @@ SELECT agent_assignment_id::text FROM agent_sessions WHERE id = $1`, guard.Sessi
 		priority: settleClosureJobPriority, maxAttempts: 3,
 		idempotencyKey: fmt.Sprintf("workflow:%s:closure:%s:settle", workflowID, closureID),
 		scope: jobInsertScope{
-			workflowID: workflowID, workflowAttemptID: attemptID, agentAssignmentID: assignmentID,
+			workflowID: workflowID, workflowAttemptID: attemptID, agentParticipantID: assignmentID,
 			agentSessionID: sessionID, agentTurnID: turnID, executionEpoch: epoch,
 		},
 		provenance: jobInsertProvenance{normalizedEventID: deliveryID, actionKey: "settle-closure"},

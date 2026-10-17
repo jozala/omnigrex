@@ -98,7 +98,7 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if string(checksum) != string(want[:]) {
 		t.Fatalf("migration checksum = %x, want %x", checksum, want)
 	}
-	for _, table := range []string{"webhook_deliveries", "workflows", "workflow_attempts", "agent_assignments", "agent_participants", "stage_assignments", "agent_sessions", "agent_turns", "change_proposals", "tool_invocations", "tool_invocation_replays", "jobs", "job_attempts", "agent_turn_slots", "job_normalized_events", "workflow_closure_barriers", "agent_turn_settlements", "workflow_github_effect_cleanups", "workflow_action_failures", "workflow_internal_events", "assignment_retention_generations", "assignment_retention_targets", "pi_runtime_profile_compatibility_results", "runtime_profile_contracts"} {
+	for _, table := range []string{"webhook_deliveries", "workflows", "workflow_attempts", "agent_participants", "stage_assignments", "agent_sessions", "agent_turns", "change_proposals", "tool_invocations", "tool_invocation_replays", "jobs", "job_attempts", "agent_turn_slots", "job_normalized_events", "workflow_closure_barriers", "agent_turn_settlements", "workflow_github_effect_cleanups", "workflow_action_failures", "workflow_internal_events", "assignment_retention_generations", "assignment_retention_targets", "pi_runtime_profile_compatibility_results", "runtime_profile_contracts"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
 			t.Fatal(err)

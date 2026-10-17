@@ -139,7 +139,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if remaining <= 0 {
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationExhausted, pending.Checkpoint.LastFailureCode)
 	}
-	role := pending.Execution.Assignment.Role
+	role := pending.Execution.Participant.Role
 	switch role {
 	case workflow.RoleDeveloper, workflow.RoleReviewer:
 	default:

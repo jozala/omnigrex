@@ -107,7 +107,7 @@ func checkPendingRuntimeProfileCompatibility(ctx context.Context, pool *pgxpool.
 	}
 	var unsupported bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (
-    SELECT 1 FROM agent_assignments
+    SELECT 1 FROM agent_participants
     WHERE runtime_profile_name <> $1 OR runtime_profile_version <> $2
     UNION ALL
     SELECT 1 FROM agent_sessions

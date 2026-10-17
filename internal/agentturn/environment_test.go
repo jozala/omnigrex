@@ -31,7 +31,7 @@ func TestRepositoryImageSelectionIsPerParticipantAndDefaultBranchProvenanceIsSep
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.RuntimeProfile.Contract().Image != imageA || len(database.calls[0].Developer.RuntimeContract) == 0 {
+	if first.RuntimeProfile.Contract().Image != imageA || len(database.calls[0].Stages[workflow.StageImplementation].RuntimeContract) == 0 {
 		t.Fatal("repository image contract was not selected and persisted")
 	}
 	for _, call := range source.fetchCalls {
@@ -41,7 +41,7 @@ func TestRepositoryImageSelectionIsPerParticipantAndDefaultBranchProvenanceIsSep
 	}
 	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + imageB + "\nplatform: linux/arm64\n")
 	catalog, _ := profile.NewCatalog([]profile.Profile{base}, []profile.Profile{first.RuntimeProfile})
-	database = &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &first.Commit.Assignment.ParticipantRuntimeBinding}}
+	database = &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &first.Commit.Participant.ParticipantRuntimeBinding}}
 	preparer = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, database)
 	retained, err := preparer.Prepare(context.Background(), validRequest())
 	if err != nil || retained.RuntimeProfile.Binding() != first.RuntimeProfile.Binding() {
@@ -96,7 +96,7 @@ func TestRetainedPiParticipantProvisionsToolsWithoutRebinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, lease := runtimeExecutionContext(t, retained, workflow.RoleDeveloper, nil)
-	state.Assignment.RuntimeImageDigest = contract.Image
+	state.Participant.RuntimeImageDigest = contract.Image
 	state.Session.RuntimeImageDigest = contract.Image
 	state.Session.Status = store.AgentSessionActive
 	state.Session.RuntimeSessionID = state.Session.ID

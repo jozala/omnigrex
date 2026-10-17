@@ -71,10 +71,10 @@ func (store *Store) GetAgentTurnRuntimeCleanupContext(ctx context.Context, lease
 	if err != nil {
 		return AgentTurnRuntimeCleanupContext{}, err
 	}
-	cleanup := AgentTurnRuntimeCleanupContext{AssignmentID: job.AgentAssignmentID}
+	cleanup := AgentTurnRuntimeCleanupContext{AssignmentID: job.AgentParticipantID}
 	if err := tx.QueryRow(ctx, `
-SELECT role, runtime_profile_name, runtime_profile_version FROM agent_assignments
-WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(
+SELECT role, runtime_profile_name, runtime_profile_version FROM agent_participants
+WHERE id = $1 AND workflow_id = $2`, job.AgentParticipantID, job.WorkflowID).Scan(
 		&cleanup.Role, &cleanup.RuntimeProfileName, &cleanup.RuntimeProfileVersion,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -182,7 +182,7 @@ FROM workflows WHERE id = $1`, job.WorkflowID).Scan(
 	if err := tx.QueryRow(ctx, `
 SELECT source.role, COALESCE(source.github_app_actor_id, (
 	SELECT reviewer.github_app_actor_id
-	FROM agent_assignments AS reviewer
+	FROM agent_participants AS reviewer
 	WHERE reviewer.workflow_id = source.workflow_id
 	  AND reviewer.role = ANY($3::text[])
 	  AND reviewer.status <> 'SUPERSEDED'
@@ -191,14 +191,13 @@ SELECT source.role, COALESCE(source.github_app_actor_id, (
 	ORDER BY reviewer.generation DESC, reviewer.created_at DESC
 	LIMIT 1
 ), 0)
-FROM agent_assignments AS source
-WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID, reviewerRoles).Scan(
+FROM agent_participants AS source
+WHERE source.id = $1 AND source.workflow_id = $2`, job.AgentParticipantID, job.WorkflowID, reviewerRoles).Scan(
 		&reconciliation.Role, &reconciliation.ReviewerActorID,
 	); err != nil {
 		return AgentTurnMutationReconciliationContext{}, fmt.Errorf("read mutation reconciliation Role actors: %w", err)
 	}
-	turn.AgentParticipantID = job.AgentAssignmentID
-	turn.AgentAssignmentID = job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	reconciliation.Turn = turn.AgentTurn
 
 	if turn.ChangeProposalID != "" {
@@ -254,7 +253,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 	}
 	if recorded && (stopReason == "completed" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
 		var participantRole workflow.Role
-		if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1`, job.AgentAssignmentID).Scan(&participantRole); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1`, job.AgentParticipantID).Scan(&participantRole); err != nil {
 			return nil, err
 		}
 		if _, eligible, err := findTerminalCorroborationSourceTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch, participantRole, ""); err != nil {
@@ -371,9 +370,9 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 	var runtimeOOMKilled bool
 	if err := tx.QueryRow(ctx, `
 SELECT assignment.role, turn.recovery_continuation, turn.runtime_oom_resource_ref IS NOT NULL
-FROM agent_assignments AS assignment
+FROM agent_participants AS assignment
 JOIN agent_turns AS turn ON turn.id = $3 AND turn.execution_epoch = $4
-WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID,
+WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentParticipantID, job.WorkflowID,
 		job.AgentTurnID, job.ExecutionEpoch).Scan(&role, &continuation, &runtimeOOMKilled); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryFenceLost
 	}

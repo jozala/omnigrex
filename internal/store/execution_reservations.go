@@ -24,7 +24,7 @@ type admittedExecutionLedger struct {
 }
 
 func (ledger admittedExecutionLedger) admit(ctx context.Context, key execution.Key, operation func(pgx.Tx) error) error {
-	if key.AgentTurnID != ledger.lease.ID || key.AssignmentID != ledger.lease.AgentAssignmentID || key.AgentSessionID != ledger.lease.AgentSessionID || key.ExecutionEpoch != ledger.lease.ExecutionEpoch {
+	if key.AgentTurnID != ledger.lease.ID || key.AssignmentID != ledger.lease.AgentParticipantID || key.AgentSessionID != ledger.lease.AgentSessionID || key.ExecutionEpoch != ledger.lease.ExecutionEpoch {
 		return ErrAgentTurnFenceLost
 	}
 	return ledger.withLockedAgentTurnLeaseOptions(ctx, ledger.lease, "admit execution operation", true, true, func(tx pgx.Tx, turn lockedTurn) error {

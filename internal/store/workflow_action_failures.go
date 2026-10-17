@@ -362,7 +362,7 @@ func exhaustExpiredWorkflowActionTx(ctx context.Context, tx pgx.Tx, job Job) err
 		_ = json.Unmarshal(job.Payload, &payload)
 		role = payload.FallbackRole
 		if !rolepkg.ValidID(role) {
-			if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments WHERE id = $1 AND workflow_id = $2`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1 AND workflow_id = $2`, job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 				return ErrPendingEventReconciliationFenceLost
 			}
 		}

@@ -318,9 +318,9 @@ func workspaceLedgerFixture(t *testing.T, database *store.Store, pool *pgxpool.P
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := execution.Key{AssignmentID: current.Assignment.ID, AgentSessionID: current.Session.ID, AgentTurnID: current.Turn.ID,
-		ExecutionEpoch: current.Turn.ExecutionEpoch, RuntimeProfileName: current.Assignment.RuntimeProfileName,
-		RuntimeProfileVersion: current.Assignment.RuntimeProfileVersion}
+	key := execution.Key{AssignmentID: current.Participant.ID, AgentSessionID: current.Session.ID, AgentTurnID: current.Turn.ID,
+		ExecutionEpoch: current.Turn.ExecutionEpoch, RuntimeProfileName: current.Participant.RuntimeProfileName,
+		RuntimeProfileVersion: current.Participant.RuntimeProfileVersion}
 	return execution.CaptureRef{Request: execution.CaptureRequest{
 		Workspace:   execution.WorkspaceRef{Key: key, Seed: "seed revision"},
 		OperationID: "github:publish:operation with spaces/and:punctuation", Purpose: execution.PublicationCapture,

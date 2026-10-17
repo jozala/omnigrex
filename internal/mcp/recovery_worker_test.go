@@ -328,7 +328,7 @@ func reconciliationJobLease() store.JobLease {
 	return store.JobLease{Job: store.Job{
 		JobSpec: store.JobSpec{
 			Queue: store.AgentTurnRecoveryQueue, Kind: store.ReconcileAgentTurnMutationsJobKind,
-			WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", AgentTurnID: "turn-1", ExecutionEpoch: 4, MaxAttempts: 3,
+			WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", AgentTurnID: "turn-1", ExecutionEpoch: 4, MaxAttempts: 3,
 		},
 		ID: "20000000-0000-4000-8000-000000000001", Status: store.JobLeased, AttemptCount: 3,
 		LeaseOwner: "recovery-worker", LeaseToken: "30000000-0000-4000-8000-000000000001",

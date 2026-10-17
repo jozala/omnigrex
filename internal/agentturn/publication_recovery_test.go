@@ -25,8 +25,8 @@ func TestPublicationRecoveryBindsPriorParticipantPRWithoutRequestingReview(t *te
 	const publicationID = "10000000-0000-4000-8000-000000000001"
 	const prID = "10000000-0000-4000-8000-000000000002"
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID:        "40000000-0000-4000-8000-000000000001",
-		AgentAssignmentID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
+		WorkflowID:         "40000000-0000-4000-8000-000000000001",
+		AgentParticipantID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -77,8 +77,8 @@ func TestPublicationRecoveryReacquiresCredentialAfterPreparingCheckout(t *testin
 	const publicationID = "10000000-0000-4000-8000-000000000001"
 	const prID = "10000000-0000-4000-8000-000000000002"
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID:        "40000000-0000-4000-8000-000000000001",
-		AgentAssignmentID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
+		WorkflowID:         "40000000-0000-4000-8000-000000000001",
+		AgentParticipantID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -133,8 +133,8 @@ func TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification(t *tes
 	const publicationID = "10000000-0000-4000-8000-000000000001"
 	const prID = "10000000-0000-4000-8000-000000000002"
 	marker, err := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID:        "40000000-0000-4000-8000-000000000001",
-		AgentAssignmentID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
+		WorkflowID:         "40000000-0000-4000-8000-000000000001",
+		AgentParticipantID: "20000000-0000-4000-8000-000000000001", OperationID: prID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,14 +303,14 @@ func TestPublicationRecoveryIgnoresNoChangePublishWhenBranchNeverExisted(t *test
 
 func recoveryTurn() (store.AgentTurnLease, store.AgentTurnExecutionContext) {
 	lease := store.AgentTurnLease{AgentTurn: store.AgentTurn{
-		ID: "30000000-0000-4000-8000-000000000001", AgentAssignmentID: "20000000-0000-4000-8000-000000000001", ExecutionEpoch: 4,
+		ID: "30000000-0000-4000-8000-000000000001", AgentParticipantID: "20000000-0000-4000-8000-000000000001", ExecutionEpoch: 4,
 	}}
 	return lease, store.AgentTurnExecutionContext{
-		WorkflowID: "40000000-0000-4000-8000-000000000001",
-		Repository: store.AgentTurnRepository{ID: 41, Owner: "jozala", Name: "omnigrex"},
-		Issue:      store.AgentTurnIssue{ID: 18, Number: 18},
-		Assignment: store.AgentParticipant{ID: lease.AgentAssignmentID, Role: workflow.RoleDeveloper},
-		Turn:       lease.AgentTurn,
+		WorkflowID:  "40000000-0000-4000-8000-000000000001",
+		Repository:  store.AgentTurnRepository{ID: 41, Owner: "jozala", Name: "omnigrex"},
+		Issue:       store.AgentTurnIssue{ID: 18, Number: 18},
+		Participant: store.AgentParticipant{ID: lease.AgentParticipantID, Role: workflow.RoleDeveloper},
+		Turn:        lease.AgentTurn,
 	}
 }
 

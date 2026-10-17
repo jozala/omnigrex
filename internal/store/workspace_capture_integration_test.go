@@ -31,8 +31,8 @@ func TestTerminalCaptureFixtureRetainsOriginalWorkspaceEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantKey := execution.Key{AssignmentID: current.Assignment.ID, AgentSessionID: current.Session.ID, AgentTurnID: current.Turn.ID,
-		ExecutionEpoch: current.Turn.ExecutionEpoch, RuntimeProfileName: current.Assignment.RuntimeProfileName, RuntimeProfileVersion: current.Assignment.RuntimeProfileVersion}
+	wantKey := execution.Key{AssignmentID: current.Participant.ID, AgentSessionID: current.Session.ID, AgentTurnID: current.Turn.ID,
+		ExecutionEpoch: current.Turn.ExecutionEpoch, RuntimeProfileName: current.Participant.RuntimeProfileName, RuntimeProfileVersion: current.Participant.RuntimeProfileVersion}
 	for _, name := range []string{"clean", "dirty tracked", "untracked", "unpublished commit"} {
 		t.Run(name, func(t *testing.T) {
 			paths := committedPublicationPaths(t)
@@ -127,11 +127,11 @@ func integrationCaptureKey(t *testing.T, pool *pgxpool.Pool, lease store.AgentTu
 SELECT participant.id::text, turn.agent_session_id::text, turn.id::text, turn.execution_epoch,
        participant.runtime_profile_name, participant.runtime_profile_version
 FROM agent_turns AS turn JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS participant ON participant.id = session.agent_assignment_id
+JOIN agent_participants AS participant ON participant.id = session.agent_participant_id
 WHERE turn.id = $1 AND turn.execution_epoch = $2 AND participant.id = $3 AND turn.agent_session_id = $4
   AND session.runtime_profile_name = participant.runtime_profile_name
   AND session.runtime_profile_version = participant.runtime_profile_version`,
-		lease.ID, lease.ExecutionEpoch, lease.AgentAssignmentID, lease.AgentSessionID).Scan(
+		lease.ID, lease.ExecutionEpoch, lease.AgentParticipantID, lease.AgentSessionID).Scan(
 		&key.AssignmentID, &key.AgentSessionID, &key.AgentTurnID, &key.ExecutionEpoch, &key.RuntimeProfileName, &key.RuntimeProfileVersion)
 	if err != nil {
 		t.Fatalf("read persisted capture key: %v", err)

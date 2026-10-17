@@ -264,15 +264,15 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err := validateExecutionBinding(execution, request.Lease); err != nil {
 		return nil, err
 	}
-	rolePolicy, ok := launcher.policies.Lookup(execution.Assignment.Role)
+	rolePolicy, ok := launcher.policies.Lookup(execution.Participant.Role)
 	if !ok {
 		return nil, fmt.Errorf("%w: Role policy", ErrRuntimeBinding)
 	}
 
 	runtimeProfile, err := launcher.registry.ResolveBinding(runtimeprofile.Binding{
-		Name: execution.Assignment.RuntimeProfileName, Version: execution.Assignment.RuntimeProfileVersion,
-		ContentSHA256: execution.Assignment.RuntimeProfileContentSHA256,
-		Image:         execution.Assignment.RuntimeImageDigest,
+		Name: execution.Participant.RuntimeProfileName, Version: execution.Participant.RuntimeProfileVersion,
+		ContentSHA256: execution.Participant.RuntimeProfileContentSHA256,
+		Image:         execution.Participant.RuntimeImageDigest,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve assigned Runtime Profile: %w", err)
@@ -294,7 +294,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 
 	key := runtimeKey(execution)
 	workspaceRef, err := launcher.workspace.Prepare(ctx, workspace.Preparation{Key: key, Checkout: workspace.Checkout{
-		AssignmentID: execution.Assignment.ID, RepositoryURL: request.RepositoryURL,
+		AssignmentID: execution.Participant.ID, RepositoryURL: request.RepositoryURL,
 		Credential: request.RepositoryCredential, Revision: revision, ExecutionEpoch: request.Lease.ExecutionEpoch,
 		Fence: func(ctx context.Context, operation func(context.Context) error) error {
 			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
@@ -312,7 +312,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	resources.workspaceRef = workspaceRef
 	resources.workspaceRef.Key = key
 	resources.store = launcher.store
-	resources.assignmentID = execution.Assignment.ID
+	resources.assignmentID = execution.Participant.ID
 	resources.discardWorkspace = rolePolicy.DiscardWorkspace
 	// A failed or ambiguously acknowledged create/start may still have dispatched
 	// the main environment for an existing Session. Establish its capture need
@@ -367,7 +367,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, fmt.Errorf("%w: turn configuration snapshot: %v", ErrRuntimeBinding, err)
 	}
 	resources.scratchPrepared = len(turnConfiguration.Directories) != 0
-	pathEnvironment, err := launcher.workspace.PrepareTurnPaths(ctx, execution.Assignment.ID, execution.Turn.ID, turnConfiguration,
+	pathEnvironment, err := launcher.workspace.PrepareTurnPaths(ctx, execution.Participant.ID, execution.Turn.ID, turnConfiguration,
 		func(ctx context.Context, operation func(context.Context) error) error {
 			return launcher.store.WithAgentTurnFence(ctx, request.Lease, operation)
 		})
@@ -385,8 +385,8 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	resources.lease = refreshedLease
 
 	registration, err := launcher.gateway.Register(mcp.TokenScope{
-		RuntimeProfileName: execution.Assignment.RuntimeProfileName, RuntimeProfileVersion: execution.Assignment.RuntimeProfileVersion,
-		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Assignment.Role,
+		RuntimeProfileName: execution.Participant.RuntimeProfileName, RuntimeProfileVersion: execution.Participant.RuntimeProfileVersion,
+		Lease: request.Lease, WorkflowID: execution.WorkflowID, Role: execution.Participant.Role,
 		Repository: mcp.RepositoryScope{ID: execution.Repository.ID, Owner: execution.Repository.Owner, Name: execution.Repository.Name},
 		Issue:      mcp.IssueScope{ID: execution.Issue.ID, Number: execution.Issue.Number}, PullRequest: pullRequest,
 		Branch: branch, BranchExists: execution.Publication != nil || execution.ChangeProposal != nil,
@@ -493,7 +493,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 		return nil, ErrRuntimeBinding
 	}
 	resources.sessionPreparationAttempted = true
-	prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Assignment.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
+	prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Participant.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
 	resources.agent = prepared
 	if prepareErr != nil {
 		return nil, fmt.Errorf("prepare Agent Session: %w", prepareErr)
@@ -788,9 +788,9 @@ func validateLaunchRequest(request LaunchRequest) error {
 
 func validateExecutionBinding(execution store.AgentTurnExecutionContext, lease store.AgentTurnLease) error {
 	if execution.WorkflowID == "" || execution.WorkflowID != lease.JobLease.WorkflowID ||
-		execution.Assignment.ID != lease.AgentAssignmentID || execution.Assignment.WorkflowID != execution.WorkflowID ||
-		execution.Session.ID != lease.AgentSessionID || execution.Session.AgentAssignmentID != execution.Assignment.ID ||
-		execution.Turn.ID != lease.ID || execution.Turn.AgentAssignmentID != lease.AgentAssignmentID ||
+		execution.Participant.ID != lease.AgentParticipantID || execution.Participant.WorkflowID != execution.WorkflowID ||
+		execution.Session.ID != lease.AgentSessionID || execution.Session.AgentParticipantID != execution.Participant.ID ||
+		execution.Turn.ID != lease.ID || execution.Turn.AgentParticipantID != lease.AgentParticipantID ||
 		execution.Turn.AgentSessionID != lease.AgentSessionID || execution.Turn.ExecutionEpoch != lease.ExecutionEpoch ||
 		execution.Turn.ControlRevision != lease.ControlRevision || execution.Session.ControlRevision != lease.ControlRevision ||
 		execution.Session.NextExecutionEpoch-1 != lease.ExecutionEpoch || execution.Repository.ID <= 0 ||
@@ -814,7 +814,7 @@ func validateExecutionBinding(execution store.AgentTurnExecutionContext, lease s
 
 func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execution store.AgentTurnExecutionContext) error {
 	contract := runtimeProfile.Contract()
-	binding := execution.Assignment.ParticipantRuntimeBinding
+	binding := execution.Participant.ParticipantRuntimeBinding
 	if contract.Name != binding.RuntimeProfileName || contract.Version != binding.RuntimeProfileVersion ||
 		runtimeProfile.ContentSHA256() != binding.RuntimeProfileContentSHA256 || contract.Image != binding.RuntimeImageDigest ||
 		execution.Session.RuntimeProfileName != binding.RuntimeProfileName ||
@@ -828,7 +828,7 @@ func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execut
 
 func checkoutSelection(execution store.AgentTurnExecutionContext, request LaunchRequest, policy role.Policy) (string, string, string, *mcp.PullRequestScope, error) {
 	if execution.ChangeProposal == nil {
-		if policy.Role != execution.Assignment.Role || policy.RequiresChangeProposal {
+		if policy.Role != execution.Participant.Role || policy.RequiresChangeProposal {
 			return "", "", "", nil, fmt.Errorf("%w: Role requires a Change Proposal", ErrRuntimeBinding)
 		}
 		if publication := execution.Publication; publication != nil {
@@ -935,8 +935,8 @@ func nilInterface(value any) bool {
 
 func runtimeKey(context store.AgentTurnExecutionContext) execution.Key {
 	return execution.Key{
-		AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+		AssignmentID: context.Participant.ID, AgentSessionID: context.Session.ID,
 		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
-		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion,
+		RuntimeProfileName: context.Participant.RuntimeProfileName, RuntimeProfileVersion: context.Participant.RuntimeProfileVersion,
 	}
 }

@@ -117,13 +117,13 @@ WHERE turn.id = $1`, lease.ID, lease.JobLease.ID).Scan(
 				t.Fatalf("claim verifier = (%#v, %v)", verificationLease, err)
 			}
 			substituted := *verificationLease
-			substituted.AgentAssignmentID = "10000000-0000-4000-8000-000000000001"
+			substituted.AgentParticipantID = "10000000-0000-4000-8000-000000000001"
 			if _, err := database.GetTerminalCorroborationContext(ctx, substituted); !errors.Is(err, store.ErrJobLeaseLost) {
 				t.Fatalf("substituted Assignment context error = %v", err)
 			}
 			context, err := database.GetTerminalCorroborationContext(ctx, *verificationLease)
 			if err != nil || context.Checkpoint.TurnID != lease.ID || context.Execution.Turn.ID != lease.ID ||
-				context.Execution.Assignment.Role != role || len(context.Mutations) != 1 || context.Mutations[0].ID != mutation.ID {
+				context.Execution.Participant.Role != role || len(context.Mutations) != 1 || context.Mutations[0].ID != mutation.ID {
 				t.Fatalf("read pending context = (%#v, %v)", context, err)
 			}
 			outcome := workflow.TurnOutcomeChangeProposalReady
@@ -1081,7 +1081,7 @@ SELECT available_at FROM jobs WHERE workflow_id = $1 AND kind = 'VERIFY_TERMINAL
 	if err := os.WriteFile(filepath.Join(paths.Workspace, "replacement.txt"), []byte("later execution"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := workspaces.Paths(lease.AgentAssignmentID)
+	cache, err := workspaces.Paths(lease.AgentParticipantID)
 	if err != nil {
 		t.Fatal(err)
 	}

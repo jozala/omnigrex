@@ -59,7 +59,7 @@ func TestProtectedRuntimeBindingsIncludeDistinctActiveAndRetainedDigests(t *test
 	seedAgentSessionWithRuntimeBindings(t, pool, 62, "DEVELOPER", activeBinding, activeBinding)
 	retained := seedAgentSessionWithRuntimeBindings(t, pool, 63, "DEVELOPER", retainedBinding, retainedBinding)
 	if _, err := pool.Exec(ctx, `
-UPDATE agent_assignments SET status = 'COMPLETED', completed_at = clock_timestamp(), retention_until = clock_timestamp() + interval '1 day'
+UPDATE agent_participants SET status = 'COMPLETED', completed_at = clock_timestamp(), retention_until = clock_timestamp() + interval '1 day'
 WHERE id = $1`, retained.assignmentID); err != nil {
 		t.Fatal(err)
 	}

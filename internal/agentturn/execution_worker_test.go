@@ -417,9 +417,9 @@ func (database *executionCaptureCheckpointStore) BeginTerminalCorroboration(_ co
 }
 
 func executionKeyForTest(context store.AgentTurnExecutionContext) execution.Key {
-	return execution.Key{AssignmentID: context.Assignment.ID, AgentSessionID: context.Session.ID,
+	return execution.Key{AssignmentID: context.Participant.ID, AgentSessionID: context.Session.ID,
 		AgentTurnID: context.Turn.ID, ExecutionEpoch: context.Turn.ExecutionEpoch,
-		RuntimeProfileName: context.Assignment.RuntimeProfileName, RuntimeProfileVersion: context.Assignment.RuntimeProfileVersion}
+		RuntimeProfileName: context.Participant.RuntimeProfileName, RuntimeProfileVersion: context.Participant.RuntimeProfileVersion}
 }
 
 func TestExecutionWorkerCleanupRetryCanProveAbsenceAndSettle(t *testing.T) {

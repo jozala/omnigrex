@@ -56,7 +56,7 @@ func NewPublicationRecoveryWithCredentials(database PublicationRecoveryStore, re
 }
 
 func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryURL, credential, defaultBranch string) error {
-	if execution.ChangeProposal != nil || execution.Assignment.Role != workflow.RoleDeveloper {
+	if execution.ChangeProposal != nil || execution.Participant.Role != workflow.RoleDeveloper {
 		return nil
 	}
 	mutations, err := recovery.store.ListParticipantPublicationMutations(ctx, lease)
@@ -134,7 +134,7 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 		return ErrPublicationConflict
 	}
 	observed, err := recovery.remote.ReconcilePublication(ctx, workspace.PublicationReconciliation{
-		AssignmentID: execution.Assignment.ID, RepositoryURL: repositoryURL, Credential: credential,
+		AssignmentID: execution.Participant.ID, RepositoryURL: repositoryURL, Credential: credential,
 		BaseRevision: latest.ExpectedSHA, ProposedRevision: latest.ProposedSHA, HistoryPublication: latest.HistoryPublication,
 		Branch: branch, OperationID: latest.ID,
 	})
@@ -147,7 +147,7 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 	if err := recovery.verifyPullRequest(ctx, execution, credential, publication, opened, openedURL); err != nil {
 		return err
 	}
-	if err := recovery.remote.PrepareRecoveredPublication(ctx, execution.Assignment.ID, repositoryURL, credential, publication.HeadSHA); err != nil {
+	if err := recovery.remote.PrepareRecoveredPublication(ctx, execution.Participant.ID, repositoryURL, credential, publication.HeadSHA); err != nil {
 		return errors.New("prepare recovered publication unavailable")
 	}
 	if !nilDependency(recovery.credentials) {
@@ -207,7 +207,7 @@ func (recovery *PublicationRecovery) verifyPullRequest(ctx context.Context, exec
 		Body        string `json:"body"`
 	}
 	marker, markerErr := githubapi.RenderMarker(githubapi.Marker{
-		WorkflowID: execution.WorkflowID, AgentAssignmentID: execution.Assignment.ID, OperationID: opened.ID,
+		WorkflowID: execution.WorkflowID, AgentParticipantID: execution.Participant.ID, OperationID: opened.ID,
 	})
 	if markerErr != nil || !decodePublicationObject(opened.Request, &request) || request.OperationID != opened.OperationID ||
 		current.ID != publication.PullRequestID || int64(current.Number) != publication.PullRequestNumber ||

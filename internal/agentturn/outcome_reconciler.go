@@ -333,12 +333,12 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 			}
 			switch prior.ToolName {
 			case mcp.ToolRequestReview:
-				if request.Execution.Assignment.Role != workflow.RoleDeveloper {
+				if request.Execution.Participant.Role != workflow.RoleDeveloper {
 					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
 				}
 				result = reconciler.reconcileDeveloper(ctx, request, observedAt, promptOutcome, mutations, prior, &freshCredentials)
 			case mcp.ToolSubmitReview:
-				if request.Execution.Assignment.Role != workflow.RoleReviewer {
+				if request.Execution.Participant.Role != workflow.RoleReviewer {
 					return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "confirmed terminal Role does not match source"), nil
 				}
 				result = reconciler.reconcileReviewer(ctx, request, observedAt, promptOutcome, prior, &freshCredentials)
@@ -558,7 +558,7 @@ func (reconciler *OutcomeReconciler) reconcileDeveloper(ctx context.Context, req
 	}
 	if provenOpen != nil {
 		marker, err := githubapi.RenderMarker(githubapi.Marker{
-			WorkflowID: request.Execution.WorkflowID, AgentAssignmentID: request.Execution.Assignment.ID,
+			WorkflowID: request.Execution.WorkflowID, AgentParticipantID: request.Execution.Participant.ID,
 			OperationID: provenOpen.MutationID,
 		})
 		if err != nil || pullRequest.NodeID != provenOpen.NodeID || pullRequest.Title != provenOpen.Title ||
@@ -876,7 +876,7 @@ func (reconciler *OutcomeReconciler) logGitHubObservationFailure(ctx context.Con
 		"workflow_id", request.Execution.WorkflowID,
 		"agent_turn_id", request.Lease.ID,
 		"execution_epoch", request.Lease.ExecutionEpoch,
-		"role", request.Execution.Assignment.Role,
+		"role", request.Execution.Participant.Role,
 		"operation", operation,
 		"pull_request_number", pullRequestNumber,
 		"failure_code", failure.code,
@@ -957,11 +957,11 @@ func validOutcomeBinding(lease store.AgentTurnLease, execution store.AgentTurnEx
 	return lease.ID != "" && lease.ExecutionEpoch > 0 && lease.ControlRevision > 0 &&
 		execution.WorkflowID != "" && execution.WorkflowID == lease.JobLease.WorkflowID &&
 		execution.Repository.ID > 0 && strings.TrimSpace(execution.Repository.Owner) != "" && strings.TrimSpace(execution.Repository.Name) != "" &&
-		execution.Assignment.ID == lease.AgentAssignmentID && execution.Assignment.WorkflowID == execution.WorkflowID &&
-		execution.Session.ID == lease.AgentSessionID && execution.Session.AgentAssignmentID == execution.Assignment.ID &&
-		execution.Turn.ID == lease.ID && execution.Turn.AgentAssignmentID == lease.AgentAssignmentID &&
+		execution.Participant.ID == lease.AgentParticipantID && execution.Participant.WorkflowID == execution.WorkflowID &&
+		execution.Session.ID == lease.AgentSessionID && execution.Session.AgentParticipantID == execution.Participant.ID &&
+		execution.Turn.ID == lease.ID && execution.Turn.AgentParticipantID == lease.AgentParticipantID &&
 		execution.Turn.AgentSessionID == lease.AgentSessionID && execution.Turn.ExecutionEpoch == lease.ExecutionEpoch &&
-		execution.Turn.ControlRevision == lease.ControlRevision && role.ValidID(execution.Assignment.Role)
+		execution.Turn.ControlRevision == lease.ControlRevision && role.ValidID(execution.Participant.Role)
 }
 
 func validPromptInput(request OutcomeReconciliation) bool {

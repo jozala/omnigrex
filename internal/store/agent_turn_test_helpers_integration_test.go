@@ -39,17 +39,14 @@ func claimFixtureAgentTurnPreparation(t *testing.T, database *store.Store, pool 
 	if err := pool.QueryRow(ctx, `
 SELECT assignment.workflow_id::text, assignment.role,
        assignment.agent_profile_name, assignment.runtime_profile_name,
-       assignment.runtime_profile_version, COALESCE(assignment.runtime_profile_content_sha256, ''),
+       assignment.runtime_profile_version, assignment.runtime_profile_content_sha256,
        assignment.runtime_image_digest
 FROM agent_sessions AS session
-JOIN agent_assignments AS assignment ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment ON assignment.id = session.agent_participant_id
 WHERE session.id = $1`, spec.AgentSessionID).Scan(
 		&workflowID, &role, &profileName, &runtimeName, &runtimeVersion, &runtimeHash, &imageDigest,
 	); err != nil {
 		return store.JobLease{}, store.AgentTurnPreparationSpec{}, err
-	}
-	if runtimeHash == "" {
-		return store.JobLease{}, store.AgentTurnPreparationSpec{}, errors.New("prepare fixture Agent Turn: legacy Runtime Profile binding")
 	}
 	status := ""
 	switch spec.Stage {

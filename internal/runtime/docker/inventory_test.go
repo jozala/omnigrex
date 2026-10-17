@@ -22,18 +22,11 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(api.options) != 3 || !api.options[0].All || !api.options[1].All || !api.options[2].All {
+	if len(api.options) != 2 || !api.options[0].All || !api.options[1].All {
 		t.Fatalf("ContainerList() options = %#v", api.options)
 	}
 	wantFilters := []mobyclient.Filters{
 		make(mobyclient.Filters).Add("label", RuntimeProcessMarkerLabel+"="+RuntimeProcessMarkerValue),
-		make(mobyclient.Filters).Add("label",
-			RuntimeProcessAssignmentLabel,
-			RuntimeProcessSessionLabel,
-			RuntimeProcessTurnLabel,
-			RuntimeProcessEpochLabel,
-			RuntimeProfileIdentityLabel,
-		),
 		make(mobyclient.Filters).Add("label", diagnosticMarkerLabel+"=true"),
 	}
 	for index, want := range wantFilters {
@@ -56,7 +49,7 @@ func TestRuntimeProcessInventoryListsCompleteManagedProcesses(t *testing.T) {
 	}
 }
 
-func TestRuntimeProcessInventoryDiscoversCompleteLegacyIdentityAndIgnoresUnrelatedContainers(t *testing.T) {
+func TestRuntimeProcessInventoryIgnoresUnmarkedCompleteIdentityAndUnrelatedContainers(t *testing.T) {
 	legacy := managedRuntimeLabels()
 	delete(legacy, RuntimeProcessMarkerLabel)
 	api := &runtimeProcessInventoryFake{result: mobyclient.ContainerListResult{Items: []container.Summary{
@@ -69,9 +62,9 @@ func TestRuntimeProcessInventoryDiscoversCompleteLegacyIdentityAndIgnoresUnrelat
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Processes) != 1 || snapshot.Processes[0].ContainerID != "legacy" ||
+	if len(snapshot.Processes) != 0 ||
 		len(snapshot.Duplicates) != 0 || len(snapshot.Malformed) != 0 {
-		t.Fatalf("legacy snapshot = %#v", snapshot)
+		t.Fatalf("unmarked container entered managed inventory: %#v", snapshot)
 	}
 }
 

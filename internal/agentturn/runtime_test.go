@@ -49,7 +49,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 	operations := []string{}
 	runtimeProfile := runtimeLauncherProfile(t)
 	execution, lease := runtimeExecutionContext(t, runtimeProfile, workflow.RoleDeveloper, nil)
-	execution.Assignment.AgentProfileName = "implementation-specialist"
+	execution.Participant.AgentProfileName = "implementation-specialist"
 	var profileConfig map[string]any
 	if err := json.Unmarshal(execution.Turn.AgentProfileConfig, &profileConfig); err != nil {
 		t.Fatal(err)
@@ -580,10 +580,10 @@ func TestLauncherRejectsRuntimeProfileDriftBeforeWorkspaceSideEffects(t *testing
 		mutate func(*store.AgentTurnExecutionContext)
 	}{
 		{name: "Assignment hash", mutate: func(execution *store.AgentTurnExecutionContext) {
-			execution.Assignment.RuntimeProfileContentSHA256 = strings.Repeat("b", 64)
+			execution.Participant.RuntimeProfileContentSHA256 = strings.Repeat("b", 64)
 		}},
 		{name: "Assignment image", mutate: func(execution *store.AgentTurnExecutionContext) {
-			execution.Assignment.RuntimeImageDigest = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("b", 64)
+			execution.Participant.RuntimeImageDigest = "registry.example/omnigrex/pi@sha256:" + strings.Repeat("b", 64)
 		}},
 		{name: "Session binding", mutate: func(execution *store.AgentTurnExecutionContext) {
 			execution.Session.RuntimeProfileVersion = "different"
@@ -1675,7 +1675,7 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 	}
 	turn := store.AgentTurn{
 		AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: runtimeTestSession, Stage: stage, Purpose: purpose, ControlRevision: 9, AgentProfileConfig: config},
-		ID:            runtimeTestTurn, AgentAssignmentID: runtimeTestAssignment, ExecutionEpoch: 7, CreatedAt: now,
+		ID:            runtimeTestTurn, AgentParticipantID: runtimeTestAssignment, ExecutionEpoch: 7, CreatedAt: now,
 	}
 	if proposal != nil {
 		turn.ChangeProposalID = proposal.ID
@@ -1684,7 +1684,7 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 	lease := store.AgentTurnLease{
 		AgentTurn: turn,
 		JobLease: store.JobLease{Job: store.Job{ID: "50000000-0000-4000-8000-000000000001", Status: store.JobLeased, JobSpec: store.JobSpec{
-			WorkflowID: runtimeTestWorkflow, AgentAssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession,
+			WorkflowID: runtimeTestWorkflow, AgentParticipantID: runtimeTestAssignment, AgentSessionID: runtimeTestSession,
 			AgentTurnID: runtimeTestTurn, ExecutionEpoch: 7,
 		}}, Attempt: 1},
 		OwnerID: "runtime-owner", OwnerToken: "owner-token", LeaseExpiresAt: now.Add(time.Minute),
@@ -1693,8 +1693,8 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		WorkflowID: runtimeTestWorkflow,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 17}, ChangeProposal: proposal,
-		Assignment: store.AgentParticipant{ParticipantRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Generation: 1, Status: store.AgentParticipantActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
-		Session: store.AgentSession{ID: runtimeTestSession, AgentAssignmentID: runtimeTestAssignment, RuntimeProfileName: binding.RuntimeProfileName,
+		Participant: store.AgentParticipant{ParticipantRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Generation: 1, Status: store.AgentParticipantActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
+		Session: store.AgentSession{ID: runtimeTestSession, AgentParticipantID: runtimeTestAssignment, RuntimeProfileName: binding.RuntimeProfileName,
 			RuntimeProfileVersion: binding.RuntimeProfileVersion, RuntimeProfileContentSHA256: binding.RuntimeProfileContentSHA256,
 			RuntimeImageDigest: binding.RuntimeImageDigest, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state",
 			Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 9, NextExecutionEpoch: 8},
@@ -1734,7 +1734,7 @@ func (*runtimeStore) ExecutionLedger(store.AgentTurnLease) execution.Ledger { re
 
 func (database *runtimeStore) AgentTurnState(context.Context, store.AgentTurnLease) (execution.StateRef, error) {
 	s := database.execution.Session
-	return execution.StateRef{ID: s.AgentAssignmentID, ParticipantID: s.AgentAssignmentID, SessionID: s.ID,
+	return execution.StateRef{ID: s.AgentParticipantID, ParticipantID: s.AgentParticipantID, SessionID: s.ID,
 		Backend: execution.BackendBinding{Family: "docker", Version: 1, Namespace: "runtime-test"}, Format: "pi-session/v3",
 		RuntimeProfileSHA256: s.RuntimeProfileContentSHA256, Image: s.RuntimeImageDigest}, nil
 }

@@ -246,7 +246,7 @@ func compatibilityPreparationSpec(commitSHA string, profile runtimeprofile.Profi
 			Profile:         store.AgentProfileSnapshot{CommitSHA: commitSHA, ContentSHA256: hash[:], Config: content},
 		}
 	}
-	return store.AgentTurnPreparationSpec{Developer: participant("developer", workflow.RoleDeveloper, "openai/compatibility"), Reviewer: participant("reviewer", workflow.RoleReviewer, "anthropic/compatibility")}
+	return store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{workflow.StageImplementation: participant("developer", workflow.RoleDeveloper, "openai/compatibility"), workflow.StageReview: participant("reviewer", workflow.RoleReviewer, "anthropic/compatibility")}}
 }
 
 func compatibilityProfile(t *testing.T, digit, architecture string) runtimeprofile.Profile {

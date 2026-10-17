@@ -30,6 +30,7 @@ This release supports `pi-rpc/v2`, guest tool storage under `/home/omnigrex`, an
 Use `OMNIGREX_PI_IMAGE` and `OMNIGREX_PI_PLATFORM` for the exact matching golden image and platform.
 Initialize this baseline with fresh PostgreSQL, runtime-state, workspace, and tool volumes; Microsandbox also requires a fresh native home and namespace.
 Startup rejects incompatible migration history and unsupported Runtime Profile contracts without converting or deleting deployment state.
+Docker recovery requires the current Runtime Process management marker and exact execution identity; complete identity labels on an unmarked container do not authorize adoption or cleanup.
 Select published images from the same qualified commit as the deployment files.
 Future supported upgrades use the coordinated [upgrade](#upgrades) and [qualification](#pi-upgrade-and-state-recovery-qualification) procedures.
 The baseline policy is recorded in [decision 0024](./decisions/0024-establish-a-clean-supported-release-baseline.md).

@@ -25,6 +25,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
+	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 )
 
@@ -69,11 +70,13 @@ func testExecutionLauncherSingleConnectionPool(t *testing.T, capture, preparatio
 	}
 	triggerPreparationWorkflow(t, database, ctx, "60000000-0000-4000-8000-000000009920", "60000000-0000-4000-8000-000000009921")
 	spec := preparationSpec("single-connection-profile", "provider/test")
-	spec.Developer.Binding = store.ParticipantRuntimeBinding{
-		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
-		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
-	}
-	spec.Developer.RuntimeContract, _ = json.Marshal(runtimeProfile.Contract())
+	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Binding = store.ParticipantRuntimeBinding{
+			AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
+			RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
+		}
+		preparation.RuntimeContract, _ = json.Marshal(runtimeProfile.Contract())
+	})
 	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), spec)
 	if err != nil {
 		t.Fatal(err)

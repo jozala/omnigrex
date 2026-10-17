@@ -81,7 +81,7 @@ func TestExactLabelCleanerStopsRemovesAndConfirmsMatchingContainersAreAbsent(t *
 	}
 }
 
-func TestExactLabelCleanerRemovesCompleteLegacyContainer(t *testing.T) {
+func TestExactLabelCleanerLeavesUnmarkedCompleteIdentityUntouched(t *testing.T) {
 	labels := exactRuntimeLabels()
 	legacy := maps.Clone(labels)
 	legacy[RuntimeProfileIdentityLabel] = "pi-rpc/v2"
@@ -94,11 +94,11 @@ func TestExactLabelCleanerRemovesCompleteLegacyContainer(t *testing.T) {
 	if err := cleaner.EnsureAbsent(context.Background(), labels); err != nil {
 		t.Fatalf("EnsureAbsent() error = %v", err)
 	}
-	if _, stopped := api.stopped["legacy"]; !stopped {
-		t.Fatal("complete legacy Runtime Process was not stopped")
+	if _, stopped := api.stopped["legacy"]; stopped {
+		t.Fatal("unmarked Runtime Process was stopped")
 	}
-	if _, removed := api.removed["legacy"]; !removed {
-		t.Fatal("complete legacy Runtime Process was not removed")
+	if _, removed := api.removed["legacy"]; removed {
+		t.Fatal("unmarked Runtime Process was removed")
 	}
 }
 
@@ -351,6 +351,7 @@ func TestOrphanCleanupRevalidatesFullIdentityWithoutRevokingLedger(t *testing.T)
 		}},
 		{"different immutable ID", func(actual *container.InspectResponse) { actual.ID = "replacement" }},
 		{"unmanaged", func(actual *container.InspectResponse) { actual.Config.Labels[RuntimeProcessMarkerLabel] = "false" }},
+		{"management marker absent", func(actual *container.InspectResponse) { delete(actual.Config.Labels, RuntimeProcessMarkerLabel) }},
 		{"missing configuration", func(actual *container.InspectResponse) { actual.Config = nil }},
 	} {
 		t.Run(test.name, func(t *testing.T) {

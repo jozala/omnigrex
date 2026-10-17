@@ -286,7 +286,7 @@ func pendingEventReconciliationLease(payload json.RawMessage) store.JobLease {
 		JobSpec: store.JobSpec{
 			Queue: store.WorkflowActionQueue, Kind: store.ReconcilePendingEventsJobKind,
 			Payload: payload, MaxAttempts: 3, WorkflowID: "workflow", WorkflowAttemptID: "attempt",
-			AgentAssignmentID: "assignment", AgentSessionID: "session", AgentTurnID: "turn", ExecutionEpoch: 2,
+			AgentParticipantID: "assignment", AgentSessionID: "session", AgentTurnID: "turn", ExecutionEpoch: 2,
 		},
 		ID: "10000000-0000-4000-8000-000000000001", Status: store.JobLeased, AttemptCount: 1,
 		LeaseOwner: "pending-event-worker", LeaseToken: "10000000-0000-4000-8000-000000000002",

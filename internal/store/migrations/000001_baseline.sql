@@ -16,7 +16,7 @@ BEGIN
     ));
     IF EXISTS (
         SELECT 1
-        FROM agent_assignments AS participant
+        FROM agent_participants AS participant
         JOIN workflows AS workflow ON workflow.id = participant.workflow_id
         WHERE workflow.repository_id = profile_repository_id
           AND participant.agent_profile_name = NEW.agent_profile_name
@@ -42,7 +42,7 @@ BEGIN
 
     FOR profile_name IN
         SELECT DISTINCT agent_profile_name
-        FROM agent_assignments
+        FROM agent_participants
         WHERE workflow_id = NEW.id
         ORDER BY agent_profile_name
     LOOP
@@ -53,8 +53,8 @@ BEGIN
 
     IF EXISTS (
         SELECT 1
-        FROM agent_assignments AS moved
-        JOIN agent_assignments AS existing
+        FROM agent_participants AS moved
+        JOIN agent_participants AS existing
           ON existing.agent_profile_name = moved.agent_profile_name
          AND existing.role <> moved.role
         JOIN workflows AS existing_workflow ON existing_workflow.id = existing.workflow_id
@@ -202,8 +202,8 @@ DECLARE
     participant_workflow_id UUID;
 BEGIN
     SELECT workflow_id INTO participant_workflow_id
-    FROM agent_assignments
-    WHERE id = NEW.agent_assignment_id;
+    FROM agent_participants
+    WHERE id = NEW.agent_participant_id;
 
     IF participant_workflow_id IS NULL THEN
         RAISE EXCEPTION 'Agent Participant does not exist';
@@ -216,7 +216,7 @@ BEGIN
 END;
 $$;
 
-CREATE TABLE public.agent_assignments (
+CREATE TABLE public.agent_participants (
     id uuid NOT NULL,
     workflow_id uuid NOT NULL,
     role text NOT NULL,
@@ -226,7 +226,6 @@ CREATE TABLE public.agent_assignments (
     runtime_profile_name text NOT NULL,
     runtime_profile_version text NOT NULL,
     runtime_image_digest text NOT NULL,
-    github_app_installation_id bigint,
     github_app_actor_id bigint,
     runtime_state_path text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
@@ -237,45 +236,21 @@ CREATE TABLE public.agent_assignments (
     created_by_preparation_job_id uuid,
     reactivated_by_preparation_job_id uuid,
     runtime_profile_content_sha256 text NOT NULL,
-    CONSTRAINT agent_assignments_agent_profile_name_check CHECK ((agent_profile_name <> ''::text)),
-    CONSTRAINT agent_assignments_generation_check CHECK ((generation > 0)),
-    CONSTRAINT agent_assignments_github_app_actor_id_check CHECK ((github_app_actor_id > 0)),
-    CONSTRAINT agent_assignments_github_app_installation_id_check CHECK ((github_app_installation_id > 0)),
-    CONSTRAINT agent_assignments_runtime_image_digest_check CHECK ((runtime_image_digest <> ''::text)),
-    CONSTRAINT agent_assignments_runtime_profile_content_sha256_check CHECK ((runtime_profile_content_sha256 ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT agent_assignments_runtime_profile_name_check CHECK ((runtime_profile_name = 'pi-rpc'::text)),
-    CONSTRAINT agent_assignments_runtime_profile_version_check CHECK ((runtime_profile_version = 'v2'::text)),
-    CONSTRAINT agent_assignments_runtime_state_path_check CHECK ((runtime_state_path <> ''::text)),
-    CONSTRAINT agent_assignments_status_check CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'WAITING_FOR_HUMAN'::text, 'COMPLETED'::text, 'SUPERSEDED'::text]))),
+    CONSTRAINT agent_participants_agent_profile_name_check CHECK ((agent_profile_name <> ''::text)),
+    CONSTRAINT agent_participants_generation_check CHECK ((generation > 0)),
+    CONSTRAINT agent_participants_github_app_actor_id_check CHECK ((github_app_actor_id > 0)),
+    CONSTRAINT agent_participants_runtime_image_digest_check CHECK ((runtime_image_digest <> ''::text)),
+    CONSTRAINT agent_participants_runtime_profile_content_sha256_check CHECK ((runtime_profile_content_sha256 ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT agent_participants_runtime_profile_name_check CHECK ((runtime_profile_name = 'pi-rpc'::text)),
+    CONSTRAINT agent_participants_runtime_profile_version_check CHECK ((runtime_profile_version = 'v2'::text)),
+    CONSTRAINT agent_participants_runtime_state_path_check CHECK ((runtime_state_path <> ''::text)),
+    CONSTRAINT agent_participants_status_check CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'WAITING_FOR_HUMAN'::text, 'COMPLETED'::text, 'SUPERSEDED'::text]))),
     CONSTRAINT agent_participants_role_syntax_check CHECK ((role ~ '^[A-Z][A-Z0-9_]{0,63}$'::text))
 );
 
-CREATE VIEW public.agent_participants AS
- SELECT id,
-    workflow_id,
-    generation AS assignment_generation,
-    role,
-    agent_profile_name,
-    runtime_profile_name,
-    runtime_profile_version,
-    runtime_profile_content_sha256,
-    runtime_image_digest,
-    github_app_installation_id,
-    github_app_actor_id,
-    runtime_state_path,
-    status,
-    created_by_preparation_job_id,
-    reactivated_by_preparation_job_id,
-    created_at,
-    updated_at,
-    completed_at,
-    retention_until,
-    state_deleted_at
-   FROM public.agent_assignments;
-
 CREATE TABLE public.agent_sessions (
     id uuid NOT NULL,
-    agent_assignment_id uuid NOT NULL,
+    agent_participant_id uuid NOT NULL,
     session_number integer NOT NULL,
     runtime_profile_name text NOT NULL,
     runtime_profile_version text NOT NULL,
@@ -367,7 +342,7 @@ CREATE TABLE public.agent_turn_settlements (
     id uuid NOT NULL,
     workflow_id uuid NOT NULL,
     workflow_attempt_id uuid NOT NULL,
-    agent_assignment_id uuid NOT NULL,
+    agent_participant_id uuid NOT NULL,
     agent_session_id uuid NOT NULL,
     agent_turn_id uuid NOT NULL,
     execution_epoch bigint NOT NULL,
@@ -678,7 +653,7 @@ CREATE TABLE public.jobs (
     idempotency_key text,
     workflow_id uuid,
     workflow_attempt_id uuid,
-    agent_assignment_id uuid,
+    agent_participant_id uuid,
     agent_session_id uuid,
     agent_turn_id uuid,
     execution_epoch bigint,
@@ -1020,17 +995,17 @@ CREATE TABLE public.workspace_captures (
     CONSTRAINT workspace_captures_sha256_check CHECK ((sha256 ~ '^[0-9a-f]{64}$'::text))
 );
 
-ALTER TABLE ONLY public.agent_assignments
-    ADD CONSTRAINT agent_assignments_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.agent_participants
+    ADD CONSTRAINT agent_participants_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY public.agent_assignments
+ALTER TABLE ONLY public.agent_participants
     ADD CONSTRAINT agent_participants_identity_key UNIQUE (workflow_id, generation, agent_profile_name);
 
-ALTER TABLE ONLY public.agent_assignments
+ALTER TABLE ONLY public.agent_participants
     ADD CONSTRAINT agent_participants_identity_role_key UNIQUE (id, workflow_id, generation, role);
 
 ALTER TABLE ONLY public.agent_sessions
-    ADD CONSTRAINT agent_sessions_agent_assignment_id_session_number_key UNIQUE (agent_assignment_id, session_number);
+    ADD CONSTRAINT agent_sessions_agent_participant_id_session_number_key UNIQUE (agent_participant_id, session_number);
 
 ALTER TABLE ONLY public.agent_sessions
     ADD CONSTRAINT agent_sessions_pkey PRIMARY KEY (id);
@@ -1120,7 +1095,7 @@ ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_pkey PRIMARY KEY (id);
 
 ALTER TABLE public.jobs
-    ADD CONSTRAINT jobs_scope_hierarchy_check CHECK ((((workflow_attempt_id IS NULL) OR (workflow_id IS NOT NULL)) AND ((agent_assignment_id IS NULL) OR (workflow_id IS NOT NULL)) AND ((agent_session_id IS NULL) OR (agent_assignment_id IS NOT NULL)) AND ((agent_turn_id IS NULL) OR (agent_session_id IS NOT NULL))));
+    ADD CONSTRAINT jobs_scope_hierarchy_check CHECK ((((workflow_attempt_id IS NULL) OR (workflow_id IS NOT NULL)) AND ((agent_participant_id IS NULL) OR (workflow_id IS NOT NULL)) AND ((agent_session_id IS NULL) OR (agent_participant_id IS NOT NULL)) AND ((agent_turn_id IS NULL) OR (agent_session_id IS NOT NULL))));
 
 ALTER TABLE ONLY public.normalized_events
     ADD CONSTRAINT normalized_events_pkey PRIMARY KEY (delivery_id);
@@ -1200,17 +1175,17 @@ ALTER TABLE ONLY public.workflows
 ALTER TABLE ONLY public.workspace_captures
     ADD CONSTRAINT workspace_captures_pkey PRIMARY KEY (agent_turn_id, execution_epoch, purpose, operation_id);
 
-CREATE UNIQUE INDEX agent_assignments_id_workflow_idx ON public.agent_assignments USING btree (id, workflow_id);
+CREATE UNIQUE INDEX agent_participants_id_workflow_idx ON public.agent_participants USING btree (id, workflow_id);
 
-CREATE INDEX agent_assignments_retention_idx ON public.agent_assignments USING btree (retention_until) WHERE ((retention_until IS NOT NULL) AND (state_deleted_at IS NULL));
+CREATE INDEX agent_participants_retention_idx ON public.agent_participants USING btree (retention_until) WHERE ((retention_until IS NOT NULL) AND (state_deleted_at IS NULL));
 
-CREATE UNIQUE INDEX agent_participants_live_runtime_state_path_idx ON public.agent_assignments USING btree (runtime_state_path) WHERE ((status = 'ACTIVE'::text) AND (state_deleted_at IS NULL));
+CREATE UNIQUE INDEX agent_participants_live_runtime_state_path_idx ON public.agent_participants USING btree (runtime_state_path) WHERE ((status = 'ACTIVE'::text) AND (state_deleted_at IS NULL));
 
-CREATE UNIQUE INDEX agent_sessions_current_idx ON public.agent_sessions USING btree (agent_assignment_id) WHERE (status = ANY (ARRAY['CREATING'::text, 'ACTIVE'::text, 'RETAINED'::text]));
+CREATE UNIQUE INDEX agent_sessions_current_idx ON public.agent_sessions USING btree (agent_participant_id) WHERE (status = ANY (ARRAY['CREATING'::text, 'ACTIVE'::text, 'RETAINED'::text]));
 
 CREATE UNIQUE INDEX agent_sessions_human_prompt_token_idx ON public.agent_sessions USING btree (human_prompt_token) WHERE (human_prompt_token IS NOT NULL);
 
-CREATE UNIQUE INDEX agent_sessions_id_assignment_idx ON public.agent_sessions USING btree (id, agent_assignment_id);
+CREATE UNIQUE INDEX agent_sessions_id_assignment_idx ON public.agent_sessions USING btree (id, agent_participant_id);
 
 CREATE UNIQUE INDEX agent_sessions_one_human_controlled_per_workflow_idx ON public.agent_sessions USING btree (workflow_id) WHERE ((control_owner = 'HUMAN'::text) AND (status = ANY (ARRAY['ACTIVE'::text, 'RETAINED'::text])));
 
@@ -1314,17 +1289,17 @@ CREATE INDEX workflow_closure_barriers_unsettled_idx ON public.workflow_closure_
 
 CREATE INDEX workflow_github_effect_cleanups_pending_idx ON public.workflow_github_effect_cleanups USING btree (workflow_id, created_at) WHERE (status = 'PENDING'::text);
 
-CREATE TRIGGER agent_participants_binding_immutable BEFORE UPDATE ON public.agent_assignments FOR EACH ROW EXECUTE FUNCTION public.protect_agent_participant_binding();
+CREATE TRIGGER agent_participants_binding_immutable BEFORE UPDATE ON public.agent_participants FOR EACH ROW EXECUTE FUNCTION public.protect_agent_participant_binding();
 
-CREATE TRIGGER agent_participants_profile_role BEFORE INSERT OR UPDATE OF agent_profile_name, role ON public.agent_assignments FOR EACH ROW EXECUTE FUNCTION public.enforce_repository_agent_profile_role();
+CREATE TRIGGER agent_participants_profile_role BEFORE INSERT OR UPDATE OF agent_profile_name, role ON public.agent_participants FOR EACH ROW EXECUTE FUNCTION public.enforce_repository_agent_profile_role();
 
-CREATE TRIGGER agent_sessions_workflow_identity BEFORE INSERT OR UPDATE OF agent_assignment_id, workflow_id ON public.agent_sessions FOR EACH ROW EXECUTE FUNCTION public.set_agent_session_workflow();
+CREATE TRIGGER agent_sessions_workflow_identity BEFORE INSERT OR UPDATE OF agent_participant_id, workflow_id ON public.agent_sessions FOR EACH ROW EXECUTE FUNCTION public.set_agent_session_workflow();
 
 CREATE TRIGGER execution_backend_binding_immutable BEFORE DELETE OR UPDATE ON public.execution_backend_binding FOR EACH ROW EXECUTE FUNCTION public.protect_execution_backend_binding();
 
 CREATE TRIGGER execution_preparation_only_cleanup_immutable BEFORE DELETE OR UPDATE ON public.execution_reservations FOR EACH ROW EXECUTE FUNCTION public.protect_preparation_only_cleanup_proof();
 
-CREATE TRIGGER participant_state_binding AFTER INSERT ON public.agent_assignments FOR EACH ROW EXECUTE FUNCTION public.initialize_participant_state_binding();
+CREATE TRIGGER participant_state_binding AFTER INSERT ON public.agent_participants FOR EACH ROW EXECUTE FUNCTION public.initialize_participant_state_binding();
 
 CREATE TRIGGER pi_runtime_profile_compatibility_results_immutable BEFORE DELETE OR UPDATE ON public.pi_runtime_profile_compatibility_results FOR EACH ROW EXECUTE FUNCTION public.reject_runtime_profile_compatibility_result_mutation();
 
@@ -1340,17 +1315,17 @@ CREATE TRIGGER workflows_repository_agent_profile_roles BEFORE UPDATE OF reposit
 
 CREATE TRIGGER workspace_captures_immutable BEFORE DELETE OR UPDATE ON public.workspace_captures FOR EACH ROW EXECUTE FUNCTION public.reject_workspace_capture_mutation();
 
-ALTER TABLE ONLY public.agent_assignments
-    ADD CONSTRAINT agent_assignments_created_by_preparation_job_id_fkey FOREIGN KEY (created_by_preparation_job_id) REFERENCES public.jobs(id);
+ALTER TABLE ONLY public.agent_participants
+    ADD CONSTRAINT agent_participants_created_by_preparation_job_id_fkey FOREIGN KEY (created_by_preparation_job_id) REFERENCES public.jobs(id);
 
-ALTER TABLE ONLY public.agent_assignments
-    ADD CONSTRAINT agent_assignments_reactivated_by_preparation_job_id_fkey FOREIGN KEY (reactivated_by_preparation_job_id) REFERENCES public.jobs(id);
+ALTER TABLE ONLY public.agent_participants
+    ADD CONSTRAINT agent_participants_reactivated_by_preparation_job_id_fkey FOREIGN KEY (reactivated_by_preparation_job_id) REFERENCES public.jobs(id);
 
-ALTER TABLE ONLY public.agent_assignments
-    ADD CONSTRAINT agent_assignments_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);
+ALTER TABLE ONLY public.agent_participants
+    ADD CONSTRAINT agent_participants_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);
 
 ALTER TABLE ONLY public.agent_sessions
-    ADD CONSTRAINT agent_sessions_agent_assignment_id_fkey FOREIGN KEY (agent_assignment_id) REFERENCES public.agent_assignments(id);
+    ADD CONSTRAINT agent_sessions_agent_participant_id_fkey FOREIGN KEY (agent_participant_id) REFERENCES public.agent_participants(id);
 
 ALTER TABLE ONLY public.agent_sessions
     ADD CONSTRAINT agent_sessions_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);
@@ -1383,7 +1358,7 @@ ALTER TABLE ONLY public.agent_turn_publications
     ADD CONSTRAINT agent_turn_publications_source_publish_mutation_id_fkey FOREIGN KEY (source_publish_mutation_id) REFERENCES public.tool_invocations(id);
 
 ALTER TABLE ONLY public.agent_turn_settlements
-    ADD CONSTRAINT agent_turn_settlements_assignment_scope_fk FOREIGN KEY (agent_assignment_id, workflow_id) REFERENCES public.agent_assignments(id, workflow_id);
+    ADD CONSTRAINT agent_turn_settlements_assignment_scope_fk FOREIGN KEY (agent_participant_id, workflow_id) REFERENCES public.agent_participants(id, workflow_id);
 
 ALTER TABLE ONLY public.agent_turn_settlements
     ADD CONSTRAINT agent_turn_settlements_attempt_scope_fk FOREIGN KEY (workflow_attempt_id, workflow_id) REFERENCES public.workflow_attempts(id, workflow_id);
@@ -1407,7 +1382,7 @@ ALTER TABLE ONLY public.agent_turn_settlements
     ADD CONSTRAINT agent_turn_settlements_recovery_job_id_fkey FOREIGN KEY (recovery_job_id) REFERENCES public.jobs(id);
 
 ALTER TABLE ONLY public.agent_turn_settlements
-    ADD CONSTRAINT agent_turn_settlements_session_scope_fk FOREIGN KEY (agent_session_id, agent_assignment_id) REFERENCES public.agent_sessions(id, agent_assignment_id);
+    ADD CONSTRAINT agent_turn_settlements_session_scope_fk FOREIGN KEY (agent_session_id, agent_participant_id) REFERENCES public.agent_sessions(id, agent_participant_id);
 
 ALTER TABLE ONLY public.agent_turn_settlements
     ADD CONSTRAINT agent_turn_settlements_successor_job_fk FOREIGN KEY (successor_job_id) REFERENCES public.jobs(id);
@@ -1467,7 +1442,7 @@ ALTER TABLE ONLY public.assignment_retention_generations
     ADD CONSTRAINT assignment_retention_generations_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);
 
 ALTER TABLE ONLY public.assignment_retention_targets
-    ADD CONSTRAINT assignment_retention_targets_assignment_fk FOREIGN KEY (assignment_id) REFERENCES public.agent_assignments(id);
+    ADD CONSTRAINT assignment_retention_targets_assignment_fk FOREIGN KEY (assignment_id) REFERENCES public.agent_participants(id);
 
 ALTER TABLE ONLY public.assignment_retention_targets
     ADD CONSTRAINT assignment_retention_targets_retention_generation_id_fkey FOREIGN KEY (retention_generation_id) REFERENCES public.assignment_retention_generations(id);
@@ -1503,7 +1478,7 @@ ALTER TABLE ONLY public.job_normalized_events
     ADD CONSTRAINT job_normalized_events_normalized_event_id_fkey FOREIGN KEY (normalized_event_id) REFERENCES public.normalized_events(delivery_id);
 
 ALTER TABLE ONLY public.jobs
-    ADD CONSTRAINT jobs_agent_assignment_id_fkey FOREIGN KEY (agent_assignment_id) REFERENCES public.agent_assignments(id);
+    ADD CONSTRAINT jobs_agent_participant_id_fkey FOREIGN KEY (agent_participant_id) REFERENCES public.agent_participants(id);
 
 ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_agent_session_id_fkey FOREIGN KEY (agent_session_id) REFERENCES public.agent_sessions(id);
@@ -1512,7 +1487,7 @@ ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_agent_turn_settlement_id_fkey FOREIGN KEY (agent_turn_settlement_id) REFERENCES public.agent_turn_settlements(id);
 
 ALTER TABLE ONLY public.jobs
-    ADD CONSTRAINT jobs_assignment_scope_fk FOREIGN KEY (agent_assignment_id, workflow_id) REFERENCES public.agent_assignments(id, workflow_id);
+    ADD CONSTRAINT jobs_assignment_scope_fk FOREIGN KEY (agent_participant_id, workflow_id) REFERENCES public.agent_participants(id, workflow_id);
 
 ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_normalized_event_id_fkey FOREIGN KEY (normalized_event_id) REFERENCES public.normalized_events(delivery_id);
@@ -1521,7 +1496,7 @@ ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_retention_generation_id_fkey FOREIGN KEY (retention_generation_id) REFERENCES public.assignment_retention_generations(id) DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE ONLY public.jobs
-    ADD CONSTRAINT jobs_session_scope_fk FOREIGN KEY (agent_session_id, agent_assignment_id) REFERENCES public.agent_sessions(id, agent_assignment_id);
+    ADD CONSTRAINT jobs_session_scope_fk FOREIGN KEY (agent_session_id, agent_participant_id) REFERENCES public.agent_sessions(id, agent_participant_id);
 
 ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT jobs_turn_epoch_fk FOREIGN KEY (agent_turn_id, execution_epoch) REFERENCES public.agent_turns(id, execution_epoch) MATCH FULL;
@@ -1551,13 +1526,13 @@ ALTER TABLE ONLY public.normalized_events
     ADD CONSTRAINT normalized_events_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);
 
 ALTER TABLE ONLY public.retained_runtime_states
-    ADD CONSTRAINT retained_runtime_states_agent_participant_id_fkey FOREIGN KEY (agent_participant_id) REFERENCES public.agent_assignments(id);
+    ADD CONSTRAINT retained_runtime_states_agent_participant_id_fkey FOREIGN KEY (agent_participant_id) REFERENCES public.agent_participants(id);
 
 ALTER TABLE ONLY public.stage_assignments
     ADD CONSTRAINT stage_assignments_created_by_preparation_job_id_fkey FOREIGN KEY (created_by_preparation_job_id) REFERENCES public.jobs(id);
 
 ALTER TABLE ONLY public.stage_assignments
-    ADD CONSTRAINT stage_assignments_participant_fk FOREIGN KEY (agent_participant_id, workflow_id, assignment_generation, role) REFERENCES public.agent_assignments(id, workflow_id, generation, role);
+    ADD CONSTRAINT stage_assignments_participant_fk FOREIGN KEY (agent_participant_id, workflow_id, assignment_generation, role) REFERENCES public.agent_participants(id, workflow_id, generation, role);
 
 ALTER TABLE ONLY public.stage_assignments
     ADD CONSTRAINT stage_assignments_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id);

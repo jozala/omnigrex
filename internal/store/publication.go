@@ -23,13 +23,13 @@ SELECT mutation.id::text, mutation.agent_turn_id::text, mutation.execution_epoch
 FROM tool_invocations AS mutation
 JOIN agent_turns AS source_turn ON source_turn.id = mutation.agent_turn_id
 JOIN agent_sessions AS source_session ON source_session.id = source_turn.agent_session_id
-WHERE source_turn.workflow_id = $1 AND source_session.agent_assignment_id = $2
+WHERE source_turn.workflow_id = $1 AND source_session.agent_participant_id = $2
   AND source_turn.id <> $3 AND source_turn.created_at <= $4
   AND source_turn.completed_at IS NOT NULL AND mutation.kind = 'MUTATION'
   AND mutation.tool_name IN ('publish_changes', 'open_pr')
   AND mutation.state = 'SUCCEEDED'
 ORDER BY source_turn.created_at, mutation.invocation_number`,
-			lease.JobLease.WorkflowID, lease.AgentAssignmentID, lease.ID, turn.CreatedAt)
+			lease.JobLease.WorkflowID, lease.AgentParticipantID, lease.ID, turn.CreatedAt)
 		if err != nil {
 			return err
 		}
@@ -74,12 +74,12 @@ JOIN agent_turns AS source ON source.id = mutation.agent_turn_id
 JOIN agent_sessions AS source_session ON source_session.id = source.agent_session_id
 WHERE mutation.id = ANY($1::uuid[]) AND mutation.kind = 'MUTATION'
   AND mutation.state = 'SUCCEEDED' AND source.workflow_id = $2
-  AND source_session.agent_assignment_id = $3 AND source.id <> $4
+  AND source_session.agent_participant_id = $3 AND source.id <> $4
   AND source.created_at <= $5 AND source.completed_at IS NOT NULL
   AND (mutation.id = $6 AND mutation.tool_name = 'publish_changes'
        OR mutation.id = $7 AND mutation.tool_name = 'open_pr')`,
 			ids, lease.JobLease.WorkflowID,
-			lease.AgentAssignmentID, lease.ID, turn.CreatedAt, publication.SourcePublishMutationID,
+			lease.AgentParticipantID, lease.ID, turn.CreatedAt, publication.SourcePublishMutationID,
 			nullableString(publication.SourceOpenPRMutationID)).Scan(&count); err != nil {
 			return err
 		}

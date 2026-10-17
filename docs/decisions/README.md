@@ -32,6 +32,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0022: Track heads without resuming work](0022-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
 | [0023: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0023-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
 | [0024: Establish a clean supported release baseline](0024-establish-a-clean-supported-release-baseline.md) | Accepted | 2026-10-16 |
+| [0025: Require current Docker management ownership](0025-require-current-docker-management-ownership.md) | Accepted | 2026-10-17 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

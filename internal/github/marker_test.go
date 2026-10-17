@@ -10,9 +10,9 @@ import (
 
 func TestMarkerRendersAndParsesVersionedGrammar(t *testing.T) {
 	marker := githubapi.Marker{
-		WorkflowID:        "workflow-019a",
-		AgentAssignmentID: "assignment_7",
-		OperationID:       "operation:42.1",
+		WorkflowID:         "workflow-019a",
+		AgentParticipantID: "assignment_7",
+		OperationID:        "operation:42.1",
 	}
 	rendered, err := githubapi.RenderMarker(marker)
 	if err != nil {
@@ -34,7 +34,7 @@ func TestMarkerRendersAndParsesVersionedGrammar(t *testing.T) {
 func TestMarkerSupportsOptionalAssignmentAndOperation(t *testing.T) {
 	markers := []githubapi.Marker{
 		{WorkflowID: "workflow-1"},
-		{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1"},
+		{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1"},
 		{WorkflowID: "workflow-1", OperationID: "operation-1"},
 	}
 	var text strings.Builder
@@ -63,7 +63,7 @@ func TestMarkerRejectsUnsafeTokensAndDoesNotTrustValidNeighborsOfMalformedText(t
 		{WorkflowID: "contains space"},
 		{WorkflowID: "workflow/1"},
 		{WorkflowID: "-starts-with-punctuation"},
-		{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-->"},
+		{WorkflowID: "workflow-1", AgentParticipantID: "assignment-->"},
 		{WorkflowID: "workflow-1", OperationID: strings.Repeat("a", 129)},
 	}
 	for _, marker := range unsafeMarkers {
@@ -134,7 +134,7 @@ func TestEnsureMarkerRejectsUntrustedOmnigrexLikeText(t *testing.T) {
 }
 
 func TestEnsureMarkerAvoidsIdenticalDuplicates(t *testing.T) {
-	marker := githubapi.Marker{WorkflowID: "workflow-1", AgentAssignmentID: "assignment-1", OperationID: "operation-1"}
+	marker := githubapi.Marker{WorkflowID: "workflow-1", AgentParticipantID: "assignment-1", OperationID: "operation-1"}
 	withMarker, err := githubapi.EnsureMarker("review body", marker)
 	if err != nil {
 		t.Fatalf("EnsureMarker() error = %v", err)

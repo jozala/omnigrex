@@ -43,7 +43,7 @@ FROM workflows WHERE id = $1`, fixture.workflowID).Scan(&workflowState, &desired
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `
-SELECT status, completed_at, retention_until FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentCompletedAt, &assignmentRetention); err != nil {
+SELECT status, completed_at, retention_until FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentCompletedAt, &assignmentRetention); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT status, retained_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus, &sessionRetainedAt); err != nil {
@@ -125,7 +125,7 @@ func TestClosureSettlementCancelsInitialPreparationWithoutCreatingEmptyRetention
 	if err := pool.QueryRow(ctx, `
 SELECT workflow.status, workflow.desired_runtime_state, preparation.status,
        attempt.status,
-       (SELECT count(*) FROM agent_assignments WHERE workflow_id = workflow.id),
+       (SELECT count(*) FROM agent_participants WHERE workflow_id = workflow.id),
        (SELECT count(*) FROM assignment_retention_generations WHERE workflow_id = workflow.id),
        (SELECT count(*) FROM jobs WHERE workflow_id = workflow.id AND kind = 'COLLECT_ASSIGNMENTS')
 FROM workflows AS workflow
@@ -193,7 +193,7 @@ func TestClosureRetainsAndCollectsPreparedCreatingSessionWithoutFabricatingRunti
 	var sessions, attempts int
 	if err := pool.QueryRow(ctx, `
 SELECT session.status, session.runtime_session_id, session.state_deleted_at,
-       (SELECT count(*) FROM agent_sessions WHERE agent_assignment_id = $2),
+       (SELECT count(*) FROM agent_sessions WHERE agent_participant_id = $2),
        (SELECT count(*) FROM workflow_attempts WHERE workflow_id = $3)
 FROM agent_sessions AS session WHERE session.id = $1`, fixture.sessionID, fixture.assignmentID, fixture.workflowID).Scan(
 		&sessionStatus, &runtimeSessionID, &sessionDeletedAt, &sessions, &attempts); err != nil {
@@ -219,7 +219,7 @@ func TestReopenBeforeCollectionReusesPreparedCreatingSessionAndBindsRuntimeOnLau
 	fixture := seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, 73, workflow.RoleDeveloper, pinnedDeveloperBinding, pinnedDeveloperBinding, store.AgentSessionCreating)
 	reviewerBinding := bindings[workflow.RoleReviewer]
 	if _, err := pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -242,14 +242,14 @@ VALUES ('40000000-0000-4000-8000-000000000735', $1, 'REVIEWER', 'ACTIVE',
 
 	prepared := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx),
 		"prepared-reactivation", "openai/reactivated")
-	if prepared.Assignment.ID != fixture.assignmentID || prepared.Session.ID != fixture.sessionID ||
-		prepared.Assignment.ParticipantRuntimeBinding != developerBinding ||
+	if prepared.Participant.ID != fixture.assignmentID || prepared.Session.ID != fixture.sessionID ||
+		prepared.Participant.ParticipantRuntimeBinding != developerBinding ||
 		prepared.Session.Status != store.AgentSessionCreating || prepared.Session.RuntimeSessionID != "" ||
 		prepared.Session.RetainedAt != nil {
-		t.Fatalf("reactivated prepared Session = %#v / %#v", prepared.Assignment, prepared.Session)
+		t.Fatalf("reactivated prepared Session = %#v / %#v", prepared.Participant, prepared.Session)
 	}
 	var sessions int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_sessions WHERE agent_assignment_id = $1`, fixture.assignmentID).Scan(&sessions); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_sessions WHERE agent_participant_id = $1`, fixture.assignmentID).Scan(&sessions); err != nil {
 		t.Fatal(err)
 	}
 	if sessions != 1 {
@@ -300,7 +300,7 @@ func TestReopenBeforeCollectionAuthorizationCancelsLeasedGenerationAndRetainedTr
 	if err := pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1`, lease.ID).Scan(&jobStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status, retention_until FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &retentionUntil); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, retention_until FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &retentionUntil); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT status FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus); err != nil {
@@ -438,7 +438,7 @@ WHERE delivery.delivery_id = $1`, reopenDeliveryID).Scan(&webhookStatus, &normal
 	if err := pool.QueryRow(ctx, `SELECT desired_runtime_state FROM workflows WHERE id = $1`, fixture.workflowID).Scan(&workflowRuntime); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus, &assignmentDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT status, state_deleted_at FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionStatus, &sessionDeletedAt); err != nil {
@@ -448,8 +448,8 @@ WHERE delivery.delivery_id = $1`, reopenDeliveryID).Scan(&webhookStatus, &normal
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
-       (SELECT count(*) FROM agent_sessions WHERE agent_assignment_id = $2),
+SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id = $1),
+       (SELECT count(*) FROM agent_sessions WHERE agent_participant_id = $2),
        (SELECT count(*) FROM agent_turns WHERE workflow_id = $1),
        (SELECT count(*) FROM workflow_attempts WHERE workflow_id = $1),
        (SELECT count(*) FROM workflow_internal_events WHERE workflow_id = $1 AND applied_at IS NOT NULL)`, fixture.workflowID, fixture.assignmentID).Scan(&assignments, &sessions, &turns, &attempts, &events); err != nil {
@@ -489,8 +489,8 @@ SELECT (SELECT count(*) FROM agent_assignments WHERE workflow_id = $1),
 		t.Fatalf("post-collection preparation payload = %s (%v), want NEW", preparationLease.Payload, err)
 	}
 	prepared := prepareTurn(t, databases[0], ctx, preparationLease, "post-collection", "openai/new")
-	if prepared.Assignment.ID == fixture.assignmentID || prepared.Assignment.Generation != 2 {
-		t.Fatalf("post-collection Assignment = %#v, want new generation", prepared.Assignment)
+	if prepared.Participant.ID == fixture.assignmentID || prepared.Participant.Generation != 2 {
+		t.Fatalf("post-collection Participant = %#v, want new generation", prepared.Participant)
 	}
 	turnLease := acquireAndBindTurn(t, databases[0], pool, ctx, prepared, "post-collection-runtime")
 	settleAcquiredTurn(t, databases[0], ctx, turnLease, store.AgentTurnSucceeded)

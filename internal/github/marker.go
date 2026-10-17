@@ -14,9 +14,9 @@ var (
 )
 
 type Marker struct {
-	WorkflowID        string
-	AgentAssignmentID string
-	OperationID       string
+	WorkflowID         string
+	AgentParticipantID string
+	OperationID        string
 }
 
 // MarkerInspection reports valid markers and whether any Omnigrex-like comment was malformed.
@@ -34,9 +34,9 @@ func RenderMarker(marker Marker) (string, error) {
 	rendered.WriteString(MarkerVersion)
 	rendered.WriteString(" workflow=")
 	rendered.WriteString(marker.WorkflowID)
-	if marker.AgentAssignmentID != "" {
+	if marker.AgentParticipantID != "" {
 		rendered.WriteString(" assignment=")
-		rendered.WriteString(marker.AgentAssignmentID)
+		rendered.WriteString(marker.AgentParticipantID)
 	}
 	if marker.OperationID != "" {
 		rendered.WriteString(" operation=")
@@ -132,7 +132,7 @@ func parseMarkerComment(comment string) (Marker, bool) {
 	index := 2
 	if index < len(fields) {
 		if assignmentID, assignment := markerField(fields[index], "assignment"); assignment {
-			marker.AgentAssignmentID = assignmentID
+			marker.AgentParticipantID = assignmentID
 			index++
 		}
 	}
@@ -161,9 +161,9 @@ func validateMarker(marker Marker) error {
 		return fmt.Errorf("%w: workflow id", ErrInvalidMarkerToken)
 	}
 	for name, value := range map[string]string{
-		"workflow id":         marker.WorkflowID,
-		"agent assignment id": marker.AgentAssignmentID,
-		"operation id":        marker.OperationID,
+		"workflow id":          marker.WorkflowID,
+		"agent participant id": marker.AgentParticipantID,
+		"operation id":         marker.OperationID,
 	} {
 		if value != "" && !validMarkerToken(value) {
 			return fmt.Errorf("%w: %s", ErrInvalidMarkerToken, name)

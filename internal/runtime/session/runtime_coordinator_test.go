@@ -72,7 +72,7 @@ func TestRuntimeCoordinatorHumanPromptCompletedReleaseFailureIsUncertain(t *test
 
 func runtimeHumanSession() store.AgentSession {
 	return store.AgentSession{
-		ID: "human-session", AgentAssignmentID: "participant", RuntimeSessionID: "runtime-session",
+		ID: "human-session", AgentParticipantID: "participant", RuntimeSessionID: "runtime-session",
 		Status: store.AgentSessionRetained, ControlOwner: store.SessionControlHuman, ControlRevision: 7,
 		RuntimeCapabilities: json.RawMessage(`{"history":true}`),
 	}

@@ -173,7 +173,7 @@ func TestAgentTurnExecutionContextIsReadOnlyUnderTheLiveEpochFence(t *testing.T)
 	if execution.Issue.ID != 7 || execution.Issue.Number != 7 || execution.ChangeProposal != nil {
 		t.Errorf("execution Work Item context = %#v", execution)
 	}
-	if execution.Assignment.ID != fixture.assignmentID || execution.Session.ID != fixture.sessionID || execution.Turn.ID != turn.ID {
+	if execution.Participant.ID != fixture.assignmentID || execution.Session.ID != fixture.sessionID || execution.Turn.ID != turn.ID {
 		t.Errorf("execution hierarchy = %#v", execution)
 	}
 
@@ -1785,7 +1785,7 @@ func TestSuccessfulSubmitReviewBindsReviewerActorWithCompareOrSet(t *testing.T) 
 	}
 	var actorID int64
 	var mutationState string
-	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT github_app_actor_id FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&actorID); err != nil {
 		t.Fatalf("read bound Reviewer actor: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT state FROM tool_invocations WHERE id = $1`, conflicting.ID).Scan(&mutationState); err != nil {
@@ -1859,13 +1859,13 @@ func TestAgentTurnPreparationAndAcquisitionRejectInactiveHierarchy(t *testing.T)
 	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET status = 'ACTIVE', active = TRUE, completed_at = NULL WHERE id = $1`, fixture.attemptID); err != nil {
 		t.Fatalf("reactivate Workflow Attempt: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET status = 'WAITING_FOR_HUMAN' WHERE id = $1`, fixture.assignmentID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_participants SET status = 'WAITING_FOR_HUMAN' WHERE id = $1`, fixture.assignmentID); err != nil {
 		t.Fatalf("pause assignment: %v", err)
 	}
 	if _, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, fixture.turnSpec()); !errors.Is(err, store.ErrAgentTurnPreparationFenceLost) {
 		t.Errorf("PrepareAgentTurn() for inactive Assignment error = %v, want ErrAgentTurnPreparationFenceLost", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET status = 'ACTIVE' WHERE id = $1`, fixture.assignmentID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_participants SET status = 'ACTIVE' WHERE id = $1`, fixture.assignmentID); err != nil {
 		t.Fatalf("reactivate assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET control_owner = 'HUMAN' WHERE id = $1`, fixture.sessionID); err != nil {
@@ -1882,7 +1882,7 @@ func TestAgentTurnPreparationAndAcquisitionRejectInactiveHierarchy(t *testing.T)
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}
 	job := agentTurnExecutionJob(t, pool, ctx, turn)
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET status = 'COMPLETED' WHERE id = $1`, fixture.assignmentID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_participants SET status = 'COMPLETED' WHERE id = $1`, fixture.assignmentID); err != nil {
 		t.Fatalf("complete assignment: %v", err)
 	}
 	if _, err := acquireFixtureAgentTurn(t, databases[0], pool, ctx, job, turn.ControlRevision, "runtime", time.Second, 1); !errors.Is(err, store.ErrAgentTurnHierarchyInactive) {
@@ -1989,12 +1989,12 @@ func agentTurnExecutionJob(t *testing.T, pool *pgxpool.Pool, ctx context.Context
 	if err := pool.QueryRow(ctx, `
 SELECT id::text, queue, kind, payload, status, priority, max_attempts,
        idempotency_key, workflow_id::text, workflow_attempt_id::text,
-       agent_assignment_id::text, agent_session_id::text, agent_turn_id::text,
+       agent_participant_id::text, agent_session_id::text, agent_turn_id::text,
        execution_epoch
 FROM jobs
 WHERE agent_turn_id = $1 AND kind = $2`, turn.ID, store.RunAgentTurnJobKind).Scan(
 		&job.ID, &job.Queue, &job.Kind, &job.Payload, &job.Status, &job.Priority, &job.MaxAttempts,
-		&job.IdempotencyKey, &job.WorkflowID, &job.WorkflowAttemptID, &job.AgentAssignmentID,
+		&job.IdempotencyKey, &job.WorkflowID, &job.WorkflowAttemptID, &job.AgentParticipantID,
 		&job.AgentSessionID, &job.AgentTurnID, &job.ExecutionEpoch,
 	); err != nil {
 		t.Fatalf("read Agent Turn execution Job: %v", err)
@@ -2061,7 +2061,7 @@ VALUES ($1, $2, 1, 'ACTIVE')`, fixture.attemptID, fixture.workflowID)
 		participantPath, sessionPath = runtimeStatePaths[0], runtimeStatePaths[1]
 	}
 	_, err = pool.Exec(ctx, `
-INSERT INTO agent_assignments (
+INSERT INTO agent_participants (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
@@ -2079,7 +2079,7 @@ VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, $7, $8, $9)`, fixture.assignmentID, fi
 	}
 	_, err = pool.Exec(ctx, `
 INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
+    id, agent_participant_id, session_number, runtime_session_id, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
 VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10)`, fixture.sessionID, fixture.assignmentID,
@@ -2097,7 +2097,7 @@ func TestAgentParticipantBindingIsImmutableWithoutStageAssignment(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if _, err := pool.Exec(ctx, `UPDATE agent_assignments SET role = 'REVIEWER' WHERE id = $1`, fixture.assignmentID); err == nil {
+	if _, err := pool.Exec(ctx, `UPDATE agent_participants SET role = 'REVIEWER' WHERE id = $1`, fixture.assignmentID); err == nil {
 		t.Fatal("Agent Participant Role mutation succeeded without a Stage Assignment")
 	}
 }

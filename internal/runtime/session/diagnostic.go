@@ -19,13 +19,13 @@ import (
 // PostgreSQL fencing is qualified separately. It owns no protected resources,
 // Workflow, or MCP mutation authority, and does not launch Turn executions.
 func CheckDiagnostic(ctx context.Context, connect RuntimeConnect) error {
-	s := store.AgentSession{ID: uuid.NewString(), AgentAssignmentID: uuid.NewString(), Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 1, NextExecutionEpoch: 2, RuntimeImageDigest: "diagnostic", RuntimeProfileContentSHA256: "diagnostic"}
-	lease := store.AgentTurnLease{AgentTurn: store.AgentTurn{ID: uuid.NewString(), AgentSessionID: s.ID, AgentAssignmentID: s.AgentAssignmentID, ExecutionEpoch: 1}}
+	s := store.AgentSession{ID: uuid.NewString(), AgentParticipantID: uuid.NewString(), Status: store.AgentSessionCreating, ControlOwner: store.SessionControlAutomation, ControlRevision: 1, NextExecutionEpoch: 2, RuntimeImageDigest: "diagnostic", RuntimeProfileContentSHA256: "diagnostic"}
+	lease := store.AgentTurnLease{AgentTurn: store.AgentTurn{ID: uuid.NewString(), AgentSessionID: s.ID, AgentParticipantID: s.AgentParticipantID, ExecutionEpoch: 1}}
 	lease.ControlRevision = 1
-	lease.JobLease.AgentTurnID, lease.JobLease.AgentSessionID, lease.JobLease.AgentAssignmentID, lease.JobLease.ExecutionEpoch = lease.ID, s.ID, s.AgentAssignmentID, 1
+	lease.JobLease.AgentTurnID, lease.JobLease.AgentSessionID, lease.JobLease.AgentParticipantID, lease.JobLease.ExecutionEpoch = lease.ID, s.ID, s.AgentParticipantID, 1
 	ledger := &diagnosticBindingStore{session: s}
 	coordinator := NewRuntimeCoordinator(ledger)
-	state := execution.StateRef{ID: s.AgentAssignmentID, ParticipantID: s.AgentAssignmentID, SessionID: s.ID, Backend: execution.BackendBinding{Family: "diagnostic", Version: 1, Namespace: uuid.NewString()}, Format: "pi-session/v3", RuntimeProfileSHA256: s.RuntimeProfileContentSHA256, Image: s.RuntimeImageDigest}
+	state := execution.StateRef{ID: s.AgentParticipantID, ParticipantID: s.AgentParticipantID, SessionID: s.ID, Backend: execution.BackendBinding{Family: "diagnostic", Version: 1, Namespace: uuid.NewString()}, Format: "pi-session/v3", RuntimeProfileSHA256: s.RuntimeProfileContentSHA256, Image: s.RuntimeImageDigest}
 	result, err := coordinator.Prepare(ctx, RuntimePrepareRequest{Lease: lease, Session: s, State: state, Connect: connect})
 	if err != nil {
 		return err

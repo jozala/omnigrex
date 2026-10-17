@@ -144,7 +144,7 @@ FOR UPDATE`, identity.AgentTurnID, identity.ExecutionEpoch))
 	if err != nil {
 		return AgentTurnRecovery{}, fmt.Errorf("lock duplicate Agent Turn execution job: %w", err)
 	}
-	if job.AgentAssignmentID != identity.AssignmentID || job.AgentSessionID != identity.AgentSessionID {
+	if job.AgentParticipantID != identity.AssignmentID || job.AgentSessionID != identity.AgentSessionID {
 		return AgentTurnRecovery{}, ErrAgentTurnFenceLost
 	}
 	if job.Status == JobLeased {
@@ -325,8 +325,8 @@ SELECT assignment.id::text, session.id::text, turn.id::text, turn.execution_epoc
        END
 FROM agent_turns AS turn
 JOIN agent_sessions AS session ON session.id = turn.agent_session_id
-JOIN agent_assignments AS assignment
-  ON assignment.id = session.agent_assignment_id
+JOIN agent_participants AS assignment
+  ON assignment.id = session.agent_participant_id
  AND assignment.runtime_profile_name = session.runtime_profile_name
  AND assignment.runtime_profile_version = session.runtime_profile_version
 LEFT JOIN jobs AS execution
@@ -350,7 +350,7 @@ CROSS JOIN LATERAL (
        AND execution.attempt_count > 0
        AND execution.workflow_id = turn.workflow_id
        AND execution.workflow_attempt_id = turn.workflow_attempt_id
-       AND execution.agent_assignment_id = assignment.id
+       AND execution.agent_participant_id = assignment.id
        AND execution.agent_session_id = session.id
        AND execution.payload = jsonb_build_object(
            'agent_turn_id', turn.id,

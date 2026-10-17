@@ -14,6 +14,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
+	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 type workerStore struct {
@@ -79,11 +80,11 @@ func (database *workerStore) AcknowledgeAgentTurnPreparationFailure(_ context.Co
 	return store.AgentTurnPreparationFailureAcknowledgement{JobID: lease.ID}, database.failErr
 }
 
-func (database *workerStore) AcknowledgeAssignmentConfigurationConflict(_ context.Context, _ store.JobLease, spec store.AgentTurnPreparationSpec) (store.AssignmentConfigurationHandoff, error) {
+func (database *workerStore) AcknowledgeParticipantConfigurationConflict(_ context.Context, _ store.JobLease, spec store.AgentTurnPreparationSpec) (store.ParticipantConfigurationHandoff, error) {
 	database.mutex.Lock()
 	database.acknowledged = append(database.acknowledged, spec)
 	database.mutex.Unlock()
-	return store.AssignmentConfigurationHandoff{}, database.ackErr
+	return store.ParticipantConfigurationHandoff{}, database.ackErr
 }
 
 type repositoryCredentialProvider struct {
@@ -246,16 +247,16 @@ func TestWorkerCancellationOfInFlightHeartbeatDoesNotSuppressFailureAcknowledgem
 func TestWorkerAcknowledgesAssignmentConfigurationConflict(t *testing.T) {
 	lease := preparationWorkerLease()
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
-	spec := store.AgentTurnPreparationSpec{Developer: store.ParticipantPreparation{Binding: store.ParticipantRuntimeBinding{AgentProfileName: "developer"}}}
+	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{workflow.StageImplementation: {Binding: store.ParticipantRuntimeBinding{AgentProfileName: "developer"}}}}
 	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
-		return agentturn.Result{}, &agentturn.AssignmentConfigurationConflictError{Preparation: spec, Cause: store.ErrAssignmentConfigurationConflict}
+		return agentturn.Result{}, &agentturn.ParticipantConfigurationConflictError{Preparation: spec, Cause: store.ErrParticipantConfigurationConflict}
 	}), 10*time.Second)
 
 	processed, err := worker.ProcessNext(context.Background())
 	if err != nil || !processed {
 		t.Fatalf("ProcessNext() = (%t, %v), want acknowledged conflict", processed, err)
 	}
-	if len(database.acknowledged) != 1 || database.acknowledged[0].Developer.Binding.AgentProfileName != "developer" {
+	if len(database.acknowledged) != 1 || database.acknowledged[0].Stages[workflow.StageImplementation].Binding.AgentProfileName != "developer" {
 		t.Fatalf("conflict acknowledgements = %#v, want exact preparation", database.acknowledged)
 	}
 	if len(database.failures) != 0 {

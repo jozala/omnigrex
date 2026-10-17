@@ -210,7 +210,7 @@ VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 3, $4, clock_timestam
 	if _, err := pool.Exec(ctx, `
 INSERT INTO jobs (
     id, queue, kind, payload, max_attempts, idempotency_key, workflow_id,
-    workflow_attempt_id, agent_assignment_id, agent_session_id, agent_turn_id,
+    workflow_attempt_id, agent_participant_id, agent_session_id, agent_turn_id,
     execution_epoch, normalized_event_id, action_key
 )
 VALUES ($1, 'workflow', 'RECONCILE_PENDING_EVENTS', $2, 2, 'pending-terminal-48', $3,
@@ -525,7 +525,7 @@ VALUES ($1, $2, 'DEFERRED', $3, 'DEFERRED', 'active_turn', 1, $4, clock_timestam
 	if _, err := pool.Exec(ctx, `
 INSERT INTO jobs (
     id, queue, kind, payload, max_attempts, idempotency_key, workflow_id,
-    workflow_attempt_id, agent_assignment_id, agent_session_id, agent_turn_id,
+    workflow_attempt_id, agent_participant_id, agent_session_id, agent_turn_id,
     execution_epoch, normalized_event_id, action_key
 )
 VALUES ($1, 'workflow', 'RECONCILE_PENDING_EVENTS', $2, 3, $3, $4,
@@ -642,7 +642,7 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 	if _, err := pool.Exec(ctx, `
 INSERT INTO jobs (
     id, queue, kind, payload, max_attempts, idempotency_key, workflow_id,
-    workflow_attempt_id, agent_assignment_id, agent_session_id, agent_turn_id, execution_epoch
+    workflow_attempt_id, agent_participant_id, agent_session_id, agent_turn_id, execution_epoch
 )
 VALUES ($1, $2, $3, $4, 3, 'pending-event-unsettled-recovery', $5, $6, $7, $8, $9, $10)`,
 		reconciliationJobID, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, payload,
@@ -806,7 +806,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 		t.Fatalf("GetClosureMutationReconciliationContext() error = %v", err)
 	}
 	if reconciliation.WorkflowID != fixture.workflowID || reconciliation.Turn.ID != turn.ID ||
-		reconciliation.Turn.AgentAssignmentID != fixture.assignmentID || reconciliation.Turn.ExecutionEpoch != turn.ExecutionEpoch ||
+		reconciliation.Turn.AgentParticipantID != fixture.assignmentID || reconciliation.Turn.ExecutionEpoch != turn.ExecutionEpoch ||
 		reconciliation.Repository.ID != 21 || reconciliation.Repository.Owner != "owner" || reconciliation.Repository.Name != "repo" ||
 		reconciliation.Issue.ID != 21 || reconciliation.Issue.Number != 21 {
 		t.Fatalf("closure mutation reconciliation context = %#v", reconciliation)
@@ -852,7 +852,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	if err := pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1`, settlementJob.ID).Scan(&settlementStatus); err != nil {
 		t.Fatalf("query completed settlement job: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT status FROM agent_assignments WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status FROM agent_participants WHERE id = $1`, fixture.assignmentID).Scan(&assignmentStatus); err != nil {
 		t.Fatalf("query assignment before ClosureSettledEvent: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind IN ('COMPLETE_ASSIGNMENTS', 'COLLECT_ASSIGNMENTS')`, fixture.workflowID).Scan(&completionJobs); err != nil {

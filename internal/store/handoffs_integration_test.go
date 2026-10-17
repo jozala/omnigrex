@@ -79,7 +79,7 @@ func TestHandoffPublicationRecoveryAndReadScope(t *testing.T) {
 	}
 	proof, err := reconciler.Reconcile(ctx, store.AgentTurnMutationReconciliationContext{
 		WorkflowID: execution.WorkflowID, Repository: execution.Repository, Issue: execution.Issue,
-		Role: execution.Assignment.Role, Turn: execution.Turn,
+		Role: execution.Participant.Role, Turn: execution.Turn,
 	}, mutation)
 	if err != nil || proof.Disposition != mcp.ReconciliationFound {
 		t.Fatalf("lost response was not recovered from the comment: %#v, %v", proof, err)

@@ -21,8 +21,6 @@ type AgentTurnPreparationRuntimeBindings struct {
 	Stage       workflow.StageID
 	Role        workflow.Role
 	Participant *ParticipantRuntimeBinding
-	Developer   *ParticipantRuntimeBinding
-	Reviewer    *ParticipantRuntimeBinding
 }
 
 // ListProtectedRuntimeBindings returns distinct launchable immutable bindings for every generation
@@ -40,7 +38,7 @@ func listProtectedRuntimeBindings(ctx context.Context, pool *pgxpool.Pool) ([]ru
 	rows, err := pool.Query(ctx, `
 SELECT id::text, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest
-FROM agent_assignments
+FROM agent_participants
 WHERE state_deleted_at IS NULL
 ORDER BY id`)
 	if err != nil {
@@ -69,7 +67,7 @@ ORDER BY id`)
 	rows.Close()
 
 	rows, err = pool.Query(ctx, `
-SELECT session.agent_assignment_id::text, session.status,
+SELECT session.agent_participant_id::text, session.status,
        session.runtime_profile_name, session.runtime_profile_version,
        session.runtime_profile_content_sha256, session.runtime_image_digest
 FROM agent_sessions AS session
@@ -151,10 +149,10 @@ SELECT participant.agent_profile_name, participant.runtime_profile_name,
        participant.runtime_profile_version, participant.runtime_profile_content_sha256,
        participant.runtime_image_digest
 FROM stage_assignments AS stage_assignment
-JOIN agent_assignments AS participant ON participant.id = stage_assignment.agent_participant_id
+JOIN agent_participants AS participant ON participant.id = stage_assignment.agent_participant_id
 WHERE stage_assignment.workflow_id = $1
   AND stage_assignment.assignment_generation = (
-      SELECT MAX(generation) FROM agent_assignments
+      SELECT MAX(generation) FROM agent_participants
       WHERE workflow_id = $1 AND state_deleted_at IS NULL
   )
   AND stage_assignment.stage_id = $2`, lease.WorkflowID, payload.Stage).Scan(
@@ -167,11 +165,5 @@ WHERE stage_assignment.workflow_id = $1
 		return AgentTurnPreparationRuntimeBindings{}, fmt.Errorf("read Stage Participant Runtime binding: %w", err)
 	}
 	result.Participant = &binding
-	switch payload.Role {
-	case workflow.RoleDeveloper:
-		result.Developer = &binding
-	case workflow.RoleReviewer:
-		result.Reviewer = &binding
-	}
 	return result, nil
 }

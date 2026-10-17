@@ -496,9 +496,9 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 SELECT workflow.status, workflow.human_handoff_reason, attempt.human_handoff_reason,
        count(*) FILTER (WHERE job.kind = 'PUBLISH_HUMAN_HANDOFF'),
 	       count(*) FILTER (WHERE job.kind = 'RECONCILE_GITHUB_LABELS'),
-	       (SELECT count(*) FROM agent_assignments
+	       (SELECT count(*) FROM agent_participants
 	        WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL),
-	       (SELECT count(*) FROM agent_assignments
+	       (SELECT count(*) FROM agent_participants
 	        WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL)
 FROM workflows AS workflow
 JOIN workflow_attempts AS attempt ON attempt.id = $2

@@ -20,11 +20,11 @@ import (
 )
 
 var (
-	ErrDependencyNil                   = errors.New("Agent Turn Preparer dependency is nil")
-	ErrInvalidRequest                  = errors.New("invalid Agent Turn preparation request")
-	ErrInvalidRuntimeProfileReference  = errors.New("invalid Runtime Profile reference")
-	ErrRuntimeProfileReferenceMismatch = errors.New("resolved Runtime Profile reference does not match Agent Profile")
-	ErrAssignmentConfigurationConflict = errors.New("Agent Assignment configuration conflict")
+	ErrDependencyNil                    = errors.New("Agent Turn Preparer dependency is nil")
+	ErrInvalidRequest                   = errors.New("invalid Agent Turn preparation request")
+	ErrInvalidRuntimeProfileReference   = errors.New("invalid Runtime Profile reference")
+	ErrRuntimeProfileReferenceMismatch  = errors.New("resolved Runtime Profile reference does not match Agent Profile")
+	ErrParticipantConfigurationConflict = errors.New("Agent Participant configuration conflict")
 	// ErrChangeProposalVerificationFailed marks a permanent authoritative
 	// verification failure (closed PR, identity change, branch/base change).
 	// The worker must not retry the GitHub observation; it must create an
@@ -32,18 +32,18 @@ var (
 	ErrChangeProposalVerificationFailed = errors.New("Change Proposal verification failed")
 )
 
-// AssignmentConfigurationConflictError carries the credential-free preparation used to detect binding drift.
-type AssignmentConfigurationConflictError struct {
+// ParticipantConfigurationConflictError carries the credential-free preparation used to detect binding drift.
+type ParticipantConfigurationConflictError struct {
 	Preparation store.AgentTurnPreparationSpec
 	Cause       error
 }
 
-func (err *AssignmentConfigurationConflictError) Error() string {
-	return fmt.Sprintf("%v: %v", ErrAssignmentConfigurationConflict, err.Cause)
+func (err *ParticipantConfigurationConflictError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrParticipantConfigurationConflict, err.Cause)
 }
 
-func (err *AssignmentConfigurationConflictError) Unwrap() []error {
-	return []error{ErrAssignmentConfigurationConflict, err.Cause}
+func (err *ParticipantConfigurationConflictError) Unwrap() []error {
+	return []error{ErrParticipantConfigurationConflict, err.Cause}
 }
 
 // ProfileLoader discovers all Agent Profiles from one repository snapshot.
@@ -170,12 +170,6 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	}
 	preparation.TurnConfiguration = encoded
 	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
-	switch bindings.Role {
-	case workflow.RoleDeveloper:
-		spec.Developer = preparation
-	case workflow.RoleReviewer:
-		spec.Reviewer = preparation
-	}
 	if head, prID, prNumber, verifyErr := preparer.verifyChangeProposal(ctx, request); verifyErr != nil {
 		return Result{}, verifyErr
 	} else if head != "" {
@@ -186,8 +180,8 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 
 	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
 	if err != nil {
-		if errors.Is(err, store.ErrAssignmentConfigurationConflict) {
-			return Result{}, &AssignmentConfigurationConflictError{
+		if errors.Is(err, store.ErrParticipantConfigurationConflict) {
+			return Result{}, &ParticipantConfigurationConflictError{
 				Preparation: spec,
 				Cause:       err,
 			}
@@ -305,11 +299,11 @@ func (err credentialSafeError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
 }
 
 func sanitizePreparationError(err error, credential string) error {
-	var conflict *AssignmentConfigurationConflictError
+	var conflict *ParticipantConfigurationConflictError
 	if errors.As(err, &conflict) {
-		return &AssignmentConfigurationConflictError{
+		return &ParticipantConfigurationConflictError{
 			Preparation: conflict.Preparation,
-			Cause:       ErrAssignmentConfigurationConflict,
+			Cause:       ErrParticipantConfigurationConflict,
 		}
 	}
 	if errors.Is(err, ErrChangeProposalVerificationFailed) {

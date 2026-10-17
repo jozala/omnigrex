@@ -293,7 +293,7 @@ func TestOutcomeReconcilerUsesCurrentDeveloperCredentialAfterExpiry(t *testing.T
 			"omnigrex", "41:feature/work", outcomeHead),
 	}
 	github := &expiringGitHub{pullRequest: outcomePullRequest(outcomeHead), expired: map[string]bool{expiredSnapshot: true}}
-	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID, OperationID: ledger[0].ID})
+	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: outcomeWorkflowID, AgentParticipantID: outcomeAssignmentID, OperationID: ledger[0].ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +784,7 @@ func TestMCPSubmitReviewRefreshesCacheForDirectReconciliation(t *testing.T) {
 				t.Fatal(err)
 			}
 			scope := mcp.ToolScope{
-				WorkflowID: outcomeWorkflowID, AgentAssignmentID: outcomeAssignmentID,
+				WorkflowID: outcomeWorkflowID, AgentParticipantID: outcomeAssignmentID,
 				AgentSessionID: outcomeSessionID, AgentTurnID: outcomeTurnID, ExecutionEpoch: 7,
 				Role: workflow.RoleReviewer, AgentProfileName: "review-specialist", RoleDisplayName: "Reviewer",
 				Repository:  mcp.RepositoryScope{ID: 41, Owner: "acme", Name: "widgets"},

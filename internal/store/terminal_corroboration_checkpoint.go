@@ -99,12 +99,12 @@ func createTerminalCorroborationCheckpointTx(ctx context.Context, tx pgx.Tx, exe
 	if err := tx.QueryRow(ctx, `
 INSERT INTO jobs (id, queue, kind, payload, status, priority, max_attempts,
                   idempotency_key, workflow_id, workflow_attempt_id,
-                  agent_assignment_id, agent_session_id, agent_turn_id, execution_epoch)
+                  agent_participant_id, agent_session_id, agent_turn_id, execution_epoch)
 VALUES ($1, 'agent-turn-recovery', $2, '{}'::jsonb, 'AVAILABLE', 80, 1000000,
         $3, $4, $5, $6, $7, $8, $9)
 RETURNING id::text`, verificationJobID, VerifyTerminalIntentJobKind,
 		"terminal-corroboration:"+turn.ID+":"+fmt.Sprint(turn.ExecutionEpoch),
-		executionJob.WorkflowID, turn.WorkflowAttemptID, executionJob.AgentAssignmentID,
+		executionJob.WorkflowID, turn.WorkflowAttemptID, executionJob.AgentParticipantID,
 		turn.AgentSessionID, turn.ID, turn.ExecutionEpoch).Scan(&checkpoint.VerificationJobID); err != nil {
 		return TerminalCorroboration{}, fmt.Errorf("enqueue terminal corroboration: %w", err)
 	}

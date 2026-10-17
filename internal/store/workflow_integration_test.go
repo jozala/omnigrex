@@ -1039,7 +1039,7 @@ func TestPendingIssueClosureReusesExistingStopJob(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 INSERT INTO jobs (
     id, queue, kind, payload, status, priority, available_at, max_attempts,
-    idempotency_key, workflow_id, workflow_attempt_id, agent_assignment_id,
+    idempotency_key, workflow_id, workflow_attempt_id, agent_participant_id,
     agent_session_id, agent_turn_id, execution_epoch, normalized_event_id, action_key
 )
 VALUES ($1, $2, $3, $4, 'AVAILABLE', 100, clock_timestamp(), 3,
@@ -1263,7 +1263,7 @@ func assertWorkflowApplicationRows(t *testing.T, pool *pgxpool.Pool, deliveryID,
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(&attempts); err != nil {
 		t.Fatalf("count active attempts: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_assignments WHERE workflow_id = $1`, workflowID).Scan(&assignments); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_participants WHERE workflow_id = $1`, workflowID).Scan(&assignments); err != nil {
 		t.Fatalf("count assignments: %v", err)
 	}
 	if attempts != 1 || assignments != 0 {

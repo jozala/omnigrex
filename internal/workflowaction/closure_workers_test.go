@@ -256,7 +256,7 @@ func closureLease(kind string, active bool) store.JobLease {
 	}
 	if active {
 		spec.WorkflowAttemptID = "60000000-0000-4000-8000-000000000001"
-		spec.AgentAssignmentID = closureAssignment
+		spec.AgentParticipantID = closureAssignment
 		spec.AgentSessionID = closureSession
 		spec.AgentTurnID = closureTurn
 		spec.ExecutionEpoch = 7

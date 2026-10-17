@@ -42,6 +42,7 @@ Both `qualification` and `pi-qualification` targets of `Dockerfile.microsandbox`
 The qualification image contains all four relocated nested-container fixture files, whose SHA-256 checksums match their original contents.
 The native Pi image passed its non-KVM provider-smoke configuration, authentication, and archive-audit helper tests under emulation.
 
-Actual Microsandbox execution remains unverified for this follow-up because the approved Linux/KVM host is unreachable.
-Once access is restored, rerun `mise run test-microsandbox-integration` and the provider-smoke bootstrap fixture through the Microsandbox backend.
+Actual Microsandbox execution was initially blocked because the approved Linux/KVM host was unreachable.
+Access was restored during the [Participant compatibility cleanup](2026-10-17-participant-compatibility-cleanup.md#verification), and the full native backend gate plus provider-smoke bootstrap passed on that follow-up source.
+This includes the relocated nested Docker/Compose/Testcontainers fixtures and production-path bootstrap/state audits for both providers on real KVM.
 Real provider prompting was not run for this follow-up; historical live-provider results are not reused as evidence for the migrated gate.

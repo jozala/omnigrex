@@ -167,7 +167,7 @@ func completeCurrentAssignmentsTx(ctx context.Context, tx pgx.Tx, workflowID str
 		retentionUntil = snapshot.Assignments.RetainedUntil
 	}
 	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET status = 'COMPLETED', completed_at = COALESCE(completed_at, clock_timestamp()),
     retention_until = $2, updated_at = clock_timestamp()
 WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID, retentionUntil); err != nil {
@@ -177,8 +177,8 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 UPDATE agent_sessions AS session
 SET status = 'RETAINED', retained_at = COALESCE(retained_at, clock_timestamp()),
     updated_at = clock_timestamp()
-FROM agent_assignments AS assignment
-WHERE assignment.workflow_id = $1 AND assignment.id = session.agent_assignment_id
+FROM agent_participants AS assignment
+WHERE assignment.workflow_id = $1 AND assignment.id = session.agent_participant_id
   AND assignment.status = 'COMPLETED' AND assignment.state_deleted_at IS NULL
   AND session.state_deleted_at IS NULL
   AND session.status IN ('CREATING', 'ACTIVE', 'RETAINED')`, workflowID); err != nil {
@@ -198,7 +198,7 @@ func scheduleAssignmentRetentionTx(ctx context.Context, tx pgx.Tx, deliveryID, s
 	}
 	rows, err := tx.Query(ctx, `
 SELECT id::text
-FROM agent_assignments
+FROM agent_participants
 WHERE workflow_id = $1 AND status = 'COMPLETED' AND state_deleted_at IS NULL
 ORDER BY id FOR UPDATE`, workflowID)
 	if err != nil {
@@ -243,12 +243,12 @@ INSERT INTO assignment_retention_targets (
     runtime_state_path, runtime_image_digest
 )
 SELECT $1::uuid, assignment.id, NULL::uuid, assignment.runtime_state_path, assignment.runtime_image_digest
-FROM agent_assignments AS assignment
+FROM agent_participants AS assignment
 WHERE assignment.id = ANY($2::uuid[])
 UNION ALL
 SELECT $1::uuid, assignment.id, session.id, session.runtime_state_path, session.runtime_image_digest
-FROM agent_assignments AS assignment
-JOIN agent_sessions AS session ON session.agent_assignment_id = assignment.id
+FROM agent_participants AS assignment
+JOIN agent_sessions AS session ON session.agent_participant_id = assignment.id
 WHERE assignment.id = ANY($2::uuid[]) AND session.status = 'RETAINED'
   AND session.state_deleted_at IS NULL`, generationID, assignmentIDs); err != nil {
 		return fmt.Errorf("capture Assignment retention targets: %w", err)
@@ -330,7 +330,7 @@ WHERE id = $1`, generation.CollectionJobID); err != nil {
 		}
 	}
 	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET retention_until = NULL, updated_at = clock_timestamp()
 WHERE id IN (
     SELECT assignment_id FROM assignment_retention_targets
@@ -510,7 +510,7 @@ WHERE id IN (
 		return AssignmentCollection{}, fmt.Errorf("mark Agent Sessions deleted: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-UPDATE agent_assignments
+UPDATE agent_participants
 SET state_deleted_at = COALESCE(state_deleted_at, $2), retention_until = NULL,
     updated_at = clock_timestamp()
 WHERE id IN (
@@ -674,18 +674,18 @@ WITH payload_assignments AS MATERIALIZED (
 ), required_assignments AS MATERIALIZED (
     SELECT assignment.id AS assignment_id, assignment.runtime_state_path,
            assignment.runtime_image_digest
-    FROM agent_assignments AS assignment
+    FROM agent_participants AS assignment
     WHERE assignment.workflow_id = $2
       AND assignment.status = 'COMPLETED'
       AND assignment.state_deleted_at IS NULL
     FOR UPDATE OF assignment
 ), required_sessions AS MATERIALIZED (
     SELECT session.id AS session_id,
-           session.agent_assignment_id AS assignment_id,
+           session.agent_participant_id AS assignment_id,
            session.runtime_state_path, session.runtime_image_digest
     FROM agent_sessions AS session
     JOIN required_assignments AS assignment
-      ON assignment.assignment_id = session.agent_assignment_id
+      ON assignment.assignment_id = session.agent_participant_id
     WHERE session.state_deleted_at IS NULL
     FOR SHARE OF session
 ), targets AS MATERIALIZED (

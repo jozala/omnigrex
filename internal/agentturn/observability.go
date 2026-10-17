@@ -25,7 +25,7 @@ func executionAttributes(execution store.AgentTurnExecutionContext) []attribute.
 		attribute.String("agent_participant_id", execution.Turn.AgentParticipantID),
 		attribute.String("agent_session_id", execution.Session.ID),
 		attribute.String("agent_turn_id", execution.Turn.ID),
-		attribute.String("role", string(execution.Assignment.Role)),
+		attribute.String("role", string(execution.Participant.Role)),
 		attribute.String("stage", string(execution.Turn.Stage)),
 	}
 }

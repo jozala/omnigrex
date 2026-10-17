@@ -10,7 +10,7 @@ import (
 )
 
 // Key is the immutable identity of one Agent Turn execution.
-// AssignmentID is the transitional persisted name for the Agent Participant.
+// AssignmentID identifies the Participant in the backend resource contract.
 type Key struct {
 	AssignmentID          string
 	AgentSessionID        string
@@ -25,7 +25,7 @@ type Ref = string
 type Platform struct{ OS, Architecture string }
 
 // Attachment names a trusted logical resource, not a host path or volume.
-// Participant-local materialization is transitional until Steps 05-06.
+// The backend resolves Participant-local storage from the execution identity.
 type Attachment struct{ Resource, Target string }
 type TemporaryDirectory struct {
 	Target     string

@@ -84,7 +84,7 @@ WHERE source_job_id = $1 AND source_attempt_number = $2 AND source_lease_token =
 	if job.Kind != RevalidateTerminalIntentJobKind || job.Queue != "agent-turn-recovery" ||
 		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
 		job.AttemptCount != lease.Attempt || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch {
 		return ErrJobLeaseLost
@@ -136,10 +136,10 @@ FROM agent_turn_corroborations WHERE agent_turn_id = $1 AND workflow_id = $2
 	if sessionOwner != SessionControlAutomation {
 		return ErrJobLeaseLost
 	}
-	turn.AgentAssignmentID, turn.AgentParticipantID = job.AgentAssignmentID, job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments
-WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants
+WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`, job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 		return corroborationReadError(err)
 	}
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
@@ -320,7 +320,7 @@ func (store *Store) RedirectRevalidationToFreshTurn(ctx context.Context, lease J
 	if job.Kind != RevalidateTerminalIntentJobKind || job.Queue != "agent-turn-recovery" ||
 		job.Status != JobLeased || job.LeaseOwner != lease.LeaseOwner || job.LeaseToken != lease.LeaseToken ||
 		job.AttemptCount != lease.Attempt || job.WorkflowID != lease.WorkflowID ||
-		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentAssignmentID != lease.AgentAssignmentID ||
+		job.WorkflowAttemptID != lease.WorkflowAttemptID || job.AgentParticipantID != lease.AgentParticipantID ||
 		job.AgentSessionID != lease.AgentSessionID || job.AgentTurnID != lease.AgentTurnID ||
 		job.ExecutionEpoch != lease.ExecutionEpoch {
 		return ErrJobLeaseLost
@@ -361,10 +361,10 @@ WHERE agent_turn_id = $1 AND workflow_id = $2 AND state = 'HANDED_OFF' FOR UPDAT
 	if sessionOwner != SessionControlAutomation {
 		return ErrJobLeaseLost
 	}
-	turn.AgentAssignmentID, turn.AgentParticipantID = job.AgentAssignmentID, job.AgentAssignmentID
+	turn.AgentParticipantID = job.AgentParticipantID
 	var role workflow.Role
-	if err := tx.QueryRow(ctx, `SELECT role FROM agent_assignments
-WHERE id = $1 AND workflow_id = $2 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, job.AgentAssignmentID, job.WorkflowID).Scan(&role); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants
+WHERE id = $1 AND workflow_id = $2 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, job.AgentParticipantID, job.WorkflowID).Scan(&role); err != nil {
 		return corroborationReadError(err)
 	}
 	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
