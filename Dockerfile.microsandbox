@@ -52,7 +52,7 @@ ENTRYPOINT ["/usr/local/bin/omnigrex"]
 
 FROM runtime AS qualification
 COPY --from=test-build /out/microsandbox.test /usr/local/bin/microsandbox.test
-COPY experiments/microsandbox/testdata /fixtures
+COPY internal/runtime/microsandbox/testdata/nested /fixtures
 ENV HOME=/tmp OMNIGREX_MICROSANDBOX_INTEGRATION=1
 ENTRYPOINT ["/usr/local/bin/microsandbox.test"]
 CMD ["-test.v", "-test.timeout", "30m"]

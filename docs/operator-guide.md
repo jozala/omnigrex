@@ -207,6 +207,31 @@ The shared automated backend gates additionally qualify actual continuation acro
 PostgreSQL integration tests verify durable identity reservation and admission fencing separately.
 See the [Session qualification evidence](./plans/2026-10-09-durable-pi-sessions.md) for acceptance coverage.
 
+### Live provider smoke
+
+Use `mise run test-pi-live` to verify real API-key-authenticated provider requests through the production `pi-rpc/v2` Profile, golden image, owned runner, configuration renderer, and selected Execution Backend.
+The gate creates isolated storage and authenticated MCP discovery fixtures, selects only the requested provider's key, submits one short prompt per provider, and audits stopped Session archives for provider and MCP credentials.
+It does not create a Workflow or make GitHub mutations.
+
+Supply a local Pi-native API-key bundle containing `openai` and `opencode-go` entries using the existing [secret-handling procedures](#secrets).
+The file is streamed into disposable test-runner tmpfs; its contents are not passed through Docker arguments, environment metadata, image layers, or persistent fixture storage.
+Only the selected provider reaches the agent's normal stdin bootstrap and `/run/pi-agent` tmpfs.
+
+```sh
+OMNIGREX_PI_LIVE_AUTH_FILE=/secure/path/pi-auth.json \
+  OMNIGREX_PI_BACKEND=docker mise run test-pi-live
+OMNIGREX_PI_LIVE_AUTH_FILE=/secure/path/pi-auth.json \
+  OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> \
+  mise run test-pi-live
+```
+
+The Microsandbox invocation needs the same approved Linux/amd64 KVM daemon as the backend gates.
+Defaults are `openai/o4-mini` and `opencode-go/muse-spark-1.3-contributor`, with checked `low` thinking.
+Set `OMNIGREX_PI_OPENAI_MODEL` or `OMNIGREX_PI_OPENCODE_MODEL` to select another explicit model ID within that provider; unavailable models or unsupported thinking fail without fallback.
+Calls use real provider service and may incur charges; this gate is opt-in and separate from deterministic CI qualification.
+Historical feasibility results do not establish that the current production-path live gate has passed; record the actual image, backend, model selection, and observed result when running it.
+OAuth/subscription snapshots are not part of this gate or the supported authentication contract.
+
 ## Pi Agent Turn qualification
 
 Pi Agent Turns use `pi-rpc/v2` on both supported backends.

@@ -5,3 +5,4 @@ coverage/
 dist/
 secrets/
 *.local
+node_modules/

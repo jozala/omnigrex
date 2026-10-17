@@ -18,8 +18,8 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Domain language](./CONTEXT.md)
 - [Architecture decisions](./docs/adr/)
 - [Project decision log](./docs/decisions/README.md)
-- [Microsandbox feasibility experiment](./experiments/microsandbox/README.md)
-- [Pi RPC feasibility experiment](./experiments/pi/README.md)
+- [Microsandbox feasibility evidence](./docs/experiments/microsandbox.md)
+- [Pi RPC feasibility evidence](./docs/experiments/pi.md)
 - [Pi and pluggable Execution Backend delivery plan](./docs/plans/2026-10-05-pi-and-pluggable-execution-backends.md)
 - [Clean supported release baseline](./docs/plans/2026-10-16-clean-runtime-baseline.md)
 - [Execution and agent boundary contracts](./docs/plans/2026-10-07-runtime-boundary-contracts.md)
@@ -115,6 +115,8 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-int
 
 Both use a disposable pinned Pi image and a controlled provider with fixture credentials.
 See the [operator guide](./docs/operator-guide.md#pi-protocol-diagnostic) for the standalone diagnostic command.
+Optional real-provider smoke uses `mise run test-pi-live` with an explicitly supplied API-key file through the production Pi runner and selected backend.
+See [live provider smoke](./docs/operator-guide.md#live-provider-smoke) for inputs and evidence boundaries.
 
 The complete backend gates, including shared conformance and Pi lifecycle qualification, are:
 

@@ -78,7 +78,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 			t.Fatalf("foreign host archive does not match source/runtime/backend contract: archived=%+v expected=%+v backend=%s", ref, source.Binding(), settings.ExecutionBackend)
 		}
 	}
-	metadata := upgradeStateSource{ref: ref}
+	metadata := qualificationStateSource{ref: ref}
 	root := os.Getenv("OMNIGREX_PI_UPGRADE_ROOT")
 	states := func(name string) *dirstate.RetainedState {
 		t.Helper()
@@ -309,9 +309,9 @@ func upgradeArchiveIdentity(t *testing.T, archive []byte) (execution.StateRef, s
 	return ref, sessionID
 }
 
-type upgradeStateSource struct{ ref execution.StateRef }
+type qualificationStateSource struct{ ref execution.StateRef }
 
-func (s upgradeStateSource) StateMetadata(_ context.Context, ref execution.StateRef) (json.RawMessage, bool, error) {
+func (s qualificationStateSource) StateMetadata(_ context.Context, ref execution.StateRef) (json.RawMessage, bool, error) {
 	if ref != s.ref {
 		return nil, false, execution.ErrBindingMismatch
 	}
