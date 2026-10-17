@@ -46,7 +46,6 @@ const (
 	recoveryContinuationPendingInfrastructure = "PENDING_INFRASTRUCTURE_FAILURE"
 	recoveryContinuationInfrastructureApplied = "INFRASTRUCTURE_FAILURE_APPLIED"
 	recoveryContinuationMutationHandoff       = "MUTATION_RECONCILIATION_HANDOFF_APPLIED"
-	recoveryContinuationMigrationHandoff      = "MIGRATION_HANDOFF_APPLIED"
 	recoveryContinuationDefinitionHandoff     = "WORKFLOW_DEFINITION_HANDOFF_APPLIED"
 	recoveryContinuationTerminalPending       = "TERMINAL_CORROBORATION_PENDING"
 	recoveryContinuationTerminalApplied       = "TERMINAL_CORROBORATION_APPLIED"
@@ -158,7 +157,7 @@ type AgentTurnExecutionContext struct {
 	ChangeProposal           *AgentTurnChangeProposal
 	Publication              *AgentTurnPublication
 	Participant              AgentParticipant
-	Assignment               AgentAssignment
+	Assignment               AgentParticipant
 	Session                  AgentSession
 	Turn                     AgentTurn
 	PriorTerminalIntent      *AgentTurnPriorTerminalIntent
@@ -1037,7 +1036,7 @@ FROM workflows WHERE id = $1`, lease.JobLease.WorkflowID).Scan(
 		); err != nil {
 			return err
 		}
-		participant, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+		participant, err := scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, lease.AgentAssignmentID))
 		if err != nil {
 			return err
 		}
@@ -1846,21 +1845,20 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
 	}
 	var recoveryLive bool
 	var registeredJobID string
-	var continuation, originalOwnerID, originalOwnerHash string
+	var originalOwnerID, originalOwnerHash string
 	if err := tx.QueryRow(ctx, `
 SELECT recovery_started_at IS NOT NULL AND recovery_settled_at IS NULL,
        CASE WHEN $3 = 'STOP_STALE_RUNTIME' THEN stop_runtime_job_id::text
              ELSE reconcile_mutations_job_id::text END,
-       recovery_continuation, COALESCE(recovery_original_owner_id, ''),
+       COALESCE(recovery_original_owner_id, ''),
        COALESCE(encode(recovery_original_owner_token_sha256, 'hex'), '')
 FROM agent_turns WHERE id = $1 AND execution_epoch = $2`,
 		job.AgentTurnID, job.ExecutionEpoch, expectedKind).Scan(
-		&recoveryLive, &registeredJobID, &continuation, &originalOwnerID, &originalOwnerHash,
+		&recoveryLive, &registeredJobID, &originalOwnerID, &originalOwnerHash,
 	); err != nil || !recoveryLive || registeredJobID != job.ID {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
-	if continuation != recoveryContinuationMigrationHandoff &&
-		(identity.OwnerID != originalOwnerID || identity.OwnerTokenSHA256 != originalOwnerHash) {
+	if identity.OwnerID != originalOwnerID || identity.OwnerTokenSHA256 != originalOwnerHash {
 		return Job{}, lockedTurn{}, ErrAgentTurnRecoveryFenceLost
 	}
 	if err := lockAgentTurnSlots(ctx, tx); err != nil {
@@ -1944,7 +1942,7 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	turn_number, execution_epoch, control_revision, status, mutation_admission_open, active,
 	COALESCE(owner_id, ''), COALESCE(owner_token::text, ''), lease_expires_at IS NOT NULL,
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
-	stage_id, COALESCE(purpose, ''), COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
+	stage_id, purpose, COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
 	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration, created_at
 FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
 		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,

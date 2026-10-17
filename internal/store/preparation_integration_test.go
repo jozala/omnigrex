@@ -123,9 +123,9 @@ VALUES ($1, $2, 'owner', 'repo', $3, $3, 'ACTIVE')`, workflowSeed.id, workflowSe
 		_, err := pool.Exec(ctx, `
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, $3, 'ACTIVE', 'default', 'runtime', '1', 'runtime:image', $4)`,
+VALUES ($1, $2, $3, 'ACTIVE', 'default', 'pi-rpc', 'v2', repeat('a', 64), 'runtime:image', $4)`,
 			id, workflowID, participantRole, statePath)
 		return err
 	}
@@ -232,7 +232,7 @@ func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) 
 	preparation.Developer.Binding.AgentProfileName = "alternate-developer"
 	preparation.Developer.ProfilePath = ".omnigrex/team/alternate-developer.md"
 	preparation.Developer.Profile.Config = agentProfileConfig("alternate-developer", workflow.RoleDeveloper,
-		"pi-rpc/v1", "openai/shared", "", 40, "Perform development.", nil)
+		"pi-rpc/v2", "openai/shared", "", 40, "Perform development.", nil)
 	preparation.Stages = map[workflow.StageID]store.ParticipantPreparation{
 		workflow.StageImplementation: preparation.Developer,
 		followup:                     preparation.Developer,
@@ -305,7 +305,7 @@ INSERT INTO agent_assignments (
     runtime_image_digest, runtime_state_path
 )
 VALUES ('60000000-0000-4000-8000-000000000094', $1, 'REVIEWER', 2, 'ACTIVE',
-        'alternate-developer', 'pi-rpc', 'v1', $2, 'sha256:reviewer',
+        'alternate-developer', 'pi-rpc', 'v2', $2, 'sha256:reviewer',
         'assignment-60000000-0000-4000-8000-000000000094/runtime-state')`,
 		application.WorkflowID, strings.Repeat("d", 64)); err == nil {
 		t.Fatal("cross-Role Agent Profile sharing succeeded")
@@ -378,7 +378,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	architectPreparation := preparation.Developer
 	architectPreparation.Binding.AgentProfileName = "architect"
 	architectPreparation.ProfilePath = ".omnigrex/team/architect.md"
-	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "pi-rpc/v1", "openai/architect", "", 40, "Design the change.", nil)
+	architectPreparation.Profile.Config = agentProfileConfig("architect", architect, "pi-rpc/v2", "openai/architect", "", 40, "Design the change.", nil)
 	preparation = store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{architecture: architectPreparation}}
 
 	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), preparation)
@@ -510,11 +510,11 @@ func TestPrepareAgentTurnAllocatesCreatingSessionBeforeFencedRuntimeBind(t *test
   "permissions": {"read": "allow", "edit": "deny"},
   "path": ".omnigrex/team/developer.md",
   "name": "developer",
-  "runtime": "pi-rpc/v1",
+  "runtime": "pi-rpc/v2",
   "model": "openai/gpt-5.2",
   "instructions": "Perform development."
 }`)
-	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "openai/gpt-5.2", "", 40, "Perform development.", nil)
+	wantProfileConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "openai/gpt-5.2", "", 40, "Perform development.", nil)
 	spec.Developer.TurnConfiguration = json.RawMessage(`{"directories":{"build":"turn"},"environment":{"GOTMPDIR":"build"}}`)
 	spec.Reviewer.Profile = store.AgentProfileSnapshot{}
 	prepared, err := database.PrepareAgentTurn(ctx, preparationJob, spec)
@@ -771,7 +771,7 @@ INSERT INTO agent_assignments (
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
 VALUES ('65000000-0000-4000-8000-0000000000a1', $1, 'DEVELOPER', 'ACTIVE',
-        'developer', 'pi-rpc', 'v1', repeat('a', 64), 'sha256:developer-runtime',
+        'developer', 'pi-rpc', 'v2', repeat('a', 64), 'sha256:developer-runtime',
         'assignment-65000000-0000-4000-8000-0000000000a1/runtime-state')`, application.WorkflowID); err != nil {
 		t.Fatalf("seed Developer Assignment: %v", err)
 	}
@@ -1242,7 +1242,7 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000007", "62000000-0000-4000-8000-000000000007")
 	lease := claimPreparationJob(t, database, ctx)
-	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
+	baseConfig := agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "openai/gpt-5.2", "", 40, "Implement safely.", nil)
 	for name, invalidate := range map[string]func(*store.AgentTurnPreparationSpec){
 		"Developer binding":            func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeImageDigest = "" },
 		"missing Runtime Profile hash": func(spec *store.AgentTurnPreparationSpec) { spec.Developer.Binding.RuntimeProfileContentSHA256 = "" },
@@ -1266,20 +1266,20 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 		t.Fatal(err)
 	}
 	invalidConfigs := map[string]func(map[string]any){
-		"missing path":       func(config map[string]any) { delete(config, "path") },
-		"mismatched path":    func(config map[string]any) { config["path"] = ".omnigrex/team/reviewer.md" },
-		"mismatched name":    func(config map[string]any) { config["name"] = "reviewer" },
-		"mismatched role":    func(config map[string]any) { config["role"] = workflow.RoleReviewer },
-		"missing runtime":    func(config map[string]any) { delete(config, "runtime") },
-		"removed runtime":    func(config map[string]any) { config["runtime"] = "opencode/v1" },
-		"invalid model":      func(config map[string]any) { config["model"] = "gpt-5.2" },
-		"removed steps":      func(config map[string]any) { config["steps"] = 0 },
-		"empty permissions":  func(config map[string]any) { config["permissions"] = map[string]string{} },
-		"blank instructions": func(config map[string]any) { config["instructions"] = " " },
-		"removed variant":    func(config map[string]any) { config["variant"] = "high" },
-		"invalid thinking":   func(config map[string]any) { config["thinking"] = " " },
-		"unknown field":      func(config map[string]any) { config["extra"] = true },
-		"credential":         func(config map[string]any) { config["permissions"] = map[string]string{"api_token": "allow"} },
+		"missing path":        func(config map[string]any) { delete(config, "path") },
+		"mismatched path":     func(config map[string]any) { config["path"] = ".omnigrex/team/reviewer.md" },
+		"mismatched name":     func(config map[string]any) { config["name"] = "reviewer" },
+		"mismatched role":     func(config map[string]any) { config["role"] = workflow.RoleReviewer },
+		"missing runtime":     func(config map[string]any) { delete(config, "runtime") },
+		"unsupported runtime": func(config map[string]any) { config["runtime"] = "unsupported/v1" },
+		"invalid model":       func(config map[string]any) { config["model"] = "gpt-5.2" },
+		"removed steps":       func(config map[string]any) { config["steps"] = 0 },
+		"empty permissions":   func(config map[string]any) { config["permissions"] = map[string]string{} },
+		"blank instructions":  func(config map[string]any) { config["instructions"] = " " },
+		"removed variant":     func(config map[string]any) { config["variant"] = "high" },
+		"invalid thinking":    func(config map[string]any) { config["thinking"] = " " },
+		"unknown field":       func(config map[string]any) { config["extra"] = true },
+		"credential":          func(config map[string]any) { config["permissions"] = map[string]string{"api_token": "allow"} },
 	}
 	for name, mutate := range invalidConfigs {
 		t.Run(name, func(t *testing.T) {
@@ -1313,7 +1313,7 @@ func TestPrepareAgentTurnRollsBackInvalidProfileAndPreservesPathValidation(t *te
 			}
 		})
 	}
-	assignments, listErr := database.ListAgentAssignments(ctx, application.WorkflowID)
+	assignments, listErr := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if listErr != nil || len(assignments) != 0 {
 		t.Fatalf("Assignments after rolled-back preparation = (%#v, %v), want none", assignments, listErr)
 	}
@@ -1390,7 +1390,7 @@ VALUES ($1, $2, 9123, 'owner', 'repo', $3, $3, 'OPEN', 'main', 'base', 'feature'
 				profile = &spec.Reviewer.Profile
 				name, role, model, instructions = "reviewer", workflow.RoleReviewer, "anthropic/reviewer", "Perform review."
 			}
-			profile.Config = agentProfileConfig(name, role, "pi-rpc/v1", model, test.thinking, 0, instructions, test.permissions)
+			profile.Config = agentProfileConfig(name, role, "pi-rpc/v2", model, test.thinking, 0, instructions, test.permissions)
 
 			if _, err := database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, agentprofile.ErrInvalidProfile) {
 				t.Fatalf("PrepareAgentTurn() error = %v, want Agent Profile policy rejection", err)
@@ -1584,20 +1584,20 @@ func TestHumanControlIsUniquePerWorkflow(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-SELECT $2, workflow_id, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v1',
-       'sha256:test', $3
+SELECT $2, workflow_id, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v2',
+       runtime_profile_content_sha256, runtime_image_digest, $3
 FROM agent_sessions WHERE id = $1`, human.ID, participantID, "assignment-"+participantID+"/runtime-state"); err != nil {
 		t.Fatalf("insert second Agent Participant: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
     id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status, runtime_capabilities
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1::uuid, $2, 1, ($1::uuid)::text, 'pi-rpc', 'v1', 'sha256:test', $3, 'ACTIVE', $4)`,
-		sessionID, participantID, "assignment-"+participantID+"/runtime-state", preparedRuntimeReady(sessionID).Capabilities); err != nil {
+VALUES ($1::uuid, $2, 1, ($1::uuid)::text, 'pi-rpc', 'v2', $5, $6, $3, 'ACTIVE', $4)`,
+		sessionID, participantID, "assignment-"+participantID+"/runtime-state", preparedRuntimeReady(sessionID).Capabilities, human.RuntimeProfileContentSHA256, human.RuntimeImageDigest); err != nil {
 		t.Fatalf("insert second Agent Session: %v", err)
 	}
 
@@ -1979,7 +1979,7 @@ WHERE workflow_id = $1`, application.WorkflowID); err != nil {
 		newGeneration.Assignment.Generation != 2 || newGeneration.Session.Status != store.AgentSessionCreating {
 		t.Fatalf("new-generation preparation = %#v", newGeneration)
 	}
-	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
+	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if err != nil || len(assignments) != 2 {
 		t.Fatalf("all Participant generations = (%#v, %v), want two lazy records", assignments, err)
 	}
@@ -2034,11 +2034,11 @@ func TestRuntimeProfilePlatformDriftCreatesConfigurationConflictAndHumanHandoff(
 
 	application := triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000011", "62000000-0000-4000-8000-000000000011")
 	const image = "registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	amd64Profile, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
+	amd64Profile, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	arm64Profile, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	arm64Profile, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2271,14 +2271,14 @@ WHERE workflow.id = $1`, application.WorkflowID, attemptID).Scan(
 				preparationStatus, preparationReason, handoffReason, handoffDiagnostic)
 		}
 
-		assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
+		assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 		if err != nil || len(assignments) != 2 {
-			t.Fatalf("ListAgentAssignments() = (%#v, %v), want exact Role pair", assignments, err)
+			t.Fatalf("ListAgentParticipants() = (%#v, %v), want exact Role pair", assignments, err)
 		}
 		for _, assignment := range assignments {
 			if assignment.ID != assignmentIDs[assignment.Role] ||
-				assignment.Status != store.AgentAssignmentWaitingForHuman ||
-				assignment.AssignmentRuntimeBinding != bindings[assignment.Role] {
+				assignment.Status != store.AgentParticipantWaitingForHuman ||
+				assignment.ParticipantRuntimeBinding != bindings[assignment.Role] {
 				t.Errorf("configuration-conflicted Assignment = %#v, want unchanged waiting %s", assignment, assignmentIDs[assignment.Role])
 			}
 		}
@@ -2325,9 +2325,9 @@ INSERT INTO agent_assignments (
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
 VALUES ('63000000-0000-4000-8000-000000000021', $1, 'DEVELOPER', 'ACTIVE',
-        'developer', 'pi-rpc', 'v1', repeat('a', 64), 'sha256:developer', 'failure/developer'),
+        'developer', 'pi-rpc', 'v2', repeat('a', 64), 'sha256:developer', 'failure/developer'),
        ('63000000-0000-4000-8000-000000000022', $1, 'REVIEWER', 'ACTIVE',
-        'reviewer', 'pi-rpc', 'v1', repeat('b', 64), 'sha256:reviewer', 'failure/reviewer')`, application.WorkflowID); err != nil {
+        'reviewer', 'pi-rpc', 'v2', repeat('b', 64), 'sha256:reviewer', 'failure/reviewer')`, application.WorkflowID); err != nil {
 		t.Fatalf("seed relevant Assignments: %v", err)
 	}
 	lease := claimPreparationJob(t, database, ctx)
@@ -2460,17 +2460,17 @@ FROM agent_assignments WHERE workflow_id = $1`, application.WorkflowID).Scan(&wa
 
 	prepared := prepareTurn(t, database, ctx, retriggered, "retriggered-profile", "openai/retriggered")
 	if prepared.Assignment.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Assignment.Generation != 1 ||
-		prepared.Assignment.Status != store.AgentAssignmentActive || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
+		prepared.Assignment.Status != store.AgentParticipantActive || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
 		t.Fatalf("retriggered preparation = %#v", prepared)
 	}
-	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
+	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if err != nil || len(assignments) != 2 {
-		t.Fatalf("ListAgentAssignments() = (%#v, %v), want original pair", assignments, err)
+		t.Fatalf("ListAgentParticipants() = (%#v, %v), want original pair", assignments, err)
 	}
 	for _, assignment := range assignments {
-		wantStatus := store.AgentAssignmentWaitingForHuman
+		wantStatus := store.AgentParticipantWaitingForHuman
 		if assignment.Role == workflow.RoleDeveloper {
-			wantStatus = store.AgentAssignmentActive
+			wantStatus = store.AgentParticipantActive
 		}
 		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != wantStatus {
 			t.Errorf("reactivated Participant = %#v, want only selected Stage Participant active", assignment)
@@ -2584,17 +2584,17 @@ WHERE workflow_id = $1 AND kind = 'PREPARE_AGENT_TURN'`, application.WorkflowID)
 	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000029", "62000000-0000-4000-8000-000000000030")
 	retriggered := claimPreparationJob(t, database, ctx)
 	prepared := prepareTurn(t, database, ctx, retriggered, "resolved-profile", "openai/resolved")
-	if prepared.Assignment.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Assignment.Status != store.AgentAssignmentActive {
+	if prepared.Assignment.ID != assignmentIDs[workflow.RoleDeveloper] || prepared.Assignment.Status != store.AgentParticipantActive {
 		t.Fatalf("retriggered preparation = %#v, want original Developer Assignment", prepared)
 	}
-	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
+	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if err != nil || len(assignments) != 2 {
-		t.Fatalf("ListAgentAssignments() = (%#v, %v), want original pair", assignments, err)
+		t.Fatalf("ListAgentParticipants() = (%#v, %v), want original pair", assignments, err)
 	}
 	for _, assignment := range assignments {
-		wantStatus := store.AgentAssignmentWaitingForHuman
+		wantStatus := store.AgentParticipantWaitingForHuman
 		if assignment.Role == workflow.RoleDeveloper {
-			wantStatus = store.AgentAssignmentActive
+			wantStatus = store.AgentParticipantActive
 		}
 		if assignment.ID != assignmentIDs[assignment.Role] || assignment.Status != wantStatus {
 			t.Errorf("reactivated Participant = %#v, want only selected Stage Participant active", assignment)
@@ -2764,7 +2764,7 @@ GROUP BY workflow.id`, application.WorkflowID).Scan(&assignmentCount, &workflowS
 	if prepared.Assignment.Role != workflow.RoleDeveloper || prepared.Assignment.Generation != 1 || prepared.Turn.Purpose != workflow.TurnPurposeReactivation {
 		t.Fatalf("retriggered preparation = %#v, want first-generation Developer reactivation", prepared)
 	}
-	assignments, err := database.ListAgentAssignments(ctx, application.WorkflowID)
+	assignments, err := database.ListAgentParticipants(ctx, application.WorkflowID)
 	if err != nil || len(assignments) != 1 {
 		t.Fatalf("retriggered Participants = (%#v, %v), want only Developer", assignments, err)
 	}
@@ -2810,20 +2810,20 @@ func preparationSpec(commitSHA, developerModel string) store.AgentTurnPreparatio
 	developerHash := sha256.Sum256([]byte(commitSHA))
 	reviewerHash := sha256.Sum256([]byte(commitSHA + "-reviewer"))
 	spec := store.AgentTurnPreparationSpec{
-		Developer: store.RolePreparation{
+		Developer: store.ParticipantPreparation{
 			ProfilePath: ".omnigrex/team/developer.md",
 			Binding:     bindings[workflow.RoleDeveloper],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA, ContentSHA256: developerHash[:],
-				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", developerModel, "", 40, "Perform development.", nil),
+				Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", developerModel, "", 40, "Perform development.", nil),
 			},
 		},
-		Reviewer: store.RolePreparation{
+		Reviewer: store.ParticipantPreparation{
 			ProfilePath: ".omnigrex/team/reviewer.md",
 			Binding:     bindings[workflow.RoleReviewer],
 			Profile: store.AgentProfileSnapshot{
 				CommitSHA: commitSHA + "-reviewer", ContentSHA256: reviewerHash[:],
-				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "anthropic/reviewer", "", 40, "Perform review.", nil),
+				Config: agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "anthropic/reviewer", "", 40, "Perform review.", nil),
 			},
 		},
 	}
@@ -2894,15 +2894,15 @@ func settleAcquiredTurn(t *testing.T, database *store.Store, ctx context.Context
 	}
 }
 
-func preparationBindings() map[workflow.Role]store.AssignmentRuntimeBinding {
-	return map[workflow.Role]store.AssignmentRuntimeBinding{
+func preparationBindings() map[workflow.Role]store.ParticipantRuntimeBinding {
+	return map[workflow.Role]store.ParticipantRuntimeBinding{
 		workflow.RoleDeveloper: {
-			AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+			AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 			RuntimeProfileContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			RuntimeImageDigest:          "sha256:developer-runtime",
 		},
 		workflow.RoleReviewer: {
-			AgentProfileName: "reviewer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+			AgentProfileName: "reviewer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 			RuntimeProfileContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			RuntimeImageDigest:          "sha256:reviewer-runtime",
 		},
@@ -2915,7 +2915,7 @@ func agentProfileConfig(name string, role workflow.Role, _ string, model, thinki
 	}
 	profile := map[string]any{
 		"name": name, "path": ".omnigrex/team/" + name + ".md", "role": role,
-		"runtime": "pi-rpc/v1", "model": model,
+		"runtime": "pi-rpc/v2", "model": model,
 		"permissions": permissions, "instructions": instructions,
 	}
 	if thinking != "" {

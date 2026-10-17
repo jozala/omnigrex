@@ -43,7 +43,7 @@ WITH stages AS (
     WHERE job.kind = 'RUN_AGENT_TURN'
       AND workflow.status IN ('DEVELOPING', 'REVIEWING') AND attempt.active
       AND participant.status = 'ACTIVE' AND session.control_owner = 'AUTOMATION'
-      AND (session.status = 'ACTIVE' OR (session.status = 'CREATING' AND session.acp_session_id IS NULL))
+      AND session.status IN ('ACTIVE', 'CREATING')
       AND turn.active AND turn.status IN ('QUEUED', 'STARTING')
       AND turn.agent_session_id = session.id AND turn.workflow_attempt_id = attempt.id
       AND turn.control_revision = session.control_revision

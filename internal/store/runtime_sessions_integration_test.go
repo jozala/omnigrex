@@ -24,8 +24,8 @@ func TestDurableRuntimeSessionReservationAndActivationAreFenced(t *testing.T) {
 	_ = triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000001011", "62000000-0000-4000-8000-000000001011")
 	spec := preparationSpec("pi-profile", "diagnostic/controlled")
 	spec.Developer.Binding.RuntimeProfileName = "pi-rpc"
-	spec.Developer.Binding.RuntimeProfileVersion = "v1"
-	spec.Developer.Profile.Config = json.RawMessage(`{"name":"developer","path":".omnigrex/team/developer.md","role":"DEVELOPER","runtime":"pi-rpc/v1","model":"diagnostic/controlled","thinking":"off","permissions":{"read":"allow"},"instructions":"Perform development."}`)
+	spec.Developer.Binding.RuntimeProfileVersion = "v2"
+	spec.Developer.Profile.Config = json.RawMessage(`{"name":"developer","path":".omnigrex/team/developer.md","role":"DEVELOPER","runtime":"pi-rpc/v2","model":"diagnostic/controlled","thinking":"off","permissions":{"read":"allow"},"instructions":"Perform development."}`)
 	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), spec)
 	if err != nil {
 		t.Fatal(err)

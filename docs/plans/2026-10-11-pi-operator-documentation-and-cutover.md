@@ -4,7 +4,7 @@
 
 The [Step 17 release record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) supersedes the historical pending-publication status below.
 The merged Pi-only release passed both-backend CI, image publication, and both exact published-image deployment smokes.
-The operator subsequently confirmed a fresh Pi/Microsandbox installation and a [live Compose-backed Work Item](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
+The operator subsequently confirmed a fresh Pi/Microsandbox installation and a [live Compose-backed Work Item](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
 The historical-release rehearsal was attempted but stopped at source-bundle isolation validation before stack startup; the operator chose to skip it and did not report a completed production backup/restore drill.
 The source-fixture rehearsal evidence in this document remains valid for its recorded scope, but the full published-release reset/recovery gate is not claimed complete.
 

@@ -345,7 +345,7 @@ FROM job_attempts WHERE job_id = $1 AND attempt_number = $2`,
 		diagnostic = RuntimeOOMDiagnostic
 	}
 
-	if continuation == recoveryContinuationMutationHandoff || continuation == recoveryContinuationMigrationHandoff ||
+	if continuation == recoveryContinuationMutationHandoff ||
 		continuation == recoveryContinuationDefinitionHandoff {
 		result, err := tx.Exec(ctx, `
 UPDATE agent_turns

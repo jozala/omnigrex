@@ -41,7 +41,7 @@ run = "go test -race ./..."
 [tasks.test-integration]
 description = "Run Docker-backed integration tests"
 depends = ["pi-image"]
-run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/deployment"
+run = "go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment"
 
 [tasks.test-compose]
 description = "Run disposable Pi full-stack deployment, persistence, webhook, and readiness gates"
@@ -130,7 +130,7 @@ docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
 '''
 
 [tasks.test-pi-live]
-description = "Run bounded live OpenCode Go and OpenAI API-key checks using an explicitly supplied auth file"
+description = "Run bounded live opencode-go and OpenAI API-key checks using an explicitly supplied auth file"
 run = '''
 : "${OMNIGREX_PI_LIVE_AUTH_FILE:?set the local path to a Pi API-key auth file}"
 OMNIGREX_PI_FEASIBILITY=1 go test -race -tags=integration -timeout 25m -count=1 -v ./experiments/pi -run '^TestPiLiveProviders$'
@@ -166,14 +166,6 @@ run = "OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
 description = "Smoke-test the Pi image-only Linux/KVM bundle on the daemon host"
 run = "OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
 
-[tasks.test-pi-cutover]
-description = "Rehearse isolated OpenCode reset, Pi Docker deployment, and coordinated recovery on the daemon host"
-run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh"
-
-[tasks.test-pi-microsandbox-cutover]
-description = "Rehearse the same reset and Pi coordinated recovery on the Linux/KVM daemon host"
-run = "OMNIGREX_PI_CUTOVER_REHEARSAL=1 OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh"
-
 [tasks.compose-check]
 description = "Validate the Docker Compose configuration"
 run = '''
@@ -182,8 +174,8 @@ OMNIGREX_SECRET_GID=1 \
 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 \
 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/omnigrex/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_PI_RPC_V1_IMAGE=registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 \
+OMNIGREX_PI_IMAGE=registry.example/omnigrex/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_PLATFORM=linux/amd64 \
 OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null \
 OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null \
@@ -192,16 +184,16 @@ OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
 docker compose config --quiet
 OMNIGREX_SECRET_GID=1 OMNIGREX_DOCKER_GID=0 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_PI_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
 OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \
 docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-docker.yaml config --quiet
 OMNIGREX_SECRET_GID=1 OMNIGREX_MICROSANDBOX_KVM_GID=2 \
 OMNIGREX_ORCHESTRATOR_IMAGE=registry.example/orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-OMNIGREX_PI_RPC_V1_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
+OMNIGREX_PI_IMAGE=registry.example/pi@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+OMNIGREX_PI_PLATFORM=linux/amd64 OMNIGREX_GITHUB_DEVELOPER_APP_ID=1 OMNIGREX_GITHUB_REVIEWER_APP_ID=2 \
 OMNIGREX_DATABASE_PASSWORD_FILE=/dev/null OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null \
 OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null \
 OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null \

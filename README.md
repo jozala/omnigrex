@@ -21,6 +21,7 @@ Human -> GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human
 - [Microsandbox feasibility experiment](./experiments/microsandbox/README.md)
 - [Pi RPC feasibility experiment](./experiments/pi/README.md)
 - [Pi and pluggable Execution Backend delivery plan](./docs/plans/2026-10-05-pi-and-pluggable-execution-backends.md)
+- [Clean supported release baseline](./docs/plans/2026-10-16-clean-runtime-baseline.md)
 - [Execution and agent boundary contracts](./docs/plans/2026-10-07-runtime-boundary-contracts.md)
 - [Location-independent workspace evidence](./docs/plans/2026-10-08-location-independent-workspaces.md)
 - [Retained-state bindings and recovery evidence](./docs/plans/2026-10-08-retained-state-bindings.md)
@@ -45,8 +46,9 @@ Follow the authoritative procedure in the [operator guide](./docs/operator-guide
 The [Pi deployment bundles](./docs/operator-guide.md#pi-operational-deployment) support Docker and Linux/amd64 Microsandbox with KVM using image-only deployment files.
 Docker supports trusted-repository execution; Microsandbox additionally supports hardware isolation and guest Docker, Compose, and Testcontainers.
 Select one backend per installation, without fallback or cross-backend state migration.
-The [published Pi release evidence](./docs/plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) records successful publication and exact-digest smoke on both backends for commit `3125265f30f5cbc97096babde01cbd8dae7388e5`.
-The [live Pi/Microsandbox exercise](./docs/dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) records installation validation, Compose-backed repository tests, and a Developer-to-Reviewer Workflow with a subsequent human-requested correction cycle.
+The [supported baseline](./docs/decisions/0024-establish-a-clean-supported-release-baseline.md) uses `pi-rpc/v2` and a fresh database/storage installation.
+Deploy one commit whose matching images have passed publication and exact-digest smoke on both backends.
+The [dogfooding record](./docs/dogfooding.md#current-baseline-validation) tracks live validation of that baseline after publication and operator deployment.
 
 ## Development
 
@@ -60,7 +62,7 @@ mise run check
 Build Pi with `mise run pi-image` and the Docker control plane with `mise run image`, or build `Dockerfile.microsandbox` on a Linux/amd64 builder.
 Use the [Pi deployment procedure](./docs/operator-guide.md#pi-operational-deployment) with actual registry digests for a configured local stack.
 The root `compose.yaml` and `.env.example` provide the Pi-only Docker development stack, with a source-built orchestrator and an exact registry-pinned Pi image.
-Set `OMNIGREX_PI_RPC_V1_IMAGE` and its matching platform, provision that image, and run `docker compose up --build --wait` after configuring the required secrets.
+Set `OMNIGREX_PI_IMAGE` and its matching platform, provision that image, and run `docker compose up --build --wait` after configuring the required secrets.
 For a locally built Pi environment, publish it to a development registry and select its resolved digest using the image procedure in the operator guide.
 Secret placement, GitHub Apps, ingress, image provisioning, and recovery procedures are authoritative in the [operator guide](./docs/operator-guide.md).
 

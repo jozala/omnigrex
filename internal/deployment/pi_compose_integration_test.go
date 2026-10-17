@@ -38,8 +38,8 @@ func TestPiOperatorExamplesPreserveComposeSelection(t *testing.T) {
 			}
 			files = append(files, "compose.instructions.yaml")
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployPiImage,
-				"OMNIGREX_PI_RPC_V1_PLATFORM":   "linux/amd64",
+				"OMNIGREX_PI_IMAGE":             testDeployPiImage,
+				"OMNIGREX_PI_PLATFORM":          "linux/amd64",
 				"OMNIGREX_MICROSANDBOX_KVM_GID": "992",
 			})
 			var selected []string
@@ -101,8 +101,8 @@ func TestPiDeployBackendRequirements(t *testing.T) {
 	for _, backend := range []string{"docker", "microsandbox"} {
 		t.Run(backend, func(t *testing.T) {
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":      testDeployPiImage,
-				"OMNIGREX_PI_RPC_V1_PLATFORM":   "linux/amd64",
+				"OMNIGREX_PI_IMAGE":             testDeployPiImage,
+				"OMNIGREX_PI_PLATFORM":          "linux/amd64",
 				"OMNIGREX_MICROSANDBOX_KVM_GID": "992",
 			})
 			var filtered []string
@@ -160,8 +160,8 @@ func TestPiDeployHealthcheckBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			environment := deploySmokeEnvironment("/dev/null", map[string]string{
-				"OMNIGREX_PI_RPC_V1_IMAGE":     testDeployPiImage,
-				"OMNIGREX_PI_RPC_V1_PLATFORM":  "linux/amd64",
+				"OMNIGREX_PI_IMAGE":            testDeployPiImage,
+				"OMNIGREX_PI_PLATFORM":         "linux/amd64",
 				"OMNIGREX_READINESS_TIMEOUT":   test.readiness,
 				"OMNIGREX_HEALTHCHECK_TIMEOUT": test.healthcheck,
 			})

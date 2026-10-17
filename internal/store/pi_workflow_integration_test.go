@@ -155,7 +155,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	settings := config.Config{ExecutionBackend: os.Getenv("OMNIGREX_PI_BACKEND"), DockerAgentNetwork: os.Getenv("OMNIGREX_PI_WORKFLOW_NETWORK"), WorkspaceVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_WORKSPACES"), RuntimeStateVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_STATES"), MiseVolume: os.Getenv("OMNIGREX_PI_WORKFLOW_TOOLS"), WorkspaceRoot: filepath.Join(root, "workspaces"), RuntimeStateRoot: filepath.Join(root, "state"), MiseRoot: filepath.Join(root, "tools"), MicrosandboxExecutable: "/usr/local/bin/msb", MicrosandboxFirmware: "/usr/local/lib/libkrunfw.so.5.6.1", MicrosandboxHome: "/tmp/msb-workflow", MicrosandboxNamespace: uuid.NewString(), MicrosandboxCPUs: 1, MicrosandboxRootDiskMiB: 4096, MCPEndpointURL: endpoint, AgentTurnExecutionTurnTimeout: 3 * time.Minute}
 	image, platform := workflowQualificationImage(t)
 	settings.ShutdownTimeout = 10 * time.Second
-	p, err := profile.NewPiV1(image, platform)
+	p, err := profile.NewPiV2(image, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if mode == "slow-bootstrap" || mode == "startup-timeout" {
 		// Deliberately slow repository-defined installation, without downloading
 		// tools or calling an external provider. The real Bootstrap runs this hook.
-		content := "[hooks]\npostinstall = \"sleep 32; touch /home/opencode/.local/share/omnigrex-tool-data/assignment/slow-bootstrap-complete\"\n"
+		content := "[hooks]\npostinstall = \"sleep 32; touch /home/omnigrex/.local/share/omnigrex-tool-data/assignment/slow-bootstrap-complete\"\n"
 		if err := os.WriteFile(filepath.Join(seed, "mise.toml"), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +240,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if mode == "startup-timeout" {
 		startupTimeout = 200 * time.Millisecond
 	}
-	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v1": pi.TurnAdapter{Store: database, StartupTimeout: startupTimeout}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
+	launcher, err := agentturn.NewLauncher(agentturn.LauncherConfig{Store: database, Registry: profile.Resolver{Catalog: registry.Catalog, Source: database}, Workspace: workspaces, Gateway: authority, Execution: factory, States: backend.States, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}, AgentAdapters: map[string]session.TurnAdapter{"pi-rpc/v2": pi.TurnAdapter{Store: database, StartupTimeout: startupTimeout}}, MemoryBytes: 512 << 20, Policies: configuration.Policies, Definition: configuration.Reducer.Definition(), PathEnvironmentAllowlist: allowedPaths})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func (p workflowQualificationProfiles) FetchRepositoryFile(_ context.Context, _,
 	if strings.Contains(path, "reviewer") {
 		role = "REVIEWER"
 	}
-	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v1\nmodel: controlled/workflow\npermissions:\n  read: allow\n  bash: allow\n---\nPerform the controlled Work Item.\n", strings.ToLower(role), role)), nil
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v2\nmodel: controlled/workflow\npermissions:\n  read: allow\n  bash: allow\n---\nPerform the controlled Work Item.\n", strings.ToLower(role), role)), nil
 }
 
 // Match this repository's approved Turn scratch and assignment cache requests.

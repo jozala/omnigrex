@@ -5,7 +5,6 @@ package store_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,25 +12,14 @@ import (
 	"github.com/jozala/omnigrex/internal/store/migrations"
 )
 
-func TestNeutralPromptMigrationPreservesHistoryAndEnforcesEvidenceShape(t *testing.T) {
+func TestNeutralPromptOutcomesEnforceEvidenceShape(t *testing.T) {
 	postgres := startPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	entries, err := migrations.Files.ReadDir(".")
-	if err != nil {
+	if err := migrations.Run(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	var earlier []string
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".sql") && entry.Name() < "000036_" {
-			earlier = append(earlier, entry.Name())
-		}
-	}
-	if len(earlier) != 35 {
-		t.Fatalf("pre-neutral migration count = %d, want 35", len(earlier))
-	}
-	applyRecordedMigrations(t, ctx, pool, earlier...)
 	fixture := seedAgentSession(t, pool, 2300)
 	const turnID = "96000000-0000-4000-8000-000000002300"
 	if _, err := pool.Exec(ctx, `INSERT INTO agent_turns (
@@ -40,8 +28,8 @@ func TestNeutralPromptMigrationPreservesHistoryAndEnforcesEvidenceShape(t *testi
     agent_profile_commit_sha, agent_profile_content_sha256,
     prompt_stop_reason, prompt_recorded_at, outcome, completed_at
 ) VALUES ($1, $2, $3, $4, 1, 1, $1, 'FAILED', FALSE, 1, 'INITIAL_DEVELOPMENT',
-          'historical-profile', decode(repeat('ab', 32), 'hex'),
-          'end_turn', clock_timestamp(), '{"stop_reason":"end_turn"}', clock_timestamp())`,
+          'current-profile', decode(repeat('ab', 32), 'hex'),
+          'completed', clock_timestamp(), '{"status":"completed"}', clock_timestamp())`,
 		turnID, fixture.workflowID, fixture.sessionID, fixture.attemptID); err != nil {
 		t.Fatal(err)
 	}
@@ -52,16 +40,8 @@ func TestNeutralPromptMigrationPreservesHistoryAndEnforcesEvidenceShape(t *testi
 			t.Fatalf("constraint violation = %v, want %s", err, constraint)
 		}
 	}
-	_, err = pool.Exec(ctx, `UPDATE agent_turns SET prompt_stop_reason = 'completed' WHERE id = $1`, turnID)
+	_, err := pool.Exec(ctx, `UPDATE agent_turns SET prompt_stop_reason = 'end_turn' WHERE id = $1`, turnID)
 	requireConstraint(err, "agent_turns_prompt_stop_reason_check")
-	if err := migrations.Run(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	var historical bool
-	if err := pool.QueryRow(ctx, `SELECT prompt_stop_reason = 'end_turn'
-    AND outcome = '{"stop_reason":"end_turn"}'::jsonb FROM agent_turns WHERE id = $1`, turnID).Scan(&historical); err != nil || !historical {
-		t.Fatalf("historical prompt was rewritten: preserved %t, error %v", historical, err)
-	}
 	for _, status := range []string{"completed", "limit_reached", "aborted"} {
 		if _, err := pool.Exec(ctx, `UPDATE agent_turns SET prompt_stop_reason = $2 WHERE id = $1`, turnID, status); err != nil {
 			t.Fatalf("neutral classification %q: %v", status, err)

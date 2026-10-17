@@ -7,7 +7,6 @@ Read the trust model before installing credentials or granting Docker access.
 
 The Pi deployment consists of one Docker Compose control-plane stack running the orchestrator and PostgreSQL, with disposable Pi Runtime Processes on the selected Docker or Microsandbox Execution Backend.
 Pi is the only supported coding-agent runtime in the current source and deployment artifacts.
-The [release qualification](./plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) records both-backend CI, published exact-digest smoke, and operator-confirmed Pi/Microsandbox deployment.
 Select a commit with matching publication and both-backend exact-digest smoke evidence; a source build alone does not establish release qualification.
 Docker Engine API 1.45 or newer and Docker Compose v2 are required.
 The operator must provide public DNS and HTTPS ingress for GitHub webhooks.
@@ -24,6 +23,16 @@ Narrow provider privileges, configure spending limits, and rotate the complete b
 
 Omnigrex does not enforce required GitHub checks before `omnigrex:pr-ready`.
 Use GitHub branch protection when checks must be mandatory.
+
+### Supported release baseline
+
+This release supports `pi-rpc/v2`, guest tool storage under `/home/omnigrex`, and the clean initial database schema.
+Use `OMNIGREX_PI_IMAGE` and `OMNIGREX_PI_PLATFORM` for the exact matching golden image and platform.
+Initialize this baseline with fresh PostgreSQL, runtime-state, workspace, and tool volumes; Microsandbox also requires a fresh native home and namespace.
+Startup rejects incompatible migration history and unsupported Runtime Profile contracts without converting or deleting deployment state.
+Select published images from the same qualified commit as the deployment files.
+Future supported upgrades use the coordinated [upgrade](#upgrades) and [qualification](#pi-upgrade-and-state-recovery-qualification) procedures.
+The baseline policy is recorded in [decision 0024](./decisions/0024-establish-a-clean-supported-release-baseline.md).
 
 ### Backend selection and guarantees
 
@@ -200,7 +209,7 @@ See the [Session qualification evidence](./plans/2026-10-09-durable-pi-sessions.
 
 ## Pi Agent Turn qualification
 
-Pi Agent Turns use `pi-rpc/v1` on both supported backends.
+Pi Agent Turns use `pi-rpc/v2` on both supported backends.
 The [implementation evidence](./plans/2026-10-09-complete-pi-agent-turns.md) describes the precise delivery boundary.
 Use a disposable deployment and fresh database/storage for this qualification; existing retained Participants keep their original runtime/image bindings.
 
@@ -211,9 +220,9 @@ mise run pi-image
 ```
 
 Build/publish repository environments outside Omnigrex and configure their actual registry digest using the existing [image and deployment procedures](#deploy).
-Set both `OMNIGREX_PI_RPC_V1_IMAGE=REGISTRY/IMAGE@sha256:DIGEST` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64` or `linux/arm64` in the disposable deployment configuration.
+Set both `OMNIGREX_PI_IMAGE=REGISTRY/IMAGE@sha256:DIGEST` and `OMNIGREX_PI_PLATFORM=linux/amd64` or `linux/arm64` in the disposable deployment configuration.
 Both settings are required; mutable tags, incomplete bindings, and unsupported platforms are rejected.
-Explicit repository Profiles use `runtime: pi-rpc/v1`, an exact `provider/model`, optional supported thinking, and the permissions described in [Agent Profiles](#agent-profiles).
+Explicit repository Profiles use `runtime: pi-rpc/v2`, an exact `provider/model`, optional supported thinking, and the permissions described in [Agent Profiles](#agent-profiles).
 The credential bundle uses Pi-native literal API-key entries, with only the selected provider written into disposable runtime storage.
 Follow the existing secret placement and recovery procedures in this guide; keep provider keys and deployment metadata out of source control and retained-state backups.
 Backend selection uses the existing `OMNIGREX_EXECUTION_BACKEND` setting and the applicable backend prerequisites.
@@ -246,7 +255,7 @@ The [recovery evidence](./plans/2026-10-10-pi-failure-recovery.md) records the f
 ## Pi operational deployment
 
 The image-only Pi bundles support fresh installations, Pi upgrades, and isolated qualification deployments.
-Read the [published release evidence](./plans/2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) for verification and release status.
+Use a release whose matching images passed both backend gates and published-image deployment smoke.
 Startup and readiness reject unsupported runtime history even when its Participant and Session storage has already been collected.
 
 The release workflow publishes `linux/amd64` Pi 1.0.4 / Node 24.14.1 golden environments at `ghcr.io/jozala/omnigrex/pi:sha-<commit>` and the SDK-enabled control plane at `ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-<commit>`.
@@ -284,12 +293,12 @@ The default bundle volume and network names are fixed, so a different project na
 Parallel installations and qualification deployments must override every storage/network name and matching `OMNIGREX_*_VOLUME`, agent-network, and native namespace setting.
 
 There are no build contexts or source-checkout dependencies in these files.
-Resolve the matching published tags to registry digests as described in [Published Images And Deployment Files](#published-images-and-deployment-files), set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend's control-plane digest, and set `OMNIGREX_PI_RPC_V1_IMAGE` and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64`.
+Resolve the matching published tags to registry digests as described in [Published Images And Deployment Files](#published-images-and-deployment-files), set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend's control-plane digest, and set `OMNIGREX_PI_IMAGE` and `OMNIGREX_PI_PLATFORM=linux/amd64`.
 Keep all exact retained Participant images available according to [Repository Environments](#repository-environments).
 
 The backend overlay selects execution authority and settings; it does not replace the configured control-plane image.
 Docker requires the `ghcr.io/jozala/omnigrex/orchestrator` image, while Microsandbox requires `ghcr.io/jozala/omnigrex/orchestrator-microsandbox`, which includes `/usr/local/bin/msb` and the native SDK.
-The `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` variables select images only for qualification scripts; normal deployment uses `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_RPC_V1_IMAGE`.
+The `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` variables select images only for qualification scripts; normal deployment uses `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_IMAGE`.
 Exported shell variables take precedence over deployment `.env` values.
 Before provisioning images or starting the stack, inspect the effective selection without printing deployment secrets:
 
@@ -301,7 +310,7 @@ docker compose config --format json |
 Use the existing [GitHub Apps](#github-apps), [secret-file placement](#secrets), and [HTTPS ingress](#supported-deployment) procedures.
 The provider file must use literal Pi-native API keys, for example `{"openai":{"type":"api_key","key":"REPLACE_WITH_SECRET"}}`.
 Only API keys are supported; executable key references, environment references, OAuth entries, and missing selected providers fail preflight.
-Pi Profiles use `runtime: pi-rpc/v1`, `provider/model`, optional thinking, and the permissions described in [Agent Profiles](#agent-profiles).
+Pi Profiles use `runtime: pi-rpc/v2`, `provider/model`, optional thinking, and the permissions described in [Agent Profiles](#agent-profiles).
 Set `OMNIGREX_PI_STARTUP_TIMEOUT` in the selected Compose deployment's `.env` to budget repository bootstrap, initial Pi configuration delivery, and initial RPC readiness (default `10m`).
 The adapter starts this single deadline when it attaches to the Runtime Process; a shorter Agent Turn or diagnostic deadline still wins.
 After the first validated `get_state` response, each subsequent configuration RPC uses its ordinary 30-second deadline while the remaining startup deadline bounds preparation overall.
@@ -319,7 +328,7 @@ docker compose exec orchestrator /usr/local/bin/omnigrex doctor --repository OWN
 ```
 
 The bundle requires Docker Engine API 1.45 or newer and no KVM device or native SDK libraries.
-Docker-backed development on macOS remains supported with locally built arm64 images and `OMNIGREX_PI_RPC_V1_PLATFORM=linux/arm64`; the release images are initially amd64.
+Docker-backed development on macOS remains supported with locally built arm64 images and `OMNIGREX_PI_PLATFORM=linux/arm64`; the release images are initially amd64.
 The host Docker socket is exposed only to the control plane, never to Pi Execution Environments.
 
 ### Microsandbox bundle
@@ -370,6 +379,8 @@ They stage only deployment files and disposable fixture secrets into a separate 
 The same disposable gates retain full-stack coverage of authenticated durable and deduplicated webhooks, rejection of invalid signatures, ignored unsupported events, PostgreSQL and storage persistence after container recreation, agent-network isolation, and readiness failure/recovery while liveness stays healthy.
 External GitHub installation checks intentionally fail for fixture App identities; no live repository is mutated.
 The Microsandbox smoke additionally proves that removing KVM access rejects normal startup.
+Deployment smoke includes coordinated Pi database/state/capture recovery and native journal recovery when applicable, without any prior-installation fixture.
+These synthetic archive markers verify operational round-trip and ownership; the Workflow and upgrade gates separately verify actual Session Continuation and History Replay.
 Set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to actual registry digests to run the same smoke against published images without local builds.
 CI runs the shared suites on Docker and on an ephemeral `ubuntu-24.04` KVM runner, fails if the device is absent or unusable, and repeats image-only smoke against the published digests after publication.
 
@@ -379,7 +390,7 @@ Qualify Pi-to-Pi Session Continuation and History Replay on isolated copies befo
 Read the [implementation evidence](./plans/2026-10-10-pi-upgrades-and-state-recovery.md) and [qualification decision](./decisions/0017-bind-pi-qualification-to-backend-contracts.md).
 Retained Participants continue using their original image and immutable contract; qualification tests isolated Session copies.
 
-Run the reproducible Pi 1.0.3-to-1.0.4 fixture gates:
+Run the reproducible source-to-candidate fixture gates:
 
 ```sh
 mise run test-pi-upgrade
@@ -388,6 +399,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-upg
 
 Use the approved `DOCKER_HOST` connection for Linux/KVM qualification.
 The gates use fixture credentials and controlled model/MCP servers, create private storage volumes, and collect their own disposable environments.
+The source and candidate are independently built images using the supported `pi-rpc/v2` layout, with separate pinned Pi package inventories.
 Their synthetic image aliases are executable test evidence and cannot emit deployment artifacts.
 
 For release qualification, provision both actual exact registry images on the qualification Docker host and select an absent absolute output path:
@@ -402,7 +414,7 @@ mise run test-pi-upgrade
 ```
 
 Use the actual package versions and select `test-pi-microsandbox-upgrade` with its KVM prerequisites for native qualification.
-The candidate must satisfy the deployment's owned Pi v1 resource contract; a different resource/Node contract needs an explicit implementation and qualification change.
+The candidate must satisfy the deployment's owned Pi golden-resource contract; a different resource/Node contract needs an explicit implementation and qualification change.
 For a historical source whose bundle differs from the included Pi 1.0.3 fixture, set `OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE` to its trusted canonical Runtime Profile contract from the source release or recovery set.
 That definition must bind the supplied source image/platform and include its approved golden-resource inventory.
 Source, candidate, and restored-source launches undergo production resource validation against their respective immutable inventories before prompting.
@@ -573,7 +585,7 @@ docker image inspect "ghcr.io/jozala/omnigrex/${CONTROL_PLANE}:sha-${COMMIT}" --
 docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
 ```
 
-The inspected values must match the workflow summary and are recorded as `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_RPC_V1_IMAGE` in the private `.env`.
+The inspected values must match the workflow summary and are recorded as `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_IMAGE` in the private `.env`.
 The native backend also needs [exact registry provisioning](#microsandbox-bundle) into its own cache; a host Docker pull alone is insufficient.
 Until a commit has both-backend publication and post-publication smoke evidence, source fixtures do not establish a deployable Pi release.
 
@@ -742,7 +754,7 @@ The supported fields are:
 | --- | --- |
 | `name` | Repository-local stable identity using lowercase letters, digits, hyphens, or underscores |
 | `role` | Role ID referenced by the active Workflow Definition, such as `DEVELOPER` or `REVIEWER` |
-| `runtime` | `pi-rpc/v1` |
+| `runtime` | `pi-rpc/v2` |
 | `model` | Provider model in `provider/model` form |
 | `thinking` | Optional Pi level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; actual model support is verified |
 | `permissions` | Nonempty map of local permissions to `allow` or `deny` |
@@ -759,7 +771,7 @@ A Pi Developer Profile can use:
 ---
 name: developer
 role: DEVELOPER
-runtime: pi-rpc/v1
+runtime: pi-rpc/v2
 model: openai/gpt-4.1
 permissions:
   read: allow
@@ -943,8 +955,8 @@ A Pi no-clone deployment uses the published Pi golden digest for the selected qu
 Set the digest from the CI workflow summary and matching platform in `.env`:
 
 ```text
-OMNIGREX_PI_RPC_V1_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:...
-OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64
+OMNIGREX_PI_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:...
+OMNIGREX_PI_PLATFORM=linux/amd64
 ```
 
 Only `linux/amd64` is published initially.
@@ -1190,7 +1202,7 @@ After collection, a new trigger creates a new Assignment Generation whose Stage 
 Every active or retained Agent Session stays pinned to its original Runtime Profile image digest.
 Keep every referenced digest available until the corresponding state is garbage-collected.
 Retained Runtime State also has an immutable Backend family, contract version, and storage namespace binding.
-The existing Docker deployment claims its configured runtime-state volume namespace once after migration 000032; changing that configuration later fails instead of attaching different data.
+The installation atomically claims its Backend family, contract version, and complete storage namespace on first composition; changing that binding later fails instead of attaching different data.
 An initialized Participant state directory that disappears fails availability and launch checks instead of starting an empty conversation store.
 Restore the matching state before resuming work.
 
@@ -1287,7 +1299,7 @@ Create a unique private recovery-set directory, then write each artifact atomica
 ```
 
 The archive preserves numeric ownership, including Runtime Process UID and GID 10001.
-Migration 000032's Backend and versioned state metadata are part of the PostgreSQL dump and must be restored with the matching state volume.
+Backend ownership and versioned state metadata are part of the PostgreSQL dump and must be restored with the matching state volume.
 The workspace and mise volumes are reproducible caches and are not required for disaster recovery when no Agent Turn is active.
 The native image cache is re-provisioned from exact registry artifacts; disposable VM root disks, memory snapshots, guest tmpfs credentials, and tool scratch are excluded.
 A diagnostic-only native installation may have no dispatch journal; an empty journal archive is allowed only when the stopped ledger has no Agent Turns.
@@ -1448,7 +1460,7 @@ Create a coordinated backup before every application, PostgreSQL, or Runtime Pro
 ### Orchestrator-Only Upgrade
 
 An orchestrator-only upgrade keeps the same configured agent digest/platform, protected historical images, and compatibility artifact.
-Record the current commit and image references, download the target commit's common Pi bundle, selected backend overlay, and environment example, keep `OMNIGREX_PI_RPC_V1_IMAGE`, its platform, namespaces, and compatibility file unchanged, and update only the selected control-plane digest before validating Compose and deploying.
+Record the current commit and image references, download the target commit's common Pi bundle, selected backend overlay, and environment example, keep `OMNIGREX_PI_IMAGE`, its platform, namespaces, and compatibility file unchanged, and update only the selected control-plane digest before validating Compose and deploying.
 
 ```sh
 docker compose config --quiet
@@ -1473,7 +1485,7 @@ Use the backend-scoped [Pi upgrade qualification procedure](#pi-upgrade-and-stat
 Packaging a host-side qualification tool is out of scope.
 
 Transfer the resulting JSON file to the deployment host (for example with `scp`), place it at an absolute host path outside the downloaded deployment directory, and set `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` to that path.
-Set `OMNIGREX_PI_RPC_V1_IMAGE` to the candidate digest and its matching platform, provision that digest into the selected backend before startup, validate Compose, deploy, and run `doctor` for every repository.
+Set `OMNIGREX_PI_IMAGE` to the candidate digest and its matching platform, provision that digest into the selected backend before startup, validate Compose, deploy, and run `doctor` for every repository.
 Keep source and candidate digests available for every active and retained session.
 
 An in-place Runtime Profile rollback is unsupported after Agent Participants using the candidate Runtime Profile exist unless the reverse direction has also been qualified.

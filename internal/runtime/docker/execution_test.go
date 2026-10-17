@@ -25,7 +25,7 @@ func TestExecutionCompileOwnsLabelsPolicyAndParticipantStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Name != "omnigrex-turn-"+request.Key.AgentTurnID+"-epoch-9" || spec.Network != factory.Network || spec.Labels[RuntimeProfileIdentityLabel] != "pi-rpc/v1" {
+	if spec.Name != "omnigrex-turn-"+request.Key.AgentTurnID+"-epoch-9" || spec.Network != factory.Network || spec.Labels[RuntimeProfileIdentityLabel] != "pi-rpc/v2" {
 		t.Fatalf("compiled identity = %#v", spec)
 	}
 	if err := validateResources(EngineOptions{AgentNetwork: factory.Network, RuntimePolicy: policy}, spec); err != nil {
@@ -282,7 +282,7 @@ func (api *lostSetupDeletionAPI) ContainerRemove(ctx context.Context, id string,
 
 func executionTestRequest() execution.Request {
 	return execution.Request{
-		Key:   execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"},
+		Key:   execution.Key{AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001", AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"},
 		Image: testImage, Platform: execution.Platform{OS: "linux", Architecture: "arm64"}, User: "10001:10001", WorkingDir: "/workspace", Command: []string{"/bin/sh"}, MemoryBytes: 64 << 20, PIDsLimit: 32,
 	}
 }

@@ -4,7 +4,6 @@ package deployment
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 )
@@ -17,7 +16,7 @@ const (
 func deploySmokeEnvironment(secretFile string, additional map[string]string) []string {
 	overrides := map[string]string{
 		"OMNIGREX_ORCHESTRATOR_IMAGE":    testDeployOrchestratorImage,
-		"OMNIGREX_PI_RPC_V1_IMAGE":       testDeployPiImage,
+		"OMNIGREX_PI_IMAGE":              testDeployPiImage,
 		"OMNIGREX_AGENT_TURN_MEMORY_MIB": "1024",
 		"COMPOSE_FILE":                   "deploy/compose.pi.yaml:deploy/compose.pi-docker.yaml",
 		"COMPOSE_PROJECT_NAME":           "omnigrex-deploy-smoke",
@@ -43,7 +42,7 @@ func TestDeployComposeSmoke(t *testing.T) {
 	}
 	validator := config.Services["pi-image"]
 	orchestrator := config.Services["orchestrator"]
-	if validator.Image != testDeployPiImage || validator.Image != orchestrator.Environment["OMNIGREX_PI_RPC_V1_IMAGE"] {
+	if validator.Image != testDeployPiImage || validator.Image != orchestrator.Environment["OMNIGREX_PI_IMAGE"] {
 		t.Fatal("validator and Runtime Profile must select the same exact Pi digest")
 	}
 	for name, service := range config.Services {
@@ -52,11 +51,6 @@ func TestDeployComposeSmoke(t *testing.T) {
 			user = "70:70"
 		}
 		assertServiceSandbox(t, name, service, user)
-		for key := range service.Environment {
-			if strings.Contains(key, "OPENCODE") || key == "OMNIGREX_AGENT_IMAGE_REFERENCE" {
-				t.Errorf("obsolete runtime configuration %s", key)
-			}
-		}
 	}
 	assertSoleDockerSocketMount(t, config.Services, "orchestrator")
 	assertStableNetworks(t, config.Networks)

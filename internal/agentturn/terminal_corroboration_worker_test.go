@@ -137,8 +137,8 @@ func redirectTestPending() store.TerminalCorroborationContext {
 		Execution: store.AgentTurnExecutionContext{
 			WorkflowID: "workflow-1",
 			Repository: store.AgentTurnRepository{ID: 91, Owner: "acme", Name: "widgets"},
-			Assignment: store.AgentAssignment{ID: "participant-1", WorkflowID: "workflow-1", Status: store.AgentAssignmentActive, Role: workflow.RoleDeveloper,
-				RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"},
+			Assignment: store.AgentParticipant{ID: "participant-1", WorkflowID: "workflow-1", Status: store.AgentParticipantActive, Role: workflow.RoleDeveloper,
+				RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"},
 			Session: store.AgentSession{ID: "session-1", AgentAssignmentID: "participant-1"},
 			Turn: store.AgentTurn{
 				AgentTurnSpec: store.AgentTurnSpec{AgentSessionID: "session-1", WorkflowAttemptID: "attempt-old", ExpectedHeadSHA: "head-a", ControlRevision: 1},

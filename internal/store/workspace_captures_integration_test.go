@@ -185,24 +185,29 @@ func TestWorkspaceCaptureLedgerRejectsReinterpretationAndInvalidDurableKeys(t *t
 		}
 	}
 	// Session and Participant profile bindings must agree, not just match input.
-	// An unreserved Session permits constructing the mismatch without violating
-	// the unrelated immutable Pi runtime identity constraint.
-	inconsistent := seedCreatingAgentSession(t, pool, 1799)
-	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, inconsistent.turnSpec())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_profile_version = 'other' WHERE id = $1`, inconsistent.sessionID); err != nil {
-		t.Fatal(err)
-	}
-	newRef := ref
-	newRef.Request.OperationID = "new capture with inconsistent Session"
-	newRef.Request.Workspace.Key.AssignmentID = inconsistent.assignmentID
-	newRef.Request.Workspace.Key.AgentSessionID = inconsistent.sessionID
-	newRef.Request.Workspace.Key.AgentTurnID = turn.ID
-	newRef.Request.Workspace.Key.ExecutionEpoch = turn.ExecutionEpoch
-	if err := database.SealCapture(ctx, newRef); !errors.Is(err, execution.ErrConflict) {
-		t.Fatalf("inconsistent Session profile = %v", err)
+	// Legal same-version column values must not conceal a different full binding.
+	for index, mutation := range []struct{ name, query string }{
+		{"contract", `UPDATE agent_sessions SET runtime_profile_content_sha256 = repeat('b', 64) WHERE id = $1`},
+		{"image", `UPDATE agent_sessions SET runtime_image_digest = 'other-image' WHERE id = $1`},
+		{"state", `UPDATE agent_sessions SET runtime_state_path = 'other-state' WHERE id = $1`},
+	} {
+		inconsistent := seedCreatingAgentSession(t, pool, 1799+index)
+		turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, inconsistent.turnSpec())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, mutation.query, inconsistent.sessionID); err != nil {
+			t.Fatal(err)
+		}
+		newRef := ref
+		newRef.Request.OperationID = "new capture with inconsistent Session " + mutation.name
+		newRef.Request.Workspace.Key.AssignmentID = inconsistent.assignmentID
+		newRef.Request.Workspace.Key.AgentSessionID = inconsistent.sessionID
+		newRef.Request.Workspace.Key.AgentTurnID = turn.ID
+		newRef.Request.Workspace.Key.ExecutionEpoch = turn.ExecutionEpoch
+		if err := database.SealCapture(ctx, newRef); !errors.Is(err, execution.ErrConflict) {
+			t.Fatalf("inconsistent Session %s = %v", mutation.name, err)
+		}
 	}
 	// Existing evidence remains readable and retryable independently of admission.
 	if got, found, err := database.LoadCapture(ctx, ref.Request); err != nil || !found || got != ref {

@@ -428,7 +428,7 @@ func TestRecoverySettlementExhaustsInfrastructureBudgetIntoHumanHandoff(t *testi
 	triggerPreparationWorkflow(t, database, ctx, "78350000-0000-4000-8000-000000000001", "78350000-0000-4000-8000-000000000002")
 	profile := preparationSpec("second-failure-profile", "openai/second-failure")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "second-failure-profile", "openai/second-failure")
-	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "second-failure-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "second-failure-runtime")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestRecoveredTerminalMutationReplaysIntoFreshOutcomeReconciliation(t *testi
 	triggerPreparationWorkflow(t, database, ctx, "78370000-0000-4000-8000-000000000001", "78370000-0000-4000-8000-000000000002")
 	profile := preparationSpec("recovery-replay-profile", "openai/recovery-replay")
 	root := prepareTurn(t, database, ctx, claimPreparationJob(t, database, ctx), "recovery-replay-profile", "openai/recovery-replay")
-	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "recovery-replay-acp")
+	rootLease := acquireAndBindTurn(t, database, pool, ctx, root, "recovery-replay-runtime")
 	if err := database.OpenMutationAdmission(ctx, rootLease); err != nil {
 		t.Fatal(err)
 	}

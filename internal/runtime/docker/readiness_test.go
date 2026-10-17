@@ -6,9 +6,37 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jozala/omnigrex/internal/runtime/profile"
+
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
+
+func TestReadinessCheckRequiresAnExactRuntimeProfile(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		api := &fakeReadinessAPI{clientVersion: "1.45"}
+		options := testReadinessProbeOptions()
+		if mismatch {
+			bound, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("b", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			options.RuntimeProfile = bound
+		} else {
+			options.RuntimeProfile = profile.Profile{}
+		}
+		probe, err := newReadinessProbe(api, func() error { return nil }, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := probe.Check(context.Background()); err == nil {
+			t.Fatalf("readiness accepted missing/mismatched profile (mismatch=%t)", mismatch)
+		}
+		if api.image != "" || len(api.created) != 0 {
+			t.Fatal("invalid profile reached resource inspection or execution")
+		}
+	}
+}
 
 func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 	api := &fakeReadinessAPI{clientVersion: "1.45"}
@@ -20,7 +48,7 @@ func TestReadinessProbeChecksResourcesAndWritableSubpaths(t *testing.T) {
 	if err := probe.Check(context.Background()); err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if api.image != "omnigrex/pi:1.0.4" {
+	if api.image != readinessTestImage {
 		t.Errorf("inspected image = %q", api.image)
 	}
 	if api.network != "omnigrex-agent" {
@@ -61,7 +89,7 @@ func TestReadinessProbeInspectDoesNotCreateContainers(t *testing.T) {
 	if err := probe.Inspect(context.Background()); err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
-	if api.image != "omnigrex/pi:1.0.4" || api.network != "omnigrex-agent" || len(api.volumes) != 3 {
+	if api.image != readinessTestImage || api.network != "omnigrex-agent" || len(api.volumes) != 3 {
 		t.Fatalf("inspected resources = image %q, network %q, volumes %v", api.image, api.network, api.volumes)
 	}
 	if len(api.created) != 0 {
@@ -156,13 +184,20 @@ func TestReadinessProbeRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
+const readinessTestImage = "registry.example/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func testReadinessProbeOptions() ReadinessProbeOptions {
+	bound, err := profile.NewPiV2(readinessTestImage, profile.Platform{OS: "linux", Arch: "amd64"})
+	if err != nil {
+		panic(err)
+	}
 	return ReadinessProbeOptions{
 		AgentNetwork:       "omnigrex-agent",
 		WorkspaceVolume:    "omnigrex-workspaces",
 		RuntimeStateVolume: "omnigrex-runtime-state",
 		MiseVolume:         "omnigrex-mise",
-		AgentImage:         "omnigrex/pi:1.0.4",
+		AgentImage:         readinessTestImage,
+		RuntimeProfile:     bound,
 	}
 }
 

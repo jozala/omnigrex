@@ -205,7 +205,7 @@ FROM workflows WHERE id = $1`, checkpoint.WorkflowID).Scan(
 		&execution.Repository.Name, &execution.Issue.ID, &execution.Issue.Number); err != nil {
 		return TerminalCorroborationContext{}, err
 	}
-	participant, err := scanAgentAssignment(tx.QueryRow(ctx, agentAssignmentSelect+` WHERE id = $1`, lease.AgentAssignmentID))
+	participant, err := scanAgentParticipant(tx.QueryRow(ctx, agentParticipantSelect+` WHERE id = $1`, lease.AgentAssignmentID))
 	if err != nil {
 		return TerminalCorroborationContext{}, err
 	}

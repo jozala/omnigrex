@@ -1582,12 +1582,12 @@ SELECT (SELECT head_sha FROM change_proposals WHERE workflow_id = $1 AND active)
 			workflow.StageImplementation: {
 				ProfilePath: ".omnigrex/team/developer.md",
 				Binding: store.ParticipantRuntimeBinding{
-					AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+					AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 					RuntimeProfileContentSHA256: strings.Repeat("a", 64), RuntimeImageDigest: "sha256:test",
 				},
 				Profile: store.AgentProfileSnapshot{
 					CommitSHA: "redirect-profile", ContentSHA256: redirectDeveloperHash[:],
-					Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "provider/test", "", 10, "Develop redirect.", nil),
+					Config: agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "provider/test", "", 10, "Develop redirect.", nil),
 				},
 			},
 		},
@@ -1878,7 +1878,7 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	retrySpec := fixture.turnSpec()
 	retrySpec.Stage, retrySpec.Purpose, retrySpec.RetryOfTurnID = workflow.StageReview, workflow.TurnPurposeRetry, original.ID
 	retrySpec.ChangeProposalID, retrySpec.ExpectedHeadSHA = original.ChangeProposalID, original.ExpectedHeadSHA
-	retrySpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0,
+	retrySpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0,
 		"Review test instructions.", nil)
 	retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, retrySpec)
 	if err != nil {
@@ -2540,7 +2540,7 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	spec := fixture.turnSpec()
 	spec.Stage, spec.Purpose, spec.RetryOfTurnID = workflow.StageReview, workflow.TurnPurposeRetry, original.ID
 	spec.ChangeProposalID, spec.ExpectedHeadSHA = original.ChangeProposalID, original.ExpectedHeadSHA
-	spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0,
+	spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0,
 		"Review test instructions.", nil)
 	retry, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {

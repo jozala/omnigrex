@@ -21,8 +21,8 @@ type AgentTurnPreparationRuntimeBindings struct {
 	Stage       workflow.StageID
 	Role        workflow.Role
 	Participant *ParticipantRuntimeBinding
-	Developer   *AssignmentRuntimeBinding
-	Reviewer    *AssignmentRuntimeBinding
+	Developer   *ParticipantRuntimeBinding
+	Reviewer    *ParticipantRuntimeBinding
 }
 
 // ListProtectedRuntimeBindings returns distinct launchable immutable bindings for every generation
@@ -38,7 +38,7 @@ func (store *ReadOnlyStore) ListProtectedRuntimeBindings(ctx context.Context) ([
 
 func listProtectedRuntimeBindings(ctx context.Context, pool *pgxpool.Pool) ([]runtimeprofile.Binding, error) {
 	rows, err := pool.Query(ctx, `
-SELECT id::text, status, runtime_profile_name, runtime_profile_version,
+SELECT id::text, runtime_profile_name, runtime_profile_version,
        runtime_profile_content_sha256, runtime_image_digest
 FROM agent_assignments
 WHERE state_deleted_at IS NULL
@@ -46,32 +46,20 @@ ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("query protected Assignments: %w", err)
 	}
-	type protectedAssignment struct {
-		binding runtimeprofile.Binding
-		legacy  bool
-	}
-	assignments := make(map[string]protectedAssignment)
+	assignments := make(map[string]runtimeprofile.Binding)
 	protected := make(map[runtimeprofile.Binding]struct{})
 	for rows.Next() {
 		var id string
-		var status AgentAssignmentStatus
 		var binding runtimeprofile.Binding
-		var contentSHA256 *string
-		if err := rows.Scan(&id, &status, &binding.Name, &binding.Version, &contentSHA256, &binding.Image); err != nil {
+		if err := rows.Scan(&id, &binding.Name, &binding.Version, &binding.ContentSHA256, &binding.Image); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan protected Assignment: %w", err)
 		}
-		if contentSHA256 == nil {
-			// Phase 6 deliberately left this marker when legacy profile content was unreconstructable.
-			assignments[id] = protectedAssignment{legacy: true}
-			continue
-		}
-		binding.ContentSHA256 = *contentSHA256
 		if binding.Validate() != nil {
 			rows.Close()
 			return nil, fmt.Errorf("%w: invalid Assignment binding", ErrProtectedRuntimeConfigurationConflict)
 		}
-		assignments[id] = protectedAssignment{binding: binding}
+		assignments[id] = binding
 		protected[binding] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
@@ -95,19 +83,14 @@ ORDER BY session.id`)
 		var assignmentID string
 		var status AgentSessionStatus
 		var binding runtimeprofile.Binding
-		var contentSHA256 *string
-		if err := rows.Scan(&assignmentID, &status, &binding.Name, &binding.Version, &contentSHA256, &binding.Image); err != nil {
+		if err := rows.Scan(&assignmentID, &status, &binding.Name, &binding.Version, &binding.ContentSHA256, &binding.Image); err != nil {
 			return nil, fmt.Errorf("scan protected Agent Session: %w", err)
 		}
 		assignment, ok := assignments[assignmentID]
-		if !ok || assignment.legacy != (contentSHA256 == nil) {
+		if !ok {
 			return nil, fmt.Errorf("%w: Assignment and Agent Session bindings differ", ErrProtectedRuntimeConfigurationConflict)
 		}
-		if assignment.legacy {
-			continue
-		}
-		binding.ContentSHA256 = *contentSHA256
-		if status == AgentSessionDeleted || binding.Validate() != nil || binding != assignment.binding {
+		if status == AgentSessionDeleted || binding.Validate() != nil || binding != assignment {
 			return nil, fmt.Errorf("%w: Assignment and Agent Session bindings differ", ErrProtectedRuntimeConfigurationConflict)
 		}
 		protected[binding] = struct{}{}
@@ -186,9 +169,9 @@ WHERE stage_assignment.workflow_id = $1
 	result.Participant = &binding
 	switch payload.Role {
 	case workflow.RoleDeveloper:
-		result.Developer = (*AssignmentRuntimeBinding)(&binding)
+		result.Developer = &binding
 	case workflow.RoleReviewer:
-		result.Reviewer = (*AssignmentRuntimeBinding)(&binding)
+		result.Reviewer = &binding
 	}
 	return result, nil
 }

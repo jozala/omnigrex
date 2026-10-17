@@ -3,13 +3,9 @@
 set -eu
 backend="${OMNIGREX_PI_BACKEND:-docker}"
 case "$backend" in docker|microsandbox) ;; *) exit 2 ;; esac
-rehearsal="${OMNIGREX_PI_CUTOVER_REHEARSAL:-0}"
-case "$rehearsal" in 0|1) ;; *) exit 2 ;; esac
-source_root="$PWD"
-if [ "$rehearsal" = 1 ]; then
-  . "$source_root/scripts/pi-cutover-rehearsal.sh"
-  validate_legacy_source
-fi
+recovery="${OMNIGREX_PI_DEPLOY_RECOVERY:-1}"
+case "$recovery" in 0|1) ;; *) exit 2 ;; esac
+. "$PWD/scripts/pi-recovery-smoke.sh"
 namespace="pi-deploy-$(date +%s)-$$"
 directory="$(mktemp -d)"
 registry="$namespace-registry"
@@ -85,9 +81,6 @@ else
   docker pull --platform linux/amd64 "$pi"
 fi
 arch="$(docker image inspect "$pi" --format '{{.Architecture}}')"
-if [ "$rehearsal" = 1 ]; then
-  prepare_legacy_images
-fi
 cp deploy/compose.pi.yaml deploy/compose.pi-"$backend".yaml "$directory/"
 mkdir "$directory/secrets"
 openssl rand -hex 32 > "$directory/secrets/database-password"
@@ -111,8 +104,8 @@ cat > "$directory/.env" <<EOF
 COMPOSE_PROJECT_NAME=$namespace
 COMPOSE_FILE=compose.pi.yaml:compose.pi-$backend.yaml:smoke.yaml
 OMNIGREX_ORCHESTRATOR_IMAGE=$orchestrator
-OMNIGREX_PI_RPC_V1_IMAGE=$pi
-OMNIGREX_PI_RPC_V1_PLATFORM=linux/$arch
+OMNIGREX_PI_IMAGE=$pi
+OMNIGREX_PI_PLATFORM=linux/$arch
 OMNIGREX_SECRET_GID=$secret_gid
 OMNIGREX_DOCKER_GID=$docker_gid
 OMNIGREX_MICROSANDBOX_KVM_GID=$kvm_gid
@@ -152,9 +145,6 @@ EOF
 cd "$directory"
 # Compose canonicalizes secret paths, including macOS's /var -> /private/var.
 directory="$(pwd -P)"
-if [ "$rehearsal" = 1 ]; then
-  rehearse_legacy_reset
-fi
 if [ "$backend" = microsandbox ]; then
   cat > native-smoke.yaml <<EOF
 volumes:
@@ -176,7 +166,7 @@ EOF
 services:
   orchestrator:
     environment:
-      OMNIGREX_PI_RPC_V1_IMAGE: $image
+      OMNIGREX_PI_IMAGE: $image
 EOF
     rm pi.tar
   else
@@ -268,8 +258,8 @@ compose start postgres
 compose up --no-build --wait --wait-timeout 180
 curl -fsS "http://127.0.0.1:$port/readyz"
 printf 'PASS durable authenticated webhooks, persistent storage, network isolation and readiness (%s)\n' "$backend"
-if [ "$rehearsal" = 1 ]; then
-  rehearse_pi_recovery
+if [ "$recovery" = 1 ]; then
+  verify_pi_recovery
 fi
 if [ "$backend" = microsandbox ]; then
   cat > missing-kvm.yaml <<EOF

@@ -139,8 +139,8 @@ func (result CompatibilityResult) Validate() error {
 	if result.Platform.OS != "linux" || result.Platform.Arch != "amd64" && result.Platform.Arch != "arm64" {
 		return fmt.Errorf("unsupported platform %q/%q", result.Platform.OS, result.Platform.Arch)
 	}
-	if result.Source.Name != "pi-rpc" || result.Target.Name != "pi-rpc" || result.Source.Version != "v1" || result.Target.Version != "v1" {
-		return errors.New("Pi qualification requires Pi-to-Pi v1 bindings")
+	if result.Source.Name != PiRuntimeName || result.Target.Name != PiRuntimeName || result.Source.Version != PiRuntimeVersion || result.Target.Version != PiRuntimeVersion {
+		return errors.New("Pi qualification requires Pi-to-Pi v2 bindings")
 	}
 	if (result.BackendFamily != "docker" && result.BackendFamily != "microsandbox") || result.BackendContractVersion != 1 {
 		return errors.New("unsupported Pi qualification backend contract")

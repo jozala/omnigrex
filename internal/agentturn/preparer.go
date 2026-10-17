@@ -230,17 +230,17 @@ func (preparer *Preparer) verifyChangeProposal(ctx context.Context, request Requ
 	return head, observed.ID, int64(observed.Number), nil
 }
 
-func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.AssignmentRuntimeBinding, environment *repoenvironment.Definition) (store.RolePreparation, runtimeprofile.Profile, error) {
+func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA string, pinned *store.ParticipantRuntimeBinding, environment *repoenvironment.Definition) (store.ParticipantPreparation, runtimeprofile.Profile, error) {
 	name, version, ok := strings.Cut(profile.Runtime(), "/")
 	if !ok || name == "" || version == "" || strings.Contains(version, "/") {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, ErrInvalidRuntimeProfileReference
 	}
 	var resolved runtimeprofile.Profile
 	var err error
 	if pinned != nil && pinned.RuntimeProfileName == name && pinned.RuntimeProfileVersion == version {
 		resolver, ok := preparer.registry.(runtimeBindingResolver)
 		if !ok {
-			return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
+			return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve retained Runtime Profile %s/%s: %w", name, version, runtimeprofile.ErrNotFound)
 		}
 		resolved, err = resolver.ResolveBinding(runtimeprofile.Binding{
 			Name: pinned.RuntimeProfileName, Version: pinned.RuntimeProfileVersion,
@@ -264,26 +264,22 @@ func (preparer *Preparer) prepareRole(profile agentprofile.Profile, commitSHA st
 		}
 	}
 	if err != nil {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("resolve Runtime Profile %s/%s: %w", name, version, err)
 	}
 	contract := resolved.Contract()
 	if contract.Name != name || contract.Version != version {
-		return store.RolePreparation{}, runtimeprofile.Profile{}, fmt.Errorf("%w: requested %s/%s, resolved %s/%s", ErrRuntimeProfileReferenceMismatch, name, version, contract.Name, contract.Version)
+		return store.ParticipantPreparation{}, runtimeprofile.Profile{}, fmt.Errorf("%w: requested %s/%s, resolved %s/%s", ErrRuntimeProfileReferenceMismatch, name, version, contract.Name, contract.Version)
 	}
 	hash := profile.ContentSHA256()
-	return store.RolePreparation{
+	return store.ParticipantPreparation{
 		RuntimeContract: mustEncodeContract(contract),
 		ProfilePath:     profile.Path(),
-		Binding: store.AssignmentRuntimeBinding{
+		Binding: store.ParticipantRuntimeBinding{
 			AgentProfileName:            string(profile.Name()),
 			RuntimeProfileName:          contract.Name,
 			RuntimeProfileVersion:       contract.Version,
 			RuntimeProfileContentSHA256: resolved.ContentSHA256(),
 			RuntimeImageDigest:          contract.Image,
-		},
-		RuntimeCompatibility: store.RuntimeCompatibilityRequirement{
-			Platform: contract.Platform, StateContractVersion: runtimeprofile.StateContractVersion,
-			WorkspacePath: runtimeprofile.StableWorkspacePath,
 		},
 		Profile: store.AgentProfileSnapshot{
 			CommitSHA:     commitSHA,

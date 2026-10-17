@@ -27,8 +27,8 @@ RUN case "$TARGETARCH" in \
     curl -fsSL "https://github.com/sharkdp/fd/releases/download/v10.3.0/fd-v10.3.0-${fd_target}.tar.gz" -o /tmp/fd.tgz && echo "$fd_sha  /tmp/fd.tgz" | sha256sum -c - && \
     mkdir /tmp/rg /tmp/fd && tar -xzf /tmp/rg.tgz -C /tmp/rg --strip-components=1 && tar -xzf /tmp/fd.tgz -C /tmp/fd --strip-components=1 && \
     cp /tmp/rg/rg /tmp/fd/fd /usr/local/bin/ && rm -rf /tmp/rg /tmp/fd /tmp/rg.tgz /tmp/fd.tgz && \
-    mkdir -p /workspace /state /run/pi-agent /home/opencode/.local/share/mise /home/opencode/.local/share/omnigrex-tool-data && \
-    chown -R 10001:10001 /workspace /state /run/pi-agent /home/opencode && \
+    mkdir -p /workspace /state /run/pi-agent /home/omnigrex/.local/share/mise /home/omnigrex/.local/share/omnigrex-tool-data && \
+    chown -R 10001:10001 /workspace /state /run/pi-agent /home/omnigrex && \
     test "$(node --version)" = v24.14.1 && test "$(mise --version | cut -d ' ' -f 1)" = 2026.8.10 && git --version
 USER 10001:10001
 WORKDIR /workspace

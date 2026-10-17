@@ -5,7 +5,7 @@ package store_test
 import (
 	"context"
 	"errors"
-	"io/fs"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,83 +16,9 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/store/migrations"
+
 	"github.com/jozala/omnigrex/internal/workflow"
 )
-
-func TestRetainedStateMigrationPreservesLegacySessionBinding(t *testing.T) {
-	postgres := startPostgres(t)
-	pool := openPool(t, postgres.databaseURL(true))
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	files, err := fs.ReadDir(migrations.Files, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var earlier []string
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".sql") && file.Name() < "000032" {
-			earlier = append(earlier, file.Name())
-		}
-	}
-	if len(earlier) != 31 {
-		t.Fatalf("prior schema migrations = %d", len(earlier))
-	}
-	applyRecordedMigrations(t, ctx, pool, earlier...)
-	// This fixture exercises the pre-Pi schema, independently of current Session APIs.
-	fixture := agentFixture{
-		workflowID:   "40000000-0000-4000-8000-000000009951",
-		assignmentID: "40000000-0000-4000-8000-000000009953",
-		sessionID:    "40000000-0000-4000-8000-000000009954",
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO workflows (id, repository_id, repository_owner, repository_name, issue_id, issue_number, status)
-VALUES ($1, 995, 'owner', 'repo', 995, 995, 'ACTIVE')`, fixture.workflowID); err != nil {
-		t.Fatal(err)
-	}
-	image := "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64)
-	if _, err := pool.Exec(ctx, `INSERT INTO agent_assignments (
-    id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
-)
-VALUES ($1, $2, 'DEVELOPER', 'ACTIVE', 'developer', 'pi-rpc', 'v1', $3, $4, $5)`,
-		fixture.assignmentID, fixture.workflowID, strings.Repeat("b", 64), image, canonicalRuntimePath(fixture.assignmentID)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO agent_sessions (
-    id, agent_assignment_id, session_number, acp_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status
-)
-VALUES ($1, $2, 1, 'historical-session', 'pi-rpc', 'v1', $3, $4, $5, 'ACTIVE')`,
-		fixture.sessionID, fixture.assignmentID, strings.Repeat("b", 64), image, canonicalRuntimePath(fixture.assignmentID)); err != nil {
-		t.Fatal(err)
-	}
-	var sessionID string
-	if err := pool.QueryRow(ctx, `SELECT acp_session_id FROM agent_sessions WHERE id = $1`, fixture.sessionID).Scan(&sessionID); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrations.Run(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	var version int
-	var location, currentSessionID string
-	var initialized bool
-	if err := pool.QueryRow(ctx, `SELECT (r.metadata->>'version')::int, r.metadata->>'subpath', r.initialized, s.acp_session_id
-FROM retained_runtime_states r JOIN agent_sessions s ON s.agent_assignment_id = r.agent_participant_id WHERE s.id = $1`, fixture.sessionID).Scan(&version, &location, &initialized, &currentSessionID); err != nil {
-		t.Fatal(err)
-	}
-	if version != 1 || location != canonicalRuntimePath(fixture.assignmentID) || !initialized || currentSessionID != sessionID {
-		t.Fatalf("migration changed retained identity: %d %q %t %q", version, location, initialized, currentSessionID)
-	}
-	var family string
-	var contract int
-	var namespace *string
-	if err := pool.QueryRow(ctx, `SELECT family, contract_version, namespace FROM execution_backend_binding`).Scan(&family, &contract, &namespace); err != nil {
-		t.Fatal(err)
-	}
-	if family != "docker" || contract != 1 || namespace != nil {
-		t.Fatalf("migration guessed deployment storage: %s %d %v", family, contract, namespace)
-	}
-}
 
 func TestRetainedStateBindingsPersistAndFenceWriters(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
@@ -111,13 +37,13 @@ func TestRetainedStateBindingsPersistAndFenceWriters(t *testing.T) {
 			t.Fatalf("backend mismatch = %v", err)
 		}
 	}
-	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixture := seedAgentSessionWithRuntimeBindings(t, pool, 993, workflow.RoleDeveloper, runtimeProfile.Binding(), runtimeProfile.Binding())
 	spec := fixture.turnSpec()
-	spec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "provider/test", "", 0, "Test instructions.", nil)
+	spec.AgentProfileConfig = agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "provider/test", "", 0, "Test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +149,7 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	if err := database.BindExecutionBackend(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
-	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
+	runtimeProfile, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}

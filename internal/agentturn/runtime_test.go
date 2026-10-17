@@ -131,7 +131,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		t.Errorf("workspace checkout = %#v", workspaces.checkout)
 	}
 	if key := workspaces.preparationKey; key.AssignmentID != runtimeTestAssignment || key.AgentSessionID != runtimeTestSession ||
-		key.AgentTurnID != runtimeTestTurn || key.ExecutionEpoch != 7 || key.RuntimeProfileName != "pi-rpc" || key.RuntimeProfileVersion != "v1" {
+		key.AgentTurnID != runtimeTestTurn || key.ExecutionEpoch != 7 || key.RuntimeProfileName != "pi-rpc" || key.RuntimeProfileVersion != "v2" {
 		t.Fatalf("workspace preparation lost full execution identity: %#v", key)
 	}
 	if gateway.scope.WorkflowID != runtimeTestWorkflow || gateway.scope.Role != workflow.RoleDeveloper ||
@@ -176,7 +176,7 @@ func TestLauncherLaunchesInitialDeveloperFromDefaultBranchUnderEpochFence(t *tes
 		dockerruntime.RuntimeProcessTurnLabel:       runtimeTestTurn,
 		dockerruntime.RuntimeProcessAssignmentLabel: runtimeTestAssignment,
 		dockerruntime.RuntimeProcessEpochLabel:      "7",
-		"io.omnigrex.runtime-profile":               "pi-rpc/v1",
+		"io.omnigrex.runtime-profile":               "pi-rpc/v2",
 		"io.omnigrex.workflow":                      runtimeTestWorkflow,
 		"io.omnigrex.execution-specification":       spec.Labels["io.omnigrex.execution-specification"],
 	}
@@ -727,7 +727,7 @@ func TestRuntimeHandleCaptureFailureRetainsEvidenceAndRetriesBeforeReviewerDisca
 	wantRequest := execution.CaptureRequest{
 		Workspace: execution.WorkspaceRef{Key: execution.Key{
 			AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
-			ExecutionEpoch: 7, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+			ExecutionEpoch: 7, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 		}}, OperationID: runtimeTestTurn, Purpose: execution.TerminalCapture,
 	}
 	if !slices.Equal(resources.workspace.captureRequests, []execution.CaptureRequest{wantRequest}) {
@@ -1065,7 +1065,7 @@ func TestLauncherRejectsWorkspaceReferenceForAnotherExecutionBeforeStartingRunti
 		func(resources *runtimeLaunchResources) {
 			resources.workspace.prepareRef = &execution.WorkspaceRef{Key: execution.Key{
 				AssignmentID: runtimeTestAssignment, AgentSessionID: runtimeTestSession, AgentTurnID: runtimeTestTurn,
-				ExecutionEpoch: 8, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+				ExecutionEpoch: 8, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 			}, Seed: runtimeTestDefaultSHA}
 		})
 	if handle != nil || !errors.Is(err, agentturn.ErrRuntimeBinding) {
@@ -1644,9 +1644,9 @@ func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.L
 
 func runtimeLauncherProfile(t *testing.T) profile.Profile {
 	t.Helper()
-	value, err := profile.NewPiV1(runtimeTestImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV2(runtimeTestImage, profile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewPiV1() error = %v", err)
+		t.Fatalf("NewPiV2() error = %v", err)
 	}
 	return value
 }
@@ -1654,11 +1654,11 @@ func runtimeLauncherProfile(t *testing.T) profile.Profile {
 func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role workflow.Role, proposal *store.AgentTurnChangeProposal) (store.AgentTurnExecutionContext, store.AgentTurnLease) {
 	t.Helper()
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	config := json.RawMessage(`{"instructions":"Work carefully.","model":"openai/gpt-5","name":"developer","path":".omnigrex/team/developer.md","permissions":{"bash":"allow","edit":"allow","read":"allow"},"role":"DEVELOPER","runtime":"pi-rpc/v1"}`)
+	config := json.RawMessage(`{"instructions":"Work carefully.","model":"openai/gpt-5","name":"developer","path":".omnigrex/team/developer.md","permissions":{"bash":"allow","edit":"allow","read":"allow"},"role":"DEVELOPER","runtime":"pi-rpc/v2"}`)
 	profileName := "developer"
 	if role == workflow.RoleReviewer {
 		profileName = "reviewer"
-		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"pi-rpc/v1"}`)
+		config = json.RawMessage(`{"instructions":"Review carefully.","model":"openai/gpt-5","name":"reviewer","path":".omnigrex/team/reviewer.md","permissions":{"bash":"allow","edit":"deny","read":"allow"},"role":"REVIEWER","runtime":"pi-rpc/v2"}`)
 	}
 	stage := workflow.StageImplementation
 	purpose := workflow.TurnPurposeInitialDevelopment
@@ -1669,8 +1669,8 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		stage = workflow.StageReview
 		purpose = workflow.TurnPurposeReview
 	}
-	binding := store.AssignmentRuntimeBinding{
-		AgentProfileName: profileName, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+	binding := store.ParticipantRuntimeBinding{
+		AgentProfileName: profileName, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 		RuntimeProfileContentSHA256: runtimeProfile.ContentSHA256(), RuntimeImageDigest: runtimeProfile.Contract().Image,
 	}
 	turn := store.AgentTurn{
@@ -1693,7 +1693,7 @@ func runtimeExecutionContext(t *testing.T, runtimeProfile profile.Profile, role 
 		WorkflowID: runtimeTestWorkflow,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 17}, ChangeProposal: proposal,
-		Assignment: store.AgentAssignment{AssignmentRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Generation: 1, Status: store.AgentAssignmentActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
+		Assignment: store.AgentParticipant{ParticipantRuntimeBinding: binding, ID: runtimeTestAssignment, WorkflowID: runtimeTestWorkflow, Role: role, Generation: 1, Status: store.AgentParticipantActive, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state"},
 		Session: store.AgentSession{ID: runtimeTestSession, AgentAssignmentID: runtimeTestAssignment, RuntimeProfileName: binding.RuntimeProfileName,
 			RuntimeProfileVersion: binding.RuntimeProfileVersion, RuntimeProfileContentSHA256: binding.RuntimeProfileContentSHA256,
 			RuntimeImageDigest: binding.RuntimeImageDigest, RuntimeStatePath: "assignment-" + runtimeTestAssignment + "/runtime-state",
@@ -2153,7 +2153,7 @@ func (preparer *runtimeTurnAdapter) Prepare(_ context.Context, request session.T
 }
 
 func runtimeAdapters(adapter session.TurnAdapter) map[string]session.TurnAdapter {
-	return map[string]session.TurnAdapter{"pi-rpc/v1": adapter}
+	return map[string]session.TurnAdapter{"pi-rpc/v2": adapter}
 }
 
 type runtimeRetainedState struct {

@@ -239,7 +239,7 @@ func TestRecoveredNeverStartedProofRejectsConflictingEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+				AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 			ledger := database.ExecutionLedger(lease)
 			if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 				t.Fatal(err)
@@ -411,7 +411,7 @@ func TestRecoveredNeverStartedProofRejectsMutationReplayWithNoCurrentInvocations
 		t.Fatal(err)
 	}
 	key := execution.Key{AssignmentID: lease.AgentAssignmentID, AgentSessionID: lease.AgentSessionID,
-		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 	ledger := database.ExecutionLedger(lease)
 	if _, _, err := ledger.ReserveExecution(ctx, key, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)

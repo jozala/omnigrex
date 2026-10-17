@@ -51,7 +51,7 @@ func TestPiDeploymentArtifacts(t *testing.T) {
 			if serviceName == "postgres" && !strings.Contains(image, "@sha256:") {
 				t.Error("PostgreSQL is not pinned")
 			}
-			if serviceName == "pi-image" && !strings.Contains(image, "${OMNIGREX_PI_RPC_V1_IMAGE:?") {
+			if serviceName == "pi-image" && !strings.Contains(image, "${OMNIGREX_PI_IMAGE:?") {
 				t.Error("Pi validator does not require exact configured image")
 			}
 			if name != "compose.yaml" && serviceName == "orchestrator" && !strings.Contains(image, "${OMNIGREX_ORCHESTRATOR_IMAGE:?") {
@@ -59,13 +59,6 @@ func TestPiDeploymentArtifacts(t *testing.T) {
 			}
 			if service["read_only"] != true || service["user"] == nil {
 				t.Errorf("%s lacks non-root read-only configuration", serviceName)
-			}
-			if environment, ok := service["environment"].(map[string]any); ok {
-				for key := range environment {
-					if strings.Contains(key, "OPENCODE") || key == "OMNIGREX_AGENT_IMAGE_REFERENCE" {
-						t.Errorf("obsolete configuration %s", key)
-					}
-				}
 			}
 		}
 	}
@@ -75,13 +68,10 @@ func TestPiDeploymentArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(content)
-		for _, required := range []string{"OMNIGREX_PI_RPC_V1_IMAGE=", "OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64", "./secrets/database-password", "./secrets/github-developer-private-key.pem", "./secrets/github-reviewer-private-key.pem", "./secrets/github-webhook-secret", "./secrets/provider-credentials.json"} {
+		for _, required := range []string{"OMNIGREX_PI_IMAGE=", "OMNIGREX_PI_PLATFORM=linux/amd64", "./secrets/database-password", "./secrets/github-developer-private-key.pem", "./secrets/github-reviewer-private-key.pem", "./secrets/github-webhook-secret", "./secrets/provider-credentials.json"} {
 			if !strings.Contains(text, required) {
 				t.Errorf("%s missing %s", name, required)
 			}
-		}
-		if strings.Contains(text, "OPENCODE_ACP") || strings.Contains(text, "OMNIGREX_AGENT_IMAGE_REFERENCE=") {
-			t.Errorf("%s contains obsolete settings", name)
 		}
 	}
 }

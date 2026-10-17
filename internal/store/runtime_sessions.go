@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
 var ErrAgentSessionRuntimeConflict = errors.New("agent session runtime identity or capability conflict")
@@ -23,7 +24,7 @@ func (store *Store) ReserveAgentSessionRuntime(ctx context.Context, lease AgentT
 		if err != nil {
 			return err
 		}
-		if session.RuntimeProfileName != "pi-rpc" || session.RuntimeProfileVersion != "v1" || session.Status != AgentSessionCreating && session.Status != AgentSessionActive {
+		if session.RuntimeProfileName != profile.PiRuntimeName || session.RuntimeProfileVersion != profile.PiRuntimeVersion || session.Status != AgentSessionCreating && session.Status != AgentSessionActive {
 			return ErrAgentSessionRuntimeConflict
 		}
 		if session.RuntimeSessionID == "" && session.Status == AgentSessionCreating {
@@ -64,7 +65,7 @@ func (store *Store) BindAgentSessionRuntime(ctx context.Context, lease AgentTurn
 		if err != nil {
 			return err
 		}
-		if session.RuntimeProfileName != "pi-rpc" || session.RuntimeProfileVersion != "v1" || session.RuntimeSessionID == "" || session.RuntimeSessionID != ready.RuntimeSessionID {
+		if session.RuntimeProfileName != profile.PiRuntimeName || session.RuntimeProfileVersion != profile.PiRuntimeVersion || session.RuntimeSessionID == "" || session.RuntimeSessionID != ready.RuntimeSessionID {
 			return ErrAgentSessionRuntimeConflict
 		}
 		if session.Status == AgentSessionCreating && len(session.RuntimeCapabilities) == 0 {

@@ -18,7 +18,7 @@ try {
     const userIndex = data.messages.findLastIndex(m => m.role === 'user');
     const envelope = JSON.parse(text(data.messages[userIndex].content));
     if (!envelope.agent_turn_id || !envelope.agent_session_id) throw new Error('missing production envelope');
-    const tools = '/home/opencode/.local/share/omnigrex-tool-data';
+    const tools = '/home/omnigrex/.local/share/omnigrex-tool-data';
     const expectedPaths = { TMPDIR: `${tools}/turn/${envelope.agent_turn_id}/build-tmp`, GOTMPDIR: `${tools}/turn/${envelope.agent_turn_id}/build-tmp`, GOCACHE: `${tools}/assignment/go-build-cache`, GOPATH: `${tools}/assignment/go-modules` };
     for (const [name, path] of Object.entries(expectedPaths)) {
       if (process.env[name] !== path || !(await stat(path)).isDirectory()) throw new Error('admitted disk-backed path was not preserved');

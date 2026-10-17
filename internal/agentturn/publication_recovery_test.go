@@ -309,7 +309,7 @@ func recoveryTurn() (store.AgentTurnLease, store.AgentTurnExecutionContext) {
 		WorkflowID: "40000000-0000-4000-8000-000000000001",
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "jozala", Name: "omnigrex"},
 		Issue:      store.AgentTurnIssue{ID: 18, Number: 18},
-		Assignment: store.AgentAssignment{ID: lease.AgentAssignmentID, Role: workflow.RoleDeveloper},
+		Assignment: store.AgentParticipant{ID: lease.AgentAssignmentID, Role: workflow.RoleDeveloper},
 		Turn:       lease.AgentTurn,
 	}
 }

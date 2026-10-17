@@ -46,7 +46,7 @@ USER 10001:10001
 	if len(fields) != 2 {
 		t.Fatal("repository image identity is incomplete")
 	}
-	bound, err := profile.NewPiV1("registry.example/repository@"+fields[0], profile.Platform{OS: "linux", Arch: fields[1]})
+	bound, err := profile.NewPiV2("registry.example/repository@"+fields[0], profile.Platform{OS: "linux", Arch: fields[1]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ printf 'set -eu\ntest "$(id -u)" = 10001\ntest ! -S /var/run/docker.sock\ntest !
 		})
 	}
 	// An unrelated image cannot qualify merely by claiming the runtime version.
-	bad, _ := profile.NewPiV1("docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b", profile.Platform{OS: "linux", Arch: fields[1]})
+	bad, _ := profile.NewPiV2("docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b", profile.Platform{OS: "linux", Arch: fields[1]})
 	if err := CheckRepositoryEnvironment(ctx, bad); err == nil {
 		t.Fatal("accepted image without golden resources")
 	}

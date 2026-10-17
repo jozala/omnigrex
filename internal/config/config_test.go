@@ -24,7 +24,7 @@ func TestReadinessBudgetRejectsHealthcheckOverflow(t *testing.T) {
 
 func TestPiOnlyDeployment(t *testing.T) {
 	settings, err := config.Load(environment(map[string]string{
-		"OMNIGREX_PI_RPC_V1_IMAGE": deploymentImage, "OMNIGREX_PI_RPC_V1_PLATFORM": "linux/amd64",
+		"OMNIGREX_PI_IMAGE": deploymentImage, "OMNIGREX_PI_PLATFORM": "linux/amd64",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -84,14 +84,14 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if got.AgentTurnMemoryBytes != 512<<20 {
 		t.Errorf("AgentTurnMemoryBytes = %d, want %d", got.AgentTurnMemoryBytes, 512<<20)
 	}
-	if got.PiRPCV1Image != deploymentImage {
-		t.Errorf("PiRPCV1Image = %q, want %q", got.PiRPCV1Image, deploymentImage)
+	if got.PiImage != deploymentImage {
+		t.Errorf("PiImage = %q, want %q", got.PiImage, deploymentImage)
 	}
 	if got.RuntimeProfileCompatibilityResultsFile != "" {
 		t.Errorf("RuntimeProfileCompatibilityResultsFile = %q, want empty", got.RuntimeProfileCompatibilityResultsFile)
 	}
-	if want := (profile.Platform{OS: "linux", Arch: "arm64"}); !reflect.DeepEqual(got.PiRPCV1Platform, want) {
-		t.Errorf("PiRPCV1Platform = %#v, want %#v", got.PiRPCV1Platform, want)
+	if want := (profile.Platform{OS: "linux", Arch: "arm64"}); !reflect.DeepEqual(got.PiPlatform, want) {
+		t.Errorf("PiPlatform = %#v, want %#v", got.PiPlatform, want)
 	}
 	if got.GitHubAPIURL != "https://api.github.com" {
 		t.Errorf("GitHubAPIURL = %q, want %q", got.GitHubAPIURL, "https://api.github.com")
@@ -150,8 +150,8 @@ func TestLoadUsesEnvironment(t *testing.T) {
 		"OMNIGREX_MCP_ADDR":                                   "127.0.0.1:9001",
 		"OMNIGREX_MCP_ENDPOINT_URL":                           "https://mcp.internal/mcp",
 		"OMNIGREX_MCP_MUTATION_OPERATION_TIMEOUT":             "17m",
-		"OMNIGREX_PI_RPC_V1_IMAGE":                            "registry.example/agent/pi@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"OMNIGREX_PI_RPC_V1_PLATFORM":                         "linux/amd64",
+		"OMNIGREX_PI_IMAGE":                                   "registry.example/agent/pi@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"OMNIGREX_PI_PLATFORM":                                "linux/amd64",
 		"OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE": "/results/runtime-profile-compatibility.json",
 		"OMNIGREX_GITHUB_API_URL":                             "https://github.example/api/v3",
 		"OMNIGREX_GIT_REMOTE_BASE_URL":                        "https://github.example/source",
@@ -212,8 +212,8 @@ func TestLoadUsesEnvironment(t *testing.T) {
 	if got.MiseVolume != values["OMNIGREX_MISE_VOLUME"] {
 		t.Errorf("MiseVolume = %q, want %q", got.MiseVolume, values["OMNIGREX_MISE_VOLUME"])
 	}
-	if got.PiRPCV1Image != values["OMNIGREX_PI_RPC_V1_IMAGE"] || got.PiRPCV1Platform != (profile.Platform{OS: "linux", Arch: "amd64"}) {
-		t.Errorf("Pi RPC v1 deployment = (%q, %#v)", got.PiRPCV1Image, got.PiRPCV1Platform)
+	if got.PiImage != values["OMNIGREX_PI_IMAGE"] || got.PiPlatform != (profile.Platform{OS: "linux", Arch: "amd64"}) {
+		t.Errorf("Pi deployment = (%q, %#v)", got.PiImage, got.PiPlatform)
 	}
 	if got.RuntimeProfileCompatibilityResultsFile != values["OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"] {
 		t.Errorf("RuntimeProfileCompatibilityResultsFile = %q", got.RuntimeProfileCompatibilityResultsFile)
@@ -274,14 +274,14 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "workspace volume", key: "OMNIGREX_WORKSPACE_VOLUME", value: "   "},
 		{name: "runtime-state volume", key: "OMNIGREX_RUNTIME_STATE_VOLUME", value: "   "},
 		{name: "mise volume", key: "OMNIGREX_MISE_VOLUME", value: "   "},
-		{name: "missing deployment image", key: "OMNIGREX_PI_RPC_V1_IMAGE", value: ""},
-		{name: "mutable deployment image", key: "OMNIGREX_PI_RPC_V1_IMAGE", value: "registry.example/agent/pi:latest"},
-		{name: "local deployment image ID", key: "OMNIGREX_PI_RPC_V1_IMAGE", value: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		{name: "unsupported deployment OS", key: "OMNIGREX_PI_RPC_V1_PLATFORM", value: "darwin/arm64"},
-		{name: "unsupported deployment architecture", key: "OMNIGREX_PI_RPC_V1_PLATFORM", value: "linux/s390x"},
-		{name: "missing deployment platform", key: "OMNIGREX_PI_RPC_V1_PLATFORM", value: ""},
-		{name: "malformed deployment platform", key: "OMNIGREX_PI_RPC_V1_PLATFORM", value: "linux"},
-		{name: "extra platform component", key: "OMNIGREX_PI_RPC_V1_PLATFORM", value: "linux/amd64/v3"},
+		{name: "missing deployment image", key: "OMNIGREX_PI_IMAGE", value: ""},
+		{name: "mutable deployment image", key: "OMNIGREX_PI_IMAGE", value: "registry.example/agent/pi:latest"},
+		{name: "local deployment image ID", key: "OMNIGREX_PI_IMAGE", value: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "unsupported deployment OS", key: "OMNIGREX_PI_PLATFORM", value: "darwin/arm64"},
+		{name: "unsupported deployment architecture", key: "OMNIGREX_PI_PLATFORM", value: "linux/s390x"},
+		{name: "missing deployment platform", key: "OMNIGREX_PI_PLATFORM", value: ""},
+		{name: "malformed deployment platform", key: "OMNIGREX_PI_PLATFORM", value: "linux"},
+		{name: "extra platform component", key: "OMNIGREX_PI_PLATFORM", value: "linux/amd64/v3"},
 		{name: "compatibility results file", key: "OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE", value: "relative.json"},
 		{name: "GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "://invalid"},
 		{name: "insecure GitHub API URL", key: "OMNIGREX_GITHUB_API_URL", value: "http://github.example"},
@@ -381,7 +381,7 @@ func TestAgentTurnMemoryDoesNotChangeRuntimeProfileBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtimeProfile, err := profile.NewPiV1(settings.PiRPCV1Image, settings.PiRPCV1Platform)
+		runtimeProfile, err := profile.NewPiV2(settings.PiImage, settings.PiPlatform)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -400,8 +400,8 @@ func TestLoadReportsAllConfigurationProblemsInOrder(t *testing.T) {
 		"OMNIGREX_WORKSPACE_ROOT":                    "relative/workspaces",
 		"OMNIGREX_MCP_ENDPOINT_URL":                  "not-an-endpoint",
 		"OMNIGREX_MCP_ADDR":                          "   ",
-		"OMNIGREX_PI_RPC_V1_IMAGE":                   "omnigrex/pi:latest",
-		"OMNIGREX_PI_RPC_V1_PLATFORM":                "darwin/s390x",
+		"OMNIGREX_PI_IMAGE":                          "omnigrex/pi:latest",
+		"OMNIGREX_PI_PLATFORM":                       "darwin/s390x",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "not-an-id",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "also-not-an-id",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "relative.pem",
@@ -423,8 +423,8 @@ func TestLoadReportsAllConfigurationProblemsInOrder(t *testing.T) {
 		"OMNIGREX_WORKSPACE_ROOT must be a clean absolute path",
 		"OMNIGREX_MCP_ENDPOINT_URL must be an HTTP URL ending at /mcp without credentials, query, or fragment",
 		"OMNIGREX_MCP_ADDR must not be blank",
-		"OMNIGREX_PI_RPC_V1_IMAGE must be a registry name with an exact sha256 digest",
-		"OMNIGREX_PI_RPC_V1_PLATFORM must be a supported linux platform",
+		"OMNIGREX_PI_IMAGE must be a registry name with an exact sha256 digest",
+		"OMNIGREX_PI_PLATFORM must be a supported linux platform",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID must be a positive integer",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID must be a positive integer",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE must be an absolute path",
@@ -546,8 +546,8 @@ func TestLoadRejectsSameGitHubAppIdentity(t *testing.T) {
 
 func environment(overrides map[string]string) func(string) string {
 	values := map[string]string{
-		"OMNIGREX_PI_RPC_V1_IMAGE":                   deploymentImage,
-		"OMNIGREX_PI_RPC_V1_PLATFORM":                "linux/arm64",
+		"OMNIGREX_PI_IMAGE":                          deploymentImage,
+		"OMNIGREX_PI_PLATFORM":                       "linux/arm64",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "101",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "202",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/secrets/developer.pem",

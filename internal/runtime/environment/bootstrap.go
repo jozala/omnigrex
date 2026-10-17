@@ -22,7 +22,7 @@ const Executable = "/usr/local/bin/omnigrex-environment"
 const MiseExecutable = "/usr/local/bin/mise"
 
 // DataDirectory is part of the immutable Pi Runtime Profile mount contract.
-const DataDirectory = "/home/opencode/.local/share/mise"
+const DataDirectory = "/home/omnigrex/.local/share/mise"
 const environmentKeys = "OMNIGREX_RUNTIME_ENV_KEYS"
 
 // BindEnvironment identifies the control-plane entries that may reach the agent.

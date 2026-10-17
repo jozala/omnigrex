@@ -81,11 +81,11 @@ func TestPublishRejectsEmptyCorruptAndTruncatedOutputs(t *testing.T) {
 func qualificationOutputs(t *testing.T) map[string][]byte {
 	t.Helper()
 	platform := profile.Platform{OS: "linux", Arch: "amd64"}
-	source, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("a", 64), platform)
+	source, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV1("registry.example/pi@sha256:"+strings.Repeat("b", 64), platform)
+	target, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("b", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}

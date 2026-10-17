@@ -221,7 +221,7 @@ func envelopeExecutionContext(role workflow.Role, purpose workflow.TurnPurpose, 
 		WorkflowID: "40000000-0000-4000-8000-000000000001",
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "owner-body", Name: "repository-comment"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 17},
-		Assignment: store.AgentAssignment{ID: "10000000-0000-4000-8000-000000000001", WorkflowID: "40000000-0000-4000-8000-000000000001", Role: role, Generation: 3},
+		Assignment: store.AgentParticipant{ID: "10000000-0000-4000-8000-000000000001", WorkflowID: "40000000-0000-4000-8000-000000000001", Role: role, Generation: 3},
 		Session:    store.AgentSession{ID: "20000000-0000-4000-8000-000000000001", AgentAssignmentID: "10000000-0000-4000-8000-000000000001"},
 		Turn: store.AgentTurn{
 			ID: "30000000-0000-4000-8000-000000000001", AgentAssignmentID: "10000000-0000-4000-8000-000000000001",

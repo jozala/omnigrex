@@ -41,7 +41,7 @@ func TestRepositoryImageSelectionIsPerParticipantAndDefaultBranchProvenanceIsSep
 	}
 	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + imageB + "\nplatform: linux/arm64\n")
 	catalog, _ := profile.NewCatalog([]profile.Profile{base}, []profile.Profile{first.RuntimeProfile})
-	database = &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &first.Commit.Assignment.AssignmentRuntimeBinding}}
+	database = &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &first.Commit.Assignment.ParticipantRuntimeBinding}}
 	preparer = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, database)
 	retained, err := preparer.Prepare(context.Background(), validRequest())
 	if err != nil || retained.RuntimeProfile.Binding() != first.RuntimeProfile.Binding() {

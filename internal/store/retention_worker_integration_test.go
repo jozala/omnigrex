@@ -437,18 +437,18 @@ func addRetainedFixtureAssignment(t *testing.T, pool *pgxpool.Pool, fixture agen
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v1', 'sha256:test', $3)`,
+VALUES ($1, $2, 'REVIEWER', 'ACTIVE', 'reviewer', 'pi-rpc', 'v2', repeat('a', 64), 'sha256:test', $3)`,
 		assignmentID, fixture.workflowID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Assignment: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 INSERT INTO agent_sessions (
     id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
-    runtime_profile_version, runtime_image_digest, runtime_state_path, status, runtime_capabilities
+    runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, $3, 'pi-rpc', 'v1', 'sha256:test', $4, 'ACTIVE', '{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}')`,
+VALUES ($1, $2, 1, $3, 'pi-rpc', 'v2', repeat('a', 64), 'sha256:test', $4, 'ACTIVE', '{"history_replay":true,"session_continuation":true,"state_format":"pi-session/v3"}')`,
 		sessionID, assignmentID, sessionID, canonicalRuntimePath(assignmentID)); err != nil {
 		t.Fatalf("add retained fixture Agent Session: %v", err)
 	}

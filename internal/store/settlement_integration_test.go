@@ -24,7 +24,7 @@ func TestSettleAgentTurnDurableBoundary(t *testing.T) {
 	t.Run("Developer initial Pull Request transitions to Reviewing and is idempotent", func(t *testing.T) {
 		fixture, lease, proposal := prepareSettlementTurn(t, database, pool, ctx, 801, workflow.RoleDeveloper, "")
 		observation := successfulSettlementObservation(workflow.TurnOutcomeChangeProposalReady, proposal)
-		observation.Completion.Outcome = json.RawMessage(`{"acp_text":"BLOCKED"}`)
+		observation.Completion.Outcome = json.RawMessage(`{"unexpected_text":"BLOCKED"}`)
 		settled, err := database.SettleAgentTurn(ctx, lease, observation)
 		if err != nil {
 			t.Fatalf("SettleAgentTurn() error = %v", err)
@@ -1133,7 +1133,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 		spec.Purpose = workflow.TurnPurposeReview
 		spec.ChangeProposalID = proposalRowID
 		spec.ExpectedHeadSHA = head
-		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
+		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
 	}
 	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {

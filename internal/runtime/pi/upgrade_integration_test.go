@@ -37,7 +37,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	sourceImage, targetImage, platform, settings := upgradeImages(t)
-	source, err := profile.NewPiV1(sourceImage, platform)
+	source, err := profile.NewPiV2(sourceImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV1(targetImage, platform)
+	target, err := profile.NewPiV2(targetImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	}
 	start := func(storage string, p profile.Profile, version string, epoch int64, mustExist bool) (agent.Connection, func()) {
 		t.Helper()
-		key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 		request, err := (pi.TurnAdapter{}).BuildProcess(p, key, "", 512<<20, nil)
 		if err != nil {
 			t.Fatal(err)

@@ -814,7 +814,7 @@ func validateExecutionBinding(execution store.AgentTurnExecutionContext, lease s
 
 func validateRuntimeProfileBinding(runtimeProfile runtimeprofile.Profile, execution store.AgentTurnExecutionContext) error {
 	contract := runtimeProfile.Contract()
-	binding := execution.Assignment.AssignmentRuntimeBinding
+	binding := execution.Assignment.ParticipantRuntimeBinding
 	if contract.Name != binding.RuntimeProfileName || contract.Version != binding.RuntimeProfileVersion ||
 		runtimeProfile.ContentSHA256() != binding.RuntimeProfileContentSHA256 || contract.Image != binding.RuntimeImageDigest ||
 		execution.Session.RuntimeProfileName != binding.RuntimeProfileName ||

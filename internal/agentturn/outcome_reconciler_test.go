@@ -39,7 +39,7 @@ const (
 	outcomeBaseSHA        = "3333333333333333333333333333333333333333"
 	outcomeCredential     = "installation-secret"
 	outcomeProfileName    = "pi-rpc"
-	outcomeProfileVersion = "v1"
+	outcomeProfileVersion = "v2"
 )
 
 var outcomeObservedAt = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
@@ -1449,7 +1449,7 @@ func outcomeRequest(t *testing.T, role workflow.Role, existingProposal bool) age
 		WorkflowID: outcomeWorkflowID,
 		Repository: store.AgentTurnRepository{ID: 41, Owner: "acme", Name: "widgets"},
 		Issue:      store.AgentTurnIssue{ID: 51, Number: 61},
-		Assignment: store.AgentAssignment{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role,
+		Assignment: store.AgentParticipant{ID: outcomeAssignmentID, WorkflowID: outcomeWorkflowID, Role: role,
 			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},
 		Session: store.AgentSession{ID: outcomeSessionID, AgentAssignmentID: outcomeAssignmentID,
 			RuntimeProfileName: outcomeProfileName, RuntimeProfileVersion: outcomeProfileVersion},

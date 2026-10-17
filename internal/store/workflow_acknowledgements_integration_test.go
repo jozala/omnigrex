@@ -328,7 +328,7 @@ VALUES ($1, $2, 22, 'owner', 'repo', 220, 22, 'OPEN', 'main', 'base', 'feature',
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.ChangeProposalID = proposalRowID
 	turnSpec.ExpectedHeadSHA = "head-old"
-	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
+	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, turnSpec)
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
@@ -762,7 +762,7 @@ UPDATE workflows SET status = 'DEVELOPING', desired_assignment_status = 'ACTIVE'
 	}
 	if runtimeIdentity.AssignmentID != fixture.assignmentID || runtimeIdentity.AgentSessionID != fixture.sessionID ||
 		runtimeIdentity.AgentTurnID != turn.ID || runtimeIdentity.ExecutionEpoch != turn.ExecutionEpoch ||
-		runtimeIdentity.RuntimeProfileName != "pi-rpc" || runtimeIdentity.RuntimeProfileVersion != "v1" {
+		runtimeIdentity.RuntimeProfileName != "pi-rpc" || runtimeIdentity.RuntimeProfileVersion != "v2" {
 		t.Fatalf("closure Runtime Process identity = %#v", runtimeIdentity)
 	}
 	if _, err := databases[0].GetClosureMutationReconciliationContext(ctx, *settlementJob); !errors.Is(err, store.ErrClosureSettlementUnsettled) {

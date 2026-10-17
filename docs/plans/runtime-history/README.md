@@ -11,6 +11,7 @@ Commands and resource contracts in these records describe their recorded revisio
 - [OpenCode 1.18.29 qualification](opencode-1.18.29.md).
 - [ACP diagnostics](acp-diagnostics.md).
 - [2026-09-07 live dogfooding](2026-09-07-dogfooding.md).
+- [2026-10-15 Pi live dogfooding](2026-10-15-pi-dogfooding.md).
 - [Implementation-specific decision backgrounds](decision-background.md).
 
 The [combined delivery plan](../2026-10-05-pi-and-pluggable-execution-backends.md) records the implementation sequence.

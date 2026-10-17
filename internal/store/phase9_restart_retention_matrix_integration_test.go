@@ -478,7 +478,7 @@ func TestPhaseNineHistoricalImageRemainsProtectedUntilCollectionFinalization(t *
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	profile, err := runtimeprofile.NewPiV1(
+	profile, err := runtimeprofile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat("7", 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)

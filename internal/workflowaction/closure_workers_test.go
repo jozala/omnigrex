@@ -270,7 +270,7 @@ func closureLease(kind string, active bool) store.JobLease {
 func closureRuntimeIdentity() store.AgentTurnRuntimeIdentity {
 	return store.AgentTurnRuntimeIdentity{
 		AssignmentID: closureAssignment, AgentSessionID: closureSession, AgentTurnID: closureTurn,
-		ExecutionEpoch: 7, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		ExecutionEpoch: 7, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 	}
 }
 

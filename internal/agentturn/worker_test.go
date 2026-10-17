@@ -246,7 +246,7 @@ func TestWorkerCancellationOfInFlightHeartbeatDoesNotSuppressFailureAcknowledgem
 func TestWorkerAcknowledgesAssignmentConfigurationConflict(t *testing.T) {
 	lease := preparationWorkerLease()
 	database := &workerStore{lease: &lease, repository: store.WorkflowRepository{Owner: "acme", Name: "widgets"}}
-	spec := store.AgentTurnPreparationSpec{Developer: store.RolePreparation{Binding: store.AssignmentRuntimeBinding{AgentProfileName: "developer"}}}
+	spec := store.AgentTurnPreparationSpec{Developer: store.ParticipantPreparation{Binding: store.ParticipantRuntimeBinding{AgentProfileName: "developer"}}}
 	worker := newPreparationWorker(t, database, &repositoryCredentialProvider{credential: "token"}, turnPreparerFunc(func(context.Context, agentturn.Request) (agentturn.Result, error) {
 		return agentturn.Result{}, &agentturn.AssignmentConfigurationConflictError{Preparation: spec, Cause: store.ErrAssignmentConfigurationConflict}
 	}), 10*time.Second)

@@ -40,7 +40,7 @@ func ConfigurationDiagnostic(roleID role.ID) (Configuration, error) {
 		permissions += "  edit: allow\n  write: allow\n"
 		keyByte = 1
 	}
-	p, err := agentprofile.Parse(".omnigrex/team/fixture.md", []byte(fmt.Sprintf("---\nname: fixture\nrole: %s\nruntime: pi-rpc/v1\nmodel: diagnostic/controlled\nthinking: off\npermissions:\n%s---\nCURRENT_OPERATOR_GUIDANCE\n", roleID, permissions)), role.BuiltinPolicyCatalog())
+	p, err := agentprofile.Parse(".omnigrex/team/fixture.md", []byte(fmt.Sprintf("---\nname: fixture\nrole: %s\nruntime: pi-rpc/v2\nmodel: diagnostic/controlled\nthinking: off\npermissions:\n%s---\nCURRENT_OPERATOR_GUIDANCE\n", roleID, permissions)), role.BuiltinPolicyCatalog())
 	if err != nil {
 		return Configuration{}, err
 	}

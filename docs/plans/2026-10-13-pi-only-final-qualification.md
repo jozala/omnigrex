@@ -1,5 +1,8 @@
 # Pi-only source and final backend qualification
 
+This record covers the original release; [decision 0024](../decisions/0024-establish-a-clean-supported-release-baseline.md) and the [clean-baseline plan](2026-10-16-clean-runtime-baseline.md) define the subsequent supported schema and `pi-rpc/v2` release.
+Its historical cutover gate is retired rather than a requirement for that new baseline.
+
 ## Scope and delivery boundary
 
 This delivers the source implementation and backend qualification for Step 17 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following [operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md).
@@ -10,7 +13,7 @@ The [operator guide](../operator-guide.md) remains authoritative for release sel
 Source qualification, merged-release publication, and both published-image deployment smokes are complete.
 The operator confirmed the Pi/Microsandbox cutover and a live Compose-backed Work Item on the published Pi-only release.
 The full Step 17 completion gate remains open for the published historical-release reset/recovery rehearsal, which the operator chose to skip for this installation.
-The earlier [live Microsandbox Work Item](2026-10-11-pi-operator-documentation-and-cutover.md#live-candidate-workflow-validation-between-steps-16-and-17) remains candidate evidence; the [published-release exercise](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) supplies the later live evidence.
+The earlier [live Microsandbox Work Item](2026-10-11-pi-operator-documentation-and-cutover.md#live-candidate-workflow-validation-between-steps-16-and-17) remains candidate evidence; the [published-release exercise](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) supplies the later live evidence.
 
 ## Published release and operator cutover
 
@@ -33,7 +36,7 @@ Later releases still require their own matching publication and smoke evidence.
 ### Operator installation and live Workflow (2026-10-15)
 
 The operator selected the published Microsandbox control plane and Pi golden image above, completed a fresh Pi installation, and confirmed successful guest Docker Compose use in [Change Proposal 20](https://github.com/jozala/omnigrex-testrun/pull/20).
-The [dogfooding record](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) preserves public Work Item, head, review, and Participant evidence, including the subsequent correction cycle.
+The [dogfooding record](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests) preserves public Work Item, head, review, and Participant evidence, including the subsequent correction cycle.
 Deployment success and guest Compose execution are operator-confirmed; repository test results are attributed to the Developer handoffs rather than presented as independently rerun tests.
 
 The operator explicitly chose to omit the old-installation backup and historical-release reset/recovery rehearsal because the previous state was disposable and downtime was acceptable.

@@ -20,7 +20,7 @@ func (source contractSource) RuntimeProfileContract(context.Context, profile.Bin
 }
 
 func TestPersistedRepositoryContractSurvivesCurrentImageAndRequirementChanges(t *testing.T) {
-	current, err := profile.NewPiV1(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
+	current, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}

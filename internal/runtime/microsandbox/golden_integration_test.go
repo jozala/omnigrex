@@ -37,7 +37,7 @@ func TestMicrosandboxGoldenEnvironmentWorkingRevisionAndSessionContinuation(t *t
 	if _, err := sdk.Image.Load(ctx, archive, image); err != nil {
 		t.Fatalf("bind exact imported fixture: %v", err)
 	}
-	runtime, err := profile.NewPiV1(image, profile.Platform{OS: "linux", Arch: "amd64"})
+	runtime, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestMicrosandboxGoldenEnvironmentWorkingRevisionAndSessionContinuation(t *t
 			key := base.Key
 			key.AssignmentID = strings.Replace(base.Key.AssignmentID, "000000000001", "00000000000"+string(rune('2'+index)), 1)
 			key.AgentSessionID = strings.Replace(base.Key.AgentSessionID, "000000000001", "00000000000"+string(rune('2'+index)), 1)
-			key.RuntimeProfileName, key.RuntimeProfileVersion = "pi-rpc", "v1"
+			key.RuntimeProfileName, key.RuntimeProfileVersion = "pi-rpc", "v2"
 			workspace := backend.location(key, "workspace")
 			if err := os.MkdirAll(workspace, 0700); err != nil {
 				t.Fatal(err)
@@ -138,7 +138,7 @@ setInterval(() => {}, 1000);
 		t.Fatal("no doctor MCP route")
 	}
 	command := exec.CommandContext(ctx, "/usr/local/bin/omnigrex", "doctor", "--repository", "fixture/repository")
-	command.Env = append(os.Environ(), "OMNIGREX_PI_RPC_V1_IMAGE="+image, "OMNIGREX_PI_RPC_V1_PLATFORM=linux/amd64", "OMNIGREX_GITHUB_DEVELOPER_APP_ID=1", "OMNIGREX_GITHUB_REVIEWER_APP_ID=2", "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null", "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null", "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null", "OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null", "OMNIGREX_DATABASE_URL=postgres://fixture@127.0.0.1:1/fixture?sslmode=disable", "OMNIGREX_MICROSANDBOX_HOME="+backend.options.Home, "OMNIGREX_MICROSANDBOX_NAMESPACE="+backend.options.Namespace, "OMNIGREX_WORKSPACE_ROOT="+backend.options.WorkspaceRoot, "OMNIGREX_RUNTIME_STATE_ROOT="+backend.options.StateRoot, "OMNIGREX_MISE_ROOT="+backend.options.ToolRoot, "OMNIGREX_READINESS_TIMEOUT=20s", "OMNIGREX_MCP_ENDPOINT_URL=http://"+host+":1/mcp")
+	command.Env = append(os.Environ(), "OMNIGREX_PI_IMAGE="+image, "OMNIGREX_PI_PLATFORM=linux/amd64", "OMNIGREX_GITHUB_DEVELOPER_APP_ID=1", "OMNIGREX_GITHUB_REVIEWER_APP_ID=2", "OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE=/dev/null", "OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE=/dev/null", "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE=/dev/null", "OMNIGREX_PROVIDER_CREDENTIALS_FILE=/dev/null", "OMNIGREX_DATABASE_URL=postgres://fixture@127.0.0.1:1/fixture?sslmode=disable", "OMNIGREX_MICROSANDBOX_HOME="+backend.options.Home, "OMNIGREX_MICROSANDBOX_NAMESPACE="+backend.options.Namespace, "OMNIGREX_WORKSPACE_ROOT="+backend.options.WorkspaceRoot, "OMNIGREX_RUNTIME_STATE_ROOT="+backend.options.StateRoot, "OMNIGREX_MISE_ROOT="+backend.options.ToolRoot, "OMNIGREX_READINESS_TIMEOUT=20s", "OMNIGREX_MCP_ENDPOINT_URL=http://"+host+":1/mcp")
 	output, _ := command.CombinedOutput()
 	// Independent secret/GitHub/PostgreSQL checks deliberately fail on this
 	// fixture, while the real selected-backend and authenticated MCP probes run.

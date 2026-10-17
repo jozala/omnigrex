@@ -367,7 +367,7 @@ func (engine *engine) Create(ctx context.Context, request execution.Request, std
 		}
 		if !record.Created {
 			if request.GoldenResources {
-				qualified, err := profile.NewBuiltinV1(request.Key.RuntimeProfileName, request.Image, profile.Platform{OS: request.Platform.OS, Arch: request.Platform.Architecture})
+				qualified, err := profile.NewBuiltinV2(request.Key.RuntimeProfileName, request.Image, profile.Platform{OS: request.Platform.OS, Arch: request.Platform.Architecture})
 				if err != nil {
 					return err
 				}

@@ -36,7 +36,7 @@ esac
 				command := exec.CommandContext(t.Context(), "sh", "scripts/test-pi-deployment.sh")
 				command.Dir = deployTestRepositoryRoot(t)
 				command.Env = append(os.Environ(), "PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+root,
-					"OMNIGREX_PI_BACKEND="+backend, "OMNIGREX_PI_CUTOVER_REHEARSAL=0", "OMNIGREX_MICROSANDBOX_KVM_GID="+strconv.Itoa(gid),
+					"OMNIGREX_PI_BACKEND="+backend, "OMNIGREX_PI_DEPLOY_RECOVERY=0", "OMNIGREX_MICROSANDBOX_KVM_GID="+strconv.Itoa(gid),
 					"OMNIGREX_PI_DEPLOY_IMAGE="+image, "OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="+image)
 				if output, err := command.CombinedOutput(); err == nil {
 					t.Fatalf("fixture did not stop at the controlled deployment boundary: %s", output)

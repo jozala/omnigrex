@@ -1,5 +1,11 @@
 # Pi runtime and pluggable execution backends
 
+## Subsequent supported baseline
+
+[Decision 0024](../decisions/0024-establish-a-clean-supported-release-baseline.md) and the [clean-baseline implementation plan](2026-10-16-clean-runtime-baseline.md) establish the subsequent supported release with fresh state and `pi-rpc/v2`.
+The delivery milestones below describe the original implementation sequence and its recorded qualification.
+The historical reset rehearsal is retired; current deployment smoke independently verifies Pi recovery, and future backend-scoped Pi upgrade qualification remains supported.
+
 ## Objective
 
 Replace OpenCode with Pi while introducing a backend-independent execution boundary with retained Docker and Microsandbox implementations.
@@ -44,7 +50,7 @@ The contract document and its linked decisions refine this plan's architectural 
 
 Commit `3125265f30f5cbc97096babde01cbd8dae7388e5` passed Docker and Linux/KVM CI, published the Pi golden image and both control planes, and passed both published-image deployment smokes.
 The [release qualification record](2026-10-13-pi-only-final-qualification.md#published-release-and-operator-cutover) identifies the public artifacts and evidence boundaries.
-The operator confirmed a fresh Pi/Microsandbox replacement and guest Docker Compose use in [Work Item 19 and Change Proposal 20](../dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
+The operator confirmed a fresh Pi/Microsandbox replacement and guest Docker Compose use in [Work Item 19 and Change Proposal 20](runtime-history/2026-10-15-pi-dogfooding.md#pi-on-microsandbox-with-compose-backed-integration-tests).
 That Workflow reached an approved head and subsequently exercised human-requested corrections with the same Developer and Reviewer Participants.
 
 The operator chose to skip the historical-release reset/recovery rehearsal because preserving the old installation and avoiding downtime were unnecessary for this installation.

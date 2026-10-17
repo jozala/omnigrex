@@ -13,16 +13,8 @@ import (
 )
 
 var (
-	ErrRuntimeProfileCompatibilityResultConflict       = errors.New("Runtime Profile compatibility result conflict")
-	ErrRuntimeProfileCompatibilityQualificationMissing = errors.New("Runtime Profile compatibility qualification missing")
+	ErrRuntimeProfileCompatibilityResultConflict = errors.New("Runtime Profile compatibility result conflict")
 )
-
-// RuntimeCompatibilityRequirement identifies the non-binding axes required by a candidate.
-type RuntimeCompatibilityRequirement struct {
-	Platform             runtimeprofile.Platform
-	StateContractVersion string
-	WorkspacePath        string
-}
 
 // RecordRuntimeProfileCompatibilityResult immutably records one successful qualification.
 // An exact replay is idempotent; the same qualification key with different result content conflicts.
@@ -66,10 +58,6 @@ func (store *Store) ImportRuntimeProfileCompatibilityResults(ctx context.Context
 }
 
 func recordRuntimeProfileCompatibilityResult(ctx context.Context, tx pgx.Tx, result runtimeprofile.CompatibilityResult) error {
-	return recordPiCompatibilityResult(ctx, tx, result)
-}
-
-func recordPiCompatibilityResult(ctx context.Context, tx pgx.Tx, result runtimeprofile.CompatibilityResult) error {
 	key, err := result.QualificationKey()
 	if err != nil {
 		return err
@@ -111,7 +99,7 @@ func (store *ReadOnlyStore) CheckPendingRuntimeProfileCompatibility(ctx context.
 func checkPendingRuntimeProfileCompatibility(ctx context.Context, pool *pgxpool.Pool, target runtimeprofile.Profile) error {
 	// New Participants receive the selected Pi image without migrating Sessions.
 	// Retained Participants remain protected by exact binding/image/state checks.
-	if target.Binding().Name != "pi-rpc" || target.Binding().Version != "v1" {
+	if target.Binding().Name != runtimeprofile.PiRuntimeName || target.Binding().Version != runtimeprofile.PiRuntimeVersion {
 		return ErrProtectedRuntimeConfigurationConflict
 	}
 	if err := target.Binding().Validate(); err != nil {
@@ -120,19 +108,19 @@ func checkPendingRuntimeProfileCompatibility(ctx context.Context, pool *pgxpool.
 	var unsupported bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (
     SELECT 1 FROM agent_assignments
-    WHERE runtime_profile_name <> 'pi-rpc' OR runtime_profile_version <> 'v1'
+    WHERE runtime_profile_name <> $1 OR runtime_profile_version <> $2
     UNION ALL
     SELECT 1 FROM agent_sessions
-    WHERE runtime_profile_name <> 'pi-rpc' OR runtime_profile_version <> 'v1'
+    WHERE runtime_profile_name <> $1 OR runtime_profile_version <> $2
     UNION ALL
     SELECT 1 FROM runtime_profile_contracts
-    WHERE contract->>'name' IS DISTINCT FROM 'pi-rpc'
-       OR contract->>'version' IS DISTINCT FROM 'v1'
-)`).Scan(&unsupported); err != nil {
+    WHERE contract->>'name' IS DISTINCT FROM $1
+       OR contract->>'version' IS DISTINCT FROM $2
+)`, runtimeprofile.PiRuntimeName, runtimeprofile.PiRuntimeVersion).Scan(&unsupported); err != nil {
 		return fmt.Errorf("inspect installation Runtime Profile history: %w", err)
 	}
 	if unsupported {
-		return fmt.Errorf("%w: installation contains unsupported runtime history; a clean Pi cutover is required", ErrProtectedRuntimeConfigurationConflict)
+		return fmt.Errorf("%w: installation contains unsupported Runtime Profile contracts", ErrProtectedRuntimeConfigurationConflict)
 	}
 	return nil
 }

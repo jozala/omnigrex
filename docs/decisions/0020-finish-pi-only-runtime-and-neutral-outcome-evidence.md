@@ -13,7 +13,8 @@ Protected-state checks alone cannot establish installation-wide runtime compatib
 
 ## Decision
 
-Require Pi in deployment configuration, Runtime Profiles, and explicit repository `runtime: pi-rpc/v1` selections.
+Require Pi in deployment configuration, Runtime Profiles, and explicit repository runtime selections.
+The supported release baseline and contract version follow [decision 0024](0024-establish-a-clean-supported-release-baseline.md).
 Accept only backend-scoped Pi qualification artifacts.
 Reject any unsupported runtime history in the installation ledger before recovery or admission, including collected history and orphaned contracts.
 

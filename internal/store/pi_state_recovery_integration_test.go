@@ -56,7 +56,7 @@ func TestPiProtectedStateRecovery(t *testing.T) {
 	if err := f.backend.States.Check(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := profile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("c", 64), f.runtime.Contract().Platform)
+	candidate, err := profile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("c", 64), f.runtime.Contract().Platform)
 	if err != nil {
 		t.Fatal(err)
 	}

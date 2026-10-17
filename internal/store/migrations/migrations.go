@@ -45,12 +45,16 @@ type migration struct {
 var Files embed.FS
 
 // Run applies every pending embedded migration in version order.
-func Run(ctx context.Context, pool *pgxpool.Pool) (runErr error) {
+func Run(ctx context.Context, pool *pgxpool.Pool) error {
+	return run(ctx, pool, Files)
+}
+
+func run(ctx context.Context, pool *pgxpool.Pool, files fs.FS) (runErr error) {
 	if pool == nil {
 		return errors.New("run migrations: nil PostgreSQL pool")
 	}
 
-	migrations, err := discover(Files)
+	migrations, err := discover(files)
 	if err != nil {
 		return err
 	}
@@ -70,6 +74,9 @@ func Run(ctx context.Context, pool *pgxpool.Pool) (runErr error) {
 
 	if _, err := conn.Exec(ctx, schemaMigrationsDDL); err != nil {
 		return fmt.Errorf("create migration history: %w", err)
+	}
+	if err := checkHistory(ctx, conn, migrations, true); err != nil {
+		return err
 	}
 
 	for _, migration := range migrations {
@@ -136,7 +143,15 @@ func Check(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return err
 	}
-	rows, err := pool.Query(ctx, `SELECT version, name, checksum FROM schema_migrations ORDER BY version`)
+	return checkHistory(ctx, pool, expected, false)
+}
+
+type historySource interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func checkHistory(ctx context.Context, source historySource, expected []migration, allowPending bool) error {
+	rows, err := source.Query(ctx, `SELECT version, name, checksum FROM schema_migrations ORDER BY version`)
 	if err != nil {
 		return fmt.Errorf("read migration history: %w", err)
 	}
@@ -154,14 +169,14 @@ func Check(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		migration := expected[index]
 		if version != migration.version || name != migration.name || !bytes.Equal(checksum, migration.checksum[:]) {
-			return fmt.Errorf("migration history differs at version %06d", migration.version)
+			return fmt.Errorf("migration %06d_%s.sql differs from recorded history; incompatible release baseline", migration.version, migration.name)
 		}
 		index++
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read migration history: %w", err)
 	}
-	if index != len(expected) {
+	if !allowPending && index != len(expected) {
 		migration := expected[index]
 		return fmt.Errorf("database is missing migration %06d_%s.sql", migration.version, migration.name)
 	}

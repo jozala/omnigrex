@@ -395,7 +395,7 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 			spec.Purpose = workflow.TurnPurposeReview
 			spec.ChangeProposalID = proposalRowID
 			spec.ExpectedHeadSHA = test.head
-			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 10, "Review test instructions.", nil)
+			spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 10, "Review test instructions.", nil)
 			turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 			if err != nil {
 				t.Fatalf("PrepareAgentTurn() error = %v", err)

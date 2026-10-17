@@ -64,7 +64,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			}
 			start := func(epoch int64, mustExist bool) (agent.Connection, func()) {
 				t.Helper()
-				key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+				key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 				request := execution.Request{Key: key, Image: image, Platform: platform, User: "10001:10001", WorkingDir: "/workspace", Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/configuration.mjs"}, Environment: pi.DiagnosticSpec(image, platform).Environment, Attachments: []execution.Attachment{{Resource: "state", Target: "/state"}}, TemporaryDirectories: pi.DiagnosticSpec(image, platform).TemporaryDirectories, MemoryBytes: 512 << 20, PIDsLimit: 256}
 				if epoch == 3 {
 					request.Environment = append(request.Environment, "OMNIGREX_PI_HISTORY_TREE_FIXTURE=1")

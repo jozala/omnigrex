@@ -99,13 +99,13 @@ func TestComposeTopology(t *testing.T) {
 	if postgres.Image != postgresImage {
 		t.Errorf("postgres image = %q, want pinned %q", postgres.Image, postgresImage)
 	}
-	if validator.Image != testDeploymentImage || orchestrator.Environment["OMNIGREX_PI_RPC_V1_IMAGE"] != validator.Image {
+	if validator.Image != testDeploymentImage || orchestrator.Environment["OMNIGREX_PI_IMAGE"] != validator.Image {
 		t.Fatal("validator and Pi Runtime Profile must use one exact digest")
 	}
 	if got := orchestrator.Environment["OMNIGREX_EXECUTION_BACKEND"]; got != "docker" {
 		t.Errorf("developer backend = %q, want docker", got)
 	}
-	if got := orchestrator.Environment["OMNIGREX_PI_RPC_V1_PLATFORM"]; got != "linux/amd64" {
+	if got := orchestrator.Environment["OMNIGREX_PI_PLATFORM"]; got != "linux/amd64" {
 		t.Errorf("orchestrator Pi platform = %q, want linux/amd64", got)
 	}
 	if got := orchestrator.Environment["OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE"]; got != "" {
@@ -151,7 +151,7 @@ func TestComposeTopology(t *testing.T) {
 	assertMounts(t, "pi-image", validator.Volumes,
 		composeMount{Type: "volume", Source: "workspaces", Target: "/workspace"},
 		composeMount{Type: "volume", Source: "runtime-state", Target: "/state"},
-		composeMount{Type: "volume", Source: "mise-data", Target: "/home/opencode/.local/share/mise"},
+		composeMount{Type: "volume", Source: "mise-data", Target: "/home/omnigrex/.local/share/mise"},
 	)
 
 	assertExactKeys(t, "orchestrator networks", orchestrator.Networks, "agent", "backend")

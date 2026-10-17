@@ -138,9 +138,9 @@ func (database *preparationStore) PrepareAgentTurn(_ context.Context, _ store.Jo
 		stage = workflow.StageReview
 	}
 	selected := spec.Stages[stage]
-	return store.AgentTurnPreparationCommit{Assignment: store.AgentAssignment{
-		AssignmentRuntimeBinding: selected.Binding,
-		Role:                     selectedRole,
+	return store.AgentTurnPreparationCommit{Assignment: store.AgentParticipant{
+		ParticipantRuntimeBinding: selected.Binding,
+		Role:                      selectedRole,
 	}}, nil
 }
 
@@ -204,11 +204,11 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 		t.Fatalf("PrepareAgentTurn() calls = %d, want one", len(database.calls))
 	}
 
-	wantBinding := func(name string) store.AssignmentRuntimeBinding {
-		return store.AssignmentRuntimeBinding{
+	wantBinding := func(name string) store.ParticipantRuntimeBinding {
+		return store.ParticipantRuntimeBinding{
 			AgentProfileName:            name,
 			RuntimeProfileName:          "pi-rpc",
-			RuntimeProfileVersion:       "v1",
+			RuntimeProfileVersion:       "v2",
 			RuntimeProfileContentSHA256: runtime.ContentSHA256(),
 			RuntimeImageDigest:          testImage,
 		}
@@ -219,7 +219,7 @@ func TestPrepareLoadsOneProfileSnapshotAndPreparesSelectedRole(t *testing.T) {
 	if spec.Developer.Binding.AgentProfileName != "" || len(spec.Stages) != 1 || strings.Contains(string(spec.Reviewer.Profile.Config), "installation-secret") {
 		t.Fatal("durable Agent Profile snapshots contain the installation credential")
 	}
-	if result.Commit.Assignment.Role != workflow.RoleReviewer || result.Commit.Assignment.AssignmentRuntimeBinding != wantBinding("reviewer") {
+	if result.Commit.Assignment.Role != workflow.RoleReviewer || result.Commit.Assignment.ParticipantRuntimeBinding != wantBinding("reviewer") {
 		t.Fatalf("selected Store commit = %#v", result.Commit)
 	}
 	if !reflect.DeepEqual(result.RuntimeProfile.Contract(), runtime.Contract()) {
@@ -449,8 +449,8 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 	if err != nil {
 		t.Fatalf("NewCatalog() error = %v", err)
 	}
-	oldDeveloper := store.AssignmentRuntimeBinding{
-		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+	oldDeveloper := store.ParticipantRuntimeBinding{
+		AgentProfileName: "developer", RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 		RuntimeProfileContentSHA256: oldProfile.ContentSHA256(), RuntimeImageDigest: oldImage,
 	}
 	oldReviewer := oldDeveloper
@@ -470,7 +470,7 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 		t.Fatalf("Prepare() retained error = %v", err)
 	}
 	if retained.Commit.Assignment.RuntimeImageDigest != oldImage || retained.RuntimeProfile.ContentSHA256() != oldProfile.ContentSHA256() {
-		t.Fatalf("retained binding migrated: Assignment %#v, profile %s", retained.Commit.Assignment.AssignmentRuntimeBinding, retained.RuntimeProfile.ContentSHA256())
+		t.Fatalf("retained binding migrated: Participant %#v, profile %s", retained.Commit.Assignment.ParticipantRuntimeBinding, retained.RuntimeProfile.ContentSHA256())
 	}
 	if retainedStore.calls[0].Developer.Binding != oldDeveloper || retainedStore.calls[0].Stages[workflow.StageImplementation].Binding != oldDeveloper || retainedStore.calls[0].Reviewer.Binding.AgentProfileName != "" {
 		t.Fatalf("retained Store bindings = %#v", retainedStore.calls[0])
@@ -482,7 +482,7 @@ func TestRuntimeProfileUpgradeKeepsRetainedBindingAndUsesCandidateForNewGenerati
 		t.Fatalf("Prepare() new error = %v", err)
 	}
 	if created.Commit.Assignment.RuntimeImageDigest != candidateImage || created.RuntimeProfile.ContentSHA256() != candidateProfile.ContentSHA256() {
-		t.Fatalf("new generation did not use candidate: Assignment %#v, profile %s", created.Commit.Assignment.AssignmentRuntimeBinding, created.RuntimeProfile.ContentSHA256())
+		t.Fatalf("new generation did not use candidate: Participant %#v, profile %s", created.Commit.Assignment.ParticipantRuntimeBinding, created.RuntimeProfile.ContentSHA256())
 	}
 	if retainedStore.calls[0].Developer.Binding != oldDeveloper {
 		t.Fatal("new generation preparation altered retained old binding")
@@ -572,7 +572,7 @@ func TestPrepareClassifiesAssignmentConfigurationConflict(t *testing.T) {
 	}
 }
 
-func assertRolePreparation(t *testing.T, got store.RolePreparation, wantBinding store.AssignmentRuntimeBinding, commitSHA string, content []byte) {
+func assertRolePreparation(t *testing.T, got store.ParticipantPreparation, wantBinding store.ParticipantRuntimeBinding, commitSHA string, content []byte) {
 	t.Helper()
 	if got.Binding != wantBinding {
 		t.Errorf("binding = %#v, want %#v", got.Binding, wantBinding)
@@ -592,9 +592,9 @@ func assertRolePreparation(t *testing.T, got store.RolePreparation, wantBinding 
 
 func runtimeProfile(t *testing.T, image string) runtimeprofile.Profile {
 	t.Helper()
-	value, err := runtimeprofile.NewPiV1(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
-		t.Fatalf("NewPiV1() error = %v", err)
+		t.Fatalf("NewPiV2() error = %v", err)
 	}
 	return value
 }
@@ -604,7 +604,7 @@ func agentProfileContent(name string, profileRole role.ID, model, thinking strin
 	if thinking != "" {
 		thinkingLine = "thinking: " + thinking + "\n"
 	}
-	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v1\nmodel: %s\n%spermissions:\n  read: allow\n  edit: deny\n---\n%s", name, profileRole, model, thinkingLine, instructions))
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v2\nmodel: %s\n%spermissions:\n  read: allow\n  edit: deny\n---\n%s", name, profileRole, model, thinkingLine, instructions))
 }
 
 func validRequest() agentturn.Request {

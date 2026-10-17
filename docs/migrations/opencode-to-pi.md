@@ -1,5 +1,9 @@
 # OpenCode-to-Pi Migration
 
+This is an archived procedure for [release commit 3125265](https://github.com/jozala/omnigrex/tree/3125265f30f5cbc97096babde01cbd8dae7388e5).
+Its cutover scripts and tasks are retired from the current supported baseline; executable commands below apply to that recorded source revision.
+Current installations follow [decision 0024](../decisions/0024-establish-a-clean-supported-release-baseline.md) and use fresh state.
+
 This historical procedure replaces a Docker/OpenCode installation with a fresh Pi installation on Docker or Microsandbox.
 It does not migrate conversations or a populated operational ledger.
 For current Pi installation, operation, upgrades, and recovery, use the [operator guide](../operator-guide.md).

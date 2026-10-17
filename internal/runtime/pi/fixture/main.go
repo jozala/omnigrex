@@ -77,7 +77,7 @@ func main() {
 	for _, id := range []role.ID{role.Developer, role.Reviewer} {
 		expires := time.Now().Add(10 * time.Minute)
 		scope := mcp.TokenScope{
-			RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1", WorkflowID: "fixture-workflow", Role: id,
+			RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2", WorkflowID: "fixture-workflow", Role: id,
 			Lease: store.AgentTurnLease{
 				AgentTurn: store.AgentTurn{ID: "fixture-turn-" + string(id), AgentAssignmentID: "fixture-participant-" + string(id), AgentSessionID: "fixture-session-" + string(id), ExecutionEpoch: 1, CreatedAt: time.Now(), AgentProfileConfig: json.RawMessage(fmt.Sprintf(`{"name":"fixture","role":%q}`, id))},
 				JobLease:  store.JobLease{WorkflowID: "fixture-workflow", AgentTurnID: "fixture-turn-" + string(id), AgentSessionID: "fixture-session-" + string(id), AgentAssignmentID: "fixture-participant-" + string(id), ExecutionEpoch: 1},

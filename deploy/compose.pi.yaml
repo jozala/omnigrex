@@ -31,8 +31,8 @@ services:
     restart: unless-stopped
 
   pi-image:
-    image: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi golden image digest}"
-    platform: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+    image: "${OMNIGREX_PI_IMAGE:?set the exact Pi golden image digest}"
+    platform: "${OMNIGREX_PI_PLATFORM:?set the Pi platform}"
     user: "10001:10001"
     entrypoint: [/bin/sh, -ec]
     command:
@@ -40,14 +40,14 @@ services:
         test "$$(id -u):$$(id -g)" = 10001:10001
         test "$$(node --version)" = v24.14.1
         test "$$(node -p 'JSON.parse(require("fs").readFileSync("/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json")).version')" = 1.0.4
-        for path in /workspace /state /home/opencode/.local/share/mise; do
+        for path in /workspace /state /home/omnigrex/.local/share/mise; do
           touch "$$path/.omnigrex-volume-root"
           rm "$$path/.omnigrex-volume-root"
         done
     volumes:
       - workspaces:/workspace
       - runtime-state:/state
-      - mise-data:/home/opencode/.local/share/mise
+      - mise-data:/home/omnigrex/.local/share/mise
     network_mode: none
     read_only: true
     cap_drop: [ALL]
@@ -69,8 +69,8 @@ services:
       OMNIGREX_MCP_ENDPOINT_URL: http://omnigrex-mcp:8081/mcp
       OMNIGREX_DATABASE_URL: postgres://omnigrex@postgres:5432/omnigrex?sslmode=disable
       OMNIGREX_DATABASE_PASSWORD_SECRET_FILE: /run/secrets/omnigrex-database-password
-      OMNIGREX_PI_RPC_V1_IMAGE: "${OMNIGREX_PI_RPC_V1_IMAGE:?set the exact Pi digest}"
-      OMNIGREX_PI_RPC_V1_PLATFORM: "${OMNIGREX_PI_RPC_V1_PLATFORM:?set the Pi platform}"
+      OMNIGREX_PI_IMAGE: "${OMNIGREX_PI_IMAGE:?set the exact Pi digest}"
+      OMNIGREX_PI_PLATFORM: "${OMNIGREX_PI_PLATFORM:?set the Pi platform}"
       OMNIGREX_GITHUB_DEVELOPER_APP_ID: "${OMNIGREX_GITHUB_DEVELOPER_APP_ID:?set the Developer App ID}"
       OMNIGREX_GITHUB_REVIEWER_APP_ID: "${OMNIGREX_GITHUB_REVIEWER_APP_ID:?set the Reviewer App ID}"
       OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-developer-private-key

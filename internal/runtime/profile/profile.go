@@ -314,7 +314,7 @@ func validate(contract Contract) error {
 			seen[requirement] = true
 		}
 	}
-	if contract.Name == "pi-rpc" && contract.Version == "v1" {
+	if contract.Name == PiRuntimeName && contract.Version == PiRuntimeVersion {
 		return validatePi(contract)
 	}
 	return invalid("unsupported profile reference %q/%q", contract.Name, contract.Version)

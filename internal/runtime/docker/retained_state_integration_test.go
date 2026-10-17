@@ -85,7 +85,7 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.initialized[ref.ID] = true
-	runtimeProfile, err := profile.NewPiV1("registry.example/omnigrex/pi@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
+	runtimeProfile, err := profile.NewPiV2("registry.example/omnigrex/pi@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 	start := func(epoch int64, mustExist bool) (execution.Engine, error) {
 		t.Helper()
 		turnID := fmt.Sprintf("30000000-0000-4000-8000-%012x", time.Now().UnixNano()&((1<<48)-1))
-		key := execution.Key{AssignmentID: ref.ID, AgentSessionID: sessionID, AgentTurnID: turnID, ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1"}
+		key := execution.Key{AssignmentID: ref.ID, AgentSessionID: sessionID, AgentTurnID: turnID, ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 		request, err := (pi.TurnAdapter{}).BuildProcess(runtimeProfile, key, "", 512<<20, nil)
 		if err != nil {
 			t.Fatal(err)

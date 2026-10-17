@@ -1744,7 +1744,7 @@ func TestSuccessfulSubmitReviewBindsReviewerActorWithCompareOrSet(t *testing.T) 
 	turnSpec.Purpose = workflow.TurnPurposeReview
 	turnSpec.ChangeProposalID = seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, "review-head")
 	turnSpec.ExpectedHeadSHA = "review-head"
-	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v1", "provider/test", "", 0, "Review test instructions.", nil)
+	turnSpec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
 	turn, err := prepareFixtureAgentTurn(t, databases[0], pool, ctx, turnSpec)
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
@@ -1979,7 +1979,7 @@ func (fixture agentFixture) turnSpec() store.AgentTurnSpec {
 		Purpose:         workflow.TurnPurposeInitialDevelopment,
 		ControlRevision: 1, AgentProfileCommitSHA: "0123456789abcdef",
 		AgentProfileContentSHA256: digest[:],
-		AgentProfileConfig:        agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v1", "provider/test", "", 0, "Test instructions.", nil),
+		AgentProfileConfig:        agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "provider/test", "", 0, "Test instructions.", nil),
 	}
 }
 
@@ -2011,22 +2011,17 @@ func seedAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture
 
 func seedCreatingAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture {
 	t.Helper()
-	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v2", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindingsAndStatus(t, pool, number, workflow.RoleDeveloper, binding, binding, store.AgentSessionCreating)
 }
 
 func seedAgentSessionForRole(t *testing.T, pool *pgxpool.Pool, number int, participantRole workflow.Role) agentFixture {
-	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v2", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindings(t, pool, number, participantRole, binding, binding)
 }
 
-func seedLegacyAgentSession(t *testing.T, pool *pgxpool.Pool, number int) agentFixture {
-	legacy := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", Image: "sha256:test"}
-	return seedAgentSessionWithRuntimeBindings(t, pool, number, workflow.RoleDeveloper, legacy, legacy)
-}
-
 func seedAgentSessionWithRuntimeStatePaths(t *testing.T, pool *pgxpool.Pool, number int, participantPath, sessionPath string) agentFixture {
-	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v1", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
+	binding := runtimeprofile.Binding{Name: "pi-rpc", Version: "v2", ContentSHA256: strings.Repeat("a", 64), Image: "sha256:test"}
 	return seedAgentSessionWithRuntimeBindings(t, pool, number, workflow.RoleDeveloper, binding, binding, participantPath, sessionPath)
 }
 
@@ -2070,7 +2065,7 @@ INSERT INTO agent_assignments (
     id, workflow_id, role, status, agent_profile_name, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path
 )
-VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, NULLIF($7, ''), $8, $9)`, fixture.assignmentID, fixture.workflowID,
+VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, $7, $8, $9)`, fixture.assignmentID, fixture.workflowID,
 		participantRole, profileName, participantBinding.Name, participantBinding.Version,
 		participantBinding.ContentSHA256, participantBinding.Image, participantPath)
 	if err != nil {
@@ -2087,7 +2082,7 @@ INSERT INTO agent_sessions (
     id, agent_assignment_id, session_number, runtime_session_id, runtime_profile_name,
     runtime_profile_version, runtime_profile_content_sha256, runtime_image_digest, runtime_state_path, status, runtime_capabilities
 )
-VALUES ($1, $2, 1, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10)`, fixture.sessionID, fixture.assignmentID,
+VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10)`, fixture.sessionID, fixture.assignmentID,
 		runtimeID, sessionBinding.Name, sessionBinding.Version, sessionBinding.ContentSHA256,
 		sessionBinding.Image, sessionPath, status, capabilities)
 	if err != nil {

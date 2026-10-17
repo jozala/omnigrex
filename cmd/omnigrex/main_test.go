@@ -97,8 +97,8 @@ func TestDoctorCommandSucceedsWhenEveryCheckPasses(t *testing.T) {
 
 func doctorTestEnvironment(name string) string {
 	values := map[string]string{
-		"OMNIGREX_PI_RPC_V1_IMAGE":                   "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64),
-		"OMNIGREX_PI_RPC_V1_PLATFORM":                "linux/amd64",
+		"OMNIGREX_PI_IMAGE":                          "registry.example/omnigrex/pi@sha256:" + strings.Repeat("a", 64),
+		"OMNIGREX_PI_PLATFORM":                       "linux/amd64",
 		"OMNIGREX_GITHUB_DEVELOPER_APP_ID":           "1",
 		"OMNIGREX_GITHUB_REVIEWER_APP_ID":            "2",
 		"OMNIGREX_GITHUB_DEVELOPER_PRIVATE_KEY_FILE": "/run/secrets/developer.pem",
@@ -291,11 +291,11 @@ func mainTestCompatibilityResult(source, target runtimeprofile.Binding, platform
 
 func TestImportPiCompatibilityResultsRequiresConfiguredTargetAndBackend(t *testing.T) {
 	platform := runtimeprofile.Platform{OS: "linux", Arch: "amd64"}
-	source, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
+	source, err := runtimeprofile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("a", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := runtimeprofile.NewPiV1("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
+	target, err := runtimeprofile.NewPiV2("registry.example/omnigrex/pi@sha256:"+strings.Repeat("b", 64), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	identity := dockerruntime.RuntimeProcessIdentity{
 		AssignmentID: "10000000-0000-4000-8000-000000000001", AgentSessionID: "20000000-0000-4000-8000-000000000001",
 		AgentTurnID: "30000000-0000-4000-8000-000000000001", ExecutionEpoch: 9,
-		RuntimeProfile: dockerruntime.RuntimeProfileIdentity{Name: "pi-rpc", Version: "v1"},
+		RuntimeProfile: dockerruntime.RuntimeProfileIdentity{Name: "pi-rpc", Version: "v2"},
 	}
 	overflow := identity
 	overflow.ExecutionEpoch = math.MaxUint64
@@ -355,7 +355,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 	wantIdentity := store.AgentTurnRuntimeIdentity{
 		AssignmentID: identity.AssignmentID, AgentSessionID: identity.AgentSessionID,
 		AgentTurnID: identity.AgentTurnID, ExecutionEpoch: 9,
-		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v1",
+		RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2",
 	}
 	if len(snapshot.Processes) != 1 || snapshot.Processes[0].Identity != wantIdentity || len(snapshot.Duplicates) != 0 {
 		t.Fatalf("translated Runtime Processes = %#v, duplicates %#v", snapshot.Processes, snapshot.Duplicates)
@@ -372,7 +372,7 @@ func TestStartupDockerAdapterTranslatesInventoryAndCleanupIdentities(t *testing.
 		dockerruntime.RuntimeProcessSessionLabel:    identity.AgentSessionID,
 		dockerruntime.RuntimeProcessTurnLabel:       identity.AgentTurnID,
 		dockerruntime.RuntimeProcessEpochLabel:      "9",
-		dockerruntime.RuntimeProfileIdentityLabel:   "pi-rpc/v1",
+		dockerruntime.RuntimeProfileIdentityLabel:   "pi-rpc/v2",
 	}
 	if !maps.Equal(cleaner.labels, wantLabels) {
 		t.Fatalf("EnsureAbsent() labels = %#v, want %#v", cleaner.labels, wantLabels)
@@ -449,7 +449,7 @@ func (importer *compatibilityImporterFake) ImportRuntimeProfileCompatibilityResu
 
 func mainTestRuntimeProfile(t *testing.T, digestDigit string) runtimeprofile.Profile {
 	t.Helper()
-	value, err := runtimeprofile.NewPiV1(
+	value, err := runtimeprofile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat(digestDigit, 64),
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)

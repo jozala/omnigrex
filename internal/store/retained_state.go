@@ -4,19 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
-// BindExecutionBackend claims the transitional namespace once. Changing a
-// configured backend or its storage namespace never reinterprets retained data.
+// BindExecutionBackend atomically claims immutable installation ownership.
 func (store *Store) BindExecutionBackend(ctx context.Context, binding execution.BackendBinding) error {
-	if binding.Family == "" || binding.Version <= 0 || binding.Namespace == "" {
+	if strings.TrimSpace(binding.Family) == "" || binding.Family != strings.TrimSpace(binding.Family) || binding.Version <= 0 || strings.TrimSpace(binding.Namespace) == "" || binding.Namespace != strings.TrimSpace(binding.Namespace) {
 		return execution.ErrBindingMismatch
 	}
-	result, err := store.pool.Exec(ctx, `UPDATE execution_backend_binding SET family = $1, contract_version = $2, namespace = $3
-WHERE (family IS NULL OR (family = $1 AND contract_version = $2)) AND (namespace IS NULL OR namespace = $3)`, binding.Family, binding.Version, binding.Namespace)
+	result, err := store.pool.Exec(ctx, `INSERT INTO execution_backend_binding AS binding (family, contract_version, namespace)
+VALUES ($1, $2, $3)
+ON CONFLICT (singleton) DO UPDATE SET family = EXCLUDED.family, contract_version = EXCLUDED.contract_version, namespace = EXCLUDED.namespace
+WHERE binding.family = EXCLUDED.family AND binding.contract_version = EXCLUDED.contract_version AND binding.namespace = EXCLUDED.namespace`, binding.Family, binding.Version, binding.Namespace)
 	if err != nil {
 		return err
 	}
@@ -28,8 +30,8 @@ WHERE (family IS NULL OR (family = $1 AND contract_version = $2)) AND (namespace
 
 func readStateRef(ctx context.Context, queryer executionQueryer, participantID, sessionID string) (execution.StateRef, error) {
 	var ref execution.StateRef
-	err := queryer.QueryRow(ctx, `SELECT a.id::text, b.family, b.contract_version, COALESCE(b.namespace, ''), r.format,
-COALESCE(a.runtime_profile_content_sha256, ''), a.runtime_image_digest
+	err := queryer.QueryRow(ctx, `SELECT a.id::text, b.family, b.contract_version, b.namespace, r.format,
+a.runtime_profile_content_sha256, a.runtime_image_digest
 FROM retained_runtime_states r JOIN agent_assignments a ON a.id = r.agent_participant_id
 CROSS JOIN execution_backend_binding b WHERE a.id = $1 AND a.state_deleted_at IS NULL
 AND ($2::text = '' OR EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id::text = $2 AND s.agent_assignment_id = a.id AND s.state_deleted_at IS NULL))`, participantID, sessionID).Scan(

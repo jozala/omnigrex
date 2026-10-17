@@ -147,6 +147,32 @@ FROM jobs WHERE kind = 'PREPARE_AGENT_TURN' LIMIT 1`); err != nil {
 	}
 }
 
+func TestDurableObservationsIncludeReservedCreatingSession(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database, ctx := databases[0], t.Context()
+	fixture := seedCreatingAgentSession(t, pool, 939)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, fixture.turnSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reservation survives an interrupted earlier preparation before activation.
+	if _, err := pool.Exec(ctx, `UPDATE agent_sessions SET runtime_session_id = id::text WHERE id = $1`, fixture.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := database.ObserveDurableState(ctx)
+	if err != nil || state.Pending["execution"].Count != 1 {
+		t.Fatalf("reserved Creating Session is not observable as eligible: %+v %v", state, err)
+	}
+	lease, acquired, err := database.ClaimAndAcquireAgentTurn(ctx, "reserved-observation", time.Minute, 1)
+	if err != nil || !acquired || lease.ID != turn.ID {
+		t.Fatalf("observed execution is not actually eligible: %+v %t %v", lease, acquired, err)
+	}
+	state, err = database.ObserveDurableState(ctx)
+	if err != nil || state.Pending["execution"].Count != 0 || state.ActiveTurns != 1 {
+		t.Fatalf("claimed execution remained pending: %+v %v", state, err)
+	}
+}
+
 func TestDurableObservationsWaitForCleanupBeforeMutationRecovery(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]

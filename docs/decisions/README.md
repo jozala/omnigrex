@@ -31,6 +31,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0021: Activate from the current Change Proposal](0021-activate-from-current-change-proposal.md) | Accepted | 2026-10-04 |
 | [0022: Track heads without resuming work](0022-track-heads-without-resuming-work.md) | Accepted | 2026-10-07 |
 | [0023: Expose scoped CI failure diagnostics with orchestrator-owned credentials](0023-scoped-ci-failure-diagnostics.md) | Proposed | 2026-10-06 |
+| [0024: Establish a clean supported release baseline](0024-establish-a-clean-supported-release-baseline.md) | Accepted | 2026-10-16 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.
