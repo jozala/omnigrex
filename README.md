@@ -66,6 +66,14 @@ Set `OMNIGREX_PI_IMAGE` and its matching platform, provision that image, and run
 For a locally built Pi environment, publish it to a development registry and select its resolved digest using the image procedure in the operator guide.
 Secret placement, GitHub Apps, ingress, image provisioning, and recovery procedures are authoritative in the [operator guide](./docs/operator-guide.md).
 
+### Omnigrex development image
+
+`mise run development-image` first builds the current checkout's Linux/amd64 Pi golden image, then derives an environment with Docker Engine, Compose, Buildx, and an image-local Go module source.
+`mise run test-development-image-cache` verifies local module reads, upstream fallback, and writable cache reuse without external network access.
+`mise run test-development-image-unit` runs the repository's unit suite with the image's actual system tools, without a host Docker socket or secrets.
+The release publishes `ghcr.io/jozala/omnigrex/development:sha-<commit>` and emits a promotable environment configuration after exact-digest Microsandbox qualification.
+See [development environment provisioning and promotion](./docs/operator-guide.md#omnigrex-development-environment) and the [delivery plan](./docs/plans/2026-10-16-development-image.md).
+
 ## Preflight Diagnostics
 
 After selecting the deployment's Compose file set as documented in the operator guide, run preflight against each repository before adding `omnigrex:run` to an Issue:

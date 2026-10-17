@@ -25,6 +25,12 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyContract := bound.Contract()
+	legacyContract.PIDsLimit = 128
+	bound, err = profile.New(legacyContract)
+	if err != nil {
+		t.Fatal(err)
+	}
 	spec := compatibilityPreparationSpec("repository-default-snapshot", bound)
 	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
 		preparation.RuntimeContract, _ = json.Marshal(bound.Contract())
@@ -50,7 +56,7 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved, err := profile.DecodeContract(content, bound.Binding()); err != nil || resolved.Binding() != bound.Binding() {
+	if resolved, err := profile.DecodeContract(content, bound.Binding()); err != nil || resolved.Binding() != bound.Binding() || resolved.Contract().PIDsLimit != 128 {
 		t.Fatalf("stored immutable resolution: %+v %v", resolved.Contract(), err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE runtime_profile_contracts SET contract = '{}' WHERE content_sha256 = $1`, bound.ContentSHA256()); err == nil {
@@ -75,7 +81,7 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 		t.Fatal(err)
 	}
 	secondLease := claimPreparationJob(t, database, ctx)
-	newImage, err := bound.WithEnvironment(compatibilityImage("d"), bound.Contract().Platform, []string{"tool-installation"})
+	newImage, err := compatibilityProfile(t, "b", "amd64").WithEnvironment(compatibilityImage("d"), bound.Contract().Platform, []string{"tool-installation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +98,19 @@ func TestRepositoryRuntimeContractIsCommittedAtomicallyAndImmutable(t *testing.T
 	}
 	if second.Participant.ID == prepared.Participant.ID || second.Session.ID == prepared.Session.ID || second.Participant.RuntimeImageDigest != newImage.Contract().Image {
 		t.Fatal("new image reused an existing Participant or Session")
+	}
+	for _, original := range []profile.Profile{bound, newImage} {
+		stored, err := database.RuntimeProfileContract(ctx, original.Binding())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := profile.DecodeContract(stored, original.Binding())
+		if err != nil || resolved.Contract().PIDsLimit != original.Contract().PIDsLimit {
+			t.Fatalf("persisted PID budget changed: %d, %v", resolved.Contract().PIDsLimit, err)
+		}
+	}
+	if newImage.Contract().PIDsLimit != 512 {
+		t.Fatalf("fresh Participant retained the old PID default: %d", newImage.Contract().PIDsLimit)
 	}
 	var originalImage string
 	if err := pool.QueryRow(ctx, `SELECT runtime_image_digest FROM agent_participants WHERE id = $1`, prepared.Participant.ID).Scan(&originalImage); err != nil || originalImage != bound.Contract().Image {

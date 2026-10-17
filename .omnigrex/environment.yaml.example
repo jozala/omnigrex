@@ -1,0 +1,9 @@
+# The release CI artifact contains this document with the real qualified digest.
+# Promote that artifact to .omnigrex/environment.yaml after backend provisioning.
+version: 1
+image: ghcr.io/jozala/omnigrex/development@sha256:<qualified-development-image-digest>
+platform: linux/amd64
+requirements:
+  - hardware-isolation
+  - nested-containers
+  - tool-installation

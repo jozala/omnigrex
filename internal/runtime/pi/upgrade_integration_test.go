@@ -201,7 +201,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, mutate := range []func(*execution.StateRef){func(r *execution.StateRef) { r.ParticipantID = uuid.NewString(); r.ID = r.ParticipantID }, func(r *execution.StateRef) { r.Image = targetImage }, func(r *execution.StateRef) { r.Backend.Family = "other" }, func(r *execution.StateRef) { r.Backend.Namespace = "other" }, func(r *execution.StateRef) { r.Format = "pi-session/v4" }} {
+		for _, mutate := range []func(*execution.StateRef){func(r *execution.StateRef) { r.ParticipantID = uuid.NewString(); r.ID = r.ParticipantID }, func(r *execution.StateRef) { r.Image = foreignUpgradeImage(ref.Image) }, func(r *execution.StateRef) { r.Backend.Family = "other" }, func(r *execution.StateRef) { r.Backend.Namespace += "-foreign" }, func(r *execution.StateRef) { r.Format = "pi-session/v4" }} {
 			wrong := ref
 			mutate(&wrong)
 			if err := copied.Restore(ctx, wrong, bytes.NewReader(archive.Bytes())); !errors.Is(err, execution.ErrBindingMismatch) {
@@ -269,6 +269,65 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 		}
 	}
 	t.Logf("PASS: Pi %s to %s, provider-free exact replay, isolated compatible-host restore and unchanged source archive", sourceVersion, targetVersion)
+}
+
+func foreignUpgradeImage(source string) string {
+	image := "registry.example/foreign-upgrade@sha256:" + strings.Repeat("a", 64)
+	if image == source {
+		return "registry.example/foreign-upgrade@sha256:" + strings.Repeat("b", 64)
+	}
+	return image
+}
+
+func TestSameImagePIDUpgradeArchiveKeepsForeignImageProbeNegative(t *testing.T) {
+	for _, image := range []string{
+		"registry.example/pi@sha256:" + strings.Repeat("a", 64),
+		"registry.example/foreign-upgrade@sha256:" + strings.Repeat("a", 64),
+	} {
+		current, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		contract := current.Contract()
+		contract.PIDsLimit = 128
+		source, err := profile.New(contract)
+		if err != nil || source.Binding() == current.Binding() {
+			t.Fatalf("same-image source/target budget contracts = %v", err)
+		}
+		participant := uuid.NewString()
+		ref := execution.StateRef{ID: participant, ParticipantID: participant,
+			Backend: execution.BackendBinding{Family: "docker", Version: 1, Namespace: "upgrade-isolated"},
+			Format:  profile.PiStateContractVersion, RuntimeProfileSHA256: source.ContentSHA256(), Image: image}
+		metadata := qualificationStateSource{ref: ref}
+		original, err := dirstate.New(t.TempDir(), ref.Backend, metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := original.Ensure(t.Context(), ref); err != nil {
+			t.Fatal(err)
+		}
+		var archive bytes.Buffer
+		if err := original.Export(t.Context(), ref, &archive); err != nil {
+			t.Fatal(err)
+		}
+		copied, err := dirstate.New(t.TempDir(), ref.Backend, metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if err := copied.Restore(t.Context(), ref, bytes.NewReader(archive.Bytes())); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wrong := ref
+		wrong.Image = foreignUpgradeImage(ref.Image)
+		if wrong.Image == image || !profile.IsExactRegistryImage(wrong.Image) {
+			t.Fatal("foreign-image probe did not change a valid exact image")
+		}
+		if err := copied.Restore(t.Context(), wrong, bytes.NewReader(archive.Bytes())); !errors.Is(err, execution.ErrBindingMismatch) {
+			t.Fatalf("same-image upgrade accepted foreign archive: %v", err)
+		}
+	}
 }
 
 // This fixture-only reader discovers the original identity for a two-host
