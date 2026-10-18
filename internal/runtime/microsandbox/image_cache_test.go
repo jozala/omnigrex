@@ -258,6 +258,40 @@ func TestRegistryDocumentCacheConcurrentInProcessSharesPopulation(t *testing.T) 
 	}
 }
 
+func TestRegistryDocumentCacheConcurrentFailureSharesCooldown(t *testing.T) {
+	home := t.TempDir()
+	_, selected, _, _, _ := cacheTestFixture(t, "registry.example", "fixture")
+	manifestRef := "registry.example/fixture@" + selected
+	var calls atomic.Int64
+	client := newCacheTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		time.Sleep(100 * time.Millisecond) // Hold the per-document lock so waiters block.
+		response := imageTestResponse(http.StatusServiceUnavailable, "unavailable")
+		response.Header.Set("Retry-After", "120")
+		return response, nil
+	})
+	cache := cacheTestCache(t, home, client)
+	const waiters = 4
+	var wg sync.WaitGroup
+	errs := make([]error, waiters)
+	for i := range waiters {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = cache.fetch(context.Background(), manifestRef)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if !errors.Is(err, errImageUnavailable) {
+			t.Fatalf("waiter %d error=%v", i, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent failing fetches=%d want 1", got)
+	}
+}
+
 func TestRegistryDocumentCacheCancellationWhileWaitingOnLock(t *testing.T) {
 	home := t.TempDir()
 	_, selected, _, original, _ := cacheTestFixture(t, "registry.example", "fixture")
@@ -941,9 +975,13 @@ func runCacheHelper(t *testing.T, home, ref, mode, lockRel, server string) *exec
 }
 
 func TestRegistryDocumentCacheSeparateProcessesSharePopulation(t *testing.T) {
-	// Serve one manifest over TLS; the ref host must match the test server.
+	// Publish the document bytes before starting the server so handler
+	// goroutines have a happens-before edge to the write under -race.
+	config := `{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`
+	manifestStr := fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"mediaType":%q,"digest":%q,"size":%d},"layers":[]}`, oci.MediaTypeImageManifest, oci.MediaTypeImageConfig, digest.FromString(config).String(), len(config))
+	manifest := []byte(manifestStr)
+	selected := digest.FromString(manifestStr).String()
 	var calls atomic.Int64
-	var manifest []byte
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		time.Sleep(100 * time.Millisecond)
@@ -952,13 +990,8 @@ func TestRegistryDocumentCacheSeparateProcessesSharePopulation(t *testing.T) {
 	}))
 	defer server.Close()
 	host := strings.TrimPrefix(server.URL, "https://")
-	config := `{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`
-	manifestStr := fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"mediaType":%q,"digest":%q,"size":%d},"layers":[]}`, oci.MediaTypeImageManifest, oci.MediaTypeImageConfig, digest.FromString(config).String(), len(config))
-	manifest = []byte(manifestStr)
-	selected := digest.FromString(manifestStr).String()
 	ref := host + "/fixture@" + selected
 	home := t.TempDir()
-	// Warm the server manifest variable before children start (already set).
 	const children = 4
 	var wg sync.WaitGroup
 	errs := make([]error, children)

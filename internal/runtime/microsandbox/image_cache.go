@@ -409,6 +409,12 @@ func (cache *registryDocumentCache) fetch(ctx context.Context, ref string) ([]by
 	} else if ctx.Err() != nil {
 		return nil, errors.Join(ctx.Err(), errImageUnavailable)
 	}
+	// A waiter may have blocked while the holder recorded a shared retry
+	// cooldown for this document. Re-check before fetching so concurrent
+	// failures do not each issue their own immediate registry request.
+	if cache.inCooldown(root, ref, host) {
+		return nil, errors.Join(ctx.Err(), errImageUnavailable)
+	}
 	content, fetchErr := fetchImageIndexWithClient(ctx, ref, cache.client)
 	if fetchErr != nil {
 		cache.recordFetchFailure(ctx, root, ref, host, fetchErr)
