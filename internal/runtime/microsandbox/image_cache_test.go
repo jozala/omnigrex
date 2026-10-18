@@ -535,6 +535,198 @@ func TestRegistryDocumentCacheCooldownAndRetryAfter(t *testing.T) {
 	}
 }
 
+func TestRegistryDocumentCacheOverlappingRetryAfterPreservesLongestDeadline(t *testing.T) {
+	home := t.TempDir()
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ensureRegistryCacheDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	current := now
+	cache := newRegistryDocumentCache(home, nil)
+	cache.now = func() time.Time { return current }
+	cache.jitter = func() float64 { return 1.0 }
+	host := "registry.example"
+	ctx := context.Background()
+	// First 429 requests a long wait; second overlapping 429 requests a short one.
+	cache.recordOriginFailure(ctx, root, host, now.Add(1200*time.Second))
+	first, ok := readRegistryRetryState(root, registryOriginCooldownRel(host))
+	if !ok {
+		t.Fatal("origin cooldown not recorded")
+	}
+	if got := time.Unix(first.NextRetryUnix, 0).Sub(now); got < 1199*time.Second {
+		t.Fatalf("long retry-after not honored: %v", got)
+	}
+	current = now.Add(10 * time.Second)
+	cache.recordOriginFailure(ctx, root, host, current.Add(60*time.Second))
+	second, ok := readRegistryRetryState(root, registryOriginCooldownRel(host))
+	if !ok {
+		t.Fatal("origin cooldown lost")
+	}
+	if got := time.Unix(second.NextRetryUnix, 0); !got.Equal(time.Unix(first.NextRetryUnix, 0)) {
+		t.Fatalf("shorter overlapping retry-after shortened deadline: first=%v second=%v", time.Unix(first.NextRetryUnix, 0), got)
+	}
+	if second.Failures != first.Failures+1 {
+		t.Fatalf("failures not incremented: %d -> %d", first.Failures, second.Failures)
+	}
+	// A different reference on the same origin is still suppressed at now+2m.
+	current = now.Add(2 * time.Minute)
+	if !cache.inCooldown(root, "registry.example/other@"+"sha256:"+strings.Repeat("2", 64), host) {
+		// inCooldown consults the persisted origin file; a missing ref file is
+		// fine because the origin deadline remains active.
+		t.Fatal("origin cooldown admitted request before server-requested time")
+	}
+}
+
+func TestRegistryDocumentCacheRefOverlappingPreservesLongestDeadline(t *testing.T) {
+	home := t.TempDir()
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ensureRegistryCacheDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	current := now
+	cache := newRegistryDocumentCache(home, nil)
+	cache.now = func() time.Time { return current }
+	cache.jitter = func() float64 { return 1.0 }
+	_, selected, _, _, _ := cacheTestFixture(t, "registry.example", "fixture")
+	ref := "registry.example/fixture@" + selected
+	cache.recordRefFailure(root, ref, now.Add(1200*time.Second))
+	first, ok := readRegistryRetryState(root, registryRefCooldownRel(ref))
+	if !ok {
+		t.Fatal("ref cooldown not recorded")
+	}
+	current = now.Add(10 * time.Second)
+	cache.recordRefFailure(root, ref, current.Add(60*time.Second))
+	second, ok := readRegistryRetryState(root, registryRefCooldownRel(ref))
+	if !ok {
+		t.Fatal("ref cooldown lost")
+	}
+	if got := time.Unix(second.NextRetryUnix, 0); !got.Equal(time.Unix(first.NextRetryUnix, 0)) {
+		t.Fatalf("shorter overlapping ref retry shortened deadline: first=%v second=%v", time.Unix(first.NextRetryUnix, 0), got)
+	}
+}
+
+func TestRegistryLockOpenFailureDoesNotBypassHeldLock(t *testing.T) {
+	home := t.TempDir()
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ensureRegistryCacheDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	docHex := strings.Repeat("b", 64)
+	lockRel := registryLockRel(docHex)
+	holder, err := acquireRegistryLock(context.Background(), root, lockRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseRegistryLock(holder)
+	before, err := root.Lstat(lockRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeIno := fileInode(before)
+	// Make the held lock file unopenable for O_RDWR without changing its
+	// type. On non-root CI this fails the second open; as root the second
+	// open still succeeds and must then block on flock rather than bypass.
+	if err := root.Chmod(lockRel, 0400); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Chmod(lockRel, 0600) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	second, err := acquireRegistryLock(ctx, root, lockRel)
+	if err == nil {
+		releaseRegistryLock(second)
+		t.Fatal("second acquire bypassed already-held lock")
+	}
+	if !errors.Is(err, errImageUnavailable) {
+		t.Fatalf("second acquire error=%v", err)
+	}
+	after, err := root.Lstat(lockRel)
+	if err != nil || !after.Mode().IsRegular() {
+		t.Fatalf("held lock file removed or replaced: %+v %v", after, err)
+	}
+	if beforeIno != 0 && fileInode(after) != beforeIno {
+		t.Fatal("held lock inode replaced while still locked")
+	}
+}
+
+func fileInode(info os.FileInfo) uint64 {
+	if stat, ok := info.Sys().(*unix.Stat_t); ok {
+		return stat.Ino
+	}
+	return 0
+}
+
+func TestRegistryDocumentCachePublicationFailureSuppressesRepeatedDownloads(t *testing.T) {
+	// A directory at the document target is never publishable: reject before
+	// fetching so persistent faults cause no registry downloads.
+	home := t.TempDir()
+	_, selected, _, original, _ := cacheTestFixture(t, "registry.example", "fixture")
+	manifestRef := "registry.example/fixture@" + selected
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ensureRegistryCacheDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	docHex, _ := registryDocHex(selected)
+	_ = root.RemoveAll(registryDocRel(docHex))
+	if err := root.Mkdir(registryDocRel(docHex), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int64
+	client := newCacheTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return imageTestResponse(http.StatusOK, string(original)), nil
+	})
+	cache := cacheTestCache(t, home, client)
+	for range 3 {
+		if _, err := cache.fetch(context.Background(), manifestRef); !errors.Is(err, errImageUnavailable) {
+			t.Fatalf("fetch=%v", err)
+		}
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("unpublishable target downloads=%d want 0", got)
+	}
+	_ = root.RemoveAll(registryDocRel(docHex))
+	// A publication fault that only surfaces during publish must still be
+	// suppressed after the first download. Make the documents directory
+	// read-only: as non-root temp creation fails after fetch (1 download then
+	// cooldown); as root the publish succeeds and warm hits share it (still 1).
+	if err := root.Chmod(registryDocSubdir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Chmod(registryDocSubdir, 0700) }()
+	calls.Store(0)
+	// Clear any ref cooldown from the directory-target phase above.
+	_ = root.Remove(registryRefCooldownRel(manifestRef))
+	for range 3 {
+		if _, err := cache.fetch(context.Background(), manifestRef); err != nil && !errors.Is(err, errImageUnavailable) {
+			// As root the first publish may succeed; subsequent warm hits
+			// return success. Both outcomes stay bounded to one download.
+			t.Fatalf("publish-fault fetch=%v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("publish-fault downloads=%d want 1", got)
+	}
+}
+
 func TestRegistryDocumentCacheClassifiesFailures(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1015,14 +1207,16 @@ func TestRegistryDocumentCacheSeparateProcessesSharePopulation(t *testing.T) {
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("cross-process fetches=%d want 1", got)
 	}
-	// A new process with no network still verifies from the shared home.
+	// Shut down the registry: a new process must verify from the shared home
+	// without dialing. Any dial now fails, so success proves offline reuse and
+	// the handler count must not increase.
+	server.Close()
 	disabled := runCacheHelper(t, home, ref, "fetch", "", "")
-	// The helper in fetch mode still needs a client, but the document is warm so
-	// it never dials. Point it at an unroutable server to prove no dial.
-	disabled.Env = append(disabled.Env, "OMNIGREX_TEST_CACHE_SERVER=")
 	if out, err := disabled.CombinedOutput(); err != nil {
-		// If the helper tried to dial it would fail; warm must succeed.
-		t.Fatalf("warm child failed: %v %s", err, out)
+		t.Fatalf("warm child failed with registry down: %v %s", err, out)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("warm child contacted registry: %d requests", got)
 	}
 	_ = io.Discard
 }

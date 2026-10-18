@@ -228,6 +228,9 @@ func writeRegistryRetryState(root *os.Root, rel string, state registryRetryState
 }
 
 func acquireRegistryLock(ctx context.Context, root *os.Root, lockRel string) (*os.File, error) {
+	// Remove only demonstrably unsafe entries before opening. A regular file
+	// is never unlinked here: another process may still hold flock on its
+	// inode, and recreating the path would create an independent lock.
 	if info, err := root.Lstat(lockRel); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			_ = root.Remove(lockRel)
@@ -237,8 +240,15 @@ func acquireRegistryLock(ctx context.Context, root *os.Root, lockRel string) (*o
 	}
 	file, err := root.OpenFile(lockRel, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0600)
 	if err != nil {
-		_ = root.Remove(lockRel)
-		file, err = root.OpenFile(lockRel, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0600)
+		// An open failure on a regular file must not unlink the stable inode.
+		// Only a symlink race (ELOOP with a confirmed symlink) may be
+		// removed and retried; all other failures return a bounded error.
+		if errors.Is(err, unix.ELOOP) {
+			if info, lerr := root.Lstat(lockRel); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				_ = root.Remove(lockRel)
+				file, err = root.OpenFile(lockRel, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0600)
+			}
+		}
 		if err != nil {
 			return nil, errors.Join(ctx.Err(), errImageUnavailable)
 		}
@@ -316,13 +326,21 @@ func (cache *registryDocumentCache) inCooldown(root *os.Root, ref, host string) 
 }
 
 func (cache *registryDocumentCache) recordRefFailure(root *os.Root, ref string, retryAfter time.Time) {
-	previous, _ := readRegistryRetryState(root, registryRefCooldownRel(ref))
+	now := cache.now()
+	rel := registryRefCooldownRel(ref)
+	previous, ok := readRegistryRetryState(root, rel)
 	failures := previous.Failures + 1
 	if failures < 1 {
 		failures = 1
 	}
 	next := cache.computeNextRetry(failures, retryAfter)
-	_ = writeRegistryRetryState(root, registryRefCooldownRel(ref), registryRetryState{Version: 1, Failures: failures, NextRetryUnix: next.Unix()})
+	// Overlapping responses must not shorten an existing active deadline.
+	if ok {
+		if prevDeadline := time.Unix(previous.NextRetryUnix, 0); prevDeadline.After(now) && prevDeadline.After(next) {
+			next = prevDeadline
+		}
+	}
+	_ = writeRegistryRetryState(root, rel, registryRetryState{Version: 1, Failures: failures, NextRetryUnix: next.Unix()})
 }
 
 func (cache *registryDocumentCache) recordOriginFailure(ctx context.Context, root *os.Root, host string, retryAfter time.Time) {
@@ -334,12 +352,20 @@ func (cache *registryDocumentCache) recordOriginFailure(ctx context.Context, roo
 	}
 	defer releaseRegistryLock(lock)
 	rel := registryOriginCooldownRel(host)
-	previous, _ := readRegistryRetryState(root, rel)
+	now := cache.now()
+	previous, ok := readRegistryRetryState(root, rel)
 	failures := previous.Failures + 1
 	if failures < 1 {
 		failures = 1
 	}
 	next := cache.computeNextRetry(failures, retryAfter)
+	// Overlapping 429 responses must not shorten an existing server-requested
+	// origin deadline: retain the maximum of the active and new deadlines.
+	if ok {
+		if prevDeadline := time.Unix(previous.NextRetryUnix, 0); prevDeadline.After(now) && prevDeadline.After(next) {
+			next = prevDeadline
+		}
+	}
 	_ = writeRegistryRetryState(root, rel, registryRetryState{Version: 1, Failures: failures, NextRetryUnix: next.Unix()})
 }
 
@@ -415,6 +441,13 @@ func (cache *registryDocumentCache) fetch(ctx context.Context, ref string) ([]by
 	if cache.inCooldown(root, ref, host) {
 		return nil, errors.Join(ctx.Err(), errImageUnavailable)
 	}
+	// A directory at the document target can never be replaced by atomic
+	// file publication. Reject before fetching so a persistent local fault
+	// does not download on every lookup. No retry state is needed: the
+	// pre-fetch check itself bounds every lookup to zero downloads.
+	if info, err := root.Lstat(registryDocRel(docHex)); err == nil && info.IsDir() {
+		return nil, errors.Join(ctx.Err(), errImageUnavailable)
+	}
 	content, fetchErr := fetchImageIndexWithClient(ctx, ref, cache.client)
 	if fetchErr != nil {
 		cache.recordFetchFailure(ctx, root, ref, host, fetchErr)
@@ -425,7 +458,10 @@ func (cache *registryDocumentCache) fetch(ctx context.Context, ref string) ([]by
 		return nil, errors.Join(ctx.Err(), errImageUnavailable)
 	}
 	// A persistent write failure must not become a silent repeated-fetch path.
+	// Record bounded retry suppression so subsequent lookups do not all
+	// re-download before failing to publish.
 	if err := publishRegistryDocument(root, docHex, content); err != nil {
+		cache.recordRefFailure(root, ref, time.Time{})
 		return nil, errors.Join(ctx.Err(), errImageUnavailable)
 	}
 	_ = root.Remove(registryRefCooldownRel(ref))
