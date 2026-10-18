@@ -7,7 +7,7 @@ const number = value => typeof value === 'number' && Number.isFinite(value) && v
 const boolean = value => typeof value === 'boolean';
 const optional = (value, valid) => value === undefined || valid(value);
 const entryID = /^[A-Za-z0-9_-]{1,128}$/;
-const thinkingLevels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const thinkingLevels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const stopReasons = new Set(['pending', 'stop', 'length', 'toolUse', 'error', 'aborted', 'deferred']);
 
 function content(value, role) {
