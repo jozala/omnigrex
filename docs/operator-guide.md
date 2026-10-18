@@ -787,7 +787,7 @@ The supported fields are:
 | `role` | Role ID referenced by the active Workflow Definition, such as `DEVELOPER` or `REVIEWER` |
 | `runtime` | `pi-rpc/v2` |
 | `model` | Provider model in `provider/model` form |
-| `thinking` | Optional Pi level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; actual model support is verified |
+| `thinking` | Optional Pi level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; vocabulary validity is distinct from model-specific support, which is verified against the actual Pi runtime |
 | `permissions` | Nonempty map of local permissions to `allow` or `deny` |
 
 Pi local permission names are `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`, and the instruction permission `skill`.
@@ -795,6 +795,10 @@ Every omitted permission defaults to deny.
 The Reviewer cannot allow `edit` or `write`.
 Unknown Profile fields and local permissions are rejected; delegation and per-step limits are unsupported.
 Runtime-provided Omnigrex MCP tools are authorized separately from these local permissions.
+
+`max` is Pi's native maximum reasoning level and is distinct from `xhigh`; one is never substituted for the other.
+A Profile value passes discovery when it uses this vocabulary, but the selected model must also advertise the level through `get_available_thinking_levels`.
+Unsupported or silently clamped selections fail during runtime preparation and doctor before any prompt is admitted, without fallback or downgrade.
 
 A Pi Developer Profile can use:
 

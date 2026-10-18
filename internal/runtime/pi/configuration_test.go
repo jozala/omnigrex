@@ -79,6 +79,61 @@ func TestCheckedConfigurationRejectsUnsupportedAndClampedValues(t *testing.T) {
 	}
 }
 
+func TestCheckedConfigurationVerifiesMaxThinkingExactly(t *testing.T) {
+	for _, tc := range []struct {
+		name, thinking, effective string
+		levels                    []string
+		wantError                 bool
+	}{
+		{"max advertised and effective", "max", "max", []string{"low", "high", "max"}, false},
+		{"max not advertised", "max", "max", []string{"low", "high"}, true},
+		{"max advertised but clamped to high", "max", "high", []string{"low", "high", "max"}, true},
+		{"max not substituted by xhigh", "max", "max", []string{"low", "high", "xhigh"}, true},
+		{"xhigh not substituted by max", "xhigh", "xhigh", []string{"low", "high", "max"}, true},
+		{"xhigh advertised and effective", "xhigh", "xhigh", []string{"low", "high", "xhigh"}, false},
+		{"unknown vocabulary rejected", "ultra", "ultra", []string{"off", "low", "ultra"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, runtime := net.Pipe()
+			connection := pi.Connect(client, pi.Options{Selection: &agent.ModelSelection{Model: "provider/model", Thinking: tc.thinking}, RequireMCP: true})
+			t.Cleanup(func() { _ = connection.Close(); _ = runtime.Close() })
+			go func() {
+				scanner := bufio.NewScanner(runtime)
+				for scanner.Scan() {
+					var command struct{ ID, Type string }
+					_ = json.Unmarshal(scanner.Bytes(), &command)
+					var data any
+					switch command.Type {
+					case "get_state":
+						data = map[string]any{"sessionId": "fixture", "isStreaming": false, "model": map[string]string{"provider": "provider", "id": "model"}, "thinkingLevel": tc.effective}
+					case "get_commands":
+						data = map[string]any{"commands": []any{map[string]string{"name": "omnigrex-ready", "source": "extension"}}}
+					case "get_available_models":
+						data = map[string]any{"models": []any{map[string]string{"provider": "provider", "id": "model"}}}
+					case "get_available_thinking_levels":
+						data = map[string]any{"levels": tc.levels}
+					case "prompt":
+						t.Error("prompt admitted despite failed configuration")
+						return
+					}
+					writeRecord(runtime, map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": true, "data": data})
+				}
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			_, err := connection.Prepare(ctx)
+			if errors.Is(err, pi.ErrConfiguration) != tc.wantError || !tc.wantError && err != nil {
+				t.Fatalf("prepare max thinking: %v", err)
+			}
+			if tc.wantError {
+				if outcome, err := connection.Prompt(ctx, "must not admit", nil); err == nil || outcome.Admitted {
+					t.Fatalf("prompt after failed max configuration: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestEphemeralConfigurationSelectsOnlyRequestedProvider(t *testing.T) {
 	configuration, err := pi.ConfigurationDiagnostic(role.Reviewer)
 	if err != nil {

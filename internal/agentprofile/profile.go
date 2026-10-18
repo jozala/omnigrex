@@ -259,10 +259,11 @@ func validateConfiguration(policy role.Policy, configuration frontMatter, instru
 	return nil
 }
 
-// ValidThinking checks vocabulary only; the adapter verifies model support.
+// ValidThinking checks vocabulary only; the adapter verifies model support
+// against the actual Pi runtime. max and xhigh are distinct levels.
 func ValidThinking(value string) bool {
 	switch value {
-	case "off", "minimal", "low", "medium", "high", "xhigh":
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
 		return true
 	}
 	return false
