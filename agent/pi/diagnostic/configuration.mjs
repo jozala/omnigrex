@@ -11,7 +11,13 @@ const fixturePrompts = new Set(['PRIOR_TURN_CONTEXT', 'configuration-audit', 'co
   'configuration-revoked', 'configuration-publish', 'configuration-invalid-arguments',
   'configuration-developer-only', 'configuration-write', 'configuration-edit', 'configuration-skill',
   'configuration-grep', 'configuration-find', 'configuration-ls', 'configuration-bash',
-  'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit', 'configuration-continuation']);
+  'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit', 'configuration-continuation',
+  'configuration-thinking-max', 'configuration-thinking-max-continue']);
+function providerReasoningSetting(data) {
+  // Generic openai-completions wire for a reasoning model without a special
+  // thinkingFormat carries the mapped level as reasoning_effort.
+  return data?.reasoning_effort ?? data?.reasoningEffort ?? data?.reasoning?.effort;
+}
 function contentText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.filter(block => block.type === 'text').map(block => block.text).join('');
@@ -64,6 +70,15 @@ try {
       if (providerRequests !== 0) throw new Error('History Replay contacted the provider');
       if (!data.messages.some(m => m.role === 'user' && contentText(m.content) === 'configuration-audit')) throw new Error('prior Session context was lost');
       if (JSON.stringify(data.messages).includes('ABANDONED_HISTORY')) throw new Error('abandoned branch became current context');
+    }
+    if (prompt === 'configuration-thinking-max-continue') {
+      if (providerRequests !== 0) throw new Error('History Replay contacted the provider');
+      if (!data.messages.some(m => m.role === 'user' && contentText(m.content) === 'configuration-thinking-max')) throw new Error('prior max Session context was lost');
+    }
+    if (prompt === 'configuration-thinking-max' || prompt === 'configuration-thinking-max-continue') {
+      const setting = providerReasoningSetting(data);
+      if (setting !== 'max') throw new Error(`provider request did not carry max reasoning (reasoning_effort=${JSON.stringify(data?.reasoning_effort)} model=${JSON.stringify(data?.model)})`);
+      if (data?.model !== undefined && data.model !== 'controlled-max') throw new Error(`provider request used unexpected model ${JSON.stringify(data?.model)}`);
     }
     providerRequests++;
     if (prompt === 'configuration-provider-error') {
@@ -147,9 +162,16 @@ try {
     chunk(delta, null); chunk({}, streamFailure ? 'network_error' : tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  // controlled-max mirrors the pinned catalog observation for a reasoning model
+  // that supports max (low/high/max, xhigh excluded). Fixture-only: production
+  // never maps models to thinking levels and always queries the live runtime.
   const models = { providers: { diagnostic: {
     baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
     models: [{ id: 'controlled', name: 'Controlled configuration', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 1024,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    { id: 'controlled-max', name: 'Controlled reasoning max', reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
+      input: ['text'], contextWindow: 32000, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } };
   if (retained) {
