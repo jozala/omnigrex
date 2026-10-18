@@ -106,11 +106,14 @@ Do not bind the native home or entire storage roots into a guest.
 
 Provision exact repository images into the selected native image cache before accepting work, using the installed `msb image pull` or image archive import commands.
 Admission verifies actual manifest/config content and platform linkage; an imported digest-shaped alias is not sufficient proof of image identity.
-Index-pinned images and SDK-reserialized registry manifests require bounded HTTPS access to their exact registry artifacts for verification.
+First-use verification of an index-pinned image or SDK-reserialized registry manifest requires bounded HTTPS access to its exact registry artifacts.
+Warm verification reuses validated immutable documents from the persistent `omnigrex-registry-documents/v1` cache under the native home, so repeated readiness checks make no registry requests for those documents, including after orchestrator restarts.
 Ordinary execution and golden-resource diagnostics use cached layered artifacts without pulling.
-Repositories requesting nested containers require flat ext4 materialization; the SDK may fetch the same declared registry digest within the bounded preparation operation to create that flat artifact.
+Repositories requesting nested containers still require flat ext4 materialization; the SDK may fetch the same declared registry digest within the bounded preparation operation to create that flat artifact, and guest workload pulls may still need registry access.
 Keep those exact registry artifacts available as described in [Repository Environments](#repository-environments).
 No repository image build or mutable-tag fallback occurs inside Omnigrex.
+Deleting the document cache is safe but requires registry access to rebuild verification evidence.
+The cache holds reproducible evidence only and is not part of the required Session backup set.
 
 The native preflight checks the installed runtime version, local SDK selection, KVM access, selected images, isolated golden resources, and the real authenticated diagnostic MCP path.
 Use the existing `doctor` command and check every reported prerequisite.
@@ -1398,7 +1401,7 @@ Create a unique private recovery-set directory, then write each artifact atomica
 The archive preserves numeric ownership, including Runtime Process UID and GID 10001.
 Backend ownership and versioned state metadata are part of the PostgreSQL dump and must be restored with the matching state volume.
 The workspace and mise volumes are reproducible caches and are not required for disaster recovery when no Agent Turn is active.
-The native image cache is re-provisioned from exact registry artifacts; disposable VM root disks, memory snapshots, guest tmpfs credentials, and tool scratch are excluded.
+The native image cache is re-provisioned from exact registry artifacts; the immutable registry-document cache under `omnigrex-registry-documents` is likewise repopulated on demand and excluded from the recovery set; disposable VM root disks, memory snapshots, guest tmpfs credentials, and tool scratch are excluded.
 A diagnostic-only native installation may have no dispatch journal; an empty journal archive is allowed only when the stopped ledger has no Agent Turns.
 If any Agent Turn exists and its journal is absent, backup fails rather than silently omitting potentially required recovery metadata.
 Archive them separately if local policy requires a complete host checkpoint.

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,50 @@ import (
 )
 
 var imageAuthParameters = regexp.MustCompile(`(?:^|[, ])(realm|service)="([^"]*)"`)
+
+// registryFetchError carries a sanitized registry failure with its HTTP status
+// and any valid Retry-After time for shared cooldown bookkeeping.
+// Its Error string never includes authorization headers, tokens, raw provider
+// bodies, or transport details.
+type registryFetchError struct {
+	status     int
+	retryAfter time.Time
+}
+
+func (err *registryFetchError) Error() string { return errImageUnavailable.Error() }
+
+func (err *registryFetchError) Unwrap() error { return errImageUnavailable }
+
+// parseRegistryRetryAfter accepts delta-seconds or an HTTP date.
+// A past date or malformed value is not a valid retry time.
+func parseRegistryRetryAfter(header string, now time.Time) (time.Time, bool) {
+	value := strings.TrimSpace(header)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return time.Time{}, false
+		}
+		return now.Add(time.Duration(seconds) * time.Second), true
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if when.After(now) {
+			return when, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func registryUnavailableWithStatus(status int, response *http.Response, now time.Time) error {
+	var retryAfter time.Time
+	if response != nil {
+		if when, ok := parseRegistryRetryAfter(response.Header.Get("Retry-After"), now); ok {
+			retryAfter = when
+		}
+	}
+	return &registryFetchError{status: status, retryAfter: retryAfter}
+}
 
 // The SDK drops parent indexes and reserializes registry manifests in its
 // cache. Fetch only the exact digest document, over HTTPS, with anonymous pull
@@ -75,7 +120,7 @@ func fetchImageIndexWithClient(ctx context.Context, ref string, client *http.Cli
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, errImageUnavailable
+		return nil, registryUnavailableWithStatus(response.StatusCode, response, time.Now())
 	}
 	return readImageDocument(response.Body, imageMetadataLimit)
 }
@@ -109,7 +154,7 @@ func anonymousImageToken(ctx context.Context, client *http.Client, challenge, re
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", errImageUnavailable
+		return "", registryUnavailableWithStatus(response.StatusCode, response, time.Now())
 	}
 	content, err := readImageDocument(response.Body, 64<<10)
 	if err != nil {
