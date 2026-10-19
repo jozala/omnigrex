@@ -107,6 +107,7 @@ This example creates a private unique directory and publishes each archive only 
 The archive preserves numeric ownership, including UID/GID 10001.
 Workspace and mise volumes are reproducible caches and are unnecessary for disaster recovery when no Turn is active.
 Native image cache is re-provisioned from exact registry artifacts; disposable root disks, snapshots, tmpfs credentials, and scratch are excluded.
+The immutable registry-document cache under `omnigrex-registry-documents` is likewise reproducible on demand and excluded from the recovery set.
 A diagnostic-only installation may have no native journal only when the stopped ledger has no Agent Turns.
 An existing Turn with an absent journal makes backup fail rather than silently omit required metadata.
 Archive disposable resources separately only if local policy requires a complete host checkpoint.

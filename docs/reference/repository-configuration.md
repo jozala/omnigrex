@@ -23,7 +23,7 @@ Unknown configuration is rejected rather than silently ignored.
 | `role` | Role ID used by the Workflow Definition, initially `DEVELOPER` or `REVIEWER` |
 | `runtime` | `pi-rpc/v2` |
 | `model` | Exact `provider/model` supported by the image and supplied credentials |
-| `thinking` | Optional `off`, `minimal`, `low`, `medium`, `high`, `xhigh`; actual model support is verified |
+| `thinking` | Optional `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; vocabulary validity is distinct from model-specific support, verified against the actual Pi runtime |
 | `permissions` | Nonempty map of supported local permission names to `allow` or `deny` |
 
 Supported local permissions are `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`, and `skill`.
@@ -32,6 +32,10 @@ MCP capabilities are authorized independently.
 Delegation, unknown Profile fields, unknown permissions, and per-step limits are unsupported.
 Every direct lowercase Markdown child of `.omnigrex/team/` is treated as configuration.
 The current selector requires exactly one Profile per Workflow Role.
+
+`max` is Pi's native maximum reasoning level and is distinct from `xhigh`; neither is substituted for the other.
+A valid vocabulary value passes discovery, but the selected model must also advertise it through `get_available_thinking_levels`.
+Unsupported or silently clamped selections fail during runtime preparation and doctor before any prompt is admitted, without fallback or downgrade.
 
 The body follows strict YAML front matter and holds preferences/instructions.
 Filename changes preserve identity when `name` remains unchanged.

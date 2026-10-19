@@ -56,6 +56,7 @@ Unknown requirements/fields, mutable tags, and unsupported platforms fail config
 Doctor does not execute the entire project test suite.
 Omnigrex does not build images or replace missing artifacts with tags.
 Keep registry artifacts available for native identity verification and nested-container flat-image materialization.
+Warm native verification reuses validated persistent registry documents without requests, while first-use verification, flat materialization, and guest pulls can still require registry access.
 For agents developing Omnigrex itself, use the qualified [Omnigrex development image](../contributors/development-image.md).
 
 ## Understand selection and tool installation

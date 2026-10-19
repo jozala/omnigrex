@@ -4,7 +4,7 @@
 
 Provide GitHub-first Markdown documentation for everyday users, repository owners, installation operators, and Omnigrex contributors.
 Rewrite the entry points and fill onboarding gaps while preserving authoritative operational procedures and accepted specifications.
-The organization follows [decision 0030](../decisions/0030-organize-documentation-around-reader-responsibilities.md).
+The organization follows [decision 0031](../decisions/0031-organize-documentation-around-reader-responsibilities.md).
 
 ## Content map
 

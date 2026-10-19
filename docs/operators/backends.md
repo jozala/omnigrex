@@ -60,12 +60,19 @@ Never bind native home or entire storage roots into a guest.
 Before accepting work, provision exact repository images into the selected cache using installed `msb image pull` or archive import commands.
 The [installation procedure](installation.md#microsandbox-bundle) gives the Compose invocation.
 Admission verifies actual manifest/config content and platform linkage; a digest-shaped imported alias is insufficient.
-Index-pinned images and SDK-reserialized registry manifests require bounded HTTPS access to exact registry artifacts for verification.
+First-use verification of an index-pinned image or SDK-reserialized registry manifest requires bounded HTTPS access to its exact registry artifacts.
+Warm verification reuses validated immutable documents from the persistent `omnigrex-registry-documents/v1` cache under the native home.
+Repeated readiness checks make no registry requests for those documents, including after orchestrator restarts.
 Ordinary execution and golden-resource diagnostics use cached layered artifacts without pulling.
 
 Nested containers require flat ext4 materialization, which may fetch the declared registry digest during bounded preparation.
+Guest workload pulls may also need registry access.
 Keep those exact registry artifacts available.
 Omnigrex does not build repository images or fall back to mutable tags.
+
+Deleting the document cache is safe but requires registry access to rebuild verification evidence.
+It contains reproducible evidence only and is not required Session backup data.
+See [decision 0030](../decisions/0030-cache-immutable-registry-documents-for-offline-verification.md).
 
 ## Failure and recovery boundaries
 

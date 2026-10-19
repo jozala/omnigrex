@@ -158,18 +158,25 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 	case <-c.done:
 		return nil, c.failureValue()
 	}
+	if err := c.awaitBootstrap(bounded, job.done); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *connection) awaitBootstrap(ctx context.Context, written <-chan error) error {
 	select {
-	case err := <-job.done:
+	case err := <-written:
 		if err == nil {
-			return c, nil
+			return nil
 		}
 		_ = c.Close()
-		return nil, agent.ErrTransport
-	case <-bounded.Done():
-		c.finishStartup(c.startupError(bounded.Err()))
+		return c.failureValue()
+	case <-ctx.Done():
+		c.finishStartup(c.startupError(ctx.Err()))
 		_ = c.Close()
-		return nil, c.startupError(bounded.Err())
+		return c.startupError(ctx.Err())
 	case <-c.done:
-		return nil, c.failureValue()
+		return c.failureValue()
 	}
 }

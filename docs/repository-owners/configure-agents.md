@@ -40,6 +40,10 @@ See the [field reference](../reference/repository-configuration.md#agent-profile
 Omitted permissions default to deny.
 Unknown fields and permissions fail discovery.
 
+The optional `thinking` field accepts Pi's native levels, including `max` where the selected model supports it.
+`max` and `xhigh` are distinct: neither is automatically mapped or downgraded to the other.
+Preparation and doctor query the actual runtime's supported levels and reject unsupported or silently clamped selections before prompting.
+
 ## Write repository preferences
 
 Use the body for repository preferences, personality, communication style, and skill selection.

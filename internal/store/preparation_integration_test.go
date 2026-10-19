@@ -1422,6 +1422,32 @@ SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id = $1),
 	}
 }
 
+func TestPrepareAgentTurnPreservesMaxThinking(t *testing.T) {
+	databases, _ := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	triggerPreparationWorkflow(t, database, ctx, "61000000-0000-4000-8000-000000000099", "62000000-0000-4000-8000-000000000099")
+	spec := preparationSpec("max-profile", "openai/gpt-5.2")
+	updateStagePreparation(&spec, workflow.StageImplementation, func(preparation *store.ParticipantPreparation) {
+		preparation.Profile.Config = agentProfileConfig("developer", workflow.RoleDeveloper, "pi-rpc/v2", "openai/gpt-5.2", "max", 0, "Perform development.", map[string]string{"read": "allow"})
+	})
+	prepared, err := database.PrepareAgentTurn(ctx, claimPreparationJob(t, database, ctx), spec)
+	if err != nil {
+		t.Fatalf("PrepareAgentTurn() with max thinking error = %v", err)
+	}
+	var stored struct {
+		Thinking string `json:"thinking"`
+	}
+	if err := json.Unmarshal(prepared.Turn.AgentProfileConfig, &stored); err != nil || stored.Thinking != "max" {
+		t.Fatalf("prepared Turn thinking = (%q, %v), want max", stored.Thinking, err)
+	}
+	if !strings.Contains(string(prepared.Turn.AgentProfileConfig), `"thinking":"max"`) {
+		t.Fatalf("prepared Turn config does not preserve max: %s", prepared.Turn.AgentProfileConfig)
+	}
+}
+
 func TestClaimAndAcquireAgentTurnAllowsLaterTurnToRecoverUnboundCreatingSession(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]

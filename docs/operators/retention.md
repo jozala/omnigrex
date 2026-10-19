@@ -18,6 +18,8 @@ Protected Workspace Captures are collected with their Participant rather than Tu
 Keep every digest referenced by active or retained Sessions available until corresponding state is collected.
 That includes repository-specific environment images, not just the current deployment golden image.
 Keep exact registry artifacts readable for native verification and flat-image materialization.
+Warm native verification reuses validated persistent registry documents without network requests, but cache misses, flat-image materialization, and guest pulls may still require registry access.
+The [document cache](backends.md#provision-exact-images) is reproducible evidence, not protected Session data.
 
 Runtime state binds backend family, contract version, and complete storage namespace when the installation first composes.
 Changing those bindings later fails instead of attaching different data.

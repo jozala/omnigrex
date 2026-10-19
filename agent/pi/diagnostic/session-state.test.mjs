@@ -62,6 +62,45 @@ test('reopening rejects malformed context without Pi normalization or file chang
   }
 });
 
+test('max and xhigh thinking levels reopen with exact values', async () => {
+  for (const level of ['max', 'xhigh']) {
+    const root = await mkdtemp('/tmp/pi-state-test-');
+    try {
+      const { manager } = await openDurableSession(identity, root);
+      const file = manager.getSessionFile();
+      const header = await readFile(file, 'utf8');
+      const entries = [
+        { type: 'message', id: '11111111', parentId: null, message: { role: 'user', content: 'prior context', timestamp: 1 } },
+        { type: 'thinking_level_change', id: '22222222', parentId: '11111111', thinkingLevel: level },
+      ];
+      const bytes = header + entries.map(entry => JSON.stringify({ timestamp: '2026-10-09T12:00:00Z', ...entry }) + '\n').join('');
+      await writeFile(file, bytes);
+      const reopened = await openDurableSession({ ...identity, mustExist: true }, root);
+      assert.equal(reopened.manager.getSessionId(), identity.runtimeSessionId);
+      const retained = await readFile(file, 'utf8');
+      assert.equal(retained, bytes, 'retained thinking level was rewritten');
+      assert.match(retained, new RegExp(`"thinkingLevel":"${level}"`), 'exact thinking level was not preserved');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('unknown thinking level fails closed without rewriting retained state', async () => {
+  const root = await mkdtemp('/tmp/pi-state-test-');
+  try {
+    const { manager } = await openDurableSession(identity, root);
+    const file = manager.getSessionFile();
+    const header = await readFile(file, 'utf8');
+    const entries = [
+      { type: 'message', id: '11111111', parentId: null, message: { role: 'user', content: 'prior context', timestamp: 1 } },
+      { type: 'thinking_level_change', id: '22222222', parentId: '11111111', thinkingLevel: 'ultra' },
+    ];
+    const bytes = header + entries.map(entry => JSON.stringify({ timestamp: '2026-10-09T12:00:00Z', ...entry }) + '\n').join('');
+    await writeFile(file, bytes);
+    await assert.rejects(openDurableSession({ ...identity, mustExist: true }, root), 'unknown thinking level was accepted');
+    assert.equal(await readFile(file, 'utf8'), bytes, 'unknown thinking level rewrote retained state');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('wrong header, duplicate entry identity, truncation, old format and symlinks fail closed', async () => {
   for (const corruption of ['wrong-header', 'duplicate', 'truncated', 'old-format', 'symlink']) {
     const root = await mkdtemp('/tmp/pi-state-test-');

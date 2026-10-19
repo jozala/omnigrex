@@ -34,6 +34,9 @@ var errImageCorrupt = errors.New("Microsandbox immutable image metadata corrupt"
 // cache/manifests/<sha256(normalized-reference)>.json. Image.Get exposes only
 // database metadata, and Image.Load permits arbitrary digest-shaped aliases.
 // Neither of those claims alone establishes an immutable image identity.
+// Original registry manifests and parent indexes are served from a persistent
+// content-addressed document cache below the configured home so repeated
+// readiness checks reuse verified immutable bytes without registry traffic.
 func verifyCachedImage(ctx context.Context, home, ref, manifestDigest, imageOS, arch string) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -46,20 +49,21 @@ func verifyCachedImage(ctx context.Context, home, ref, manifestDigest, imageOS, 
 	}
 	defer root.Close()
 	key := sha256.Sum256([]byte(ref)) // Exact references are already normalized.
-	file, err := root.OpenFile(filepath.Join("cache", "manifests", hex.EncodeToString(key[:])+".json"), os.O_RDONLY|unix.O_NONBLOCK, 0)
+	file, err := root.OpenFile(filepath.Join("cache", "manifests", hex.EncodeToString(key[:])+".json"), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return errImageUnavailable
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > imageMetadataLimit {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > imageMetadataLimit {
 		return errImageCorrupt
 	}
 	content, err := readImageDocument(file, imageMetadataLimit)
 	if err != nil {
 		return err
 	}
-	return verifyImageContent(ctx, ref, manifestDigest, imageOS, arch, content, fetchImageIndex)
+	cache := newRegistryDocumentCache(home, nil)
+	return verifyImageContent(ctx, ref, manifestDigest, imageOS, arch, content, cache.fetch)
 }
 
 func readImageDocument(reader io.Reader, limit int64) ([]byte, error) {
