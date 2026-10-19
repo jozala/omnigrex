@@ -6,7 +6,7 @@ This record covers the initial Linux execution-environment proof from [Step 01 o
 The original executable experiment and reproduction instructions are preserved in [the historical source](https://github.com/jozala/omnigrex/tree/415ba6d/experiments/microsandbox).
 The CLI and standalone SDK prototype images and harnesses have been retired in favor of the production backend conformance suite.
 Compose and Testcontainers fixtures now belong to `internal/runtime/microsandbox/testdata/nested` and remain part of production Linux/KVM qualification.
-Deployment and secret procedures remain in the [operator guide](../operator-guide.md).
+Deployment and secret procedures remain in the [operator guides](../operators/README.md).
 
 ## Observed on 2026-10-05
 

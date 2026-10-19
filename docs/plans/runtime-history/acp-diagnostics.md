@@ -1,6 +1,6 @@
 # Diagnosing ACP failures
 
-These are archived diagnostics for the historical transport; current operational procedures are in the [operator guide](../../operator-guide.md).
+These are archived diagnostics for the historical transport; current operational procedures are in the [operator guides](../../operators/README.md).
 
 ACP connects the orchestrator to the Runtime Process.
 MCP connects the agent to Omnigrex capabilities.
@@ -77,4 +77,4 @@ These logs cannot diagnose an internal Runtime Process connection that never
 crosses the orchestrator's ACP transport. If runtime stderr reports an error
 without a corresponding ACP entry, inspect runtime-side diagnostics too.
 
-For deployment and recovery procedures, see the [operator guide](../../operator-guide.md).
+For deployment and recovery procedures, see the [operator guides](../../operators/README.md).

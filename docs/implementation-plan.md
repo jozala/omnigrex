@@ -1,5 +1,8 @@
 # First-Iteration Implementation Plan
 
+This is the historical OpenCode/ACP implementation sequence, not the current Pi-only architecture or development guide.
+Use the [contributor guides](contributors/README.md) for current commands and the [plans index](plans/README.md) for subsequent delivery records.
+
 This plan implements the behavior defined in [First Iteration](./plans/first-iteration.md).
 Each phase has a verification gate and should leave the repository in a working state.
 

@@ -45,7 +45,7 @@ Omnigrex never builds or automatically pulls repository images.
 The exact selected platform and digest must already be available to the execution backend.
 
 The original Alpine-based example has been retired; the current [Pi repository image example](../../agent/environments/pi-example/Dockerfile) derives from an externally supplied Pi golden digest and adds an explicitly versioned Debian development package.
-Image construction, publication, availability, and configuration procedures are authoritative in the [operator guide](../operator-guide.md#repository-environments).
+Image construction, publication, availability, and configuration procedures are authoritative in the [repository environment guide](../repository-owners/development-environments.md).
 
 ## Tool setup and control protection
 

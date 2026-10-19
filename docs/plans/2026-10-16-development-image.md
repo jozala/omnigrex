@@ -24,7 +24,7 @@ Release CI publishes the development image using the newly published golden dige
 After the ordinary published Pi deployment gates, a dedicated Linux/KVM job qualifies the exact development digest and emits an `environment.yaml` artifact.
 The first publication precedes the repository change that promotes that real document to `.omnigrex/environment.yaml`.
 The checked-in `.omnigrex/environment.yaml.example` is illustrative and is not active configuration.
-Deployment and image provisioning procedures remain authoritative in the [operator guide](../operator-guide.md#omnigrex-development-environment).
+Development-image construction and promotion follow the [contributor guide](../contributors/development-image.md); image provisioning follows [operator installation](../operators/installation.md).
 
 ## Verification
 

@@ -218,7 +218,7 @@ Cover missing or malformed required skills, a denied skill tool call, and a new 
 Check that test-created scratch files do not become production workspace changes and that Reviewer tracked-file rules remain intact.
 
 Record the deliberate checkout-skill exception in a focused ADR and update current implementation and operator documentation where it would otherwise claim all feature-branch skills are excluded.
-Link operational procedures to `docs/operator-guide.md` rather than duplicating deployment or secret instructions.
+Link operational procedures to the focused guides under `docs/operators/` rather than duplicating deployment or secret instructions.
 Do not modify the accepted `docs/plans/first-iteration.md` specification.
 
 Completion criterion: documented boundaries and pinned-runtime tests agree on which skill source is now permitted.

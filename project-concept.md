@@ -1,5 +1,8 @@
 # Autonomous AI Team for Software Development
 
+This document describes the broader product vision, including capabilities beyond the current implementation.
+For supported behavior and getting started, use the [project README](README.md) and [documentation hub](docs/README.md).
+
 ## 1. Project idea
 
 The goal of the project is to create a platform that enables building **autonomous teams of AI agents responsible for software development**.

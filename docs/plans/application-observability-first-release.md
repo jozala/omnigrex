@@ -12,7 +12,7 @@ Continue writing logs to stdout for collection through Docker; do not add direct
 
 ## Read First and Confirm the Starting Point
 
-Read `AGENTS.md`, `README.md`, `CONTEXT.md`, the relevant ADRs, and `docs/operator-guide.md`.
+Read `AGENTS.md`, `README.md`, `CONTEXT.md`, the relevant ADRs, and `docs/operators/observability.md`.
 Use the domain terminology in `CONTEXT.md` and preserve the existing ownership, fencing, retry, and shutdown contracts.
 Start implementation from current `main`, checking whether the existing telemetry and readiness-suppression changes have already merged.
 Do not change `docs/plans/first-iteration.md`.

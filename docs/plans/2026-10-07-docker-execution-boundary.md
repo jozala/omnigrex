@@ -117,4 +117,4 @@ The neutral adapter keeps stdin available across pre-launch reattachment and req
 Remove that legacy distinction with the remaining OpenCode path in Step 17.
 The current OpenCode credential environment and ACP coordination remain transitional until their assigned Pi implementation steps.
 
-Operational procedures remain authoritative in the [operator guide](../operator-guide.md).
+Operational procedures remain authoritative in the [operator guides](../operators/README.md).

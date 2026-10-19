@@ -40,4 +40,4 @@ Operational procedures remain in the operator guide.
 - [Contract design](../plans/2026-10-07-runtime-boundary-contracts.md)
 - [Superseded ADR 0010](../plans/runtime-history/adr-0010.md)
 - [Pi credential-path evidence](../experiments/pi.md)
-- [Operator guide](../operator-guide.md)
+- [Operator secret handling](../operators/secrets.md)

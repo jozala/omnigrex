@@ -592,7 +592,7 @@ Diagnostic sessions leave no retained runtime state.
 
 **Scope**
 
-- Update `README.md`, `docs/operator-guide.md`, domain terminology where necessary, and decision records.
+- Update `README.md`, focused guides under `docs/operators/`, domain terminology where necessary, and decision records.
 - Document backend guarantees and selection.
 - Document repository image construction and qualification.
 - Document credential placement, backup scope, restore, and retained-image requirements.

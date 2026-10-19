@@ -5,7 +5,7 @@
 This record covers Step 02 of the [combined Pi and execution-backend plan](../plans/2026-10-05-pi-and-pluggable-execution-backends.md).
 The original probe and reproduction commands are preserved in [the historical source](https://github.com/jozala/omnigrex/tree/415ba6d/experiments/pi).
 The prototype image, RPC client, fixture extensions, and subscription snapshot have been retired in favor of production-adapter qualification.
-Current optional API-key smoke runs through the production Pi runner; see [live provider smoke](../operator-guide.md#live-provider-smoke).
+Current optional API-key smoke runs through the production Pi runner; see [live-provider smoke](../contributors/runtime-qualification.md#live-provider-smoke).
 It builds on the [Microsandbox topology proof](microsandbox.md).
 
 The candidate is Pi 1.0.4 from `@earendil-works/pi-coding-agent`, Node 24.14.1, and Microsandbox 0.7.6.

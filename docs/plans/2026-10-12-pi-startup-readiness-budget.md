@@ -8,7 +8,7 @@ An operator's live candidate deployment exposed the startup failure described be
 This document proposes a fix; it does not claim implementation or qualification.
 
 Relevant delivery records are [Step 15 operational integration](2026-10-11-pi-operational-integration.md) and [Step 16 operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md).
-The [operator guide](../operator-guide.md) remains authoritative for deployment and recovery procedures.
+The [operator guides](../operators/README.md) remain authoritative for deployment and recovery procedures.
 
 ## Problem and observed evidence
 

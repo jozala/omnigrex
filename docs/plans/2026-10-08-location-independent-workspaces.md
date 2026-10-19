@@ -25,7 +25,7 @@ The successful mechanism proof preserves that xattr and decodes guest-visible mo
 The production Microsandbox adapter must repeat the proof and implement this translation in Step 08.
 
 The following commands record the original prototype runs, whose [source and instructions](https://github.com/jozala/omnigrex/tree/415ba6d/experiments/pi) are preserved in Git history.
-The executable prototype is retired; current capture coverage runs through the production backend and Pi Workflow gates described in the [operator guide](../operator-guide.md#diagnostics-and-backend-gates).
+The executable prototype is retired; current capture coverage runs through the production backend and Pi Workflow gates described in the [contributor testing guide](../contributors/testing.md#complete-backend-qualification).
 
 ```sh
 OMNIGREX_PI_FEASIBILITY=1 OMNIGREX_PI_BACKEND=docker \
@@ -79,7 +79,7 @@ A later checkout cannot replace that evidence.
 
 Captures live under `workspace-captures` in the retained-state volume, outside the Session-state subpaths mounted into agents.
 They remain available through deferred verification, human revalidation, and restart, and are deleted only under Participant collection authorization.
-Operational backup and restore procedures remain in the [operator guide](../operator-guide.md#backup).
+Operational procedures remain in the [backup](../operators/backup.md) and [restore](../operators/restore.md) guides.
 
 ## Verification coverage
 

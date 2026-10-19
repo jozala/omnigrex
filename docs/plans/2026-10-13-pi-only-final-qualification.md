@@ -8,7 +8,7 @@ Its historical cutover gate is retired rather than a requirement for that new ba
 This delivers the source implementation and backend qualification for Step 17 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following [operator documentation and cutover rehearsal](2026-10-11-pi-operator-documentation-and-cutover.md).
 Pi is the only supported coding-agent runtime in the application, repository Profiles, images, deployment defaults, and CI publication path.
 Docker and Microsandbox remain separately supported Execution Backends.
-The [operator guide](../operator-guide.md) remains authoritative for release selection and current deployment/recovery; historical clean disposal and cutover are documented in the [migration guide](../migrations/opencode-to-pi.md).
+The [operator guides](../operators/README.md) remain authoritative for release selection and current deployment/recovery; historical clean disposal and cutover are documented in the [migration guide](../migrations/opencode-to-pi.md).
 
 Source qualification, merged-release publication, and both published-image deployment smokes are complete.
 The operator confirmed the Pi/Microsandbox cutover and a live Compose-backed Work Item on the published Pi-only release.

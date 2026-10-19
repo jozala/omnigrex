@@ -11,7 +11,7 @@ The implementation narrative below describes the historical Step 15 milestone; S
 
 This implements the source and qualification work for Step 15 of the [combined plan](2026-10-05-pi-and-pluggable-execution-backends.md), following [Pi upgrades and state recovery](2026-10-10-pi-upgrades-and-state-recovery.md).
 The [release-gating decision](../decisions/0018-gate-pi-publication-on-both-backend-deployments.md) records the preparatory runtime selection and deployment/CI policy.
-The operator guide owns the authoritative [Pi deployment procedure](../operator-guide.md#pi-operational-deployment).
+The operator installation guide owns the authoritative [Pi deployment procedure](../operators/installation.md).
 
 ## Operational integration
 
