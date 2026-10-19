@@ -556,7 +556,10 @@ func (c *connection) exchange(ctx context.Context, command string, fields map[st
 	case <-c.done:
 		return response{}, c.failureValue()
 	}
-	written := job.done
+	return c.awaitResponse(ctx, pending, job.done)
+}
+
+func (c *connection) awaitResponse(ctx context.Context, pending *pendingRequest, written <-chan error) (response, error) {
 	for {
 		select {
 		case result := <-pending.result:
@@ -566,7 +569,7 @@ func (c *connection) exchange(ctx context.Context, command string, fields map[st
 			return result, nil
 		case err := <-written:
 			if err != nil {
-				return response{}, agent.ErrTransport
+				return response{}, c.failureValue()
 			}
 			written = nil
 		case <-ctx.Done():
