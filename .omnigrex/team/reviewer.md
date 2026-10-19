@@ -3,7 +3,7 @@ name: reviewer
 role: REVIEWER
 runtime: pi-rpc/v2
 model: opencode-go/deepseek-v4.1-flash
-thinking: high
+thinking: max
 permissions:
   read: allow
   edit: deny
