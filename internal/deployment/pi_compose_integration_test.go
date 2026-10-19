@@ -15,7 +15,11 @@ import (
 
 func TestPiOperatorExamplesPreserveComposeSelection(t *testing.T) {
 	root := repositoryRoot(t)
-	guide, err := os.ReadFile(filepath.Join(root, "docs/operator-guide.md"))
+	guide, err := os.ReadFile(filepath.Join(root, "docs/operators/installation.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := os.ReadFile(filepath.Join(root, "docs/operators/agent-policy.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +57,13 @@ func TestPiOperatorExamplesPreserveComposeSelection(t *testing.T) {
 			if backend == "microsandbox" {
 				section = "### Microsandbox bundle\n"
 			}
-			for _, anchor := range []string{section, "Files are loaded once at orchestrator startup.\n"} {
-				_, text, found := strings.Cut(string(guide), anchor)
+			for _, example := range []struct{ document, anchor string }{
+				{string(guide), section},
+				{string(policy), "Files are loaded once at orchestrator startup.\n"},
+			} {
+				_, text, found := strings.Cut(example.document, example.anchor)
 				if !found {
-					t.Fatalf("missing operator example %q", anchor)
+					t.Fatalf("missing operator example %q", example.anchor)
 				}
 				_, text, found = strings.Cut(text, "```sh\n")
 				if !found {

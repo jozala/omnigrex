@@ -48,7 +48,7 @@ The probe image pins Pi 1.0.4, Node 24.14.1, the base image digest, and the exis
 Its controlled HTTP provider uses only a nonsecret fixture credential and persists configuration and Session files in disposable tmpfs.
 Docker diagnostics accept content-addressed local image IDs as well as exact registry digests; this does not change protected Participant image admission.
 Microsandbox qualification imports a disposable archive and validates its exact manifest digest through the existing native image boundary.
-Operational reproduction commands are authoritative in the [operator guide](../operator-guide.md#pi-protocol-diagnostic).
+Reproduction commands are authoritative in the [Pi protocol diagnostic guide](../contributors/runtime-qualification.md#pi-protocol-diagnostic).
 
 ## Acceptance coverage and observed evidence
 

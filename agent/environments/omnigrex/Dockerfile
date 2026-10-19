@@ -75,7 +75,7 @@ ENTRYPOINT ["/opt/qualification/cache.test", "-test.v"]
 # Catch repository test-tool dependencies before publishing a candidate image.
 FROM cache-qualification AS repository-qualification
 COPY . /workspace
-COPY --from=development-docs /operator-guide.md /workspace/docs/operator-guide.md
+COPY --from=development-docs / /workspace/docs/
 ENV PATH=/opt/qualification/go/bin:/usr/local/bin:/usr/bin:/bin \
     HOME=/tmp GOPATH=/var/tmp/go-modules GOCACHE=/var/tmp/go-build \
     GOPROXY=file:///opt/omnigrex/go-proxy,https://proxy.golang.org,direct \

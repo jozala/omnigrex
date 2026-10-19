@@ -351,7 +351,7 @@ Prefer parsing JSON log entries and asserting fields and entry counts rather tha
 
 ## 9. Documentation and verification
 
-Update the MCP troubleshooting section in `docs/operator-guide.md`:
+Update the MCP troubleshooting section in `docs/operators/troubleshooting.md`:
 
 - Explain the new fields, rejection logs, event counts, and duration semantics.
 - Explain that HTTP `200` does not imply GraphQL or tool success.

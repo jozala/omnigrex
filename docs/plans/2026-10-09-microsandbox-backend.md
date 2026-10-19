@@ -17,7 +17,7 @@ No backend branch is added to Workflow or Agent Turn policy.
 The native implementation is built with CGO and the `microsandbox` build tag.
 `Dockerfile.microsandbox` supplies the pinned native runtime and a separate qualification target.
 The default static Docker image remains available and explicitly rejects Microsandbox selection.
-Host and configuration procedures are authoritative in the [operator guide](../operator-guide.md#microsandbox-execution-backend).
+Host and configuration procedures are authoritative in the [operator backend guide](../operators/backends.md).
 
 ## Identity, provisioning, and recovery
 

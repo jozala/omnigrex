@@ -2,7 +2,7 @@
 
 ## Application Contract
 
-Use the [operator guide](../operator-guide.md#application-metrics) for configuration and lifecycle behavior.
+Use the [operator observability guide](../operators/observability.md#application-metrics) for configuration and lifecycle behavior.
 The application uses OpenTelemetry and OTLP/HTTP; backend-specific configuration belongs outside this repository.
 Logs remain JSON on stdout and use the existing Docker collection route.
 

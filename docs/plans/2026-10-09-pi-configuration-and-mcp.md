@@ -14,7 +14,7 @@ Immutable file-edit authority now belongs directly to Role Policy rather than it
 
 The runner and extension are packaged in the existing pinned disposable diagnostic image and exercised by `omnigrex pi-diagnostic --configuration`, including a Reviewer option.
 The image also packages checksum-locked ripgrep 15.1.0 and fd 10.3.0 for offline Pi `grep` and `find` execution on both supported architectures.
-Operational commands remain authoritative in the [operator guide](../operator-guide.md#pi-protocol-diagnostic).
+Diagnostic commands remain authoritative in the [runtime qualification guide](../contributors/runtime-qualification.md#pi-protocol-diagnostic).
 
 ## Candidate Agent Profile schema
 
@@ -59,7 +59,7 @@ Per-Turn MCP headers remain in process memory and are not copied into Session fi
 Configuration and endpoint debug formatting is redacted.
 Provider failures and aborted responses retain their actual stop reason, the pinned Pi retryability distinction, selected model identity, and valid numeric usage counters.
 Their error summaries are fixed safe strings; untrusted error bodies, partial content, response identifiers, and diagnostic metadata are discarded before Session append rather than scrubbed from files afterward.
-The credential trust and operational recovery procedures remain in the [operator guide](../operator-guide.md).
+The credential trust and operational recovery procedures remain in the [operator guides](../operators/README.md).
 
 ## Acceptance tests and observed evidence
 

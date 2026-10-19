@@ -57,7 +57,7 @@ The existing ACP compatibility consumers remain scoped to their preparatory owne
 The complete eleven-scenario matrix passed on Docker/Linux arm64 and Microsandbox/Linux amd64 with usable KVM.
 The native gate used the explicitly approved Linux Docker host; connection values and deployment metadata are excluded here.
 The tests use fixture-only credentials and controlled GitHub responses, with no live provider requests or external GitHub mutations.
-Gate commands and applicable host prerequisites are authoritative in the [operator guide](../operator-guide.md#candidate-pi-agent-turn-qualification).
+Gate commands and applicable host prerequisites are authoritative in the [runtime qualification guide](../contributors/runtime-qualification.md#complete-agent-turns-and-recovery).
 
 Observed passing commands:
 

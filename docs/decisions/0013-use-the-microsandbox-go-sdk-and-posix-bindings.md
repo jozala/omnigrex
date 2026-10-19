@@ -47,4 +47,4 @@ Guest-root access through the private Docker daemon can alter guest controls and
 - [Execution Backend ownership](0005-separate-execution-backends-from-coordination.md).
 - [Workspace capture contract](0010-seal-portable-workspace-evidence-before-publication.md).
 - [Step 08 implementation and qualification](../plans/2026-10-09-microsandbox-backend.md).
-- [Operator guide](../operator-guide.md#microsandbox-execution-backend).
+- [Operator backend guide](../operators/backends.md).

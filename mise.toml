@@ -217,6 +217,10 @@ docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml 
 description = "Build the orchestrator image"
 run = "docker build --tag omnigrex/orchestrator:dev ."
 
+[tasks.docs-check]
+description = "Check public Markdown links and heading anchors without network access"
+run = "go test ./internal/documentation -run TestDocumentationLinks -count=1"
+
 [tasks.check]
 description = "Run all local verification checks"
 depends = ["format-check", "lint", "deadcode", "test", "compose-check"]

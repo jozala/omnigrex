@@ -38,6 +38,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0028: Keep an empty domain parent for guest workloads and nested containers](0028-keep-a-domain-parent-for-nested-containers.md) | Accepted | 2026-10-16 |
 | [0029: Preserve historical PID budgets and size new Pi Participants for development](0029-preserve-historical-pid-budgets-and-size-new-participants.md) | Accepted | 2026-10-16 |
 | [0030: Cache immutable registry documents for offline verification](0030-cache-immutable-registry-documents-for-offline-verification.md) | Accepted | 2026-10-18 |
+| [0031: Organize documentation around reader responsibilities](0031-organize-documentation-around-reader-responsibilities.md) | Accepted | 2026-10-18 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

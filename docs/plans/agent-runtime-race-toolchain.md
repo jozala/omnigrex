@@ -49,7 +49,7 @@ Run destructive Compose checks only where their stable local resources can be re
 ## Documentation And Rollout
 
 Document the build-tool contract and focused validation command in `agent/opencode/README.md`.
-Qualify the actual deployed source digest against the corrected candidate digest using the [Runtime Profile image-change procedure](../operator-guide.md#runtime-profile-image-change), even when both contain the same OpenCode version.
+Qualify the actual deployed source digest against the corrected candidate digest using the [Runtime Profile image-change procedure](../operators/upgrades.md#runtime-profile-image-change), even when both contain the same OpenCode version.
 Existing Agent Sessions remain pinned to the original image digest.
 An existing Workflow can reuse those sessions after a new `omnigrex:run`, so adopting the corrected tools for that Workflow requires a separate supported session-lifecycle decision.
 The test-fake race reported by PR #16 remains a distinct Change Proposal issue; this fix gives future Agent Turns the tooling needed to reproduce it.

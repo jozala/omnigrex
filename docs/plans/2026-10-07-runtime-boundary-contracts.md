@@ -408,7 +408,7 @@ It also identifies where the new experimental evidence belongs.
 | `internal/config/config.go` | Docker network/volume roots and OpenCode image settings | Namespaced selected-backend configuration at composition; remove obsolete agent settings at cutover |
 | `Dockerfile`, `agent/opencode/`, `compose.yaml`, `deploy/compose.yaml`, both environment examples | Docker-only resources and agent distribution | Dual backend deployment and qualified Pi/environment artifacts in Steps 07 and 15; OpenCode removal in Step 17 |
 | `.github/workflows/ci.yaml`, `mise.toml`, integration tests under runtime/doctor/store/deployment | Docker-only image, qualification and test entry points | Shared conformance factories plus backend-specific jobs in Steps 04, 08, 13-15 |
-| `README.md`, `docs/operator-guide.md`, compatibility documentation | Docker-specific readiness, backups, restore, image retention and deployment procedures | Selected-backend operational procedures in Steps 15-16; link rather than duplicate secret procedures |
+| `README.md`, `docs/operators/`, compatibility documentation | Docker-specific readiness, backups, restore, image retention and deployment procedures | Selected-backend operational procedures in Steps 15-16; link rather than duplicate secret procedures |
 | `docs/experiments/` | Historical feasibility evidence; executable prototypes are retired | Current executable coverage belongs to the production adapter and backend suites |
 
 Historical migrations remain unchanged; add forward-only migrations.

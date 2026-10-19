@@ -60,7 +60,7 @@ The suite audits retained files for fixture credentials and rejects missing acti
 Public-boundary tests cover append-order cursors, sink acknowledgement failure, bounded stalled consumers, prompt exclusion, corrupt history, stale Store fences, wrong identities, wrong live connections, immutable capabilities, replay-before-human-prompt, and uncertain human writer barriers.
 Owned file tests cover header persistence, exact recovery, missing activated state, wrong headers, duplicate entries, truncation, old formats, symlinks, malformed messages, and missing or wrong-branch context references without modifying rejected input.
 The standalone `pi-diagnostic --sessions` exercises reachable candidate coordination with a disposable in-memory ledger; PostgreSQL tests supply the durable Store evidence.
-Operational commands are authoritative in the [operator guide](../operator-guide.md#pi-protocol-diagnostic).
+Diagnostic commands are authoritative in the [runtime qualification guide](../contributors/runtime-qualification.md#pi-protocol-diagnostic).
 
 ## Verification evidence
 

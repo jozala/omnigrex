@@ -12,7 +12,7 @@ func TestPiOperatorRestoreRequiresConfirmedNativeAbsence(t *testing.T) {
 	for _, mode := range []string{"nonempty", "unavailable", "empty"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
-			guide, err := os.ReadFile(filepath.Join(deployTestRepositoryRoot(t), "docs/operator-guide.md"))
+			guide, err := os.ReadFile(filepath.Join(deployTestRepositoryRoot(t), "docs/operators/restore.md"))
 			if err != nil {
 				t.Fatal(err)
 			}

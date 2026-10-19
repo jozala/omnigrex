@@ -15,7 +15,8 @@ Composition registers the Pi contract when optional candidate image/platform set
 The candidate is discoverable through explicit Pi repository Profiles and the existing preparation service.
 Current image selection and retained immutable bindings continue following decision 0009.
 Both Compose bundles pass the optional settings without changing the current OpenCode default.
-Candidate qualification and credential placement procedures are authoritative in the [operator guide](../operator-guide.md#candidate-pi-agent-turn-qualification).
+Candidate qualification is authoritative in the [runtime qualification guide](../contributors/runtime-qualification.md#complete-agent-turns-and-recovery).
+Credential placement follows the [operator secret procedure](../operators/secrets.md).
 
 ## Launch, prompt, and settlement ownership
 

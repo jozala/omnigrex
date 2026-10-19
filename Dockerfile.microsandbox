@@ -82,8 +82,8 @@ CMD ["-test.v", "-test.timeout", "30m"]
 
 FROM qualification AS development-qualification
 COPY . /fixtures/development
-# The normal context excludes docs; only this public guide is needed by tests.
-COPY --from=development-docs /operator-guide.md /fixtures/development/docs/operator-guide.md
+# The normal context excludes docs; qualification checks public docs and examples.
+COPY --from=development-docs / /fixtures/development/docs/
 ENTRYPOINT ["/usr/local/bin/microsandbox.test"]
 
 FROM runtime AS pi-qualification

@@ -47,7 +47,7 @@ Authorized Participant collection also removes abandoned `.restore-<32 lowercase
 Provider credentials retain the existing ephemeral OpenCode environment supply.
 State exports exclude Turn scratch, tool caches, workspaces, captures, and executable environment snapshots.
 The full coordinated PostgreSQL/state-volume backup remains the authoritative recovery set and includes protected captures.
-See the [operator guide](../operator-guide.md#backup) for backup, restore, and supplemental Session export procedures.
+See the [backup](../operators/backup.md) and [restore](../operators/restore.md) guides for coordinated recovery and supplemental Session procedures.
 
 ## Verification
 

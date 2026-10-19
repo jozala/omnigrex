@@ -6,7 +6,7 @@ Current installations follow [decision 0024](../decisions/0024-establish-a-clean
 
 This historical procedure replaces a Docker/OpenCode installation with a fresh Pi installation on Docker or Microsandbox.
 It does not migrate conversations or a populated operational ledger.
-For current Pi installation, operation, upgrades, and recovery, use the [operator guide](../operator-guide.md).
+For current Pi installation, operation, upgrades, and recovery, use the [operator guides](../operators/README.md).
 
 ## One-time OpenCode-to-Pi cutover
 
@@ -25,7 +25,7 @@ The first operator-confirmed Pi/Microsandbox cutover and its [evidence boundarie
    Choose the Pi backend and provision its exact images and host prerequisites before touching the old installation.
 3. Stop webhook ingress and pause human triggers for the maintenance window.
    Let admitted GitHub mutations settle; unresolved publication, stop, or corroboration evidence is a blocker to reset.
-4. Using the old Compose file set, complete the [coordinated backup](../operator-guide.md#backup) and verify its checksums and archive inventory.
+4. Using the old Compose file set, complete the [coordinated backup](../operators/backup.md) and verify its checksums and archive inventory.
    Preserve old secrets, including the old database password and provider bundle, in encrypted storage separately from operational exports.
    Keep the old deployment stopped and verify no managed execution remains.
 5. Record active Issues, Pull Requests, published heads, and uncertain external operations for human disposition.
@@ -49,8 +49,8 @@ Use the recorded names for customized installations and inspect any external vol
 Never apply this disposal command during an ordinary upgrade, backup, or restore.
 Do not restore the OpenCode dump, Session data, captures, compatibility artifact, or native metadata into the fresh Pi installation.
 
-Prepare the target deployment directory using [Pi operational deployment](../operator-guide.md#pi-operational-deployment), export its exact Compose file set, and replace the provider secret with the Pi-native API-key bundle.
-OpenCode's `type: api` credential entries must become literal Pi-native `type: api_key` entries; follow the current [secret-file procedure](../operator-guide.md#secrets) for their placement and permissions.
+Prepare the target deployment directory using [Pi installation](../operators/installation.md), export its exact Compose file set, and replace the provider secret with the Pi-native API-key bundle.
+OpenCode's `type: api` credential entries must become literal Pi-native `type: api_key` entries; follow the current [secret-file procedure](../operators/secrets.md) for their placement and permissions.
 Use fresh PostgreSQL, runtime-state, workspace, and tool volumes; for Microsandbox also use a fresh native home/journal and namespace.
 Reusing stable default volume names is allowed only after confirmed disposal.
 Changing only a project name or backend setting is insufficient.

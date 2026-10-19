@@ -53,7 +53,7 @@ The same test resolves a protected source contract while a different candidate i
 The normal Store integration suite independently verifies backend-distinct immutable Pi evidence and migration history.
 
 Session-only archives remain supplemental to PostgreSQL and protected Workspace Captures.
-The operator guide is authoritative for [qualification and compatible-host recovery](../operator-guide.md#pi-upgrade-and-state-recovery-qualification), [backup](../operator-guide.md#backup), and [restore](../operator-guide.md#restore).
+The focused guides are authoritative for [qualification and compatible-host drills](../contributors/runtime-qualification.md#pi-upgrade-and-state-recovery-qualification), [backup](../operators/backup.md), and [restore](../operators/restore.md).
 
 ## Delivery boundary
 
