@@ -16,6 +16,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -36,14 +37,25 @@ const maxOutcomeDiagnosticRunes = 4096
 type PromptErrorClassification string
 
 const (
-	PromptErrorDeadline        PromptErrorClassification = "DEADLINE"
-	PromptErrorCancellation    PromptErrorClassification = "CANCELLATION"
-	PromptErrorFailure         PromptErrorClassification = "FAILURE"
-	PromptErrorInvalidResponse PromptErrorClassification = "INVALID_RESPONSE"
+	PromptErrorDeadline                  PromptErrorClassification = "DEADLINE"
+	PromptErrorCancellation              PromptErrorClassification = "CANCELLATION"
+	PromptErrorFailure                   PromptErrorClassification = "FAILURE"
+	PromptErrorInvalidResponse           PromptErrorClassification = "INVALID_RESPONSE"
+	PromptErrorSubscriptionQuota         PromptErrorClassification = "SUBSCRIPTION_QUOTA"
+	PromptErrorSubscriptionAuth          PromptErrorClassification = "SUBSCRIPTION_AUTH"
+	PromptErrorSubscriptionConfiguration PromptErrorClassification = "SUBSCRIPTION_CONFIGURATION"
 )
 
 // ClassifyPromptError maps prompt errors to the terminal Agent Turn status contract.
 func ClassifyPromptError(err error) PromptErrorClassification {
+	switch {
+	case errors.Is(err, providerauth.ErrQuota):
+		return PromptErrorSubscriptionQuota
+	case errors.Is(err, providerauth.ErrAuthentication):
+		return PromptErrorSubscriptionAuth
+	case errors.Is(err, providerauth.ErrConfiguration):
+		return PromptErrorSubscriptionConfiguration
+	}
 	if errors.Is(err, ErrRuntimeOOMKilled) {
 		return PromptErrorFailure
 	}
@@ -97,6 +109,7 @@ type OutcomeReconcilerConfig struct {
 	Clock                  interface{ Now() time.Time }
 	Logger                 *slog.Logger
 	ProviderCredentialJSON []json.RawMessage
+	ProviderRedactor       func(string) string
 	// RetryWait pauses between transient GitHub observation retries.
 	// It defaults to a real timer-based wait when nil; tests inject a
 	// controlled hook so no real-time waiting simulates retry timing.
@@ -155,6 +168,7 @@ type OutcomeReconciler struct {
 	clock                outcomeReconcilerClock
 	logger               *slog.Logger
 	diagnosticRedactor   *strings.Replacer
+	providerRedactor     func(string) string
 	retryWait            func(context.Context, time.Duration) error
 }
 
@@ -194,7 +208,7 @@ func NewOutcomeReconciler(config OutcomeReconcilerConfig) (*OutcomeReconciler, e
 		store: config.Store, github: config.GitHub,
 		workspace: config.Workspace, gitRemoteBase: remoteBase,
 		developerCredentials: config.DeveloperCredentials, reviewerCredentials: config.ReviewerCredentials,
-		clock: clock, logger: config.Logger, diagnosticRedactor: redactor, retryWait: config.RetryWait,
+		clock: clock, logger: config.Logger, diagnosticRedactor: redactor, retryWait: config.RetryWait, providerRedactor: config.ProviderRedactor,
 	}, nil
 }
 
@@ -264,10 +278,13 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 	promptDiagnostic := promptFailureDiagnostic(request)
 	// A lost response or deadline does not invalidate a completed terminal intent.
 	// Explicit cancellation and inadmissible terminal outcomes still prevent acceptance.
-	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline {
+	if promptDiagnostic != "" && request.PromptError != PromptErrorFailure && request.PromptError != PromptErrorDeadline && !subscriptionPromptFailure(request.PromptError) {
 		return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 	}
 	if len(intents) == 0 {
+		if subscriptionPromptFailure(request.PromptError) {
+			return store.AgentTurnSettlementObservation{ObservedAt: observedAt, Outcome: workflow.TurnOutcomePrerequisiteFailed, Diagnostic: promptDiagnostic, Completion: store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: promptDiagnostic}}, nil
+		}
 		if publication := request.Execution.Publication; publication != nil {
 			for _, mutation := range mutations {
 				if mutation.State == store.MutationFailed && mutation.ToolName == mcp.ToolPublishChanges &&
@@ -974,7 +991,11 @@ func validPromptInput(request OutcomeReconciliation) bool {
 		return true
 	}
 	return request.PromptError == PromptErrorDeadline || request.PromptError == PromptErrorCancellation ||
-		request.PromptError == PromptErrorFailure || request.PromptError == PromptErrorInvalidResponse
+		request.PromptError == PromptErrorFailure || request.PromptError == PromptErrorInvalidResponse || subscriptionPromptFailure(request.PromptError)
+}
+
+func subscriptionPromptFailure(class PromptErrorClassification) bool {
+	return class == PromptErrorSubscriptionQuota || class == PromptErrorSubscriptionAuth || class == PromptErrorSubscriptionConfiguration
 }
 
 func validateTerminalLedger(mutations []store.MutationReservation, lease store.AgentTurnLease) string {
@@ -1037,6 +1058,12 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 			diagnostic = "Agent prompt was cancelled"
 		case PromptErrorInvalidResponse:
 			diagnostic = "Agent prompt returned an invalid outcome"
+		case PromptErrorSubscriptionQuota:
+			return providerauth.ErrQuota.Error()
+		case PromptErrorSubscriptionAuth:
+			return providerauth.ErrAuthentication.Error()
+		case PromptErrorSubscriptionConfiguration:
+			return providerauth.ErrConfiguration.Error()
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
@@ -1109,6 +1136,9 @@ func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.Agent
 }
 
 func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
+	if reconciler.providerRedactor != nil {
+		value = reconciler.providerRedactor(value)
+	}
 	value = reconciler.redactProviderDiagnostic(value)
 	for _, secret := range secrets {
 		if secret != "" {

@@ -48,6 +48,8 @@ The MCP endpoint check expects the running orchestrator to reject unauthenticate
 Doctor never prints keys, JWTs, installation tokens, webhook secrets, or provider credentials.
 
 Passing doctor does not prove paid provider authorization or successful installation of working-revision tools in a real Turn.
+In subscription mode, provider preflight also checks the running authentication manager's safe login, storage, and block status without refreshing tokens or submitting inference.
+Use [authentication status and recovery](provider-authentication.md#recover-access) to correct those prerequisites.
 Doctor has its own shorter outer diagnostic budget.
 Verify actual repository build/tests in controlled work and real ingress through a GitHub delivery returning HTTP 202.
 

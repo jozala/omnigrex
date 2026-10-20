@@ -76,7 +76,29 @@ Override IDs using `OMNIGREX_PI_OPENAI_MODEL` or `OMNIGREX_PI_OPENCODE_MODEL` wi
 Unavailable models or unsupported thinking fail without fallback.
 Calls use real service and may incur charges; this is separate from deterministic CI.
 Record actual image/backend/model and observed outcomes rather than relying on feasibility evidence.
-OAuth/subscription snapshots are unsupported.
+OAuth/subscription snapshots are unsupported by this API-key gate.
+
+### ChatGPT subscription qualification
+
+Use a dedicated browser-authorized qualification registration rather than a copied production refresh token.
+The gate builds isolated backend resources, starts the normal Omnigrex login command, prints a browser URL, and accepts the full loopback redirect through stdin when the browser is remote.
+The registration lives only in the isolated controller-side volume and is logged out and remotely revoked on completion where possible.
+No OpenAI API key is used or accepted as fallback.
+
+```sh
+OMNIGREX_PI_BACKEND=docker mise run test-pi-subscription-live
+OMNIGREX_PI_BACKEND=microsandbox OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> \
+  mise run test-pi-subscription-live
+```
+
+The default model is `openai/gpt-6.1-sol`; set `OMNIGREX_PI_OPENAI_MODEL` to an exact pinned model available to the account if necessary.
+Each smoke requires real inference, an isolated MCP fixture-tool call, another model request carrying the tool result, and an audit of stopped Session archives for issued credentials.
+It performs no real GitHub reads or mutations.
+The native command needs the same Linux/amd64 KVM prerequisites as other native gates.
+Record both actual backend/image/model results before claiming subscription release qualification.
+
+Deterministic authentication-manager tests cover refresh serialization, idle renewal, persistence, interrupted renewal, account replacement/logout races, and independent recovery blocks.
+The Pi failure-boundary fixture also runs the subscription request/tool-history, per-request token replacement, error-sanitization, and no-ambient-key-fallback tests on both backend suites.
 
 ## Complete Agent Turns and recovery
 

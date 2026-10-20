@@ -38,7 +38,7 @@ RUN --mount=type=bind,source=deploy/orchestrator-apk-packages.sha256,target=/tmp
     rm -rf /tmp/apks && \
     addgroup -g 10001 omnigrex && \
     adduser -D -u 10001 -G omnigrex -h /home/omnigrex omnigrex && \
-    mkdir -p /var/lib/omnigrex/workspaces /var/lib/omnigrex/mise && \
+    mkdir -p /var/lib/omnigrex/workspaces /var/lib/omnigrex/mise /var/lib/omnigrex/provider-auth && \
     chown -R 10001:10001 /var/lib/omnigrex
 
 COPY --from=build --chown=10001:10001 /out/omnigrex /usr/local/bin/omnigrex

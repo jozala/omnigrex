@@ -17,6 +17,7 @@ For a personal installation you may have all three responsibilities.
 | --- | --- |
 | Configure App permissions and installations | [GitHub Apps](github-apps.md) |
 | Place or rotate credentials | [Secrets](secrets.md) |
+| Sign in with ChatGPT or select OpenAI API-key authentication | [Provider authentication](provider-authentication.md) |
 | Understand execution and native storage constraints | [Backends](backends.md) |
 | Supply deployment-owned agent instructions and approved tool paths | [Agent policy](agent-policy.md) |
 | Verify readiness and diagnose onboarding | [Health and diagnostics](health-and-diagnostics.md) |

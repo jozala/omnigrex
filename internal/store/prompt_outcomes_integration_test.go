@@ -56,4 +56,11 @@ func TestNeutralPromptOutcomesEnforceEvidenceShape(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET prompt_stop_reason = NULL, prompt_error_class = 'DEADLINE' WHERE id = $1`, turnID); err != nil {
 		t.Fatalf("neutral error classification: %v", err)
 	}
+	for _, class := range []string{"SUBSCRIPTION_QUOTA", "SUBSCRIPTION_AUTH", "SUBSCRIPTION_CONFIGURATION"} {
+		if _, err := pool.Exec(ctx, `UPDATE agent_turns SET prompt_error_class = $2 WHERE id = $1`, turnID, class); err != nil {
+			t.Fatalf("durable subscription classification %s: %v", class, err)
+		}
+	}
+	_, err = pool.Exec(ctx, `UPDATE agent_turns SET prompt_error_class = 'provider-secret' WHERE id = $1`, turnID)
+	requireConstraint(err, "agent_turns_prompt_error_class_check")
 }

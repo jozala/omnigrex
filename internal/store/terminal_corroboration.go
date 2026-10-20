@@ -428,7 +428,7 @@ WHERE id = $1 AND execution_epoch = $2 AND status = 'SETTLING'
 }
 
 func validCorroborationPrompt(outcome json.RawMessage, promptError string) bool {
-	if promptError == "FAILURE" || promptError == "DEADLINE" {
+	if eligibleCorroborationError(promptError) {
 		return len(outcome) == 0
 	}
 	if promptError != "" {
@@ -510,7 +510,7 @@ JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source.workflow_id = $2
    AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
-        OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+         OR source.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
         AND source.outcome->>'status' = 'completed'
         AND COALESCE(source.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))

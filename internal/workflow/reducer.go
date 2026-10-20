@@ -564,7 +564,7 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 	next.ActiveTurn = nil
 	next.ResumeRole = ""
 
-	if event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomeInfrastructureFailed {
+	if event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomePrerequisiteFailed && event.Outcome != TurnOutcomeInfrastructureFailed {
 		if _, ok := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome); !ok {
 			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 		}
@@ -574,7 +574,7 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 		return reducer.reduceDeveloperSettled(snapshot, next, event)
 	case TurnOutcomeChangesRequested, TurnOutcomeApproved:
 		return reducer.reduceReviewSettled(snapshot, next, event)
-	case TurnOutcomeBlocked:
+	case TurnOutcomeBlocked, TurnOutcomePrerequisiteFailed:
 		return reduceBlocked(next, event)
 	case TurnOutcomeInfrastructureFailed:
 		if event.CorroborationHandoffReason != "" {

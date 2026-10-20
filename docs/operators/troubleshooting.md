@@ -41,6 +41,8 @@ Only exact managed identities authorize adoption or cleanup; do not add labels t
 | Missing Runtime Profile image | Provision the exact digest in the selected backend; do not substitute a mutable tag |
 | Pi startup timeout | Turn/Session startup observations, working-revision tool installation, startup budget, and overall Turn timeout |
 | Configuration Human Handoff | Repository owner's [configuration checks](../repository-owners/troubleshooting.md) and operator instruction validation |
+| `subscription_auth` or `subscription_quota` | [Inspect and restore subscription access](provider-authentication.md#recover-access), then explicitly resume Work Items |
+| `subscription_configuration` | Selected model/account entitlement, supported direct Responses capabilities, and matching qualified controller/Pi images |
 
 INFO-level `Pi startup readiness started` and `Pi startup readiness completed` include Turn/Session identity, budget, duration, and safe outcome after RPC and durable Session preparation.
 They do not identify a particular tool download or prove an uncertain execution stopped.

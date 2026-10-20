@@ -389,7 +389,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
              AND replay.source_tool_invocation_id = tool_invocations.id
               AND replay.source_agent_turn_id = tool_invocations.agent_turn_id
               AND (original_turn.prompt_recorded_at IS NULL OR original_turn.prompt_stop_reason = 'completed'
-                   OR original_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+                    OR original_turn.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
               AND (original_turn.outcome IS NULL OR (original_turn.outcome->'admitted' = 'true'::jsonb
                    AND original_turn.outcome->>'status' = 'completed'
                    AND COALESCE(original_turn.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
@@ -444,7 +444,7 @@ WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCC
   AND source_turn.workflow_id = current_turn.workflow_id
   AND source_turn.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
    AND (source_turn.prompt_recorded_at IS NULL OR source_turn.prompt_stop_reason = 'completed'
-        OR source_turn.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+         OR source_turn.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (source_turn.outcome IS NULL OR (source_turn.outcome->'admitted' = 'true'::jsonb
         AND source_turn.outcome->>'status' = 'completed'
         AND COALESCE(source_turn.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))

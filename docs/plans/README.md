@@ -50,5 +50,6 @@ Consult each document and linked Work Item for its own delivery/evidence status.
 - [Agent race toolchain](agent-runtime-race-toolchain.md).
 - [Application observability](application-observability-first-release.md).
 - [Documentation cleanup](2026-10-18-documentation-cleanup.md).
+- [ChatGPT subscription authentication](2026-10-20-chatgpt-subscription.md).
 
 [Documentation hub](../README.md)

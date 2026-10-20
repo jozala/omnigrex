@@ -1059,7 +1059,7 @@ JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
   AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
    AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
-        OR source.prompt_error_class IN ('FAILURE', 'DEADLINE'))
+         OR source.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
         AND source.outcome->>'status' = 'completed'
         AND COALESCE(source.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
@@ -2222,7 +2222,7 @@ SELECT COALESCE((outcome IS NULL OR (outcome->'admitted' = 'true'::jsonb
         AND outcome->>'status' = 'completed'
         AND COALESCE(outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
    AND (prompt_recorded_at IS NULL OR prompt_stop_reason = 'completed'
-         OR prompt_error_class IN ('FAILURE', 'DEADLINE'))
+          OR prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (last_error IS NULL OR (last_error NOT LIKE 'Agent prompt was cancelled%'
         AND last_error NOT LIKE 'Agent prompt returned an invalid outcome%')), FALSE)
 FROM agent_turns WHERE id = $1`, source.AgentTurnID).Scan(&eligible); err != nil {

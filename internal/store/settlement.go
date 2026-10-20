@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	rolepolicy "github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -433,16 +434,26 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	}
 	var recordedOutcome json.RawMessage
 	var recordedDiagnostic string
-	if err := tx.QueryRow(ctx, `SELECT outcome, COALESCE(last_error, '') FROM agent_turns WHERE id = $1`, turn.ID).Scan(&recordedOutcome, &recordedDiagnostic); err != nil {
+	var promptError string
+	if err := tx.QueryRow(ctx, `SELECT outcome, COALESCE(last_error, ''), COALESCE(prompt_error_class, '') FROM agent_turns WHERE id = $1`, turn.ID).Scan(&recordedOutcome, &recordedDiagnostic, &promptError); err != nil {
 		return false, err
 	}
 	if strings.HasPrefix(recordedDiagnostic, "Agent prompt was cancelled") || strings.HasPrefix(recordedDiagnostic, "Agent prompt returned an invalid outcome") {
 		diagnostic = recordedDiagnostic
 	}
+	outcome, terminalStatus := workflow.TurnOutcomeInfrastructureFailed, AgentTurnInterrupted
+	switch promptError {
+	case "SUBSCRIPTION_QUOTA":
+		outcome, terminalStatus, diagnostic = workflow.TurnOutcomePrerequisiteFailed, AgentTurnFailed, providerauth.ErrQuota.Error()
+	case "SUBSCRIPTION_AUTH":
+		outcome, terminalStatus, diagnostic = workflow.TurnOutcomePrerequisiteFailed, AgentTurnFailed, providerauth.ErrAuthentication.Error()
+	case "SUBSCRIPTION_CONFIGURATION":
+		outcome, terminalStatus, diagnostic = workflow.TurnOutcomePrerequisiteFailed, AgentTurnFailed, providerauth.ErrConfiguration.Error()
+	}
 	observation, observationJSON, observationHash, err := canonicalizeAgentTurnSettlementObservation(AgentTurnSettlementObservation{
-		ObservedAt: recoveryStartedAt, Outcome: workflow.TurnOutcomeInfrastructureFailed,
+		ObservedAt: recoveryStartedAt, Outcome: outcome,
 		Diagnostic: diagnostic,
-		Completion: AgentTurnCompletion{Status: AgentTurnInterrupted, Outcome: recordedOutcome, LastError: diagnostic},
+		Completion: AgentTurnCompletion{Status: terminalStatus, Outcome: recordedOutcome, LastError: diagnostic},
 	})
 	if err != nil {
 		return false, err
@@ -458,7 +469,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 				ID: settlementID, ObservedAt: observation.ObservedAt,
 				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 			},
-			Turn: guard, Outcome: workflow.TurnOutcomeInfrastructureFailed,
+			Turn: guard, Outcome: outcome,
 			PendingEvents: pending, Diagnostic: observation.Diagnostic,
 		})
 	}
@@ -488,7 +499,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		executionAttempt, executionLeaseOwner, executionLeaseToken, originalOwnerID,
 		originalOwnerHash, authority.ID, authority.Kind, authority.AttemptCount,
 		authority.LeaseOwner, authority.LeaseToken, observationJSON, observationHash[:],
-		workflow.TurnOutcomeInfrastructureFailed, AgentTurnInterrupted, nullableJSON(observation.TerminalOutcome),
+		outcome, terminalStatus, nullableJSON(observation.TerminalOutcome),
 		diagnostic, int64(pending.Count), nullableString(pending.LatestObservedHeadSHA),
 		decision.Disposition, decision.Reason, decision.Snapshot.State,
 		int64(decision.Snapshot.Revision), nullableString(turn.ChangeProposalID))
@@ -504,7 +515,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		RecoveryJobID: authority.ID, RecoveryJobKind: authority.Kind,
 		Disposition: decision.Disposition, Reason: decision.Reason,
 		State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
-		TerminalStatus: AgentTurnInterrupted, ChangeProposalID: turn.ChangeProposalID,
+		TerminalStatus: terminalStatus, ChangeProposalID: turn.ChangeProposalID,
 		PendingEventCount: pending.Count, LatestObservedHeadSHA: pending.LatestObservedHeadSHA,
 	}
 	if err := resolveSettlementActionJobs(ctx, tx, settlementID, &result); err != nil {
@@ -520,7 +531,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 	}
 	turnResult, err := tx.Exec(ctx, `
 UPDATE agent_turns AS turn
-SET status = 'INTERRUPTED', last_error = $3,
+SET status = $6, last_error = $3,
     completed_at = COALESCE(completed_at, $4), recovery_settled_at = $4,
     recovery_continuation = 'INFRASTRUCTURE_FAILURE_APPLIED', recovery_settlement_id = $5
 WHERE turn.id = $1 AND turn.execution_epoch = $2
@@ -534,7 +545,7 @@ WHERE turn.id = $1 AND turn.execution_epoch = $2
       SELECT 1 FROM tool_invocations
       WHERE agent_turn_id = turn.id AND execution_epoch = turn.execution_epoch
         AND kind = 'MUTATION' AND state IN ('RESERVED', 'IN_FLIGHT', 'UNKNOWN', 'RECONCILING')
-	)`, turn.ID, turn.ExecutionEpoch, diagnostic, result.SettledAt, settlementID)
+	)`, turn.ID, turn.ExecutionEpoch, diagnostic, result.SettledAt, settlementID, terminalStatus)
 	if err != nil || turnResult.RowsAffected() != 1 {
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
@@ -579,11 +590,11 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 	if successful && (result.TerminalStatus != AgentTurnSucceeded || result.TerminalLastError != "") {
 		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: successful Workflow outcome requires a successful terminal Turn", ErrAgentTurnSettlementInvalid)
 	}
-	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed &&
+	if (result.Outcome == workflow.TurnOutcomeInfrastructureFailed || result.Outcome == workflow.TurnOutcomePrerequisiteFailed) &&
 		(result.TerminalStatus != AgentTurnFailed && result.TerminalStatus != AgentTurnInterrupted && result.TerminalStatus != AgentTurnTimedOut || result.TerminalLastError == "") {
 		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: infrastructure failure requires a failed terminal Turn and diagnostic", ErrAgentTurnSettlementInvalid)
 	}
-	if !successful && result.Outcome != workflow.TurnOutcomeInfrastructureFailed {
+	if !successful && result.Outcome != workflow.TurnOutcomeInfrastructureFailed && result.Outcome != workflow.TurnOutcomePrerequisiteFailed {
 		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: unsupported Workflow outcome", ErrAgentTurnSettlementInvalid)
 	}
 	switch result.Outcome {
@@ -595,7 +606,7 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 		if result.ChangeProposal == nil || result.Review == nil || result.AuthorizedReviewerActorID <= 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: Reviewer outcome shape", ErrAgentTurnSettlementInvalid)
 		}
-	case workflow.TurnOutcomeBlocked, workflow.TurnOutcomeInfrastructureFailed:
+	case workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed, workflow.TurnOutcomeInfrastructureFailed:
 		if result.ChangeProposal != nil || result.Review != nil || result.ExistingReview != nil || result.AuthorizedReviewerActorID != 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: terminal outcome has unrelated review evidence", ErrAgentTurnSettlementInvalid)
 		}

@@ -32,6 +32,18 @@ See [release/image selection](../operators/installation.md), [App permissions](.
 The controller reads mounted secrets, including `OMNIGREX_DATABASE_PASSWORD_SECRET_FILE` for its PostgreSQL password path.
 Never put secret contents into examples or command-line values.
 
+## OpenAI authentication
+
+| Setting | Meaning |
+| --- | --- |
+| `OMNIGREX_OPENAI_AUTH_MODE` | `api_key` by default, or explicit `subscription`; never automatic paid fallback |
+| `OMNIGREX_PROVIDER_CREDENTIALS_FILE` | Literal API-key bundle; optional/empty for subscription-only use; unrelated provider keys remain selectable |
+| `OMNIGREX_PROVIDER_AUTH_ROOT` | Binary default `/var/lib/omnigrex/provider-auth`; controller-only mutable credentials, separate from workspace, runtime state, and mise roots |
+
+Compose mounts its dedicated `provider-auth` volume at the fixed container root above.
+A custom root requires a matching explicit environment/mount override.
+See [provider authentication](../operators/provider-authentication.md) for login, status, recovery, account replacement, and protected backups.
+
 ## Runtime and maintenance budgets
 
 | Setting | Supplied stack value or binary default |
