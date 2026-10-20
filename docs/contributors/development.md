@@ -34,6 +34,35 @@ The ordinary Dockerfile builds the static Docker backend.
 Selecting Microsandbox in a binary without SDK support fails explicitly.
 See [backend constraints](../operators/backends.md).
 
+### Docker controller package policy
+
+The controller installs `bash`, `ca-certificates`, `curl`, `git`, `jq`, `gcc`, `musl-dev`, `openssh-client-default`, and `ripgrep` with `apk add --no-cache` and normal signature verification.
+Each build records its actual installed closure, including base and transitive packages, as sorted `apk info -v` output at `/usr/share/omnigrex/apk-packages.txt`.
+Inspect the inventory bound to an exact image digest without relying on mutable tags.
+
+```sh
+docker run --rm --entrypoint /bin/cat IMAGE@sha256:DIGEST /usr/share/omnigrex/apk-packages.txt
+```
+
+Verify a built controller image against required tools, compiler and header function, Git HTTPS support, CA certificates, non-root execution, and inventory agreement.
+
+```sh
+sh scripts/check-orchestrator-image.sh omnigrex/orchestrator:dev-amd64
+sh scripts/check-orchestrator-image.sh omnigrex/orchestrator:dev-arm64
+```
+
+Refresh installed OS packages intentionally so the package-installation layer is genuinely uncached on each checked architecture.
+
+```sh
+docker buildx build --no-cache-filter runtime --platform linux/amd64 --load --tag omnigrex/orchestrator:dev-amd64 .
+docker buildx build --no-cache-filter runtime --platform linux/arm64 --load --tag omnigrex/orchestrator:dev-arm64 .
+```
+
+Docker build-layer caching and APK `--no-cache` are distinct mechanisms.
+The former controls whether Docker reuses the installation layer, while the latter controls only whether APK keeps a local package cache inside that layer.
+Retain released images for recovery because rebuilding a source commit is not a substitute for preserving its qualified image.
+See [controller package decision](../decisions/0033-resolve-controller-packages-from-signed-alpine-repositories.md).
+
 ## Run a local stack
 
 The root [compose.yaml](../../compose.yaml) and [.env.example](../../.env.example) describe the Docker development stack.
