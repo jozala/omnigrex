@@ -31,8 +31,40 @@ docker build --file Dockerfile.microsandbox --target runtime --tag omnigrex/orch
 
 The native image packages pinned runtime/firmware/SDK dependencies and the source-pinned guest agent.
 The ordinary Dockerfile builds the static Docker backend.
+It keeps the digest-pinned Alpine base image and resolves only top-level controller packages through normal signed repositories.
+Later builds of the same source may resolve different signed OS packages and produce different image digests without a dependency-lock diff.
+Already deployed digest-pinned images are unchanged by repository updates.
 Selecting Microsandbox in a binary without SDK support fails explicitly.
 See [backend constraints](../operators/backends.md).
+
+### Docker controller package policy
+
+The controller installs `bash`, `ca-certificates`, `curl`, `git`, `jq`, `gcc`, `musl-dev`, `openssh-client-default`, and `ripgrep` with `apk add --no-cache` and normal signature verification.
+Each build records its actual installed closure, including base and transitive packages, as sorted `apk info -v` output at `/usr/share/omnigrex/apk-packages.txt`.
+Inspect the inventory bound to an exact image digest without relying on mutable tags.
+
+```sh
+docker run --rm IMAGE@sha256:DIGEST cat /usr/share/omnigrex/apk-packages.txt
+```
+
+Verify a built controller image against required tools, compiler and header function, Git HTTPS support, CA certificates, non-root execution, and inventory agreement.
+
+```sh
+sh scripts/check-orchestrator-image.sh IMAGE
+```
+
+Refresh installed OS packages intentionally so the package-installation layer is genuinely uncached on each checked architecture.
+
+```sh
+docker buildx build --no-cache-filter runtime --platform linux/amd64 --tag omnigrex/orchestrator:dev .
+docker buildx build --no-cache-filter runtime --platform linux/arm64 --tag omnigrex/orchestrator:dev .
+```
+
+Docker build-layer caching and APK `--no-cache` are distinct mechanisms.
+The former controls whether Docker reuses the installation layer, while the latter controls only whether APK keeps a local package cache inside that layer.
+Retain released images for recovery because rebuilding a source commit is not a substitute for preserving its qualified image.
+The analogous Ubuntu artifact-retention concern in `Dockerfile.microsandbox` remains separate follow-up without distribution or compatibility-check changes.
+See [controller package decision](../decisions/0032-resolve-controller-packages-from-signed-alpine-repositories.md).
 
 ## Run a local stack
 

@@ -31,6 +31,10 @@ mise exec -- go test -tags=integration ./internal/deployment -run TestPiOperator
 
 The restore test uses stub commands and temporary data.
 The Compose example test renders the documented selections without deploying or changing protected state.
+`TestOrchestratorImageBuildPolicy` checks the Dockerfile policy without Docker: it requires signed-repository installation, the image-bound inventory, non-root configuration, and absence of the removed exact-APK lock.
+`scripts/check-orchestrator-image.sh` checks a built controller image for required tools, compiler and header function, Git HTTPS support, CA certificates, non-root execution, and inventory agreement without asserting a fixed package count or revision.
+The Docker deployment smoke runs that image check for its freshly built orchestrator before publishing fixture images.
+See [source builds](development.md#docker-controller-package-policy).
 
 ## Complete backend qualification
 
