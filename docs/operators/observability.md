@@ -9,7 +9,7 @@ There is no direct OpenTelemetry log export or public metrics endpoint.
 ## Microsandbox SDK failures
 
 `Microsandbox SDK call failed` records the failing `sdk_operation`, `sdk_error_kind`, original `error`, and `duration_ms`.
-Available resource name/ID/status and `participant_id`, `agent_session_id`, `agent_turn_id`, and `execution_epoch` identify the execution; trace/span fields follow the calling context.
+Available resource name/ID/status and `agent_participant_id`, `agent_session_id`, `agent_turn_id`, and `execution_epoch` identify the execution; trace/span fields follow the calling context.
 Unexpected SDK failures are ERROR; cancellation/deadline failures are WARN.
 Successful calls and expected absent-sandbox lookups do not produce these records.
 Native handle close/detach timeouts report an unresolved operation, not proof of completion.

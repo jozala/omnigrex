@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +91,7 @@ func TestRuntimeLogsArchivePreservesAllFiles(t *testing.T) {
 }
 
 func TestRuntimeLogsArchiveRejectsUnsafePaths(t *testing.T) {
-	for _, kind := range []string{"source-link", "parent-link", "hard-link", "fifo", "destination-link", "foreign", "diagnostic", "traversal", "replacement", "invalid-key"} {
+	for _, kind := range []string{"source-link", "parent-link", "hard-link", "fifo", "destination-link", "destination-file-link", "foreign", "diagnostic", "traversal", "replacement", "invalid-key"} {
 		t.Run(kind, func(t *testing.T) {
 			backend, meta, source, destination := archiveFixture(t)
 			outside := filepath.Join(t.TempDir(), "outside")
@@ -122,6 +124,14 @@ func TestRuntimeLogsArchiveRejectsUnsafePaths(t *testing.T) {
 				if err := os.Symlink(filepath.Dir(outside), destination); err != nil {
 					t.Fatal(err)
 				}
+			case "destination-file-link":
+				if err := os.MkdirAll(destination, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(destination, "exec.log")); err != nil {
+					t.Fatal(err)
+				}
+				writeArchiveFile(t, filepath.Join(source, "exec.log"), "new source")
 			case "foreign":
 				meta.Labels[namespaceLabel] = "other"
 			case "diagnostic":
@@ -151,6 +161,28 @@ func TestRuntimeLogsArchiveRejectsUnsafePaths(t *testing.T) {
 				return nil
 			})
 		})
+	}
+}
+
+func TestRuntimeLogPartialWritePreservesCompletedFile(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	writeArchiveFile(t, filepath.Join(directory.Name(), "exec.log"), "previous complete log")
+	failure := errors.New("simulated out of space")
+	err = publishLogFile(context.Background(), directory, "exec.log", func(writer io.Writer) error { _, _ = writer.Write([]byte("partial")); return failure })
+	if !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(filepath.Join(directory.Name(), "exec.log"))
+	if string(content) != "previous complete log" {
+		t.Fatal("partial file replaced completed evidence")
+	}
+	entries, _ := directory.ReadDir(-1)
+	if len(entries) != 1 {
+		t.Fatal("staging leaked", entries)
 	}
 }
 
@@ -189,5 +221,25 @@ func TestRuntimeLogsArchiveRetryAndPartialFailure(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(destination, "archive.json"))
 	if json.Unmarshal(content, &manifest) != nil || manifest.Files["runtime.log"] != "missing" {
 		t.Fatalf("missing files not recorded: %s", content)
+	}
+}
+
+func TestRuntimeLogsArchiveRetryRetainsInventory(t *testing.T) {
+	backend, meta, source, destination := archiveFixture(t)
+	writeArchiveFile(t, filepath.Join(source, "exec.log"), "complete")
+	writeArchiveFile(t, filepath.Join(source, "exec.log.1"), "complete rotation")
+	if err := backend.archiveRuntimeLogs(context.Background(), testRequest().Key, meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.archiveRuntimeLogs(context.Background(), testRequest().Key, meta); err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct{ Files map[string]string }
+	content, _ := os.ReadFile(filepath.Join(destination, "archive.json"))
+	if json.Unmarshal(content, &manifest) != nil || manifest.Files["exec.log"] != "retained" || manifest.Files["exec.log.1"] != "retained" {
+		t.Fatalf("lost retained-file inventory: %s", content)
 	}
 }

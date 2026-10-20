@@ -32,7 +32,7 @@ func resourceLogAttrs(resource metadata) []slog.Attr {
 	}
 	var key execution.Key
 	if json.Unmarshal([]byte(resource.Labels[identityLabel]), &key) == nil && validKey(key) {
-		attrs = append(attrs, slog.String("participant_id", key.AssignmentID), slog.String("agent_session_id", key.AgentSessionID), slog.String("agent_turn_id", key.AgentTurnID), slog.Int64("execution_epoch", key.ExecutionEpoch))
+		attrs = append(attrs, slog.String("agent_participant_id", key.AssignmentID), slog.String("agent_session_id", key.AgentSessionID), slog.String("agent_turn_id", key.AgentTurnID), slog.Int64("execution_epoch", key.ExecutionEpoch))
 	}
 	return attrs
 }
@@ -49,7 +49,12 @@ type runtimeLogArchive struct {
 func (backend *Backend) removeResource(ctx context.Context, resource metadata) error {
 	var key execution.Key
 	if malformedResource(resource) == "" && resource.Labels[diagnosticLabel] == "" && json.Unmarshal([]byte(resource.Labels[identityLabel]), &key) == nil {
-		copyCtx, cancel := context.WithTimeout(ctx, runtimeLogArchiveWait)
+		wait := runtimeLogArchiveWait
+		if deadline, bounded := ctx.Deadline(); bounded {
+			// Optional diagnostics must leave time for the actual cleanup call.
+			wait = min(wait, max(0, time.Until(deadline)/2))
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, wait)
 		err := backend.archiveRuntimeLogs(copyCtx, key, resource)
 		cancel()
 		if err != nil {
@@ -82,6 +87,25 @@ func (backend *Backend) archiveRuntimeLogs(ctx context.Context, key execution.Ke
 	}
 	defer destination.Close()
 	manifest := runtimeLogArchive{Key: key, Resource: resource, Captured: time.Now().UTC(), Files: map[string]string{"runtime.log": "missing", "kernel.log": "missing", "exec.log": "missing"}}
+	// A retry can outlive native removal (for example after a lost Remove
+	// acknowledgement). Do not describe already-preserved evidence as missing.
+	retained, err := destination.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, entry := range retained {
+		if !nativeLogFilename(entry.Name()) {
+			continue
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(destination.Fd()), entry.Name(), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
+			return errors.New("unsafe retained archive entry")
+		}
+		manifest.Files[entry.Name()] = "retained"
+	}
 	source, err := openLogDirectory(filepath.Join(backend.options.Home, "sandboxes", resource.Name, "logs"), false)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

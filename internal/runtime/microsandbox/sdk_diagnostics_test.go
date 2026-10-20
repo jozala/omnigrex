@@ -41,7 +41,7 @@ func TestSDKCallDiagnostics(t *testing.T) {
 			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
 				t.Fatal(err)
 			}
-			for field, want := range map[string]any{"error": test.err.Error(), "level": test.level, "sdk_operation": "GetSandbox", "sdk_error_kind": "Internal", "resource_id": "native-id", "resource_name": "sandbox", "participant_id": key.AssignmentID, "agent_session_id": key.AgentSessionID, "agent_turn_id": key.AgentTurnID, "execution_epoch": float64(1), "trace_id": span.TraceID().String(), "span_id": span.SpanID().String()} {
+			for field, want := range map[string]any{"error": test.err.Error(), "level": test.level, "sdk_operation": "GetSandbox", "sdk_error_kind": "Internal", "resource_id": "native-id", "resource_name": "sandbox", "agent_participant_id": key.AssignmentID, "agent_session_id": key.AgentSessionID, "agent_turn_id": key.AgentTurnID, "execution_epoch": float64(1), "trace_id": span.TraceID().String(), "span_id": span.SpanID().String()} {
 				if record[field] != want {
 					t.Errorf("%s = %v, want %v", field, record[field], want)
 				}
@@ -54,7 +54,7 @@ func TestSDKCallDiagnostics(t *testing.T) {
 	t.Run("missing identity", func(t *testing.T) {
 		output := captureDiagnostics(t)
 		logSDKCallFailure(context.Background(), sdkCallDiagnostic{Operation: "ListSandboxes", Started: time.Now()}, "Unknown", errors.New("cause"))
-		if strings.Contains(output.String(), "participant_id") || strings.Contains(output.String(), "resource_id") {
+		if strings.Contains(output.String(), "agent_participant_id") || strings.Contains(output.String(), "resource_id") {
 			t.Fatal(output.String())
 		}
 	})

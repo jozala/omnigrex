@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
@@ -16,6 +17,34 @@ type deletingLogPlatform struct {
 	*fakePlatform
 	beforeRemove func(metadata)
 	home         string
+}
+
+type stalledArchivePlatform struct{ *fakePlatform }
+
+func (driver *stalledArchivePlatform) Lookup(ctx context.Context, _ string) (metadata, error) {
+	<-ctx.Done()
+	return metadata{}, ctx.Err()
+}
+func (driver *stalledArchivePlatform) Remove(ctx context.Context, resource metadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return driver.fakePlatform.Remove(ctx, resource)
+}
+
+func TestRuntimeLogCopyDeadlineReservesRemovalBudget(t *testing.T) {
+	_ = captureDiagnostics(t)
+	backend, meta, _, _ := archiveFixture(t)
+	driver := backend.platform.(*fakePlatform)
+	backend.platform = &stalledArchivePlatform{fakePlatform: driver}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := backend.removeResource(ctx, meta); err != nil {
+		t.Fatalf("optional archival exhausted native removal budget: %v", err)
+	}
+	if driver.removes != 1 {
+		t.Fatal("native removal skipped")
+	}
 }
 
 func (driver *deletingLogPlatform) Remove(ctx context.Context, meta metadata) error {

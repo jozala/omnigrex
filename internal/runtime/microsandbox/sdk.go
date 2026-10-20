@@ -16,6 +16,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	sdk "github.com/superradcompany/microsandbox/sdk/go"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type sdkPlatform struct{ options Options }
@@ -338,6 +339,7 @@ type sdkStream struct {
 }
 
 func (stream *sdkStream) Next(ctx context.Context) (event, error) {
+	ctx = stream.diagnosticContext(ctx)
 	call := sdkCall("Exec.Recv", stream.resource)
 	record, err := stream.handle.Recv(ctx)
 	if err != nil {
@@ -361,6 +363,7 @@ func (stream *sdkStream) Next(ctx context.Context) (event, error) {
 	return result, nil
 }
 func (stream *sdkStream) Write(ctx context.Context, data []byte) (int, error) {
+	ctx = stream.diagnosticContext(ctx)
 	if stream.stdin == nil {
 		return 0, io.ErrClosedPipe
 	}
@@ -377,6 +380,13 @@ func (stream *sdkStream) Close() error {
 		stream.closeErr = boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Exec.Close", stream.resource, func(context.Context) error { return stream.handle.Close() }), sdkRelease("Detach", stream.resource, stream.sandbox.Detach))
 	})
 	return stream.closeErr
+}
+
+func (stream *sdkStream) diagnosticContext(ctx context.Context) context.Context {
+	if !trace.SpanContextFromContext(ctx).IsValid() && stream.ctx != nil {
+		return trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(stream.ctx))
+	}
+	return ctx
 }
 
 // sdkRelease reports raw errors before boundedNativeRelease sanitizes them.

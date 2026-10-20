@@ -57,7 +57,7 @@ Before normal or recovery removal, Omnigrex attempts to copy complete available 
 ```
 
 The directory is beside the guest-mounted `runtime-state`, never mounted into the guest.
-`archive.json` identifies the execution key, native resource, capture time, and copied/missing/failed file inventory.
+`archive.json` identifies the execution key, native resource, capture time, and copied/retained/missing/failed file inventory.
 Directories are private (`0700`); archived files are private (`0600`) under the orchestrator's UID/GID.
 `runtime.log` contains host runtime diagnostics, `kernel.log` the guest kernel console, and `exec.log` raw primary-execution output, not every guest command or the full Session history.
 All three are retained without severity filtering or redaction; treat them as sensitive private content.
@@ -66,14 +66,14 @@ With your installation's selected Compose files, locate and copy an archive with
 
 ```sh
 docker compose exec -T orchestrator find /var/lib/omnigrex/runtime-state -type f -name archive.json
-docker compose cp orchestrator:/var/lib/omnigrex/runtime-state/assignment-<participant-id>/runtime-logs/<agent-turn-id>-<epoch>/<resource-id-sha256> ./private-native-logs
+docker compose cp 'orchestrator:/var/lib/omnigrex/runtime-state/assignment-<participant-id>/runtime-logs/<agent-turn-id>-<epoch>/<resource-id-sha256>' ./private-native-logs
 ```
 
 Replace the angle-bracket placeholders and protect the local destination before sharing any content.
 Archives survive environment removal and controller recreation through the existing runtime-state volume and share [Participant retention](retention.md#session-retention).
 Only ordinary Agent Turn resources with valid identity receive Participant archives; diagnostic-only and malformed resources do not.
 
-Copying starts after confirmed stop, before native removal, with a five-second per-resource budget limited by the cleanup deadline.
+Copying starts after confirmed stop, before native removal, with a five-second per-resource budget capped at half the remaining cleanup deadline to reserve time for removal.
 `Microsandbox native log archive incomplete` warns when preservation fails, but archival failure does not block safe cleanup.
 Already completed file copies survive retries; partial files are never published as complete logs.
 Missing source files are recorded rather than synthesized, and native rotation may already have discarded earlier entries.
