@@ -71,3 +71,15 @@ No production credential bundle or refresh-token snapshot was inspected or impor
 Two read-only subagent reviewers evaluated the complete change against its requirements and documented architecture in three rounds.
 Important findings about diagnostic-prose classification, permanent model-access failure, oversized terminal events, and CR-only SSE framing were corrected and covered by regression tests.
 Both reviewers reported no remaining important P1/P2 findings in the third round.
+
+## Runtime endpoint namespace follow-up
+
+The private credential endpoint moves from `/mcp/provider-auth` to `/runtime/provider-auth` so its URL identifies an internal runtime HTTP operation rather than an MCP protocol operation.
+The Pi adapter resolves this path on the configured private listener's origin, retaining per-Turn bearer authorization and execution fencing.
+Token retrieval and failure reports both use the new path; the old path is unavailable.
+This requires matching rebuilt controller and Pi images, as with other owned-runner changes.
+The live qualification results above describe the original subscription implementation before this endpoint change.
+
+Follow-up verification passed: focused race-enabled MCP/Pi tests, all 17 subscription Node tests, `mise run check`, `mise run test-integration`, `mise run test-pi-integration`, and `mise run test-pi-microsandbox-integration` on the authorized Linux/amd64 KVM host.
+Coverage verifies token retrieval and failure reporting on `/runtime/provider-auth`, retained authorization/fencing, and authenticated GET/POST rejection under the old MCP-prefixed path without invoking credential operations.
+Two independent read-only subagent reviews reported no important P1/P2 findings for this namespace follow-up.

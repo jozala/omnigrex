@@ -76,7 +76,7 @@ export function subscriptionPayload(source) {
 // through the controller, without ambient keys or local OAuth refresh fallback.
 export async function subscriptionRuntime(configuration, agentDir, modelsPath, fetcher = fetch) {
   const endpoint = new URL(configuration.mcp.url);
-  endpoint.pathname += '/provider-auth';
+  endpoint.pathname = '/runtime/provider-auth';
   endpoint.search = '';
   const headers = Object.fromEntries(configuration.mcp.headers.map(header => [header.name, header.value]));
   let generation = '';

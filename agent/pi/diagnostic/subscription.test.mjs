@@ -16,7 +16,7 @@ test('subscription resolves credentials for successive model requests and preser
   const bodies = [];
   try {
     const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-      if (String(url).endsWith('/mcp/provider-auth')) {
+      if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
         assert.equal(init.headers.Authorization, 'Bearer turn-authority');
         assert.equal(init.redirect, 'error');
         const index = tokens++;
@@ -72,7 +72,7 @@ test('quota classification is reported before sanitized failure persistence', as
   const reports = [];
   try {
     const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-      if (String(url).endsWith('/mcp/provider-auth')) {
+      if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
         if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
         return Response.json({ access_token: 'access-secret', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
       }
@@ -111,7 +111,7 @@ test('only structured HTTP and SSE codes determine account-wide blocks', async t
       const reports = [];
       try {
         const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-          if (String(url).endsWith('/mcp/provider-auth')) {
+          if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
             if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
             return Response.json({ access_token: 'access-fixture', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
           }

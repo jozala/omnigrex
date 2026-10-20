@@ -615,7 +615,7 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if request.URL.Path == parsedPath(gateway.endpointURL)+"/provider-auth" {
+	if request.URL.Path == runtimeProviderAuthPath {
 		gateway.serveProviderAuth(response, request, registration)
 		return
 	}

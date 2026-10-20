@@ -10,6 +10,10 @@ import (
 	"github.com/jozala/omnigrex/internal/providerauth"
 )
 
+// Runtime authentication shares the private listener and Turn authority with
+// MCP, but has its own HTTP namespace rather than an MCP protocol path.
+const runtimeProviderAuthPath = "/runtime/provider-auth"
+
 // RuntimeCredentialProvider is deliberately separate from the model-visible
 // tool protocol. Existing per-Turn authority scopes access and failure reports.
 type RuntimeCredentialProvider interface {

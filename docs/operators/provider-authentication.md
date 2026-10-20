@@ -67,7 +67,8 @@ Network failures use bounded refresh backoff and do not delete the login.
 
 Compose persists credentials in the controller-only `omnigrex-provider-auth` volume at `/var/lib/omnigrex/provider-auth`.
 The directory is mode 0700 and the credential file is mode 0600, owned by UID/GID 10001.
-Guests retrieve access-only tokens through a private, per-Turn authenticated endpoint before model requests.
+Guests retrieve access-only tokens through the private `/runtime/provider-auth` HTTP endpoint before model requests.
+It shares the listener and per-Turn authorization with `/mcp`, but is separate from the MCP protocol and agent-visible tools.
 The refresh token, ID token, durable credential directory, and administrative socket are never mounted into guests.
 Repository code can still read access tokens intentionally supplied to its Runtime Process.
 

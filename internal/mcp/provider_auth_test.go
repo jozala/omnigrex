@@ -45,7 +45,7 @@ func TestRuntimeCredentialsRequireLiveOpenAITurnAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := httptest.NewRequest(http.MethodGet, "/mcp/provider-auth", nil)
+			request := httptest.NewRequest(http.MethodGet, "/runtime/provider-auth", nil)
 			request.Header.Set("Authorization", registration.Server.Headers[0].Value)
 			want := http.StatusUnauthorized
 			switch scenario {
@@ -103,7 +103,7 @@ func TestRuntimeCredentialFailureReportsUseClosedVocabulary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, body := range []string{`{"generation":"fixture","failure":"subscription_quota"}`, `{"generation":"fixture","failure":"provider-secret"}`, `{"generation":"fixture","failure":"subscription_auth","secret":"untrusted"}`} {
-		request := httptest.NewRequest(http.MethodPost, "/mcp/provider-auth", strings.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, "/runtime/provider-auth", strings.NewReader(body))
 		request.Header.Set("Authorization", registration.Server.Headers[0].Value)
 		response := httptest.NewRecorder()
 		gateway.ServeHTTP(response, request)
@@ -113,5 +113,36 @@ func TestRuntimeCredentialFailureReportsUseClosedVocabulary(t *testing.T) {
 	}
 	if provider.reports != 1 {
 		t.Fatalf("accepted reports = %d", provider.reports)
+	}
+}
+
+func TestRuntimeCredentialsAreUnavailableUnderMCPPath(t *testing.T) {
+	now := time.Now()
+	accessCalls := 0
+	provider := &runtimeCredentials{access: func() (providerauth.AccessToken, error) {
+		accessCalls++
+		return providerauth.AccessToken{Access: "private-access-token"}, nil
+	}}
+	gateway, err := mcp.New(mcp.Config{EndpointURL: "http://gateway.test/mcp", Store: &fakeStore{}, Backend: fakeBackend{}, ProviderAuth: provider, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := validScope(now)
+	scope.Lease.AgentProfileConfig = json.RawMessage(`{"role":"DEVELOPER","name":"developer","model":"openai/fixture"}`)
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		request := httptest.NewRequest(method, "/mcp/provider-auth", strings.NewReader(`{"generation":"fixture","failure":"subscription_quota"}`))
+		request.Header.Set("Authorization", registration.Server.Headers[0].Value)
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "private-access-token") {
+			t.Fatalf("old runtime path response = %d %s", response.Code, response.Body.String())
+		}
+	}
+	if accessCalls != 0 || provider.reports != 0 {
+		t.Fatal("MCP path invoked runtime credential operations")
 	}
 }

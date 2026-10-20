@@ -269,7 +269,7 @@ func liveMCPEndpoint(t *testing.T, token string, calls *atomic.Int32, subscripti
 	}
 	base := providerSmokeMCP(token, calls, len(subscription) != 0)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(subscription) == 0 || r.URL.Path != "/mcp/provider-auth" {
+		if len(subscription) == 0 || r.URL.Path != "/runtime/provider-auth" {
 			base.ServeHTTP(w, r)
 			return
 		}

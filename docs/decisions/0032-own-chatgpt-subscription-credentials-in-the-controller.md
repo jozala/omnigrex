@@ -16,6 +16,7 @@ The operator selected one ChatGPT account per installation, unattended renewal, 
 Select subscription or API-key authentication explicitly for the `openai` provider without changing Agent Profile model identifiers or falling back to paid API requests.
 The controller owns browser authentication, verified identity, protected persistent credentials, serialized renewal, and renewal during idle periods.
 Runtime Processes retrieve access-only tokens through a private, authenticated, execution-fenced interface before model requests and call OpenAI directly.
+Use `/runtime/provider-auth` for this plain HTTP interface, sharing the private listener and Turn authority with `/mcp` while keeping separate protocol paths.
 Keep credentials separate from PostgreSQL Workflow records and Retained Runtime State.
 
 Successful ordinary login may replace the account while Agent Turns are active.
