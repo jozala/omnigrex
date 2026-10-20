@@ -211,6 +211,17 @@ func (state *RetainedState) Collect(ctx context.Context, ref execution.StateRef)
 	if state.cleaner != nil {
 		return state.cleaner.EnsureAbsent(ctx, ref.ParticipantID, location)
 	}
+	if state.binding.Family == "microsandbox" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Native logs are optional host-only diagnostics, beside (never inside)
+		// guest-mounted Session state. The same irrevocable Participant collection
+		// authority above covers both, including retries after Session deletion.
+		if err := removeStateTree(parent, "runtime-logs"); err != nil {
+			return fmt.Errorf("collect native runtime logs: %w", err)
+		}
+	}
 	return removeStateTree(parent, path.Base(location))
 }
 

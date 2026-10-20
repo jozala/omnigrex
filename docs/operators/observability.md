@@ -6,6 +6,22 @@ Logs are JSON on stdout and use your existing Docker collection route.
 Preserve JSON fields and keep domain IDs, trace/span IDs, diagnostic call IDs, and GitHub request IDs out of log stream labels.
 There is no direct OpenTelemetry log export or public metrics endpoint.
 
+## Microsandbox SDK failures
+
+`Microsandbox SDK call failed` records the failing `sdk_operation`, `sdk_error_kind`, original `error`, and `duration_ms`.
+Available resource name/ID/status and `agent_participant_id`, `agent_session_id`, `agent_turn_id`, and `execution_epoch` identify the execution; trace/span fields follow the calling context.
+Unexpected SDK failures are ERROR; cancellation/deadline failures are WARN.
+Successful calls and expected absent-sandbox lookups do not produce these records.
+Native handle close/detach timeouts report an unresolved operation, not proof of completion.
+The timeout record has `sdk_failure_phase=release_wait`; if native work later returns a concrete SDK error, that original cause is logged separately without repeating close/detach or extending the wait.
+Failed-exec and stdin-error events are logged even when the SDK receive call returns no Go error, with `sdk_failure_event` and available path/errno details.
+
+SDK error text is intentionally **not redacted** and can contain sensitive data, guest output, or configuration.
+Restrict access to these operator logs and inspect them before sharing.
+A TODO at the logging boundary tracks future sensitive-data prevention; returned errors remain sanitized for their existing callers.
+These JSON records reach Loki/Grafana through the existing Docker log collector, not a new exporter.
+Complete [native runtime log files](troubleshooting.md#retained-microsandbox-native-logs) remain host-local and are not forwarded to Grafana.
+
 ## Tracing
 
 Tracing uses OTLP/HTTP with protobuf encoding and is inactive unless a generic or trace-specific endpoint is configured.
