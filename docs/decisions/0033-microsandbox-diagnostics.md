@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-20
-decision-makers: [Repository owner]
+decision-makers: [Mariusz]
 ---
 # Preserve Microsandbox failure evidence without changing cleanup policy
 
@@ -21,7 +21,7 @@ Preserve complete available `runtime.log`, `kernel.log`, `exec.log`, and numeric
 Do not forward their contents to Grafana or include them in supplemental Session exports.
 Use existing Participant retention rather than another expiry policy.
 Copying is best-effort and bounded; failed preservation warns but does not block cleanup or establish stop/writeback evidence.
-The repository owner requested unredacted diagnostics and all three files, then approved implementation of the plan including its retention and best-effort choices.
+Mariusz requested unredacted diagnostics and all three files, then approved implementation of the plan including its retention and best-effort choices.
 
 ## Rationale
 
