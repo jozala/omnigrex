@@ -23,6 +23,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/github/webhook"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/retention"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
@@ -61,6 +62,10 @@ func main() {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+		case "auth":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runAuthCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 		case "pi-diagnostic":
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -277,8 +282,22 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure MCP tool backend: %w", err)
 	}
+	var subscription *providerauth.Manager
+	var runtimeCredentials mcp.RuntimeCredentialProvider
+	var subscriptionAccess agentturn.SubscriptionAccess
+	var providerRedactor func(string) string
+	if settings.OpenAIAuthMode == "subscription" {
+		subscription, err = providerauth.New(settings.ProviderAuthRoot)
+		if err != nil {
+			return err
+		}
+		defer subscription.Close()
+		runtimeCredentials, subscriptionAccess = subscription, subscription
+		providerRedactor = subscription.Redact
+	}
 	toolGateway, err := mcp.New(mcp.Config{
-		EndpointURL: settings.MCPEndpointURL, Logger: logger, Store: database, Backend: toolBackend,
+		ProviderAuth: runtimeCredentials,
+		EndpointURL:  settings.MCPEndpointURL, Logger: logger, Store: database, Backend: toolBackend,
 		Ledger: readLedger, LifecycleContext: ctx, MutationFinalizationTimeout: settings.AgentTurnExecutionCleanupTimeout,
 		MutationOperationTimeout: settings.MCPMutationOperationTimeout,
 		Policies:                 rolePolicies,
@@ -357,12 +376,18 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Runtime Process Launcher: %w", err)
 	}
-	providerCredentialJSON, err := readNonemptyJSONObject(settings.ProviderCredentialsFile)
+	var providerCredentialJSON json.RawMessage
+	if subscription != nil {
+		providerCredentialJSON, err = providerauth.SubscriptionBundle(settings.ProviderCredentialsFile)
+	} else {
+		providerCredentialJSON, err = readNonemptyJSONObject(settings.ProviderCredentialsFile)
+	}
 	if err != nil {
 		return fmt.Errorf("read provider credentials: %w", err)
 	}
 	outcomeReconciler, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{
-		Store: database, GitHub: githubServices.api, Logger: logger,
+		ProviderRedactor: providerRedactor,
+		Store:            database, GitHub: githubServices.api, Logger: logger,
 		Workspace:            workspaces,
 		GitRemoteBaseURL:     settings.GitRemoteBaseURL,
 		DeveloperCredentials: developerRepositoryCredentials, ReviewerCredentials: reviewerRepositoryCredentials,
@@ -373,7 +398,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Agent Turn outcome reconciler: %w", err)
 	}
 	executionWorker, executionWorkerErr := agentturn.NewExecutionWorker(agentturn.ExecutionWorkerDependencies{
-		Store: database, DeveloperCredentials: developerRepositoryCredentials,
+		Subscription: subscriptionAccess,
+		Store:        database, DeveloperCredentials: developerRepositoryCredentials,
 		ReviewerCredentials: reviewerRepositoryCredentials, DefaultBranch: githubServices.api,
 		Launcher:            runtimeLauncher,
 		Outcomes:            outcomeReconciler,
@@ -535,6 +561,20 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 			return nil
 		})
 	return runServices(ctx,
+		func(ctx context.Context) error {
+			if subscription == nil {
+				<-ctx.Done()
+				return nil
+			}
+			return subscription.Run(ctx)
+		},
+		func(ctx context.Context) error {
+			if subscription == nil {
+				<-ctx.Done()
+				return nil
+			}
+			return subscription.ServeAdmin(ctx, settings.ProviderAuthRoot)
+		},
 		func(ctx context.Context) error {
 			return server.Run(ctx, settings.HTTPAddr, settings.ShutdownTimeout, logger, readiness, githubServices.webhookHandler)
 		},

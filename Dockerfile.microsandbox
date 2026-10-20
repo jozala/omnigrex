@@ -67,7 +67,7 @@ FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
 COPY --from=agentd-build /src/target/x86_64-unknown-linux-musl/release/agentd /usr/local/lib/omnigrex/agentd
 COPY --from=agentd-source /src/LICENSE /usr/share/licenses/omnigrex/microsandbox-agentd/LICENSE
-RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise && chown -R 10001:10001 /var/lib/omnigrex
+RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise /var/lib/omnigrex/provider-auth && chown -R 10001:10001 /var/lib/omnigrex
 ENV OMNIGREX_EXECUTION_BACKEND=microsandbox
 ENV MSB_AGENTD_PATH=/usr/local/lib/omnigrex/agentd
 USER 10001:10001

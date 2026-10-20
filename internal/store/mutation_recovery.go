@@ -251,7 +251,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		&stopReason, &errorClass, &recorded); err != nil {
 		return nil, err
 	}
-	if recorded && (stopReason == "completed" || errorClass == "FAILURE" || errorClass == "DEADLINE") {
+	if recorded && (stopReason == "completed" || eligibleCorroborationError(errorClass)) {
 		var participantRole workflow.Role
 		if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1`, job.AgentParticipantID).Scan(&participantRole); err != nil {
 			return nil, err

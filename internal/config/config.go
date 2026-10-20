@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -92,6 +93,8 @@ type Config struct {
 	GitHubReviewerPrivateKeyFile           string
 	GitHubWebhookSecretFile                string
 	ProviderCredentialsFile                string
+	OpenAIAuthMode                         string
+	ProviderAuthRoot                       string
 	WebhookLeaseDuration                   time.Duration
 	WebhookPollInterval                    time.Duration
 	AgentTurnPreparationLeaseDuration      time.Duration
@@ -202,6 +205,17 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var problems []error
+	mode, authRoot, authErr := LoadProviderAuth(getenv)
+	if authErr != nil {
+		problems = append(problems, authErr)
+	} else {
+		config.OpenAIAuthMode, config.ProviderAuthRoot = mode, authRoot
+		for _, root := range []string{config.RuntimeStateRoot, config.WorkspaceRoot, config.MiseRoot} {
+			if authRoot == root || strings.HasPrefix(authRoot, root+string(filepath.Separator)) || strings.HasPrefix(root, authRoot+string(filepath.Separator)) {
+				problems = append(problems, errors.New("OMNIGREX_PROVIDER_AUTH_ROOT must be separate from workspace, runtime state, and mise roots"))
+			}
+		}
+	}
 	if config.ExecutionBackend != "docker" && config.ExecutionBackend != "microsandbox" {
 		problems = append(problems, fmt.Errorf("OMNIGREX_EXECUTION_BACKEND must be docker or microsandbox"))
 	}
@@ -323,6 +337,9 @@ func Load(getenv func(string) string) (Config, error) {
 		{name: "OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE", value: config.GitHubWebhookSecretFile},
 		{name: "OMNIGREX_PROVIDER_CREDENTIALS_FILE", value: config.ProviderCredentialsFile},
 	} {
+		if path.name == "OMNIGREX_PROVIDER_CREDENTIALS_FILE" && config.OpenAIAuthMode == "subscription" && path.value == "" {
+			continue
+		}
 		if !filepath.IsAbs(path.value) {
 			problems = append(problems, fmt.Errorf("%s must be an absolute path", path.name))
 		}

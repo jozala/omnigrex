@@ -35,7 +35,8 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		if recorded && (recordedStop != stopReason || recordedError != errorClass) {
 			return ErrTerminalCorroborationConflict
 		}
-		if !recorded && !turn.MutationAdmissionOpen {
+		earlyPrerequisite := turn.Status == AgentTurnRunning && subscriptionPrerequisiteClass(errorClass)
+		if !recorded && !turn.MutationAdmissionOpen && !earlyPrerequisite {
 			return ErrAgentTurnFenceLost
 		}
 	}
@@ -68,7 +69,7 @@ func validAgentTurnPromptEvidence(stopReason, errorClass string) bool {
 	}
 	if errorClass != "" {
 		switch errorClass {
-		case "FAILURE", "DEADLINE", "CANCELLATION", "INVALID_RESPONSE":
+		case "FAILURE", "DEADLINE", "CANCELLATION", "INVALID_RESPONSE", "SUBSCRIPTION_QUOTA", "SUBSCRIPTION_AUTH", "SUBSCRIPTION_CONFIGURATION":
 			return true
 		default:
 			return false
@@ -80,4 +81,17 @@ func validAgentTurnPromptEvidence(stopReason, errorClass string) bool {
 	default:
 		return false
 	}
+}
+
+func eligibleCorroborationError(class string) bool {
+	switch class {
+	case "FAILURE", "DEADLINE", "SUBSCRIPTION_QUOTA", "SUBSCRIPTION_AUTH", "SUBSCRIPTION_CONFIGURATION":
+		return true
+	default:
+		return false
+	}
+}
+
+func subscriptionPrerequisiteClass(class string) bool {
+	return class == "SUBSCRIPTION_QUOTA" || class == "SUBSCRIPTION_AUTH" || class == "SUBSCRIPTION_CONFIGURATION"
 }

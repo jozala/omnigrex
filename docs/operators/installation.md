@@ -75,7 +75,7 @@ For Microsandbox, a host Docker pull is insufficient; also provision the native 
 Complete these focused procedures before startup:
 
 1. [Create the GitHub Apps](github-apps.md) and install both on the managed repositories.
-2. [Place secrets and set file groups](secrets.md), including a Pi-native literal API-key provider bundle.
+2. [Place secrets and set file groups](secrets.md), and select [API-key or ChatGPT subscription authentication](provider-authentication.md).
 3. [Configure HTTPS ingress](#https-ingress).
 4. If required, add [operator agent guidance](agent-policy.md) and storage overrides to the selected Compose file set.
 5. Coordinate [repository configuration](../repository-owners/connect-a-repository.md) with each owner.
@@ -135,6 +135,9 @@ Protected native home holds the cache and dispatch journal; disk-backed `TMPDIR`
 Preserve its protected journal in [backups](backup.md), not disposable cached images or VM disks.
 
 ## 7. Verify and hand over
+
+For subscription authentication, complete [ChatGPT login](provider-authentication.md#sign-in) before requiring repository doctor to pass.
+Subscription access is an execution prerequisite; a missing login does not prevent starting the controller to perform authentication.
 
 Check local health and dependency readiness, using the configured HTTP port if it differs:
 

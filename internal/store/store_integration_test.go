@@ -83,8 +83,8 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("migration count = %d, want 1", count)
+	if want := bundledMigrationCount(t); count != want {
+		t.Fatalf("migration count = %d, want %d", count, want)
 	}
 	contents, err := migrations.Files.ReadFile("000001_baseline.sql")
 	if err != nil {
@@ -135,13 +135,22 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("migration count = %d, want 1", count)
+	if want := bundledMigrationCount(t); count != want {
+		t.Fatalf("migration count = %d, want %d", count, want)
 	}
 	database.Close()
 	if err := database.Ready(ctx); err == nil {
 		t.Fatal("closed database reported ready")
 	}
+}
+
+func bundledMigrationCount(t *testing.T) int {
+	t.Helper()
+	files, err := migrations.Files.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(files)
 }
 
 func TestOpenReadOnlyDoesNotApplyMigrations(t *testing.T) {

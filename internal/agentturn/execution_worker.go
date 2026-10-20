@@ -12,6 +12,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
@@ -82,6 +83,7 @@ var (
 
 // ExecutionWorkerDependencies are stable production services, each narrowed to this worker's use.
 type ExecutionWorkerDependencies struct {
+	Subscription         SubscriptionAccess
 	Store                ExecutionWorkerStore
 	DeveloperCredentials RepositoryCredentialProvider
 	ReviewerCredentials  RepositoryCredentialProvider
@@ -116,6 +118,7 @@ func (ExecutionWorkerConfig) GoString() string {
 
 // ExecutionWorker claims and executes RUN_AGENT_TURN actions without owning process construction details.
 type ExecutionWorker struct {
+	subscription         SubscriptionAccess
 	store                ExecutionWorkerStore
 	developerCredentials RepositoryCredentialProvider
 	reviewerCredentials  RepositoryCredentialProvider
@@ -181,7 +184,8 @@ func NewExecutionWorker(dependencies ExecutionWorkerDependencies, config Executi
 		return nil, fmt.Errorf("%w: Workflow Definition Role capabilities: %v", ErrInvalidExecutionWorker, err)
 	}
 	return &ExecutionWorker{
-		store: dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
+		subscription: dependencies.Subscription,
+		store:        dependencies.Store, developerCredentials: dependencies.DeveloperCredentials,
 		reviewerCredentials: dependencies.ReviewerCredentials, defaultBranch: dependencies.DefaultBranch,
 		launcher: dependencies.Launcher, outcomes: dependencies.Outcomes,
 		workspace: dependencies.Workspace, publicationRecovery: dependencies.PublicationRecovery,
@@ -243,6 +247,16 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	}
 	telemetry.AddAttributes(workCtx, executionAttributes(execution)...)
 	var operationErr error
+	usingSubscription := false
+	if !nilDependency(worker.subscription) {
+		var profile struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(execution.Turn.AgentProfileConfig, &profile) == nil && strings.HasPrefix(profile.Model, "openai/") {
+			usingSubscription = true
+			operationErr = worker.subscription.Check()
+		}
+	}
 
 	var repositoryCredential string
 	providerCredential := worker.providerCredential
@@ -391,6 +405,11 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 		} else {
 			promptCtx := workCtx
 			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, worker.agentEventSink)
+			if usingSubscription && outcome.Admitted && outcome.Status == agent.Failed && outcome.FailureGeneration != "" && (outcome.FailureClass == providerauth.QuotaFailure || outcome.FailureClass == providerauth.AuthFailure) {
+				if reportErr := worker.subscription.Report(outcome.FailureGeneration, outcome.FailureClass); reportErr != nil {
+					operationErr = errors.Join(operationErr, reportErr)
+				}
+			}
 			response, promptErr := normalizedPromptEvidence(outcome, promptErr)
 			if promptErr == nil && response.Status == agent.Aborted && promptCtx.Err() == context.DeadlineExceeded {
 				promptErr = context.DeadlineExceeded
@@ -399,7 +418,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 				// Classify the agent ending before an independent backend observation
 				// can add a deadline or transport error to the diagnostic chain.
 				promptClassification = ClassifyPromptError(promptErr)
-				operationErr = fmt.Errorf("prompt Agent Turn: %w", promptErr)
+				operationErr = errors.Join(operationErr, fmt.Errorf("prompt Agent Turn: %w", promptErr))
 				if observer, ok := runtime.(interface {
 					ObserveOOM(context.Context) (bool, error)
 				}); ok {
@@ -419,6 +438,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 				promptResponse = &response
 			}
 		}
+	}
+	if promptClassification == "" && subscriptionPromptFailure(ClassifyPromptError(operationErr)) {
+		promptClassification = ClassifyPromptError(operationErr)
 	}
 	return worker.finalize(leaseCtx, *lease, execution, repositoryCredential, *secrets, runtime, promptResponse, promptClassification, operationErr)
 }
