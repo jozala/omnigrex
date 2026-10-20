@@ -1,13 +1,12 @@
+//go:build microsandbox && cgo
+
 package microsandbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"time"
-
-	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
 type sdkCallDiagnostic struct {
@@ -18,20 +17,6 @@ type sdkCallDiagnostic struct {
 
 func sdkCall(operation string, resource metadata) sdkCallDiagnostic {
 	return sdkCallDiagnostic{Operation: operation, Resource: resource, Started: time.Now()}
-}
-
-func resourceLogAttrs(resource metadata) []slog.Attr {
-	var attrs []slog.Attr
-	for key, value := range map[string]string{"resource_id": resource.ID, "resource_name": resource.Name, "resource_status": resource.Status} {
-		if value != "" {
-			attrs = append(attrs, slog.String(key, value))
-		}
-	}
-	var key execution.Key
-	if json.Unmarshal([]byte(resource.Labels[identityLabel]), &key) == nil && validKey(key) {
-		attrs = append(attrs, slog.String("participant_id", key.AssignmentID), slog.String("agent_session_id", key.AgentSessionID), slog.String("agent_turn_id", key.AgentTurnID), slog.Int64("execution_epoch", key.ExecutionEpoch))
-	}
-	return attrs
 }
 
 func logSDKCallFailure(ctx context.Context, call sdkCallDiagnostic, kind string, err error) {

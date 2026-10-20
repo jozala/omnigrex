@@ -23,6 +23,20 @@ import (
 
 const runtimeLogArchiveWait = 5 * time.Second
 
+func resourceLogAttrs(resource metadata) []slog.Attr {
+	var attrs []slog.Attr
+	for key, value := range map[string]string{"resource_id": resource.ID, "resource_name": resource.Name, "resource_status": resource.Status} {
+		if value != "" {
+			attrs = append(attrs, slog.String(key, value))
+		}
+	}
+	var key execution.Key
+	if json.Unmarshal([]byte(resource.Labels[identityLabel]), &key) == nil && validKey(key) {
+		attrs = append(attrs, slog.String("participant_id", key.AssignmentID), slog.String("agent_session_id", key.AgentSessionID), slog.String("agent_turn_id", key.AgentTurnID), slog.Int64("execution_epoch", key.ExecutionEpoch))
+	}
+	return attrs
+}
+
 type runtimeLogArchive struct {
 	Key      execution.Key     `json:"key"`
 	Resource metadata          `json:"resource"`

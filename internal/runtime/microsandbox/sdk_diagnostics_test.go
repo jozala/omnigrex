@@ -1,27 +1,17 @@
+//go:build microsandbox && cgo
+
 package microsandbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jozala/omnigrex/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
-
-func captureDiagnostics(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var output bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(&output, nil))))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return &output
-}
 
 func TestSDKCallDiagnostics(t *testing.T) {
 	for _, test := range []struct {
