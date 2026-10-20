@@ -25,7 +25,7 @@ docker run --rm --entrypoint /bin/sh "$image" -ec '
   ssh -V 2>&1
   rg --version
   test -s /etc/ssl/certs/ca-certificates.crt
-  test -x /usr/lib/git-core/git-remote-https
+  test -x "$(git --exec-path)/git-remote-https"
   test -r /usr/share/omnigrex/apk-packages.txt
   test -s /usr/share/omnigrex/apk-packages.txt
   for package in bash ca-certificates curl git jq gcc musl-dev openssh-client-default ripgrep; do

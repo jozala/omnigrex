@@ -46,9 +46,12 @@ func TestOrchestratorImageBuildPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	scriptText := string(script)
-	for _, required := range []string{"apk info -v", "/usr/share/omnigrex/apk-packages.txt", "git-remote-https", "ca-certificates.crt", "10001"} {
+	for _, required := range []string{"apk info -v", "/usr/share/omnigrex/apk-packages.txt", "git --exec-path", "git-remote-https", "ca-certificates.crt", "10001"} {
 		if !strings.Contains(scriptText, required) {
 			t.Errorf("check-orchestrator-image.sh missing required check %q", required)
 		}
+	}
+	if strings.Contains(scriptText, "/usr/lib/git-core") {
+		t.Error("check-orchestrator-image.sh must not use the Ubuntu git-core path /usr/lib/git-core")
 	}
 }

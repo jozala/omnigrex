@@ -44,7 +44,7 @@ Each build records its actual installed closure, including base and transitive p
 Inspect the inventory bound to an exact image digest without relying on mutable tags.
 
 ```sh
-docker run --rm IMAGE@sha256:DIGEST cat /usr/share/omnigrex/apk-packages.txt
+docker run --rm --entrypoint /bin/cat IMAGE@sha256:DIGEST /usr/share/omnigrex/apk-packages.txt
 ```
 
 Verify a built controller image against required tools, compiler and header function, Git HTTPS support, CA certificates, non-root execution, and inventory agreement.
