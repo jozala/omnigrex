@@ -66,6 +66,7 @@ type releaseTestSandbox struct {
 func (sandbox *releaseTestSandbox) Detach(ctx context.Context) error { return sandbox.detach(ctx) }
 
 func TestSDKStreamClosePreservesFailureAndDetachesExactlyOnce(t *testing.T) {
+	output := captureDiagnostics(t)
 	var closed, detached atomic.Int32
 	source := errors.New("guest-output provider-api-key")
 	transport := &sdkStream{
@@ -80,6 +81,9 @@ func TestSDKStreamClosePreservesFailureAndDetachesExactlyOnce(t *testing.T) {
 	}
 	first := transport.Close()
 	second := transport.Close()
+	if !strings.Contains(output.String(), source.Error()) {
+		t.Fatalf("missing raw release diagnostics: %s", output)
+	}
 	if !errors.Is(first, execution.ErrUnknownEffect) || first != second || errors.Is(first, source) || strings.Contains(fmt.Sprintf("%+v", first), "api-key") {
 		t.Fatalf("stream closure discarded failure or retained source: %v / %v", first, second)
 	}
