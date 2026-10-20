@@ -15,6 +15,8 @@ import (
 	sdk "github.com/superradcompany/microsandbox/sdk/go"
 )
 
+func unobservedRelease(run func(context.Context) error) nativeRelease { return nativeRelease{run: run} }
+
 func TestNativeReleaseBoundsBlockingCloseAndStillDetaches(t *testing.T) {
 	blocked := make(chan struct{})
 	finished := make(chan struct{})
@@ -22,14 +24,14 @@ func TestNativeReleaseBoundsBlockingCloseAndStillDetaches(t *testing.T) {
 	defer close(blocked)
 	start := time.Now()
 	err := boundedNativeRelease(context.Background(), 25*time.Millisecond,
-		func(context.Context) error { <-blocked; close(finished); return nil },
-		func(ctx context.Context) error {
+		unobservedRelease(func(context.Context) error { <-blocked; close(finished); return nil }),
+		unobservedRelease(func(ctx context.Context) error {
 			if _, ok := ctx.Deadline(); !ok {
 				return errors.New("no deadline")
 			}
 			close(detached)
 			return nil
-		},
+		}),
 	)
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, execution.ErrUnknownEffect) {
 		t.Fatalf("blocking close reported settled release: %v", err)
@@ -120,7 +122,7 @@ func TestSDKStreamCloseBoundsBackgroundNativeClose(t *testing.T) {
 func TestNativeReleaseBoundsDetachThatIgnoresCancellation(t *testing.T) {
 	blocked := make(chan struct{})
 	defer close(blocked)
-	err := boundedNativeRelease(context.Background(), 25*time.Millisecond, func(context.Context) error { <-blocked; return nil })
+	err := boundedNativeRelease(context.Background(), 25*time.Millisecond, unobservedRelease(func(context.Context) error { <-blocked; return nil }))
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, execution.ErrUnknownEffect) {
 		t.Fatalf("blocking detach was not bounded/ambiguous: %v", err)
 	}
@@ -129,7 +131,7 @@ func TestNativeReleaseBoundsDetachThatIgnoresCancellation(t *testing.T) {
 func TestNativeReleaseAfterCallerCancellationGetsIndependentDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := boundedNativeRelease(ctx, time.Second, func(releaseCtx context.Context) error {
+	err := boundedNativeRelease(ctx, time.Second, unobservedRelease(func(releaseCtx context.Context) error {
 		if releaseCtx.Err() != nil {
 			return errors.New("inherited caller cancellation")
 		}
@@ -137,7 +139,7 @@ func TestNativeReleaseAfterCallerCancellationGetsIndependentDeadline(t *testing.
 			return errors.New("missing release deadline")
 		}
 		return nil
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,8 +148,8 @@ func TestNativeReleaseAfterCallerCancellationGetsIndependentDeadline(t *testing.
 func TestNativeReleasePreservesFailuresWithoutRetainingSource(t *testing.T) {
 	source := errors.New("guest-output config provider-api-key")
 	err := boundedNativeRelease(context.Background(), time.Second,
-		func(context.Context) error { return source },
-		func(context.Context) error { return nil },
+		unobservedRelease(func(context.Context) error { return source }),
+		unobservedRelease(func(context.Context) error { return nil }),
 	)
 	if !errors.Is(err, execution.ErrUnknownEffect) || errors.Is(err, source) || strings.Contains(fmt.Sprintf("%+v", err), "api-key") {
 		t.Fatalf("release failure discarded or source retained: %v", err)

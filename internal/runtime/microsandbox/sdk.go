@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -253,11 +254,18 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 	if err := boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Stdin.Close", meta, func(context.Context) error { return stdin.Close() })); err != nil {
 		return err
 	}
+	return awaitSDKExecution(ctx, meta, handle)
+}
+
+type sdkEventReceiver interface {
+	Recv(context.Context) (*sdk.ExecEvent, error)
+}
+
+func awaitSDKExecution(ctx context.Context, meta metadata, handle sdkEventReceiver) error {
 	for {
-		call := sdkCall("Exec.Recv", meta)
-		event, err := handle.Recv(ctx)
+		event, err := receiveSDKEvent(ctx, meta, handle)
 		if err != nil {
-			return sdkError(ctx, call, err)
+			return err
 		}
 		if event.Kind == sdk.ExecEventFailed || event.Kind == sdk.ExecEventStdinError {
 			return execution.ErrUnknownEffect
@@ -272,6 +280,35 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 			return execution.ErrUnknownEffect
 		}
 	}
+}
+
+// SDK 0.7.6 reports failed execs/stdin writes as events with a nil Go error.
+// Both consumers use this boundary before losing the structured failure payload.
+func receiveSDKEvent(ctx context.Context, meta metadata, handle sdkEventReceiver) (*sdk.ExecEvent, error) {
+	call := sdkCall("Exec.Recv", meta)
+	record, err := handle.Recv(ctx)
+	if err != nil {
+		return nil, sdkError(ctx, call, err)
+	}
+	if record.Kind == sdk.ExecEventFailed || record.Kind == sdk.ExecEventStdinError {
+		kind, message := "ExecFailed", "SDK exec failure event without details"
+		details := []slog.Attr{slog.String("sdk_failure_event", "exec_failed")}
+		if record.Kind == sdk.ExecEventStdinError {
+			details[0] = slog.String("sdk_failure_event", "stdin_error")
+		}
+		if failure := record.Failure; failure != nil {
+			kind, message = failure.Kind, failure.Message
+			details = append(details, slog.String("sdk_failure_path", failure.Path), slog.String("sdk_failure_errno_name", failure.ErrnoName))
+			if failure.Errno != nil {
+				details = append(details, slog.Int("sdk_failure_errno", *failure.Errno))
+			}
+		}
+		logSDKCallFailure(ctx, call, kind, errors.New(message), details...)
+		safe := *record
+		safe.Failure, safe.Data = nil, nil
+		return &safe, nil
+	}
+	return record, nil
 }
 
 func (driver sdkPlatform) Stream(ctx context.Context, meta metadata, command []string, user string) (stream, error) {
@@ -340,10 +377,9 @@ type sdkStream struct {
 
 func (stream *sdkStream) Next(ctx context.Context) (event, error) {
 	ctx = stream.diagnosticContext(ctx)
-	call := sdkCall("Exec.Recv", stream.resource)
-	record, err := stream.handle.Recv(ctx)
+	record, err := receiveSDKEvent(ctx, stream.resource, stream.handle)
 	if err != nil {
-		return event{}, sdkError(ctx, call, err)
+		return event{}, err
 	}
 	result := event{Data: record.Data, ExitCode: record.ExitCode}
 	switch record.Kind {
@@ -389,21 +425,18 @@ func (stream *sdkStream) diagnosticContext(ctx context.Context) context.Context 
 	return ctx
 }
 
-// sdkRelease reports raw errors before boundedNativeRelease sanitizes them.
-// A stuck destructor gets an attributable timeout, not a fabricated completion.
-func sdkRelease(operation string, resource metadata, release func(context.Context) error) func(context.Context) error {
-	return func(ctx context.Context) error {
-		call := sdkCall(operation, resource)
-		var once sync.Once
-		report := func(err error) { once.Do(func() { _ = sdkError(ctx, call, err) }) }
-		stop := context.AfterFunc(ctx, func() { report(ctx.Err()) })
-		defer stop()
-		err := release(ctx)
-		diagnosticErr := err
-		if diagnosticErr == nil {
-			diagnosticErr = ctx.Err()
-		}
-		report(diagnosticErr)
-		return err
+// Waiting out a budget and a later SDK error are distinct observations. Neither
+// repeats native work nor hides the other, and raw errors never enter results.
+func sdkRelease(operation string, resource metadata, release func(context.Context) error) nativeRelease {
+	call := sdkCall(operation, resource)
+	return nativeRelease{
+		run: func(ctx context.Context) error {
+			err := release(ctx)
+			_ = sdkError(ctx, call, err)
+			return err
+		},
+		onTimeout: func(ctx context.Context) {
+			logSDKCallFailure(ctx, call, "Unknown", ctx.Err(), slog.String("sdk_failure_phase", "release_wait"))
+		},
 	}
 }

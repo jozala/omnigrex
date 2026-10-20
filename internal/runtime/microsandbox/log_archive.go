@@ -86,6 +86,10 @@ func (backend *Backend) archiveRuntimeLogs(ctx context.Context, key execution.Ke
 		return err
 	}
 	defer destination.Close()
+	if err := lockLogArchive(ctx, destination); err != nil {
+		return err
+	}
+	defer unix.Flock(int(destination.Fd()), unix.LOCK_UN)
 	manifest := runtimeLogArchive{Key: key, Resource: actual, Captured: time.Now().UTC(), Files: map[string]string{"runtime.log": "missing", "kernel.log": "missing", "exec.log": "missing"}}
 	// A retry can outlive native removal (for example after a lost Remove
 	// acknowledgement). Do not describe already-preserved evidence as missing.
@@ -94,6 +98,14 @@ func (backend *Backend) archiveRuntimeLogs(ctx context.Context, key execution.Ke
 		return err
 	}
 	for _, entry := range retained {
+		if logArchiveStageName(entry.Name()) {
+			// The resource lock excludes every live archive writer. A process
+			// crash releases the lock, so these stages are now abandoned.
+			if err := unix.Unlinkat(int(destination.Fd()), entry.Name(), 0); err != nil {
+				return err
+			}
+			continue
+		}
 		if !nativeLogFilename(entry.Name()) {
 			continue
 		}
@@ -106,8 +118,8 @@ func (backend *Backend) archiveRuntimeLogs(ctx context.Context, key execution.Ke
 		}
 		manifest.Files[entry.Name()] = "retained"
 	}
-	source, err := openLogDirectory(filepath.Join(backend.options.Home, "sandboxes", resource.Name, "logs"), false)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	source, err := backend.openRuntimeLogSource(ctx, resource)
+	if err != nil {
 		return err
 	}
 	var failures []error

@@ -13,6 +13,8 @@ Available resource name/ID/status and `agent_participant_id`, `agent_session_id`
 Unexpected SDK failures are ERROR; cancellation/deadline failures are WARN.
 Successful calls and expected absent-sandbox lookups do not produce these records.
 Native handle close/detach timeouts report an unresolved operation, not proof of completion.
+The timeout record has `sdk_failure_phase=release_wait`; if native work later returns a concrete SDK error, that original cause is logged separately without repeating close/detach or extending the wait.
+Failed-exec and stdin-error events are logged even when the SDK receive call returns no Go error, with `sdk_failure_event` and available path/errno details.
 
 SDK error text is intentionally **not redacted** and can contain sensitive data, guest output, or configuration.
 Restrict access to these operator logs and inspect them before sharing.

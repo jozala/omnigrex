@@ -76,6 +76,9 @@ Only ordinary Agent Turn resources with valid identity receive Participant archi
 Copying starts after confirmed stop, before native removal, with a five-second per-resource budget capped at half the remaining cleanup deadline to reserve time for removal.
 `Microsandbox native log archive incomplete` warns when preservation fails, but archival failure does not block safe cleanup.
 Already completed file copies survive retries; partial files are never published as complete logs.
+Archive writers serialize per native resource and reclaim abandoned temporary files on retry after a controller crash, without removing another active writer's staging files.
+The opened source directory is pinned and revalidated against the exact native identity before copying, rather than trusting a potentially replaced sandbox name.
+The copy budget is cooperative: context checks bound lock waits and work between filesystem calls, but cannot interrupt an operating-system write or `Sync` that stalls.
 Missing source files are recorded rather than synthesized, and native rotation may already have discarded earlier entries.
 There is no live follower: logs internally deleted by failed-create rollback or emitted during native removal may be unavailable.
 An absent archive is not a readiness failure, and log contents do not establish stop, flush, or OOM receipts.
