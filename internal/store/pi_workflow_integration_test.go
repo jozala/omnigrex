@@ -137,7 +137,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	}
 	configuration := builtinStoreConfig(t)
 	allowedPaths := []string{"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"}
-	database, err := store.Open(ctx, url, secret, configuration)
+	database, err := openTimedStore(t, ctx, url, secret, configuration)
 	if err != nil {
 		t.Fatal(err)
 	}

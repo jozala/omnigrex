@@ -2118,7 +2118,7 @@ func TestReplayedAndDirectConflictingAncestorIntentsCannotBeConfirmed(t *testing
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2239,7 +2239,7 @@ func TestConfirmationOfSameAncestorEffectRemainsConfirmableAfterInterruptedRetry
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
 	if err != nil {
 		t.Fatal(err)
 	}

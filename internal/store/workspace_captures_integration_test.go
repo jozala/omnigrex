@@ -32,7 +32,7 @@ func TestWorkspaceCaptureLedgerSurvivesStoreReopenWithOneConnection(t *testing.T
 	defer cancel()
 	open := func() *store.Store {
 		t.Helper()
-		database, err := store.Open(ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
+		database, err := openTimedStore(t, ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
 		if err != nil {
 			t.Fatal(err)
 		}

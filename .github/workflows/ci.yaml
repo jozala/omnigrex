@@ -33,8 +33,11 @@ jobs:
       - name: Run static analysis
         run: go vet ./...
 
+      - name: Build test timing tool
+        run: go build -o "$RUNNER_TEMP/omnigrex-test-timings" ./scripts/test-timings
+
       - name: Run unit tests
-        run: go test -race ./...
+        run: '"$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" unit -- go test -race -count=1 -json ./...'
 
       - name: Validate Docker Compose
         env:
@@ -66,8 +69,8 @@ jobs:
         run: |
           docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
           docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
-          go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
-          OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 ./internal/runtime/pi
+          "$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" integration -- go test -p 1 -race -tags=integration -timeout 30m -count=1 -json ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
+          OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker "$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" pi-protocol -- go test -race -tags=integration -timeout 15m -count=1 -json ./internal/runtime/pi
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh
@@ -82,6 +85,19 @@ jobs:
             --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
           sh scripts/test-development-image-cache.sh
           sh scripts/test-development-image-unit.sh
+
+      - name: Summarize test timings
+        if: always()
+        run: go run ./scripts/test-timings report "$RUNNER_TEMP/test-timings" unit integration pi-protocol >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test timings
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: check-test-timings
+          path: ${{ runner.temp }}/test-timings/
+          if-no-files-found: warn
+          retention-days: 7
 
   microsandbox:
     runs-on: ubuntu-24.04

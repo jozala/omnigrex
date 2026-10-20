@@ -60,7 +60,7 @@ func TestCompleteWebhookTransitionUsesStoreReducerForSharedStageIDs(t *testing.T
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestStageAssignmentsReuseParticipantAndSessionForSameProfile(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, storeConfigForReducer(t, reducer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +442,7 @@ func TestPrepareAgentTurnSupportsPolicyDefinedRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	database.Close()
-	database, err = store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	database, err = openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1666,7 +1666,7 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, store.Config{Reducer: reducer, Policies: policies})
 	if err != nil {
 		t.Fatal(err)
 	}

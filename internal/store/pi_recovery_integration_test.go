@@ -256,7 +256,7 @@ func (f *piWorkflowFixture) testExecutionFault(t *testing.T) {
 	if err := f.backend.Close(); err != nil {
 		t.Fatal(err)
 	}
-	f.database, err = store.Open(f.ctx, f.databaseURL, f.password, builtinStoreConfig(t))
+	f.database, err = openTimedStore(t, f.ctx, f.databaseURL, f.password, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

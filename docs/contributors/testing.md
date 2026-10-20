@@ -32,6 +32,40 @@ mise exec -- go test -tags=integration ./internal/deployment -run TestPiOperator
 The restore test uses stub commands and temporary data.
 The Compose example test renders the documented selections without deploying or changing protected state.
 
+## Investigate test duration
+
+The PR `check` job captures the host-side unit, general Docker integration, and Pi protocol test commands with `go test -json -count=1`.
+It preserves readable test progress and test failures, publishes a job summary, and uploads the `check-test-timings` artifact for seven days, including available evidence after failure.
+An interrupted or unstarted command is reported as incomplete, not as zero time.
+Missing, null, or negative terminal-event durations also make the capture incomplete; their costs are `null` in JSON and unavailable in Markdown, while an explicit zero remains a valid measurement.
+An unfinished command's wall time is likewise `null`, and a measured wall time remains available even when test-event data is incomplete.
+Observed packages and named tests must have terminal events; output alone does not establish a complete test execution.
+
+To measure the store suite locally after preparing the [Docker integration prerequisites](#docker-backed-integration):
+
+```sh
+mise exec -- go build -o bin/test-timings ./scripts/test-timings
+mise exec -- bin/test-timings run coverage/test-timings integration -- sh scripts/go-test.sh -p 1 -race -tags=integration -count=1 -json -timeout 30m ./internal/store
+mise exec -- bin/test-timings report coverage/test-timings integration
+```
+
+Use a fresh output directory for each comparison, or remove only that comparison's old timing files first.
+Each capture writes `<label>.events.jsonl` and `<label>.run.json`; reporting writes `summary.md` and `summary.json`.
+The JSON summary includes all completed test results and fixture samples, while the Markdown tables show the slowest twenty entries per category.
+The runner expects a JSON-producing Go test command and returns its failing exit code; malformed capture output also fails an otherwise successful command.
+
+Store integration fixtures log PostgreSQL container startup, port discovery, readiness polling, removal, and each writable `store.Open` call.
+Fixture identifiers are process-local counters, and timing records contain no connection strings, passwords, SQL parameters, or error messages.
+Raw Go test output still has the same sensitivity as ordinary CI logs and must not contain real credentials.
+Fresh and already-migrated schema probes measure `migrations.Run` separately and verify the resulting migration history.
+The `store_open` phase includes connection setup and migration handling; probe results do not establish the migration share of every store initialization.
+
+Phase statistics report sample count, errors, total measured work, median, and nearest-rank p95.
+Parent test durations include their subtests, and concurrent package or phase totals are not elapsed wall time.
+Command wall time includes compilation and execution, but not preceding image builds.
+Docker-contained Workflow, recovery, upgrade, deployment, and development-image gates are outside this capture scope, as are individual SQL operations and unfinished fixture phases.
+Do not subtract these samples from wall time and label the remainder as test-body time.
+
 ## Complete backend qualification
 
 ```sh

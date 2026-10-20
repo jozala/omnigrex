@@ -123,7 +123,7 @@ func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	writable, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	writable, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
 	}
 }
 
-type postgresContainer struct{ hostPort string }
+type postgresContainer struct{ hostPort, fixture string }
 
 func (postgres postgresContainer) databaseURL(withPassword bool) string {
 	user := url.User(postgresUser)
@@ -225,35 +225,53 @@ func startPostgres(t *testing.T) postgresContainer {
 		t.Fatal(err)
 	}
 	name := fmt.Sprintf("omnigrex-postgres-test-%d", time.Now().UnixNano())
+	fixture := fmt.Sprint(fixtureTimingSequence.Add(1))
 	args := []string{"run", "--detach", "--rm", "--name", name, "--user", "70:70", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--tmpfs", "/var/lib/postgresql:rw,noexec,nosuid,nodev,size=256m,uid=70,gid=70,mode=0700",
 		"--tmpfs", "/var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0750",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0700",
 		"--env", "POSTGRES_USER=" + postgresUser, "--env", "POSTGRES_PASSWORD=" + postgresPassword, "--env", "POSTGRES_DB=" + postgresDatabase,
 		"--publish", "127.0.0.1::5432", postgresImage}
-	if output, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+	finishStart := beginFixturePhase(t, fixture, "postgres_start")
+	output, err := exec.Command("docker", args...).CombinedOutput()
+	finishStart(err)
+	if err != nil {
 		t.Fatalf("start PostgreSQL: %v\n%s", err, output)
 	}
 	t.Cleanup(func() {
-		if output, err := exec.Command("docker", "rm", "--force", name).CombinedOutput(); err != nil && !strings.Contains(string(output), "No such container") {
+		finishRemove := beginFixturePhase(t, fixture, "postgres_remove")
+		output, err := exec.Command("docker", "rm", "--force", name).CombinedOutput()
+		if strings.Contains(string(output), "No such container") {
+			err = nil
+		}
+		finishRemove(err)
+		if err != nil {
 			t.Errorf("remove PostgreSQL: %v\n%s", err, output)
 		}
 	})
-	output, err := exec.Command("docker", "port", name, "5432/tcp").CombinedOutput()
+	finishPort := beginFixturePhase(t, fixture, "postgres_port")
+	output, err = exec.Command("docker", "port", name, "5432/tcp").CombinedOutput()
 	if err != nil {
+		finishPort(err)
 		t.Fatalf("PostgreSQL port: %v %s", err, output)
 	}
 	_, port, err := net.SplitHostPort(strings.TrimSpace(string(output)))
+	finishPort(err)
 	if err != nil {
 		t.Fatal(err)
 	}
-	postgres := postgresContainer{hostPort: port}
+	postgres := postgresContainer{hostPort: port, fixture: fixture}
+	host := net.JoinHostPort("127.0.0.1", port)
+	fixtureTimingHosts.Store(host, fixture)
+	t.Cleanup(func() { fixtureTimingHosts.Delete(host) })
+	finishReady := beginFixturePhase(t, fixture, "postgres_ready")
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		config, err := pgxpool.ParseConfig(postgres.databaseURL(true))
 		if err != nil {
 			cancel()
+			finishReady(err)
 			t.Fatal(err)
 		}
 		pool, err := pgxpool.NewWithConfig(ctx, config)
@@ -263,10 +281,12 @@ func startPostgres(t *testing.T) postgresContainer {
 		}
 		cancel()
 		if err == nil {
+			finishReady(nil)
 			return postgres
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	finishReady(context.DeadlineExceeded)
 	logs, _ := exec.Command("docker", "logs", name).CombinedOutput()
 	t.Fatalf("PostgreSQL did not become ready\n%s", logs)
 	return postgresContainer{}
