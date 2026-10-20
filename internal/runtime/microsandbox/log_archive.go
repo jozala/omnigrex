@@ -86,7 +86,7 @@ func (backend *Backend) archiveRuntimeLogs(ctx context.Context, key execution.Ke
 		return err
 	}
 	defer destination.Close()
-	manifest := runtimeLogArchive{Key: key, Resource: resource, Captured: time.Now().UTC(), Files: map[string]string{"runtime.log": "missing", "kernel.log": "missing", "exec.log": "missing"}}
+	manifest := runtimeLogArchive{Key: key, Resource: actual, Captured: time.Now().UTC(), Files: map[string]string{"runtime.log": "missing", "kernel.log": "missing", "exec.log": "missing"}}
 	// A retry can outlive native removal (for example after a lost Remove
 	// acknowledgement). Do not describe already-preserved evidence as missing.
 	retained, err := destination.ReadDir(-1)

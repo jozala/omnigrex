@@ -399,7 +399,11 @@ func sdkRelease(operation string, resource metadata, release func(context.Contex
 		stop := context.AfterFunc(ctx, func() { report(ctx.Err()) })
 		defer stop()
 		err := release(ctx)
-		report(err)
+		diagnosticErr := err
+		if diagnosticErr == nil {
+			diagnosticErr = ctx.Err()
+		}
+		report(diagnosticErr)
 		return err
 	}
 }

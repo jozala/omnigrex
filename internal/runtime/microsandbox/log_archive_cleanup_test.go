@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -88,6 +89,11 @@ func TestRuntimeLogsPreservedBeforeRemoval(t *testing.T) {
 				content, err := os.ReadFile(filepath.Join(archiveDestination(backend, request.Key, meta.ID), "exec.log"))
 				if err != nil || string(content) != "native "+meta.ID {
 					t.Errorf("archive unavailable before native deletion: %q, %v", content, err)
+				}
+				var manifest struct{ Resource metadata }
+				content, err = os.ReadFile(filepath.Join(archiveDestination(backend, request.Key, meta.ID), "archive.json"))
+				if err != nil || json.Unmarshal(content, &manifest) != nil || manifest.Resource.Status != "Stopped" {
+					t.Errorf("archive metadata did not record observed stop: %s, %v", content, err)
 				}
 			}}
 			if scenario == "reconstructed" {

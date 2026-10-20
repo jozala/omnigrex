@@ -48,6 +48,19 @@ func TestSDKStreamFailuresKeepExecutionContext(t *testing.T) {
 	}
 }
 
+func TestSDKReleaseReportsExpiredBudget(t *testing.T) {
+	output := captureDiagnostics(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := sdkRelease("Exec.Close", metadata{ID: "original"}, func(context.Context) error { cancel(); return nil })
+	if err := release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "WARN") || !strings.Contains(output.String(), "Exec.Close") || !strings.Contains(output.String(), "context canceled") {
+		t.Fatalf("late release lost expired-budget diagnostic: %s", output)
+	}
+}
+
 func TestSDKExpectedAbsenceDoesNotLogFailure(t *testing.T) {
 	output := captureDiagnostics(t)
 	source := &sdk.Error{Kind: sdk.ErrSandboxNotFound}
