@@ -16,6 +16,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
@@ -54,7 +55,7 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		{Name: "operator-agent-instructions", Run: state.checkOperatorInstructions},
 		{Name: "runtime-profile-contract", Run: state.checkRuntimeProfile},
 		{Name: "runtime-profile-compatibility-artifact", Run: state.checkCompatibilityArtifact},
-		{Name: "provider-credentials", Run: func(context.Context) error { return validateJSONObjectFile(settings.ProviderCredentialsFile) }},
+		{Name: "provider-credentials", Run: state.checkProviderCredentials},
 		{Name: "github-webhook-secret", Run: func(context.Context) error { return validateNonemptyFile(settings.GitHubWebhookSecretFile) }},
 		{Name: "developer-github-app-key", Run: state.checkDeveloperKey},
 		{Name: "reviewer-github-app-key", Run: state.checkReviewerKey},
@@ -69,6 +70,7 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		{Name: "developer-github-installation", Run: state.checkDeveloperInstallation},
 		{Name: "reviewer-github-installation", Run: state.checkReviewerInstallation},
 		{Name: "agent-profiles", Run: state.checkAgentProfiles},
+		{Name: "openai-subscription", Run: state.checkOpenAISubscription},
 		{Name: "effective-agent-profiles", Run: state.checkEffectiveProfiles},
 		{Name: "effective-agent-runtimes", Run: state.checkEffectiveRuntimes},
 		{Name: "mcp-endpoint", Run: state.checkMCPEndpoint},
@@ -78,6 +80,52 @@ func RunProduction(ctx context.Context, settings config.Config, repository Repos
 		return nil, err
 	}
 	return runner.Run(ctx), nil
+}
+
+func (state *productionState) checkProviderCredentials(ctx context.Context) error {
+	if state.settings.OpenAIAuthMode != "subscription" {
+		return validateJSONObjectFile(state.settings.ProviderCredentialsFile)
+	}
+	bundle, err := providerauth.SubscriptionBundle(state.settings.ProviderCredentialsFile)
+	clear(bundle)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (state *productionState) checkOpenAISubscription(ctx context.Context) error {
+	if state.settings.OpenAIAuthMode != "subscription" {
+		return nil
+	}
+	if !state.profilesLoaded {
+		return errors.New("Agent Profile check did not pass")
+	}
+	selected := false
+	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+		name, ok := state.profileSelection.Profile(roleID)
+		p, found := state.profiles.Profile(name)
+		if ok && found && strings.HasPrefix(p.Model(), "openai/") {
+			selected = true
+		}
+	}
+	if !selected {
+		return nil
+	}
+	status, err := providerauth.NewAdminClient(state.settings.ProviderAuthRoot).Status(ctx)
+	if err != nil {
+		return err
+	}
+	if !status.StorageAvailable {
+		return providerauth.ErrStorage
+	}
+	if !status.SignedIn || status.AuthBlocked {
+		return providerauth.ErrAuthentication
+	}
+	if status.QuotaBlocked {
+		return providerauth.ErrQuota
+	}
+	return nil
 }
 
 func backendResourcesName(settings config.Config) string {
@@ -471,7 +519,12 @@ func (state *productionState) checkEffectiveProfiles(context.Context) error {
 	if err != nil {
 		return err
 	}
-	credentials, err := os.ReadFile(state.settings.ProviderCredentialsFile)
+	var credentials []byte
+	if state.settings.OpenAIAuthMode == "subscription" {
+		credentials, err = providerauth.SubscriptionBundle(state.settings.ProviderCredentialsFile)
+	} else {
+		credentials, err = os.ReadFile(state.settings.ProviderCredentialsFile)
+	}
 	if err != nil {
 		return errors.New("provider credentials are unavailable")
 	}

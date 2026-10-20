@@ -182,6 +182,7 @@ func TestComposeTopology(t *testing.T) {
 		}
 	}
 	assertMounts(t, "orchestrator", orchestrator.Volumes,
+		composeMount{Type: "volume", Source: "provider-auth", Target: "/var/lib/omnigrex/provider-auth"},
 		composeMount{Type: "bind", Source: dockerSocket, Target: dockerSocket, ReadOnly: true},
 		composeMount{Type: "bind", Source: "/dev/null", Target: "/run/omnigrex/runtime-profile-compatibility-results.json", ReadOnly: true},
 		composeMount{Type: "volume", Source: "workspaces", Target: "/var/lib/omnigrex/workspaces"},
@@ -325,12 +326,13 @@ func assertStableNetworks(t *testing.T, networks map[string]composeNetwork) {
 func assertStableVolumes(t *testing.T, volumes map[string]composeResource) {
 	t.Helper()
 	want := map[string]string{
+		"provider-auth": "omnigrex-provider-auth",
 		"postgres-data": "omnigrex-postgres",
 		"workspaces":    "omnigrex-workspaces",
 		"runtime-state": "omnigrex-runtime-state",
 		"mise-data":     "omnigrex-mise",
 	}
-	assertExactKeys(t, "volumes", volumes, "mise-data", "postgres-data", "runtime-state", "workspaces")
+	assertExactKeys(t, "volumes", volumes, "provider-auth", "mise-data", "postgres-data", "runtime-state", "workspaces")
 	for key, name := range want {
 		if got := volumes[key].Name; got != name {
 			t.Errorf("volume %s name = %q, want %q", key, got, name)

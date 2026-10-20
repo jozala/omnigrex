@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,6 +83,8 @@ type turn struct {
 	settled         chan struct{}
 	settledOK       bool
 	lastReason      string
+	lastFailure     string
+	lastGeneration  string
 	outcome         agent.Outcome
 	retryBackoff    bool
 	cancelRequested bool
@@ -688,12 +691,15 @@ func (c *connection) record(content []byte) error {
 		}
 		if message.Role == "assistant" {
 			t.lastReason = ""
+			t.lastFailure, t.lastGeneration = "", ""
 			t.retryBackoff, t.retryCancelled = false, false
 		}
 	case "message_end":
 		var message struct {
-			Role       string `json:"role"`
-			StopReason string `json:"stopReason"`
+			Role         string `json:"role"`
+			StopReason   string `json:"stopReason"`
+			ErrorMessage string `json:"errorMessage"`
+			Generation   string `json:"omnigrexProviderGeneration"`
 		}
 		if json.Unmarshal(record.Message, &message) != nil || message.Role == "" {
 			return agent.ErrProtocol
@@ -705,6 +711,15 @@ func (c *connection) record(content []byte) error {
 				return agent.ErrProtocol
 			}
 			t.lastReason = message.StopReason
+			if message.StopReason == "error" {
+				switch message.ErrorMessage {
+				case "Omnigrex subscription_quota", "Omnigrex subscription_auth", "Omnigrex subscription_configuration", "Omnigrex subscription_temporary":
+					t.lastFailure = strings.TrimPrefix(message.ErrorMessage, "Omnigrex ")
+					if len(message.Generation) == 36 && !strings.ContainsAny(message.Generation, "\x00\r\n") {
+						t.lastGeneration = message.Generation
+					}
+				}
+			}
 		}
 	case "auto_retry_start":
 		t.retryBackoff, t.retryCancelled = true, false
@@ -728,6 +743,9 @@ func (c *connection) record(content []byte) error {
 				outcome.LimitReached = t.lastReason == "length"
 			case "error":
 				outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
+				if t.lastFailure != "" {
+					outcome.FailureClass, outcome.FailureGeneration = t.lastFailure, t.lastGeneration
+				}
 			case "aborted":
 				outcome.Status = agent.Aborted
 			default:

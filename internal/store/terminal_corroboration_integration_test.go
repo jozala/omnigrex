@@ -216,6 +216,12 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 }
 
 func TestKnownPromptCompletionSurvivesCleanupFailureAndCorroboratesAfterStop(t *testing.T) {
+	for _, class := range []string{"", "SUBSCRIPTION_QUOTA", "SUBSCRIPTION_AUTH", "SUBSCRIPTION_CONFIGURATION"} {
+		t.Run("ending-"+class, func(t *testing.T) { testKnownPromptCompletionSurvivesCleanupFailure(t, class) })
+	}
+}
+
+func testKnownPromptCompletionSurvivesCleanupFailure(t *testing.T, promptError string) {
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -239,7 +245,11 @@ func TestKnownPromptCompletionSurvivesCleanupFailureAndCorroboratesAfterStop(t *
 	if err := database.CompleteMutation(ctx, lease, mutation.ID, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
+	stopReason := "completed"
+	if promptError != "" {
+		stopReason = ""
+	}
+	if err := database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, stopReason, promptError); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.BeginAgentTurnRecovery(ctx, lease); err != nil {

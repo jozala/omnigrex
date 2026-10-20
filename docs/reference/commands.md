@@ -25,6 +25,26 @@ The default is `http://127.0.0.1:8080/readyz`.
 The HTTP client budget is readiness timeout plus five seconds; align the outer Compose timeout using [health settings](../operators/health-and-diagnostics.md#liveness-and-readiness).
 It returns 0 on success and nonzero on configuration, request, or response failure.
 
+## auth
+
+```sh
+docker compose exec orchestrator /usr/local/bin/omnigrex auth login
+docker compose exec orchestrator /usr/local/bin/omnigrex auth login --new-account
+docker compose exec orchestrator /usr/local/bin/omnigrex auth status
+docker compose exec orchestrator /usr/local/bin/omnigrex auth logout
+docker compose exec orchestrator /usr/local/bin/omnigrex auth unblock
+```
+
+Authentication commands load only the authentication mode and credential-root settings.
+They use the running controller's private administrative socket, or acquire exclusive offline ownership if the controller is absent.
+`login` supports browser callback and manual full-redirect completion with a ten-minute attempt lifetime.
+`--new-account` registers a different account/workspace through ordinary login, without an active-Turn barrier.
+`status` prints safe JSON, including mode, verified identity, login/storage availability, and independent authentication/quota blocks.
+`logout` removes local tokens and reports whether remote revocation was confirmed.
+`unblock` clears only the durable quota block for another attempt; it performs no model prompt and resumes no Work Item.
+Exit codes are 0 for command success, 1 for operational failure, and 2 for invalid arguments/configuration.
+See the authoritative [authentication procedure](../operators/provider-authentication.md).
+
 ## state export and state restore
 
 Both require `--participant` with the exact Agent Participant UUID.

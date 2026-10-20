@@ -61,7 +61,7 @@ docker buildx build --no-cache-filter runtime --platform linux/arm64 --load --ta
 Docker build-layer caching and APK `--no-cache` are distinct mechanisms.
 The former controls whether Docker reuses the installation layer, while the latter controls only whether APK keeps a local package cache inside that layer.
 Retain released images for recovery because rebuilding a source commit is not a substitute for preserving its qualified image.
-See [controller package decision](../decisions/0032-resolve-controller-packages-from-signed-alpine-repositories.md).
+See [controller package decision](../decisions/0033-resolve-controller-packages-from-signed-alpine-repositories.md).
 
 ## Run a local stack
 

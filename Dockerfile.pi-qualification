@@ -7,9 +7,11 @@ COPY internal ./internal
 COPY agent/pi ./agent/pi
 RUN --mount=type=cache,target=/root/.cache/go-build go test -c -race -tags=integration -o /out/workflow.test ./internal/store
 RUN --mount=type=cache,target=/root/.cache/go-build go test -c -race -tags=integration -o /out/pi.test ./internal/runtime/pi
+RUN --mount=type=cache,target=/root/.cache/go-build go build -o /out/omnigrex ./cmd/omnigrex
 
 FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
 COPY --from=build /out/workflow.test /usr/local/bin/workflow.test
 COPY --from=build /out/pi.test /usr/local/bin/pi.test
+COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/workflow.test"]

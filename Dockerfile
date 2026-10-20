@@ -20,7 +20,7 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 RUN apk add --no-cache \
     bash ca-certificates curl git jq gcc musl-dev \
     openssh-client-default ripgrep && \
-    mkdir -p /usr/share/omnigrex /var/lib/omnigrex/workspaces /var/lib/omnigrex/mise && \
+    mkdir -p /usr/share/omnigrex /var/lib/omnigrex/workspaces /var/lib/omnigrex/mise /var/lib/omnigrex/provider-auth && \
     apk info -v | sort > /usr/share/omnigrex/apk-packages.txt && \
     chmod 644 /usr/share/omnigrex/apk-packages.txt && \
     addgroup -g 10001 omnigrex && \

@@ -1,11 +1,17 @@
 #!/bin/sh
 set -eu
-: "${OMNIGREX_PI_LIVE_AUTH_FILE:?set the local path to a Pi API-key auth file}"
-auth="$OMNIGREX_PI_LIVE_AUTH_FILE"
-test -f "$auth" && test -r "$auth"
 backend="${OMNIGREX_PI_BACKEND:-docker}"
 pattern="${OMNIGREX_PI_LIVE_TEST_PATTERN:-^TestPiLiveProviders$}"
-case "$pattern" in '^TestPiLiveProviders$'|'^TestPiProviderSmokeBootstrap$') ;; *) exit 2 ;; esac
+case "$pattern" in
+  '^TestPiLiveSubscription$') auth=''; openai_model="${OMNIGREX_PI_OPENAI_MODEL:-gpt-6.1-sol}" ;;
+  '^TestPiLiveProviders$'|'^TestPiProviderSmokeBootstrap$')
+    : "${OMNIGREX_PI_LIVE_AUTH_FILE:?set the local path to a Pi API-key auth file}"
+    auth="$OMNIGREX_PI_LIVE_AUTH_FILE"
+    test -f "$auth" && test -r "$auth"
+    openai_model="${OMNIGREX_PI_OPENAI_MODEL:-o4-mini}"
+    ;;
+  *) exit 2 ;;
+esac
 case "$backend" in
   docker) ;;
   microsandbox) : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the approved Docker host KVM group}" ;;
@@ -54,14 +60,25 @@ docker create --interactive --name "$wrapper" --network "$network" "$@" \
   --env "OMNIGREX_PI_LIVE_TEST_PATTERN=$pattern" \
   --env "OMNIGREX_PI_LIVE_IMAGE=$binding" --env "OMNIGREX_PI_LIVE_LOCAL_IMAGE=$local_image" \
   --env "OMNIGREX_PI_LIVE_ARCH=$arch" --env "OMNIGREX_PI_LIVE_VOLUME=$volume" --env "OMNIGREX_PI_LIVE_NETWORK=$network" \
-  --env "OMNIGREX_PI_OPENAI_MODEL=${OMNIGREX_PI_OPENAI_MODEL:-o4-mini}" \
+  --env "OMNIGREX_PI_OPENAI_MODEL=$openai_model" \
   --env "OMNIGREX_PI_OPENCODE_MODEL=${OMNIGREX_PI_OPENCODE_MODEL:-muse-spark-1.3-contributor}" \
   --entrypoint /bin/sh "$qualification" \
-  -ec 'umask 077; cat > /run/pi-live/auth.json; exec /usr/local/bin/pi.test -test.v -test.run "$OMNIGREX_PI_LIVE_TEST_PATTERN" -test.timeout 10m' >/dev/null
+  -ec 'umask 077
+    if [ "$OMNIGREX_PI_LIVE_TEST_PATTERN" = "^TestPiLiveSubscription$" ]; then
+      export OMNIGREX_OPENAI_AUTH_MODE=subscription OMNIGREX_PROVIDER_AUTH_ROOT=/data/provider-auth
+      /usr/local/bin/omnigrex auth login --new-account
+    else
+      cat > /run/pi-live/auth.json
+    fi
+    exec /usr/local/bin/pi.test -test.v -test.run "$OMNIGREX_PI_LIVE_TEST_PATTERN" -test.timeout 10m' >/dev/null
 if [ "$backend" = microsandbox ]; then
   docker image save --output "$archives/image.tar" "$image"
   chmod 0644 "$archives/image.tar"
   docker cp "$archives/image.tar" "$wrapper:/tmp/pi-live-image.tar"
 fi
-docker start --attach --interactive "$wrapper" < "$auth"
+if [ "$pattern" = '^TestPiLiveSubscription$' ]; then
+  docker start --attach --interactive "$wrapper"
+else
+  docker start --attach --interactive "$wrapper" < "$auth"
+fi
 test "$(docker inspect "$wrapper" --format '{{.State.ExitCode}}')" = 0

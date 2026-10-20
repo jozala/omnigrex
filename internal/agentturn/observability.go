@@ -55,7 +55,7 @@ func observeSettlement(ctx context.Context, observation store.AgentTurnSettlemen
 		switch observation.Outcome {
 		case workflow.TurnOutcomeInfrastructureFailed:
 			telemetry.SetOutcome(ctx, telemetry.Failure, "outcome_unavailable")
-		case workflow.TurnOutcomeBlocked:
+		case workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed:
 			telemetry.SetOutcome(ctx, telemetry.DomainOutcome, "")
 		}
 	}

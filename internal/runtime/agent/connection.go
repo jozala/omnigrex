@@ -26,7 +26,9 @@ type Outcome struct {
 	Admitted     bool
 	Status       Status
 	FailureClass string
-	LimitReached bool
+	// FailureGeneration identifies the credential generation, never a token.
+	FailureGeneration string
+	LimitReached      bool
 }
 
 type Ready struct {

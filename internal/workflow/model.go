@@ -249,6 +249,7 @@ const (
 	TurnOutcomeChangesRequested     TurnOutcome = "CHANGES_REQUESTED"
 	TurnOutcomeApproved             TurnOutcome = "APPROVED"
 	TurnOutcomeBlocked              TurnOutcome = "BLOCKED"
+	TurnOutcomePrerequisiteFailed   TurnOutcome = "PREREQUISITE_FAILED"
 	TurnOutcomeInfrastructureFailed TurnOutcome = "INFRASTRUCTURE_FAILED"
 )
 

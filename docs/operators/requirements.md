@@ -32,11 +32,12 @@ The Docker control plane has effective host-root authority through the Docker so
 The Microsandbox control plane receives KVM access instead of the host Docker socket.
 
 Pi Runtime Processes receive no GitHub credentials or host Docker socket.
-They do receive the selected provider's real API key and outbound network access.
-Malicious repository code can expose that key even inside a microVM.
+They receive the selected provider's real API key, or controller-issued access-only ChatGPT tokens, and outbound network access.
+Malicious repository code can expose supplied credentials even inside a microVM.
 Different Roles can select different providers from one bundle; only the selected entry enters each environment.
 Scope provider privileges narrowly, configure spending limits, and rotate the complete bundle after suspected compromise.
 Credential mediation is not implemented.
+ChatGPT refresh credentials remain controller-owned; see [provider authentication](provider-authentication.md) for login, renewal, and account-wide limits.
 
 Local tool permissions, including Reviewer edit restrictions, do not turn arbitrary trusted shell execution into a file-security boundary.
 Workflow transitions and MCP authority remain separately enforced.

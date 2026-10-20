@@ -149,6 +149,10 @@ docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
 description = "Smoke-test real providers through the production Pi runner and selected backend using disposable state"
 run = "sh scripts/test-pi-live.sh"
 
+[tasks.test-pi-subscription-live]
+description = "Sign in to a disposable ChatGPT registration and qualify production inference and tool use on the selected backend"
+run = "OMNIGREX_PI_LIVE_TEST_PATTERN='^TestPiLiveSubscription$' sh scripts/test-pi-live.sh"
+
 [tasks.test-docker-integration]
 description = "Run shared conformance, Pi lifecycle/recovery/upgrade, and image-only deployment gates on Docker"
 run = '''

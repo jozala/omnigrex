@@ -22,6 +22,7 @@ Keep provider credentials separate from Retained Runtime State and per-Turn MCP 
 Do not serialize credential inputs into database records, labels, image layers, instruction bundles, ordinary diagnostic output, or state-backup manifests.
 Delete the disposable credential material with its execution lifecycle.
 Leave provider mediation, OAuth refresh persistence, and refresh concurrency to separate work.
+[Decision 0032](0032-own-chatgpt-subscription-credentials-in-the-controller.md) defines that subsequent OAuth work with controller-owned refresh and guest access-token delivery.
 
 ## Rationale
 

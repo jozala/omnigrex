@@ -1,6 +1,9 @@
 package agentturn
 
-import "github.com/jozala/omnigrex/internal/runtime/agent"
+import (
+	"github.com/jozala/omnigrex/internal/providerauth"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
+)
 
 // Only positively admitted completion or abort evidence is a terminal response.
 // Uncertain admission and settlement remain failures and never prove execution stopped.
@@ -15,6 +18,16 @@ func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, 
 		}
 		return outcome, nil
 	case agent.Failed, agent.Rejected:
+		if outcome.Admitted && outcome.Status == agent.Failed {
+			switch outcome.FailureClass {
+			case providerauth.QuotaFailure:
+				return agent.Outcome{}, providerauth.ErrQuota
+			case providerauth.AuthFailure:
+				return agent.Outcome{}, providerauth.ErrAuthentication
+			case providerauth.ConfigurationFailure:
+				return agent.Outcome{}, providerauth.ErrConfiguration
+			}
+		}
 		return agent.Outcome{}, agent.ErrRuntime
 	case agent.Unknown:
 		return agent.Outcome{}, agent.ErrTransport

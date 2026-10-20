@@ -87,6 +87,7 @@ type ReadLedger interface {
 }
 
 type Config struct {
+	ProviderAuth                RuntimeCredentialProvider
 	EndpointURL                 string
 	Logger                      *slog.Logger
 	Store                       Store
@@ -227,6 +228,7 @@ func (registration Registration) GoString() string {
 }
 
 type Gateway struct {
+	providerAuth                RuntimeCredentialProvider
 	endpointURL                 string
 	logger                      *slog.Logger
 	store                       Store
@@ -325,6 +327,7 @@ func New(config Config) (*Gateway, error) {
 		config.RoleCatalog = role.BuiltinCatalog()
 	}
 	return &Gateway{
+		providerAuth:                config.ProviderAuth,
 		endpointURL:                 config.EndpointURL,
 		logger:                      config.Logger,
 		store:                       config.Store,
@@ -610,6 +613,10 @@ func (gateway *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Re
 		gateway.logRequestRejected(request, "", "tool_authorization", "stale_authorization")
 		response.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if request.URL.Path == runtimeProviderAuthPath {
+		gateway.serveProviderAuth(response, request, registration)
 		return
 	}
 	if request.URL.Path != parsedPath(gateway.endpointURL) {
