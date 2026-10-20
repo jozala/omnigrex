@@ -129,10 +129,18 @@ func TestExecutionWorkerSettlesCorroboratedHandoffAfterPromptEOF(t *testing.T) {
 
 func TestExecutionWorkerHeartbeatLossCancelsPromptAndOnlyCleansRuntime(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	fixture.store.heartbeatErrAt = 2
+	fixture.store.heartbeatErrAfterOperation = "prompt-ready"
 	fixture.store.heartbeatErr = store.ErrAgentTurnFenceLost
 	fixture.config.HeartbeatInterval = time.Millisecond
 	fixture.prompter.prompt = func(ctx context.Context) (agent.Outcome, error) {
+		// An agent can have many in-flight child operations. Cancellation wakes
+		// the prompt before propagation through all children has completed, so
+		// lease authority must already be revoked when the prompt wakes.
+		for range 1024 {
+			_, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
+		}
+		fixture.operations.add("prompt-ready")
 		<-ctx.Done()
 		return agent.Outcome{Admitted: true, Status: agent.Unknown}, ctx.Err()
 	}
@@ -151,7 +159,13 @@ func TestExecutionWorkerHeartbeatLossCancelsPromptAndOnlyCleansRuntime(t *testin
 			t.Fatalf("operations = %v, fence loss must not perform %s", operations, forbidden)
 		}
 	}
-	if contains(operations, "mcp-renew") {
+	// Healthy heartbeats may renew MCP while the prompt prepares its child
+	// operations. The final heartbeat fails and must not renew that authority.
+	failedHeartbeat := len(operations) - 1
+	for failedHeartbeat >= 0 && operations[failedHeartbeat] != "heartbeat" {
+		failedHeartbeat--
+	}
+	if failedHeartbeat < 0 || contains(operations[failedHeartbeat+1:], "mcp-renew") {
 		t.Fatalf("operations = %v, failed heartbeat must not renew MCP authority", operations)
 	}
 }
