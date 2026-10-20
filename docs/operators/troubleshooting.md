@@ -46,6 +46,40 @@ INFO-level `Pi startup readiness started` and `Pi startup readiness completed` i
 They do not identify a particular tool download or prove an uncertain execution stopped.
 Doctor's successful shorter probe does not prove real working-revision bootstrap will complete.
 
+## Retained Microsandbox native logs
+
+For SDK failures, first inspect [SDK diagnostics](observability.md#microsandbox-sdk-failures) for the operation and original cause.
+Before normal or recovery removal, Omnigrex attempts to copy complete available `runtime.log`, `kernel.log`, `exec.log`, and their positive-integer numeric rotations into:
+
+```text
+<OMNIGREX_RUNTIME_STATE_ROOT>/assignment-<participant-id>/runtime-logs/
+  <agent-turn-id>-<execution-epoch>/<sha256-of-native-resource-id>/
+```
+
+The directory is beside the guest-mounted `runtime-state`, never mounted into the guest.
+`archive.json` identifies the execution key, native resource, capture time, and copied/missing/failed file inventory.
+Directories are private (`0700`); archived files are private (`0600`) under the orchestrator's UID/GID.
+`runtime.log` contains host runtime diagnostics, `kernel.log` the guest kernel console, and `exec.log` raw primary-execution output, not every guest command or the full Session history.
+All three are retained without severity filtering or redaction; treat them as sensitive private content.
+
+With your installation's selected Compose files, locate and copy an archive without changing it:
+
+```sh
+docker compose exec -T orchestrator find /var/lib/omnigrex/runtime-state -type f -name archive.json
+docker compose cp orchestrator:/var/lib/omnigrex/runtime-state/assignment-<participant-id>/runtime-logs/<agent-turn-id>-<epoch>/<resource-id-sha256> ./private-native-logs
+```
+
+Replace the angle-bracket placeholders and protect the local destination before sharing any content.
+Archives survive environment removal and controller recreation through the existing runtime-state volume and share [Participant retention](retention.md#session-retention).
+Only ordinary Agent Turn resources with valid identity receive Participant archives; diagnostic-only and malformed resources do not.
+
+Copying starts after confirmed stop, before native removal, with a five-second per-resource budget limited by the cleanup deadline.
+`Microsandbox native log archive incomplete` warns when preservation fails, but archival failure does not block safe cleanup.
+Already completed file copies survive retries; partial files are never published as complete logs.
+Missing source files are recorded rather than synthesized, and native rotation may already have discarded earlier entries.
+There is no live follower: logs internally deleted by failed-create rollback or emitted during native removal may be unavailable.
+An absent archive is not a readiness failure, and log contents do not establish stop, flush, or OOM receipts.
+
 ## Read MCP diagnostics
 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.

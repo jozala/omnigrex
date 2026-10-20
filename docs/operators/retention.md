@@ -12,6 +12,9 @@ The user must add `omnigrex:run` after reopening.
 Physical collection is irrevocable once started.
 After collection, a new trigger creates a fresh Assignment Generation with new Participants/Sessions; prior operational history remains in PostgreSQL.
 Protected Workspace Captures are collected with their Participant rather than Turn scratch or live workspace caches.
+Host-local [Microsandbox native log archives](troubleshooting.md#retained-microsandbox-native-logs) follow this same Participant retention authorization and are collected with Session data.
+Their retention countdown starts after Issue closure, not after an individual Turn finishes or a Change Proposal becomes ready.
+There is no separate log retention setting or size quota; monitor disk capacity because complete logs can contain substantial primary-execution output.
 
 ## Protect images and bindings
 
