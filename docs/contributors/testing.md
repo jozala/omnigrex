@@ -31,6 +31,7 @@ mise exec -- go test -tags=integration ./internal/deployment -run TestPiOperator
 
 The restore test uses stub commands and temporary data.
 The Compose example test renders the documented selections without deploying or changing protected state.
+The Docker-backed gate exercises the controller image check described in [source builds](development.md#docker-controller-package-policy).
 
 ## Complete backend qualification
 
