@@ -61,7 +61,7 @@ func (backend *Backend) clean(ctx context.Context, key execution.Key, ledger exe
 						return execution.ErrUnknownEffect
 					}
 					for _, resource := range remaining {
-						if err := backend.platform.Remove(ctx, resource); err != nil {
+						if err := backend.removeResource(ctx, resource); err != nil {
 							return errors.Join(execution.ErrUnknownEffect, err)
 						}
 					}
@@ -105,7 +105,7 @@ func (backend *Backend) clean(ctx context.Context, key execution.Key, ledger exe
 				return execution.ErrUnknownEffect
 			}
 			for _, resource := range resources {
-				if err := backend.platform.Remove(ctx, resource); err != nil {
+				if err := backend.removeResource(ctx, resource); err != nil {
 					return errors.Join(execution.ErrUnknownEffect, err)
 				}
 			}
@@ -269,7 +269,7 @@ func (backend *Backend) EnsureOrphansAbsent(ctx context.Context, key execution.K
 		if _, err := backend.confirmEnvironmentStopped(ctx, actual); err != nil {
 			return errors.Join(execution.ErrUnknownEffect, err)
 		}
-		if err := backend.platform.Remove(ctx, actual); err != nil {
+		if err := backend.removeResource(ctx, actual); err != nil {
 			return errors.Join(execution.ErrUnknownEffect, err)
 		}
 	}
