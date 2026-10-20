@@ -30,6 +30,7 @@ type Configuration struct {
 	MCP              agent.MCPEndpoint      `json:"mcp"`
 	MCPTools         []string               `json:"mcpTools"`
 	Auth             json.RawMessage        `json:"auth"`
+	Subscription     bool                   `json:"subscription,omitempty"`
 	Session          *agent.SessionIdentity `json:"session,omitempty"`
 }
 
@@ -56,7 +57,11 @@ func Render(p agentprofile.Profile, policy role.Policy, operator agentinstructio
 		Type string `json:"type"`
 		Key  string `json:"key"`
 	}
-	if json.Unmarshal(bundle[provider], &entry) != nil || entry.Type != "api_key" || strings.TrimSpace(entry.Key) == "" || strings.TrimSpace(entry.Key) != entry.Key || strings.HasPrefix(entry.Key, "!") || strings.ContainsAny(entry.Key, "\x00\r\n") || keyReferencesEnvironment(entry.Key) {
+	if json.Unmarshal(bundle[provider], &entry) != nil {
+		return Configuration{}, ErrConfiguration
+	}
+	subscription := provider == "openai" && entry.Type == "controller"
+	if !subscription && (entry.Type != "api_key" || strings.TrimSpace(entry.Key) == "" || strings.TrimSpace(entry.Key) != entry.Key || strings.HasPrefix(entry.Key, "!") || strings.ContainsAny(entry.Key, "\x00\r\n") || keyReferencesEnvironment(entry.Key)) {
 		return Configuration{}, ErrConfiguration
 	}
 	// Pi's auth reader treats dollar signs as template/escape syntax. Encode
@@ -67,6 +72,9 @@ func Render(p agentprofile.Profile, policy role.Policy, operator agentinstructio
 		return Configuration{}, ErrConfiguration
 	}
 	result := Configuration{Selection: agent.ModelSelection{Model: p.Model(), Thinking: p.Thinking()}, Tools: []string{}, Instructions: operator.Compose(policy, stage, purpose, p.Instructions()), MCP: endpoint, MCPTools: slices.Clone(policy.MCPTools), Auth: auth}
+	if subscription {
+		result.Subscription, result.Auth = true, json.RawMessage(`{}`)
+	}
 	for _, name := range []string{"read", "edit", "write", "bash", "grep", "find", "ls"} {
 		if p.Permission(name) == agentprofile.Allow {
 			result.Tools = append(result.Tools, name)

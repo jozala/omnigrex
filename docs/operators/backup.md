@@ -113,6 +113,7 @@ An existing Turn with an absent journal makes backup fail rather than silently o
 Archive disposable resources separately only if local policy requires a complete host checkpoint.
 
 Back up `.env`, secrets, compatibility artifacts, deployed commit, and every referenced image digest separately in encrypted storage.
+Include the controller-only subscription credential directory using [its stopped-writer backup procedure](provider-authentication.md#renewal-and-storage).
 Do not put them in the same unencrypted directory as operational exports.
 
 Restart the unchanged deployment, run repository preflight, then reopen ingress and human-trigger admission:

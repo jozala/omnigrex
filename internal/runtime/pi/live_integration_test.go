@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/conformance"
@@ -67,7 +68,33 @@ func TestPiProviderSmokeBootstrap(t *testing.T) {
 	runProviderSmoke(t, []byte(`{"openai":{"type":"api_key","key":"bootstrap-fixture-only-openai"},"opencode-go":{"type":"api_key","key":"bootstrap-fixture-only-opencode"}}`), false)
 }
 
-func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
+func TestPiLiveSubscription(t *testing.T) {
+	if os.Getenv("OMNIGREX_PI_LIVE_INTEGRATION") != "1" || os.Getenv("OMNIGREX_PI_LIVE_TEST_PATTERN") != "^TestPiLiveSubscription$" {
+		t.Skip("run mise run test-pi-subscription-live and complete the disposable browser login")
+	}
+	manager, err := providerauth.New(filepath.Join(os.Getenv("OMNIGREX_PI_LIVE_ROOT"), "provider-auth"))
+	if err != nil {
+		t.Fatal("cannot own the isolated subscription registration")
+	}
+	defer manager.Close()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		revoked, err := manager.Logout(ctx)
+		if err != nil {
+			t.Error("could not remove isolated subscription login")
+		}
+		if !revoked {
+			t.Log("remote revocation was not confirmed; disconnect the qualification registration in ChatGPT Settings")
+		}
+	}()
+	if err := manager.Check(); err != nil {
+		t.Fatal(err)
+	}
+	runProviderSmoke(t, []byte(`{"openai":{"type":"controller"}}`), true, manager)
+}
+
+func runProviderSmoke(t *testing.T, content []byte, prompt bool, subscription ...*providerauth.Manager) {
 	t.Helper()
 	var bundle map[string]struct {
 		Key string `json:"key"`
@@ -87,12 +114,15 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 	}
 	token := uuid.NewString()
 	var calls atomic.Int32
-	endpoint := liveMCPEndpoint(t, token, &calls)
+	endpoint := liveMCPEndpoint(t, token, &calls, subscription...)
 	env := providerSmokeEnvironment(t, root, endpoint.URL)
 	for _, selection := range []struct{ provider, model, override string }{
 		{"opencode-go", "muse-spark-1.3-contributor", "OMNIGREX_PI_OPENCODE_MODEL"},
 		{"openai", "o4-mini", "OMNIGREX_PI_OPENAI_MODEL"},
 	} {
+		if len(subscription) != 0 && selection.provider != "openai" {
+			continue
+		}
 		t.Run(selection.provider, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 			defer cancel()
@@ -100,7 +130,7 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 			if override := os.Getenv(selection.override); override != "" {
 				model = override
 			}
-			configuration, err := providerSmokeConfiguration(selection.provider+"/"+model, content, endpoint)
+			configuration, err := providerSmokeConfiguration(selection.provider+"/"+model, content, endpoint, len(subscription) != 0)
 			if err != nil {
 				t.Fatal("live provider selection or API-key credential is unsupported")
 			}
@@ -174,7 +204,11 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 				t.Fatal("exact model, thinking, authenticated MCP, or Session preparation failed")
 			}
 			if prompt {
-				outcome, err := connection.Prompt(ctx, "Reply with exactly OK. Do not use tools.", nil)
+				text := "Reply with exactly OK. Do not use tools."
+				if len(subscription) != 0 {
+					text = "Call omnigrex_get_issue once to read the isolated fixture, then reply with exactly OK. Do not use any other tools."
+				}
+				outcome, err := connection.Prompt(ctx, text, nil)
 				if err != nil || !outcome.Admitted || outcome.Status != agent.Completed {
 					t.Fatal("live provider did not complete an admitted production Pi prompt")
 				}
@@ -183,8 +217,11 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 			if _, err := connection.Replay(ctx, agent.HistoryCursor{}, history); err != nil || len(history.events) == 0 {
 				t.Fatal("live Session history is unavailable")
 			}
-			if calls.Load() != 0 {
+			if len(subscription) == 0 && calls.Load() != 0 {
 				t.Fatal("live smoke unexpectedly invoked an MCP business tool")
+			}
+			if len(subscription) != 0 && calls.Load() == 0 {
+				t.Fatal("live subscription did not execute the fixture tool")
 			}
 			_ = connection.Close()
 			cleanup()
@@ -198,6 +235,9 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 			if err := checkProviderSmokeArchive(archive.Bytes(), key.AgentSessionID, append(secrets, token)); err != nil {
 				t.Fatal(err)
 			}
+			if len(subscription) != 0 && subscription[0].Redact(string(archive.Bytes())) != string(archive.Bytes()) {
+				t.Fatal("subscription credential entered retained Session state")
+			}
 			if prompt {
 				t.Logf("PASS: live %s/%s through the production runner, exact configuration, authenticated MCP, durable Session and credential-free retained state", selection.provider, model)
 			} else {
@@ -207,23 +247,59 @@ func runProviderSmoke(t *testing.T, content []byte, prompt bool) {
 	}
 }
 
-func providerSmokeConfiguration(model string, credentials []byte, endpoint agent.MCPEndpoint) (pi.Configuration, error) {
-	p, err := agentprofile.Parse(".omnigrex/team/provider-smoke.md", []byte(fmt.Sprintf("---\nname: provider-smoke\nrole: REVIEWER\nruntime: pi-rpc/v2\nmodel: %q\nthinking: low\npermissions:\n  read: deny\n---\nVerify provider connectivity without using tools.\n", model)), role.BuiltinPolicyCatalog())
+func providerSmokeConfiguration(model string, credentials []byte, endpoint agent.MCPEndpoint, toolUse ...bool) (pi.Configuration, error) {
+	instructions := "Verify provider connectivity without using tools."
+	if len(toolUse) != 0 && toolUse[0] {
+		instructions = "Verify provider connectivity by calling the isolated omnigrex_get_issue fixture once, then reply briefly."
+	}
+	p, err := agentprofile.Parse(".omnigrex/team/provider-smoke.md", []byte(fmt.Sprintf("---\nname: provider-smoke\nrole: REVIEWER\nruntime: pi-rpc/v2\nmodel: %q\nthinking: low\npermissions:\n  read: deny\n---\n%s\n", model, instructions)), role.BuiltinPolicyCatalog())
 	if err != nil {
 		return pi.Configuration{}, pi.ErrConfiguration
 	}
 	policy, _ := role.BuiltinPolicyCatalog().Lookup(role.Reviewer)
 	policy.MCPTools = []string{"get_issue"}
-	return pi.Render(p, policy, agentinstructions.Operator{}, workflow.StageDefinition{Role: role.Reviewer, Instructions: "Reply briefly without calling tools."}, workflow.TurnPurpose("provider_smoke"), endpoint, credentials)
+	return pi.Render(p, policy, agentinstructions.Operator{}, workflow.StageDefinition{Role: role.Reviewer, Instructions: instructions}, workflow.TurnPurpose("provider_smoke"), endpoint, credentials)
 }
 
-func liveMCPEndpoint(t *testing.T, token string, calls *atomic.Int32) agent.MCPEndpoint {
+func liveMCPEndpoint(t *testing.T, token string, calls *atomic.Int32, subscription ...*providerauth.Manager) agent.MCPEndpoint {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: providerSmokeMCP(token, calls), ReadHeaderTimeout: 5 * time.Second}
+	base := providerSmokeMCP(token, calls, len(subscription) != 0)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(subscription) == 0 || r.URL.Path != "/mcp/provider-auth" {
+			base.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			var input struct {
+				Generation string `json:"generation"`
+				Failure    string `json:"failure"`
+			}
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&input) != nil || subscription[0].Report(input.Generation, input.Failure) != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, "{}")
+			return
+		}
+		access, err := subscription[0].Access(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"failure": providerauth.Failure(err)})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(access)
+	})
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 	addresses, err := net.InterfaceAddrs()
@@ -240,7 +316,7 @@ func liveMCPEndpoint(t *testing.T, token string, calls *atomic.Int32) agent.MCPE
 	return agent.MCPEndpoint{}
 }
 
-func providerSmokeMCP(token string, calls *atomic.Int32) http.Handler {
+func providerSmokeMCP(token string, calls *atomic.Int32, toolUse ...bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mcp" || r.Header.Get("Authorization") != "Bearer "+token {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -268,6 +344,13 @@ func providerSmokeMCP(token string, calls *atomic.Int32) http.Handler {
 			response["result"] = map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "provider-smoke", "version": "1"}}
 		case "tools/list":
 			response["result"] = map[string]any{"tools": []any{map[string]any{"name": "get_issue", "description": "Unused live-smoke fixture", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}}}}
+		case "tools/call":
+			calls.Add(1)
+			if len(toolUse) != 0 && toolUse[0] {
+				response["result"] = map[string]any{"content": []any{map[string]string{"type": "text", "text": "Isolated qualification fixture: no GitHub data or mutations."}}, "isError": false}
+			} else {
+				response["error"] = map[string]any{"code": -32601, "message": "Business tools are unavailable in provider smoke"}
+			}
 		default:
 			calls.Add(1)
 			response["error"] = map[string]any{"code": -32601, "message": "Business tools are unavailable in provider smoke"}

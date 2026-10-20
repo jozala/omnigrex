@@ -62,7 +62,7 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 			return event.CorroborationHandoffReason == "" && validChangeProposal(event.ChangeProposal) && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangesRequested, TurnOutcomeApproved:
 			return event.CorroborationHandoffReason == "" && event.AuthorizedReviewerActorID > 0 && validChangeProposal(event.ChangeProposal) && validReview(event.Review) && (event.ExistingReview == nil || validReview(event.ExistingReview))
-		case TurnOutcomeBlocked:
+		case TurnOutcomeBlocked, TurnOutcomePrerequisiteFailed:
 			return event.CorroborationHandoffReason == "" && event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeInfrastructureFailed:
 			return (event.CorroborationHandoffReason == "" ||

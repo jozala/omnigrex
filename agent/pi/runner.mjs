@@ -5,6 +5,7 @@ import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
+import { subscriptionRuntime } from './subscription-auth.mjs';
 
 const agentDir = '/run/pi-agent';
 const cwd = '/workspace';
@@ -72,11 +73,13 @@ export async function prepareRuntime(configuration, sessionManager, models) {
     enableAnalytics: false, enableInstallTelemetry: false, enableSkillCommands: true,
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {
+    const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null) : undefined;
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager, modelRuntimeSignal: AbortSignal.timeout(15000),
+      modelRuntime: subscription?.runtime,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        disabledBuiltinExtensions: ['mcp'], extensionFactories: [failureExtension, mcpExtension(configuration)],
+        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), mcpExtension(configuration)],
         additionalSkillPaths: skills,
         // Overrides avoid interpreting instruction text as a file path and
         // prevent even reading automatic SYSTEM/APPEND_SYSTEM sources.
@@ -90,6 +93,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
     const modelId = configuration.selection.model.slice(separator + 1);
     const model = services.modelRuntime.getModel(provider, modelId);
     if (!model || !services.modelRuntime.hasConfiguredAuth(provider)) throw new Error('exact model unavailable');
+    if (subscription && (provider !== 'openai' || model.api !== 'openai-responses' || model.baseUrl !== 'https://api.openai.com/v1')) throw new Error('exact model does not support direct ChatGPT authentication');
     const tools = [...configuration.tools, ...configuration.mcpTools.map(name => `omnigrex_${name}`)];
     const result = await createAgentSessionFromServices({ services, sessionManager: manager, model, tools,
       thinkingLevel: configuration.selection.thinking || undefined });

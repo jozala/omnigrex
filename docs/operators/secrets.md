@@ -16,7 +16,7 @@ openssl rand -hex 32 > secrets/github-webhook-secret
 ```
 
 Copy each App key into the separate PEM path in the [App guide](github-apps.md#keys-and-installation).
-Copy a Pi-native API-key bundle:
+For API-key authentication, copy a Pi-native API-key bundle:
 
 ```sh
 cp /secure/path/pi-auth.json secrets/provider-credentials.json
@@ -35,7 +35,8 @@ The bundle is a nonempty JSON object with literal API keys:
 ```
 
 The requested `provider/model` must exist in the exact Pi image and work with that key.
-Executable key references, environment references, OAuth entries, and missing selected providers are unsupported.
+Executable key references, environment references, imported OAuth snapshots, and missing selected API-key providers are unsupported.
+For OpenAI subscription login, use [provider authentication](provider-authentication.md); mutable OAuth credentials are owned separately by the controller, not imported through this bundle.
 Only the selected entry is written to mode-0600 `/run/pi-agent/auth.json` in disposable tmpfs; MCP bearer authority stays in memory.
 Normal retained-state, database, image, and diagnostic paths exclude keys.
 Trusted repository code can deliberately copy supplied keys, so this is not credential mediation.
@@ -73,6 +74,7 @@ Webhook-secret rotation is not atomic across GitHub and the deployment.
 Stop the controller, change the remote and local secret during one maintenance window, recreate the controller, and verify a real delivery before new work.
 
 For provider credentials, replace the complete deployment bundle, recreate the controller, run preflight, and verify every configured model with controlled work.
+ChatGPT subscription rotation and account replacement instead use the [authentication commands](provider-authentication.md#sign-in).
 After suspected repository compromise, rotate the complete provider bundle.
 Securely remove superseded local and backup copies according to the operator's retention policy.
 

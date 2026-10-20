@@ -125,6 +125,8 @@ networks:
   agent:
     name: $namespace-agent
 volumes:
+  provider-auth:
+    name: $namespace-provider-auth
   postgres-data:
     name: $namespace-postgres
   workspaces:

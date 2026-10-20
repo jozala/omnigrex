@@ -144,6 +144,29 @@ func TestTerminalOutcomesAndEOF(t *testing.T) {
 	}
 }
 
+func TestSubscriptionFailuresRetainOnlyRecognizedClassification(t *testing.T) {
+	for _, failure := range []string{"subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary", "secret-provider-text"} {
+		t.Run(failure, func(t *testing.T) {
+			c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "error", "errorMessage": "Omnigrex " + failure, "omnigrexProviderGeneration": "00000000-0000-4000-8000-000000000001"}})
+				writeRecord(runtime, map[string]any{"type": "agent_settled"})
+			})
+			outcome, err := c.Prompt(ctx, "work", nil)
+			if err != nil || !outcome.Admitted || outcome.Status != agent.Failed {
+				t.Fatalf("failed outcome = %+v, %v", outcome, err)
+			}
+			want := failure
+			if failure == "secret-provider-text" {
+				want = "provider_failure"
+			}
+			if outcome.FailureClass != want {
+				t.Fatalf("failure = %s", outcome.FailureClass)
+			}
+		})
+	}
+}
+
 func TestUnknownOutcomesNeverBecomeCompletion(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

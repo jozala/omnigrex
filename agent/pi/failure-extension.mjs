@@ -5,7 +5,7 @@ const counter = value => Number.isFinite(value) ? value : 0;
 // Pi invokes message_end extensions before notifying listeners and appending
 // the finalized message to SessionManager. Reconstruct failure records there,
 // rather than redacting files or Go events after secret-bearing text is saved.
-export function failureExtension(pi) {
+export function failureExtension(pi, subscription) {
   pi.on('message_end', (event, ctx) => {
     const source = event.message;
     if (source?.role !== 'assistant' || !['error', 'aborted'].includes(source.stopReason)) return;
@@ -15,7 +15,7 @@ export function failureExtension(pi) {
     // Pi catches extension exceptions and would otherwise persist the source.
     let model;
     try { model = ctx.model; } catch { /* Retain only unknown identity below. */ }
-    return { message: {
+    const sanitized = { message: {
       role: 'assistant', content: [],
       // Identity comes from the selected runtime model, not provider responses.
       api: model?.api ?? 'unknown', provider: model?.provider ?? 'unknown', model: model?.id ?? 'unknown',
@@ -35,5 +35,15 @@ export function failureExtension(pi) {
         : retryable ? 'Provider returned error' : 'Provider request failed',
       timestamp: Number.isFinite(source.timestamp) ? source.timestamp : Date.now(),
     } };
+    if (!subscription || source.stopReason !== 'error') return sanitized;
+    return subscription.failure(source).then(({ failure, generation }) => {
+      sanitized.message.errorMessage = `Omnigrex ${failure}`;
+      sanitized.message.omnigrexProviderGeneration = generation;
+      return sanitized;
+    }).catch(() => {
+      // An extension exception would let Pi persist the unsanitized source.
+      sanitized.message.errorMessage = 'Omnigrex subscription_temporary';
+      return sanitized;
+    });
   });
 }

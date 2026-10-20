@@ -77,6 +77,8 @@ services:
       OMNIGREX_GITHUB_REVIEWER_PRIVATE_KEY_FILE: /run/secrets/omnigrex-github-reviewer-private-key
       OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/omnigrex-github-webhook-secret
       OMNIGREX_PROVIDER_CREDENTIALS_FILE: /run/secrets/omnigrex-provider-credentials
+      OMNIGREX_OPENAI_AUTH_MODE: "${OMNIGREX_OPENAI_AUTH_MODE:-api_key}"
+      OMNIGREX_PROVIDER_AUTH_ROOT: /var/lib/omnigrex/provider-auth
       OMNIGREX_WORKSPACE_ROOT: /var/lib/omnigrex/workspaces
       OMNIGREX_RUNTIME_STATE_ROOT: /var/lib/omnigrex/runtime-state
       OMNIGREX_WORKSPACE_CAPTURE_ROOT: /var/lib/omnigrex/runtime-state/workspace-captures
@@ -115,6 +117,7 @@ services:
       - omnigrex-provider-credentials
     volumes:
       - workspaces:/var/lib/omnigrex/workspaces
+      - provider-auth:/var/lib/omnigrex/provider-auth
       - runtime-state:/var/lib/omnigrex/runtime-state
       - mise-data:/var/lib/omnigrex/mise
       - type: bind
@@ -157,6 +160,8 @@ networks:
   agent:
     name: omnigrex-agent
 volumes:
+  provider-auth:
+    name: omnigrex-provider-auth
   postgres-data:
     name: omnigrex-postgres
   workspaces:
@@ -175,4 +180,4 @@ secrets:
   omnigrex-github-webhook-secret:
     file: "${OMNIGREX_GITHUB_WEBHOOK_SECRET_FILE:?set webhook secret file}"
   omnigrex-provider-credentials:
-    file: "${OMNIGREX_PROVIDER_CREDENTIALS_FILE:?set Pi-native API-key file}"
+    file: "${OMNIGREX_PROVIDER_CREDENTIALS_FILE:-/dev/null}"

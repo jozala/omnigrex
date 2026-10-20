@@ -21,6 +21,7 @@ Authorize checkout-local `.agents/skills/` discovery only through the Profile's 
 
 Send one bounded bootstrap frame over the backend's process transport before ordinary RPC commands.
 Render only the selected provider's literal API key into a private disposable Pi-native `auth.json` file.
+[Decision 0032](0032-own-chatgpt-subscription-credentials-in-the-controller.md) extends authentication with controller-managed ChatGPT access tokens resolved by the owned runner.
 Reject environment-reference inputs and encode accepted literal dollar characters so Pi's template reader cannot transform their value.
 Keep MCP authority in process memory and reject MCP discovery that differs from the expected per-Turn capability set.
 Apply the exact-endpoint fetch policy to POST, optional SSE, and reconnection requests, rejecting redirects before forwarding authority.

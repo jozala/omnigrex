@@ -462,6 +462,17 @@ func TestAgentBlockerCreatesHumanHandoff(t *testing.T) {
 	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 1)
 }
 
+func TestOperationalPrerequisiteFailureHandsOffWithoutInfrastructureRetry(t *testing.T) {
+	for _, snapshot := range []workflow.Snapshot{developingSnapshot(nil), reviewingSnapshot(1, "review-head")} {
+		event := settledEvent(snapshot, "provider-prerequisite", workflow.TurnOutcomePrerequisiteFailed)
+		event.Diagnostic = "subscription_quota: operator recovery required"
+		decision := reduce(snapshot, event)
+		assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonAgentBlocked, workflow.StateNeedsHuman, snapshot.Revision+1)
+		assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 1)
+		assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	}
+}
+
 func TestAssignmentConfigurationConflictCreatesHumanHandoff(t *testing.T) {
 	for _, test := range []struct {
 		name     string

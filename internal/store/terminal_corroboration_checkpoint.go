@@ -135,7 +135,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 		&stopReason, &errorClass, &recorded); err != nil {
 		return false, err
 	}
-	if !recorded || (stopReason != "completed" && errorClass != "FAILURE" && errorClass != "DEADLINE") {
+	if !recorded || (stopReason != "completed" && !eligibleCorroborationError(errorClass)) {
 		return false, nil
 	}
 	sourceID, valid, err := findTerminalCorroborationSourceTx(ctx, tx, turn.ID, turn.ExecutionEpoch, role, "")
