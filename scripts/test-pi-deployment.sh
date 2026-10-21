@@ -58,6 +58,7 @@ if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
   sh scripts/docker-build.sh --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
   if [ "$backend" = docker ]; then
     sh scripts/docker-build.sh --quiet --tag omnigrex/orchestrator:dev .
+    sh scripts/check-orchestrator-image.sh omnigrex/orchestrator:dev
     ensure_fixture_registry
     for image in pi:1.0.4 orchestrator:dev; do
       name="${image%%:*}"

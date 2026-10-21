@@ -20,7 +20,7 @@ The check job also uses a disposable local registry to expose its source-built P
 Run `sh scripts/test-ci-buildkit.sh` for a Docker-backed parent/child build and cache-pruning regression; it creates disposable local builder and registry resources when they are not already present.
 The Microsandbox gate runs the patched guest-agent workload tests through `test-agentd` with a new invocation nonce, so a warm image-build cache cannot skip them.
 The cache is disposable, so a miss can lengthen a build but cannot change the required cold/offline module checks or exact-digest release gates.
-See [decision 0033](../decisions/0033-persist-ci-build-layers-without-runtime-state.md) for cache scope and trust boundaries.
+See [decision 0035](../decisions/0035-persist-ci-build-layers-without-runtime-state.md) for cache scope and trust boundaries.
 
 ## Docker-backed integration
 
@@ -40,6 +40,7 @@ mise exec -- go test -tags=integration ./internal/deployment -run TestPiOperator
 
 The restore test uses stub commands and temporary data.
 The Compose example test renders the documented selections without deploying or changing protected state.
+The Docker-backed gate exercises the controller image check described in [source builds](development.md#docker-controller-package-policy).
 
 ## Complete backend qualification
 
