@@ -11,7 +11,7 @@ import (
 )
 
 func TestMigrationTimingFreshAndExisting(t *testing.T) {
-	postgres := startPostgres(t)
+	postgres := startIsolatedPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
 	for _, phase := range []string{"probe_migrations_fresh", "probe_migrations_existing"} {
 		if !t.Run(phase, func(t *testing.T) {

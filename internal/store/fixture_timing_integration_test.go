@@ -18,7 +18,7 @@ import (
 
 // IDs are process-local counters, never container names or connection strings.
 var fixtureTimingSequence atomic.Uint64
-var fixtureTimingHosts sync.Map
+var fixtureTimingDatabases sync.Map
 
 type fixtureTimingLogger interface {
 	Helper()
@@ -50,7 +50,7 @@ func openTimedStore(t fixtureTimingLogger, ctx context.Context, databaseURL, pas
 	t.Helper()
 	var fixture string
 	if parsed, parseErr := url.Parse(databaseURL); parseErr == nil {
-		if value, found := fixtureTimingHosts.Load(parsed.Host); found {
+		if value, found := fixtureTimingDatabases.Load(parsed.Host + "\x00" + parsed.Path); found {
 			fixture = value.(string)
 		}
 	}
@@ -93,5 +93,25 @@ func TestTimedStoreOpenPreservesErrorsWithoutLoggingConnectionDetails(t *testing
 	}
 	if !strings.Contains(logger.String(), `"outcome":"error"`) || !strings.Contains(logger.String(), `"phase":"store_open"`) || strings.Contains(logger.String(), "private") {
 		t.Fatalf("unsafe or missing timing: %s", logger.String())
+	}
+}
+
+func TestStoreOpenTimingDistinguishesDatabasesOnOneServer(t *testing.T) {
+	for _, name := range []string{"first", "second"} {
+		key := "fixture.invalid:5432\x00/" + name
+		fixtureTimingDatabases.Store(key, name+"-fixture")
+		t.Cleanup(func() { fixtureTimingDatabases.Delete(key) })
+		var logger fixtureTimingBuffer
+		_, err := openTimedStore(&logger, context.Background(), "postgres://private:private@fixture.invalid:5432/"+name+"?application_name=private", "/private-secret", store.Config{})
+		if err == nil {
+			t.Fatal("invalid configuration unexpectedly opened a store")
+		}
+		var record fixtureTimingRecord
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(logger.String(), "fixture_timing ")), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Fixture != name+"-fixture" || strings.Contains(logger.String(), "private") {
+			t.Fatalf("incorrect or unsafe fixture attribution: %s", logger.String())
+		}
 	}
 }

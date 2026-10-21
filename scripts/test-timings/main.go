@@ -71,14 +71,15 @@ type phaseSummary struct {
 
 type runReport struct {
 	captureMetadata
-	Recorded bool           `json:"recorded"`
-	Fixtures int            `json:"fixture_attempts"`
-	Failed   int            `json:"failed_tests"`
-	Skipped  int            `json:"skipped_tests"`
-	Packages []result       `json:"packages"`
-	Tests    []result       `json:"tests"`
-	Samples  []phaseSample  `json:"fixture_samples"`
-	Phases   []phaseSummary `json:"phases"`
+	Recorded  bool           `json:"recorded"`
+	Fixtures  int            `json:"fixture_attempts"`
+	Databases int            `json:"database_fixtures"`
+	Failed    int            `json:"failed_tests"`
+	Skipped   int            `json:"skipped_tests"`
+	Packages  []result       `json:"packages"`
+	Tests     []result       `json:"tests"`
+	Samples   []phaseSample  `json:"fixture_samples"`
+	Phases    []phaseSummary `json:"phases"`
 }
 
 type timingReport struct {
@@ -311,6 +312,7 @@ func readReport(directory string, labels []string) timingReport {
 func analyzeEvents(reader io.Reader, run *runReport) {
 	var executions executionTracker
 	fixtures := map[string]bool{}
+	databases := map[string]bool{}
 	phaseValues := map[string][]float64{}
 	phaseErrors := map[string]int{}
 	events := 0
@@ -350,12 +352,16 @@ func analyzeEvents(reader io.Reader, run *runReport) {
 		if record.Phase == "postgres_start" {
 			fixtures[key+"\x00"+record.Fixture] = true
 		}
+		if record.Phase == "postgres_database_create" {
+			databases[key+"\x00"+record.Fixture] = true
+		}
 	}, func(issue string) { run.Issues = append(run.Issues, issue) })
 	if events == 0 {
 		run.Issues = append(run.Issues, "no Go test events captured")
 	}
 	run.Issues = append(run.Issues, executions.issues()...)
 	run.Fixtures = len(fixtures)
+	run.Databases = len(databases)
 	for phase, values := range phaseValues {
 		slices.Sort(values)
 		middle := len(values) / 2
@@ -441,7 +447,7 @@ func writeMarkdown(writer io.Writer, report timingReport) {
 		if run.ExitCode != nil {
 			exit = fmt.Sprint(*run.ExitCode)
 		}
-		fmt.Fprintf(writer, "Capture: **%s**. Command wall time: %s. Exit code: %s. PostgreSQL fixture attempts: %d. Failed test records: %d. Skipped test records: %d.\n\n", status, wall, exit, run.Fixtures, run.Failed, run.Skipped)
+		fmt.Fprintf(writer, "Capture: **%s**. Command wall time: %s. Exit code: %s. PostgreSQL container start attempts: %d. Database creation attempts: %d. Failed test records: %d. Skipped test records: %d.\n\n", status, wall, exit, run.Fixtures, run.Databases, run.Failed, run.Skipped)
 		for _, issue := range run.Issues {
 			fmt.Fprintf(writer, "- %s\n", markdownCell(issue))
 		}

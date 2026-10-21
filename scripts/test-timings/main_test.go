@@ -357,6 +357,26 @@ func TestReportUsesNearestRankP95AndRetainsAllSamples(t *testing.T) {
 	}
 }
 
+func TestReportCountsDatabaseFixturesSeparatelyFromContainerStarts(t *testing.T) {
+	directory := t.TempDir()
+	var events strings.Builder
+	for _, record := range []string{
+		`{"fixture":"server","phase":"postgres_start","elapsed_ns":1000000000,"outcome":"ok"}`,
+		`{"fixture":"first","phase":"postgres_database_create","elapsed_ns":1000000,"outcome":"ok"}`,
+		`{"fixture":"second","phase":"postgres_database_create","elapsed_ns":1000000,"outcome":"ok"}`,
+	} {
+		data, _ := json.Marshal(testEvent{Action: "output", Package: "store", Test: "TestDatabases", Output: fixtureMarker + record + "\n"})
+		fmt.Fprintln(&events, string(data))
+	}
+	fmt.Fprintln(&events, `{"Action":"pass","Package":"store","Test":"TestDatabases","Elapsed":2}`)
+	fmt.Fprintln(&events, `{"Action":"pass","Package":"store","Elapsed":2}`)
+	writeCapture(t, directory, "integration", events.String(), true, 0)
+	run := readReport(directory, []string{"integration"}).Runs[0]
+	if !run.Complete || run.Fixtures != 1 || run.Databases != 2 {
+		t.Fatalf("shared-server fixture counts = %+v", run)
+	}
+}
+
 func TestCaptureStreamsLargeSuccessfulEvents(t *testing.T) {
 	directory := t.TempDir()
 	var output, diagnostics bytes.Buffer

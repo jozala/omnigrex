@@ -54,7 +54,16 @@ Each capture writes `<label>.events.jsonl` and `<label>.run.json`; reporting wri
 The JSON summary includes all completed test results and fixture samples, while the Markdown tables show the slowest twenty entries per category.
 The runner expects a JSON-producing Go test command and returns its failing exit code; malformed capture output also fails an otherwise successful command.
 
-Store integration fixtures log PostgreSQL container startup, port discovery, readiness polling, removal, and each writable `store.Open` call.
+Ordinary store integration fixtures lazily share one PostgreSQL process per test-binary invocation, but each fixture gets a distinct empty database cloned from `template0`.
+The normal migration path still runs for every store initialization; no migrated application template, shared tables, or rollback-only isolation replaces fresh databases.
+Test cleanup drops only its database, including any leaked connections, and `TestMain` removes the owned shared container after all tests finish.
+Dedicated startup/password and concurrent-migration tests, the fresh/existing migration probes, and the separate migration-engine package retain fresh PostgreSQL processes.
+The shared server retains filesystem hardening and normal durability settings; bounded WAL/checkpoint settings keep repeated fixture creation within its disposable tmpfs budget.
+This changes fixture allocation, not the suite's application-test parallelism.
+
+Store integration fixtures log PostgreSQL container startup, port discovery, readiness polling, removal, isolated database creation/drop, and each writable `store.Open` call.
+Reports count container-start attempts separately from per-database creation attempts so process reuse is visible.
+Internal fixture phases from nested helper subprocesses are not merged into the parent command's phase counts, although their runtime remains included in the owning test's duration.
 Fixture identifiers are process-local counters, and timing records contain no connection strings, passwords, SQL parameters, or error messages.
 Raw Go test output still has the same sensitivity as ordinary CI logs and must not contain real credentials.
 Fresh and already-migrated schema probes measure `migrations.Run` separately and verify the resulting migration history.
