@@ -229,7 +229,7 @@ func openPhaseFiveStores(t *testing.T, count int) ([]*store.Store, *pgxpool.Pool
 	databases := make([]*store.Store, 0, count)
 	for range count {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+		database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 		cancel()
 		if err != nil {
 			t.Fatalf("store.Open() error = %v", err)

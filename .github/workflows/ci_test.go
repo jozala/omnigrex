@@ -23,6 +23,9 @@ type ciStep struct {
 	Name string            `yaml:"name"`
 	Run  string            `yaml:"run"`
 	Env  map[string]string `yaml:"env"`
+	If   string            `yaml:"if"`
+	Uses string            `yaml:"uses"`
+	With map[string]string `yaml:"with"`
 }
 
 func readCIJobs(t *testing.T) map[string]ciJob {
@@ -124,6 +127,53 @@ func TestCIAggregateFailsClosed(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestCITimingCaptureAndPublicationStayOnTheDockerRunner(t *testing.T) {
+	jobs := readCIJobs(t)
+	wantSteps := []string{"Build test timing tool", "Run unit tests", "Run Docker-backed integration tests", "Summarize test timings", "Upload test timings"}
+	var found []string
+	for jobName, job := range jobs {
+		for _, step := range job.Steps {
+			for _, name := range wantSteps {
+				if step.Name != name {
+					continue
+				}
+				if jobName != "docker-check" {
+					t.Errorf("%s must run alongside its captures in docker-check, not %s", name, jobName)
+					continue
+				}
+				found = append(found, name)
+				switch name {
+				case "Build test timing tool":
+					if !strings.Contains(step.Run, `go build -o "$RUNNER_TEMP/omnigrex-test-timings" ./scripts/test-timings`) {
+						t.Error("missing timing executable build")
+					}
+				case "Run unit tests":
+					if !strings.Contains(step.Run, `run "$RUNNER_TEMP/test-timings" unit -- go test -race -count=1 -json ./...`) {
+						t.Error("unit timing capture lost")
+					}
+				case "Run Docker-backed integration tests":
+					for _, label := range []string{"integration", "pi-protocol"} {
+						if !strings.Contains(step.Run, `run "$RUNNER_TEMP/test-timings" `+label+` -- go test`) {
+							t.Errorf("%s timing capture lost", label)
+						}
+					}
+				case "Summarize test timings":
+					if step.If != "always()" || !strings.Contains(step.Run, `report "$RUNNER_TEMP/test-timings" unit integration pi-protocol >> "$GITHUB_STEP_SUMMARY"`) {
+						t.Error("timing summary must retain all captures even after failure")
+					}
+				case "Upload test timings":
+					if step.If != "always()" || !strings.HasPrefix(step.Uses, "actions/upload-artifact@") || step.With["name"] != "check-test-timings" || step.With["path"] != "${{ runner.temp }}/test-timings/" || step.With["retention-days"] != "7" {
+						t.Error("timing artifacts must retain the capture directory even after failure")
+					}
+				}
+			}
+		}
+	}
+	if !reflect.DeepEqual(found, wantSteps) {
+		t.Errorf("Docker timing steps = %v, want %v in that order", found, wantSteps)
 	}
 }
 

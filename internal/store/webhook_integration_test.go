@@ -652,7 +652,7 @@ func openWebhookStore(t *testing.T) *store.Store {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
 	}

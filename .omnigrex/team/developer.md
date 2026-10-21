@@ -2,8 +2,8 @@
 name: developer
 role: DEVELOPER
 runtime: pi-rpc/v2
-model: opencode-go/muse-spark-1.3-contributor
-thinking: xhigh
+model: openai/gpt-6.1-sol
+thinking: medium
 permissions:
   read: allow
   edit: allow

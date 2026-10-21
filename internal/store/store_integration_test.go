@@ -5,11 +5,7 @@ package store_test
 import (
 	"context"
 	"crypto/sha256"
-	"fmt"
-	"net"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -53,7 +49,7 @@ func storeConfigForReducer(t *testing.T, reducer workflow.Reducer) store.Config 
 }
 
 func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
-	postgres := startPostgres(t)
+	postgres := startIsolatedPostgres(t)
 	pool := openPool(t, postgres.databaseURL(true))
 	const callers = 8
 	start := make(chan struct{})
@@ -116,14 +112,14 @@ func TestRunExecutesMigrationsExactlyOnceUnderConcurrentCalls(t *testing.T) {
 }
 
 func TestOpenUsesPasswordSecretAndReturnsReadyStore(t *testing.T) {
-	postgres := startPostgres(t)
+	postgres := startIsolatedPostgres(t)
 	passwordFile := filepath.Join(t.TempDir(), "database-password")
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +183,7 @@ func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	writable, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	writable, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,69 +203,6 @@ func TestOpenReadOnlyChecksCurrentMigrationHistory(t *testing.T) {
 	if err := database.CheckMigrations(ctx); err == nil {
 		t.Fatal("changed migration history accepted")
 	}
-}
-
-type postgresContainer struct{ hostPort string }
-
-func (postgres postgresContainer) databaseURL(withPassword bool) string {
-	user := url.User(postgresUser)
-	if withPassword {
-		user = url.UserPassword(postgresUser, postgresPassword)
-	}
-	return (&url.URL{Scheme: "postgres", User: user, Host: net.JoinHostPort("127.0.0.1", postgres.hostPort), Path: "/" + postgresDatabase, RawQuery: "sslmode=disable"}).String()
-}
-
-func startPostgres(t *testing.T) postgresContainer {
-	t.Helper()
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("omnigrex-postgres-test-%d", time.Now().UnixNano())
-	args := []string{"run", "--detach", "--rm", "--name", name, "--user", "70:70", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--tmpfs", "/var/lib/postgresql:rw,noexec,nosuid,nodev,size=256m,uid=70,gid=70,mode=0700",
-		"--tmpfs", "/var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0750",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70,mode=0700",
-		"--env", "POSTGRES_USER=" + postgresUser, "--env", "POSTGRES_PASSWORD=" + postgresPassword, "--env", "POSTGRES_DB=" + postgresDatabase,
-		"--publish", "127.0.0.1::5432", postgresImage}
-	if output, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
-		t.Fatalf("start PostgreSQL: %v\n%s", err, output)
-	}
-	t.Cleanup(func() {
-		if output, err := exec.Command("docker", "rm", "--force", name).CombinedOutput(); err != nil && !strings.Contains(string(output), "No such container") {
-			t.Errorf("remove PostgreSQL: %v\n%s", err, output)
-		}
-	})
-	output, err := exec.Command("docker", "port", name, "5432/tcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("PostgreSQL port: %v %s", err, output)
-	}
-	_, port, err := net.SplitHostPort(strings.TrimSpace(string(output)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	postgres := postgresContainer{hostPort: port}
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		config, err := pgxpool.ParseConfig(postgres.databaseURL(true))
-		if err != nil {
-			cancel()
-			t.Fatal(err)
-		}
-		pool, err := pgxpool.NewWithConfig(ctx, config)
-		if err == nil {
-			err = pool.Ping(ctx)
-			pool.Close()
-		}
-		cancel()
-		if err == nil {
-			return postgres
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	logs, _ := exec.Command("docker", "logs", name).CombinedOutput()
-	t.Fatalf("PostgreSQL did not become ready\n%s", logs)
-	return postgresContainer{}
 }
 
 func openPool(t *testing.T, databaseURL string) *pgxpool.Pool {

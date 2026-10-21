@@ -49,7 +49,7 @@ func TestNeverStartedRuntimeRecoveryCompletesWithRealDocker(t *testing.T) {
 			}
 			open := func() *store.Store {
 				t.Helper()
-				database, err := store.Open(ctx, postgres.databaseURL(false), password, builtinStoreConfig(t))
+				database, err := openTimedStore(t, ctx, postgres.databaseURL(false), password, builtinStoreConfig(t))
 				if err != nil {
 					t.Fatal(err)
 				}
