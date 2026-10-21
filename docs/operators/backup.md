@@ -8,6 +8,9 @@ PostgreSQL and the runtime-state volume form one coordinated recovery set, plus 
 The ledger contains canonical Runtime Profile contracts and immutable backend/image ownership.
 Runtime state contains Pi Session data and sealed Workspace Captures under `workspace-captures`, mounted only into the orchestrator at `/var/lib/omnigrex/runtime-state/workspace-captures`.
 Captures preserve publication and terminal evidence after the original execution and live workspace disappear.
+Host-local [Microsandbox native log archives](troubleshooting.md#retained-microsandbox-native-logs) are optional diagnostic evidence under Participant `runtime-logs` siblings.
+The complete-volume backup below includes them automatically; supplemental Session exports exclude them.
+They can contain sensitive unredacted output and must receive the same access protection as other private retained data.
 They are protected Participant data, not disposable workspace cache.
 See the [workspace evidence contract](../plans/2026-10-08-location-independent-workspaces.md).
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	sdk "github.com/superradcompany/microsandbox/sdk/go"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type sdkPlatform struct{ options Options }
@@ -37,10 +39,14 @@ func newPlatform(options Options) (platform, error) {
 				return nil, err
 			}
 		}
+		call := sdkCall("ResolveRuntime", metadata{})
 		if _, err := sdk.ResolveRuntime(sdk.RuntimeConfig{Home: options.Home, MSBPath: options.Executable, LibkrunfwPath: options.Firmware}); err != nil {
+			_ = sdkError(context.Background(), call, err)
 			return nil, errors.New("Microsandbox SDK cannot resolve the installed runtime/firmware pair")
 		}
+		call = sdkCall("DefaultBackendInfo", metadata{})
 		info, err := sdk.DefaultBackendInfo()
+		_ = sdkError(context.Background(), call, err)
 		if err != nil || info.Kind != sdk.BackendLocal {
 			return nil, errors.New("Microsandbox SDK must select its local backend")
 		}
@@ -49,7 +55,7 @@ func newPlatform(options Options) (platform, error) {
 	return sdkPlatform{options}, nil
 }
 
-func sdkError(ctx context.Context, err error) error {
+func sdkError(ctx context.Context, call sdkCallDiagnostic, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -60,13 +66,22 @@ func sdkError(ctx context.Context, err error) error {
 	if errors.As(err, &failure) {
 		kind = failure.Kind.String()
 	}
+	logSDKCallFailure(ctx, call, kind, err)
 	return errors.Join(ctx.Err(), fmt.Errorf("Microsandbox SDK operation failed (%s)", kind))
 }
 
-func fromSDK(handle *sdk.SandboxHandle) (metadata, error) {
+func sdkLookupError(ctx context.Context, call sdkCallDiagnostic, err error) error {
+	if sdk.IsKind(err, sdk.ErrSandboxNotFound) {
+		return execution.ErrNotFound
+	}
+	return sdkError(ctx, call, err)
+}
+
+func fromSDK(ctx context.Context, handle *sdk.SandboxHandle) (metadata, error) {
+	call := sdkCall("Config", metadata{ID: handle.ID(), Name: handle.Name()})
 	config, err := handle.Config()
 	if err != nil {
-		return metadata{}, execution.ErrConflict
+		return metadata{}, errors.Join(execution.ErrConflict, sdkError(ctx, call, err))
 	}
 	status := strings.ToLower(string(handle.Status()))
 	if status != "" {
@@ -76,19 +91,18 @@ func fromSDK(handle *sdk.SandboxHandle) (metadata, error) {
 }
 
 func (driver sdkPlatform) Lookup(ctx context.Context, name string) (metadata, error) {
+	call := sdkCall("GetSandbox", metadata{Name: name})
 	handle, err := sdk.GetSandbox(ctx, name)
 	if err != nil {
-		if sdk.IsKind(err, sdk.ErrSandboxNotFound) {
-			return metadata{}, execution.ErrNotFound
-		}
-		return metadata{}, sdkError(ctx, err)
+		return metadata{}, sdkLookupError(ctx, call, err)
 	}
-	return fromSDK(handle)
+	return fromSDK(ctx, handle)
 }
 func (driver sdkPlatform) exact(ctx context.Context, meta metadata) (*sdk.SandboxHandle, error) {
+	call := sdkCall("GetSandbox", meta)
 	handle, err := sdk.GetSandbox(ctx, meta.Name)
 	if err != nil {
-		return nil, sdkError(ctx, err)
+		return nil, sdkError(ctx, call, err)
 	}
 	if handle.ID() != meta.ID {
 		return nil, execution.ErrConflict
@@ -100,8 +114,9 @@ func (driver sdkPlatform) live(ctx context.Context, meta metadata) (*sdk.Sandbox
 	if err != nil {
 		return nil, err
 	}
+	call := sdkCall("Connect", meta)
 	sandbox, err := handle.Connect(ctx)
-	return sandbox, sdkError(ctx, err)
+	return sandbox, sdkError(ctx, call, err)
 }
 
 func (driver sdkPlatform) Create(ctx context.Context, definition creation) (metadata, error) {
@@ -152,13 +167,15 @@ func (driver sdkPlatform) Create(ctx context.Context, definition creation) (meta
 		rootDisk = sdk.RootDisk.Flat(sdk.RootDiskFlatOptions{SizeMiB: uint32(driver.options.RootDiskMiB)})
 		pullPolicy = sdk.PullPolicyIfMissing
 	}
+	meta := metadata{Name: definition.Name, Labels: definition.Labels}
+	call := sdkCall("CreateSandbox", meta)
 	sandbox, err := sdk.CreateSandbox(ctx, definition.Name, sdk.WithImage(request.Image), sdk.WithMemory(uint32(request.MemoryBytes>>20)), sdk.WithCPUs(uint8(driver.options.CPUs)), sdk.WithRootDisk(rootDisk), sdk.WithUser(request.User), sdk.WithWorkdir(request.WorkingDir), sdk.WithEntrypoint("/bin/sh"), sdk.WithCmd(), sdk.WithMounts(volumes), sdk.WithLabels(definition.Labels), sdk.WithNetwork(network), sdk.WithPullPolicy(pullPolicy), sdk.WithMaxDuration(maximumDuration), sdk.WithDetached(), sdk.WithQuietLogs())
 	if err != nil {
-		return metadata{}, sdkError(ctx, err)
+		return metadata{}, sdkError(ctx, call, err)
 	}
 	// Release ownership without stopping the VM. Durable inventory, not a Go
 	// handle lifetime, owns its recovery and termination.
-	if err := boundedNativeRelease(ctx, nativeReleaseWait, sandbox.Detach); err != nil {
+	if err := boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Detach", meta, sandbox.Detach)); err != nil {
 		return metadata{}, err
 	}
 	return driver.Lookup(ctx, definition.Name)
@@ -169,13 +186,14 @@ func (driver sdkPlatform) List(ctx context.Context, cursor string) ([]metadata, 
 	if cursor != "" {
 		options = append(options, sdk.WithListCursor(cursor))
 	}
+	call := sdkCall("ListSandboxes", metadata{})
 	page, err := sdk.ListSandboxesWith(ctx, options...)
 	if err != nil {
-		return nil, "", sdkError(ctx, err)
+		return nil, "", sdkError(ctx, call, err)
 	}
 	var entries []metadata
 	for _, handle := range page.Sandboxes {
-		meta, err := fromSDK(handle)
+		meta, err := fromSDK(ctx, handle)
 		if err != nil {
 			return nil, "", err
 		}
@@ -192,9 +210,10 @@ func (driver sdkPlatform) Image(ctx context.Context, reference string) (string, 
 	if !profile.IsExactRegistryImage(reference) {
 		return "", "", execution.ErrInvalidSpec
 	}
+	call := sdkCall("Image.Get", metadata{})
 	image, err := sdk.Image.Get(ctx, reference)
 	if err != nil {
-		return "", "", sdkError(ctx, err)
+		return "", "", sdkError(ctx, call, err)
 	}
 	if image.Reference() != reference {
 		return "", "", execution.ErrBindingMismatch
@@ -210,12 +229,13 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 	if err != nil {
 		return err
 	}
+	call := sdkCall("ExecStream", meta)
 	handle, err := sandbox.ExecStream(ctx, command[0], command[1:], sdk.WithExecUser(user), sdk.WithExecStdinPipe())
 	if err != nil {
-		return errors.Join(sdkError(ctx, err), boundedNativeRelease(ctx, nativeReleaseWait, sandbox.Detach))
+		return errors.Join(sdkError(ctx, call, err), boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Detach", meta, sandbox.Detach)))
 	}
 	defer func() {
-		result = errors.Join(result, boundedNativeRelease(ctx, nativeReleaseWait, func(context.Context) error { return handle.Close() }, sandbox.Detach))
+		result = errors.Join(result, boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Exec.Close", meta, func(context.Context) error { return handle.Close() }), sdkRelease("Detach", meta, sandbox.Detach)))
 	}()
 	stdin := handle.TakeStdin()
 	if stdin == nil {
@@ -226,17 +246,26 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 		if err != nil || len(content) >= 1<<20 {
 			return execution.ErrInvalidSpec
 		}
+		call := sdkCall("Stdin.Write", meta)
 		if _, err := stdin.WriteCtx(ctx, content); err != nil {
-			return sdkError(ctx, err)
+			return sdkError(ctx, call, err)
 		}
 	}
-	if err := boundedNativeRelease(ctx, nativeReleaseWait, func(context.Context) error { return stdin.Close() }); err != nil {
+	if err := boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Stdin.Close", meta, func(context.Context) error { return stdin.Close() })); err != nil {
 		return err
 	}
+	return awaitSDKExecution(ctx, meta, handle)
+}
+
+type sdkEventReceiver interface {
+	Recv(context.Context) (*sdk.ExecEvent, error)
+}
+
+func awaitSDKExecution(ctx context.Context, meta metadata, handle sdkEventReceiver) error {
 	for {
-		event, err := handle.Recv(ctx)
+		event, err := receiveSDKEvent(ctx, meta, handle)
 		if err != nil {
-			return sdkError(ctx, err)
+			return err
 		}
 		if event.Kind == sdk.ExecEventFailed || event.Kind == sdk.ExecEventStdinError {
 			return execution.ErrUnknownEffect
@@ -253,16 +282,46 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 	}
 }
 
+// SDK 0.7.6 reports failed execs/stdin writes as events with a nil Go error.
+// Both consumers use this boundary before losing the structured failure payload.
+func receiveSDKEvent(ctx context.Context, meta metadata, handle sdkEventReceiver) (*sdk.ExecEvent, error) {
+	call := sdkCall("Exec.Recv", meta)
+	record, err := handle.Recv(ctx)
+	if err != nil {
+		return nil, sdkError(ctx, call, err)
+	}
+	if record.Kind == sdk.ExecEventFailed || record.Kind == sdk.ExecEventStdinError {
+		kind, message := "ExecFailed", "SDK exec failure event without details"
+		details := []slog.Attr{slog.String("sdk_failure_event", "exec_failed")}
+		if record.Kind == sdk.ExecEventStdinError {
+			details[0] = slog.String("sdk_failure_event", "stdin_error")
+		}
+		if failure := record.Failure; failure != nil {
+			kind, message = failure.Kind, failure.Message
+			details = append(details, slog.String("sdk_failure_path", failure.Path), slog.String("sdk_failure_errno_name", failure.ErrnoName))
+			if failure.Errno != nil {
+				details = append(details, slog.Int("sdk_failure_errno", *failure.Errno))
+			}
+		}
+		logSDKCallFailure(ctx, call, kind, errors.New(message), details...)
+		safe := *record
+		safe.Failure, safe.Data = nil, nil
+		return &safe, nil
+	}
+	return record, nil
+}
+
 func (driver sdkPlatform) Stream(ctx context.Context, meta metadata, command []string, user string) (stream, error) {
 	sandbox, err := driver.live(ctx, meta)
 	if err != nil {
 		return nil, err
 	}
+	call := sdkCall("ExecStream", meta)
 	handle, err := sandbox.ExecStream(ctx, command[0], command[1:], sdk.WithExecUser(user), sdk.WithExecStdinPipe())
 	if err != nil {
-		return nil, errors.Join(sdkError(ctx, err), boundedNativeRelease(ctx, nativeReleaseWait, sandbox.Detach))
+		return nil, errors.Join(sdkError(ctx, call, err), boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Detach", meta, sandbox.Detach)))
 	}
-	return &sdkStream{handle: handle, stdin: handle.TakeStdin(), sandbox: sandbox}, nil
+	return &sdkStream{handle: handle, stdin: handle.TakeStdin(), sandbox: sandbox, resource: meta, ctx: context.WithoutCancel(ctx)}, nil
 }
 
 func (driver sdkPlatform) Pause(ctx context.Context, meta metadata) error {
@@ -270,14 +329,16 @@ func (driver sdkPlatform) Pause(ctx context.Context, meta metadata) error {
 	if err != nil {
 		return err
 	}
-	return sdkError(ctx, handle.PauseWithGuestFlush(ctx, sdk.GuestFlushRequired))
+	call := sdkCall("PauseWithGuestFlush", meta)
+	return sdkError(ctx, call, handle.PauseWithGuestFlush(ctx, sdk.GuestFlushRequired))
 }
 func (driver sdkPlatform) Resume(ctx context.Context, meta metadata) error {
 	handle, err := driver.exact(ctx, meta)
 	if err != nil {
 		return err
 	}
-	return sdkError(ctx, handle.Resume(ctx))
+	call := sdkCall("Resume", meta)
+	return sdkError(ctx, call, handle.Resume(ctx))
 }
 func (driver sdkPlatform) Stop(ctx context.Context, meta metadata) error {
 	handle, err := driver.exact(ctx, meta)
@@ -287,18 +348,22 @@ func (driver sdkPlatform) Stop(ctx context.Context, meta metadata) error {
 	if terminalEnvironmentStatus(string(handle.Status())) {
 		return nil
 	}
-	return sdkError(ctx, handle.Kill(ctx, sdk.WithKillTimeout(5*time.Second)))
+	call := sdkCall("Kill", meta)
+	return sdkError(ctx, call, handle.Kill(ctx, sdk.WithKillTimeout(5*time.Second)))
 }
 func (driver sdkPlatform) Remove(ctx context.Context, meta metadata) error {
 	handle, err := driver.exact(ctx, meta)
 	if err != nil {
 		return err
 	}
-	return sdkError(ctx, handle.Remove(ctx))
+	call := sdkCall("Remove", meta)
+	return sdkError(ctx, call, handle.Remove(ctx))
 }
 
 type sdkStream struct {
-	handle interface {
+	resource metadata
+	ctx      context.Context
+	handle   interface {
 		Recv(context.Context) (*sdk.ExecEvent, error)
 		Close() error
 	}
@@ -311,9 +376,10 @@ type sdkStream struct {
 }
 
 func (stream *sdkStream) Next(ctx context.Context) (event, error) {
-	record, err := stream.handle.Recv(ctx)
+	ctx = stream.diagnosticContext(ctx)
+	record, err := receiveSDKEvent(ctx, stream.resource, stream.handle)
 	if err != nil {
-		return event{}, sdkError(ctx, err)
+		return event{}, err
 	}
 	result := event{Data: record.Data, ExitCode: record.ExitCode}
 	switch record.Kind {
@@ -333,15 +399,44 @@ func (stream *sdkStream) Next(ctx context.Context) (event, error) {
 	return result, nil
 }
 func (stream *sdkStream) Write(ctx context.Context, data []byte) (int, error) {
+	ctx = stream.diagnosticContext(ctx)
 	if stream.stdin == nil {
 		return 0, io.ErrClosedPipe
 	}
+	call := sdkCall("Stdin.Write", stream.resource)
 	n, err := stream.stdin.WriteCtx(ctx, data)
-	return n, sdkError(ctx, err)
+	return n, sdkError(ctx, call, err)
 }
 func (stream *sdkStream) Close() error {
 	stream.closeOnce.Do(func() {
-		stream.closeErr = boundedNativeRelease(context.Background(), nativeReleaseWait, func(context.Context) error { return stream.handle.Close() }, stream.sandbox.Detach)
+		ctx := stream.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		stream.closeErr = boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Exec.Close", stream.resource, func(context.Context) error { return stream.handle.Close() }), sdkRelease("Detach", stream.resource, stream.sandbox.Detach))
 	})
 	return stream.closeErr
+}
+
+func (stream *sdkStream) diagnosticContext(ctx context.Context) context.Context {
+	if !trace.SpanContextFromContext(ctx).IsValid() && stream.ctx != nil {
+		return trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(stream.ctx))
+	}
+	return ctx
+}
+
+// Waiting out a budget and a later SDK error are distinct observations. Neither
+// repeats native work nor hides the other, and raw errors never enter results.
+func sdkRelease(operation string, resource metadata, release func(context.Context) error) nativeRelease {
+	call := sdkCall(operation, resource)
+	return nativeRelease{
+		run: func(ctx context.Context) error {
+			err := release(ctx)
+			_ = sdkError(ctx, call, err)
+			return err
+		},
+		onTimeout: func(ctx context.Context) {
+			logSDKCallFailure(ctx, call, "Unknown", ctx.Err(), slog.String("sdk_failure_phase", "release_wait"))
+		},
+	}
 }
