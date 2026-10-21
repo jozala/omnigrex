@@ -54,13 +54,20 @@ run = "mise run test-pi-deployment"
 description = "Run the opt-in live GitHub App repository read and review gate"
 run = "go test -tags=live ./internal/github -run 'TestLive(DeveloperAppGetsRepositoryByID|ReviewerAppSubmitsApproveAndRequestChanges)' -count=1 -v"
 
+[tasks.test-agentd]
+description = "Run patched Microsandbox guest-agent workload tests on every qualification"
+run = '''
+OMNIGREX_BUILDKIT_CACHE_ONLY=1 sh scripts/docker-build.sh --platform linux/amd64 --file Dockerfile.microsandbox \
+  --target agentd-test --build-arg "OMNIGREX_AGENTD_TEST_NONCE=$(date +%s)-$$" .
+'''
+
 [tasks.test-microsandbox-integration]
 description = "Qualify the SDK-backed adapter, captures, state, golden resources, and nested Docker on Linux/KVM"
 shell = "bash -ec"
 run = '''
 : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
-docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/microsandbox-golden-fixture:step08 .
-docker build --file Dockerfile.microsandbox --target qualification --tag omnigrex/microsandbox-qualification:step08 .
+sh scripts/docker-build.sh --file agent/pi/Dockerfile --target golden --tag omnigrex/microsandbox-golden-fixture:step08 .
+sh scripts/docker-build.sh --file Dockerfile.microsandbox --target qualification --tag omnigrex/microsandbox-qualification:step08 .
 set -o pipefail
 docker image save omnigrex/microsandbox-golden-fixture:step08 | docker run --rm -i \
   --label io.omnigrex.qualification=microsandbox-step08 \
@@ -73,20 +80,20 @@ docker image save omnigrex/microsandbox-golden-fixture:step08 | docker run --rm 
 
 [tasks.pi-diagnostic-image]
 description = "Build the pinned disposable Pi protocol diagnostic image"
-run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
+run = "sh scripts/docker-build.sh --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 ."
 
 [tasks.pi-image]
 description = "Build the pinned Pi repository environment"
-run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
+run = "sh scripts/docker-build.sh --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
 
 [tasks.development-golden-image]
 description = "Build the current Linux/amd64 Pi golden image for local development-image qualification"
-run = "docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/development-golden:dev ."
+run = "sh scripts/docker-build.sh --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/development-golden:dev ."
 
 [tasks.development-image]
 description = "Build the Linux/amd64 development environment from this checkout's Pi golden image"
 depends = ["development-golden-image"]
-run = "docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --tag omnigrex/development:dev ."
+run = "sh scripts/docker-build.sh --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --tag omnigrex/development:dev ."
 
 [tasks.test-development-image-cache]
 description = "Qualify image-local module downloads, fallback, and writable cache reuse without external network"
@@ -135,7 +142,7 @@ shell = "bash -ec"
 depends = ["pi-diagnostic-image"]
 run = '''
 : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the /dev/kvm group of the Docker host}"
-docker build --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-qualification:step09 .
+sh scripts/docker-build.sh --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-qualification:step09 .
 set -o pipefail
 docker image save omnigrex/pi-diagnostic:step09 | docker run --rm -i \
   --label io.omnigrex.qualification=pi-step09 \
@@ -168,6 +175,7 @@ mise run test-pi-deployment
 description = "Run the same release gates plus nested-container qualification on Linux/KVM"
 run = '''
 mise run test-microsandbox-integration
+mise run test-agentd
 mise run test-pi-microsandbox-integration
 OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-microsandbox-workflow
 mise run test-pi-microsandbox-recovery
@@ -219,7 +227,7 @@ docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml 
 
 [tasks.image]
 description = "Build the orchestrator image"
-run = "docker build --tag omnigrex/orchestrator:dev ."
+run = "sh scripts/docker-build.sh --tag omnigrex/orchestrator:dev ."
 
 [tasks.docs-check]
 description = "Check public Markdown links and heading anchors without network access"

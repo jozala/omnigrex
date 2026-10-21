@@ -18,7 +18,7 @@ for name in pi orchestrator orchestrator-microsandbox development; do
       ;;
   esac
   tag="ghcr.io/jozala/omnigrex/$name:sha-$OMNIGREX_RELEASE_COMMIT"
-  docker build --platform linux/amd64 --file "$file" --target "$target" \
+  sh scripts/docker-build.sh --platform linux/amd64 --file "$file" --target "$target" \
     --build-arg "VERSION=$OMNIGREX_RELEASE_COMMIT" \
     "$@" \
     --label org.opencontainers.image.source=https://github.com/jozala/omnigrex --tag "$tag" .

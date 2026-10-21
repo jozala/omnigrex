@@ -45,7 +45,7 @@ func TestGoTestTaskPreservesArgumentsCachesAndExitStatus(t *testing.T) {
 				}
 			}
 			got := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
-			want := []string{tmp, goTmp, "/allocated/go-modules", "/allocated/go-build", "test", "-race", "-run", "case with spaces", "./..."}
+			want := []string{tmp, goTmp, "/allocated/go-modules", "/allocated/go-build", "test", "-count=1", "-race", "-run", "case with spaces", "./..."}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Go task environment/arguments = %q; want %q", got, want)
 			}

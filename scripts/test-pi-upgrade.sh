@@ -33,8 +33,8 @@ if [ -n "$artifact" ]; then
 fi
 if [ -z "$source" ] && [ -z "$target" ]; then
   if [ "${OMNIGREX_PI_UPGRADE_USE_CACHED_FIXTURES:-0}" != 1 ]; then
-    docker build --quiet --file agent/pi/Dockerfile --target upgrade-source --tag omnigrex/pi-upgrade-source:1.0.3 .
-    docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+    sh scripts/docker-build.sh --quiet --file agent/pi/Dockerfile --target upgrade-source --tag omnigrex/pi-upgrade-source:1.0.3 .
+    sh scripts/docker-build.sh --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
   fi
   source=omnigrex/pi-upgrade-source:1.0.3
   target=omnigrex/pi:1.0.4
@@ -71,7 +71,7 @@ fi
 if [ "$backend" = microsandbox ]; then
   : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the approved Docker host KVM group}"
   test "$arch" = amd64
-  docker build --quiet --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-upgrade-qualification:native .
+  sh scripts/docker-build.sh --quiet --file Dockerfile.microsandbox --target pi-qualification --tag omnigrex/pi-upgrade-qualification:native .
   docker create --name "$wrapper" --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
     --memory 4g --memory-swap 4g --cpus 2 --pids-limit 1024 \
     --mount "type=volume,src=$source_volume,dst=/data/source" --mount "type=volume,src=$candidate_volume,dst=/data/candidate" --mount "type=volume,src=$restore_volume,dst=/data/restore" \
@@ -89,7 +89,7 @@ if [ "$backend" = microsandbox ]; then
   chmod 0644 "$archives/target.tar"
   docker cp "$archives/target.tar" "$wrapper:/tmp/pi-upgrade-TARGET.tar"
 else
-  docker build --quiet --platform "linux/$arch" --file Dockerfile.pi-qualification --tag omnigrex/pi-upgrade-qualification:docker .
+  sh scripts/docker-build.sh --quiet --platform "linux/$arch" --file Dockerfile.pi-qualification --tag omnigrex/pi-upgrade-qualification:docker .
   gid="$(docker run --rm --user 0:0 --entrypoint /usr/bin/stat --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock "$target" -c %g /var/run/docker.sock)"
   docker create --name "$wrapper" --group-add "$gid" --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     --mount "type=volume,src=$source_volume,dst=/data/source" --mount "type=volume,src=$candidate_volume,dst=/data/candidate" --mount "type=volume,src=$restore_volume,dst=/data/restore" \

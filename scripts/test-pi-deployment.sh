@@ -55,9 +55,9 @@ trap 'exit 143' HUP TERM
 orchestrator="${OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE:-}"
 pi="${OMNIGREX_PI_DEPLOY_IMAGE:-}"
 if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
-  docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+  sh scripts/docker-build.sh --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
   if [ "$backend" = docker ]; then
-    docker build --quiet --tag omnigrex/orchestrator:dev .
+    sh scripts/docker-build.sh --quiet --tag omnigrex/orchestrator:dev .
     ensure_fixture_registry
     for image in pi:1.0.4 orchestrator:dev; do
       name="${image%%:*}"
@@ -68,7 +68,7 @@ if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
     pi="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/pi:fixture" --format '{{index .RepoDigests 0}}')"
   else
     : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the host KVM group}"
-    docker build --quiet --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
+    sh scripts/docker-build.sh --quiet --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
     orchestrator=omnigrex/orchestrator-microsandbox:dev
     pi=omnigrex/pi:1.0.4
   fi

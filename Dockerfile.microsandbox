@@ -17,8 +17,14 @@ WORKDIR /src
 COPY --from=agentd-source /src/ ./
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN test "$TARGETARCH" = amd64 && \
-    cargo test --locked --jobs 2 --target x86_64-unknown-linux-musl -p microsandbox-agentd --lib workload::tests && \
+    cargo test --locked --jobs 2 --target x86_64-unknown-linux-musl -p microsandbox-agentd --lib --no-run && \
     cargo build --locked --jobs 2 --target x86_64-unknown-linux-musl --release -p microsandbox-agentd
+
+# Qualification changes the nonce so cached compilation never skips the test run.
+FROM agentd-build AS agentd-test
+ARG OMNIGREX_AGENTD_TEST_NONCE
+RUN test -n "$OMNIGREX_AGENTD_TEST_NONCE" && \
+    cargo test --locked --jobs 2 --target x86_64-unknown-linux-musl -p microsandbox-agentd --lib workload::tests
 
 # Download packages only; Debian build-stage executables never enter Ubuntu.
 FROM toolchain AS git-download
@@ -43,13 +49,13 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY agent/pi ./agent/pi
 ARG VERSION=dev
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -tags=microsandbox -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/omnigrex ./cmd/omnigrex
+RUN CGO_ENABLED=1 go build -tags=microsandbox -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/omnigrex ./cmd/omnigrex
 
 FROM build AS test-build
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/microsandbox.test ./internal/runtime/microsandbox
+RUN CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/microsandbox.test ./internal/runtime/microsandbox
 
 FROM build AS pi-test-build
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/pi.test ./internal/runtime/pi
+RUN CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/pi.test ./internal/runtime/pi
 
 FROM ghcr.io/superradcompany/microsandbox@sha256:be3d9f5f99b937ac4c4452b2ff33657a4ef74a117fdb584abb6d3c7db53e248f AS git-runtime
 # The digest is Ubuntu Noble/amd64 with glibc 2.39 and CA certificates.
@@ -93,7 +99,7 @@ ENTRYPOINT ["/usr/local/bin/pi.test"]
 CMD ["-test.v", "-test.timeout", "15m"]
 
 FROM build AS pi-workflow-test-build
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/workflow.test ./internal/store
+RUN CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/workflow.test ./internal/store
 
 FROM runtime AS pi-workflow-qualification
 COPY --from=pi-workflow-test-build /out/workflow.test /usr/local/bin/workflow.test

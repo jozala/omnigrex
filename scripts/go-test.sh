@@ -6,4 +6,4 @@ set -eu
 if [ -d /opt/omnigrex/go-proxy ]; then
   export TMPDIR=/var/tmp GOTMPDIR=/var/tmp
 fi
-exec go test "$@"
+exec go test -count=1 "$@"

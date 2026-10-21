@@ -13,6 +13,15 @@ Run the narrowest relevant tests during implementation, then this gate for code 
 Use `mise run docs-check` for a documentation-only link/anchor pass.
 See [mise.toml](../../mise.toml) for the exact executable commands.
 
+CI restores the check job's Go module/build cache and separate BuildKit layer caches for the check, Microsandbox, publication, and development-image smoke jobs.
+The image-build scripts use the BuildKit cache only when `OMNIGREX_BUILDKIT_CACHE_DIR` is set; local commands keep their usual Docker build behavior.
+Each cached CI image is loaded into Docker for its existing qualification consumer, and tests run with fresh Go results even when compilation is cached.
+The check job also uses a disposable local registry to expose its source-built Pi and development images to the isolated BuildKit container for chained image builds.
+Run `sh scripts/test-ci-buildkit.sh` for a Docker-backed parent/child build and cache-pruning regression; it creates disposable local builder and registry resources when they are not already present.
+The Microsandbox gate runs the patched guest-agent workload tests through `test-agentd` with a new invocation nonce, so a warm image-build cache cannot skip them.
+The cache is disposable, so a miss can lengthen a build but cannot change the required cold/offline module checks or exact-digest release gates.
+See [decision 0033](../decisions/0033-persist-ci-build-layers-without-runtime-state.md) for cache scope and trust boundaries.
+
 ## Docker-backed integration
 
 ```sh

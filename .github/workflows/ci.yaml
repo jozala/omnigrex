@@ -12,15 +12,29 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      OMNIGREX_BUILDKIT_CACHE_DIR: /tmp/omnigrex-buildkit
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore and save BuildKit layers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.OMNIGREX_BUILDKIT_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-buildkit-check-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-buildkit-check-
+
+      - name: Select BuildKit builder with runner-local source image registry
+        run: sh scripts/ci-buildkit-registry.sh start
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Check formatting
         run: |
@@ -34,7 +48,10 @@ jobs:
         run: go vet ./...
 
       - name: Run unit tests
-        run: go test -race ./...
+        run: go test -race -count=1 ./...
+
+      - name: Test BuildKit source image handoff and cache lifecycle
+        run: sh scripts/test-ci-buildkit.sh
 
       - name: Validate Docker Compose
         env:
@@ -57,16 +74,16 @@ jobs:
           docker compose -f deploy/compose.pi.yaml -f deploy/compose.pi-microsandbox.yaml config --quiet
 
       - name: Build image
-        run: docker build --tag omnigrex/orchestrator:dev .
+        run: sh scripts/docker-build.sh --tag omnigrex/orchestrator:dev .
 
       - name: Verify non-root image user
         run: test "$(docker image inspect --format '{{.Config.User}}' omnigrex/orchestrator:dev)" = "10001:10001"
 
       - name: Run Docker-backed integration tests
         run: |
-          docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
-          docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
-          go test -p 1 -race -tags=integration -timeout 30m ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
+          OMNIGREX_BUILDKIT_LOCAL_IMAGE=omnigrex/pi:1.0.4 OMNIGREX_BUILDKIT_PUSH_IMAGE=omnigrex-ci-registry:5000/omnigrex/pi:1.0.4 sh scripts/docker-build.sh --file agent/pi/Dockerfile --target golden .
+          sh scripts/docker-build.sh --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
+          go test -p 1 -race -tags=integration -timeout 30m -count=1 ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
           OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker go test -race -tags=integration -timeout 15m -count=1 ./internal/runtime/pi
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh
@@ -78,17 +95,31 @@ jobs:
 
       - name: Build the development environment and qualify its module source
         run: |
-          docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
-            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
-          sh scripts/test-development-image-cache.sh
-          sh scripts/test-development-image-unit.sh
+          OMNIGREX_BUILDKIT_LOCAL_IMAGE=omnigrex/development:dev OMNIGREX_BUILDKIT_PUSH_IMAGE=omnigrex-ci-registry:5000/omnigrex/development:dev sh scripts/docker-build.sh --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
+            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex-ci-registry:5000/omnigrex/pi:1.0.4 .
+          docker tag omnigrex/development:dev omnigrex-ci-registry:5000/omnigrex/development:dev
+          OMNIGREX_DEVELOPMENT_IMAGE=omnigrex-ci-registry:5000/omnigrex/development:dev sh scripts/test-development-image-cache.sh
+          OMNIGREX_DEVELOPMENT_IMAGE=omnigrex-ci-registry:5000/omnigrex/development:dev sh scripts/test-development-image-unit.sh
 
   microsandbox:
     runs-on: ubuntu-24.04
+    env:
+      OMNIGREX_BUILDKIT_CACHE_DIR: /tmp/omnigrex-buildkit
     timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore and save BuildKit layers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.OMNIGREX_BUILDKIT_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-buildkit-microsandbox-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-buildkit-microsandbox-
+
+      - name: Select BuildKit container builder
+        run: docker buildx create --name omnigrex-ci --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+
       - name: Require Linux amd64 KVM
         run: |
           test "$(uname -m)" = x86_64
@@ -110,6 +141,8 @@ jobs:
 
   publish:
     needs: [check, microsandbox]
+    env:
+      OMNIGREX_BUILDKIT_CACHE_DIR: /tmp/omnigrex-buildkit
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -120,6 +153,17 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore and save BuildKit layers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.OMNIGREX_BUILDKIT_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-buildkit-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-buildkit-publish-
+
+      - name: Select BuildKit container builder
+        run: docker buildx create --name omnigrex-ci --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -190,9 +234,21 @@ jobs:
       packages: read
     env:
       OMNIGREX_DEVELOPMENT_IMAGE: ${{ needs.publish.outputs.development_image }}
+      OMNIGREX_BUILDKIT_CACHE_DIR: /tmp/omnigrex-buildkit
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore and save BuildKit layers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.OMNIGREX_BUILDKIT_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-buildkit-development-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-buildkit-development-smoke-
+
+      - name: Select BuildKit container builder
+        run: docker buildx create --name omnigrex-ci --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+
       - name: Require KVM
         run: |
           test "$(uname -m)" = x86_64

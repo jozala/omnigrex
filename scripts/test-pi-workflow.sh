@@ -15,12 +15,12 @@ cleanup() {
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT HUP INT TERM
-docker build --quiet --file agent/pi/Dockerfile --target workflow-fixture --tag omnigrex/pi-workflow:step12 .
+sh scripts/docker-build.sh --quiet --file agent/pi/Dockerfile --target workflow-fixture --tag omnigrex/pi-workflow:step12 .
 if [ "$backend" = microsandbox ]; then
   : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the approved Docker host KVM group}"
-  docker build --quiet --file Dockerfile.microsandbox --target pi-workflow-qualification --tag omnigrex/pi-workflow-qualification:step12 .
+  sh scripts/docker-build.sh --quiet --file Dockerfile.microsandbox --target pi-workflow-qualification --tag omnigrex/pi-workflow-qualification:step12 .
 else
-  docker build --quiet --file Dockerfile.pi-qualification --tag omnigrex/pi-workflow-qualification:step12 .
+  sh scripts/docker-build.sh --quiet --file Dockerfile.pi-qualification --tag omnigrex/pi-workflow-qualification:step12 .
 fi
 docker network create "$network" >/dev/null
 docker run --detach --rm --name "$database" --network "$network" --env POSTGRES_PASSWORD=qualification-only-password --env POSTGRES_DB=qualification postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 >/dev/null
