@@ -58,7 +58,7 @@ func testExecutionLauncherSingleConnectionPool(t *testing.T, capture, preparatio
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	database, err := store.Open(ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
+	database, err := openTimedStore(t, ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2`, lease.ID, lease.ExecutionEpo
 		// No settlement happened. Restart after cleanup lost its lease or response
 		// must resolve the retained proof instead of requiring a removed source.
 		database.Close()
-		database, err = store.Open(ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
+		database, err = openTimedStore(t, ctx, postgres.databaseURL(false)+"&pool_max_conns=1", password, builtinStoreConfig(t))
 		if err != nil {
 			t.Fatal(err)
 		}

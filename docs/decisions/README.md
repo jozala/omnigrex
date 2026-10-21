@@ -42,6 +42,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0032: Own ChatGPT subscription credentials in the controller](0032-own-chatgpt-subscription-credentials-in-the-controller.md) | Accepted | 2026-10-20 |
 | [0033: Resolve Docker controller packages from signed Alpine repositories](0033-resolve-controller-packages-from-signed-alpine-repositories.md) | Accepted | 2026-10-20 |
 | [0034: Preserve Microsandbox failure evidence without changing cleanup policy](0034-microsandbox-diagnostics.md) | Accepted | 2026-10-20 |
+| [0037: Reuse PostgreSQL test processes while isolating databases](0037-reuse-postgres-processes-with-isolated-test-databases.md) | Accepted | 2026-10-21 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

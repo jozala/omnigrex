@@ -207,7 +207,7 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 	if err := os.WriteFile(passwordFile, []byte(postgresPassword), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	first, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestRuntimeProfileCompatibilityResultPersistsAcrossStoreRestart(t *testing.
 		t.Fatal(err)
 	}
 	first.Close()
-	second, err := store.Open(ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
+	second, err := openTimedStore(t, ctx, postgres.databaseURL(false), passwordFile, builtinStoreConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

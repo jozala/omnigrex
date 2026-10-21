@@ -682,15 +682,18 @@ func (worker *ExecutionWorker) startHeartbeat(parent context.Context, lease stor
 		}
 	finished:
 		if err != nil {
-			cancelWork(err)
+			// Revoke finalization authority before waking a cancelled prompt;
+			// work cancellation can still be propagating through child contexts
+			// when the prompt returns and attempts to finalize its Agent Turn.
 			cancelLease(err)
+			cancelWork(err)
 		}
 		done <- err
 	}()
 	initialErr := <-initial
 	if initialErr != nil {
-		cancelWork(initialErr)
 		cancelLease(initialErr)
+		cancelWork(initialErr)
 	}
 	return executionHeartbeat{workCtx: workCtx, leaseCtx: leaseCtx, stopSignal: stopSignal, done: done, initialErr: initialErr, renewal: renewal}
 }
