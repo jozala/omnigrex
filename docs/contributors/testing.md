@@ -118,7 +118,13 @@ Never substitute real credentials into ordinary fixture gates.
 
 ## Release evidence
 
-CI gates publication on Docker and required Linux/amd64 KVM qualification, then repeats image-only smoke against actual published registry digests.
+CI runs `docker-check`, `development-qualification`, and the required Linux/amd64 KVM `microsandbox` job independently.
+The stable `check` job succeeds only when all three pass, preserving the required branch-protection context and gating publication on every qualification.
+The development job builds a same-checkout golden image, verifies the cold/offline module source, and runs the real development-container unit suite with its resource limits.
+To check the dependency contract locally, run `mise exec -- go test -race ./.github/workflows`.
+CI runs these tests explicitly because `go test ./...` excludes hidden directories.
+They execute the aggregate shell against success, failure, cancellation, skipped, and missing results, and check isolated development-build ordering and failure propagation with disposable stubs.
+After publication, CI repeats image-only smoke against actual published registry digests.
 The development image has additional exact-digest native qualification before repository promotion.
 Passing unit tests or fixture aliases alone does not establish a deployable release.
 See [runtime qualification](runtime-qualification.md) and [release selection](../operators/installation.md#1-select-a-qualified-commit).

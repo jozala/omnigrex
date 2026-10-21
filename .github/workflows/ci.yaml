@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  docker-check:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -38,6 +38,9 @@ jobs:
 
       - name: Run unit tests
         run: '"$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" unit -- go test -race -count=1 -json ./...'
+
+      - name: Test CI qualification contract
+        run: go test -race ./.github/workflows
 
       - name: Validate Docker Compose
         env:
@@ -79,13 +82,6 @@ jobs:
       - name: Compile live GitHub App gate
         run: go test -tags=live ./internal/github -run '^$'
 
-      - name: Build the development environment and qualify its module source
-        run: |
-          docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
-            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
-          sh scripts/test-development-image-cache.sh
-          sh scripts/test-development-image-unit.sh
-
       - name: Summarize test timings
         if: always()
         run: go run ./scripts/test-timings report "$RUNNER_TEMP/test-timings" unit integration pi-protocol >> "$GITHUB_STEP_SUMMARY"
@@ -98,6 +94,20 @@ jobs:
           path: ${{ runner.temp }}/test-timings/
           if-no-files-found: warn
           retention-days: 7
+
+  development-qualification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the development environment and qualify its module source
+        run: |
+          docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+          docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
+            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
+          sh scripts/test-development-image-cache.sh
+          sh scripts/test-development-image-unit.sh
 
   microsandbox:
     runs-on: ubuntu-24.04
@@ -124,8 +134,24 @@ jobs:
           mise install
           mise run test-microsandbox
 
+  # Keep the existing required check context while all three qualifications run independently.
+  check:
+    if: always()
+    needs: [docker-check, development-qualification, microsandbox]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every qualification to pass
+        env:
+          DOCKER_CHECK: ${{ needs.docker-check.result }}
+          DEVELOPMENT_QUALIFICATION: ${{ needs.development-qualification.result }}
+          MICROSANDBOX: ${{ needs.microsandbox.result }}
+        run: |
+          test "$DOCKER_CHECK" = success
+          test "$DEVELOPMENT_QUALIFICATION" = success
+          test "$MICROSANDBOX" = success
+
   publish:
-    needs: [check, microsandbox]
+    needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

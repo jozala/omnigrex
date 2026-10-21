@@ -31,7 +31,8 @@ Pre-baseline golden images are unsupported.
 
 Only the `development` target is published.
 Cache/repository qualification targets add disposable fixtures excluded from the production image.
-Before publication, the source-built image must pass the unit suite with its actual system tools, including jq-based deployment fixtures.
+Before publication, the independent CI `development-qualification` job must pass the module-source check and unit suite with the source-built image's actual system tools, including jq-based deployment fixtures.
+The required `check` job waits for this qualification, Docker checks, and Microsandbox qualification before publication.
 
 ## Module source and scratch behavior
 
