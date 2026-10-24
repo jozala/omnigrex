@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jozala/omnigrex/internal/role"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,6 +43,7 @@ type Profile struct {
 	runtime      string
 	model        string
 	thinking     string
+	maxSteps     *stepbudget.Limit
 	permissions  map[string]PermissionAction
 	instructions string
 	contentHash  [sha256.Size]byte
@@ -49,6 +51,7 @@ type Profile struct {
 }
 
 type frontMatter struct {
+	MaxSteps    *stepbudget.Limit           `yaml:"max_steps,omitempty"`
 	Name        Name                        `yaml:"name"`
 	Role        Role                        `yaml:"role"`
 	Runtime     string                      `yaml:"runtime"`
@@ -105,12 +108,14 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		runtime:      configuration.Runtime,
 		model:        configuration.Model,
 		thinking:     configuration.Thinking,
+		maxSteps:     configuration.MaxSteps,
 		permissions:  clonePermissions(configuration.Permissions),
 		instructions: string(instructions),
 		contentHash:  contentHash,
 	}
 	var err error
 	profile.canonical, err = json.Marshal(struct {
+		MaxSteps     *stepbudget.Limit           `json:"max_steps,omitempty"`
 		Instructions string                      `json:"instructions"`
 		Model        string                      `json:"model"`
 		Name         Name                        `json:"name"`
@@ -120,6 +125,7 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		Runtime      string                      `json:"runtime"`
 		Thinking     string                      `json:"thinking,omitempty"`
 	}{
+		MaxSteps:     profile.maxSteps,
 		Instructions: profile.instructions,
 		Model:        profile.model,
 		Name:         profile.name,
@@ -133,6 +139,14 @@ func profileFromConfiguration(path string, configuration frontMatter, instructio
 		return Profile{}, fmt.Errorf("encode Agent Profile snapshot: %w", err)
 	}
 	return profile, nil
+}
+
+func (profile Profile) MaxSteps() *stepbudget.Limit {
+	if profile.maxSteps == nil {
+		return nil
+	}
+	value := *profile.maxSteps
+	return &value
 }
 
 func (profile Profile) Name() Name                       { return profile.name }

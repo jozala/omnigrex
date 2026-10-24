@@ -28,7 +28,23 @@ type Outcome struct {
 	FailureClass string
 	// FailureGeneration identifies the credential generation, never a token.
 	FailureGeneration string
-	LimitReached      bool
+	// LimitReached retains the pre-existing output/token-length limit.
+	// Step-budget summary pressure is independent evidence, never this flag.
+	LimitReached bool
+	StepBudget   *agentevent.StepBudgetObservation
+	// BudgetSummary is bounded untrusted text. Redact before normalization or publication.
+	BudgetSummary string
+}
+
+// OutcomeEvidence is the minimal durable controller settlement contract.
+// StepBudgetExhausted is set only by reconciliation for incomplete-work Human
+// Handoff, never by the runtime or the summary's wording.
+type OutcomeEvidence struct {
+	Admitted            bool                              `json:"admitted"`
+	Status              Status                            `json:"status"`
+	LimitReached        bool                              `json:"limit_reached,omitempty"`
+	StepBudget          *agentevent.StepBudgetObservation `json:"step_budget,omitempty"`
+	StepBudgetExhausted bool                              `json:"step_budget_exhausted,omitempty"`
 }
 
 type Ready struct {

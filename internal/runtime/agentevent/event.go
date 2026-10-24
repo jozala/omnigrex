@@ -3,6 +3,7 @@ package agentevent
 import (
 	"context"
 	"encoding/json"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"time"
 )
 
@@ -27,7 +28,13 @@ type AgentEvent struct {
 	Metadata        OperationalMetadata
 }
 
+// StepBudgetObservation is the neutral budget evidence shared by live Agent
+// Events and terminal outcomes. The alias preserves one validated schema;
+// consumers do not translate it or maintain a second counter.
+type StepBudgetObservation = stepbudget.Observation
+
 type OperationalMetadata struct {
+	StepBudget            *StepBudgetObservation
 	MessageID             string
 	ToolCallID            string
 	ToolName              string

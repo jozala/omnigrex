@@ -15,6 +15,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -23,6 +24,7 @@ var ErrConfiguration = errors.New("Pi configuration is unavailable or unsupporte
 // Configuration contains ephemeral launch inputs, never a durable Profile binding.
 // Credentials travel over the process transport, not backend environment metadata.
 type Configuration struct {
+	StepBudget       *stepbudget.Limit      `json:"stepBudget,omitempty"`
 	Selection        agent.ModelSelection   `json:"selection"`
 	Tools            []string               `json:"tools"`
 	RepositorySkills bool                   `json:"repositorySkills"`
@@ -145,6 +147,7 @@ func Start(ctx context.Context, transport io.ReadWriteCloser, configuration Conf
 		return nil, ErrConfiguration
 	}
 	options.Selection = &configuration.Selection
+	options.StepBudget = configuration.StepBudget
 	options.RequireMCP = true
 	if configuration.Session != nil {
 		if configuration.Session.RuntimeSessionID != configuration.Session.AgentSessionID || configuration.Session.AgentSessionID == "" {

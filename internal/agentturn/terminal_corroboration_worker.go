@@ -9,6 +9,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -203,14 +204,15 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		request.PromptDiagnostic = "the agent response was unavailable before corroboration"
 	} else {
 		var outcome struct {
-			Admitted     bool         `json:"admitted"`
-			Status       agent.Status `json:"status"`
-			LimitReached bool         `json:"limit_reached,omitempty"`
+			Admitted     bool                    `json:"admitted"`
+			Status       agent.Status            `json:"status"`
+			LimitReached bool                    `json:"limit_reached,omitempty"`
+			StepBudget   *stepbudget.Observation `json:"step_budget,omitempty"`
 		}
 		if json.Unmarshal(pending.Checkpoint.PromptOutcome, &outcome) != nil || !outcome.Admitted || outcome.Status != agent.Completed || outcome.LimitReached {
 			return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 		}
-		request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Completed}
+		request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Completed, StepBudget: outcome.StepBudget}
 	}
 	var failure *TerminalCorroborationFailure
 	request.OnCorroborationFailure = func(observed TerminalCorroborationFailure) { failure = &observed }

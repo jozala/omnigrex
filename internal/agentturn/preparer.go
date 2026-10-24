@@ -9,10 +9,12 @@ import (
 	"reflect"
 	"strings"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/repoenvironment"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -96,11 +98,12 @@ type Result struct {
 
 // Preparer translates repository Agent Profiles into a durable preparation specification.
 type Preparer struct {
-	loader   ProfileLoader
-	selector agentprofile.Selector
-	registry RuntimeRegistry
-	store    PreparationStore
-	verifier ChangeProposalVerifier
+	loader          ProfileLoader
+	selector        agentprofile.Selector
+	registry        RuntimeRegistry
+	store           PreparationStore
+	verifier        ChangeProposalVerifier
+	defaultMaxSteps stepbudget.Limit
 }
 
 func NewPreparer(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
@@ -114,6 +117,12 @@ func NewPreparerWithChangeProposalVerifier(loader ProfileLoader, selector agentp
 	preparer := NewPreparer(loader, selector, registry, preparationStore)
 	preparer.verifier = verifier
 	return preparer
+}
+
+// SetDefaultMaxSteps supplies the operator fallback for subsequently prepared
+// Turns. Configure before starting preparation workers.
+func (preparer *Preparer) SetDefaultMaxSteps(limit stepbudget.Limit) {
+	preparer.defaultMaxSteps = limit
 }
 
 // Prepare resolves the current Stage's Role configuration and commits one fenced Agent Turn preparation.
@@ -164,6 +173,13 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		return Result{}, fmt.Errorf("prepare Role %s profile: %w", bindings.Role, err)
 	}
 	configuration := snapshot.TurnConfiguration()
+	effective := stepbudget.Resolve(profile.MaxSteps(), preparer.defaultMaxSteps)
+	configuration.StepBudget = &effective
+	if !piresources.SupportsStepBudget(selectedRuntime.Contract().GoldenResourceContract) {
+		if effective.Finite() {
+			return Result{}, fmt.Errorf("%w: retained Runtime Profile does not support step budgets; select a qualified new Participant binding", agentprofile.ErrInvalidProfile)
+		}
+	}
 	encoded, err := json.Marshal(configuration)
 	if err != nil {
 		return Result{}, fmt.Errorf("encode turn configuration: %w", err)

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jozala/omnigrex/internal/role"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 )
 
 // JSON can encode one source byte as six bytes. The additional bounded room
@@ -23,12 +24,16 @@ func DecodeSnapshot(raw json.RawMessage, policies role.PolicyCatalog) (Profile, 
 	}
 	for key := range fields {
 		switch key {
-		case "name", "role", "path", "runtime", "model", "thinking", "permissions", "instructions":
+		case "name", "role", "path", "runtime", "model", "thinking", "max_steps", "permissions", "instructions":
 		default:
 			return Profile{}, ErrInvalidProfile
 		}
 	}
+	if v, ok := fields["max_steps"]; ok && bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return Profile{}, ErrInvalidProfile
+	}
 	var value struct {
+		MaxSteps     *stepbudget.Limit           `json:"max_steps,omitempty"`
 		Name         Name                        `json:"name"`
 		Role         Role                        `json:"role"`
 		Path         string                      `json:"path"`
@@ -50,5 +55,5 @@ func DecodeSnapshot(raw json.RawMessage, policies role.PolicyCatalog) (Profile, 
 	if decodedBytes > MaxContentSize {
 		return Profile{}, ErrProfileTooLarge
 	}
-	return profileFromConfiguration(value.Path, frontMatter{Name: value.Name, Role: value.Role, Runtime: value.Runtime, Model: value.Model, Thinking: value.Thinking, Permissions: value.Permissions}, []byte(value.Instructions), sha256.Sum256(raw), policies)
+	return profileFromConfiguration(value.Path, frontMatter{MaxSteps: value.MaxSteps, Name: value.Name, Role: value.Role, Runtime: value.Runtime, Model: value.Model, Thinking: value.Thinking, Permissions: value.Permissions}, []byte(value.Instructions), sha256.Sum256(raw), policies)
 }

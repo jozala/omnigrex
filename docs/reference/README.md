@@ -11,3 +11,5 @@ Use reference pages to look up a contract after choosing an [audience guide](../
 Task instructions stay in the user, repository-owner, operator, and contributor guides.
 
 [Documentation hub](../README.md)
+
+- [Agent step budgets](agent-step-budgets.md): configuration, preparation lifecycle, typed evidence, and per-Turn diagnosis.

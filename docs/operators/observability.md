@@ -115,3 +115,9 @@ Use the [application observability contract](../observability/application.md) fo
 Its application series target is bounded; inspect actual backend translation and metadata before accepting a deployment.
 Configure log/trace navigation, no-data behavior, thresholds, and notifications in the deployment's own records.
 Application instrumentation tests do not establish successful live collector delivery or alert behavior.
+
+## Diagnose an Agent Turn step budget
+
+Use the correlated per-Turn observations and settlement outcome described in the [step-budget contract](../reference/agent-step-budgets.md#per-turn-diagnostics).
+Summary-only entry is pressure, not a failure verdict.
+Aggregate step-budget instruments are deferred to Work Item #112.

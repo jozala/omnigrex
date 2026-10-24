@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-//go:embed runner.mjs mcp-extension.mjs failure-extension.mjs subscription-auth.mjs session-state.mjs session-validation.mjs history-rpc.mjs package.json package-lock.json package-integrity.mjs qualify-packages.mjs
+//go:embed step-budget.mjs runner.mjs mcp-extension.mjs failure-extension.mjs subscription-auth.mjs session-state.mjs session-validation.mjs history-rpc.mjs package.json package-lock.json package-integrity.mjs qualify-packages.mjs
 var resources embed.FS
 
 // ResourceContract is the approved inventory captured when a Pi Runtime
@@ -115,4 +115,18 @@ done
 	}
 	script.WriteString("/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/omnigrex/pi/qualify-packages.mjs\n")
 	return script.String(), nil
+}
+
+// SupportsStepBudget examines immutable resources, not the current deployment.
+func SupportsStepBudget(content json.RawMessage) bool {
+	var contract ResourceContract
+	if json.Unmarshal(content, &contract) != nil {
+		return false
+	}
+	for _, file := range contract.Files {
+		if file.Name == "step-budget.mjs" {
+			return true
+		}
+	}
+	return false
 }

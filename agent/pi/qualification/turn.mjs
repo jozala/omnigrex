@@ -35,11 +35,14 @@ try {
     }
     const results = data.messages.slice(userIndex + 1).filter(m => m.role === 'tool');
     const step = results.length;
-    const names = data.tools.map(t => t.function.name);
+    const names = (data.tools ?? []).map(t => t.function.name);
     if (role === 'REVIEWER' && (names.includes('write') || names.includes('edit') || names.includes('omnigrex_publish_changes'))) throw new Error('Reviewer authority expanded');
     const result = index => JSON.parse(text(results[index].content));
     let name, args;
-    if (fault === 'concurrent-turns') {
+    if (names.length === 0) {
+      const system = data.messages.filter(m => m.role === 'system').map(m => text(m.content)).join('\n');
+      if (!system.includes('An incomplete outcome is permitted')) throw new Error('missing reserved summary instruction');
+    } else if (fault === 'concurrent-turns') {
       const notify = phase => fetch(`${process.env.OMNIGREX_PI_WORKFLOW_CONTROL_URL}?turn=${envelope.agent_turn_id}&phase=${phase}&issue=${envelope.issue_number}`);
       if (step > 0) {
         if (result(step - 1).number !== envelope.issue_number) throw new Error('cross-Turn MCP authority');
