@@ -5,6 +5,7 @@ import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
+import { stepBudget } from './step-budget.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
 const agentDir = '/run/pi-agent';
@@ -74,12 +75,15 @@ export async function prepareRuntime(configuration, sessionManager, models) {
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {
     const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null) : undefined;
+    const budget = configuration.stepBudget === undefined ? undefined : stepBudget(configuration.stepBudget, (data, summary) => {
+      process.stdout.write(JSON.stringify({ type: 'omnigrex_step_budget', data, ...(summary ? { summary } : {}) }) + '\n');
+    });
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager, modelRuntimeSignal: AbortSignal.timeout(15000),
       modelRuntime: subscription?.runtime,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), mcpExtension(configuration)],
+        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), mcpExtension(configuration), ...(budget ? [budget.extension] : [])],
         additionalSkillPaths: skills,
         // Overrides avoid interpreting instruction text as a file path and
         // prevent even reading automatic SYSTEM/APPEND_SYSTEM sources.
@@ -97,6 +101,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
     const tools = [...configuration.tools, ...configuration.mcpTools.map(name => `omnigrex_${name}`)];
     const result = await createAgentSessionFromServices({ services, sessionManager: manager, model, tools,
       thinkingLevel: configuration.selection.thinking || undefined });
+    budget?.attach(result.session, tools);
     if (result.modelFallbackMessage) throw new Error('model fallback rejected');
     return { ...result, services, diagnostics: services.diagnostics };
   };

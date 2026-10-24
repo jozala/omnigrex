@@ -12,6 +12,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/turnconfig"
 )
 
@@ -118,6 +119,7 @@ type Config struct {
 	AssignmentToolCachePollInterval        time.Duration
 	AgentPathEnvironmentAllowlist          []string
 	AgentInstructionsDir                   string
+	AgentMaxSteps                          stepbudget.Limit
 	HTTPAddr                               string
 	ReadinessTimeout                       time.Duration
 	ShutdownTimeout                        time.Duration
@@ -146,7 +148,9 @@ func (err *ValidationError) Problems() []error {
 	return append([]error(nil), err.problems...)
 }
 
-func Load(getenv func(string) string) (Config, error) {
+// Load accepts an optional presence lookup because Getenv alone cannot
+// distinguish an unset fallback from an explicitly invalid empty value.
+func Load(getenv func(string) string, lookup ...func(string) (string, bool)) (Config, error) {
 	config := Config{
 		ExecutionBackend:                       valueOrDefault(getenv("OMNIGREX_EXECUTION_BACKEND"), "docker"),
 		MicrosandboxExecutable:                 valueOrDefault(getenv("OMNIGREX_MICROSANDBOX_EXECUTABLE"), "/usr/local/bin/msb"),
@@ -205,6 +209,19 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var problems []error
+	value := getenv("OMNIGREX_AGENT_MAX_STEPS")
+	present := value != ""
+	if len(lookup) > 0 {
+		value, present = lookup[0]("OMNIGREX_AGENT_MAX_STEPS")
+	}
+	if present {
+		limit, err := stepbudget.Parse(value)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("OMNIGREX_AGENT_MAX_STEPS: %w", err))
+		} else {
+			config.AgentMaxSteps = limit
+		}
+	}
 	mode, authRoot, authErr := LoadProviderAuth(getenv)
 	if authErr != nil {
 		problems = append(problems, authErr)

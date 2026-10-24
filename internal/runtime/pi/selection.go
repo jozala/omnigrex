@@ -21,12 +21,16 @@ func (c *connection) configure(ctx context.Context) error {
 			return ErrConfiguration
 		}
 		found := false
+		budgetFound := false
 		for _, command := range commands.Commands {
+			if command.Name == "omnigrex-step-budget-v1" && command.Source == "extension" {
+				budgetFound = true
+			}
 			if command.Name == "omnigrex-ready" && command.Source == "extension" {
 				found = true
 			}
 		}
-		if !found {
+		if !found || c.options.StepBudget != nil && !budgetFound {
 			return ErrConfiguration
 		}
 	}

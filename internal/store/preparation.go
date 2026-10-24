@@ -16,6 +16,7 @@ import (
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -1346,6 +1347,7 @@ func lockAgentTurnPreparationWorkflow(ctx context.Context, tx pgx.Tx, workflowID
 }
 
 type agentProfileConfig struct {
+	MaxSteps     *stepbudget.Limit                        `json:"max_steps,omitempty"`
 	Name         string                                   `json:"name"`
 	Path         string                                   `json:"path"`
 	Role         workflow.Role                            `json:"role"`
@@ -1367,6 +1369,13 @@ func validateAgentProfileConfigForIdentity(value json.RawMessage, expectedPath s
 	config, err := canonicalJSON(value)
 	if err != nil {
 		return nil, fmt.Errorf("prepare Agent Turn: Agent Profile config: %w", err)
+	}
+	catalog, err := role.NewPolicyCatalog([]role.ID{policy.Role}, []role.Policy{policy})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := agentprofile.DecodeSnapshot(config, catalog); err != nil {
+		return nil, err
 	}
 	var snapshot agentProfileConfig
 	decoder := json.NewDecoder(bytes.NewReader(config))

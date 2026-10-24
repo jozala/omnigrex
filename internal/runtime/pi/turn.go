@@ -84,6 +84,7 @@ func (adapter TurnAdapter) Prepare(ctx context.Context, request session.TurnPrep
 	}
 	coordinator := session.NewRuntimeCoordinator(adapter.Store)
 	result, err := coordinator.Prepare(ctx, session.RuntimePrepareRequest{Lease: request.Lease, Session: request.Session, State: request.State, Connect: func(ctx context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
+		configuration.StepBudget = request.StepBudget
 		configuration.Session = &identity
 		return Start(ctx, request.Transport, configuration, Options{CallerDeadlineOnly: true, StartupTimeout: adapter.StartupTimeout, DeferStartupCompletion: true, EventContext: agentevent.Context{TurnID: request.Lease.ID, AgentSessionID: request.Session.ID}})
 	}})

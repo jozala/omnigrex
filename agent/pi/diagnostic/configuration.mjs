@@ -12,7 +12,7 @@ const fixturePrompts = new Set(['PRIOR_TURN_CONTEXT', 'configuration-audit', 'co
   'configuration-developer-only', 'configuration-write', 'configuration-edit', 'configuration-skill',
   'configuration-grep', 'configuration-find', 'configuration-ls', 'configuration-bash',
   'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit', 'configuration-continuation',
-  'configuration-thinking-max', 'configuration-thinking-max-continue']);
+  'configuration-budget', 'configuration-budget-audit', 'configuration-thinking-max', 'configuration-thinking-max-continue']);
 function providerReasoningSetting(data) {
   // Generic openai-completions wire for a reasoning model without a special
   // thinkingFormat carries the mapped level as reasoning_effort.
@@ -32,6 +32,7 @@ async function runFixture(command, args) {
 }
 try {
   const configuration = await readBootstrap();
+  if (process.env.OMNIGREX_PI_BUDGET_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/step-budget.test.mjs']);
   if (process.env.OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/session-state.test.mjs']);
   if (process.env.OMNIGREX_PI_MCP_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/mcp-boundary.test.mjs']);
   if (process.env.OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/failure-boundary.test.mjs', '/opt/omnigrex/pi/diagnostic/subscription.test.mjs']);
@@ -93,6 +94,15 @@ try {
     const currentUser = data.messages.findLastIndex(m => m.role === 'user');
     const toolResults = data.messages.slice(currentUser + 1).filter(m => m.role === 'tool');
     const finalResult = contentText(toolResults.at(-1)?.content);
+    if (prompt === 'configuration-budget-audit') {
+      const audit = await (await fetch('http://127.0.0.1:8844/audit')).json();
+      if (audit.length !== configuration.stepBudget - 1) throw new Error('summary iteration executed MCP authority');
+      if (configuration.stepBudget > 1 && system.includes('An incomplete outcome is permitted')) throw new Error('stale summary instruction');
+    }
+    if (prompt === 'configuration-budget') {
+      const final = names.length === 0;
+      if (final !== system.includes('An incomplete outcome is permitted')) throw new Error('summary projection mismatch');
+    }
     if (prompt === 'configuration-revoked' && !toolResults.length) await fetch('http://127.0.0.1:8844/revoke');
     if (prompt === 'configuration-audit') {
       if (!system.includes('CURRENT_OPERATOR_GUIDANCE') || !system.includes('CURRENT_STAGE_OBJECTIVE')) throw new Error('missing current instructions');
@@ -105,7 +115,17 @@ try {
     }
     const call = (name, args) => ({ id: `call-${++requests}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
     let tool;
+    if (prompt === 'configuration-budget') tool = call('omnigrex_get_issue', {});
     if (prompt === 'configuration-mcp' && !toolResults.length) tool = call('omnigrex_get_issue', {});
+    if (prompt === 'configuration-budget-audit') {
+      const audit = await (await fetch('http://127.0.0.1:8844/audit')).json();
+      if (audit.length !== configuration.stepBudget - 1) throw new Error('summary iteration executed MCP authority');
+      if (configuration.stepBudget > 1 && system.includes('An incomplete outcome is permitted')) throw new Error('stale summary instruction');
+    }
+    if (prompt === 'configuration-budget') {
+      const final = names.length === 0;
+      if (final !== system.includes('An incomplete outcome is permitted')) throw new Error('summary projection mismatch');
+    }
     if (prompt === 'configuration-revoked' && !toolResults.length) tool = call('omnigrex_get_issue', {});
     if (prompt === 'configuration-publish' && !toolResults.length) tool = call('omnigrex_publish_changes', { operation_id: 'fixture-publish' });
     if (prompt === 'configuration-invalid-arguments' && !toolResults.length) tool = call('omnigrex_get_issue', { unexpected: true });

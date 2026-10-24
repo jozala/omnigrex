@@ -48,6 +48,7 @@ See [provider authentication](../operators/provider-authentication.md) for login
 
 | Setting | Supplied stack value or binary default |
 | --- | --- |
+| `OMNIGREX_AGENT_MAX_STEPS` | Unset: unlimited; positive decimal integer (1..2147483647) or `unlimited`; explicitly empty is invalid; [step budgets](agent-step-budgets.md) |
 | `OMNIGREX_AGENT_TURN_CONCURRENCY_LIMIT` | 2 |
 | `OMNIGREX_AGENT_TURN_MEMORY_MIB` | Compose 1024 MiB; unset binary 512 MiB |
 | `OMNIGREX_AGENT_TURN_EXECUTION_TURN_TIMEOUT` | `2h` |

@@ -3,6 +3,7 @@ package agentevent
 import (
 	"context"
 	"encoding/json"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type AgentEvent struct {
 }
 
 type OperationalMetadata struct {
+	StepBudget            *stepbudget.Observation
 	MessageID             string
 	ToolCallID            string
 	ToolName              string

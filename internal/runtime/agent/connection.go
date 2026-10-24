@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 )
 
 type Status string
@@ -29,6 +30,19 @@ type Outcome struct {
 	// FailureGeneration identifies the credential generation, never a token.
 	FailureGeneration string
 	LimitReached      bool
+	StepBudget        *stepbudget.Observation
+	BudgetSummary     string
+}
+
+// OutcomeEvidence is the minimal durable controller settlement contract.
+// StepBudgetExhausted is set only by reconciliation for incomplete-work Human
+// Handoff, never by the runtime or the summary's wording.
+type OutcomeEvidence struct {
+	Admitted            bool                    `json:"admitted"`
+	Status              Status                  `json:"status"`
+	LimitReached        bool                    `json:"limit_reached,omitempty"`
+	StepBudget          *stepbudget.Observation `json:"step_budget,omitempty"`
+	StepBudgetExhausted bool                    `json:"step_budget_exhausted,omitempty"`
 }
 
 type Ready struct {

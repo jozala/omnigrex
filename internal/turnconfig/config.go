@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,6 +27,9 @@ const (
 
 // Configuration contains only path requests, never repository-supplied path values.
 type Configuration struct {
+	// StepBudget is controller-resolved preparation evidence, not a field in the
+	// repository path-request YAML. Nil denotes a historical unbudgeted Turn.
+	StepBudget  *stepbudget.Limit    `json:"step_budget,omitempty"`
 	Directories map[string]Lifecycle `json:"directories"`
 	Environment map[string]string    `json:"environment"`
 }
