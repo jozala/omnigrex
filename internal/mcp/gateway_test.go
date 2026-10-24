@@ -2079,6 +2079,10 @@ type fakeStore struct {
 	releaseReserve     chan struct{}
 }
 
+func (fake *fakeStore) ListAgentTurnPublicationReads(_ context.Context, _ store.AgentTurnLease, _ bool) ([]store.MutationReservation, error) {
+	return nil, fake.validateErr
+}
+
 type lifecycleContextKey struct{}
 
 type mutationContextObservation struct {

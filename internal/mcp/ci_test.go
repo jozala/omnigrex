@@ -141,8 +141,11 @@ func TestCIRegressionBothRolesRetrieveFailedStepAndAssertion(t *testing.T) {
 		t.Run(string(role), func(t *testing.T) {
 			backend, scope := ciBackend(t, client, role)
 			checksRaw := ciExecute(t, backend, scope, mcp.ToolGetCheckRuns, `{}`)
-			var checks []map[string]any
-			if err := json.Unmarshal(checksRaw, &checks); err != nil || len(checks) != 1 {
+			var checks struct {
+				HeadSHA   string           `json:"head_sha"`
+				CheckRuns []map[string]any `json:"check_runs"`
+			}
+			if err := json.Unmarshal(checksRaw, &checks); err != nil || len(checks.CheckRuns) != 1 || checks.HeadSHA != ciRegressionHead {
 				t.Fatalf("get_check_runs = %s, %v", checksRaw, err)
 			}
 			diagRaw := ciExecute(t, backend, scope, mcp.ToolGetCheckRunDiagnostics, `{"check_run_id":501}`)

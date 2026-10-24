@@ -34,6 +34,19 @@ Stage Assignments select durable Agent Participants with their own Agent Session
 An Execution Backend creates disposable environments; it does not own the business Workflow or durable conversation identity.
 Repository code runs without GitHub credentials and reaches business capabilities through authenticated, scoped MCP.
 
+## Publication-derived MCP reads
+
+Turn token authority and mutation expected-head fences remain immutable.
+Developer PR metadata, reviews/threads, checks, and Actions diagnostics instead use a separate read target derived from successful publication/open-PR mutations in the exact live Turn/epoch ledger.
+The target advances after each durable publication and can include the PR opened during that Turn; it never follows an unrelated external push.
+Acknowledged ancestor replays contribute ordered evidence unless publication recovery has already bound a verified starting head.
+Reviewer reads, Issue reads, handoff lookup, and mutation actions retain their original targeting rules.
+See [decision 0038](../decisions/0038-derive-publication-read-targets-from-the-turn-ledger.md) for the authority boundary.
+
+Collection responses identify the queried commit even when empty: `get_check_runs` returns `{head_sha, check_runs}`, `list_pull_request_reviews` returns `{head_sha, reviews}`, and `list_review_threads` returns `{head_sha, threads}`.
+PR metadata identifies it in `head.sha`; existing CI diagnostic responses retain their head metadata.
+These collection tools previously returned bare arrays; consumers must read the named collection field.
+
 ## Read the decisions behind a change
 
 - [Visible versus execution state](../adr/0001-separate-visible-workflow-and-execution-state.md).
