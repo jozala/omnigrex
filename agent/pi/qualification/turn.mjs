@@ -35,7 +35,7 @@ try {
     }
     const results = data.messages.slice(userIndex + 1).filter(m => m.role === 'tool');
     const step = results.length;
-    const names = data.tools.map(t => t.function.name);
+    const names = (data.tools ?? []).map(t => t.function.name);
     if (role === 'REVIEWER' && (names.includes('write') || names.includes('edit') || names.includes('omnigrex_publish_changes'))) throw new Error('Reviewer authority expanded');
     const result = index => JSON.parse(text(results[index].content));
     let name, args;

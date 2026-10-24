@@ -87,7 +87,7 @@ try {
       response.end(JSON.stringify({ error: { message: `Invalid API key: ${request.headers.authorization.slice('Bearer '.length)}; ${configuration.mcp.headers[0].value}` } }));
       return;
     }
-    const names = data.tools.map(t => t.function.name).sort();
+    const names = (data.tools ?? []).map(t => t.function.name).sort();
     const system = data.messages.filter(m => m.role === 'system').map(m => contentText(m.content)).join('\n');
     if (system.includes('POISON_')) throw new Error('poisoned instructions');
     if (prompt === 'PRIOR_TURN_CONTEXT' && (!system.includes('OLD_OPERATOR_GUIDANCE') || !system.includes('OLD_STAGE_OBJECTIVE'))) throw new Error('prior instructions were not used');

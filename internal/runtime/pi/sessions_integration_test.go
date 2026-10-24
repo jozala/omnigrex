@@ -126,7 +126,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			}
 			outcome, err := recovered.Prompt(ctx, "configuration-audit", nil)
 			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
-				t.Fatalf("first prompt: %+v %v", outcome, err)
+				t.Fatalf("first prompt: %+v evidence=%+v %v", outcome, outcome.StepBudget, err)
 			}
 			removeRecovered()
 			continued, removeContinued := start(3, true)

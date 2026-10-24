@@ -66,6 +66,8 @@ Finalized error/cancelled responses increment the response count; missing respon
 `internal/stepbudget.Observation` is the enforcement counter's bounded source of truth, translated by the Pi adapter into `agent.Outcome.StepBudget` and `agentevent.OperationalMetadata.StepBudget`.
 The neutral event contract exposes the same schema as `agentevent.StepBudgetObservation`, reused by terminal outcomes without coupling the agent interface directly to configuration packages.
 Consumers, including #112, must reuse this evidence rather than parse log text or maintain another counter.
+The owned runner captures its framed writer before Pi installs the extension stdout guard, keeping budget evidence on the controller transport rather than stderr.
+Queue cleanup and tool restoration run before the externally visible settlement receipt, so an immediate next prompt cannot race late queue events.
 The owned JSONL record `omnigrex_step_budget` carries a `data` object:
 
 | Field | Meaning |

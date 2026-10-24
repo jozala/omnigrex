@@ -140,7 +140,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 					got, err = c.Prompt(ctx, "configuration-provider-error-audit", nil)
 				}
 				if inputs.StepBudget != nil && (got.StepBudget == nil || !got.StepBudget.Stopped || !got.StepBudget.Complete || got.StepBudget.Used != uint64(inputs.StepBudget.Steps())) {
-					t.Fatalf("budget outcome = %+v", got)
+					t.Fatalf("budget outcome = %+v; evidence=%+v error=%v; stderr: %s", got, got.StepBudget, err, stderr.String())
 				}
 				if err != nil || got.Status != agent.Completed {
 					t.Fatalf("prompt: %+v %v; stderr: %s", got, err, stderr.String())

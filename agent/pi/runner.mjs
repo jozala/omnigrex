@@ -63,6 +63,9 @@ async function skillPaths(enabled) {
 }
 
 export async function prepareRuntime(configuration, sessionManager, models) {
+  // RPC mode redirects ordinary extension stdout to stderr. Capture the owned
+  // framed writer before that guard is installed, as historyInput does.
+  const write = process.stdout.write.bind(process.stdout);
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await writeFile(join(agentDir, 'auth.json'), JSON.stringify(configuration.auth), { mode: 0o600 });
   // Only the disposable controlled-provider fixture supplies models here.
@@ -76,7 +79,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
   const createRuntime = async ({ sessionManager: manager }) => {
     const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null) : undefined;
     const budget = configuration.stepBudget === undefined ? undefined : stepBudget(configuration.stepBudget, (data, summary) => {
-      process.stdout.write(JSON.stringify({ type: 'omnigrex_step_budget', data, ...(summary ? { summary } : {}) }) + '\n');
+      write(JSON.stringify({ type: 'omnigrex_step_budget', data, ...(summary ? { summary } : {}) }) + '\n');
     });
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager, modelRuntimeSignal: AbortSignal.timeout(15000),

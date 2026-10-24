@@ -3,6 +3,7 @@ export const summaryInstruction = 'Summarize completed work, unfinished work, an
 const maxSteps = 2147483647;
 export function stepBudget(limit, observe) {
   if (limit !== 'unlimited' && (!Number.isInteger(limit) || limit < 1 || limit > maxSteps)) throw new Error('Invalid step budget');
+  let session, configuredTools;
   let active = false, used = 0, responses = 0, summary = false, stopped = false, settled = false, summaryText = '';
   const emit = complete => observe({ limit, used, responses, summary, stopped, complete }, summaryText);
   const extension = pi => {
@@ -21,9 +22,18 @@ export function stepBudget(limit, observe) {
       // Also fences registered deferred/codemode calls via ctx.executeTool.
       if (active && summary) return { block: true, reason: 'Summary-only Agent Turn', terminate: true };
     });
-    pi.on('agent_settled', () => { if (active) { settled = true; emit(true); } });
+    pi.on('agent_settled', () => {
+      if (!active) return;
+      // Pi clearQueue emits queue_update. Complete cleanup BEFORE RPC publishes
+      // agent_settled, so the next admitted prompt cannot race a late event.
+      if (summary) session.clearQueue();
+      session.setActiveToolsByName(configuredTools);
+      settled = true;
+      emit(true);
+    });
   };
-  const attach = (session, configuredTools) => {
+  const attach = (current, tools) => {
+    session = current; configuredTools = [...tools];
     const prompt = session.prompt.bind(session);
     session.prompt = async (...args) => {
       // Steering/follow-up input during this activity is not a new admission.
@@ -33,12 +43,12 @@ export function stepBudget(limit, observe) {
       emit(false);
       try { return await prompt(...args); }
       finally {
-        if (!settled) emit(false);
+        if (!settled) {
+          emit(false);
+          if (summary) session.clearQueue();
+          session.setActiveToolsByName(configuredTools);
+        }
         active = false;
-        // Pi abort stops the outer loop but leaves its queue intact. Do not
-        // silently execute old continuation work with a fresh Turn allowance.
-        if (summary) session.clearQueue();
-        session.setActiveToolsByName(configuredTools);
       }
     };
     const prepare = session.agent.prepareRequest;
