@@ -20,7 +20,7 @@ async function fixture(t, limit, response, outer = false) {
     if (result.hold) return;
     if (result.failure) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Controlled provider rejection' } })); return; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    const delta = result.tools ? { role: 'assistant', tool_calls: result.tools.map((name, index) => ({ index, id: `call-${requests.length}-${index}`, type: 'function', function: { name, arguments: '{}' } })) } : { role: 'assistant', content: 'Work is incomplete; verification remains.' };
+    const delta = result.tools ? { role: 'assistant', tool_calls: result.tools.map((name, index) => ({ index, id: `call-${requests.length}-${index}`, type: 'function', function: { name, arguments: '{}' } })) } : { role: 'assistant', content: result.text ?? 'Work is incomplete; verification remains.' };
     for (const [d, f] of [[delta, null], [{}, result.reason ?? (result.tools ? 'tool_calls' : 'stop')]]) res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta: d, finish_reason: f }] })}\n\n`);
     res.end('data: [DONE]\n\n');
   });
@@ -128,5 +128,15 @@ test('cancellation in summary-only mode is not step exhaustion', async t => {
   await f.session.abort(); await prompt;
   assert.equal(f.requests.length, 1);
   assert.equal(f.observations.at(-1).stopped, false);
+  assert.equal(f.observations.at(-1).complete, true);
+});
+
+
+test('oversized summaries are omitted wholesale rather than exposing pre-redaction credential fragments', async t => {
+  const f = await fixture(t, 1, () => ({ text: 'unfinished '.repeat(400) + 'fixture-only-secret' }));
+  await f.session.prompt('work');
+  assert.equal(f.observations.at(-1).text, '');
+  assert.equal(f.observations.at(-1).used, 1);
+  assert.equal(f.observations.at(-1).stopped, true);
   assert.equal(f.observations.at(-1).complete, true);
 });

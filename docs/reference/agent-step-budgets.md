@@ -80,7 +80,9 @@ The owned JSONL record `omnigrex_step_budget` carries a `data` object:
 Usage counters are bounded by JavaScript's largest safe integer (9007199254740991); representational overflow is a protocol failure, never positive exhaustion.
 The adapter validates field presence, types, bounds, monotonicity, and agreement with the prepared budget.
 A configured runtime missing settlement evidence is a protocol failure, not invented zero usage or exhaustion.
-The optional bounded `summary` record field is untrusted text used only by the credential-redacting settlement diagnostic path, never a completion claim or metric label.
+The optional `summary` record field accepts at most 2048 UTF-8 bytes of untrusted text, used only by the credential-redacting settlement diagnostic path, never as a completion claim or metric label.
+Oversized summaries are omitted wholesale; runtime truncation or normalization before controller credential redaction could leak a credential fragment.
+The controller redacts full accepted text before control-character normalization and final diagnostic truncation.
 No metric export or provider/tool payload is required for enforcement or settlement.
 For an admitted terminal response the existing Turn outcome retains the minimal budget observation alongside admission/status evidence.
 Failed or uncertain transport outcomes report the last observation through correlated usage diagnostics, without inventing complete durable prompt evidence.

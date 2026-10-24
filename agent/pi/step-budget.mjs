@@ -61,7 +61,13 @@ export function stepBudget(limit, observe) {
       if (summary) {
         const reason = turn.message.stopReason;
         stopped = reason === 'stop' || reason === 'toolUse';
-        if (stopped) summaryText = turn.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 2048);
+        if (stopped) {
+          const text = turn.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+          // Never truncate or normalize before the controller redacts secrets:
+          // either could leave an unrecognizable credential fragment. Omit an
+          // oversized summary wholesale; the counter evidence is independent.
+          summaryText = Buffer.byteLength(text, 'utf8') <= 2048 ? text : '';
+        }
         emit(false);
         // finishTurn only ends the INNER loop. abort sets Pi's outer activity
         // flag synchronously, suppressing queues and pre-settle continuations.

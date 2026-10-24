@@ -705,7 +705,7 @@ func (c *connection) record(content []byte) error {
 	switch record.Type {
 	case "omnigrex_step_budget":
 		observation, err := stepbudget.Decode(record.Data)
-		if err != nil || c.options.StepBudget == nil || observation.Limit != *c.options.StepBudget || len(record.Summary) > 8192 {
+		if err != nil || c.options.StepBudget == nil || observation.Limit != *c.options.StepBudget || len(record.Summary) > 2048 {
 			return agent.ErrProtocol
 		}
 		if old := t.budget; old != nil && (old.Complete || observation.Used < old.Used || observation.Responses < old.Responses || old.Summary && !observation.Summary || old.Stopped && !observation.Stopped) {
