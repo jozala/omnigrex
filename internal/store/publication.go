@@ -124,3 +124,36 @@ func nullablePublicationInt64(value int64) any {
 	}
 	return value
 }
+
+// ListAgentTurnPublicationReads snapshots successful publication evidence under
+// the live fence without requiring mutation admission to be closed. A recovered
+// publication already forms the starting authority, so its historical replays
+// must not move the read target backwards.
+func (store *Store) ListAgentTurnPublicationReads(ctx context.Context, lease AgentTurnLease, includeReplays bool) ([]MutationReservation, error) {
+	var mutations []MutationReservation
+	err := store.withLockedAgentTurnLeaseOptions(ctx, lease, "read Agent Turn publication target", false, true, func(tx pgx.Tx, _ lockedTurn) error {
+		query := mutationSelect + `
+WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+ORDER BY invocation_number`
+		if includeReplays {
+			query = mutationLedgerSelect
+		}
+		query = `SELECT * FROM (` + query + `) AS publication
+WHERE state = 'SUCCEEDED' AND tool_name IN ('publish_changes', 'open_pr')
+ORDER BY invocation_number`
+		rows, err := tx.Query(ctx, query, lease.ID, lease.ExecutionEpoch)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			mutation, err := scanMutation(rows)
+			if err != nil {
+				return err
+			}
+			mutations = append(mutations, mutation)
+		}
+		return rows.Err()
+	})
+	return mutations, err
+}

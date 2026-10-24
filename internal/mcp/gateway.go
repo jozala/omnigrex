@@ -171,6 +171,7 @@ type Invocation struct {
 	Mutation          MutationMetadata
 	lease             store.AgentTurnLease
 	recordProposedTip func(context.Context, string) error
+	readTarget        *publicationReadTarget
 }
 
 func (Invocation) String() string   { return "MCP tool invocation" }
@@ -770,7 +771,8 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
 	}
-	if !scopeAllowsTool(registration.scope, params.Name) {
+	_, publicationReads := gateway.backend.(publicationReadResolver)
+	if !scopeAllowsTool(registration.scope, params.Name) && !(publicationReads && tool.Class == ReadTool && publicationBoundRead(tool.Name)) {
 		gateway.logRequestRejected(request, tool.Name, "tool_authorization", "missing_turn_context")
 		writeToolError(response, rpc.ID, "tool is unavailable in this turn")
 		return
@@ -802,7 +804,13 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 	defer operation.Finish(&operationErr)
 	started := gateway.now()
 	recordedInvocation := cloneInvocation(invocation)
-	result, err := gateway.backend.Execute(request.Context(), invocation)
+	var result json.RawMessage
+	if resolver, ok := gateway.backend.(publicationReadResolver); ok && publicationBoundRead(invocation.Name) {
+		invocation.readTarget, err = gateway.publicationReadTarget(request.Context(), resolver, invocation)
+	}
+	if err == nil {
+		result, err = gateway.backend.Execute(request.Context(), invocation)
+	}
 	succeeded := err == nil && len(result) != 0 && json.Valid(result)
 	if !succeeded {
 		operationErr = err
