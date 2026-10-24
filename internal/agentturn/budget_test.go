@@ -3,7 +3,6 @@ package agentturn_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -145,7 +144,7 @@ func TestHistoricalRuntimeDoesNotSilentlyAcceptFiniteBudget(t *testing.T) {
 	preparer := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database)
 	limit, _ := stepbudget.Parse("1")
 	preparer.SetDefaultMaxSteps(limit)
-	if _, err := preparer.Prepare(context.Background(), validRequest()); !errors.Is(err, agentprofile.ErrInvalidProfile) || len(database.calls) != 0 {
+	if _, err := preparer.Prepare(context.Background(), validRequest()); err == nil || !githubapi.ExtractSafeErrorMetadata(err).Permanent || !strings.Contains(err.Error(), "does not support step budgets") || len(database.calls) != 0 {
 		t.Fatalf("historical finite budget was not a prerequisite failure: %v", err)
 	}
 	preparer.SetDefaultMaxSteps(stepbudget.Limit{})

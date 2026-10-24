@@ -64,6 +64,7 @@ Finalized error/cancelled responses increment the response count; missing respon
 `internal/stepbudget.Limit` is the validated finite-or-unlimited type.
 `agent.OutcomeEvidence` is the durable settlement schema, including the controller-only `StepBudgetExhausted` fact.
 `internal/stepbudget.Observation` is the enforcement counter's bounded source of truth, translated by the Pi adapter into `agent.Outcome.StepBudget` and `agentevent.OperationalMetadata.StepBudget`.
+The neutral event contract exposes the same schema as `agentevent.StepBudgetObservation`, reused by terminal outcomes without coupling the agent interface directly to configuration packages.
 Consumers, including #112, must reuse this evidence rather than parse log text or maintain another counter.
 The owned JSONL record `omnigrex_step_budget` carries a `data` object:
 
