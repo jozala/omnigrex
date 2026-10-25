@@ -21,7 +21,9 @@ import (
 // independent catalog opens/closes. In particular, never open the DB directly
 // here: even a diagnostic open/close can release SQLite's process-wide locks.
 func TestNativeCatalogLongevity(t *testing.T) {
-	backend, request, ctx := nativeFixture(t)
+	backend, request, parentCtx := nativeFixture(t)
+	ctx, cancel := context.WithTimeout(parentCtx, 8*time.Minute)
+	defer cancel()
 	const iterations = 16
 	started := time.Now()
 	prefix := fmt.Sprintf("catalog-%d", started.UnixNano())
@@ -30,8 +32,10 @@ func TestNativeCatalogLongevity(t *testing.T) {
 	}
 	names := []string{}
 	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		for _, name := range names {
-			if err := sdk.RemoveVolume(context.Background(), name); err != nil {
+			if err := sdk.RemoveVolume(cleanup, name); err != nil {
 				t.Error(err)
 			}
 		}
@@ -71,9 +75,20 @@ func TestNativeCatalogLongevity(t *testing.T) {
 		if err := process.Start(ctx); err != nil {
 			t.Fatal(err)
 		}
-		output, err := io.ReadAll(process.Transport())
-		if err != nil || string(output) != "catalog-complete" {
-			t.Fatalf("normal completion: %q, %v", output, err)
+		type completion struct {
+			output []byte
+			err    error
+		}
+		completed := make(chan completion, 1)
+		go func() { output, err := io.ReadAll(process.Transport()); completed <- completion{output, err} }()
+		select {
+		case result := <-completed:
+			if result.err != nil || string(result.output) != "catalog-complete" {
+				t.Fatalf("normal completion: %q, %v", result.output, result.err)
+			}
+		case <-ctx.Done():
+			_ = process.Transport().Close()
+			t.Fatal("catalog lifecycle exceeded eight-minute bound")
 		}
 		if exit, err := process.ObserveExit(ctx); err != nil || !exit.Exited || !exit.ExitCodeKnown || exit.ExitCode != 0 {
 			t.Fatalf("exit: %+v, %v", exit, err)

@@ -49,6 +49,8 @@ Never manually remove migration records, SQLite/WAL/SHM files, volumes, or recov
    With the old deployment selected and `BACKUP_DIR` pointing to the private coordinated backup directory, run:
 
    ```sh
+   (
+   set -eu
    umask 077
    test -d "$BACKUP_DIR"
    test ! -e "$BACKUP_DIR/microsandbox-home.tar.gz"
@@ -57,6 +59,7 @@ Never manually remove migration records, SQLite/WAL/SHM files, volumes, or recov
    tar -tzf "$BACKUP_DIR/microsandbox-home.tar.gz.tmp" > /dev/null
    mv "$BACKUP_DIR/microsandbox-home.tar.gz.tmp" "$BACKUP_DIR/microsandbox-home.tar.gz"
    (cd "$BACKUP_DIR"; shasum -a 256 microsandbox-home.tar.gz >> SHA256SUMS)
+   )
    ```
 
    Run fail-fast (`set -eu`) in the same stopped-writer window as the other archives; do not proceed after a failed command.
@@ -89,5 +92,6 @@ No restore, downgrade, live volume replacement, or running-installation mutation
 Its output reports actual elapsed time and process participation, rather than presenting a test timeout as measured soak duration.
 `TestNativeCatalogUpgradeAndBackupRecovery` uses only disposable copies and reports migration/recovery assertions.
 `TestNativeCoordinatedReleasePayload` checks the actual CLI, firmware, loaded FFI hashes, local backend, explicit runtime paths, and patched-agent provenance.
+The Pi failure-recovery matrix also exercises acknowledged `publish_changes` and `request_review`, an injected unknown cleanup effect, blocked Reviewer admission until confirmed recovery, durable terminal-intent corroboration, and subsequent Reviewer launch without replaying publication.
 These are bounded regressions, not a guarantee that every production concurrency schedule or outage is covered.
 Omnigrex agents run non-KVM checks locally and obtain native evidence from PR CI; guest `/dev/kvm` presence is not permission or proof of nested virtualization.
