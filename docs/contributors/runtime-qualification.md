@@ -8,7 +8,7 @@ For remote native gates, use an existing authorized `DOCKER_HOST` connection and
 
 ## Pi protocol diagnostic
 
-The disposable Pi 1.0.4 diagnostic exercises the adapter with a controlled HTTP provider, no real credentials, no GitHub/business MCP authority, no Workflow, and temporary tmpfs Session storage.
+The disposable Pi 1.4.0 diagnostic exercises the adapter with a controlled HTTP provider, no real credentials, no GitHub/business MCP authority, no Workflow, and temporary tmpfs Session storage.
 Build the image and resolve exact local content identity:
 
 ```sh
@@ -55,7 +55,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-int
 
 ## Owned RPC event projection
 
-The owned runner qualifies Pi 1.0.4's public runtime/Session subscription boundary, not a replacement RPC implementation.
+The owned runner qualifies Pi 1.4.0's public runtime/Session subscription boundary, not a replacement RPC implementation.
 Only the RPC subscriber receives projected events; the real Session, extensions, model context, and durable conversation keep their original messages.
 `agent_end` is activity, never settlement authority; `agent_settled` and validated assistant stop/error evidence remain required.
 
@@ -165,6 +165,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-upg
 ```
 
 Fixture gates use controlled provider/MCP servers, private volumes, and independently built source/candidate inventories.
+The default fixtures test the frozen Pi 1.0.4 dependency bundle against Pi 1.4.0 with the current owned runner; they do not substitute for qualification of historical release images and their retained contracts.
 Synthetic aliases are test evidence and cannot emit deployment artifacts.
 
 For actual release qualification, provision both exact registry images and choose an absent private absolute output path:
@@ -172,8 +173,8 @@ For actual release qualification, provision both exact registry images and choos
 ```sh
 OMNIGREX_PI_UPGRADE_SOURCE_IMAGE='REGISTRY/PI@sha256:SOURCE_DIGEST' \
 OMNIGREX_PI_UPGRADE_TARGET_IMAGE='REGISTRY/PI@sha256:CANDIDATE_DIGEST' \
-OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.3 \
-OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.0.4 \
+OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.4 \
+OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.4.0 \
 OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE='/private/absolute/source-runtime-contract.json' \
 OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE='/private/absolute/pi-compatibility.json' \
 mise run test-pi-upgrade

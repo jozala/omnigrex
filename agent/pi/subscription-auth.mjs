@@ -57,7 +57,7 @@ function observeFailures(response, record) {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-// Pi 1.0.4 emits flat function tools and may emit system-role messages for
+// Pi emits flat function tools and may emit system-role messages for
 // non-reasoning models. Normalize only this documented direct subscription path.
 export function subscriptionPayload(source) {
   const payload = { ...source, store: false, stream: true };

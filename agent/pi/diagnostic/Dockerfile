@@ -43,7 +43,7 @@ COPY --from=fixture-build /out/pi-mcp-fixture /usr/local/bin/pi-mcp-fixture
 COPY --from=search-tools /out/search/rg/rg /out/search/fd/fd /usr/local/bin/
 RUN printf '#!/bin/sh\nexec /usr/local/bin/node /opt/omnigrex/pi/fixture.mjs\n' > /usr/local/bin/omnigrex-pi-diagnostic && chmod 0755 /usr/local/bin/omnigrex-pi-diagnostic && \
     mkdir -p /workspace /run/pi-agent && chown 10001:10001 /workspace /run/pi-agent && \
-    test "$(node --version)" = v24.14.1 && test "$(node node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version)" = 1.0.4 && \
+    test "$(node --version)" = v24.14.1 && test "$(node node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version)" = 1.4.0 && \
     rg --version && test "$(fd --version)" = 'fd 10.3.0'
 ENV HOME=/tmp PI_CODING_AGENT_DIR=/run/pi-agent PI_OFFLINE=1 PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
 USER 10001:10001

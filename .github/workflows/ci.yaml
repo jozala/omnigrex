@@ -70,7 +70,7 @@ jobs:
 
       - name: Run Docker-backed integration tests
         run: |
-          docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+          docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
           docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diagnostic:step09 .
           "$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" integration -- go test -p 1 -race -tags=integration -timeout 30m -count=1 -json ./internal/doctor ./internal/runtime/docker ./internal/store ./internal/store/migrations ./internal/deployment
           OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker "$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" pi-protocol -- go test -race -tags=integration -timeout 15m -count=1 -json ./internal/runtime/pi
@@ -103,9 +103,9 @@ jobs:
 
       - name: Build the development environment and qualify its module source
         run: |
-          docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+          docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
           docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
-            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .
+            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.4.0 --tag omnigrex/development:dev .
           sh scripts/test-development-image-cache.sh
           sh scripts/test-development-image-unit.sh
 

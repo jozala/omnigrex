@@ -66,6 +66,38 @@ func TestPromptAdmissionDoesNotSettleTurn(t *testing.T) {
 	}
 }
 
+func TestRuntimeDiagnosticsIdentifyAdapterContract(t *testing.T) {
+	c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		settle(runtime, "stop")
+	})
+	var events []agentevent.AgentEvent
+	if _, err := c.Prompt(ctx, "complete", eventSinkFunc(func(event agentevent.AgentEvent) {
+		events = append(events, event)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	observed := false
+	for _, event := range events {
+		if len(event.Metadata.Runtime) == 0 {
+			continue
+		}
+		var metadata struct {
+			Runtime string `json:"runtime"`
+		}
+		if err := json.Unmarshal(event.Metadata.Runtime, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata.Runtime != "pi-rpc/v2" {
+			t.Fatalf("runtime diagnostics claim a fixed package version instead of the adapter contract: %q", metadata.Runtime)
+		}
+		observed = true
+	}
+	if !observed {
+		t.Fatal("missing runtime diagnostics")
+	}
+}
+
 func writeRecord(runtime net.Conn, record map[string]any) {
 	content, _ := json.Marshal(record)
 	_, _ = runtime.Write(append(content, '\n'))

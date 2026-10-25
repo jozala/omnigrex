@@ -727,7 +727,7 @@ func (c *connection) record(content []byte) error {
 		if record.Success == nil {
 			return agent.ErrProtocol
 		}
-		// Pi 1.0.4 aborts its backoff without appending an aborted assistant
+		// Pi aborts its backoff without appending an aborted assistant
 		// message. Recognize its exact cancellation marker only for a requested
 		// abort in that backoff; arbitrary provider error text is not evidence.
 		t.retryCancelled = t.retryBackoff && t.lastReason == "error" && t.cancelRequested && !*record.Success && record.FinalError == "Retry cancelled"
@@ -782,7 +782,7 @@ func (c *connection) runtimeEvent(kind, status, failure, source, reason string, 
 		Event          string `json:"event"`
 		Reason         string `json:"assistant_stop_reason,omitempty"`
 		RetryCancelled bool   `json:"retry_cancelled,omitempty"`
-	}{"pi-rpc/1.0.4", source, reason, retryCancelled})
+	}{"pi-rpc/v2", source, reason, retryCancelled})
 	return event
 }
 
