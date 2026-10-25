@@ -40,7 +40,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0030: Cache immutable registry documents for offline verification](0030-cache-immutable-registry-documents-for-offline-verification.md) | Accepted | 2026-10-18 |
 | [0031: Organize documentation around reader responsibilities](0031-organize-documentation-around-reader-responsibilities.md) | Accepted | 2026-10-18 |
 | [0032: Own ChatGPT subscription credentials in the controller](0032-own-chatgpt-subscription-credentials-in-the-controller.md) | Accepted | 2026-10-20 |
-| [0033: Resolve Docker controller packages from signed Alpine repositories](0033-resolve-controller-packages-from-signed-alpine-repositories.md) | Accepted | 2026-10-20 |
+| [0033: Resolve controller packages from signed distribution repositories](0033-resolve-controller-packages-from-signed-alpine-repositories.md) | Accepted | 2026-10-20 |
 | [0034: Preserve Microsandbox failure evidence without changing cleanup policy](0034-microsandbox-diagnostics.md) | Accepted | 2026-10-20 |
 | [0036: Aggregate independent CI qualification behind the existing required check](0036-aggregate-parallel-ci-qualification.md) | Accepted | 2026-10-21 |
 | [0037: Reuse PostgreSQL test processes while isolating databases](0037-reuse-postgres-processes-with-isolated-test-databases.md) | Accepted | 2026-10-21 |
