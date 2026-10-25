@@ -189,7 +189,11 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
             for await (const event of input) {
               if (event.type === 'error') {
                 call.diagnostic.elapsed_ms = Math.min(86400000, Math.round(performance.now() - call.started));
-                if (event.error.stopReason === 'aborted') call.diagnostic.cause = 'cancelled';
+                if (event.error.stopReason === 'aborted') {
+                  const cause = normalizedCause(undefined, args[2]?.signal);
+                  if (cause !== 'unknown') call.diagnostic.cause = cause;
+                  else if (call.diagnostic.cause !== 'timeout') call.diagnostic.cause = 'cancelled';
+                }
                 evidence.set(event.error, call);
               }
               yield event;

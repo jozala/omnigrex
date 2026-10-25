@@ -169,17 +169,21 @@ test('failure observations survive sanitation with honest sources and no raw pro
     { name: 'network', fetch: () => { throw networkError('ENOTFOUND'); }, stage: 'transport', cause: 'network' },
     { name: 'timeout', fetch: () => { throw new DOMException(sentinel, 'TimeoutError'); }, stage: 'transport', cause: 'timeout' },
     { name: 'cancel', fetch: () => { throw new DOMException(sentinel, 'AbortError'); }, stage: 'transport', cause: 'cancelled' },
+    { name: 'signal timeout', abortReason: 'TimeoutError', stage: 'transport', cause: 'timeout' },
+    { name: 'signal cancellation', abortReason: 'AbortError', stage: 'transport', cause: 'cancelled' },
     { name: 'unknown transport', fetch: () => { throw new Error(sentinel); }, stage: 'transport', cause: 'unknown' },
     { name: 'local payload', payload: () => { throw new Error(sentinel); }, stage: 'payload', cause: 'validation' },
   ]) await t.test(scenario.name, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'omnigrex-diagnostic-'));
+    const controller = new AbortController();
     try {
       const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
         if (String(url).includes('/runtime/provider-auth')) return init.method === 'POST' ? Response.json({}) : (scenario.auth ?? credential)();
+        if (scenario.abortReason) { controller.abort(new DOMException(sentinel, scenario.abortReason)); throw controller.signal.reason; }
         return scenario.fetch();
       });
       const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
-      const source = await subscription.runtime.completeSimple(model, context, { onPayload: scenario.payload });
+      const source = await subscription.runtime.completeSimple(model, context, { onPayload: scenario.payload, signal: controller.signal });
       assert.ok(['error', 'aborted'].includes(source.stopReason));
       let finalize;
       failureExtension({ on(_event, handler) { finalize = handler; } }, subscription);
