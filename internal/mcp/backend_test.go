@@ -41,7 +41,9 @@ func TestProductionBackendUsesDeveloperCredentialsForNonReviewOperations(t *test
 		{name: mcp.ToolGetIssue, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
 		{name: mcp.ToolListIssueComments, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
 		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolListPullRequestReviews, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolListReviewThreads, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolGetCheckRuns, credential: "developer-secret", owner: "acme", repository: "widgets", head: productionHeadSHA},
 	}

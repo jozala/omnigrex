@@ -148,7 +148,20 @@ func TestRecoveredPRRequestsReviewWithoutOpeningDuplicate(t *testing.T) {
 	scope := replayGatewayScope(nextLease, bound, head)
 	scope.PullRequest = &mcp.PullRequestScope{ID: bound.Publication.PullRequestID, Number: bound.Publication.PullRequestNumber}
 	scope.BranchExists = true
+	scope.RecoveredPublication = true
 	nextGateway, nextRegistration := openReplayGateway(t, database, backend, scope)
+	// Historical replay evidence cannot roll observation back from the recovered head.
+	callReplayGatewayTool(t, nextGateway, nextRegistration, mcp.ToolPublishChanges,
+		map[string]any{"operation_id": "publish-1", "message": "Fix"}, false)
+	callReplayGatewayTool(t, nextGateway, nextRegistration, mcp.ToolGetPullRequest, map[string]any{}, false)
+	replayEvidence, err := database.ListAgentTurnPublicationReads(ctx, nextLease, true)
+	if err != nil || len(replayEvidence) != 1 {
+		t.Fatalf("replay evidence = %#v, %v", replayEvidence, err)
+	}
+	currentEvidence, err := database.ListAgentTurnPublicationReads(ctx, nextLease, false)
+	if err != nil || len(currentEvidence) != 0 {
+		t.Fatalf("current evidence = %#v, %v", currentEvidence, err)
+	}
 	callReplayGatewayTool(t, nextGateway, nextRegistration, mcp.ToolRequestReview,
 		map[string]any{"operation_id": "request-review-after-recovery", "summary": "Ready"}, false)
 	if err := nextGateway.CloseAndDrain(ctx, nextRegistration); err != nil {

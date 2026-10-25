@@ -41,7 +41,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	github := &replayGatewayGitHub{head: finalHead, branch: "omnigrex/issue-95", base: "main"}
 	workflowMutations := &replayGatewayWorkflow{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: workflowMutations,
+		GitHub: &publicationReadGitHub{github}, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: workflowMutations,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +67,10 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1", "message": "First"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2", "message": "Second"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolOpenPR, map[string]any{"operation_id": "open-1", "title": "Changes", "body": "Ready"}, false)
+	read := callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolGetCheckRuns, map[string]any{}, false)
+	if !strings.Contains(read, finalHead) {
+		t.Fatalf("acknowledged replay read = %s", read)
+	}
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
 	github.mutex.Lock()

@@ -209,6 +209,16 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 }
 
 func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
+	// Apply observation context only to read execution, leaving the caller's
+	// immutable authority and all mutation planning untouched.
+	if invocation.readTarget != nil {
+		if invocation.Class != ReadTool || !publicationBoundRead(invocation.Name) {
+			return nil, ErrInvalidInvocation
+		}
+		invocation.Scope = cloneToolScope(invocation.Scope)
+		invocation.Scope.HeadSHA = invocation.readTarget.HeadSHA
+		invocation.Scope.PullRequest = invocation.readTarget.PullRequest
+	}
 	tool, err := backend.validateInvocation(invocation)
 	if err != nil {
 		return nil, err
@@ -292,17 +302,23 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		}
 		result = pullRequest
 	case ToolListPullRequestReviews:
+		if err := backend.verifyReadPullRequest(ctx, credential, invocation.Scope); err != nil {
+			return nil, err
+		}
 		reviews, callErr := backend.github.ListPullRequestReviews(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
 			return nil, newGitHubReadError(callErr)
 		}
-		result = reviews
+		result = map[string]any{"head_sha": invocation.Scope.HeadSHA, "reviews": reviews}
 	case ToolListReviewThreads:
+		if err := backend.verifyReadPullRequest(ctx, credential, invocation.Scope); err != nil {
+			return nil, err
+		}
 		threads, callErr := backend.github.ListReviewThreads(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
 			return nil, newGitHubReadError(callErr)
 		}
-		result = threads
+		result = map[string]any{"head_sha": invocation.Scope.HeadSHA, "threads": threads}
 	case ToolGetCheckRuns:
 		checks, callErr := backend.github.GetCheckRuns(ctx, credential, owner, repository, invocation.Scope.HeadSHA)
 		if callErr != nil {
@@ -313,7 +329,10 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 				return nil, ErrToolPrecondition
 			}
 		}
-		result = checks
+		result = struct {
+			HeadSHA   string               `json:"head_sha"`
+			CheckRuns []githubapi.CheckRun `json:"check_runs"`
+		}{invocation.Scope.HeadSHA, checks}
 	case ToolPublishChanges:
 		return backend.publishChanges(ctx, invocation, credential)
 	case ToolOpenPR:
@@ -1429,4 +1448,17 @@ func (backend *ProductionBackend) String() string {
 
 func (backend *ProductionBackend) GoString() string {
 	return "mcp.ProductionBackend{dependencies:<redacted>}"
+}
+
+// PR collection reads reject unrelated external pushes rather than silently
+// returning collaboration state for an unqualified head.
+func (backend *ProductionBackend) verifyReadPullRequest(ctx context.Context, credential string, scope ToolScope) error {
+	pr, err := backend.github.GetPullRequest(ctx, credential, scope.Repository.Owner, scope.Repository.Name, int(scope.PullRequest.Number))
+	if err != nil {
+		return newGitHubReadError(err)
+	}
+	if !matchesScopedPullRequest(pr, scope) {
+		return ErrToolPrecondition
+	}
+	return nil
 }
