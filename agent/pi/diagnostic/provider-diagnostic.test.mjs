@@ -19,3 +19,11 @@ test('closed diagnostic schema drops malformed, oversized and throwing metadata'
     assert.ok(!JSON.stringify(result).includes(secret));
   }
 });
+
+test('stateful getters cannot pass an allowlist and then substitute a secret', () => {
+  for (const [field, safe] of [['stage', 'local'], ['cause', 'http'], ['code', 'model_not_found'], ['retryability', 'unknown'], ['auth_mode', 'subscription'], ['attempt', '00000000-0000-4000-8000-000000000001'], ['request_id_hash', 'a'.repeat(64)]]) {
+    let reads = 0;
+    const source = { get [field]() { return reads++ === 0 ? safe : secret; } };
+    assert.ok(!JSON.stringify(safeDiagnostic(source)).includes('SENTINEL'), field);
+  }
+});

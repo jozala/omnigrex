@@ -19,15 +19,18 @@ export function safeDiagnostic(source) {
   const result = { stage: 'unknown', cause: 'unknown', retryability: 'unknown', http_status: null, code: 'unknown', request_id_hash: null, elapsed_ms: null, auth_mode: 'unknown', attempt: null };
   try {
     if (!source || typeof source !== 'object') return result;
-    if (stages.has(source.stage)) result.stage = source.stage;
-    if (causes.has(source.cause)) result.cause = source.cause;
-    if (['unknown', 'yes', 'no'].includes(source.retryability)) result.retryability = source.retryability;
-    if (Number.isInteger(source.http_status) && source.http_status >= 100 && source.http_status <= 599) result.http_status = source.http_status;
-    if (providerCodes.has(source.code)) result.code = source.code;
-    if (typeof source.attempt === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(source.attempt)) result.attempt = source.attempt;
-    if (typeof source.request_id_hash === 'string' && /^[0-9a-f]{64}$/u.test(source.request_id_hash)) result.request_id_hash = source.request_id_hash;
-    if (Number.isInteger(source.elapsed_ms) && source.elapsed_ms >= 0 && source.elapsed_ms <= 86400000) result.elapsed_ms = source.elapsed_ms;
-    if (source.auth_mode === 'subscription') result.auth_mode = 'subscription';
+    // Snapshot once: a stateful getter must not substitute a value after its
+    // first read has passed an allowlist or syntactic check.
+    const { stage, cause, retryability, http_status, code, attempt, request_id_hash, elapsed_ms, auth_mode } = source;
+    if (stages.has(stage)) result.stage = stage;
+    if (causes.has(cause)) result.cause = cause;
+    if (['unknown', 'yes', 'no'].includes(retryability)) result.retryability = retryability;
+    if (Number.isInteger(http_status) && http_status >= 100 && http_status <= 599) result.http_status = http_status;
+    if (providerCodes.has(code)) result.code = code;
+    if (typeof attempt === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(attempt)) result.attempt = attempt;
+    if (typeof request_id_hash === 'string' && /^[0-9a-f]{64}$/u.test(request_id_hash)) result.request_id_hash = request_id_hash;
+    if (Number.isInteger(elapsed_ms) && elapsed_ms >= 0 && elapsed_ms <= 86400000) result.elapsed_ms = elapsed_ms;
+    if (auth_mode === 'subscription') result.auth_mode = 'subscription';
   } catch { return { ...result, stage: 'unknown', cause: 'unknown' }; }
   return result;
 }

@@ -46,7 +46,7 @@ Start with the Turn reference in the Human Handoff, then search `retry_of_turn_i
 `Agent Turn infrastructure retry decision` records the used/limit budget after a committed live settlement and its fixed decision reason.
 Retry-exhaustion Human Handoffs also include used/limit and both Turn references; recovery-owned interruptions may have no provider request observation, so follow their Turn and recovery logs instead of expecting a provider ID.
 This diagnostic change does not increase retry limits, automatically resume a Workflow, or clear subscription blocks.
-Use the existing [authentication recovery procedure](secrets.md) for credential problems and explicitly resume only after resolving the underlying issue.
+Use the existing [authentication recovery procedure](provider-authentication.md#recover-access) for credential problems and explicitly resume only after resolving the underlying issue.
 
 Raw response bodies, arbitrary exception text/stacks, prompts, completions, tool payloads, credentials, cookie/authorization headers, and URLs/query strings are never part of this schema.
 Do not enable unrestricted SDK/HTTP debug logging or reproduce a paid request merely to obtain basic failure evidence.
