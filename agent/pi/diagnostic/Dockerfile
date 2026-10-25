@@ -30,8 +30,9 @@ WORKDIR /opt/omnigrex/pi
 COPY agent/pi/package.json agent/pi/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY agent/pi/diagnostic/fixture.mjs ./fixture.mjs
-COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs ./
+COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs agent/pi/control-events.mjs ./
 COPY agent/pi/subscription-auth.mjs ./
+COPY agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/control-rpc.test.mjs agent/pi/diagnostic/control-rpc-fixture.mjs ./diagnostic/
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs

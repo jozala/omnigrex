@@ -53,6 +53,39 @@ mise run test-pi-integration
 OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-integration
 ```
 
+## Owned RPC event projection
+
+The owned runner qualifies Pi 1.0.4's public runtime/Session subscription boundary, not a replacement RPC implementation.
+Only the RPC subscriber receives projected events; the real Session, extensions, model context, and durable conversation keep their original messages.
+`agent_end` is activity, never settlement authority; `agent_settled` and validated assistant stop/error evidence remain required.
+
+| Outbound event | Control-channel projection |
+| --- | --- |
+| `agent_end` | Type and `willRetry`; no `messages` access or serialization |
+| `message_start`, `message_end` | Type, message role, stop reason, error marker, provider generation |
+| `message_update` | Type, role, delta kind/index; stock Pi conversion retains tool-call start identity without the partial message; no text/thinking/argument deltas |
+| `turn_end`, `entry_appended`, `queue_update`, `bash_execution_update` | Event type only; redundant message/tool/entry/queued-text/output bodies stay in the Session owner |
+| `tool_execution_start/update/end` | Type, tool-call identity/name, parent identity, error flag; no arguments/results |
+| `compaction_end` | Type, reason, aborted/retry flags and error; no compaction summary |
+| Retry, settlement, other lifecycle and unknown events | Unchanged; required fields are not truncated |
+
+The controller still bounds every JSONL record to 1 MiB and fails closed on malformed/oversized required records.
+Command responses are not filtered or re-correlated; production History Replay uses the separate bounded metadata operation, not native transcript-returning RPC queries.
+Native transcript queries and unknown future events remain subject to the same controller bound, not a promise of arbitrary transcript transfer.
+Diagnostics use closed-vocabulary runtime observations, never transcript bodies or new raw-event logging.
+An infrastructure protocol failure is not repaired by accepting a terminal intent without valid outcome evidence.
+
+New Runtime Profiles include the projection module in their owned-resource hash inventory.
+Historical inventories remain valid and retain their original behavior; upgrade and both-backend qualification are still required before selecting a new deployment.
+If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
+Run `node --test agent/pi/diagnostic/control-events.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
+The configuration gate also runs `control-rpc.test.mjs` against the pinned SDK for long normal/retry/error/cancel completion, correlated commands during streaming, stdout backpressure, EOF cleanup, and fresh-process continuation.
+The both-backend Session gate performs a multi-megabyte normal completion followed by fresh-environment continuation and bounded metadata replay.
+Long-Turn fixtures accumulate several individually bounded assistant messages through read-tool calls, so only the redundant aggregate exceeds 1 MiB.
+The separate durable Session limits remain unchanged: 1 MiB per entry and 256 MiB per file; projection does not make an oversized individual durable entry reopenable.
+The SDK continuation test uses the owned durable Session opener as well, rather than bypassing its validation with the permissive Pi loader.
+The controlled Workflow gate exercises long `request_review`, `submit_review`, and blocked completion through production launch, MCP, and reconciliation.
+
 ## Live-provider smoke
 
 `test-pi-live` submits a short real prompt per provider through production `pi-rpc/v2`, the golden image, owned runner, checked renderer, and selected backend.

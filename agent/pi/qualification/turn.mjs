@@ -1,7 +1,7 @@
 // Qualification only: replace the HTTP model catalog, retaining production
 // bootstrap, durable preparation, resources, RPC, permissions and MCP bridge.
 import http from 'node:http';
-import { stat } from 'node:fs/promises';
+import { stat, writeFile } from 'node:fs/promises';
 import { readBootstrap, run } from '../runner.mjs';
 import { openDurableSession } from '../session-state.mjs';
 
@@ -9,6 +9,8 @@ const text = value => typeof value === 'string' ? value : Array.isArray(value) ?
 try {
   const configuration = await readBootstrap();
   const fault = process.env.OMNIGREX_PI_WORKFLOW_FAULT ?? '';
+  const longFile = '/run/pi-agent/long-fixture.txt';
+  await writeFile(longFile, 'Controlled long-Turn tool result.');
   let requestCount = 0;
   const server = http.createServer(async (request, response) => {
     let body = '';
@@ -48,6 +50,8 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
+    } else if (fault === 'long-blocked') {
+      if (step === 0) { name = 'omnigrex_report_blocked'; args = { operation_id: 'controlled-blocked', reason: 'Controlled prerequisite unavailable', details: 'Synthetic long-Turn blocked completion.' }; }
     } else if (role === 'DEVELOPER') {
       if (step === 0) { name = 'bash'; args = { command: "printf 'one\\n' > feature.txt; git add feature.txt; git commit -m 'Add first change'; printf 'two\\n' >> feature.txt; git add feature.txt; git commit -m 'Complete change'" }; }
       if (step === 1) { name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }
@@ -61,14 +65,21 @@ try {
       if (!fault) throw new Error('controlled capability failed');
       name = undefined; args = undefined;
     }
+    const paddingCalls = data.messages.slice(userIndex + 1).filter(m => m.role === 'assistant')
+      .flatMap(m => m.tool_calls ?? []).filter(t => t.function.name === 'read' && JSON.parse(t.function.arguments).path === longFile);
+    const longMessage = ['', 'long-blocked'].includes(fault) && !name && paddingCalls.length < 6;
+    if (longMessage) { name = 'read'; args = { path: longFile }; }
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const tool = name ? { id: `controlled-${++requestCount}`, type: 'function', function: { name, arguments: JSON.stringify(args) } } : null;
     const chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id: 'controlled-workflow', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    // Several individually bounded assistant messages produce a multi-megabyte
+    // agent_end without violating the separate durable Session entry limit.
+    if (longMessage) chunk({ role: 'assistant', content: 'LONG_WORKFLOW_BODY'.repeat(32000) }, null);
     chunk(tool ? { role: 'assistant', tool_calls: [{ index: 0, ...tool }] } : { role: 'assistant', content: 'Controlled Turn complete.' }, null);
     chunk({}, tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const models = { providers: { controlled: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', models: [{ id: 'workflow', name: 'Controlled workflow', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } };
+  const models = { providers: { controlled: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', models: [{ id: 'workflow', name: 'Controlled workflow', reasoning: false, input: ['text'], contextWindow: 2000000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } };
   const { manager, disposition } = await openDurableSession(configuration.session);
   process.stdout.write(JSON.stringify({ type: 'omnigrex_session_ready', sessionId: manager.getSessionId(), disposition, capabilities: { history_replay: true, session_continuation: true, state_format: 'pi-session/v3' } }) + '\n');
   await run(configuration, manager, models);
