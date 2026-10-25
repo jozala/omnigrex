@@ -42,7 +42,7 @@ func (backend *ProductionBackend) resolvePublicationRead(scope ToolScope, mutati
 		}
 		previous = mutation.InvocationNumber
 		metadata := replayMetadataForScope(mutation.ToolName, scope)
-		if mutation.ExternalService != metadata.ExternalService || mutation.ExternalResourceID != metadata.ExternalResourceID || mutation.ExpectedSHA != target.HeadSHA {
+		if mutation.ExternalService != metadata.ExternalService || mutation.ExternalResourceID != metadata.ExternalResourceID || !validRevision(mutation.ExpectedSHA) {
 			return publicationReadTarget{}, ErrToolPrecondition
 		}
 		switch mutation.ToolName {
@@ -55,13 +55,20 @@ func (backend *ProductionBackend) resolvePublicationRead(scope ToolScope, mutati
 			if !decodeExactResult(mutation.Result, &result) || result.Changed == nil || !validRevision(result.Head) || result.Branch != scope.Branch ||
 				mutation.HistoryPublication && *result.Changed && mutation.ProposedSHA == "" ||
 				mutation.ProposedSHA != "" && (!*result.Changed || mutation.ProposedSHA != result.Head) ||
-				*result.Changed && result.Head == target.HeadSHA || !*result.Changed && result.Head != target.HeadSHA {
+				*result.Changed && result.Head == mutation.ExpectedSHA || !*result.Changed && result.Head != mutation.ExpectedSHA {
+				return publicationReadTarget{}, ErrToolPrecondition
+			}
+			// Verified preparation can repair an existing PR retry's starting head
+			// before the publication that produced it is acknowledged as a replay.
+			// Accept that fully validated, already-applied result without moving the
+			// target; a mismatched predecessor may never grant a different head.
+			if mutation.ExpectedSHA != target.HeadSHA && result.Head != target.HeadSHA {
 				return publicationReadTarget{}, ErrToolPrecondition
 			}
 			target.HeadSHA = result.Head
 		case ToolOpenPR:
 			pr, _, ok := restoredPullRequest(mutation.Result, target.HeadSHA)
-			if !ok || !sameOrMissingPullRequest(target.PullRequest, pr) {
+			if !ok || mutation.ExpectedSHA != target.HeadSHA || !sameOrMissingPullRequest(target.PullRequest, pr) {
 				return publicationReadTarget{}, ErrToolPrecondition
 			}
 			target.PullRequest = pr

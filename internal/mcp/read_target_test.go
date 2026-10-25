@@ -65,6 +65,29 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 			}
 		})
 	}
+	// A retry can start at a verified, repaired PR head before it acknowledges
+	// the publication that produced that head. The historical expected SHA is
+	// not the starting authority, and the replay must not disable reads.
+	repaired := cloneToolScope(scope)
+	repaired.HeadSHA = first
+	repaired.PullRequest = &PullRequestScope{ID: 456, Number: 23}
+	for _, evidence := range [][]store.MutationReservation{chain[:1], {chain[0], chain[2]}} {
+		want := first
+		if len(evidence) > 1 {
+			want = final
+		}
+		target, err := backend.resolvePublicationRead(repaired, evidence)
+		if err != nil || target.HeadSHA != want || !reflect.DeepEqual(target.PullRequest, repaired.PullRequest) {
+			t.Fatalf("repaired-head replay target = %#v, %v; want %s", target, err, want)
+		}
+	}
+	// Even already-applied results must retain complete publication validation.
+	invalidApplied := chain[0]
+	invalidApplied.ProposedSHA = final
+	if _, err := backend.resolvePublicationRead(repaired, []store.MutationReservation{invalidApplied}); err == nil {
+		t.Fatal("accepted invalid already-applied publication")
+	}
+
 	// An existing PR retains its identity while Developer publications advance only
 	// the observation head. Reviewer reads stay frozen even in the presence of evidence.
 	scope.PullRequest = &PullRequestScope{ID: 456, Number: 23}

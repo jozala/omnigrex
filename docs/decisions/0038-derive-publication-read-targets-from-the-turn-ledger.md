@@ -17,6 +17,7 @@ Keep token authority, mutation scopes, expected-head fences, and Reviewer target
 For Developer PR and CI reads, derive a separate observation target from successful publication/open-PR mutations recorded for the exact live Turn and execution epoch.
 Validate the repository/branch resource, ordered expected-head chain, captured publication tip, and PR result identity before using that evidence.
 Include durably acknowledged ancestor replays, not arbitrary prior mutations.
+When verified preparation has repaired an existing Change Proposal to a publication's result head, validate the acknowledged publication against its own expected head and treat that equal-result evidence as already applied; it must neither reject reads nor move the target backward.
 When recovery has already bound a verified publication as the starting scope, exclude historical replays from this derivation so they cannot roll the observation target backward.
 Do not use GitHub's current branch tip or process-local publication maps to grant read access.
 
