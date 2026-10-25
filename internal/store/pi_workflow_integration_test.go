@@ -86,8 +86,17 @@ func TestPiControlledWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(bytes), strings.Repeat("LONG_WORKFLOW_BODY", 200000)) {
-			t.Fatal("complete long assistant transcript was not retained")
+		longMessages := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(bytes)), "\n") {
+			if len(line) > 1<<20 {
+				t.Fatal("fixture exceeded durable Session entry bound")
+			}
+			if strings.Contains(line, strings.Repeat("LONG_WORKFLOW_BODY", 32000)) {
+				longMessages++
+			}
+		}
+		if longMessages != 6 || len(bytes) < 2<<20 {
+			t.Fatalf("complete long transcript was not retained: messages=%d bytes=%d", longMessages, len(bytes))
 		}
 		for _, secret := range []string{"workflow-only-provider-key", "developer-token", "reviewer-token"} {
 			if strings.Contains(string(bytes), secret) {

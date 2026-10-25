@@ -70,7 +70,7 @@ try {
     if (prompt === 'configuration-continuation') {
       if (providerRequests !== 0) throw new Error('History Replay contacted the provider');
       if (!data.messages.some(m => m.role === 'user' && contentText(m.content) === 'configuration-audit')) throw new Error('prior Session context was lost');
-      if (!data.messages.some(m => m.role === 'assistant' && contentText(m.content) === 'LONG_SESSION_BODY'.repeat(200000))) throw new Error('long durable assistant body was lost');
+      if (data.messages.filter(m => m.role === 'assistant' && contentText(m.content) === 'LONG_SESSION_BODY'.repeat(32000)).length !== 6) throw new Error('long durable assistant messages were lost');
       if (JSON.stringify(data.messages).includes('ABANDONED_HISTORY')) throw new Error('abandoned branch became current context');
     }
     if (prompt === 'configuration-thinking-max-continue') {
@@ -107,6 +107,8 @@ try {
     }
     const call = (name, args) => ({ id: `call-${++requests}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
     let tool;
+    const longMessage = prompt === 'configuration-long' && toolResults.length < 6;
+    if (longMessage) tool = call('read', { path: '/workspace/example.txt' });
     if (prompt === 'configuration-mcp' && !toolResults.length) tool = call('omnigrex_get_issue', {});
     if (prompt === 'configuration-revoked' && !toolResults.length) tool = call('omnigrex_get_issue', {});
     if (prompt === 'configuration-publish' && !toolResults.length) tool = call('omnigrex_publish_changes', { operation_id: 'fixture-publish' });
@@ -161,10 +163,10 @@ try {
     const delta = streamFailure ? { role: 'assistant', content: `Failed response: ${request.headers.authorization}; ${configuration.mcp.headers[0].value}` }
       : tool ? { role: 'assistant', tool_calls: [{ index: 0, ...tool }] } : { role: 'assistant', content: 'configuration passed' };
     const chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id: 'config', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    if (prompt === 'configuration-long') {
-      chunk({ role: 'assistant' }, null);
-      for (let i = 0; i < 200; i++) chunk({ content: 'LONG_SESSION_BODY'.repeat(1000) }, null);
-    } else chunk(delta, null);
+    // Each durable message stays below 1 MiB; only agent_end's redundant
+    // aggregate exceeds the control-channel bound, as in the incident.
+    if (longMessage) chunk({ role: 'assistant', content: 'LONG_SESSION_BODY'.repeat(32000) }, null);
+    chunk(delta, null);
     chunk({}, streamFailure ? 'network_error' : tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

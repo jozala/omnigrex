@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const fixture = fileURLToPath(new URL('./control-rpc-fixture.mjs', import.meta.url));
-const body = 'LONG_RPC_BODY'.repeat(250000);
+const body = 'LONG_RPC_BODY'.repeat(40000);
 async function prompt(t, root, mode, continued = false) {
   const child = spawn(process.execPath, [fixture, root, mode, continued ? 'continued' : ''],
     { env: { ...process.env, PI_OFFLINE: '1', PI_TELEMETRY: '0', PI_SKIP_VERSION_CHECK: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -43,7 +43,7 @@ async function prompt(t, root, mode, continued = false) {
         }
         if (record.type === 'message_update' && record.assistantMessageEvent.type === 'text_delta') {
           deltas++;
-          if (mode === 'cancel' && deltas === 250) send({ type: 'abort', id: 'cancel-long' });
+          if (mode === 'cancel' && deltas === 7) send({ type: 'abort', id: 'cancel-long' });
         }
         if (record.type === 'agent_settled') resolveSettled();
       }
@@ -86,9 +86,10 @@ for (const mode of ['normal', 'retry', 'error', 'cancel']) {
     await prompt(t, root, mode);
     if (mode === 'normal') {
       const path = await readFile(join(root, 'session-path'), 'utf8');
-      const entries = (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-      assert.ok(entries.some(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.content.some(block => block.type === 'text' && block.text === body)), 'durable Session lost complete assistant body');
-      await copyFile(path, join(root, 'session.jsonl'));
+      const lines = (await readFile(path, 'utf8')).trim().split('\n');
+      assert.ok(lines.every(line => Buffer.byteLength(line) < 1 << 20), 'fixture violated durable entry bound');
+      const entries = lines.map(line => JSON.parse(line));
+      assert.equal(entries.filter(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.content.some(block => block.type === 'text' && block.text === body)).length, 6, 'durable Session lost complete assistant messages');
       await prompt(t, root, 'normal', true);
     }
   });

@@ -80,7 +80,10 @@ Historical inventories remain valid and retain their original behavior; upgrade 
 If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
 Run `node --test agent/pi/diagnostic/control-events.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
 The configuration gate also runs `control-rpc.test.mjs` against the pinned SDK for long normal/retry/error/cancel completion, correlated commands during streaming, stdout backpressure, EOF cleanup, and fresh-process continuation.
-The both-backend Session gate now performs a multi-megabyte normal completion followed by fresh-environment continuation and bounded metadata replay.
+The both-backend Session gate performs a multi-megabyte normal completion followed by fresh-environment continuation and bounded metadata replay.
+Long-Turn fixtures accumulate several individually bounded assistant messages through read-tool calls, so only the redundant aggregate exceeds 1 MiB.
+The separate durable Session limits remain unchanged: 1 MiB per entry and 256 MiB per file; projection does not make an oversized individual durable entry reopenable.
+The SDK continuation test uses the owned durable Session opener as well, rather than bypassing its validation with the permissive Pi loader.
 The controlled Workflow gate exercises long `request_review`, `submit_review`, and blocked completion through production launch, MCP, and reconciliation.
 
 ## Live-provider smoke

@@ -4,17 +4,20 @@ import http from 'node:http';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices,
-  SessionManager, SettingsManager, runRpcMode } from '@earendil-works/pi-coding-agent';
+  SettingsManager, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { controlRuntime } from '../control-events.mjs';
+import { openDurableSession } from '../session-state.mjs';
 
 const [root, mode, continued] = process.argv.slice(2);
-const body = 'LONG_RPC_BODY'.repeat(250000);
+const body = 'LONG_RPC_BODY'.repeat(40000);
+const file = join(root, 'read-fixture.txt');
+await writeFile(file, 'Controlled tool result.');
 let attempts = 0;
 const server = http.createServer(async (request, response) => {
   let raw = '';
   for await (const chunk of request) raw += chunk;
   const data = JSON.parse(raw);
-  if (continued && !data.messages.some(message => message.role === 'assistant' && message.content === body)) {
+  if (continued && data.messages.filter(message => message.role === 'assistant' && message.content === body).length !== 6) {
     response.writeHead(400); response.end(); return;
   }
   if (mode === 'retry' && ++attempts === 1) {
@@ -24,8 +27,15 @@ const server = http.createServer(async (request, response) => {
   response.writeHead(200, { 'Content-Type': 'text/event-stream' });
   const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'control-rpc', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
   chunk({ role: 'assistant' });
-  if (continued) chunk({ content: 'continued with complete history' });
-  else for (let i = 0; i < 250; i++) chunk({ content: 'LONG_RPC_BODY'.repeat(1000) });
+  const results = data.messages.slice(data.messages.findLastIndex(m => m.role === 'user') + 1).filter(m => m.role === 'tool');
+  const longMessage = !continued && results.length < 6;
+  if (longMessage) {
+    chunk({ content: body });
+    chunk({ tool_calls: [{ index: 0, id: `read-${results.length}`, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } }] });
+    chunk({}, 'tool_calls');
+    response.end('data: [DONE]\n\n'); return;
+  }
+  chunk({ content: continued ? 'continued with complete history' : 'controlled completion' });
   if (mode === 'cancel') return; // Real RPC abort must stop the pending stream.
   chunk({}, mode === 'error' ? 'network_error' : 'stop');
   response.end('data: [DONE]\n\n');
@@ -39,18 +49,18 @@ await writeFile(join(agentDir, 'models.json'), JSON.stringify({ providers: { dia
   models: [{ id: 'controlled', name: 'Controlled', reasoning: false, input: ['text'], contextWindow: 2000000, maxTokens: 1024,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
 } } }));
-const manager = continued ? SessionManager.open(join(root, 'session.jsonl'), join(root, 'sessions'), root)
-  : SessionManager.create(root, join(root, 'sessions'));
+const id = '11111111-1111-4111-8111-111111111111';
+const { manager } = await openDurableSession({ agentSessionId: id, runtimeSessionId: id, mustExist: Boolean(continued) }, root);
 // Publish the path out of band for the parent; no transcript on stdout.
 await writeFile(join(root, 'session-path'), manager.getSessionFile());
 const settingsManager = SettingsManager.inMemory({ retry: { enabled: mode === 'retry', maxRetries: 1, baseDelayMs: 10 },
   compaction: { enabled: false }, cacheWarming: 'off', enableAnalytics: false, enableInstallTelemetry: false }, { projectTrusted: false });
 const runtime = await createAgentSessionRuntime(async ({ sessionManager }) => {
-  const services = await createAgentSessionServices({ cwd: root, agentDir, settingsManager,
+  const services = await createAgentSessionServices({ cwd: '/workspace', agentDir, settingsManager,
     resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       disabledBuiltinExtensions: ['mcp'], systemPromptOverride: () => 'Controlled qualification only' } });
   const model = services.modelRuntime.getModel('diagnostic', 'controlled');
-  const session = await createAgentSessionFromServices({ services, sessionManager, model, tools: [] });
+  const session = await createAgentSessionFromServices({ services, sessionManager, model, tools: ['read'] });
   return { ...session, services, diagnostics: services.diagnostics };
-}, { cwd: root, agentDir, sessionManager: manager });
+}, { cwd: '/workspace', agentDir, sessionManager: manager });
 await runRpcMode(controlRuntime(runtime));
