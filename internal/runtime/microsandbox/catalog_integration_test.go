@@ -147,10 +147,13 @@ func TestNativeCatalogPeer(t *testing.T) {
 		if _, err := sdk.CreateVolume(ctx, os.Getenv("OMNIGREX_CATALOG_NAME")); err != nil {
 			t.Fatal(err)
 		}
-	} else if mode != "verify" {
+	} else if mode != "verify" && mode != "verify-retained" {
 		t.Fatal("invalid peer mode")
 	}
 	assertCatalogVolumes(t, ctx, strings.Split(os.Getenv("OMNIGREX_CATALOG_EXPECTED"), ","))
+	if mode == "verify-retained" {
+		verifyRetainedCatalogData(t, ctx)
+	}
 	assertNoDeletedCatalogMappings(t)
 	t.Logf("CATALOG PEER PASS pid=%d mode=%s", os.Getpid(), mode)
 }

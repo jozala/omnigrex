@@ -30,6 +30,11 @@ COPY agent/pi ./agent/pi
 ARG VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -tags=microsandbox -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/omnigrex ./cmd/omnigrex
 
+FROM toolchain AS catalog-v076-build
+WORKDIR /src
+COPY internal/runtime/microsandbox/testdata/catalog-v076/ ./
+RUN CGO_ENABLED=1 go build -mod=readonly -trimpath -o /out/catalog-v076 .
+
 FROM build AS test-build
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/microsandbox.test ./internal/runtime/microsandbox
 
@@ -50,6 +55,7 @@ FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
 COPY --from=agentd-build /src/target/x86_64-unknown-linux-musl/release/agentd /usr/local/lib/omnigrex/agentd
 COPY --from=agentd-source /src/LICENSE /usr/share/licenses/omnigrex/microsandbox-agentd/LICENSE
+RUN mkdir -p /usr/share/omnigrex && printf '%s\n' 'df3e0f7dd69280b88f6e28d6d3cf5fe4bb4a87a0 patched-domain-cgroups' > /usr/share/omnigrex/microsandbox-agentd-source
 RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise /var/lib/omnigrex/provider-auth && chown -R 10001:10001 /var/lib/omnigrex
 ENV OMNIGREX_EXECUTION_BACKEND=microsandbox
 ENV MSB_AGENTD_PATH=/usr/local/lib/omnigrex/agentd
@@ -60,6 +66,7 @@ FROM runtime AS qualification
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 && rm -rf /var/lib/apt/lists/*
 USER 10001:10001
+COPY --from=catalog-v076-build /out/catalog-v076 /usr/local/bin/catalog-v076
 COPY --from=test-build /out/microsandbox.test /usr/local/bin/microsandbox.test
 COPY internal/runtime/microsandbox/testdata/nested /fixtures
 ENV HOME=/tmp OMNIGREX_MICROSANDBOX_INTEGRATION=1
