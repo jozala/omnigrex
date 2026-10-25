@@ -48,6 +48,8 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
+    } else if (fault === 'long-blocked') {
+      if (step === 0) { name = 'omnigrex_report_blocked'; args = { operation_id: 'controlled-blocked', reason: 'Controlled prerequisite unavailable', details: 'Synthetic long-Turn blocked completion.' }; }
     } else if (role === 'DEVELOPER') {
       if (step === 0) { name = 'bash'; args = { command: "printf 'one\\n' > feature.txt; git add feature.txt; git commit -m 'Add first change'; printf 'two\\n' >> feature.txt; git add feature.txt; git commit -m 'Complete change'" }; }
       if (step === 1) { name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }
@@ -65,6 +67,11 @@ try {
     const tool = name ? { id: `controlled-${++requestCount}`, type: 'function', function: { name, arguments: JSON.stringify(args) } } : null;
     const chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id: 'controlled-workflow', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
     chunk(tool ? { role: 'assistant', tool_calls: [{ index: 0, ...tool }] } : { role: 'assistant', content: 'Controlled Turn complete.' }, null);
+    if (!tool) {
+      // Synthetic final content exceeds the old per-record bound. Stream in
+      // small deltas; the durable Session must keep all of it, RPC must not.
+      for (let i = 0; i < 200; i++) chunk({ content: 'LONG_WORKFLOW_BODY'.repeat(1000) }, null);
+    }
     chunk({}, tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

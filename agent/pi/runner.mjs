@@ -5,6 +5,7 @@ import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
+import { controlRuntime } from './control-events.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
 const agentDir = '/run/pi-agent';
@@ -114,7 +115,7 @@ export async function run(configuration, sessionManager, models) {
     input.on('error', () => process.exit(1));
     Object.defineProperty(process, 'stdin', { value: input });
   }
-  const rpc = runRpcMode(runtime);
+  const rpc = runRpcMode(controlRuntime(runtime));
   source.resume();
   await rpc;
 }

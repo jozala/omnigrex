@@ -12,7 +12,7 @@ const fixturePrompts = new Set(['PRIOR_TURN_CONTEXT', 'configuration-audit', 'co
   'configuration-developer-only', 'configuration-write', 'configuration-edit', 'configuration-skill',
   'configuration-grep', 'configuration-find', 'configuration-ls', 'configuration-bash',
   'configuration-provider-error', 'configuration-provider-stream-error', 'configuration-provider-error-audit', 'configuration-continuation',
-  'configuration-thinking-max', 'configuration-thinking-max-continue']);
+  'configuration-thinking-max', 'configuration-thinking-max-continue', 'configuration-long']);
 function providerReasoningSetting(data) {
   // Generic openai-completions wire for a reasoning model without a special
   // thinkingFormat carries the mapped level as reasoning_effort.
@@ -32,6 +32,7 @@ async function runFixture(command, args) {
 }
 try {
   const configuration = await readBootstrap();
+  if (process.env.OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/diagnostic/control-events.test.mjs', '/opt/omnigrex/pi/diagnostic/control-rpc.test.mjs']);
   if (process.env.OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/session-state.test.mjs']);
   if (process.env.OMNIGREX_PI_MCP_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/mcp-boundary.test.mjs']);
   if (process.env.OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/failure-boundary.test.mjs', '/opt/omnigrex/pi/diagnostic/subscription.test.mjs']);
@@ -69,6 +70,7 @@ try {
     if (prompt === 'configuration-continuation') {
       if (providerRequests !== 0) throw new Error('History Replay contacted the provider');
       if (!data.messages.some(m => m.role === 'user' && contentText(m.content) === 'configuration-audit')) throw new Error('prior Session context was lost');
+      if (!data.messages.some(m => m.role === 'assistant' && contentText(m.content) === 'LONG_SESSION_BODY'.repeat(200000))) throw new Error('long durable assistant body was lost');
       if (JSON.stringify(data.messages).includes('ABANDONED_HISTORY')) throw new Error('abandoned branch became current context');
     }
     if (prompt === 'configuration-thinking-max-continue') {
@@ -159,7 +161,11 @@ try {
     const delta = streamFailure ? { role: 'assistant', content: `Failed response: ${request.headers.authorization}; ${configuration.mcp.headers[0].value}` }
       : tool ? { role: 'assistant', tool_calls: [{ index: 0, ...tool }] } : { role: 'assistant', content: 'configuration passed' };
     const chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id: 'config', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    chunk(delta, null); chunk({}, streamFailure ? 'network_error' : tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
+    if (prompt === 'configuration-long') {
+      chunk({ role: 'assistant' }, null);
+      for (let i = 0; i < 200; i++) chunk({ content: 'LONG_SESSION_BODY'.repeat(1000) }, null);
+    } else chunk(delta, null);
+    chunk({}, streamFailure ? 'network_error' : tool ? 'tool_calls' : 'stop'); response.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   // controlled-max mirrors the pinned catalog observation for a reasoning model
@@ -167,11 +173,11 @@ try {
   // never maps models to thinking levels and always queries the live runtime.
   const models = { providers: { diagnostic: {
     baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
-    models: [{ id: 'controlled', name: 'Controlled configuration', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 1024,
+    models: [{ id: 'controlled', name: 'Controlled configuration', reasoning: false, input: ['text'], contextWindow: 2000000, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
     { id: 'controlled-max', name: 'Controlled reasoning max', reasoning: true,
       thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
-      input: ['text'], contextWindow: 32000, maxTokens: 1024,
+      input: ['text'], contextWindow: 2000000, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } };
   if (retained) {
