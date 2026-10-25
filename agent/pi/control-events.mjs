@@ -6,6 +6,9 @@ export function controlEvent(event) {
     case 'agent_end':
       return { type: event.type, willRetry: event.willRetry };
     case 'message_start':
+      // Rejected requests can start with an already failed, unsanitized message.
+      // Only finalized message_end has crossed pre-persistence sanitization.
+      return { type: event.type, message: { role: event.message.role } };
     case 'message_end': {
       const { role, stopReason, errorMessage, omnigrexProviderGeneration } = event.message;
       return { type: event.type, message: { role, stopReason, errorMessage, omnigrexProviderGeneration } };
@@ -30,9 +33,14 @@ export function controlEvent(event) {
     case 'tool_execution_end':
       return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName,
         parentToolCallId: event.parentToolCallId, isError: event.isError };
+    case 'compaction_start':
+      return { type: event.type, reason: event.reason };
     case 'compaction_end':
+      // Summary calls bypass conversational message_end sanitization. Neither
+      // summary bodies nor arbitrary provider errors belong on the RPC wire.
       return { type: event.type, reason: event.reason, aborted: event.aborted,
-        willRetry: event.willRetry, errorMessage: event.errorMessage };
+        willRetry: event.willRetry,
+        errorMessage: event.errorMessage ? 'Omnigrex compaction_failed' : undefined };
     default:
       // Required lifecycle/retry fields and unknown future events are never
       // silently discarded. The controller's existing 1 MiB bound fails closed.

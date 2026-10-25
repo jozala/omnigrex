@@ -70,7 +70,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
   if (models) await writeFile(join(agentDir, 'models.json'), JSON.stringify(models), { mode: 0o600 });
   const skills = await skillPaths(configuration.repositorySkills);
   const settingsManager = SettingsManager.inMemory({
-    retry: { enabled: false }, compaction: { enabled: false }, cacheWarming: 'off',
+    retry: { enabled: false }, compaction: { enabled: true }, cacheWarming: 'off',
     enableAnalytics: false, enableInstallTelemetry: false, enableSkillCommands: true,
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {

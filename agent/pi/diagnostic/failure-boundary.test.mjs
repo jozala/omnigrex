@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isRetryableAssistantError } from '@earendil-works/pi-ai/compat';
+import { isRetryableAssistantError, isContextOverflow } from '@earendil-works/pi-ai/compat';
 import { failureExtension } from './failure-extension.mjs';
 
 const secret = 'failure-boundary-fixture-secret';
@@ -56,5 +56,34 @@ test('an invalidated context cannot bypass pre-persistence sanitation', () => {
   const context = { get model() { throw new Error(`stale context: ${secret}`); } };
   const { message } = finalize({ message: { role: 'assistant', stopReason: 'error', errorMessage: secret } }, context);
   assert.equal(message.stopReason, 'error');
+  assert.equal(JSON.stringify(message).includes(secret), false);
+});
+
+for (const [errorMessage, overflow] of [
+  [`400 Your input exceeds the context window of this model: ${secret}`, true],
+  [`400 context_length_exceeded: ${secret}`, true],
+  [`400 prompt is too long: ${secret}`, true],
+  [`429 rate limit: too many tokens ${secret}`, false],
+  [`429 insufficient_quota: context_length_exceeded ${secret}`, false],
+  [`daily token limit exceeded: ${secret}`, false],
+  [`401 Invalid API key: ${secret}`, false],
+  [`503 transport unavailable: ${secret}`, false],
+]) {
+  test(`safe native overflow classification: ${errorMessage.split(':')[0]}`, () => {
+    let finalize;
+    failureExtension({ on(_event, handler) { finalize = handler; } });
+    const { message } = finalize({ message: { role: 'assistant', stopReason: 'error', errorMessage } }, { model });
+    assert.equal(isContextOverflow(message), overflow);
+    assert.equal(JSON.stringify(message).includes(secret), false);
+  });
+}
+
+test('explicit overflow is not overwritten by subscription temporary classification', async () => {
+  let finalize;
+  failureExtension({ on(_event, handler) { finalize = handler; } }, {
+    failure() { throw new Error('overflow must not become account failure'); },
+  });
+  const { message } = await finalize({ message: { role: 'assistant', stopReason: 'error', errorMessage: `context_length_exceeded ${secret}` } }, { model });
+  assert.equal(isContextOverflow(message), true);
   assert.equal(JSON.stringify(message).includes(secret), false);
 });

@@ -43,6 +43,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 		{"failed partial response retention", role.Developer, "configuration-provider-stream-error", ""},
 		{"failure record sanitation boundaries", role.Developer, "configuration-audit", "failure-boundary"},
 		{"compact control event boundaries", role.Developer, "configuration-audit", "control-boundary"},
+		{"native compaction boundaries", role.Developer, "configuration-audit", "compaction-boundary"},
 		{"durable file safety boundaries", role.Developer, "configuration-audit", "session-boundary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,6 +60,8 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				spec.Namespace = settings.RuntimeStateVolume
 			}
 			switch tc.corrupt {
+			case "compaction-boundary":
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_COMPACTION_FIXTURE=1")
 			case "control-boundary":
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE=1")
 			case "model":
