@@ -57,6 +57,9 @@ USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/omnigrex"]
 
 FROM runtime AS qualification
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 && rm -rf /var/lib/apt/lists/*
+USER 10001:10001
 COPY --from=test-build /out/microsandbox.test /usr/local/bin/microsandbox.test
 COPY internal/runtime/microsandbox/testdata/nested /fixtures
 ENV HOME=/tmp OMNIGREX_MICROSANDBOX_INTEGRATION=1
