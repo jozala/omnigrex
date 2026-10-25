@@ -112,7 +112,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = c.Close() }()
-			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "control-boundary" {
+			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "control-boundary" && tc.corrupt != "compaction-boundary" {
 				if _, err := c.Prepare(ctx); !errors.Is(err, pi.ErrConfiguration) {
 					t.Fatalf("invalid preparation did not report a configuration failure: %v", err)
 				}
