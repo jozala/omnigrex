@@ -71,7 +71,7 @@ test('transcript-heavy activity has explicit compact projections without mutatin
 
 test('outcome evidence, retry and unknown required fields are not truncated', () => {
   const end = { type: 'message_end', message: { ...message, stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation' } };
-  assert.deepEqual(controlEvent(end).message, { role: 'assistant', stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation' });
+  assert.deepEqual(controlEvent(end).message, { role: 'assistant', stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation', omnigrexProviderDiagnostic: undefined });
   for (const source of [
     { type: 'agent_settled' },
     { type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 10, errorMessage: 'temporary' },

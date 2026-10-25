@@ -1,6 +1,8 @@
 package agentturn
 
 import (
+	"fmt"
+
 	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 )
@@ -21,11 +23,13 @@ func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, 
 		if outcome.Admitted && outcome.Status == agent.Failed {
 			switch outcome.FailureClass {
 			case providerauth.QuotaFailure:
-				return agent.Outcome{}, providerauth.ErrQuota
+				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrQuota)
 			case providerauth.AuthFailure:
-				return agent.Outcome{}, providerauth.ErrAuthentication
+				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrAuthentication)
+			case providerauth.TemporaryFailure:
+				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrRequestTemporary)
 			case providerauth.ConfigurationFailure:
-				return agent.Outcome{}, providerauth.ErrConfiguration
+				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrConfiguration)
 			}
 		}
 		return agent.Outcome{}, agent.ErrRuntime
@@ -34,4 +38,11 @@ func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, 
 	default:
 		return agent.Outcome{}, agent.ErrProtocol
 	}
+}
+
+func promptProviderError(outcome agent.Outcome, cause error) error {
+	if outcome.FailureDiagnostic == nil {
+		return cause
+	}
+	return fmt.Errorf("%w (%s)", cause, outcome.FailureDiagnostic.Summary())
 }

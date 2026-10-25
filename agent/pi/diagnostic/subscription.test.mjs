@@ -140,10 +140,90 @@ test('unavailable controller does not fall back to ambient OpenAI credentials', 
   process.env.OPENAI_API_KEY = 'sk-must-not-be-used';
   try {
     const subscription = await subscriptionRuntime(configuration, directory, null, async () => Response.json({ failure: 'subscription_auth' }, { status: 503 }));
-    await assert.rejects(subscription.runtime.getAuth('openai'), /subscription_auth/u);
-    assert.equal((await subscription.failure({ errorMessage: '' })).failure, 'subscription_auth');
+    const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+    const source = await subscription.runtime.completeSimple(model, { messages: [] });
+    assert.equal((await subscription.failure(source)).failure, 'subscription_auth');
   } finally {
     if (old === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = old;
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+const sentinel = 'SENTINEL-credential-prompt-https-private-query';
+const credential = () => Response.json({ access_token: sentinel, generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
+const context = { messages: [{ role: 'user', content: sentinel, timestamp: 1 }] };
+const networkError = code => Object.assign(new Error(sentinel), { cause: { code }, secret: sentinel });
+const sse = data => new Response(data, { headers: { 'content-type': 'text/event-stream', 'x-request-id': sentinel } });
+
+test('failure observations survive sanitation with honest sources and no raw provider data', async t => {
+  for (const scenario of [
+    { name: 'credential HTTP', auth: () => Response.json({ failure: 'subscription_auth', secret: sentinel }, { status: 503 }), stage: 'credential', status: 503, cause: 'http' },
+    { name: 'credential network', auth: () => { throw networkError('ECONNREFUSED'); }, stage: 'credential', cause: 'network' },
+    { name: 'credential malformed', auth: () => Response.json({ access_token: sentinel }), stage: 'credential', status: 200, cause: 'unknown' },
+    { name: 'provider HTTP known', fetch: () => Response.json({ error: { code: 'model_not_found', type: sentinel, message: sentinel } }, { status: 404, headers: { 'x-request-id': sentinel, 'set-cookie': sentinel } }), stage: 'provider_http', status: 404, code: 'model_not_found', cause: 'http' },
+    { name: 'provider HTTP unknown', fetch: () => Response.json({ error: { code: sentinel, type: sentinel, message: sentinel } }, { status: 502 }), stage: 'provider_http', status: 502, cause: 'http' },
+    { name: 'SSE named error', fetch: () => sse(`event: error\ndata: ${JSON.stringify({ code: 'subscription_sharing_usage_unavailable', message: sentinel })}\n\n`), stage: 'provider_stream', status: 200, code: 'subscription_sharing_usage_unavailable', cause: 'stream_error' },
+    { name: 'SSE unknown code', fetch: () => sse(`event: error\ndata: ${JSON.stringify({ code: sentinel, message: sentinel })}\n\n`), stage: 'provider_stream', status: 200, cause: 'stream_error' },
+    { name: 'stream interruption', fetch: () => new Response(new ReadableStream({ start(c) { c.error(networkError('ECONNRESET')); } }), { headers: { 'content-type': 'text/event-stream' } }), stage: 'provider_stream', status: 200, cause: 'network' },
+    { name: 'invalid response protocol', fetch: () => Response.json({ secret: sentinel }), stage: 'provider_stream', status: 200, cause: 'protocol' },
+    { name: 'network', fetch: () => { throw networkError('ENOTFOUND'); }, stage: 'transport', cause: 'network' },
+    { name: 'timeout', fetch: () => { throw new DOMException(sentinel, 'TimeoutError'); }, stage: 'transport', cause: 'timeout' },
+    { name: 'cancel', fetch: () => { throw new DOMException(sentinel, 'AbortError'); }, stage: 'transport', cause: 'cancelled' },
+    { name: 'unknown transport', fetch: () => { throw new Error(sentinel); }, stage: 'transport', cause: 'unknown' },
+    { name: 'local payload', payload: () => { throw new Error(sentinel); }, stage: 'payload', cause: 'validation' },
+  ]) await t.test(scenario.name, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'omnigrex-diagnostic-'));
+    try {
+      const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
+        if (String(url).includes('/runtime/provider-auth')) return init.method === 'POST' ? Response.json({}) : (scenario.auth ?? credential)();
+        return scenario.fetch();
+      });
+      const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+      const source = await subscription.runtime.completeSimple(model, context, { onPayload: scenario.payload });
+      assert.ok(['error', 'aborted'].includes(source.stopReason));
+      let finalize;
+      failureExtension({ on(_event, handler) { finalize = handler; } }, subscription);
+      const { message } = await finalize({ message: source }, { model });
+      const d = message.omnigrexProviderDiagnostic;
+      assert.equal(d.stage, scenario.stage);
+      assert.equal(d.http_status, scenario.status ?? null);
+      assert.equal(d.code, scenario.code ?? 'unknown');
+      assert.equal(d.cause, scenario.cause);
+      assert.equal(d.retryability, 'unknown');
+      assert.match(d.attempt, /^[0-9a-f-]{36}$/u);
+      assert.ok(d.elapsed_ms >= 0);
+      const serialized = JSON.stringify(message);
+      assert.ok(!serialized.includes(sentinel), serialized);
+      assert.ok(!serialized.includes('responseId'));
+      if (d.request_id_hash) assert.match(d.request_id_hash, /^[0-9a-f]{64}$/u);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
+test('concurrent and later calls cannot inherit another request diagnostic', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omnigrex-concurrent-'));
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  try {
+    const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
+      if (String(url).includes('/runtime/provider-auth')) return credential();
+      const model = JSON.parse(init.body).model;
+      if (model === 'first') { await pending; return Response.json({ error: { code: 'model_not_found' } }, { status: 404 }); }
+      release();
+      throw networkError('ECONNREFUSED');
+    });
+    const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+    const [first, second] = await Promise.all(['first', 'second'].map(id => subscription.runtime.completeSimple({ ...model, id }, context)));
+    const a = await subscription.failure(first), b = await subscription.failure(second);
+    assert.equal(a.diagnostic.stage, 'provider_http');
+    assert.equal(a.diagnostic.http_status, 404);
+    assert.equal(b.diagnostic.stage, 'transport');
+    assert.equal(b.diagnostic.http_status, null);
+    assert.equal(b.diagnostic.code, 'unknown');
+    assert.notEqual(a.diagnostic.attempt, b.diagnostic.attempt);
+    const unrelated = await subscription.failure({ errorMessage: sentinel });
+    assert.equal(unrelated.diagnostic.stage, 'unknown');
+    assert.equal(unrelated.generation, '');
+    assert.equal(unrelated.failure, 'subscription_temporary');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

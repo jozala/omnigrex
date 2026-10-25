@@ -728,7 +728,7 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 	next.Assignments.Status = AssignmentWaitingForHuman
 	next.Revision++
 	actions := []Action{
-		MarkHumanHandoffAction{Reason: ReasonInfrastructureRetriesExhausted, Diagnostic: event.Diagnostic},
+		MarkHumanHandoffAction{Reason: ReasonInfrastructureRetriesExhausted, Diagnostic: fmt.Sprintf("%s [agent_turn_id=%s retry_of_turn_id=%s infrastructure_retry_budget=%d/%d; see controller logs]", event.Diagnostic, event.Turn.TurnID, event.Turn.RetryOfTurnID, next.CurrentAttempt.InfrastructureRetryBudget.Used, next.CurrentAttempt.InfrastructureRetryBudget.Limit)},
 		ReconcileLabelsAction{State: StateNeedsHuman},
 	}
 	if pendingRequiresReconciliation(event.PendingEvents) {

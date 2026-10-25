@@ -81,3 +81,21 @@ func TestSubscriptionQuotaReportsAreRetriedInsideController(t *testing.T) {
 		t.Fatal("controller did not record observed quota failure")
 	}
 }
+
+func TestSubscriptionHandoffIncludesOnlyValidatedStructuredEvidence(t *testing.T) {
+	request := outcomeRequest(t, workflow.RoleDeveloper, true)
+	request.PromptResponse, request.PromptError, request.PromptDiagnostic = nil, agentturn.PromptErrorSubscriptionQuota, "SENTINEL"
+	request.PromptProviderDiagnostic = &agent.ProviderDiagnostic{Stage: "provider_http", HTTPStatus: new(429), Code: "subscription_sharing_usage_limit_exceeded", Cause: "http", RequestIDHash: "SENTINEL", Attempt: "SENTINEL"}
+	observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"subscription_quota", "stage=provider_http", "http_status=429", "code=subscription_sharing_usage_limit_exceeded"} {
+		if !strings.Contains(observation.Diagnostic, want) {
+			t.Errorf("missing %s: %s", want, observation.Diagnostic)
+		}
+	}
+	if strings.Contains(observation.Diagnostic, "SENTINEL") {
+		t.Fatal("untrusted detail persisted")
+	}
+}

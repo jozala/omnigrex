@@ -31,13 +31,14 @@ COPY agent/pi/package.json agent/pi/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY agent/pi/diagnostic/fixture.mjs ./fixture.mjs
 COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs agent/pi/control-events.mjs ./
-COPY agent/pi/subscription-auth.mjs ./
+COPY agent/pi/subscription-auth.mjs agent/pi/provider-diagnostic.mjs ./
 COPY agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/control-rpc.test.mjs agent/pi/diagnostic/control-rpc-fixture.mjs ./diagnostic/
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs
 COPY agent/pi/diagnostic/failure-boundary.test.mjs ./failure-boundary.test.mjs
 COPY agent/pi/diagnostic/subscription.test.mjs ./diagnostic/subscription.test.mjs
+COPY agent/pi/diagnostic/provider-diagnostic.test.mjs ./diagnostic/provider-diagnostic.test.mjs
 COPY agent/pi/diagnostic/session-state.test.mjs ./session-state.test.mjs
 COPY --from=fixture-build /out/pi-mcp-fixture /usr/local/bin/pi-mcp-fixture
 COPY --from=search-tools /out/search/rg/rg /out/search/fd/fd /usr/local/bin/

@@ -71,3 +71,21 @@ func (f *neutralPromptFixture) Prompt(_ context.Context, _ store.AgentTurnLease,
 	return f.outcome, nil
 }
 func (*neutralPromptFixture) Close() error { return nil }
+
+func TestSubscriptionTemporarySummaryRetainsObservationInsteadOfRuntimeRejection(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.runtime.agent = &neutralPromptFixture{outcome: agent.Outcome{Admitted: true, Status: agent.Failed, FailureClass: "subscription_temporary", FailureDiagnostic: agent.ParseProviderDiagnostic([]byte(`{"stage":"provider_http","cause":"http","http_status":502,"code":"model_not_found"}`))}}
+	_, err := fixture.worker(t).ProcessNext(t.Context())
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	diagnostic := fixture.outcomes.request.PromptDiagnostic
+	for _, want := range []string{"subscription_temporary", "stage=provider_http", "http_status=502", "code=model_not_found"} {
+		if !strings.Contains(diagnostic, want) {
+			t.Errorf("missing %s: %s", want, diagnostic)
+		}
+	}
+	if strings.Contains(diagnostic, "runtime rejected") {
+		t.Fatalf("misleading rejection: %s", diagnostic)
+	}
+}

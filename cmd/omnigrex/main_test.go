@@ -17,6 +17,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/doctor"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -546,4 +547,31 @@ type startupReconcilerFake struct {
 
 func (reconciler startupReconcilerFake) Reconcile(ctx context.Context) (startup.ReconciliationResult, error) {
 	return reconciler.reconcile(ctx)
+}
+
+func TestProviderFailureOperationalLogIsStructuredAndCorrelated(t *testing.T) {
+	var output bytes.Buffer
+	sink := loggingAgentEventSink{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	runtime, err := json.Marshal(map[string]any{"provider_failure": agent.ParseProviderDiagnostic([]byte(`{"stage":"provider_http","cause":"http","http_status":502,"code":"model_not_found","message":"SENTINEL"}`))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sink.Emit(t.Context(), agentevent.AgentEvent{WorkflowID: "workflow", RetryOfTurnID: "interrupted-turn", AssignmentID: "participant", AgentSessionID: "session", TurnID: "turn", ExecutionEpoch: 2, Kind: "provider_request_failed", Metadata: agentevent.OperationalMetadata{Status: "failed", FailureClass: "subscription_temporary", Runtime: runtime}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log map[string]any
+	if err := json.Unmarshal(output.Bytes(), &log); err != nil {
+		t.Fatal(err)
+	}
+	if log["workflow_id"] != "workflow" || log["retry_of_turn_id"] != "interrupted-turn" || log["agent_turn_id"] != "turn" || log["failure_class"] != "subscription_temporary" {
+		t.Fatalf("missing correlation: %v", log)
+	}
+	diagnostic := log["runtime"].(map[string]any)["provider_failure"].(map[string]any)
+	if diagnostic["stage"] != "provider_http" || diagnostic["http_status"] != float64(502) || diagnostic["code"] != "model_not_found" {
+		t.Fatalf("lost evidence: %v", log)
+	}
+	if strings.Contains(output.String(), "SENTINEL") {
+		t.Fatal("raw provider data logged")
+	}
 }

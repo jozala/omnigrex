@@ -244,5 +244,5 @@ func runtimeTurnIdentity(s store.AgentSession, lease store.AgentTurnLease) bool 
 }
 
 func runtimeEventContext(lease store.AgentTurnLease, s store.AgentSession) agentevent.Context {
-	return agentevent.Context{AssignmentID: s.AgentParticipantID, AgentSessionID: s.ID, TurnID: lease.ID, ExecutionEpoch: uint64(lease.ExecutionEpoch), ControlRevision: uint64(lease.ControlRevision)}
+	return agentevent.Context{WorkflowID: lease.JobLease.WorkflowID, RetryOfTurnID: lease.RetryOfTurnID, AssignmentID: s.AgentParticipantID, AgentSessionID: s.ID, TurnID: lease.ID, ExecutionEpoch: uint64(lease.ExecutionEpoch), ControlRevision: uint64(lease.ControlRevision)}
 }

@@ -133,6 +133,7 @@ type ActiveTurn struct {
 }
 
 type TurnGuard struct {
+	RetryOfTurnID    string
 	TurnID           string
 	SessionID        string
 	AttemptID        string

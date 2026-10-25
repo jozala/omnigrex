@@ -85,6 +85,7 @@ type turn struct {
 	lastReason      string
 	lastFailure     string
 	lastGeneration  string
+	lastDiagnostic  *agent.ProviderDiagnostic
 	outcome         agent.Outcome
 	retryBackoff    bool
 	cancelRequested bool
@@ -692,14 +693,16 @@ func (c *connection) record(content []byte) error {
 		if message.Role == "assistant" {
 			t.lastReason = ""
 			t.lastFailure, t.lastGeneration = "", ""
+			t.lastDiagnostic = nil
 			t.retryBackoff, t.retryCancelled = false, false
 		}
 	case "message_end":
 		var message struct {
-			Role         string `json:"role"`
-			StopReason   string `json:"stopReason"`
-			ErrorMessage string `json:"errorMessage"`
-			Generation   string `json:"omnigrexProviderGeneration"`
+			Role         string          `json:"role"`
+			StopReason   string          `json:"stopReason"`
+			ErrorMessage string          `json:"errorMessage"`
+			Generation   string          `json:"omnigrexProviderGeneration"`
+			Diagnostic   json.RawMessage `json:"omnigrexProviderDiagnostic"`
 		}
 		if json.Unmarshal(record.Message, &message) != nil || message.Role == "" {
 			return agent.ErrProtocol
@@ -711,6 +714,9 @@ func (c *connection) record(content []byte) error {
 				return agent.ErrProtocol
 			}
 			t.lastReason = message.StopReason
+			if message.StopReason == "error" || message.StopReason == "aborted" {
+				t.lastDiagnostic = agent.ParseProviderDiagnostic(message.Diagnostic)
+			}
 			if message.StopReason == "error" {
 				switch message.ErrorMessage {
 				case "Omnigrex subscription_quota", "Omnigrex subscription_auth", "Omnigrex subscription_configuration", "Omnigrex subscription_temporary":
@@ -719,6 +725,18 @@ func (c *connection) record(content []byte) error {
 						t.lastGeneration = message.Generation
 					}
 				}
+			}
+		}
+
+		if message.Role == "assistant" && (message.StopReason == "error" || message.StopReason == "aborted") && t.lastDiagnostic != nil {
+			failure := t.lastFailure
+			if failure == "" {
+				failure = "provider_failure"
+			}
+			select {
+			case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, t.lastReason, false):
+			default:
+				return agent.ErrBackpressure
 			}
 		}
 	case "auto_retry_start":
@@ -733,7 +751,7 @@ func (c *connection) record(content []byte) error {
 		t.retryCancelled = t.retryBackoff && t.lastReason == "error" && t.cancelRequested && !*record.Success && record.FinalError == "Retry cancelled"
 		t.retryBackoff = false
 	case "agent_settled":
-		outcome := agent.Outcome{Admitted: true}
+		outcome := agent.Outcome{Admitted: true, FailureDiagnostic: t.lastDiagnostic}
 		if t.retryCancelled {
 			outcome.Status = agent.Aborted
 		} else {
@@ -778,11 +796,13 @@ func (c *connection) record(content []byte) error {
 func (c *connection) runtimeEvent(kind, status, failure, source, reason string, retryCancelled bool) agentevent.AgentEvent {
 	event := c.eventLocked(kind, status, failure)
 	event.Metadata.Runtime, _ = json.Marshal(struct {
-		Runtime        string `json:"runtime"`
-		Event          string `json:"event"`
-		Reason         string `json:"assistant_stop_reason,omitempty"`
-		RetryCancelled bool   `json:"retry_cancelled,omitempty"`
-	}{"pi-rpc/1.0.4", source, reason, retryCancelled})
+		Runtime         string                    `json:"runtime"`
+		Event           string                    `json:"event"`
+		Reason          string                    `json:"assistant_stop_reason,omitempty"`
+		RetryCancelled  bool                      `json:"retry_cancelled,omitempty"`
+		ProviderFailure *agent.ProviderDiagnostic `json:"provider_failure,omitempty"`
+		SelectedModel   string                    `json:"selected_model,omitempty"`
+	}{"pi-rpc/1.0.4", source, reason, retryCancelled, c.activeDiagnostic(kind), c.selectedModel()})
 	return event
 }
 
@@ -794,7 +814,7 @@ func (c *connection) event(kind, status, failure string) agentevent.AgentEvent {
 
 func (c *connection) eventLocked(kind, status, failure string) agentevent.AgentEvent {
 	owner := c.options.EventContext
-	return agentevent.AgentEvent{AssignmentID: owner.AssignmentID, AgentSessionID: owner.AgentSessionID, TurnID: owner.TurnID, ExecutionEpoch: owner.ExecutionEpoch, ControlRevision: owner.ControlRevision, Kind: agentevent.Kind(kind), ObservedAt: time.Now().UTC(), Metadata: agentevent.OperationalMetadata{Status: status, FailureClass: failure}}
+	return agentevent.AgentEvent{WorkflowID: owner.WorkflowID, RetryOfTurnID: owner.RetryOfTurnID, AssignmentID: owner.AssignmentID, AgentSessionID: owner.AgentSessionID, TurnID: owner.TurnID, ExecutionEpoch: owner.ExecutionEpoch, ControlRevision: owner.ControlRevision, Kind: agentevent.Kind(kind), ObservedAt: time.Now().UTC(), Metadata: agentevent.OperationalMetadata{Status: status, FailureClass: failure}}
 }
 
 func (c *connection) failureValue() error { c.mu.Lock(); defer c.mu.Unlock(); return c.failure }
@@ -835,4 +855,18 @@ func failureClass(err error) string {
 	default:
 		return "transport_lost"
 	}
+}
+
+func (c *connection) activeDiagnostic(kind string) *agent.ProviderDiagnostic {
+	if (kind == "prompt_settled" || kind == "provider_request_failed") && c.active != nil {
+		return c.active.lastDiagnostic
+	}
+	return nil
+}
+
+func (c *connection) selectedModel() string {
+	if c.options.Selection != nil {
+		return c.options.Selection.Model
+	}
+	return ""
 }

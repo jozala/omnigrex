@@ -6,6 +6,52 @@ Logs are JSON on stdout and use your existing Docker collection route.
 Preserve JSON fields and keep domain IDs, trace/span IDs, diagnostic call IDs, and GitHub request IDs out of log stream labels.
 There is no direct OpenTelemetry log export or public metrics endpoint.
 
+## Provider and subscription request failures
+
+`Agent Session observation` records with `kind=provider_request_failed` describe an observed failed assistant request; `kind=prompt_settled` records why the Agent Turn ended.
+These WARN records use the existing controller stdout logging pipeline and survive Runtime Process cleanup.
+Join them by `workflow_id`, `agent_participant_id`, `agent_session_id`, `agent_turn_id`, `execution_epoch`, and trace/span fields when available.
+`retry_of_turn_id` links a retried Turn to the earlier failed or interrupted Turn.
+The `runtime` field is a JSON object, with `selected_model` (the configured provider/model) and `provider_failure`:
+
+| Field | Meaning |
+| --- | --- |
+| `attempt` | Locally generated UUID for one model request, not a provider ID; absent when unavailable. |
+| `auth_mode` | `subscription` for the observed controller-managed path, otherwise `unknown`. |
+| `stage` | `credential`, `payload`, `provider_http`, `provider_stream`, `transport`, `local`, or `unknown`. |
+| `cause` | `http`, `stream_error`, `network`, `timeout`, `cancelled`, `validation`, `protocol`, or `unknown`. |
+| `http_status` | Observed status or null. At `credential` this is the **controller auth endpoint**, not OpenAI. At `provider_stream`, 200 describes the initial successful response, not successful inference. |
+| `code` | Explicitly allowlisted structured provider code, or `unknown`; arbitrary codes/types are discarded. |
+| `retryability` | `yes`, `no`, or `unknown`; currently unknown unless explicitly observed. The broad failure category does not establish retryability. |
+| `elapsed_ms` | Bounded time from request start to terminal observation, including credential resolution; null if unavailable. |
+| `request_id_hash` | SHA-256 fingerprint of a bounded `x-request-id`, absent when unavailable or invalid; never the raw header. |
+
+`subscription_temporary` is a fallback classification, **not proof of a provider outage or an OpenAI error response**.
+For example, `stage=transport, cause=network, http_status=null` establishes no HTTP response; `stage=provider_http, http_status=502, code=unknown` does establish a provider HTTP error despite an unknown code.
+`stage=provider_stream, http_status=200, cause=stream_error` identifies a later structured SSE error; a stream read failure can instead carry `network`, `timeout`, or `unknown`.
+`payload/validation` is local request preparation, while `provider_stream/protocol` can indicate an unexpected non-SSE response.
+A genuinely unobserved local/SDK cause remains unknown rather than being inferred from error prose.
+Other providers currently retain unknown observations through the shared boundary; do not infer subscription evidence for them.
+
+For JSON controller logs collected into a file:
+
+```sh
+jq 'select(.agent_turn_id == "TURN-ID" and (.kind == "provider_request_failed" or .kind == "prompt_settled")) | {workflow_id, agent_turn_id, execution_epoch, retry_of_turn_id, failure_class, runtime, trace_id}' controller.jsonl
+jq 'select(.workflow_id == "WORKFLOW-ID" and .msg == "Agent Turn infrastructure retry decision") | {agent_turn_id, retry_of_turn_id, retry_budget_used, retry_budget_limit, reason}' controller.jsonl
+```
+
+In Grafana/Loki, select your existing controller stream and filter parsed fields, for example `{service_name="omnigrex"} | json | agent_turn_id="TURN-ID"` (adapt the stream label to your collector).
+Do not make Turn IDs, attempt UUIDs, fingerprints, or other correlation values stream/metric labels.
+Start with the Turn reference in the Human Handoff, then search `retry_of_turn_id` to find the interruption or failure that consumed the automatic retry budget.
+`Agent Turn infrastructure retry decision` records the used/limit budget after a committed live settlement and its fixed decision reason.
+Retry-exhaustion Human Handoffs also include used/limit and both Turn references; recovery-owned interruptions may have no provider request observation, so follow their Turn and recovery logs instead of expecting a provider ID.
+This diagnostic change does not increase retry limits, automatically resume a Workflow, or clear subscription blocks.
+Use the existing [authentication recovery procedure](secrets.md) for credential problems and explicitly resume only after resolving the underlying issue.
+
+Raw response bodies, arbitrary exception text/stacks, prompts, completions, tool payloads, credentials, cookie/authorization headers, and URLs/query strings are never part of this schema.
+Do not enable unrestricted SDK/HTTP debug logging or reproduce a paid request merely to obtain basic failure evidence.
+The original request ID cannot be recovered from its fingerprint; separately obtained evidence can be hashed for comparison.
+
 ## Microsandbox SDK failures
 
 `Microsandbox SDK call failed` records the failing `sdk_operation`, `sdk_error_kind`, original `error`, and `duration_ms`.

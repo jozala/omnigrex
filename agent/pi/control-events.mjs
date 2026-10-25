@@ -7,8 +7,8 @@ export function controlEvent(event) {
       return { type: event.type, willRetry: event.willRetry };
     case 'message_start':
     case 'message_end': {
-      const { role, stopReason, errorMessage, omnigrexProviderGeneration } = event.message;
-      return { type: event.type, message: { role, stopReason, errorMessage, omnigrexProviderGeneration } };
+      const { role, stopReason, errorMessage, omnigrexProviderGeneration, omnigrexProviderDiagnostic } = event.message;
+      return { type: event.type, message: { role, stopReason, errorMessage, omnigrexProviderGeneration, omnigrexProviderDiagnostic } };
     }
     case 'message_update': {
       const update = event.assistantMessageEvent;
