@@ -76,19 +76,43 @@ async function fixture(t, mode) {
   const models = { providers: { diagnostic: { baseUrl: `${url}/v1`, api: 'openai-completions',
     models: [{ id: 'controlled', name: 'Controlled', reasoning: false, input: ['text'], contextWindow: 65536, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } };
-  const config = instructions => ({ auth: { diagnostic: { type: 'api_key', key: 'fixture-only' } },
+  const agentDir = join(root, 'agent');
+  const config = instructions => ({ auth: { diagnostic: { type: 'api_key', key: `fixture-${mode}` } },
     instructions, selection: { model: 'diagnostic/controlled', thinking: 'off' }, repositorySkills: false,
     tools: [], mcpTools: [], mcp: { url: `${url}/mcp`, headers: [] } });
   async function open(manager, instructions) {
-    runtime = await prepareRuntime(config(instructions), manager, models);
+    runtime = await prepareRuntime(config(instructions), manager, models, { agentDir });
     controlRuntime(runtime).session.subscribe(e => wire.push(e));
     return runtime;
   }
   await open(manager, 'CURRENT_DEPLOYMENT_INSTRUCTIONS');
   t.after(async () => { if (runtime) await runtime.dispose(); });
-  return { manager, identity, root, before, requests, wire, open,
+  return { manager, identity, root, agentDir, before, requests, wire, open,
     get runtime() { return runtime; }, get summaries() { return summaries; }, get conversations() { return conversations; } };
 }
+
+test('compaction fixtures preserve another runtime’s credentials and model catalog', { timeout: 30000 }, async t => {
+  const parent = await fixture(t, 'parent');
+  const authPath = join(parent.agentDir, 'auth.json');
+  const modelsPath = join(parent.agentDir, 'models.json');
+  const authBefore = await readFile(authPath, 'utf8');
+  const modelsBefore = await readFile(modelsPath, 'utf8');
+
+  const child = await fixture(t, 'child');
+  assert.notEqual(child.agentDir, parent.agentDir);
+  assert.equal(await readFile(authPath, 'utf8'), authBefore);
+  assert.equal(await readFile(modelsPath, 'utf8'), modelsBefore);
+  assert.equal(JSON.parse(await readFile(join(child.agentDir, 'auth.json'), 'utf8')).diagnostic.key, 'fixture-child');
+  const model = parent.runtime.services.modelRuntime.getModel('diagnostic', 'controlled');
+  const auth = await parent.runtime.services.modelRuntime.getAuth(model);
+  assert.equal(auth.auth.apiKey, 'fixture-parent', 'the live runtime must retain its own credential');
+
+  await parent.runtime.session.prompt('parent continues after fixture initialization');
+  assert.equal(parent.conversations, 1);
+  assert.equal(child.conversations, 0, 'the parent must still use its own provider endpoint');
+  await child.runtime.session.prompt('child uses its own fixture');
+  assert.equal(child.conversations, 1);
+});
 
 for (const mode of ['threshold', 'overflow', 'overflow-guard', 'summary-failure', 'cancel', 'preprompt', 'preprompt-cancel']) {
   test(`native compaction: ${mode}`, { timeout: 30000 }, async t => {

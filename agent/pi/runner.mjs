@@ -8,7 +8,6 @@ import { historyInput } from './history-rpc.mjs';
 import { controlRuntime } from './control-events.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
-const agentDir = '/run/pi-agent';
 const cwd = '/workspace';
 
 export async function readBootstrap() {
@@ -62,7 +61,9 @@ async function skillPaths(enabled) {
   return result.sort();
 }
 
-export async function prepareRuntime(configuration, sessionManager, models) {
+// In-process fixtures must isolate credentials and model files from the agent
+// running the tests. Production callers retain the disposable bootstrap path.
+export async function prepareRuntime(configuration, sessionManager, models, { agentDir = '/run/pi-agent' } = {}) {
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await writeFile(join(agentDir, 'auth.json'), JSON.stringify(configuration.auth), { mode: 0o600 });
   // Only the disposable controlled-provider fixture supplies models here.
