@@ -27,7 +27,7 @@ Nested microVM execution is investigated, not a release gate.
 
 ## Microsandbox prerequisites
 
-The native image pins Microsandbox and its Go SDK to 0.7.6.
+The native image pins Microsandbox and its Go SDK to 0.7.11.
 It includes the pinned runtime, firmware, SDK library, CGO-enabled orchestrator, and trusted repository preparation tools.
 The source-pinned guest-agent patch selected by `MSB_AGENTD_PATH` places workload processes under `/microsandbox-workload/agent`, leaving the parent empty for Docker memory-controller delegation, aggregate PID limits, and freezing.
 See [decision 0028](../decisions/0028-keep-a-domain-parent-for-nested-containers.md) and [backend evidence](../plans/2026-10-09-microsandbox-backend.md).
