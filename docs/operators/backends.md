@@ -32,6 +32,7 @@ It includes the pinned runtime, firmware, SDK library, CGO-enabled orchestrator,
 The source-pinned guest-agent patch selected by `MSB_AGENTD_PATH` places workload processes under `/microsandbox-workload/agent`, leaving the parent empty for Docker memory-controller delegation, aggregate PID limits, and freezing.
 See [decision 0028](../decisions/0028-keep-a-domain-parent-for-nested-containers.md) and [backend evidence](../plans/2026-10-09-microsandbox-backend.md).
 Image-only hosts need no Rust or Go toolchain.
+For the coordinated v0.7.11 catalog migration, qualification, rollout, and backup recovery requirements, see [Microsandbox upgrade](microsandbox-upgrade.md).
 
 The control-plane process uses UID/GID 10001 and needs read/write KVM access through the device's numeric group.
 Use a separate dedicated group for secret files.
