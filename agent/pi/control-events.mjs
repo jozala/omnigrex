@@ -1,4 +1,4 @@
-// Pi 1.0.4's public Session subscription is the projection boundary. Only the
+// Pi's public Session subscription is the projection boundary. Only the
 // RPC consumer sees this view; persistence, extensions and the agent keep the
 // original events. Do not intercept stdout or replace Pi's RPC implementation.
 export function controlEvent(event) {

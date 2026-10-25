@@ -43,7 +43,7 @@ func TestExecutionConformanceDocker(t *testing.T) {
 func TestExecutionPiUsesNeutralFactoryAndTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "omnigrex/pi:1.0.4", "--format", "{{.Id}} {{.Architecture}}").Output()
+	output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "omnigrex/pi:1.4.0", "--format", "{{.Id}} {{.Architecture}}").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

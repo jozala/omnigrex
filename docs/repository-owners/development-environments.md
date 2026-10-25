@@ -23,7 +23,7 @@ docker image inspect registry.example/team/development:qualified --format '{{ind
 This build example runs from an Omnigrex source checkout or a build context containing the example Dockerfile.
 Replace placeholders with actual approved digests and package versions.
 Use a controlled package mirror/snapshot when reproducible rebuilding is required.
-Preserve Node 24.14.1, Pi 1.0.4 and its locked package/resource inventory, the owned runner/extensions/bootstrap, mise, Git/shell/search resources, and UID/GID 10001.
+Preserve Node 24.14.1, Pi 1.4.0 and its locked package/resource inventory, the owned runner/extensions/bootstrap, mise, Git/shell/search resources, and UID/GID 10001.
 Labels or image ancestry do not replace executable/resource qualification.
 Install extra tools in `/usr/local/bin` or activate them through working-revision mise configuration.
 

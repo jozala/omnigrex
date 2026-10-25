@@ -101,7 +101,7 @@ func TestNeverStartedRuntimeRecoveryCompletesWithRealDocker(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			image, err := client.ImageInspect(ctx, "omnigrex/pi:1.0.4")
+			image, err := client.ImageInspect(ctx, "omnigrex/pi:1.4.0")
 			if err != nil {
 				t.Fatalf("inspect built Pi image: %v", err)
 			}

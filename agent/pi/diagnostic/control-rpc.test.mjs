@@ -63,6 +63,7 @@ async function prompt(t, root, mode, continued = false) {
   const end = records.findLastIndex(record => record.type === 'agent_end');
   const receipt = records.findLastIndex(record => record.type === 'agent_settled');
   assert.ok(end >= 0 && receipt > end, 'agent_settled must follow agent_end');
+  assert.equal(records[receipt].aborted, mode === 'cancel');
   for (const record of records.filter(record => record.type === 'agent_end')) {
     assert.equal(typeof record.willRetry, 'boolean');
     assert.equal('messages' in record, false);

@@ -18,7 +18,7 @@ The release publishes Linux/amd64 images under `ghcr.io/jozala/omnigrex/`:
 | --- | --- |
 | `orchestrator:sha-<full-commit-SHA>` | Docker control plane |
 | `orchestrator-microsandbox:sha-<full-commit-SHA>` | Native SDK/KVM control plane |
-| `pi:sha-<full-commit-SHA>` | Pi 1.0.4 / Node 24.14.1 golden environment |
+| `pi:sha-<full-commit-SHA>` | Pi 1.4.0 / Node 24.14.1 golden environment |
 | `development:sha-<full-commit-SHA>` | Omnigrex's own derived development environment; separately qualified before repository promotion |
 
 No `latest` tag is published, and Pull Request runs publish no images.
