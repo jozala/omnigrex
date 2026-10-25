@@ -58,14 +58,13 @@ func (backend *ProductionBackend) resolvePublicationRead(scope ToolScope, mutati
 				*result.Changed && result.Head == mutation.ExpectedSHA || !*result.Changed && result.Head != mutation.ExpectedSHA {
 				return publicationReadTarget{}, ErrToolPrecondition
 			}
-			// Verified preparation can repair an existing PR retry's starting head
-			// before the publication that produced it is acknowledged as a replay.
-			// Accept that fully validated, already-applied result without moving the
-			// target; a mismatched predecessor may never grant a different head.
-			if mutation.ExpectedSHA != target.HeadSHA && result.Head != target.HeadSHA {
-				return publicationReadTarget{}, ErrToolPrecondition
+			// Historical replay may start and finish behind a repaired retry head.
+			// It is still fully validated above, but only a publication connected to
+			// the current target may advance it. Other valid rows cannot grant a
+			// different head, roll the target back, or disable its existing reads.
+			if mutation.ExpectedSHA == target.HeadSHA {
+				target.HeadSHA = result.Head
 			}
-			target.HeadSHA = result.Head
 		case ToolOpenPR:
 			pr, _, ok := restoredPullRequest(mutation.Result, target.HeadSHA)
 			if !ok || mutation.ExpectedSHA != target.HeadSHA || !sameOrMissingPullRequest(target.PullRequest, pr) {

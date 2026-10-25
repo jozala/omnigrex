@@ -108,116 +108,143 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 }
 
 func TestGatewayReadsAfterExistingPRRetryRepairsHeadAndReplaysPublication(t *testing.T) {
-	databases, pool := openPhaseFiveStores(t, 1)
-	database := databases[0]
-	fixture := seedAgentSession(t, pool, 116)
-	ctx := context.Background()
-	const base = "0123456789abcdef0123456789abcdef01234567"
-	const first = "1123456789abcdef0123456789abcdef01234567"
-	const final = "2123456789abcdef0123456789abcdef01234567"
-	proposalID := seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, base)
-	if _, err := pool.Exec(ctx, `UPDATE change_proposals SET pull_request_id=654,pull_request_number=23,head_ref='omnigrex/issue-116' WHERE id=$1`, proposalID); err != nil {
-		t.Fatal(err)
-	}
-	api := &publicationReadGitHub{&replayGatewayGitHub{head: base, branch: "omnigrex/issue-116", base: "main"}}
-	publisher := &replayGatewayPublisher{results: []workspace.PublicationResult{{Head: first, Changed: true}, {Head: final, Changed: true}}}
-	newBackend := func() *mcp.ProductionBackend {
-		backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return backend
-	}
-	// Use production verified preparation, including its Change Proposal head
-	// repair, rather than just supplying an advanced head to a token fixture.
-	start := func(retryOf store.AgentTurn, verified string) (store.AgentTurn, store.AgentTurnLease, store.AgentTurnExecutionContext) {
-		spec := fixture.turnSpec()
-		spec.ExpectedHeadSHA = base
-		spec.Purpose = workflow.TurnPurposeRequestedChanges
-		if retryOf.ID != "" {
-			spec.Purpose = workflow.TurnPurposeRetry
-			spec.RetryOfTurnID = retryOf.ID
-		}
-		preparationLease, preparation, err := claimFixtureAgentTurnPreparation(t, database, pool, ctx, spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		preparation.VerifiedHeadSHA, preparation.VerifiedPRID, preparation.VerifiedPRNumber = verified, 654, 23
-		prepared, err := database.PrepareAgentTurn(ctx, preparationLease, preparation)
-		if err != nil {
-			t.Fatal(err)
-		}
-		lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, prepared.Turn), prepared.Turn.ControlRevision, "existing-pr-retry", time.Minute, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := database.OpenMutationAdmission(ctx, lease); err != nil {
-			t.Fatal(err)
-		}
-		return prepared.Turn, lease, execution
-	}
-	scopeFor := func(lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, head string) mcp.TokenScope {
-		scope := replayGatewayScope(lease, execution, head)
-		scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
-		return scope
-	}
-	root, lease, execution := start(store.AgentTurn{}, base)
-	gateway, registration := openReplayGateway(t, database, newBackend(), scopeFor(lease, execution, base))
-	callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
-	api.head = first
-	if err := gateway.CloseAndDrain(ctx, registration); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.CloseMutationAdmission(ctx, lease); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.FinalizeAgentTurn(ctx, lease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "prompt interrupted after publication"}); err != nil {
-		t.Fatal(err)
-	}
-	retry, lease, execution := start(root, first)
-	if retry.ExpectedHeadSHA != first || execution.ChangeProposal == nil || execution.ChangeProposal.HeadSHA != first {
-		t.Fatalf("head repair did not occur: %#v, %#v", retry, execution.ChangeProposal)
-	}
-	scope := scopeFor(lease, execution, first)
-	gateway, registration = openReplayGateway(t, database, newBackend(), scope)
-	callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
-	evidence, err := database.ListAgentTurnPublicationReads(ctx, lease, true)
-	if err != nil || len(evidence) != 1 || evidence[0].ExpectedSHA != base {
-		t.Fatalf("acknowledged historical evidence = %#v, %v", evidence, err)
-	}
-	assertReads := func(head string) {
-		t.Helper()
-		for name, args := range map[string]map[string]any{
-			mcp.ToolGetPullRequest: {}, mcp.ToolListPullRequestReviews: {}, mcp.ToolListReviewThreads: {}, mcp.ToolGetCheckRuns: {}, mcp.ToolListCIRuns: {},
-			mcp.ToolGetCheckRunDiagnostics: {"check_run_id": 501}, mcp.ToolGetCIRun: {"run_id": 601}, mcp.ToolGetCIJobLogs: {"job_id": 701}, mcp.ToolSearchCIJobLogs: {"job_id": 701, "query": "FAIL"},
-		} {
-			response := callReplayGatewayTool(t, gateway, registration, name, args, false)
-			if !strings.Contains(response, head) {
-				t.Fatalf("%s did not query %s: %s", name, head, response)
+	for _, multiple := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multiple_publications_%t", multiple), func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			database := databases[0]
+			fixture := seedAgentSession(t, pool, 116)
+			ctx := context.Background()
+			const base = "0123456789abcdef0123456789abcdef01234567"
+			const first = "1123456789abcdef0123456789abcdef01234567"
+			const second = "2123456789abcdef0123456789abcdef01234567"
+			const final = "3123456789abcdef0123456789abcdef01234567"
+			repaired := first
+			results := []workspace.PublicationResult{{Head: first, Changed: true}}
+			if multiple {
+				repaired = second
+				results = append(results, workspace.PublicationResult{Head: second, Changed: true})
 			}
-		}
-	}
-	assertReads(first)
-	callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2"}, false)
-	api.head = final
-	assertReads(final)
-	if publisher.callCount() != 2 || publisher.calls[1].ExpectedOldHead != first {
-		t.Fatalf("publication fence changed: %#v", publisher.calls)
-	}
-	if err := gateway.CloseAndDrain(ctx, registration); err != nil {
-		t.Fatal(err)
-	}
-	gateway, registration = openReplayGateway(t, database, newBackend(), scope)
-	assertReads(final)
-	if scope.HeadSHA != first {
-		t.Fatal("starting authority changed")
-	}
-	if err := gateway.CloseAndDrain(ctx, registration); err != nil {
-		t.Fatal(err)
+			results = append(results, workspace.PublicationResult{Head: final, Changed: true})
+			proposalID := seedFixtureChangeProposal(t, pool, ctx, fixture.workflowID, base)
+			if _, err := pool.Exec(ctx, `UPDATE change_proposals SET pull_request_id=654,pull_request_number=23,head_ref='omnigrex/issue-116' WHERE id=$1`, proposalID); err != nil {
+				t.Fatal(err)
+			}
+			api := &publicationReadGitHub{&replayGatewayGitHub{head: base, branch: "omnigrex/issue-116", base: "main"}}
+			publisher := &replayGatewayPublisher{results: results}
+			newBackend := func() *mcp.ProductionBackend {
+				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return backend
+			}
+			// Use production verified preparation, including its Change Proposal head
+			// repair, rather than just supplying an advanced head to a token fixture.
+			start := func(retryOf store.AgentTurn, verified string) (store.AgentTurn, store.AgentTurnLease, store.AgentTurnExecutionContext) {
+				spec := fixture.turnSpec()
+				spec.ExpectedHeadSHA = base
+				spec.Purpose = workflow.TurnPurposeRequestedChanges
+				if retryOf.ID != "" {
+					spec.Purpose = workflow.TurnPurposeRetry
+					spec.RetryOfTurnID = retryOf.ID
+				}
+				preparationLease, preparation, err := claimFixtureAgentTurnPreparation(t, database, pool, ctx, spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				preparation.VerifiedHeadSHA, preparation.VerifiedPRID, preparation.VerifiedPRNumber = verified, 654, 23
+				prepared, err := database.PrepareAgentTurn(ctx, preparationLease, preparation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, agentTurnExecutionJob(t, pool, ctx, prepared.Turn), prepared.Turn.ControlRevision, "existing-pr-retry", time.Minute, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.OpenMutationAdmission(ctx, lease); err != nil {
+					t.Fatal(err)
+				}
+				return prepared.Turn, lease, execution
+			}
+			scopeFor := func(lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, head string) mcp.TokenScope {
+				scope := replayGatewayScope(lease, execution, head)
+				scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
+				return scope
+			}
+			root, lease, execution := start(store.AgentTurn{}, base)
+			gateway, registration := openReplayGateway(t, database, newBackend(), scopeFor(lease, execution, base))
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
+			api.head = first
+			if multiple {
+				callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2"}, false)
+				api.head = second
+			}
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.FinalizeAgentTurn(ctx, lease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "prompt interrupted after publication"}); err != nil {
+				t.Fatal(err)
+			}
+			retry, lease, execution := start(root, repaired)
+			if retry.ExpectedHeadSHA != repaired || execution.ChangeProposal == nil || execution.ChangeProposal.HeadSHA != repaired {
+				t.Fatalf("head repair did not occur: %#v, %#v", retry, execution.ChangeProposal)
+			}
+			scope := scopeFor(lease, execution, repaired)
+			gateway, registration = openReplayGateway(t, database, newBackend(), scope)
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
+			evidence, err := database.ListAgentTurnPublicationReads(ctx, lease, true)
+			if err != nil || len(evidence) != 1 || evidence[0].ExpectedSHA != base {
+				t.Fatalf("acknowledged historical evidence = %#v, %v", evidence, err)
+			}
+			assertReads := func(head string) {
+				t.Helper()
+				for name, args := range map[string]map[string]any{
+					mcp.ToolGetPullRequest: {}, mcp.ToolListPullRequestReviews: {}, mcp.ToolListReviewThreads: {}, mcp.ToolGetCheckRuns: {}, mcp.ToolListCIRuns: {},
+					mcp.ToolGetCheckRunDiagnostics: {"check_run_id": 501}, mcp.ToolGetCIRun: {"run_id": 601}, mcp.ToolGetCIJobLogs: {"job_id": 701}, mcp.ToolSearchCIJobLogs: {"job_id": 701, "query": "FAIL"},
+				} {
+					response := callReplayGatewayTool(t, gateway, registration, name, args, false)
+					if !strings.Contains(response, head) {
+						t.Fatalf("%s did not query %s: %s", name, head, response)
+					}
+				}
+			}
+			assertReads(repaired)
+			if multiple {
+				// Reads after only the older replay already retained H2. Acknowledging
+				// the remainder of the chain must not change that observation target.
+				callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2"}, false)
+				assertReads(repaired)
+			}
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-next"}, false)
+			api.head = final
+			assertReads(final)
+			wantPublications := 2
+			if multiple {
+				wantPublications = 3
+			}
+			if publisher.callCount() != wantPublications || publisher.calls[wantPublications-1].ExpectedOldHead != repaired {
+				t.Fatalf("publication fence changed: %#v", publisher.calls)
+			}
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+			gateway, registration = openReplayGateway(t, database, newBackend(), scope)
+			assertReads(final)
+			if scope.HeadSHA != repaired {
+				t.Fatal("starting authority changed")
+			}
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+
+		})
 	}
 }
 

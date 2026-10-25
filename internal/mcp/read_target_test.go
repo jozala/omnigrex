@@ -43,7 +43,6 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 		{"another branch", func(_ *ToolScope, m []store.MutationReservation) {
 			m[0].Result = json.RawMessage(`{"head":"` + first + `","branch":"other","changed":true}`)
 		}},
-		{"unrelated expected head", func(_ *ToolScope, m []store.MutationReservation) { m[2].ExpectedSHA = base }},
 		{"unrelated proposed head", func(_ *ToolScope, m []store.MutationReservation) { m[2].ProposedSHA = first }},
 		{"missing captured head", func(_ *ToolScope, m []store.MutationReservation) { m[0].ProposedSHA = "" }},
 		{"unsuccessful mutation", func(_ *ToolScope, m []store.MutationReservation) { m[0].State = store.MutationUnknown }},
@@ -81,6 +80,23 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 			t.Fatalf("repaired-head replay target = %#v, %v; want %s", target, err, want)
 		}
 	}
+	// A retry repaired to the latest publication must remain readable even
+	// immediately after replaying only the older publication in a longer chain.
+	repaired.HeadSHA = final
+	for _, evidence := range [][]store.MutationReservation{chain[:1], {chain[0], chain[2]}} {
+		target, err := backend.resolvePublicationRead(repaired, evidence)
+		if err != nil || target.HeadSHA != final || !reflect.DeepEqual(target.PullRequest, repaired.PullRequest) {
+			t.Fatalf("historical replay changed or rejected target: %#v, %v", target, err)
+		}
+	}
+	// Ignoring a nonconnecting publication never grants its result head.
+	disconnected := append([]store.MutationReservation(nil), chain...)
+	disconnected[2].ExpectedSHA = base
+	target, err = backend.resolvePublicationRead(scope, disconnected)
+	if err != nil || target.HeadSHA != first {
+		t.Fatalf("disconnected publication granted a head: %#v, %v", target, err)
+	}
+
 	// Even already-applied results must retain complete publication validation.
 	invalidApplied := chain[0]
 	invalidApplied.ProposedSHA = final

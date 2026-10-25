@@ -40,7 +40,8 @@ Turn token authority and mutation expected-head fences remain immutable.
 Developer PR metadata, reviews/threads, checks, and Actions diagnostics instead use a separate read target derived from successful publication/open-PR mutations in the exact live Turn/epoch ledger.
 The target advances after each durable publication and can include the PR opened during that Turn; it never follows an unrelated external push.
 Acknowledged ancestor replays contribute ordered evidence unless publication recovery has already bound a verified starting head.
-A replay whose validated result already equals the read target is already applied, including when verified preparation repaired an existing Change Proposal head before the retry Turn began.
+Each publication is validated against its own expected head; only a matching predecessor advances the read target.
+Other fully validated historical rows leave the target unchanged, including older publications replayed after verified preparation repaired an existing Change Proposal to a later head.
 Reviewer reads, Issue reads, handoff lookup, and mutation actions retain their original targeting rules.
 See [decision 0038](../decisions/0038-derive-publication-read-targets-from-the-turn-ledger.md) for the authority boundary.
 
