@@ -78,10 +78,10 @@ for (const [errorMessage, overflow] of [
   });
 }
 
-test('explicit overflow is not overwritten by subscription temporary classification', async () => {
+test('explicit overflow survives an eligible subscription classification', async () => {
   let finalize;
   failureExtension({ on(_event, handler) { finalize = handler; } }, {
-    failure() { throw new Error('overflow must not become account failure'); },
+    async failure() { return { failure: 'subscription_configuration', generation: 'fixture', allowContextOverflow: true }; },
   });
   const { message } = await finalize({ message: { role: 'assistant', stopReason: 'error', errorMessage: `context_length_exceeded ${secret}` } }, { model });
   assert.equal(isContextOverflow(message), true);

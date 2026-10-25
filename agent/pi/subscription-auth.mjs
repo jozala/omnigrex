@@ -81,6 +81,8 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   const headers = Object.fromEntries(configuration.mcp.headers.map(header => [header.name, header.value]));
   let generation = '';
   let observedFailure = '';
+  // Private integration hint, not provider diagnostic text or a new error schema.
+  let allowContextOverflow = false;
   const request = async (method, body, signal) => fetcher(endpoint.href, {
     method, headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: body && JSON.stringify(body), redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
@@ -95,6 +97,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   if (!provider) throw new Error('Exact OpenAI provider unavailable');
   const resolve = async ({ signal }) => {
     observedFailure = '';
+    allowContextOverflow = false;
     try {
       const response = await request('GET', undefined, signal);
       const token = await response.json();
@@ -120,11 +123,15 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
       const response = await (options.fetch ?? fetcher)(url, { ...init, redirect: 'error' });
       if (!response.ok) {
         const code = await httpFailureCode(response);
+        allowContextOverflow = [400, 413].includes(response.status) && !structuredFailures.has(code);
         observedFailure = structuredFailures.get(code) ?? (response.status === 401 ? 'subscription_auth'
           : [400, 403, 404].includes(response.status) ? 'subscription_configuration' : 'subscription_temporary');
         return response;
       }
-      return observeFailures(response, code => { observedFailure = structuredFailures.get(code) ?? 'subscription_temporary'; });
+      return observeFailures(response, code => {
+        allowContextOverflow = ['context_length_exceeded', 'model_context_window_exceeded'].includes(code);
+        observedFailure = structuredFailures.get(code) ?? 'subscription_temporary';
+      });
     },
   });
   runtime.registerNativeProvider({ ...provider,
@@ -144,7 +151,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
         // The Go worker also receives the generation for a controller-local retry.
         try { await request('POST', { generation, failure }); } catch { /* Worker retries from sanitized evidence. */ }
       }
-      return { failure, generation };
+      return { failure, generation, allowContextOverflow };
     },
   };
 }

@@ -43,8 +43,11 @@ export function failureExtension(pi, subscription) {
         : retryable ? 'Provider returned error' : 'Provider request failed',
       timestamp: Number.isFinite(source.timestamp) ? source.timestamp : Date.now(),
     } };
-    if (!subscription || overflow || source.stopReason !== 'error') return sanitized;
-    return subscription.failure(source).then(({ failure, generation }) => {
+    if (!subscription || source.stopReason !== 'error') return sanitized;
+    return subscription.failure(source).then(({ failure, generation, allowContextOverflow }) => {
+      // Structured subscription quota/auth/configuration evidence wins over
+      // provider prose, even when that prose looks like context overflow.
+      if (overflow && allowContextOverflow) return sanitized;
       sanitized.message.errorMessage = `Omnigrex ${failure}`;
       sanitized.message.omnigrexProviderGeneration = generation;
       return sanitized;
