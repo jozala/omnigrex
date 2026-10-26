@@ -440,7 +440,7 @@ func newWorkspaceDockerFixture(t *testing.T, mutateLabels func(map[string]string
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	image, err := client.ImageInspect(ctx, "omnigrex/pi:1.0.4")
+	image, err := client.ImageInspect(ctx, "omnigrex/pi:1.4.0")
 	if err != nil {
 		t.Fatalf("inspect pinned Pi fixture image (mise run pi-image): %v", err)
 	}

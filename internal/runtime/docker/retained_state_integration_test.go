@@ -37,7 +37,7 @@ func TestRetainedStateDockerConformance(t *testing.T) {
 	}
 	const helperImage = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 	run("pull", helperImage)
-	agent := strings.Fields(run("image", "inspect", "omnigrex/pi:1.0.4", "--format", "{{.Id}} {{.Architecture}}"))
+	agent := strings.Fields(run("image", "inspect", "omnigrex/pi:1.4.0", "--format", "{{.Id}} {{.Architecture}}"))
 	if len(agent) != 2 {
 		t.Fatal("incomplete agent image identity")
 	}

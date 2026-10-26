@@ -14,7 +14,7 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 	const first = "1123456789abcdef0123456789abcdef01234567"
 	const final = "2123456789abcdef0123456789abcdef01234567"
 	scope := ToolScope{Role: workflow.RoleDeveloper, AgentTurnID: "turn", ExecutionEpoch: 2,
-		Repository: RepositoryScope{ID: 123}, Branch: "omnigrex/issue-115", DefaultBranch: "main", HeadSHA: base}
+		Repository: RepositoryScope{ID: 123, Owner: "acme", Name: "widgets"}, Branch: "omnigrex/issue-115", DefaultBranch: "main", HeadSHA: base}
 	publish := func(number int64, before, after string) store.MutationReservation {
 		raw, _ := json.Marshal(map[string]any{"head": after, "branch": scope.Branch, "changed": before != after})
 		return store.MutationReservation{ID: "publish", AgentTurnID: scope.AgentTurnID, ExecutionEpoch: 2, InvocationNumber: number,
@@ -23,7 +23,7 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 	}
 	open := store.MutationReservation{ID: "open", AgentTurnID: scope.AgentTurnID, ExecutionEpoch: 2, InvocationNumber: 2,
 		ToolName: ToolOpenPR, State: store.MutationSucceeded, ExternalService: "github", ExternalResourceID: "123:" + scope.Branch + ":main", ExpectedSHA: first,
-		Result: json.RawMessage(`{"pull_request_id":456,"node_id":"PR_456","number":23,"html_url":"https://github.test/pull/23","head_sha":"` + first + `"}`)}
+		Result: json.RawMessage(`{"version":1,"repository_id":123,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-115","status":"OPEN","pull_request_id":456,"node_id":"PR_456","number":23,"html_url":"https://github.test/pull/23","head_sha":"` + first + `"}`)}
 	backend := &ProductionBackend{}
 	chain := []store.MutationReservation{publish(1, base, first), open, publish(3, first, final)}
 	target, err := backend.resolvePublicationRead(scope, chain)
@@ -51,7 +51,7 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 			s.PullRequest = &PullRequestScope{ID: 999, Number: 99}
 		}},
 		{"unrelated PR head", func(_ *ToolScope, m []store.MutationReservation) {
-			m[1].Result = json.RawMessage(`{"pull_request_id":456,"node_id":"PR_456","number":23,"html_url":"https://github.test/pull/23","head_sha":"` + base + `"}`)
+			m[1].Result = json.RawMessage(`{"version":1,"repository_id":123,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-115","status":"OPEN","pull_request_id":456,"node_id":"PR_456","number":23,"html_url":"https://github.test/pull/23","head_sha":"` + base + `"}`)
 		}},
 	}
 	for _, test := range tests {

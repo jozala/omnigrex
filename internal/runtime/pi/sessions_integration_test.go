@@ -122,7 +122,11 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if err != nil || ready.RuntimeSessionID != sessionID || ready.Disposition != "recovered" {
 				t.Fatalf("exact creation recovery: %+v %v", ready, err)
 			}
-			outcome, err := recovered.Prompt(ctx, "configuration-audit", nil)
+			outcome, err := recovered.Prompt(ctx, "configuration-long", nil)
+			if err != nil || outcome.Status != agent.Completed {
+				t.Fatalf("multi-megabyte normal completion: %+v %v", outcome, err)
+			}
+			outcome, err = recovered.Prompt(ctx, "configuration-audit", nil)
 			if err != nil || outcome.Status != agent.Completed {
 				t.Fatalf("first prompt: %+v %v", outcome, err)
 			}
@@ -153,7 +157,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 					branches++
 				}
 			}
-			if users != 262 || compactions != 1 || branches != 1 {
+			if users != 263 || compactions != 1 || branches != 1 {
 				t.Fatalf("replay omitted append-order branches/compaction: users=%d compactions=%d branches=%d", users, compactions, branches)
 			}
 			before := len(sink.events)

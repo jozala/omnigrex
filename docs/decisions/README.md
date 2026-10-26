@@ -45,7 +45,11 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0036: Aggregate independent CI qualification behind the existing required check](0036-aggregate-parallel-ci-qualification.md) | Accepted | 2026-10-21 |
 | [0037: Reuse PostgreSQL test processes while isolating databases](0037-reuse-postgres-processes-with-isolated-test-databases.md) | Accepted | 2026-10-21 |
 | [0038: Derive publication read targets without rebinding Turn authority](0038-derive-publication-read-targets-from-the-turn-ledger.md) | Accepted | 2026-10-24 |
-| [0039: Coordinate Microsandbox payload and catalog upgrades](0039-coordinate-microsandbox-catalog-upgrades.md) | Accepted | 2026-10-25 |
+| [0039: Project Pi events at the owned RPC subscription](0039-project-pi-control-events.md) | Accepted | 2026-10-25 |
+| [0040: Use native Pi compaction within the existing Turn lifecycle](0040-use-native-pi-compaction-within-turn-lifecycle.md) | Accepted | 2026-10-25 |
+| [0041: Separate Pi compaction and retry timestamps](0041-separate-pi-compaction-and-retry-timestamps.md) | Accepted | 2026-10-26 |
+| [0042: Associate publication at Turn settlement without granting readiness](0042-associate-publication-at-turn-settlement.md) | Accepted | 2026-10-26 |
+| [0043: Coordinate Microsandbox payload and catalog upgrades](0043-coordinate-microsandbox-catalog-upgrades.md) | Accepted | 2026-10-25 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

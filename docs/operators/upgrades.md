@@ -5,6 +5,19 @@
 Create a coordinated backup before every application, PostgreSQL, or Runtime Profile upgrade.
 Use the same backend, logical namespace, protected images, and selected Compose file set throughout.
 
+## Publication association upgrade precondition
+
+Before upgrading across the publication-evidence change in [decision 0042](../decisions/0042-associate-publication-at-turn-settlement.md), finish or explicitly resolve pre-change publication operations and their related Agent Turn settlement, recovery, and deferred-event reconciliation under the old controller.
+Keep the installation quiescent through the controller replacement; do not admit new work that can create pre-change evidence during this boundary.
+A successful old-format `open_pr` result lacks metadata needed for the new settlement-time association path and is unsupported there.
+Do not rely on a restart, another webhook, or another Agent Turn to enrich it.
+If unfinished pre-change processing cannot be resolved, postpone the upgrade and retain its ledger and protected state for operator investigation using [the troubleshooting guide](troubleshooting.md).
+This is a manual upgrade precondition, not an automated drain or migration facility.
+
+The updated controller records PR association independently of review readiness and tracks valid heads without resuming a Human Handoff.
+Deploying it does not reopen completed settlements, reset failed reconciliation deliveries, repair historical Workflows, or authorize new work in existing Human Handoffs.
+Historical repair requires separate authorization; never reset the database or delete retained state to bypass this boundary.
+
 ## Orchestrator-only upgrade
 
 Keep the configured agent digest/platform and protected historical images, but account for possible changes to the default contract selected for new Participants.

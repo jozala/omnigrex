@@ -1,4 +1,4 @@
-import { isRetryableAssistantError } from '@earendil-works/pi-ai/compat';
+import { isRetryableAssistantError, isContextOverflow } from '@earendil-works/pi-ai/compat';
 
 const counter = value => Number.isFinite(value) ? value : 0;
 
@@ -10,6 +10,13 @@ export function failureExtension(pi, subscription) {
     const source = event.message;
     if (source?.role !== 'assistant' || !['error', 'aborted'].includes(source.stopReason)) return;
     const retryable = typeof source.errorMessage === 'string' && isRetryableAssistantError(source);
+    // Preserve only explicit context/input overflow. Pi also recognizes broad
+    // phrases such as "token limit exceeded", which can describe account quota.
+    // Never infer overflow from usage on a failed request or retain source text.
+    const error = typeof source.errorMessage === 'string' ? source.errorMessage : '';
+    const overflow = source.stopReason === 'error' && isContextOverflow(source) &&
+      /context[_ ](?:length|window|size)|(?:prompt|input)(?: is)? too long|input token count.*exceeds the maximum/i.test(error) &&
+      !/\b(?:401|403|429)\b|quota|rate.?limit|authentication|unauthorized|too many requests/i.test(error);
     const usage = source.usage;
     // A context invalidated during shutdown must not make this hook throw:
     // Pi catches extension exceptions and would otherwise persist the source.
@@ -32,11 +39,15 @@ export function failureExtension(pi, subscription) {
       // recognized by its pinned classifier, without retaining source text,
       // partial content, response IDs, or arbitrary diagnostic metadata.
       errorMessage: source.stopReason === 'aborted' ? 'Provider request aborted'
+        : overflow ? 'Context length exceeded'
         : retryable ? 'Provider returned error' : 'Provider request failed',
       timestamp: Number.isFinite(source.timestamp) ? source.timestamp : Date.now(),
     } };
     if (!subscription || source.stopReason !== 'error') return sanitized;
-    return subscription.failure(source).then(({ failure, generation }) => {
+    return subscription.failure(source).then(({ failure, generation, allowContextOverflow }) => {
+      // Structured subscription quota/auth/configuration evidence wins over
+      // provider prose, even when that prose looks like context overflow.
+      if (overflow && allowContextOverflow) return sanitized;
       sanitized.message.errorMessage = `Omnigrex ${failure}`;
       sanitized.message.omnigrexProviderGeneration = generation;
       return sanitized;

@@ -54,7 +54,8 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 			(event.PriorTerminalTurnID == "" && event.PriorTerminalStage == "" && event.PriorTerminalRole == "" ||
 				event.PriorTerminalTurnID != "" && event.PriorTerminalStage != "" && definition.ContainsRole(event.PriorTerminalRole))
 	case TurnSettledEvent:
-		if !validTurnGuard(definition, event.Turn) || !validPendingObservation(event.PendingEvents) {
+		if !validTurnGuard(definition, event.Turn) || !validPendingObservation(event.PendingEvents) ||
+			(event.PublicationAssociation != nil && (!validChangeProposal(event.PublicationAssociation) || event.PublicationAssociation.ReadyForSHA != "" || event.Turn.ChangeProposalID != 0 || event.Turn.Role != RoleDeveloper)) {
 			return false
 		}
 		switch event.Outcome {

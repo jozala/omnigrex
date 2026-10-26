@@ -17,7 +17,7 @@ import (
 )
 
 func TestReadinessProbeExercisesRealDockerResources(t *testing.T) {
-	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
+	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.4.0")
 	image = readinessRegistryImage(t, image)
 	arch := strings.TrimSpace(dockerCommand(t, "image", "inspect", image, "--format", "{{.Architecture}}"))
 	bound, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: arch})

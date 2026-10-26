@@ -13,6 +13,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/uuidtext"
@@ -220,7 +221,7 @@ func (reconciler *ProductionReconciler) reconcileOpenPullRequest(ctx context.Con
 	if len(matches) == 1 && !conflict {
 		matched := matches[0]
 		matched.Head.SHA = mutation.ExpectedSHA
-		result, err := encodePullRequestResult(matched)
+		result, err := encodePullRequestResult(matched, RepositoryScope{ID: reconciliation.Repository.ID, Owner: reconciliation.Repository.Owner, Name: reconciliation.Repository.Name})
 		if err != nil {
 			return unresolvedReconciliation(), nil
 		}
@@ -551,17 +552,29 @@ func foundReviewRequest(pullRequestID, pullRequestNumber int64, head string) (Mu
 	return foundReconciliation(result), nil
 }
 
-func encodePullRequestResult(pullRequest githubapi.PullRequest) (json.RawMessage, error) {
-	if pullRequest.ID <= 0 || pullRequest.NodeID == "" || pullRequest.Number <= 0 || pullRequest.HTMLURL == "" {
+func encodePullRequestResult(pr githubapi.PullRequest, repository RepositoryScope) (json.RawMessage, error) {
+	// Retain lifecycle observations; closed/merged artifacts prove a successful
+	// operation but cannot establish an active settlement association.
+	if pr.State != "open" && pr.State != "closed" ||
+		pr.Head.Label != "" && pr.Head.Label != repository.Owner+":"+pr.Head.Ref ||
+		pr.Base.Label != "" && pr.Base.Label != repository.Owner+":"+pr.Base.Ref {
 		return nil, ErrInvalidMutationReconciliation
 	}
-	return json.Marshal(struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int    `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}{pullRequest.ID, pullRequest.NodeID, pullRequest.Number, pullRequest.HTMLURL, pullRequest.Head.SHA})
+	status := "OPEN"
+	if pr.State == "closed" {
+		status = "CLOSED"
+	}
+	if pr.Merged {
+		status = "MERGED"
+	}
+	result := publication.OpenResult{Version: 1, PullRequestID: pr.ID, NodeID: pr.NodeID,
+		Number: int64(pr.Number), HTMLURL: pr.HTMLURL, HeadSHA: pr.Head.SHA,
+		RepositoryID: repository.ID, RepositoryOwner: repository.Owner, RepositoryName: repository.Name,
+		BaseRef: pr.Base.Ref, BaseSHA: pr.Base.SHA, HeadRef: pr.Head.Ref, Status: status}
+	if !result.Valid() {
+		return nil, ErrInvalidMutationReconciliation
+	}
+	return json.Marshal(result)
 }
 
 func encodeReviewResult(review githubapi.Review) (json.RawMessage, error) {

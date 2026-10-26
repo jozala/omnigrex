@@ -39,6 +39,19 @@ import (
 )
 
 func TestPiControlledWorkflow(t *testing.T) {
+	t.Run("long blocked completion", func(t *testing.T) {
+		f := newPiWorkflowFixture(t, "long-blocked")
+		prepared := f.prepare(t)
+		processed, err := f.worker.ProcessNext(f.ctx)
+		if err != nil || !processed {
+			t.Fatalf("long blocked Pi execution: %t %v", processed, err)
+		}
+		f.assertState(t, workflow.StateNeedsHuman)
+		var outcome string
+		if err := f.pool(t).QueryRow(f.ctx, `SELECT workflow_outcome FROM agent_turn_settlements WHERE agent_turn_id=$1`, prepared.Commit.Turn.ID).Scan(&outcome); err != nil || outcome != string(workflow.TurnOutcomeBlocked) {
+			t.Fatalf("successful blocked intent not reconciled: %s %v", outcome, err)
+		}
+	})
 	f := newPiWorkflowFixture(t, "")
 	ctx, database, settings := f.ctx, f.database, f.settings
 	worker, workspaces, github, authority := f.worker, f.workspaces, f.github, f.authority
@@ -72,6 +85,18 @@ func TestPiControlledWorkflow(t *testing.T) {
 		bytes, err := os.ReadFile(filepath.Join(settings.RuntimeStateRoot, "assignment-"+participant.ID, "runtime-state", "sessions", durable.ID, "session.jsonl"))
 		if err != nil {
 			t.Fatal(err)
+		}
+		longMessages := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(bytes)), "\n") {
+			if len(line) > 1<<20 {
+				t.Fatal("fixture exceeded durable Session entry bound")
+			}
+			if strings.Contains(line, strings.Repeat("LONG_WORKFLOW_BODY", 32000)) {
+				longMessages++
+			}
+		}
+		if longMessages != 6 || len(bytes) < 2<<20 {
+			t.Fatalf("complete long transcript was not retained: messages=%d bytes=%d", longMessages, len(bytes))
 		}
 		for _, secret := range []string{"workflow-only-provider-key", "developer-token", "reviewer-token"} {
 			if strings.Contains(string(bytes), secret) {

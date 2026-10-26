@@ -77,7 +77,7 @@ run = "docker build --file agent/pi/diagnostic/Dockerfile --tag omnigrex/pi-diag
 
 [tasks.pi-image]
 description = "Build the pinned Pi repository environment"
-run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 ."
+run = "docker build --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 ."
 
 [tasks.development-golden-image]
 description = "Build the current Linux/amd64 Pi golden image for local development-image qualification"

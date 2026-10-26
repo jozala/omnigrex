@@ -79,16 +79,18 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
-	events          chan agentevent.AgentEvent
-	settled         chan struct{}
-	settledOK       bool
-	lastReason      string
-	lastFailure     string
-	lastGeneration  string
-	outcome         agent.Outcome
-	retryBackoff    bool
-	cancelRequested bool
-	retryCancelled  bool
+	events            chan agentevent.AgentEvent
+	settled           chan struct{}
+	settledOK         bool
+	lastReason        string
+	lastFailure       string
+	lastGeneration    string
+	outcome           agent.Outcome
+	retryBackoff      bool
+	cancelRequested   bool
+	retryCancelled    bool
+	compactionFailed  bool
+	compactionAborted bool
 }
 
 // Connect starts reading immediately, including events emitted before a waiter.
@@ -393,7 +395,9 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		}
 	}
 
-	result, err := c.request(ctx, "prompt", map[string]string{"message": text})
+	// Pi may summarize retained context before acknowledging admission. The
+	// existing Turn deadline, not the ordinary command timeout, bounds this work.
+	result, err := c.exchange(ctx, "prompt", map[string]string{"message": text})
 	if err != nil {
 		if result.acknowledged && errors.Is(err, agent.ErrRuntime) {
 			return agent.Outcome{Status: agent.Rejected, FailureClass: "runtime_rejection"}, err
@@ -635,6 +639,8 @@ func (c *connection) record(content []byte) error {
 		Data         json.RawMessage `json:"data"`
 		Message      json.RawMessage `json:"message"`
 		FinalError   string          `json:"finalError"`
+		ErrorMessage string          `json:"errorMessage"`
+		Aborted      bool            `json:"aborted"`
 		SessionID    string          `json:"sessionId"`
 		Disposition  string          `json:"disposition"`
 		Capabilities json.RawMessage `json:"capabilities"`
@@ -691,6 +697,10 @@ func (c *connection) record(content []byte) error {
 		}
 		if message.Role == "assistant" {
 			t.lastReason = ""
+			t.compactionFailed = false
+			// A cancelled pre-prompt summary can be followed by Pi's synthetic
+			// assistant error, not an aborted assistant. Keep that cancellation.
+			t.compactionAborted = t.compactionAborted && t.cancelRequested
 			t.lastFailure, t.lastGeneration = "", ""
 			t.retryBackoff, t.retryCancelled = false, false
 		}
@@ -727,15 +737,36 @@ func (c *connection) record(content []byte) error {
 		if record.Success == nil {
 			return agent.ErrProtocol
 		}
-		// Pi 1.0.4 aborts its backoff without appending an aborted assistant
+		// Pi aborts its backoff without appending an aborted assistant
 		// message. Recognize its exact cancellation marker only for a requested
 		// abort in that backoff; arbitrary provider error text is not evidence.
 		t.retryCancelled = t.retryBackoff && t.lastReason == "error" && t.cancelRequested && !*record.Success && record.FinalError == "Retry cancelled"
 		t.retryBackoff = false
+	case "compaction_start":
+	case "compaction_end":
+		t.compactionAborted = record.Aborted
+		t.compactionFailed = !record.Aborted && record.ErrorMessage != ""
+		failure := ""
+		if t.compactionFailed {
+			failure = "compaction_failed"
+		}
+		select {
+		case t.events <- c.runtimeEvent("activity", status, failure, record.Type, "", false):
+		default:
+			return agent.ErrBackpressure
+		}
+		return nil
 	case "agent_settled":
 		outcome := agent.Outcome{Admitted: true}
-		if t.retryCancelled {
+		// Cancellation after a successful summary (including the compatibility
+		// wait) can leave an assistant stop and a successful compaction_end.
+		// Honor native settlement's abort confirmation only for our own request;
+		// requesting cancellation alone must not override a completed run.
+		if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
 			outcome.Status = agent.Aborted
+		} else if t.compactionFailed {
+			// Reuse bounded provider-failure handling; compaction is not completion.
+			outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
 		} else {
 			switch t.lastReason {
 			case "stop", "length":
@@ -761,7 +792,7 @@ func (c *connection) record(content []byte) error {
 		}
 		close(t.settled)
 		return nil
-	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end", "auto_compaction_start", "auto_compaction_end":
+	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end":
 	default:
 		return nil
 	}
@@ -782,7 +813,7 @@ func (c *connection) runtimeEvent(kind, status, failure, source, reason string, 
 		Event          string `json:"event"`
 		Reason         string `json:"assistant_stop_reason,omitempty"`
 		RetryCancelled bool   `json:"retry_cancelled,omitempty"`
-	}{"pi-rpc/1.0.4", source, reason, retryCancelled})
+	}{"pi-rpc/v2", source, reason, retryCancelled})
 	return event
 }
 
