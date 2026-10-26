@@ -32,6 +32,7 @@ async function runFixture(command, args) {
 }
 try {
   const configuration = await readBootstrap();
+  if (process.env.OMNIGREX_PI_COMPACTION_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/diagnostic/compaction.test.mjs']);
   if (process.env.OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/diagnostic/control-events.test.mjs', '/opt/omnigrex/pi/diagnostic/control-rpc.test.mjs']);
   if (process.env.OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/session-state.test.mjs']);
   if (process.env.OMNIGREX_PI_MCP_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/mcp-boundary.test.mjs']);

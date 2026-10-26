@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { subscriptionRuntime, subscriptionPayload } from '../subscription-auth.mjs';
+import { isContextOverflow } from '@earendil-works/pi-ai/compat';
 import { failureExtension } from '../failure-extension.mjs';
 
 const configuration = { mcp: { url: 'http://controller.test:8081/mcp', headers: [{ name: 'Authorization', value: 'Bearer turn-authority' }] } };
@@ -147,3 +148,29 @@ test('unavailable controller does not fall back to ambient OpenAI credentials', 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// Structured account evidence takes precedence over ambiguous provider prose.
+for (const [code, wantOverflow] of [['context_length_exceeded', true], ['subscription_sharing_usage_limit_exceeded', false]]) {
+  test(`subscription compaction respects structured failure ${code}`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'omnigrex-subscription-overflow-'));
+    const reports = [];
+    try {
+      const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
+        if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+          if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
+          return Response.json({ access_token: 'access-fixture', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
+        }
+        return Response.json({ error: { code, message: 'Your input exceeds the context window of this model access-secret' } }, { status: 400 });
+      });
+      const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+      const source = await subscription.runtime.completeSimple(model, { messages: [{ role: 'user', content: 'fixture', timestamp: 1 }] });
+      let finalize;
+      failureExtension({ on(_event, handler) { finalize = handler; } }, subscription);
+      const { message } = await finalize({ message: source }, { model });
+      assert.equal(isContextOverflow(message), wantOverflow);
+      assert.equal(JSON.stringify(message).includes('secret'), false);
+      assert.equal(reports.length, wantOverflow ? 0 : 1);
+      if (!wantOverflow) assert.equal(message.errorMessage, 'Omnigrex subscription_quota');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+}
