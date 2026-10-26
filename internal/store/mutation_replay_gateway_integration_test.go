@@ -29,6 +29,9 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 95)
+	if _, err := pool.Exec(context.Background(), `UPDATE workflow_attempts SET infrastructure_failure_limit=1 WHERE id=$1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const (
@@ -126,6 +129,11 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 2 {
 		t.Fatalf("fresh replay outcome = %#v, GitHub gets %d", observation, github.getCallCount())
 	}
+	settled, err := database.SettleAgentTurn(ctx, retryLease, observation)
+	if err != nil || settled.ChangeProposalID == "" || settled.State != workflow.StateReviewing {
+		t.Fatalf("ancestor publication association = %#v, %v", settled, err)
+	}
+
 }
 
 func TestGatewayMalformedAncestorReplayFailsClosedWithoutLedgerEvidence(t *testing.T) {

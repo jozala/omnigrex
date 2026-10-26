@@ -229,6 +229,14 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
+	var publicationProof *settlementPublication
+	if compatible {
+		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, job, turn, role, snapshot, canonical.ChangeProposal)
+		if err != nil {
+			return AgentTurnSettlement{}, err
+		}
+	}
+
 	event := workflow.TurnSettledEvent{
 		EventMetadata: workflow.EventMetadata{
 			ID: settlementID, ObservedAt: canonical.ObservedAt,
@@ -241,7 +249,7 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
 			ExpectedHeadSHA:  turn.ExpectedHeadSHA,
 		},
-		Outcome: canonical.Outcome, ChangeProposal: proposal,
+		Outcome: canonical.Outcome, ChangeProposal: proposal, PublicationAssociation: publicationProof.projection(),
 		Review: canonical.Review, ExistingReview: canonical.ExistingReview,
 		AuthorizedReviewerActorID: canonical.AuthorizedReviewerActorID,
 		PendingEvents:             pending, Diagnostic: canonical.Diagnostic,
@@ -257,8 +265,12 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 	if decision.Disposition != workflow.DispositionApplied {
 		return AgentTurnSettlement{}, ErrAgentTurnSettlementRejected
 	}
-	if snapshot.ChangeProposal == nil && canonical.ChangeProposal != nil {
-		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, job, turn, *canonical.ChangeProposal)
+	initialProposal := canonical.ChangeProposal
+	if publicationProof != nil {
+		initialProposal = &publicationProof.Proposal
+	}
+	if compatible && snapshot.ChangeProposal == nil && initialProposal != nil {
+		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, job, turn, *initialProposal)
 		if err != nil {
 			return AgentTurnSettlement{}, err
 		}
@@ -309,7 +321,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		return AgentTurnSettlement{}, err
 	}
 	result.SettledAt = result.SettledAt.UTC()
-	resultJSON, err := json.Marshal(result)
+	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}

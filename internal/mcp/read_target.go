@@ -66,7 +66,7 @@ func (backend *ProductionBackend) resolvePublicationRead(scope ToolScope, mutati
 				target.HeadSHA = result.Head
 			}
 		case ToolOpenPR:
-			pr, _, ok := restoredPullRequest(mutation.Result, target.HeadSHA)
+			pr, _, ok := restoredPullRequest(mutation.Result, target.HeadSHA, scope)
 			if !ok || mutation.ExpectedSHA != target.HeadSHA || !sameOrMissingPullRequest(target.PullRequest, pr) {
 				return publicationReadTarget{}, ErrToolPrecondition
 			}
