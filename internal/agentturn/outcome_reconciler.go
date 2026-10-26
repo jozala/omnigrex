@@ -17,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/providerauth"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -923,17 +924,11 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 		Title       string `json:"title"`
 		Body        string `json:"body"`
 	}
-	var result struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int64  `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}
+	result, resultErr := publication.DecodeOpenResult(mutation.Result)
 	head, base, resourceOK := exactOpenPullRequestResource(mutation.ExternalResourceID, repositoryID)
 	if mutation.ExternalService != "github" || !resourceOK || !decodeExactObject(mutation.Request, &arguments) ||
 		arguments.OperationID != mutation.OperationID || strings.TrimSpace(arguments.Title) == "" ||
-		!decodeExactObject(mutation.Result, &result) || result.PullRequestID <= 0 || result.Number <= 0 ||
+		resultErr != nil || result.RepositoryID != repositoryID || result.HeadRef != head || result.BaseRef != base ||
 		strings.TrimSpace(result.NodeID) == "" || strings.TrimSpace(result.HeadSHA) == "" || mutation.ExpectedSHA != result.HeadSHA {
 		return openPullRequestEvidence{}, false
 	}

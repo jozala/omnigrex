@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { subscriptionRuntime, subscriptionPayload } from '../subscription-auth.mjs';
+import { isContextOverflow } from '@earendil-works/pi-ai/compat';
 import { failureExtension } from '../failure-extension.mjs';
 
 const configuration = { mcp: { url: 'http://controller.test:8081/mcp', headers: [{ name: 'Authorization', value: 'Bearer turn-authority' }] } };
@@ -229,5 +230,58 @@ test('concurrent and later calls cannot inherit another request diagnostic', asy
     assert.equal(unrelated.diagnostic.stage, 'unknown');
     assert.equal(unrelated.generation, '');
     assert.equal(unrelated.failure, 'subscription_temporary');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+// Structured account evidence takes precedence over ambiguous provider prose.
+for (const [code, wantOverflow] of [['context_length_exceeded', true], ['subscription_sharing_usage_limit_exceeded', false]]) {
+  test(`subscription compaction respects structured failure ${code}`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'omnigrex-subscription-overflow-'));
+    const reports = [];
+    try {
+      const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
+        if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+          if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
+          return Response.json({ access_token: 'access-fixture', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
+        }
+        return Response.json({ error: { code, message: 'Your input exceeds the context window of this model access-secret' } }, { status: 400 });
+      });
+      const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+      const source = await subscription.runtime.completeSimple(model, { messages: [{ role: 'user', content: 'fixture', timestamp: 1 }] });
+      let finalize;
+      failureExtension({ on(_event, handler) { finalize = handler; } }, subscription);
+      const { message } = await finalize({ message: source }, { model });
+      assert.equal(isContextOverflow(message), wantOverflow);
+      assert.equal(JSON.stringify(message).includes('secret'), false);
+      assert.equal(reports.length, wantOverflow ? 0 : 1);
+      if (!wantOverflow) assert.equal(message.errorMessage, 'Omnigrex subscription_quota');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
+test('concurrent overflow and quota failures keep diagnostics and compaction hints request-scoped', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omnigrex-overflow-concurrent-'));
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  try {
+    const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
+      if (String(url).includes('/runtime/provider-auth')) return init.method === 'POST' ? Response.json({}) : credential();
+      const model = JSON.parse(init.body).model;
+      if (model === 'overflow') await pending;
+      else release();
+      const code = model === 'overflow' ? 'context_length_exceeded' : 'subscription_sharing_usage_limit_exceeded';
+      return Response.json({ error: { code, message: `Your input exceeds the context window of this model ${sentinel}` } }, { status: 400 });
+    });
+    const model = subscription.runtime.getModel('openai', 'gpt-6.1-sol');
+    const sources = await Promise.all(['overflow', 'quota'].map(id => subscription.runtime.completeSimple({ ...model, id }, context)));
+    let finalize;
+    failureExtension({ on(_event, handler) { finalize = handler; } }, subscription);
+    const [overflow, quota] = await Promise.all(sources.map(message => finalize({ message }, { model })));
+    assert.equal(isContextOverflow(overflow.message), true);
+    assert.equal(isContextOverflow(quota.message), false);
+    assert.equal(quota.message.errorMessage, 'Omnigrex subscription_quota');
+    assert.equal(overflow.message.omnigrexProviderDiagnostic.http_status, 400);
+    assert.equal(quota.message.omnigrexProviderDiagnostic.code, 'subscription_sharing_usage_limit_exceeded');
+    assert.notEqual(overflow.message.omnigrexProviderDiagnostic.attempt, quota.message.omnigrexProviderDiagnostic.attempt);
+    assert.ok(!JSON.stringify([overflow, quota]).includes(sentinel));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

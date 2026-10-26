@@ -2,9 +2,33 @@ package piresources
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestCompactionCompatibilityResourceKeepsHistoricalInventoriesValid(t *testing.T) {
+	const name = "compaction-compat-extension.mjs"
+	var current ResourceContract
+	if err := json.Unmarshal(CurrentContract("amd64"), &current); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
+		t.Fatal("current runtime does not qualify the compaction compatibility extension")
+	}
+	current.Files = slices.DeleteFunc(current.Files, func(file ResourceFile) bool { return file.Name == name })
+	retained, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := QualificationScript("amd64", retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, name) {
+		t.Fatal("historical runtime was rebound to the new compatibility extension")
+	}
+}
 
 func TestResourceQualificationUsesRetainedInventory(t *testing.T) {
 	var old ResourceContract
@@ -45,5 +69,32 @@ func TestResourceContractsRejectExecutableOrIncompleteInventory(t *testing.T) {
 	}
 	if _, err := NormalizeContract(json.RawMessage(`{"version":1,"command":"sh"}`)); err == nil {
 		t.Fatal("unknown resource command accepted")
+	}
+}
+
+func TestProviderDiagnosticResourceKeepsHistoricalInventoriesValid(t *testing.T) {
+	const name = "provider-diagnostic.mjs"
+	var current ResourceContract
+	if err := json.Unmarshal(CurrentContract("amd64"), &current); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
+		t.Fatal("current runtime does not qualify the provider diagnostic module")
+	}
+	script, err := QualificationScript("amd64", CurrentContract("amd64"))
+	if err != nil || !strings.Contains(script, name) {
+		t.Fatalf("current qualification omits diagnostics: %v", err)
+	}
+	current.Files = slices.DeleteFunc(current.Files, func(file ResourceFile) bool { return file.Name == name })
+	retained, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical, err := QualificationScript("amd64", retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(historical, name) {
+		t.Fatal("historical runtime was rebound to a new diagnostic module")
 	}
 }

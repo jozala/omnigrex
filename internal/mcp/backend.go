@@ -17,6 +17,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
@@ -447,7 +448,7 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 		progress.head = result.Head
 		progress.branchExists = progress.branchExists || *result.Changed || result.Head != invocation.Scope.HeadSHA
 	case ToolOpenPR:
-		pullRequest, head, ok := restoredPullRequest(source.Result, source.ExpectedSHA)
+		pullRequest, head, ok := restoredPullRequest(source.Result, source.ExpectedSHA, invocation.Scope)
 		if !ok {
 			return ErrToolPrecondition
 		}
@@ -650,14 +651,12 @@ func (backend *ProductionBackend) openPullRequest(ctx context.Context, invocatio
 		pullRequest.Head.SHA != expectedHead || pullRequest.Base.Ref != invocation.Scope.DefaultBranch || pullRequest.HTMLURL == "" {
 		return nil, OutcomeUnknown(ErrToolPrecondition)
 	}
+	result, err := encodePullRequestResult(pullRequest, invocation.Scope.Repository)
+	if err != nil {
+		return nil, OutcomeUnknown(ErrToolPrecondition)
+	}
 	backend.recordOpenedPullRequest(invocation.Scope, pullRequest)
-	return json.Marshal(struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int    `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}{pullRequest.ID, pullRequest.NodeID, pullRequest.Number, pullRequest.HTMLURL, pullRequest.Head.SHA})
+	return result, nil
 }
 
 func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
@@ -1313,16 +1312,9 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 	return metadata
 }
 
-func restoredPullRequest(raw json.RawMessage, expectedHead string) (*PullRequestScope, string, bool) {
-	var result struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int64  `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}
-	if !decodeExactResult(raw, &result) || result.PullRequestID <= 0 || result.NodeID == "" || result.Number <= 0 ||
-		result.HTMLURL == "" || result.HeadSHA != expectedHead {
+func restoredPullRequest(raw json.RawMessage, expectedHead string, scope ToolScope) (*PullRequestScope, string, bool) {
+	result, err := publication.DecodeOpenResult(raw)
+	if err != nil || result.HeadSHA != expectedHead || result.RepositoryID != scope.Repository.ID || result.RepositoryOwner != scope.Repository.Owner || result.RepositoryName != scope.Repository.Name || result.HeadRef != scope.Branch || result.BaseRef != scope.DefaultBranch {
 		return nil, "", false
 	}
 	return &PullRequestScope{ID: result.PullRequestID, Number: result.Number}, result.HeadSHA, true

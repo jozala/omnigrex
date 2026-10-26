@@ -41,7 +41,7 @@ func TestPublicationRecoveryBindsPriorParticipantPRWithoutRequestingReview(t *te
 		{ID: prID, OperationID: "open-18", State: store.MutationSucceeded, ToolName: mcp.ToolOpenPR,
 			ExternalService: "github", ExternalResourceID: "41:omnigrex/issue-18:main", ExpectedSHA: recoveryHead,
 			Request: json.RawMessage(`{"operation_id":"open-18","title":"Fix it","body":"Ready"}`),
-			Result:  json.RawMessage(`{"pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
+			Result:  json.RawMessage(`{"version":1,"repository_id":41,"repository_owner":"jozala","repository_name":"omnigrex","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-18","status":"OPEN","pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
 	}}
 	remote := &publicationRecoveryRemote{head: recoveryHead}
 	github := &publicationRecoveryGitHub{pullRequests: []githubapi.PullRequest{{
@@ -90,7 +90,7 @@ func TestPublicationRecoveryReacquiresCredentialAfterPreparingCheckout(t *testin
 		{ID: prID, OperationID: "open-18", State: store.MutationSucceeded, ToolName: mcp.ToolOpenPR,
 			ExternalService: "github", ExternalResourceID: "41:omnigrex/issue-18:main", ExpectedSHA: recoveryHead,
 			Request: json.RawMessage(`{"operation_id":"open-18","title":"Fix it","body":"Ready"}`),
-			Result:  json.RawMessage(`{"pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
+			Result:  json.RawMessage(`{"version":1,"repository_id":41,"repository_owner":"jozala","repository_name":"omnigrex","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-18","status":"OPEN","pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
 	}}
 	clock := &expiryClock{now: time.Date(2026, time.October, 8, 7, 45, 0, 0, time.UTC)}
 	cache, _ := newExpiryCache(t, clock, "recovery", 5*time.Minute, time.Hour)
@@ -146,7 +146,7 @@ func TestPublicationRecoveryFailsSafeWhenCredentialExpiresMidVerification(t *tes
 		{ID: prID, OperationID: "open-18", State: store.MutationSucceeded, ToolName: mcp.ToolOpenPR,
 			ExternalService: "github", ExternalResourceID: "41:omnigrex/issue-18:main", ExpectedSHA: recoveryHead,
 			Request: json.RawMessage(`{"operation_id":"open-18","title":"Fix it","body":"Ready"}`),
-			Result:  json.RawMessage(`{"pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
+			Result:  json.RawMessage(`{"version":1,"repository_id":41,"repository_owner":"jozala","repository_name":"omnigrex","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-18","status":"OPEN","pull_request_id":901,"node_id":"PR_901","number":19,"html_url":"https://github.com/jozala/omnigrex/pull/19","head_sha":"` + recoveryHead + `"}`)},
 	}}
 	// The initial observation succeeds; the re-observation after the recovered
 	// publication is prepared fails as an expired credential would.

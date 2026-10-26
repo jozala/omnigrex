@@ -31,8 +31,11 @@ COPY agent/pi/package.json agent/pi/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY agent/pi/diagnostic/fixture.mjs ./fixture.mjs
 COPY agent/pi/runner.mjs agent/pi/mcp-extension.mjs agent/pi/failure-extension.mjs agent/pi/session-state.mjs agent/pi/session-validation.mjs agent/pi/history-rpc.mjs agent/pi/control-events.mjs ./
+COPY agent/pi/compaction-compat-extension.mjs ./
 COPY agent/pi/subscription-auth.mjs agent/pi/provider-diagnostic.mjs ./
 COPY agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/control-rpc.test.mjs agent/pi/diagnostic/control-rpc-fixture.mjs ./diagnostic/
+COPY agent/pi/diagnostic/compaction.test.mjs ./diagnostic/
+COPY agent/pi/diagnostic/compaction-compat.test.mjs ./diagnostic/
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs
@@ -44,7 +47,7 @@ COPY --from=fixture-build /out/pi-mcp-fixture /usr/local/bin/pi-mcp-fixture
 COPY --from=search-tools /out/search/rg/rg /out/search/fd/fd /usr/local/bin/
 RUN printf '#!/bin/sh\nexec /usr/local/bin/node /opt/omnigrex/pi/fixture.mjs\n' > /usr/local/bin/omnigrex-pi-diagnostic && chmod 0755 /usr/local/bin/omnigrex-pi-diagnostic && \
     mkdir -p /workspace /run/pi-agent && chown 10001:10001 /workspace /run/pi-agent && \
-    test "$(node --version)" = v24.14.1 && test "$(node node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version)" = 1.0.4 && \
+    test "$(node --version)" = v24.14.1 && test "$(node node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version)" = 1.4.0 && \
     rg --version && test "$(fd --version)" = 'fd 10.3.0'
 ENV HOME=/tmp PI_CODING_AGENT_DIR=/run/pi-agent PI_OFFLINE=1 PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
 USER 10001:10001

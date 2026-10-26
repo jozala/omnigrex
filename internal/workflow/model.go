@@ -262,6 +262,8 @@ type PendingEventsObservation struct {
 
 // TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
 type TurnSettledEvent struct {
+	// PublicationAssociation is store-derived bookkeeping, not readiness evidence.
+	PublicationAssociation *ChangeProposal
 	EventMetadata
 	Turn                       TurnGuard
 	Outcome                    TurnOutcome

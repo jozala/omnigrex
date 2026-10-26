@@ -180,6 +180,14 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		}
 	}
 
+	var publicationProof *settlementPublication
+	if compatible {
+		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, job, turn, role, snapshot, canonicalObservation.ChangeProposal)
+		if err != nil {
+			return AgentTurnSettlement{}, err
+		}
+	}
+
 	event := workflow.TurnSettledEvent{
 		EventMetadata: workflow.EventMetadata{
 			ID: settlementID, ObservedAt: canonicalObservation.ObservedAt,
@@ -191,7 +199,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
 			ExpectedHeadSHA:  turn.ExpectedHeadSHA,
 		},
-		Outcome: canonicalObservation.Outcome, ChangeProposal: proposal,
+		Outcome: canonicalObservation.Outcome, ChangeProposal: proposal, PublicationAssociation: publicationProof.projection(),
 		Review: canonicalObservation.Review, ExistingReview: canonicalObservation.ExistingReview,
 		AuthorizedReviewerActorID: canonicalObservation.AuthorizedReviewerActorID,
 		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic,
@@ -207,8 +215,12 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		return AgentTurnSettlement{}, fmt.Errorf("%w: disposition %s, reason %s", ErrAgentTurnSettlementRejected, decision.Disposition, decision.Reason)
 	}
 
-	if compatible && snapshot.ChangeProposal == nil && canonicalObservation.ChangeProposal != nil {
-		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, job, turn, *canonicalObservation.ChangeProposal)
+	initialProposal := canonicalObservation.ChangeProposal
+	if publicationProof != nil {
+		initialProposal = &publicationProof.Proposal
+	}
+	if compatible && snapshot.ChangeProposal == nil && initialProposal != nil {
+		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, job, turn, *initialProposal)
 		if err != nil {
 			return AgentTurnSettlement{}, err
 		}
@@ -255,7 +267,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 		return AgentTurnSettlement{}, fmt.Errorf("timestamp Agent Turn settlement: %w", err)
 	}
 	result.SettledAt = result.SettledAt.UTC()
-	resultJSON, err := json.Marshal(result)
+	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("encode Agent Turn settlement result: %w", err)
 	}
@@ -467,6 +479,15 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	if err != nil {
 		return false, fmt.Errorf("generate recovered Agent Turn settlement identity: %w", err)
 	}
+	var publicationProof *settlementPublication
+	if reducer.DefinitionCompatible(snapshot) {
+		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, authority, turn, role, snapshot, nil)
+		if err != nil {
+			return false, err
+		}
+	}
+	proposalID := turn.ChangeProposalID
+
 	decision := reducer.DefinitionIncompatible(snapshot)
 	if reducer.DefinitionCompatible(snapshot) {
 		decision = reducer.Reduce(snapshot, workflow.TurnSettledEvent{
@@ -474,7 +495,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 				ID: settlementID, ObservedAt: observation.ObservedAt,
 				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 			},
-			Turn: guard, Outcome: outcome,
+			Turn: guard, Outcome: outcome, PublicationAssociation: publicationProof.projection(),
 			PendingEvents: pending, Diagnostic: observation.Diagnostic,
 		})
 	}
@@ -484,6 +505,13 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 	if decision.Disposition != workflow.DispositionApplied {
 		return false, fmt.Errorf("%w: disposition %s, reason %s", ErrAgentTurnSettlementRejected, decision.Disposition, decision.Reason)
 	}
+	if publicationProof != nil {
+		proposalID, err = insertInitialSettlementChangeProposal(ctx, tx, settlementID, authority, turn, publicationProof.Proposal)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
 INSERT INTO agent_turn_settlements (
     id, workflow_id, workflow_attempt_id, agent_participant_id, agent_session_id,
@@ -507,7 +535,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		outcome, terminalStatus, nullableJSON(observation.TerminalOutcome),
 		diagnostic, int64(pending.Count), nullableString(pending.LatestObservedHeadSHA),
 		decision.Disposition, decision.Reason, decision.Snapshot.State,
-		int64(decision.Snapshot.Revision), nullableString(turn.ChangeProposalID))
+		int64(decision.Snapshot.Revision), nullableString(proposalID))
 	if err != nil {
 		return false, fmt.Errorf("persist recovered Agent Turn settlement provenance: %w", err)
 	}
@@ -520,7 +548,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		RecoveryJobID: authority.ID, RecoveryJobKind: authority.Kind,
 		Disposition: decision.Disposition, Reason: decision.Reason,
 		State: decision.Snapshot.State, Revision: decision.Snapshot.Revision,
-		TerminalStatus: terminalStatus, ChangeProposalID: turn.ChangeProposalID,
+		TerminalStatus: terminalStatus, ChangeProposalID: proposalID,
 		PendingEventCount: pending.Count, LatestObservedHeadSHA: pending.LatestObservedHeadSHA,
 	}
 	if err := resolveSettlementActionJobs(ctx, tx, settlementID, &result); err != nil {
@@ -530,7 +558,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		return false, fmt.Errorf("timestamp recovered Agent Turn settlement: %w", err)
 	}
 	result.SettledAt = result.SettledAt.UTC()
-	resultJSON, err := json.Marshal(result)
+	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return false, fmt.Errorf("encode recovered Agent Turn settlement result: %w", err)
 	}

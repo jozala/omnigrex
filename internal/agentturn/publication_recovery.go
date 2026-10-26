@@ -11,6 +11,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	publicationevidence "github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -104,23 +105,17 @@ func (recovery *PublicationRecovery) Recover(ctx context.Context, lease store.Ag
 			publication.HeadSHA, publication.SourcePublishMutationID = result.Head, mutation.ID
 			latest = mutation
 		case mcp.ToolOpenPR:
-			var result struct {
-				ID      int64  `json:"pull_request_id"`
-				NodeID  string `json:"node_id"`
-				Number  int64  `json:"number"`
-				HTMLURL string `json:"html_url"`
-				HeadSHA string `json:"head_sha"`
-			}
+			result, resultErr := publicationevidence.DecodeOpenResult(mutation.Result)
 			if opened.ID != "" || mutation.ExternalService != "github" ||
 				mutation.ExternalResourceID != fmt.Sprintf("%d:%s:%s", execution.Repository.ID, branch, defaultBranch) ||
-				!decodePublicationObject(mutation.Result, &result) || result.ID <= 0 || result.Number <= 0 ||
+				resultErr != nil || result.RepositoryID != execution.Repository.ID || result.RepositoryOwner != execution.Repository.Owner || result.RepositoryName != execution.Repository.Name || result.HeadRef != branch || result.BaseRef != defaultBranch ||
 				result.NodeID == "" || result.HTMLURL == "" || !validPublicationSHA(result.HeadSHA) || result.HeadSHA != mutation.ExpectedSHA ||
 				latest.ID == "" || publication.HeadSHA != mutation.ExpectedSHA {
 				return ErrPublicationConflict
 			}
 			opened = mutation
 			openedURL = result.HTMLURL
-			publication.PullRequestID, publication.PullRequestNumber, publication.PullRequestNodeID = result.ID, result.Number, result.NodeID
+			publication.PullRequestID, publication.PullRequestNumber, publication.PullRequestNodeID = result.PullRequestID, result.Number, result.NodeID
 			publication.SourceOpenPRMutationID = mutation.ID
 		}
 	}

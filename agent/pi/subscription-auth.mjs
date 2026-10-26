@@ -68,7 +68,7 @@ function observeFailures(response, record, interrupted) {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-// Pi 1.0.4 emits flat function tools and may emit system-role messages for
+// Pi emits flat function tools and may emit system-role messages for
 // non-reasoning models. Normalize only this documented direct subscription path.
 export function subscriptionPayload(source) {
   const payload = { ...source, store: false, stream: true };
@@ -150,6 +150,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
       if (!response.ok) {
         const code = await httpFailureCode(response);
         if (call) {
+          call.allowContextOverflow = [400, 413].includes(response.status) && !structuredFailures.has(code);
           call.failure = structuredFailures.get(code) ?? (response.status === 401 ? 'subscription_auth'
             : [400, 403, 404].includes(response.status) ? 'subscription_configuration' : 'subscription_temporary');
           call.diagnostic.cause = 'http';
@@ -159,6 +160,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
       }
       return observeFailures(response, code => {
         if (call) {
+          call.allowContextOverflow = ['context_length_exceeded', 'model_context_window_exceeded'].includes(code);
           call.failure = structuredFailures.get(code) ?? 'subscription_temporary';
           call.diagnostic.cause = 'stream_error';
           call.diagnostic.code = providerCodes.has(code) ? code : 'unknown';
@@ -181,7 +183,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   for (const method of ['stream', 'streamSimple']) {
     const original = runtime[method].bind(runtime);
     runtime[method] = (...args) => {
-      const call = { diagnostic: newDiagnostic(), generation: '', failure: '', started: performance.now() };
+      const call = { diagnostic: newDiagnostic(), generation: '', failure: '', allowContextOverflow: false, started: performance.now() };
       const output = calls.run(call, () => lazyStream(args[0], async () => {
         const input = original(...args);
         return {
@@ -213,7 +215,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
       if (generation && ['subscription_quota', 'subscription_auth'].includes(failure)) {
         try { await request('POST', { generation, failure }); } catch { /* Worker retries from sanitized evidence. */ }
       }
-      return { failure, generation, diagnostic: safeDiagnostic(call?.diagnostic) };
+      return { failure, generation, allowContextOverflow: call?.allowContextOverflow ?? false, diagnostic: safeDiagnostic(call?.diagnostic) };
     },
   };
 }

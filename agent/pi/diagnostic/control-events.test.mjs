@@ -80,3 +80,13 @@ test('outcome evidence, retry and unknown required fields are not truncated', ()
   ]) assert.equal(controlEvent(source), source);
   assert.throws(() => controlEvent({ type: 'message_end', message: null }));
 });
+
+test('compaction failures and rejected-request starts cannot leak provider text', () => {
+  const secret = 'synthetic-provider-secret';
+  const start = controlEvent({ type: 'message_start', message: { role: 'assistant', stopReason: 'error', errorMessage: secret } });
+  assert.deepEqual(start, { type: 'message_start', message: { role: 'assistant' } });
+  const end = controlEvent({ type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false,
+    errorMessage: `Context overflow recovery failed: ${secret}`, result: { summary: secret } });
+  assert.deepEqual(end, { type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false, errorMessage: 'Omnigrex compaction_failed' });
+  assert.equal(JSON.stringify(end).includes(secret), false);
+});
