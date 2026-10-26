@@ -685,6 +685,9 @@ func (f *piWorkflowFixture) testPostPublicationCleanupRecovery(t *testing.T) {
 	}
 	f.assertRecoveryBarrier(t, lease)
 	f.recover(t, lease, true)
+	// Successful mutations still have a durable reconciliation job. Complete
+	// that barrier before terminal corroboration can be enqueued.
+	f.reconcileMutations(t)
 	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: f.database, GitHub: f.github, Workspace: f.workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}})
 	if err != nil {
 		t.Fatal(err)
