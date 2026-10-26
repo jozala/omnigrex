@@ -231,7 +231,7 @@ func TestOutcomeReconcilerAcceptsDeveloperRequestReviewFromDurableAndFreshEviden
 	ledger := []store.MutationReservation{
 		outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
 			`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
-			`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+			`{"version":1,"repository_id":41,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"feature/work","status":"OPEN","pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
 			"github", "41:feature/work:main", outcomeHead),
 		outcomeSucceededMutation(2, mcp.ToolRequestReview, "review-1",
 			`{"operation_id":"review-1","summary":"Ready"}`,
@@ -281,7 +281,7 @@ func TestOutcomeReconcilerAcceptsReviewAfterPublishingAgainOnNewlyOpenedPR(t *te
 	}
 	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
 		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
-		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		`{"version":1,"repository_id":41,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"feature/work","status":"OPEN","pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
 		"github", "41:feature/work:main", outcomeHead)
 	published := outcomeSucceededMutation(2, mcp.ToolPublishChanges, "publish-2",
 		`{"operation_id":"publish-2","message":"Additional edit"}`,
@@ -343,7 +343,7 @@ func TestOutcomeReconcilerRequiresRecoveredPRMarkerAtReviewHandoff(t *testing.T)
 			}
 			source := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-prior",
 				`{"operation_id":"open-prior","title":"Change","body":"Ready"}`,
-				`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+				`{"version":1,"repository_id":41,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"feature/work","status":"OPEN","pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
 				"github", "41:feature/work:main", outcomeHead)
 			source.ID = sourceOpenPR
 			observation, err := newOutcomeReconciler(t, &outcomeStore{mutations: []store.MutationReservation{outcomeRequestReviewMutation(1)}, prior: []store.MutationReservation{source}},
@@ -385,7 +385,7 @@ func TestOutcomeReconcilerBlocksHeadConflictAfterRecoveredBranchOpenedPR(t *test
 	}
 	opened := outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
 		`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
-		`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+		`{"version":1,"repository_id":41,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"feature/work","status":"OPEN","pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
 		"github", "41:feature/work:main", outcomeHead)
 	failed := outcomeFailedMutation(2, mcp.ToolRequestReview)
 	failed.LastError = mcp.FailurePullRequestHeadMismatch
