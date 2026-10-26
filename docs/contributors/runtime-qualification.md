@@ -92,6 +92,9 @@ The controlled Workflow gate exercises long `request_review`, `submit_review`, a
 The configuration gate runs `agent/pi/diagnostic/compaction.test.mjs` on both backends against the pinned Pi 1.4.0 SDK and production runner settings, extensions, model metadata, Session opener, History Replay, and owned event projection.
 Deterministic HTTP/SSE fixtures exercise native threshold summaries with queued same-assignment continuation and reduced context, explicit overflow compact-and-retry and its unsuccessful-recovery guard, summary failure with ordinary retries disabled, post-run and pre-prompt cancellation, and retained-context pre-prompt compaction.
 Successful cases reopen the same identity, retain prior append-order history, and verify current-deployment instruction authority.
+The same gate runs `compaction-compat.test.mjs` with controlled clocks to check strict timestamp separation, early timer wakeups, repeated summaries, and bounded continuation under frozen or rolled-back clocks.
+Native qualification also cancels a queued continuation during the compatibility wait; the Go adapter tests distinguish requested, confirmed cancellation from unsolicited flags and completion winning an abort race.
+The owned compatibility hook is a temporary Pi 1.4.0 workaround, not another compaction implementation; see [decision 0041](../decisions/0041-separate-pi-compaction-and-retry-timestamps.md).
 The Go Pi tests cover actual event names, safe diagnostics, settlement only at `agent_settled`, cancellation across Pi's synthetic preflight error, and Turn-deadline-bounded prompt admission beyond the ordinary RPC timeout.
 Failure-boundary fixtures check that explicit overflow survives sanitization but ambiguous quota/authentication/transport errors do not become overflow.
 No live credentials or paid requests are used.

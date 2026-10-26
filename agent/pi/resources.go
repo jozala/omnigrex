@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-//go:embed runner.mjs mcp-extension.mjs failure-extension.mjs subscription-auth.mjs session-state.mjs session-validation.mjs history-rpc.mjs control-events.mjs package.json package-lock.json package-integrity.mjs qualify-packages.mjs
+//go:embed runner.mjs mcp-extension.mjs failure-extension.mjs compaction-compat-extension.mjs subscription-auth.mjs session-state.mjs session-validation.mjs history-rpc.mjs control-events.mjs package.json package-lock.json package-integrity.mjs qualify-packages.mjs
 var resources embed.FS
 
 // ResourceContract is the approved inventory captured when a Pi Runtime

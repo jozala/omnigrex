@@ -758,7 +758,11 @@ func (c *connection) record(content []byte) error {
 		return nil
 	case "agent_settled":
 		outcome := agent.Outcome{Admitted: true}
-		if t.compactionAborted || t.retryCancelled {
+		// Cancellation after a successful summary (including the compatibility
+		// wait) can leave an assistant stop and a successful compaction_end.
+		// Honor native settlement's abort confirmation only for our own request;
+		// requesting cancellation alone must not override a completed run.
+		if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
 			outcome.Status = agent.Aborted
 		} else if t.compactionFailed {
 			// Reuse bounded provider-failure handling; compaction is not completion.
