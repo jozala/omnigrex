@@ -148,3 +148,54 @@ func TestCompactionEndStillRequiresSettlementReceipt(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 }
+
+func TestCancellationDuringCompactionCompatibilityWaitRequiresConfirmedSettlement(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		requestCancel   bool
+		settlementAbort bool
+		want            agent.Status
+	}{
+		{"confirmed cancellation", true, true, agent.Aborted},
+		{"unsolicited flag", false, true, agent.Completed},
+		{"completion wins cancellation race", true, false, agent.Completed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compacting, finish := make(chan struct{}), make(chan struct{})
+			c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]string{"role": "assistant", "stopReason": "stop"}})
+				writeRecord(runtime, map[string]any{"type": "compaction_start", "reason": "threshold"})
+				close(compacting)
+				if tc.requestCancel {
+					return // The abort command releases the pending compatibility wait.
+				}
+				<-finish
+				writeRecord(runtime, map[string]any{"type": "compaction_end", "reason": "threshold", "aborted": false, "willRetry": false})
+				writeRecord(runtime, map[string]any{"type": "agent_settled", "aborted": tc.settlementAbort})
+			}, func(runtime net.Conn, id string) {
+				writeRecord(runtime, map[string]any{"type": "compaction_end", "reason": "threshold", "aborted": false, "willRetry": false})
+				writeRecord(runtime, map[string]any{"type": "agent_settled", "aborted": tc.settlementAbort})
+				writeRecord(runtime, map[string]any{"type": "response", "id": id, "command": "abort", "success": true})
+			})
+			done := make(chan agent.Outcome, 1)
+			go func() { outcome, _ := c.Prompt(ctx, "continue original assignment", nil); done <- outcome }()
+			<-compacting
+			if tc.requestCancel {
+				if err := c.Cancel(ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				close(finish)
+			}
+			select {
+			case outcome := <-done:
+				if outcome.Status != tc.want {
+					t.Fatalf("settlement: %+v; want %s", outcome, tc.want)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		})
+	}
+}

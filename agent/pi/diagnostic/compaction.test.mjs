@@ -114,6 +114,40 @@ test('compaction fixtures preserve another runtime’s credentials and model cat
   assert.equal(child.conversations, 1);
 });
 
+test('cancellation during the compatibility wait preserves native settlement evidence', { timeout: 30000 }, async t => {
+  const f = await fixture(t, 'threshold');
+  const append = f.manager.appendCompaction.bind(f.manager);
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  let cancellation, cancelledBeforeCompactionEnd;
+  f.manager.appendCompaction = (...args) => {
+    const result = append(...args);
+    // Freeze only after real persistence so the production hook must yield.
+    const boundary = Date.parse(f.manager.getBranch().at(-1).timestamp);
+    Date.now = () => boundary;
+    setTimeout(() => {
+      cancelledBeforeCompactionEnd = !f.wire.some(event => event.type === 'compaction_end');
+      cancellation = f.runtime.session.abort();
+      Date.now = realNow;
+    }, 0);
+    return result;
+  };
+  f.runtime.session.subscribe(event => {
+    if (event.type === 'compaction_start') void f.runtime.session.followUp('continue original assignment');
+  });
+  await f.runtime.session.prompt('continue original assignment');
+  Date.now = realNow;
+  assert.ok(cancellation, 'compatibility wait must allow cancellation to run');
+  await cancellation;
+  assert.equal(cancelledBeforeCompactionEnd, true, 'cancellation must run inside the awaited compatibility hook, not during later continuation');
+  assert.equal(f.summaries, 1);
+  assert.equal(f.conversations, 1, 'cancelled continuation must not contact the provider');
+  assert.equal(f.wire.find(event => event.type === 'compaction_end').aborted, false);
+  const settled = f.wire.filter(event => event.type === 'agent_settled');
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].aborted, true, 'successful compaction must not erase cancellation evidence');
+});
+
 for (const mode of ['threshold', 'overflow', 'overflow-guard', 'summary-failure', 'cancel', 'preprompt', 'preprompt-cancel']) {
   test(`native compaction: ${mode}`, { timeout: 30000 }, async t => {
     const f = await fixture(t, mode);
@@ -149,6 +183,7 @@ for (const mode of ['threshold', 'overflow', 'overflow-guard', 'summary-failure'
     }
     assert.ok(durable.includes(summary), 'summary belongs in protected Session state');
     if (mode === 'overflow-guard') {
+      assert.equal(f.summaries, 1, 'exhausted recovery must not compact again');
       assert.equal(f.conversations, 2, 'native overflow recovery allows only one retry');
       assert.equal(ends.at(-1).errorMessage, 'Omnigrex compaction_failed');
       assert.equal(ends.at(-1).willRetry, false);

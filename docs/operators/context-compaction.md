@@ -35,6 +35,7 @@ A failed end reports `compaction_failed`, without summary bodies, prompts, tool 
 An unresolved compaction failure at settlement uses existing bounded provider-failure handling rather than reporting completion; cancellation is not completion either.
 If native pre-prompt compaction fails but Pi subsequently completes a conversational request successfully, that later result remains authoritative and the failed compaction activity is still visible.
 Only `agent_settled` settles the prompt; a compaction event or `agent_end` alone does not.
+If cancellation is requested after a summary succeeds, the native settlement receipt can still confirm an abort; successful compaction does not override that confirmed cancellation.
 Pre-prompt compaction can legitimately delay prompt admission beyond the ordinary RPC timeout, but remains bounded by the existing Agent Turn deadline and cancellation/cleanup budgets.
 
 For repeated failures, inspect safe [diagnostics](health-and-diagnostics.md), the selected model, and the Participant's retained runtime image before using normal [troubleshooting](troubleshooting.md) and Human Handoff procedures.
@@ -46,6 +47,7 @@ Historical Human Handoffs, including #116, have not been established as context-
 Use a qualified image containing both Pi 1.4.0 and the compaction-enabled owned runner/resources.
 Pi 1.4.0 fixes cancellation during pre-prompt compaction; the integration must not be transplanted onto the older 1.0.4 runtime.
 New resource hashes are included through the existing owned-resource inventory and image qualification mechanisms.
+Newly qualified images also include a deployment-owned compatibility hook for Pi 1.4.0's same-millisecond compaction/retry timestamp collision; it does not add another recovery attempt or change settlement policy.
 Existing Participants keep their exact pinned runtime images and do not automatically acquire this capability when the controller is upgraded.
 Do not rebind existing Participants or migrate historical failed Sessions as an upgrade shortcut.
 Follow [upgrades](upgrades.md) and select only images with passing [both-backend qualification](../contributors/runtime-qualification.md).

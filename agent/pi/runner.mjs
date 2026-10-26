@@ -3,6 +3,7 @@ import { join, relative, isAbsolute } from 'node:path';
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, SettingsManager, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
+import { compactionCompatibilityExtension } from './compaction-compat-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
 import { controlRuntime } from './control-events.mjs';
@@ -81,7 +82,7 @@ export async function prepareRuntime(configuration, sessionManager, models, { ag
       modelRuntime: subscription?.runtime,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), mcpExtension(configuration)],
+        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), compactionCompatibilityExtension, mcpExtension(configuration)],
         additionalSkillPaths: skills,
         // Overrides avoid interpreting instruction text as a file path and
         // prevent even reading automatic SYSTEM/APPEND_SYSTEM sources.
