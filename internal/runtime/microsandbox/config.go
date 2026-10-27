@@ -16,7 +16,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
-const Version = "0.7.6"
+const Version = "0.7.11"
 
 // Options are trusted deployment settings, never repository configuration.
 type Options struct {
@@ -96,7 +96,7 @@ func Check(ctx context.Context, options Options) error {
 		return err
 	}
 	if strings.TrimSpace(version.String()) != "msb "+Version {
-		return errors.New("Microsandbox executable version must be 0.7.6")
+		return errors.New("Microsandbox executable version must be 0.7.11")
 	}
 	return runner.Run(ctx, nil, io.Discard, "doctor")
 }

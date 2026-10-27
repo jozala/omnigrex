@@ -49,6 +49,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0040: Use native Pi compaction within the existing Turn lifecycle](0040-use-native-pi-compaction-within-turn-lifecycle.md) | Accepted | 2026-10-25 |
 | [0041: Separate Pi compaction and retry timestamps](0041-separate-pi-compaction-and-retry-timestamps.md) | Accepted | 2026-10-26 |
 | [0042: Associate publication at Turn settlement without granting readiness](0042-associate-publication-at-turn-settlement.md) | Accepted | 2026-10-26 |
+| [0043: Coordinate Microsandbox payload and catalog upgrades](0043-coordinate-microsandbox-catalog-upgrades.md) | Accepted | 2026-10-25 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.
