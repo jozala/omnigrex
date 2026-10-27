@@ -232,3 +232,45 @@ func TestBudgetRecordingDoesNotWaitForFailingExporter(t *testing.T) {
 		t.Fatal("export changed critical evidence")
 	}
 }
+
+func TestKnownConfigurationWithUnknownUsage(t *testing.T) {
+	for _, value := range []string{"7", "unlimited"} {
+		t.Run(value, func(t *testing.T) {
+			reader := budgetReader(t)
+			limit, _ := stepbudget.Parse(value)
+			NewAgentTurnObserver("REVIEWER", &limit, nil).Finish(context.Background(), nil, "transport")
+			var data metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &data); err != nil {
+				t.Fatal(err)
+			}
+			observed := false
+			for _, scope := range data.ScopeMetrics {
+				for _, m := range scope.Metrics {
+					switch m.Name {
+					case "omnigrex.agent_turn.budget_observations":
+						p := m.Data.(metricdata.Sum[int64]).DataPoints[0]
+						mode, _ := p.Attributes.Value("budget_mode")
+						status, _ := p.Attributes.Value("completeness")
+						want := "unlimited"
+						if limit.Finite() {
+							want = "finite"
+						}
+						if mode.AsString() != want || status.AsString() != "unknown" {
+							t.Fatal(p)
+						}
+						observed = true
+					case "omnigrex.agent_turn.step_limit":
+						if !limit.Finite() || m.Data.(metricdata.Histogram[float64]).DataPoints[0].Sum != 7 {
+							t.Fatal(m)
+						}
+					default:
+						t.Fatalf("unknown usage invented instrument: %s", m.Name)
+					}
+				}
+			}
+			if !observed {
+				t.Fatal("missing unknown usage coverage")
+			}
+		})
+	}
+}

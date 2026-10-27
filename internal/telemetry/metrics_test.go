@@ -311,6 +311,12 @@ func TestFinalMetricsCollectionAndTraceFlushHaveIndependentBoundedShutdown(t *te
 	}
 	_, operation := StartOperation(serviceCtx, AgentTurnExecute)
 	operation.Finish(new(error))
+	budget := NewAgentTurnObserver("DEVELOPER", nil, nil)
+	startRecording := time.Now()
+	budget.Finish(serviceCtx, nil, "transport")
+	if time.Since(startRecording) > time.Second {
+		t.Fatal("budget recording waited for slow exporter")
+	}
 	stopServices()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()

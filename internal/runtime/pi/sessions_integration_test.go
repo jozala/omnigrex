@@ -142,7 +142,13 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			verifyBudget := budgetMetricExport(t)
 			observer := telemetry.NewAgentTurnObserver("DEVELOPER", nil, nil)
 			sink := &historySink{}
-			cursor, err := continued.Replay(ctx, agent.HistoryCursor{}, sink)
+			replaySink := historySinkFunc(func(ctx context.Context, event agentevent.AgentEvent) error {
+				if err := observer.Emit(ctx, event); err != nil {
+					return err
+				}
+				return sink.Emit(ctx, event)
+			})
+			cursor, err := continued.Replay(ctx, agent.HistoryCursor{}, replaySink)
 			if err != nil || cursor.RuntimeSessionID != sessionID || len(sink.events) < 2 {
 				t.Fatalf("persisted replay: %+v %v", cursor, err)
 			}
@@ -166,7 +172,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 				t.Fatalf("replay omitted append-order branches/compaction: users=%d compactions=%d branches=%d", users, compactions, branches)
 			}
 			before := len(sink.events)
-			if got, err := continued.Replay(ctx, cursor, sink); err != nil || got != cursor || len(sink.events) != before {
+			if got, err := continued.Replay(ctx, cursor, replaySink); err != nil || got != cursor || len(sink.events) != before {
 				t.Fatalf("cursor replay: %+v %v", got, err)
 			}
 			outcome, err = continued.Prompt(ctx, "configuration-continuation", observer)
@@ -175,7 +181,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
 				t.Fatalf("continued context or provider-free replay: %+v %v", outcome, err)
 			}
-			_, err = continued.Replay(ctx, agent.HistoryCursor{RuntimeSessionID: uuid.NewString()}, sink)
+			_, err = continued.Replay(ctx, agent.HistoryCursor{RuntimeSessionID: uuid.NewString()}, replaySink)
 			if !errors.Is(err, agent.ErrSession) {
 				t.Fatalf("foreign cursor: %v", err)
 			}
