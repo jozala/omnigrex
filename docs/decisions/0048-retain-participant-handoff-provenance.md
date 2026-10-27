@@ -16,7 +16,9 @@ The normal Workflow revision, Stage, preparation lease, active-Turn, Session Con
 Clear the waiting provenance when the Participant is reactivated; a subsequent Handoff establishes new provenance.
 Unused Participants remain waiting rather than being eagerly reactivated with the selected Participant.
 
-For existing waiting Participants, the forward migration reconstructs provenance from the most recent completed Handoff in their Workflow that postdates their creation, excluding deleted Participants and Participants with a recorded later reactivation.
+For existing waiting Participants, the forward migration reconstructs provenance from the most recent durable Handoff in their Workflow that postdates their creation, excluding deleted Participants and Participants with a recorded later reactivation.
+This includes a pending Handoff whose Attempt is still active with no completion timestamp; the creation guard uses the Attempt's persisted update timestamp in that case.
+Backfilling provenance does not authorize preparation within that same Attempt: a later human activation must first supersede it.
 Absent matching evidence, provenance remains null and continuation fails closed.
 This schema upgrade does not activate any Workflow or create any Agent Turn.
 

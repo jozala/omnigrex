@@ -10,12 +10,17 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/store/migrations"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 func TestWaitingDeveloperContinuesAfterReviewerOnlyAttempts(t *testing.T) {
-	for _, approvals := range []int{0, 1, 3} {
-		t.Run(fmt.Sprintf("%d approvals", approvals), func(t *testing.T) {
+	for _, scenario := range []struct {
+		approvals int
+		upgrade   bool
+	}{{0, false}, {1, false}, {3, false}, {0, true}, {1, true}} {
+		approvals := scenario.approvals
+		t.Run(fmt.Sprintf("%d approvals/upgrade=%t", approvals, scenario.upgrade), func(t *testing.T) {
 			databases, pool := openPhaseFiveStores(t, 1)
 			database := databases[0]
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -53,6 +58,28 @@ func TestWaitingDeveloperContinuesAfterReviewerOnlyAttempts(t *testing.T) {
 			handoff := settle(reviewer, workflow.TurnOutcomeBlocked, nil, 0)
 			if handoff.State != workflow.StateNeedsHuman {
 				t.Fatalf("handoff = %#v", handoff)
+			}
+			if scenario.upgrade {
+				// Recreate the pre-upgrade ledger shape at an actual pending Handoff.
+				// Execute the production backfill unchanged over the real schema.
+				var pending bool
+				if err := pool.QueryRow(ctx, `SELECT active AND completed_at IS NULL AND human_handoff_reason IS NOT NULL FROM workflow_attempts WHERE id = $1`, reviewer.Turn.WorkflowAttemptID).Scan(&pending); err != nil || !pending {
+					t.Fatalf("pending Handoff = %t, %v", pending, err)
+				}
+				migration, err := migrations.Files.ReadFile("000003_participant_handoff_provenance.sql")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := pool.Exec(ctx, `ALTER TABLE agent_participants DROP COLUMN waiting_handoff_attempt_id`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := pool.Exec(ctx, string(migration)); err != nil {
+					t.Fatal(err)
+				}
+				var backfilled int
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_participants WHERE workflow_id = $1 AND status = 'WAITING_FOR_HUMAN' AND waiting_handoff_attempt_id = $2`, app.WorkflowID, reviewer.Turn.WorkflowAttemptID).Scan(&backfilled); err != nil || backfilled != 2 {
+					t.Fatalf("backfilled waiting Participants = %d, %v; want 2", backfilled, err)
+				}
 			}
 			for i := 0; i <= approvals; i++ {
 				activation := triggerPreparationWorkflow(t, database, ctx, fmt.Sprintf("61000000-0000-4000-8000-%012d", 100+i), fmt.Sprintf("62000000-0000-4000-8000-%012d", 100+i))
