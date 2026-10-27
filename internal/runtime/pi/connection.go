@@ -643,7 +643,7 @@ func (c *connection) record(content []byte) error {
 		FinalError   string          `json:"finalError"`
 		ErrorMessage string          `json:"errorMessage"`
 		Diagnostic   json.RawMessage `json:"diagnostic"`
-		FailureClass string          `json:"failureClass"`
+		FailureClass json.RawMessage `json:"failureClass"`
 		Aborted      bool            `json:"aborted"`
 		SessionID    string          `json:"sessionId"`
 		Disposition  string          `json:"disposition"`
@@ -697,9 +697,11 @@ func (c *connection) record(content []byte) error {
 		// owned request observation is diagnostic only, never settlement proof.
 		t.lastDiagnostic = agent.ParseProviderDiagnostic(record.Diagnostic)
 		failure := "provider_failure"
-		switch record.FailureClass {
+		var observedClass string
+		_ = json.Unmarshal(record.FailureClass, &observedClass)
+		switch observedClass {
 		case "subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary":
-			failure = record.FailureClass
+			failure = observedClass
 		}
 		select {
 		case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, "", false):

@@ -249,7 +249,7 @@ func TestSummaryRequestDiagnosticReachesOperationalEvent(t *testing.T) {
 			requests := 0
 			outcome, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
 				if strings.Contains(string(event.Metadata.Runtime), "SENTINEL") {
-					t.Fatal("raw summary metadata escaped")
+					t.Error("raw summary metadata escaped")
 				}
 				if event.Kind == "provider_request_failed" {
 					requests++
@@ -291,5 +291,30 @@ func TestRequestObservationDoesNotDuplicateConversationalFailure(t *testing.T) {
 	}))
 	if err != nil || outcome.Status != agent.Aborted || outcome.FailureDiagnostic == nil || outcome.FailureDiagnostic.Cause != "timeout" || requests != 1 {
 		t.Fatalf("admitted timeout: %+v, %v; requests=%d", outcome, err, requests)
+	}
+}
+
+func TestMalformedSummaryObservationCannotChangeSettlement(t *testing.T) {
+	for _, diagnostic := range []any{"SENTINEL", map[string]any{"stage": "provider_http", "code": strings.Repeat("SENTINEL", 1000)}} {
+		c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+			admit(runtime, id)
+			writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]string{"role": "assistant", "stopReason": "stop"}})
+			writeRecord(runtime, map[string]any{"type": "compaction_start"})
+			writeRecord(runtime, map[string]any{"type": "omnigrex_provider_request_failed", "failureClass": map[string]string{"message": "SENTINEL"}, "diagnostic": diagnostic})
+			writeRecord(runtime, map[string]any{"type": "compaction_end", "errorMessage": "Omnigrex compaction_failed"})
+			writeRecord(runtime, map[string]any{"type": "agent_settled"})
+		})
+		requests := 0
+		outcome, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+			if strings.Contains(string(event.Metadata.Runtime), "SENTINEL") || strings.Contains(event.Metadata.FailureClass, "SENTINEL") {
+				t.Error("malformed diagnostic escaped")
+			}
+			if event.Kind == "provider_request_failed" {
+				requests++
+			}
+		}))
+		if err != nil || outcome.Status != agent.Failed || outcome.FailureClass != "provider_failure" || outcome.FailureDiagnostic == nil || outcome.FailureDiagnostic.Stage != "unknown" || requests != 1 {
+			t.Fatalf("diagnostic changed native settlement: %+v, %v; requests=%d", outcome, err, requests)
+		}
 	}
 }
