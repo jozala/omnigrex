@@ -25,7 +25,7 @@ func TestRepositoryEnvironmentQualifiesResourcesAndInstallsWorkingRevisionTools(
 	defer cancel()
 	root := t.TempDir()
 	// A separately built repository image supplies one extra development tool.
-	dockerfile := `FROM omnigrex/pi:1.0.4
+	dockerfile := `FROM omnigrex/pi:1.4.0
 USER root
 RUN printf '#!/bin/sh\nprintf "repository-tool-v1\\n"\n' > /usr/local/bin/repository-tool && chmod 0755 /usr/local/bin/repository-tool
 USER 10001:10001

@@ -43,6 +43,8 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 		{"Reviewer provider failure retention", role.Reviewer, "configuration-provider-error", ""},
 		{"failed partial response retention", role.Developer, "configuration-provider-stream-error", ""},
 		{"failure record sanitation boundaries", role.Developer, "configuration-audit", "failure-boundary"},
+		{"compact control event boundaries", role.Developer, "configuration-audit", "control-boundary"},
+		{"native compaction boundaries", role.Developer, "configuration-audit", "compaction-boundary"},
 		{"durable file safety boundaries", role.Developer, "configuration-audit", "session-boundary"},
 		{"step budget SDK boundaries", role.Developer, "configuration-audit", "budget-boundary"},
 		{"production budget 1", role.Developer, "configuration-budget", "budget-1"},
@@ -62,6 +64,10 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				spec.Namespace = settings.RuntimeStateVolume
 			}
 			switch tc.corrupt {
+			case "compaction-boundary":
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_COMPACTION_FIXTURE=1")
+			case "control-boundary":
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE=1")
 			case "model":
 				inputs.Selection.Model = "diagnostic/does-not-exist"
 			case "thinking":
@@ -115,7 +121,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = c.Close() }()
-			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "budget-boundary" && tc.corrupt != "budget-1" && tc.corrupt != "budget-3" {
+			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "control-boundary" && tc.corrupt != "compaction-boundary" && tc.corrupt != "budget-boundary" && tc.corrupt != "budget-1" && tc.corrupt != "budget-3" {
 				if _, err := c.Prepare(ctx); !errors.Is(err, pi.ErrConfiguration) {
 					t.Fatalf("invalid preparation did not report a configuration failure: %v", err)
 				}

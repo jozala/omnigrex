@@ -8,7 +8,7 @@ For remote native gates, use an existing authorized `DOCKER_HOST` connection and
 
 ## Pi protocol diagnostic
 
-The disposable Pi 1.0.4 diagnostic exercises the adapter with a controlled HTTP provider, no real credentials, no GitHub/business MCP authority, no Workflow, and temporary tmpfs Session storage.
+The disposable Pi 1.4.0 diagnostic exercises the adapter with a controlled HTTP provider, no real credentials, no GitHub/business MCP authority, no Workflow, and temporary tmpfs Session storage.
 Build the image and resolve exact local content identity:
 
 ```sh
@@ -52,6 +52,55 @@ Automated protocol gates build/transfer their fixtures without client host mount
 mise run test-pi-integration
 OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-integration
 ```
+
+## Owned RPC event projection
+
+The owned runner qualifies Pi 1.4.0's public runtime/Session subscription boundary, not a replacement RPC implementation.
+Only the RPC subscriber receives projected events; the real Session, extensions, model context, and durable conversation keep their original messages.
+`agent_end` is activity, never settlement authority; `agent_settled` and validated assistant stop/error evidence remain required.
+
+| Outbound event | Control-channel projection |
+| --- | --- |
+| `agent_end` | Type and `willRetry`; no `messages` access or serialization |
+| `message_start` | Type and role only; a rejected request can contain unsanitized error text before finalization |
+| `message_end` | Type, message role, stop reason, sanitized error marker, provider generation, bounded provider diagnostic |
+| `message_update` | Type, role, delta kind/index; stock Pi conversion retains tool-call start identity without the partial message; no text/thinking/argument deltas |
+| `turn_end`, `entry_appended`, `queue_update`, `bash_execution_update` | Event type only; redundant message/tool/entry/queued-text/output bodies stay in the Session owner |
+| `tool_execution_start/update/end` | Type, tool-call identity/name, parent identity, error flag; no arguments/results |
+| `omnigrex_provider_request_failed` (owned request observer) | Closed failure class and revalidated diagnostic only; delivered to the RPC subscriber without adding Session messages, including native summary requests |
+| `compaction_start`, `compaction_end` | Type and reason; end includes aborted/retry flags and a fixed failure marker, never a summary or raw provider error |
+| Retry, settlement, other lifecycle and unknown events | Unchanged; required fields are not truncated |
+
+The controller still bounds every JSONL record to 1 MiB and fails closed on malformed/oversized required records.
+Command responses are not filtered or re-correlated; production History Replay uses the separate bounded metadata operation, not native transcript-returning RPC queries.
+Native transcript queries and unknown future events remain subject to the same controller bound, not a promise of arbitrary transcript transfer.
+Diagnostics use closed-vocabulary runtime observations, never transcript bodies or new raw-event logging.
+An infrastructure protocol failure is not repaired by accepting a terminal intent without valid outcome evidence.
+
+New Runtime Profiles include the projection module in their owned-resource hash inventory.
+Historical inventories remain valid and retain their original behavior; upgrade and both-backend qualification are still required before selecting a new deployment.
+If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
+Run `node --test agent/pi/diagnostic/control-events.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
+The configuration gate also runs `control-rpc.test.mjs` against the pinned SDK for long normal/retry/error/cancel completion, correlated commands during streaming, stdout backpressure, EOF cleanup, and fresh-process continuation.
+The both-backend Session gate performs a multi-megabyte normal completion followed by fresh-environment continuation and bounded metadata replay.
+Long-Turn fixtures accumulate several individually bounded assistant messages through read-tool calls, so only the redundant aggregate exceeds 1 MiB.
+The separate durable Session limits remain unchanged: 1 MiB per entry and 256 MiB per file; projection does not make an oversized individual durable entry reopenable.
+The SDK continuation test uses the owned durable Session opener as well, rather than bypassing its validation with the permissive Pi loader.
+The controlled Workflow gate exercises long `request_review`, `submit_review`, and blocked completion through production launch, MCP, and reconciliation.
+
+## Native compaction qualification
+
+The configuration gate runs `agent/pi/diagnostic/compaction.test.mjs` on both backends against the pinned Pi 1.4.0 SDK and production runner settings, extensions, model metadata, Session opener, History Replay, and owned event projection.
+Deterministic HTTP/SSE fixtures exercise native threshold summaries with queued same-assignment continuation and reduced context, explicit overflow compact-and-retry and its unsuccessful-recovery guard, summary failure with ordinary retries disabled, post-run and pre-prompt cancellation, and retained-context pre-prompt compaction.
+Successful cases reopen the same identity, retain prior append-order history, and verify current-deployment instruction authority.
+The same gate runs `compaction-compat.test.mjs` with controlled clocks to check strict timestamp separation, early timer wakeups, repeated summaries, and bounded continuation under frozen or rolled-back clocks.
+Native qualification also cancels a queued continuation during the compatibility wait; the Go adapter tests distinguish requested, confirmed cancellation from unsolicited flags and completion winning an abort race.
+The owned compatibility hook is a temporary Pi 1.4.0 workaround, not another compaction implementation; see [decision 0041](../decisions/0041-separate-pi-compaction-and-retry-timestamps.md).
+The Go Pi tests cover actual event names, safe diagnostics, settlement only at `agent_settled`, cancellation across Pi's synthetic preflight error, and Turn-deadline-bounded prompt admission beyond the ordinary RPC timeout.
+Failure-boundary fixtures check that explicit overflow survives sanitization but ambiguous quota/authentication/transport errors do not become overflow.
+No live credentials or paid requests are used.
+Dedicated combined compaction/step-budget qualification belongs to [#130](https://github.com/jozala/omnigrex/issues/130); these standalone fixtures do not claim it passed.
+See [operator behavior and limitations](../operators/context-compaction.md).
 
 ## Live-provider smoke
 
@@ -132,6 +181,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-upg
 ```
 
 Fixture gates use controlled provider/MCP servers, private volumes, and independently built source/candidate inventories.
+The default fixtures test the frozen Pi 1.0.4 dependency bundle against Pi 1.4.0 with the current owned runner; they do not substitute for qualification of historical release images and their retained contracts.
 Synthetic aliases are test evidence and cannot emit deployment artifacts.
 
 For actual release qualification, provision both exact registry images and choose an absent private absolute output path:
@@ -139,8 +189,8 @@ For actual release qualification, provision both exact registry images and choos
 ```sh
 OMNIGREX_PI_UPGRADE_SOURCE_IMAGE='REGISTRY/PI@sha256:SOURCE_DIGEST' \
 OMNIGREX_PI_UPGRADE_TARGET_IMAGE='REGISTRY/PI@sha256:CANDIDATE_DIGEST' \
-OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.3 \
-OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.0.4 \
+OMNIGREX_PI_UPGRADE_SOURCE_VERSION=1.0.4 \
+OMNIGREX_PI_UPGRADE_TARGET_VERSION=1.4.0 \
 OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE='/private/absolute/source-runtime-contract.json' \
 OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE='/private/absolute/pi-compatibility.json' \
 mise run test-pi-upgrade

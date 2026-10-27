@@ -66,6 +66,38 @@ func TestPromptAdmissionDoesNotSettleTurn(t *testing.T) {
 	}
 }
 
+func TestRuntimeDiagnosticsIdentifyAdapterContract(t *testing.T) {
+	c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		settle(runtime, "stop")
+	})
+	var events []agentevent.AgentEvent
+	if _, err := c.Prompt(ctx, "complete", eventSinkFunc(func(event agentevent.AgentEvent) {
+		events = append(events, event)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	observed := false
+	for _, event := range events {
+		if len(event.Metadata.Runtime) == 0 {
+			continue
+		}
+		var metadata struct {
+			Runtime string `json:"runtime"`
+		}
+		if err := json.Unmarshal(event.Metadata.Runtime, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata.Runtime != "pi-rpc/v2" {
+			t.Fatalf("runtime diagnostics claim a fixed package version instead of the adapter contract: %q", metadata.Runtime)
+		}
+		observed = true
+	}
+	if !observed {
+		t.Fatal("missing runtime diagnostics")
+	}
+}
+
 func writeRecord(runtime net.Conn, record map[string]any) {
 	content, _ := json.Marshal(record)
 	_, _ = runtime.Write(append(content, '\n'))
@@ -701,5 +733,47 @@ func TestRetryBackoffCancellationStillRequiresSettlement(t *testing.T) {
 	got := <-done
 	if !errors.Is(got.err, context.DeadlineExceeded) || got.outcome.Status != agent.Unknown {
 		t.Fatalf("unsettled cancellation = %+v, %v", got.outcome, got.err)
+	}
+}
+
+func TestProviderDiagnosticSurvivesSettlementAndCannotLeakAcrossMessages(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		t.Run(fmt.Sprint(later), func(t *testing.T) {
+			c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "error", "errorMessage": "Omnigrex subscription_temporary", "omnigrexProviderDiagnostic": map[string]any{"stage": "provider_http", "cause": "http", "http_status": 502, "code": "SENTINEL", "message": "SENTINEL"}}})
+				if later {
+					writeRecord(runtime, map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
+					writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "error", "errorMessage": "Omnigrex subscription_temporary"}})
+				}
+				writeRecord(runtime, map[string]any{"type": "agent_settled"})
+			})
+			var terminal agentevent.AgentEvent
+			calls := 0
+			got, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+				if strings.Contains(string(event.Metadata.Runtime), "SENTINEL") {
+					t.Error("raw diagnostic leaked")
+				}
+				if event.Kind == "provider_request_failed" {
+					calls++
+				}
+				if event.Kind == "prompt_settled" {
+					terminal = event
+				}
+			}))
+			if err != nil || got.Status != agent.Failed || got.FailureClass != "subscription_temporary" {
+				t.Fatalf("settlement = %+v, %v", got, err)
+			}
+			if got.FailureDiagnostic == nil || calls == 0 {
+				t.Fatal("missing provider event")
+			}
+			if later {
+				if got.FailureDiagnostic.Stage != "unknown" || got.FailureDiagnostic.HTTPStatus != nil {
+					t.Fatalf("stale diagnostic = %+v", got.FailureDiagnostic)
+				}
+			} else if got.FailureDiagnostic.Stage != "provider_http" || *got.FailureDiagnostic.HTTPStatus != 502 || !strings.Contains(string(terminal.Metadata.Runtime), `"http_status":502`) {
+				t.Fatalf("lost diagnostic: %s", terminal.Metadata.Runtime)
+			}
+		})
 	}
 }

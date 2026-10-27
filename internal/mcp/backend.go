@@ -17,6 +17,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
@@ -209,6 +210,16 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 }
 
 func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
+	// Apply observation context only to read execution, leaving the caller's
+	// immutable authority and all mutation planning untouched.
+	if invocation.readTarget != nil {
+		if invocation.Class != ReadTool || !publicationBoundRead(invocation.Name) {
+			return nil, ErrInvalidInvocation
+		}
+		invocation.Scope = cloneToolScope(invocation.Scope)
+		invocation.Scope.HeadSHA = invocation.readTarget.HeadSHA
+		invocation.Scope.PullRequest = invocation.readTarget.PullRequest
+	}
 	tool, err := backend.validateInvocation(invocation)
 	if err != nil {
 		return nil, err
@@ -292,17 +303,23 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		}
 		result = pullRequest
 	case ToolListPullRequestReviews:
+		if err := backend.verifyReadPullRequest(ctx, credential, invocation.Scope); err != nil {
+			return nil, err
+		}
 		reviews, callErr := backend.github.ListPullRequestReviews(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
 			return nil, newGitHubReadError(callErr)
 		}
-		result = reviews
+		result = map[string]any{"head_sha": invocation.Scope.HeadSHA, "reviews": reviews}
 	case ToolListReviewThreads:
+		if err := backend.verifyReadPullRequest(ctx, credential, invocation.Scope); err != nil {
+			return nil, err
+		}
 		threads, callErr := backend.github.ListReviewThreads(ctx, credential, owner, repository, pullRequestNumber)
 		if callErr != nil {
 			return nil, newGitHubReadError(callErr)
 		}
-		result = threads
+		result = map[string]any{"head_sha": invocation.Scope.HeadSHA, "threads": threads}
 	case ToolGetCheckRuns:
 		checks, callErr := backend.github.GetCheckRuns(ctx, credential, owner, repository, invocation.Scope.HeadSHA)
 		if callErr != nil {
@@ -313,7 +330,10 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 				return nil, ErrToolPrecondition
 			}
 		}
-		result = checks
+		result = struct {
+			HeadSHA   string               `json:"head_sha"`
+			CheckRuns []githubapi.CheckRun `json:"check_runs"`
+		}{invocation.Scope.HeadSHA, checks}
 	case ToolPublishChanges:
 		return backend.publishChanges(ctx, invocation, credential)
 	case ToolOpenPR:
@@ -428,7 +448,7 @@ func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invoc
 		progress.head = result.Head
 		progress.branchExists = progress.branchExists || *result.Changed || result.Head != invocation.Scope.HeadSHA
 	case ToolOpenPR:
-		pullRequest, head, ok := restoredPullRequest(source.Result, source.ExpectedSHA)
+		pullRequest, head, ok := restoredPullRequest(source.Result, source.ExpectedSHA, invocation.Scope)
 		if !ok {
 			return ErrToolPrecondition
 		}
@@ -631,14 +651,12 @@ func (backend *ProductionBackend) openPullRequest(ctx context.Context, invocatio
 		pullRequest.Head.SHA != expectedHead || pullRequest.Base.Ref != invocation.Scope.DefaultBranch || pullRequest.HTMLURL == "" {
 		return nil, OutcomeUnknown(ErrToolPrecondition)
 	}
+	result, err := encodePullRequestResult(pullRequest, invocation.Scope.Repository)
+	if err != nil {
+		return nil, OutcomeUnknown(ErrToolPrecondition)
+	}
 	backend.recordOpenedPullRequest(invocation.Scope, pullRequest)
-	return json.Marshal(struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int    `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}{pullRequest.ID, pullRequest.NodeID, pullRequest.Number, pullRequest.HTMLURL, pullRequest.Head.SHA})
+	return result, nil
 }
 
 func (backend *ProductionBackend) commentOnIssue(ctx context.Context, invocation Invocation, credential string) (json.RawMessage, error) {
@@ -1294,16 +1312,9 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 	return metadata
 }
 
-func restoredPullRequest(raw json.RawMessage, expectedHead string) (*PullRequestScope, string, bool) {
-	var result struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int64  `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}
-	if !decodeExactResult(raw, &result) || result.PullRequestID <= 0 || result.NodeID == "" || result.Number <= 0 ||
-		result.HTMLURL == "" || result.HeadSHA != expectedHead {
+func restoredPullRequest(raw json.RawMessage, expectedHead string, scope ToolScope) (*PullRequestScope, string, bool) {
+	result, err := publication.DecodeOpenResult(raw)
+	if err != nil || result.HeadSHA != expectedHead || result.RepositoryID != scope.Repository.ID || result.RepositoryOwner != scope.Repository.Owner || result.RepositoryName != scope.Repository.Name || result.HeadRef != scope.Branch || result.BaseRef != scope.DefaultBranch {
 		return nil, "", false
 	}
 	return &PullRequestScope{ID: result.PullRequestID, Number: result.Number}, result.HeadSHA, true
@@ -1429,4 +1440,17 @@ func (backend *ProductionBackend) String() string {
 
 func (backend *ProductionBackend) GoString() string {
 	return "mcp.ProductionBackend{dependencies:<redacted>}"
+}
+
+// PR collection reads reject unrelated external pushes rather than silently
+// returning collaboration state for an unqualified head.
+func (backend *ProductionBackend) verifyReadPullRequest(ctx context.Context, credential string, scope ToolScope) error {
+	pr, err := backend.github.GetPullRequest(ctx, credential, scope.Repository.Owner, scope.Repository.Name, int(scope.PullRequest.Number))
+	if err != nil {
+		return newGitHubReadError(err)
+	}
+	if !matchesScopedPullRequest(pr, scope) {
+		return ErrToolPrecondition
+	}
+	return nil
 }

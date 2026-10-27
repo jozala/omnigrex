@@ -12,6 +12,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -41,7 +42,9 @@ func TestProductionBackendUsesDeveloperCredentialsForNonReviewOperations(t *test
 		{name: mcp.ToolGetIssue, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
 		{name: mcp.ToolListIssueComments, credential: "developer-secret", owner: "acme", repository: "widgets", number: 12},
 		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolListPullRequestReviews, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
+		{name: mcp.ToolGetPullRequest, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolListReviewThreads, credential: "developer-secret", owner: "acme", repository: "widgets", number: 23},
 		{name: mcp.ToolGetCheckRuns, credential: "developer-secret", owner: "acme", repository: "widgets", head: productionHeadSHA},
 	}
@@ -360,7 +363,7 @@ func TestProductionBackendRestoresOrderedPublicationReplayAndContinues(t *testin
 		`{"head":"`+head1+`","branch":"`+scope.Branch+`","changed":true}`)
 	open := replayMutation("51000000-0000-4000-8000-000000000002", mcp.ToolOpenPR,
 		`{"operation_id":"open-1","title":"Changes","body":"Ready"}`, "github", "9123:"+scope.Branch+":"+scope.DefaultBranch, head1,
-		`{"pull_request_id":654,"node_id":"PR_654","number":23,"html_url":"https://github.com/acme/widgets/pull/23","head_sha":"`+head1+`"}`)
+		`{"version":1,"repository_id":9123,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"omnigrex/issue-12","status":"OPEN","pull_request_id":654,"node_id":"PR_654","number":23,"html_url":"https://github.com/acme/widgets/pull/23","head_sha":"`+head1+`"}`)
 	review := replayMutation("51000000-0000-4000-8000-000000000003", mcp.ToolRequestReview,
 		`{"operation_id":"review-1","summary":"Ready"}`, "omnigrex", "9123:"+scope.Branch, head1,
 		`{"outcome":"REVIEW_REQUESTED","pull_request_id":654,"pull_request_number":23,"head_sha":"`+head1+`"}`)
@@ -577,6 +580,12 @@ func TestProductionBackendPerformsMarkedGitHubMutationsAndCommitBoundReview(t *t
 		result, err := backend.Execute(context.Background(), invocation)
 		if err != nil || !json.Valid(result) {
 			t.Fatalf("Execute(%s) = %s, %v", invocation.Name, result, err)
+		}
+		if invocation.Name == mcp.ToolOpenPR {
+			evidence, err := publication.DecodeOpenResult(result)
+			if err != nil || evidence.RepositoryID != initial.Repository.ID || evidence.RepositoryOwner != initial.Repository.Owner || evidence.RepositoryName != initial.Repository.Name || evidence.HeadSHA != initial.HeadSHA || evidence.HeadRef != initial.Branch || evidence.BaseRef != initial.DefaultBranch || evidence.BaseSHA != productionHeadSHA || evidence.Status != "OPEN" {
+				t.Fatalf("normal open evidence = %#v, %v", evidence, err)
+			}
 		}
 	}
 	reviewer := productionToolScope(workflow.RoleReviewer)
@@ -1353,7 +1362,7 @@ func (api *backendGitHub) OpenPullRequest(_ context.Context, credential, _, _ st
 	if head == "" {
 		head = productionHeadSHA
 	}
-	return githubapi.PullRequest{ID: 654, NodeID: "PR_654", Number: 23, HTMLURL: "https://github.test/acme/widgets/pull/23", Head: githubapi.PullRequestBranch{Ref: request.Head, SHA: head}, Base: githubapi.PullRequestBranch{Ref: request.Base}}, nil
+	return githubapi.PullRequest{ID: 654, NodeID: "PR_654", Number: 23, State: "open", HTMLURL: "https://github.test/acme/widgets/pull/23", Head: githubapi.PullRequestBranch{Ref: request.Head, SHA: head}, Base: githubapi.PullRequestBranch{Ref: request.Base, SHA: productionHeadSHA}}, nil
 }
 
 func (api *backendGitHub) CreateIssueComment(_ context.Context, credential, _, _ string, number int, request githubapi.CommentRequest) (githubapi.IssueComment, error) {

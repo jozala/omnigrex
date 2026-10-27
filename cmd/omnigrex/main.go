@@ -619,7 +619,7 @@ func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.Age
 		if event.Metadata.FailureClass != "" {
 			level = slog.LevelWarn
 		}
-		sink.logger.Log(ctx, level, "Agent Session observation", "agent_participant_id", event.AssignmentID, "agent_session_id", event.AgentSessionID, "agent_turn_id", event.TurnID, "execution_epoch", event.ExecutionEpoch, "control_revision", event.ControlRevision, "kind", event.Kind, "status", event.Metadata.Status, "failure_class", event.Metadata.FailureClass, "runtime", string(event.Metadata.Runtime))
+		sink.logger.Log(ctx, level, "Agent Session observation", "workflow_id", event.WorkflowID, "retry_of_turn_id", event.RetryOfTurnID, "agent_participant_id", event.AssignmentID, "agent_session_id", event.AgentSessionID, "agent_turn_id", event.TurnID, "execution_epoch", event.ExecutionEpoch, "control_revision", event.ControlRevision, "kind", event.Kind, "status", event.Metadata.Status, "failure_class", event.Metadata.FailureClass, "runtime", event.Metadata.Runtime)
 		return nil
 	}
 	level := slog.LevelDebug

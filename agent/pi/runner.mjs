@@ -3,12 +3,13 @@ import { join, relative, isAbsolute } from 'node:path';
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, SettingsManager, runRpcMode } from '@earendil-works/pi-coding-agent';
 import { mcpExtension } from './mcp-extension.mjs';
 import { failureExtension } from './failure-extension.mjs';
+import { compactionCompatibilityExtension } from './compaction-compat-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
 import { stepBudget } from './step-budget.mjs';
+import { controlRuntime } from './control-events.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
-const agentDir = '/run/pi-agent';
 const cwd = '/workspace';
 
 export async function readBootstrap() {
@@ -62,9 +63,10 @@ async function skillPaths(enabled) {
   return result.sort();
 }
 
-export async function prepareRuntime(configuration, sessionManager, models) {
-  // RPC mode redirects ordinary extension stdout to stderr. Capture the owned
-  // framed writer before that guard is installed, as historyInput does.
+// In-process fixtures must isolate credentials and model files from the agent
+// running the tests. Production callers retain the disposable bootstrap path.
+export async function prepareRuntime(configuration, sessionManager, models, { agentDir = '/run/pi-agent', subscriptionFetch = fetch } = {}) {
+  // Capture the owned framed writer before RPC redirects extension stdout.
   const write = process.stdout.write.bind(process.stdout);
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await writeFile(join(agentDir, 'auth.json'), JSON.stringify(configuration.auth), { mode: 0o600 });
@@ -73,11 +75,11 @@ export async function prepareRuntime(configuration, sessionManager, models) {
   if (models) await writeFile(join(agentDir, 'models.json'), JSON.stringify(models), { mode: 0o600 });
   const skills = await skillPaths(configuration.repositorySkills);
   const settingsManager = SettingsManager.inMemory({
-    retry: { enabled: false }, compaction: { enabled: false }, cacheWarming: 'off',
+    retry: { enabled: false }, compaction: { enabled: true }, cacheWarming: 'off',
     enableAnalytics: false, enableInstallTelemetry: false, enableSkillCommands: true,
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {
-    const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null) : undefined;
+    const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null, subscriptionFetch) : undefined;
     const budget = configuration.stepBudget === undefined ? undefined : stepBudget(configuration.stepBudget, (data, summary) => {
       write(JSON.stringify({ type: 'omnigrex_step_budget', data, ...(summary ? { summary } : {}) }) + '\n');
     });
@@ -86,7 +88,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
       modelRuntime: subscription?.runtime,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), mcpExtension(configuration), ...(budget ? [budget.extension] : [])],
+        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), compactionCompatibilityExtension, mcpExtension(configuration), ...(budget ? [budget.extension] : [])],
         additionalSkillPaths: skills,
         // Overrides avoid interpreting instruction text as a file path and
         // prevent even reading automatic SYSTEM/APPEND_SYSTEM sources.
@@ -106,7 +108,7 @@ export async function prepareRuntime(configuration, sessionManager, models) {
       thinkingLevel: configuration.selection.thinking || undefined });
     budget?.attach(result.session, tools);
     if (result.modelFallbackMessage) throw new Error('model fallback rejected');
-    return { ...result, services, diagnostics: services.diagnostics };
+    return { ...result, services: { ...services, subscribeProviderFailures: subscription?.subscribeFailures }, diagnostics: services.diagnostics };
   };
   return createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
 }
@@ -122,7 +124,7 @@ export async function run(configuration, sessionManager, models) {
     input.on('error', () => process.exit(1));
     Object.defineProperty(process, 'stdin', { value: input });
   }
-  const rpc = runRpcMode(runtime);
+  const rpc = runRpcMode(controlRuntime(runtime));
   source.resume();
   await rpc;
 }

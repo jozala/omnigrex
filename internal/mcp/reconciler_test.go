@@ -10,6 +10,7 @@ import (
 
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
@@ -136,9 +137,13 @@ func TestProductionReconcilerFindsExactPullRequestAndReviewArtifacts(t *testing.
 		mutation.State = store.MutationSucceeded
 
 		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
-		if err != nil || result.Disposition != mcp.ReconciliationFound ||
-			string(result.Outcome.Result) != `{"pull_request_id":654,"node_id":"PR_654","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"0123456789abcdef0123456789abcdef01234567"}` {
+		if err != nil || result.Disposition != mcp.ReconciliationFound {
 			t.Fatalf("Reconcile(open_pr) = (%#v, %v)", result, err)
+		}
+		evidence, err := publication.DecodeOpenResult(result.Outcome.Result)
+		want := publication.OpenResult{Version: 1, PullRequestID: 654, NodeID: "PR_654", Number: 23, HTMLURL: "https://github.test/acme/widgets/pull/23", HeadSHA: productionHeadSHA, RepositoryID: 9123, RepositoryOwner: "acme", RepositoryName: "widgets", BaseRef: "main", BaseSHA: "1123456789abcdef0123456789abcdef01234567", HeadRef: "omnigrex/issue-12", Status: "CLOSED"}
+		if err != nil || evidence != want {
+			t.Fatalf("recovered open evidence = %#v, %v; want %#v", evidence, err, want)
 		}
 		if api.pullRequestQuery != (githubapi.ListPullRequestsRequest{Head: "omnigrex/issue-12", Base: "main"}) {
 			t.Fatalf("ListPullRequests request = %#v", api.pullRequestQuery)
@@ -293,10 +298,10 @@ func TestProductionReconcilerFindsTurnScopedArtifactsAfterProposalHeadAdvances(t
 
 	t.Run("open Pull Request", func(t *testing.T) {
 		api := &reconciliationGitHub{pullRequests: []githubapi.PullRequest{{
-			ID: 654, NodeID: "PR_654", Number: 23, Title: "Implement it",
+			ID: 654, NodeID: "PR_654", Number: 23, Title: "Implement it", State: "open",
 			Body: "Description\n\nCloses #12\n\n" + marker, HTMLURL: "https://github.test/acme/widgets/pull/23",
 			Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-12", SHA: advancedHeadSHA},
-			Base: githubapi.PullRequestBranch{Ref: "main"},
+			Base: githubapi.PullRequestBranch{Ref: "main", SHA: productionHeadSHA},
 		}}}
 		mutation := reconciliationMutation(mcp.ToolOpenPR, `{"operation_id":"caller-open","title":"Implement it","body":"Description"}`)
 		mutation.ExternalResourceID = "9123:omnigrex/issue-12:main"
@@ -356,10 +361,10 @@ func TestProductionReconcilerFindsTurnScopedArtifactsAfterProposalHeadAdvances(t
 func TestProductionReconcilerOpenPullRequestRequiresPersistedExactBase(t *testing.T) {
 	marker := reconciliationMarker(t, reconciliationMutationID)
 	matching := githubapi.PullRequest{
-		ID: 654, NodeID: "PR_654", Number: 23, Title: "Implement it",
+		ID: 654, NodeID: "PR_654", Number: 23, Title: "Implement it", State: "open",
 		Body: "Description\n\nCloses #12\n\n" + marker, HTMLURL: "https://github.test/acme/widgets/pull/23",
 		Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-12", SHA: productionHeadSHA},
-		Base: githubapi.PullRequestBranch{Ref: "main"},
+		Base: githubapi.PullRequestBranch{Ref: "main", SHA: productionHeadSHA},
 	}
 	newMutation := func(resource string) store.MutationReservation {
 		mutation := reconciliationMutation(mcp.ToolOpenPR, `{"operation_id":"caller-open","title":"Implement it","body":"Description"}`)
@@ -623,7 +628,7 @@ func TestProductionReconcilerDiscoversRequestReviewPullRequestWithoutChangePropo
 	api := &reconciliationGitHub{pullRequests: []githubapi.PullRequest{{
 		ID: 654, NodeID: "PR_654", Number: 23, Title: "Implement", Body: "Closes #12\n\n" + marker,
 		HTMLURL: "https://github.test/acme/widgets/pull/23", Head: githubapi.PullRequestBranch{Ref: "omnigrex/issue-12", SHA: productionHeadSHA},
-		Base: githubapi.PullRequestBranch{Ref: "main"},
+		Base: githubapi.PullRequestBranch{Ref: "main", SHA: productionHeadSHA},
 	}}}
 	reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
 	mutation := reconciliationMutation(mcp.ToolRequestReview, `{"operation_id":"caller-review","summary":"Ready"}`)

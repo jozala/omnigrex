@@ -41,6 +41,9 @@ Early completion does not force another request.
 The owned runner chains Pi's supported SDK hooks; it does not fork the loop or introduce a runtime service.
 At the final response boundary it ends the inner loop and synchronously requests public Session abort without awaiting idle inside the callback.
 This also stops queued-message and pre-settlement outer continuations.
+Pi 1.4.0 native compaction maintenance is not a conversational iteration and never resets or replenishes the allowance.
+Pre-prompt compaction, between-request threshold compaction, and overflow compact-and-retry share the admitted prompt's counter; the retried conversational request consumes the next iteration.
+See [native compaction](../operators/context-compaction.md) for its separate provider cost, cancellation, and failure behavior.
 Queued continuation input left by this stop is cleared rather than executed against another Turn's allowance.
 Configured tools are restored after activity settles; summary transcript projections are request-only and never become stale Session instructions.
 

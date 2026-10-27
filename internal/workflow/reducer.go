@@ -563,6 +563,14 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 	next := cloneSnapshot(snapshot)
 	next.ActiveTurn = nil
 	next.ResumeRole = ""
+	if event.PublicationAssociation != nil {
+		if snapshot.ChangeProposal != nil || event.Outcome == TurnOutcomeChangeProposalReady &&
+			(event.ChangeProposal == nil || *event.ChangeProposal != *event.PublicationAssociation) {
+			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
+		}
+		proposal := *event.PublicationAssociation
+		next.ChangeProposal = &proposal
+	}
 
 	if event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomePrerequisiteFailed && event.Outcome != TurnOutcomeInfrastructureFailed {
 		if _, ok := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome); !ok {
@@ -720,7 +728,11 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 	if next.CurrentAttempt.InfrastructureRetryBudget.Used < next.CurrentAttempt.InfrastructureRetryBudget.Limit {
 		next.CurrentAttempt.InfrastructureRetryBudget.Used++
 		next.Revision++
-		intent := EnqueueTurnAction{Stage: event.Turn.Stage, Role: event.Turn.Role, Purpose: TurnPurposeRetry, ExpectedHeadSHA: event.Turn.ExpectedHeadSHA, RetryOfTurnID: event.Turn.TurnID}
+		head := event.Turn.ExpectedHeadSHA
+		if event.PublicationAssociation != nil {
+			head = event.PublicationAssociation.HeadSHA
+		}
+		intent := EnqueueTurnAction{Stage: event.Turn.Stage, Role: event.Turn.Role, Purpose: TurnPurposeRetry, ExpectedHeadSHA: head, RetryOfTurnID: event.Turn.TurnID}
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonInfrastructureRetry, Actions: successorActions(event.Turn, event.PendingEvents, intent)}
 	}
 	next.State = StateNeedsHuman
@@ -728,7 +740,7 @@ func reduceInfrastructureFailure(next Snapshot, event TurnSettledEvent) Decision
 	next.Assignments.Status = AssignmentWaitingForHuman
 	next.Revision++
 	actions := []Action{
-		MarkHumanHandoffAction{Reason: ReasonInfrastructureRetriesExhausted, Diagnostic: event.Diagnostic},
+		MarkHumanHandoffAction{Reason: ReasonInfrastructureRetriesExhausted, Diagnostic: fmt.Sprintf("%s [agent_turn_id=%s retry_of_turn_id=%s infrastructure_retry_budget=%d/%d; see controller logs]", event.Diagnostic, event.Turn.TurnID, event.Turn.RetryOfTurnID, next.CurrentAttempt.InfrastructureRetryBudget.Used, next.CurrentAttempt.InfrastructureRetryBudget.Limit)},
 		ReconcileLabelsAction{State: StateNeedsHuman},
 	}
 	if pendingRequiresReconciliation(event.PendingEvents) {

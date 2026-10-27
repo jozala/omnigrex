@@ -102,6 +102,9 @@ Image-only deployment smoke must run on the daemon host because Compose secrets 
 Its fixtures use isolated names and remove their own resources; inspect the task/script before running a full-stack gate against a shared host.
 The production Compose files retain fixed defaults and are not isolated merely by changing the project name.
 
+The native integration gate also runs the bounded catalog longevity/multi-process, coordinated payload, and v0.7.6-to-v0.7.11 catalog migration/backup-recovery regressions.
+See [Microsandbox upgrade evidence](../operators/microsandbox-upgrade.md#ci-evidence-boundary) for their assertions and limits.
+
 ## Live external gates
 
 The GitHub gate performs a Developer App repository-ID read and submits both Reviewer outcomes against a pre-existing Developer App-authored Pull Request.

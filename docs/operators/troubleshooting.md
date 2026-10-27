@@ -116,6 +116,14 @@ Calls never reaching the gateway and authentication failures without trusted reg
 Stale-authority logs cover post-authentication checks, not every expired registration.
 Mutation planning/reservation/replay/detached execution retain their separate diagnostics.
 
+Developer PR and CI reads use the latest durably published head in the same Turn, not necessarily the starting SHA in its envelope.
+Compare the returned head metadata to the publication result; `get_check_runs` includes `head_sha` even when `check_runs` is empty.
+After another publication advances the target, restart pagination rather than reusing a prior-head continuation.
+An external push does not become authorized: PR metadata and collaboration reads reject a mismatched head, while CI reads remain at the published SHA.
+If a publication is still unknown or being reconciled, it grants no new read access until successful durable evidence exists.
+Do not substitute starting-commit checks for current-head verification or bypass MCP with direct GitHub credentials.
+For persistent scope rejection, retain Turn/epoch and mutation identifiers and inspect the publication ledger/recovery outcome before retrying; a compatible controller upgrade is required for deployments that still freeze all reads at the starting head.
+
 ## Publication and terminal verification
 
 A later Developer Turn can reuse prior published work only after matching durable mutations and fresh GitHub state for the same Participant.

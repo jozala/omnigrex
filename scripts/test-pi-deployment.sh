@@ -55,12 +55,12 @@ trap 'exit 143' HUP TERM
 orchestrator="${OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE:-}"
 pi="${OMNIGREX_PI_DEPLOY_IMAGE:-}"
 if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
-  docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .
+  docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
   if [ "$backend" = docker ]; then
     docker build --quiet --tag omnigrex/orchestrator:dev .
     sh scripts/check-orchestrator-image.sh omnigrex/orchestrator:dev
     ensure_fixture_registry
-    for image in pi:1.0.4 orchestrator:dev; do
+    for image in pi:1.4.0 orchestrator:dev; do
       name="${image%%:*}"
       docker tag "omnigrex/$image" "127.0.0.1:$registry_port/omnigrex/$name:fixture"
       docker push "127.0.0.1:$registry_port/omnigrex/$name:fixture" >/dev/null
@@ -71,7 +71,7 @@ if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
     : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the host KVM group}"
     docker build --quiet --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
     orchestrator=omnigrex/orchestrator-microsandbox:dev
-    pi=omnigrex/pi:1.0.4
+    pi=omnigrex/pi:1.4.0
   fi
 elif [ -z "$orchestrator" ] || [ -z "$pi" ]; then
   printf '%s\n' 'Supply both published image digests or neither.' >&2
@@ -156,7 +156,7 @@ volumes:
 EOF
   COMPOSE_FILE="$COMPOSE_FILE:native-smoke.yaml"
   cleanup_compose_file="$COMPOSE_FILE"
-  if [ "$pi" = omnigrex/pi:1.0.4 ]; then
+  if [ "$pi" = omnigrex/pi:1.4.0 ]; then
     # Docker archive import synthesizes a new manifest. Only source fixtures
     # may bind that imported digest; it is not registry-image release evidence.
     docker image save "$pi" > pi.tar

@@ -81,18 +81,22 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
-	budget          *stepbudget.Observation
-	budgetSummary   string
-	events          chan agentevent.AgentEvent
-	settled         chan struct{}
-	settledOK       bool
-	lastReason      string
-	lastFailure     string
-	lastGeneration  string
-	outcome         agent.Outcome
-	retryBackoff    bool
-	cancelRequested bool
-	retryCancelled  bool
+	budget            *stepbudget.Observation
+	budgetSummary     string
+	events            chan agentevent.AgentEvent
+	settled           chan struct{}
+	settledOK         bool
+	lastReason        string
+	lastFailure       string
+	lastGeneration    string
+	lastDiagnostic    *agent.ProviderDiagnostic
+	lastLoggedAttempt string
+	outcome           agent.Outcome
+	retryBackoff      bool
+	cancelRequested   bool
+	retryCancelled    bool
+	compactionFailed  bool
+	compactionAborted bool
 }
 
 // Connect starts reading immediately, including events emitted before a waiter.
@@ -413,7 +417,9 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		}
 	}
 
-	result, err := c.request(ctx, "prompt", map[string]string{"message": text})
+	// Pi may summarize retained context before acknowledging admission. The
+	// existing Turn deadline, not the ordinary command timeout, bounds this work.
+	result, err := c.exchange(ctx, "prompt", map[string]string{"message": text})
 	if err != nil {
 		if result.acknowledged && errors.Is(err, agent.ErrRuntime) {
 			return agent.Outcome{Status: agent.Rejected, FailureClass: "runtime_rejection"}, err
@@ -655,6 +661,10 @@ func (c *connection) record(content []byte) error {
 		Data         json.RawMessage `json:"data"`
 		Message      json.RawMessage `json:"message"`
 		FinalError   string          `json:"finalError"`
+		ErrorMessage string          `json:"errorMessage"`
+		Diagnostic   json.RawMessage `json:"diagnostic"`
+		FailureClass json.RawMessage `json:"failureClass"`
+		Aborted      bool            `json:"aborted"`
 		SessionID    string          `json:"sessionId"`
 		Disposition  string          `json:"disposition"`
 		Capabilities json.RawMessage `json:"capabilities"`
@@ -722,6 +732,28 @@ func (c *connection) record(content []byte) error {
 			return agent.ErrBackpressure
 		}
 		return nil
+	case "omnigrex_provider_request_failed":
+		// Native summary calls do not emit conversational message_end. This
+		// owned request observation is diagnostic only, never settlement proof.
+		t.lastDiagnostic = agent.ParseProviderDiagnostic(record.Diagnostic)
+		// Only the separately validated request marker establishes its category.
+		// Do not turn this observation into a prerequisite or retry-policy input.
+		t.lastDiagnostic.Category = ""
+		failure := "provider_failure"
+		var observedClass string
+		_ = json.Unmarshal(record.FailureClass, &observedClass)
+		switch observedClass {
+		case "subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary":
+			failure = observedClass
+			t.lastDiagnostic.Category = observedClass
+		}
+		select {
+		case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, "", false):
+			t.lastLoggedAttempt = t.lastDiagnostic.Attempt
+		default:
+			return agent.ErrBackpressure
+		}
+		return nil
 	case "message_start":
 		var message struct {
 			Role string `json:"role"`
@@ -731,15 +763,21 @@ func (c *connection) record(content []byte) error {
 		}
 		if message.Role == "assistant" {
 			t.lastReason = ""
+			t.compactionFailed = false
+			// A cancelled pre-prompt summary can be followed by Pi's synthetic
+			// assistant error, not an aborted assistant. Keep that cancellation.
+			t.compactionAborted = t.compactionAborted && t.cancelRequested
 			t.lastFailure, t.lastGeneration = "", ""
+			t.lastDiagnostic = nil
 			t.retryBackoff, t.retryCancelled = false, false
 		}
 	case "message_end":
 		var message struct {
-			Role         string `json:"role"`
-			StopReason   string `json:"stopReason"`
-			ErrorMessage string `json:"errorMessage"`
-			Generation   string `json:"omnigrexProviderGeneration"`
+			Role         string          `json:"role"`
+			StopReason   string          `json:"stopReason"`
+			ErrorMessage string          `json:"errorMessage"`
+			Generation   string          `json:"omnigrexProviderGeneration"`
+			Diagnostic   json.RawMessage `json:"omnigrexProviderDiagnostic"`
 		}
 		if json.Unmarshal(record.Message, &message) != nil || message.Role == "" {
 			return agent.ErrProtocol
@@ -751,14 +789,34 @@ func (c *connection) record(content []byte) error {
 				return agent.ErrProtocol
 			}
 			t.lastReason = message.StopReason
+			if message.StopReason == "error" || message.StopReason == "aborted" {
+				observed := t.lastDiagnostic
+				t.lastDiagnostic = agent.ParseProviderDiagnostic(message.Diagnostic)
+				if observed != nil && observed.Attempt != "" && observed.Attempt == t.lastDiagnostic.Attempt {
+					t.lastDiagnostic.Category = observed.Category
+				}
+			}
 			if message.StopReason == "error" {
 				switch message.ErrorMessage {
 				case "Omnigrex subscription_quota", "Omnigrex subscription_auth", "Omnigrex subscription_configuration", "Omnigrex subscription_temporary":
 					t.lastFailure = strings.TrimPrefix(message.ErrorMessage, "Omnigrex ")
+					t.lastDiagnostic.Category = t.lastFailure
 					if len(message.Generation) == 36 && !strings.ContainsAny(message.Generation, "\x00\r\n") {
 						t.lastGeneration = message.Generation
 					}
 				}
+			}
+		}
+
+		if message.Role == "assistant" && (message.StopReason == "error" || message.StopReason == "aborted") && t.lastDiagnostic != nil && (t.lastDiagnostic.Attempt == "" || t.lastDiagnostic.Attempt != t.lastLoggedAttempt) {
+			failure := t.lastFailure
+			if failure == "" {
+				failure = "provider_failure"
+			}
+			select {
+			case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, t.lastReason, false):
+			default:
+				return agent.ErrBackpressure
 			}
 		}
 	case "auto_retry_start":
@@ -767,13 +825,30 @@ func (c *connection) record(content []byte) error {
 		if record.Success == nil {
 			return agent.ErrProtocol
 		}
-		// Pi 1.0.4 aborts its backoff without appending an aborted assistant
+		// Pi aborts its backoff without appending an aborted assistant
 		// message. Recognize its exact cancellation marker only for a requested
 		// abort in that backoff; arbitrary provider error text is not evidence.
 		t.retryCancelled = t.retryBackoff && t.lastReason == "error" && t.cancelRequested && !*record.Success && record.FinalError == "Retry cancelled"
 		t.retryBackoff = false
+	case "compaction_start":
+		// A summary is a separate request; earlier assistant failure evidence is not
+		// evidence of the summary outcome. Its failed-request event is already emitted.
+		t.lastDiagnostic = nil
+	case "compaction_end":
+		t.compactionAborted = record.Aborted
+		t.compactionFailed = !record.Aborted && record.ErrorMessage != ""
+		failure := ""
+		if t.compactionFailed {
+			failure = "compaction_failed"
+		}
+		select {
+		case t.events <- c.runtimeEvent("activity", status, failure, record.Type, "", false):
+		default:
+			return agent.ErrBackpressure
+		}
+		return nil
 	case "agent_settled":
-		outcome := agent.Outcome{Admitted: true}
+		outcome := agent.Outcome{Admitted: true, FailureDiagnostic: t.lastDiagnostic}
 		if c.options.StepBudget != nil && (t.budget == nil || !t.budget.Complete) {
 			return agent.ErrProtocol
 		}
@@ -788,8 +863,11 @@ func (c *connection) record(content []byte) error {
 		}
 		if t.cancelRequested && t.budget != nil && t.budget.Stopped && t.lastReason != "error" {
 			outcome.Status = agent.Aborted
-		} else if t.retryCancelled {
+		} else if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
 			outcome.Status = agent.Aborted
+		} else if t.compactionFailed {
+			// Reuse bounded provider-failure handling; compaction is not completion.
+			outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
 		} else {
 			switch t.lastReason {
 			case "stop", "length":
@@ -820,7 +898,7 @@ func (c *connection) record(content []byte) error {
 		}
 		close(t.settled)
 		return nil
-	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end", "auto_compaction_start", "auto_compaction_end":
+	case "agent_start", "agent_end", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end":
 	default:
 		return nil
 	}
@@ -837,11 +915,13 @@ func (c *connection) record(content []byte) error {
 func (c *connection) runtimeEvent(kind, status, failure, source, reason string, retryCancelled bool) agentevent.AgentEvent {
 	event := c.eventLocked(kind, status, failure)
 	event.Metadata.Runtime, _ = json.Marshal(struct {
-		Runtime        string `json:"runtime"`
-		Event          string `json:"event"`
-		Reason         string `json:"assistant_stop_reason,omitempty"`
-		RetryCancelled bool   `json:"retry_cancelled,omitempty"`
-	}{"pi-rpc/1.0.4", source, reason, retryCancelled})
+		Runtime         string                    `json:"runtime"`
+		Event           string                    `json:"event"`
+		Reason          string                    `json:"assistant_stop_reason,omitempty"`
+		RetryCancelled  bool                      `json:"retry_cancelled,omitempty"`
+		ProviderFailure *agent.ProviderDiagnostic `json:"provider_failure,omitempty"`
+		SelectedModel   string                    `json:"selected_model,omitempty"`
+	}{"pi-rpc/v2", source, reason, retryCancelled, c.activeDiagnostic(kind), c.selectedModel()})
 	return event
 }
 
@@ -853,7 +933,7 @@ func (c *connection) event(kind, status, failure string) agentevent.AgentEvent {
 
 func (c *connection) eventLocked(kind, status, failure string) agentevent.AgentEvent {
 	owner := c.options.EventContext
-	return agentevent.AgentEvent{AssignmentID: owner.AssignmentID, AgentSessionID: owner.AgentSessionID, TurnID: owner.TurnID, ExecutionEpoch: owner.ExecutionEpoch, ControlRevision: owner.ControlRevision, Kind: agentevent.Kind(kind), ObservedAt: time.Now().UTC(), Metadata: agentevent.OperationalMetadata{Status: status, FailureClass: failure}}
+	return agentevent.AgentEvent{WorkflowID: owner.WorkflowID, RetryOfTurnID: owner.RetryOfTurnID, AssignmentID: owner.AssignmentID, AgentSessionID: owner.AgentSessionID, TurnID: owner.TurnID, ExecutionEpoch: owner.ExecutionEpoch, ControlRevision: owner.ControlRevision, Kind: agentevent.Kind(kind), ObservedAt: time.Now().UTC(), Metadata: agentevent.OperationalMetadata{Status: status, FailureClass: failure}}
 }
 
 func (c *connection) failureValue() error { c.mu.Lock(); defer c.mu.Unlock(); return c.failure }
@@ -894,4 +974,18 @@ func failureClass(err error) string {
 	default:
 		return "transport_lost"
 	}
+}
+
+func (c *connection) activeDiagnostic(kind string) *agent.ProviderDiagnostic {
+	if (kind == "prompt_settled" || kind == "provider_request_failed") && c.active != nil {
+		return c.active.lastDiagnostic
+	}
+	return nil
+}
+
+func (c *connection) selectedModel() string {
+	if c.options.Selection != nil {
+		return c.options.Selection.Model
+	}
+	return ""
 }

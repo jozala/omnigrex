@@ -123,7 +123,7 @@ The final diff review confirmed that core Workflow and Agent Turn policy have no
 ## Review regression coverage
 
 The first independent Standards and Spec reviews identified missing trusted Git tooling, digest-alias trust, conflicting ephemeral-input retries, missing-resource observation blocking recovery, unbounded SDK release, and malformed diagnostic inventory.
-The native image now installs the checksum-locked Ubuntu Git/HTTPS dependency closure and tests actual trusted workspace preparation, capture inspection, and certificate handling in that image.
+The native image includes Git/HTTPS tooling and tests actual trusted workspace preparation, capture inspection, and certificate handling in that image.
 Image admission authenticates cached manifest/config bytes and verifies a selected platform manifest's linkage to its digest-pinned OCI index, rather than trusting a reference-shaped alias.
 The pinned SDK reserializes registry manifests and omits parent indexes, so registry-origin/index verification requires bounded HTTPS access to the exact registry artifacts.
 Exact imported platform-manifest artifacts remain verifiable without registry access when their cached bytes match their digest.

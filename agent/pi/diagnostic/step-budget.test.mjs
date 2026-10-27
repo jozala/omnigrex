@@ -7,29 +7,31 @@ import { join } from 'node:path';
 import { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager } from '@earendil-works/pi-coding-agent';
 import { stepBudget, summaryInstruction } from './step-budget.mjs';
 
-async function fixture(t, limit, response, outer = false) {
+async function fixture(t, limit, response, outer = false, compactionMode = undefined) {
   const root = await mkdtemp(join(tmpdir(), 'omnigrex-budget-'));
   const requests = [], calls = [], observations = [];
-  let session, pending = 0;
+  let session, pending = 0, summaries = 0;
   const budget = stepBudget(limit, (data, summary) => observations.push({ ...data, text: summary }));
   const server = http.createServer(async (req, res) => {
     let raw = ''; for await (const c of req) raw += c;
-    const data = JSON.parse(raw); requests.push(data);
+    const data = JSON.parse(raw);
+    const maintenance = data.messages.some(m => m.role === 'system' && JSON.stringify(m.content).includes('You are a context summarization assistant'));
+    if (maintenance) summaries++; else requests.push(data);
     assert.equal(pending, 0, 'preceding tool batch must finish before next request');
-    const result = response(requests.length, data);
+    const result = maintenance ? { text: 'Checkpoint: continue the original assignment.' } : response(requests.length, data);
     if (result.hold) return;
-    if (result.failure) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Controlled provider rejection' } })); return; }
+    if (result.failure) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: result.overflow ? 'Your input exceeds the context window of this model' : 'Controlled provider rejection' } })); return; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const delta = result.tools ? { role: 'assistant', tool_calls: result.tools.map((name, index) => ({ index, id: `call-${requests.length}-${index}`, type: 'function', function: { name, arguments: '{}' } })) } : { role: 'assistant', content: result.text ?? 'Work is incomplete; verification remains.' };
-    for (const [d, f] of [[delta, null], [{}, result.reason ?? (result.tools ? 'tool_calls' : 'stop')]]) res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta: d, finish_reason: f }] })}\n\n`);
+    for (const [d, f] of [[delta, null], [{}, result.reason ?? (result.tools ? 'tool_calls' : 'stop')]]) res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'controlled', choices: [{ index: 0, delta: d, finish_reason: f }], ...(f ? { usage: { prompt_tokens: result.inputTokens ?? 1000, completion_tokens: 1, total_tokens: (result.inputTokens ?? 1000) + 1 } } : {}) })}\n\n`);
     res.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { session?.dispose(); server.closeAllConnections(); await new Promise(r => server.close(r)); await rm(root, { recursive: true, force: true }); });
   await writeFile(join(root, 'auth.json'), JSON.stringify({ controlled: { type: 'api_key', key: 'fixture-only' } }));
-  await writeFile(join(root, 'models.json'), JSON.stringify({ providers: { controlled: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', models: [{ id: 'controlled', name: 'controlled', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
+  await writeFile(join(root, 'models.json'), JSON.stringify({ providers: { controlled: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', models: [{ id: 'controlled', name: 'controlled', reasoning: false, input: ['text'], contextWindow: 65536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
   const services = await createAgentSessionServices({ cwd: root, agentDir: root,
-    settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false }, cacheWarming: 'off' }, { projectTrusted: false }),
+    settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: !!compactionMode }, cacheWarming: 'off' }, { projectTrusted: false }),
     resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, disabledBuiltinExtensions: ['mcp'], systemPromptOverride: () => 'FORCED_SYSTEM', extensionFactories: [budget.extension, pi => {
       for (const name of ['probe', 'omnigrex_fixture', 'deferred_fixture']) pi.registerTool({ name, label: name, description: name, ...(name === 'deferred_fixture' ? { exposure: 'deferred' } : {}), parameters: { type: 'object', properties: {} }, async execute(_id, _args, _signal, _update, ctx) {
         if (name === 'probe') await ctx.executeTool('deferred_fixture', {});
@@ -42,10 +44,16 @@ async function fixture(t, limit, response, outer = false) {
         if (outer === true || outer === 'settle') pi.on('agent_before_settle', () => ({ entries: [{ type: 'custom_message', customType: 'budget-fixture', content: 'Continue fixture work', display: false }], continue: true }));
       }
     }] } });
-  ({ session } = await createAgentSessionFromServices({ services, sessionManager: SessionManager.inMemory(root), model: services.modelRuntime.getModel('controlled', 'controlled'), tools: ['probe', 'omnigrex_fixture', 'deferred_fixture'] }));
+  const manager = SessionManager.inMemory(root);
+  if (compactionMode) for (let i = 0; i < 8; i++) {
+    manager.appendMessage({ role: 'user', content: 'retained history '.repeat(2400), timestamp: 1 + 2 * i });
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'prior response' }], api: 'openai-completions', provider: 'controlled', model: 'controlled', stopReason: 'stop', timestamp: 2 + 2 * i,
+      usage: { input: compactionMode === 'preprompt' && i === 7 ? 60000 : 1000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: compactionMode === 'preprompt' && i === 7 ? 60001 : 1001, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+  }
+  ({ session } = await createAgentSessionFromServices({ services, sessionManager: manager, model: services.modelRuntime.getModel('controlled', 'controlled'), tools: ['probe', 'omnigrex_fixture', 'deferred_fixture'] }));
   budget.attach(session, ['probe', 'omnigrex_fixture']);
   await session.bindExtensions({});
-  return { session, requests, calls, observations };
+  return { session, requests, calls, observations, get summaries() { return summaries; } };
 }
 
 for (const limit of [1, 3]) test(`limit ${limit}: no N+1, no executable or declared summary tools, outer continuations fenced`, async t => {
@@ -139,4 +147,15 @@ test('oversized summaries are omitted wholesale rather than exposing pre-redacti
   assert.equal(f.observations.at(-1).used, 1);
   assert.equal(f.observations.at(-1).stopped, true);
   assert.equal(f.observations.at(-1).complete, true);
+});
+
+for (const [mode, limit] of [['preprompt', 1], ['threshold', 3], ['overflow', 2]]) test(`native ${mode} compaction never replenishes the conversational allowance`, async t => {
+  const f = await fixture(t, limit, n => mode === 'overflow' && n === 1 ? { failure: true, overflow: true } : { tools: ['probe', 'omnigrex_fixture'], inputTokens: mode === 'threshold' && n === 1 ? 60000 : 1000 }, false, mode);
+  await f.session.prompt('continue original assignment');
+  assert.equal(f.summaries, 1, 'real native maintenance must execute, outside the conversational counter');
+  assert.equal(f.requests.length, limit, 'native continuation must never issue conversational request N+1');
+  assert.equal(f.requests.at(-1).tools?.length ?? 0, 0);
+  assert.ok(JSON.stringify(f.requests.at(-1).messages).includes(summaryInstruction));
+  assert.equal(f.calls.length, mode === 'threshold' ? 6 : 0);
+  assert.deepEqual(f.observations.at(-1), { limit, used: limit, responses: limit, summary: true, stopped: true, complete: true, text: '' });
 });

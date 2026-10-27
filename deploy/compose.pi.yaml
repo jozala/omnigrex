@@ -39,7 +39,7 @@ services:
       - |
         test "$$(id -u):$$(id -g)" = 10001:10001
         test "$$(node --version)" = v24.14.1
-        test "$$(node -p 'JSON.parse(require("fs").readFileSync("/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json")).version')" = 1.0.4
+        test "$$(node -p 'JSON.parse(require("fs").readFileSync("/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json")).version')" = 1.4.0
         for path in /workspace /state /home/omnigrex/.local/share/mise; do
           touch "$$path/.omnigrex-volume-root"
           rm "$$path/.omnigrex-volume-root"

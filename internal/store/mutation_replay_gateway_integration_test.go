@@ -29,6 +29,9 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	databases, pool := openPhaseFiveStores(t, 1)
 	database := databases[0]
 	fixture := seedAgentSession(t, pool, 95)
+	if _, err := pool.Exec(context.Background(), `UPDATE workflow_attempts SET infrastructure_failure_limit=1 WHERE id=$1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const (
@@ -41,7 +44,7 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	github := &replayGatewayGitHub{head: finalHead, branch: "omnigrex/issue-95", base: "main"}
 	workflowMutations := &replayGatewayWorkflow{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
-		GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: workflowMutations,
+		GitHub: &publicationReadGitHub{github}, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: workflowMutations,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +70,10 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1", "message": "First"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2", "message": "Second"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolOpenPR, map[string]any{"operation_id": "open-1", "title": "Changes", "body": "Ready"}, false)
+	read := callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolGetCheckRuns, map[string]any{}, false)
+	if !strings.Contains(read, finalHead) {
+		t.Fatalf("acknowledged replay read = %s", read)
+	}
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
 	callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestReview, map[string]any{"operation_id": "request-review-1", "summary": "Ready"}, false)
 	github.mutex.Lock()
@@ -122,6 +129,11 @@ func TestGatewayRestoresAncestorPublicationReplayForFreshOutcomeReconciliation(t
 		observation.ChangeProposal == nil || observation.ChangeProposal.HeadSHA != finalHead || github.getCallCount() != 2 {
 		t.Fatalf("fresh replay outcome = %#v, GitHub gets %d", observation, github.getCallCount())
 	}
+	settled, err := database.SettleAgentTurn(ctx, retryLease, observation)
+	if err != nil || settled.ChangeProposalID == "" || settled.State != workflow.StateReviewing {
+		t.Fatalf("ancestor publication association = %#v, %v", settled, err)
+	}
+
 }
 
 func TestGatewayMalformedAncestorReplayFailsClosedWithoutLedgerEvidence(t *testing.T) {

@@ -36,5 +36,6 @@ Treating exhaustion as infrastructure failure would silently replenish the allow
 
 Typed bounded observations support individual Turn diagnosis without a telemetry backend or a second counter.
 Aggregate telemetry remains assigned to [Work Item 112](https://github.com/jozala/omnigrex/issues/112).
+Native compaction follows [0040](0040-use-native-pi-compaction-within-turn-lifecycle.md) without replenishing conversational allowances.
 Historical Runtime Profiles remain immutable; finite budgets require qualified budget-capable resources rather than silent image rebinding.
 See the [operator contract](../reference/agent-step-budgets.md) for configuration, accounting, compatibility, and recovery.

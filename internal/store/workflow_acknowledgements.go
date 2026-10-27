@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -161,7 +162,28 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 	if err != nil || !equalStringSets(linkedEventIDs(linkedEvents), payload.DeferredNormalizedEventID) || len(linkedEvents) != int(payload.Count) {
 		return PendingEventReconciliation{}, ErrPendingEventReconciliationFenceLost
 	}
-	if err := prepareLinkedDeferredEvents(linkedEvents, snapshot); err != nil {
+	var settlementResult struct {
+		Publication *settlementPublication `json:"publication_association"`
+	}
+	var resultJSON []byte
+	readErr := tx.QueryRow(ctx, `SELECT result FROM agent_turn_settlements WHERE agent_turn_id=$1 AND execution_epoch=$2 AND settled_at IS NOT NULL`, job.AgentTurnID, job.ExecutionEpoch).Scan(&resultJSON)
+	if readErr != nil && !errors.Is(readErr, pgx.ErrNoRows) {
+		return PendingEventReconciliation{}, readErr
+	}
+	if readErr == nil {
+		if err := json.Unmarshal(resultJSON, &settlementResult); err != nil {
+			return PendingEventReconciliation{}, err
+		}
+	}
+
+	var publicationEdges []publicationEdge
+	if proof := settlementResult.Publication; proof != nil {
+		if snapshot.ChangeProposal == nil || snapshot.ChangeProposal.ID != proof.Proposal.PullRequestID || snapshot.ChangeProposal.Number != proof.Proposal.PullRequestNumber {
+			return PendingEventReconciliation{}, ErrAgentTurnPublicationConflict
+		}
+		publicationEdges = proof.Edges
+	}
+	if err := prepareLinkedDeferredEvents(linkedEvents, snapshot, publicationEdges); err != nil {
 		return PendingEventReconciliation{}, err
 	}
 
@@ -404,7 +426,7 @@ FOR UPDATE OF event, delivery`, job.ID)
 
 // prepareLinkedDeferredEvents validates synchronization identity and derives one
 // causal path before payload content can influence replay order.
-func prepareLinkedDeferredEvents(linked []linkedDeferredEvent, snapshot workflow.Snapshot) error {
+func prepareLinkedDeferredEvents(linked []linkedDeferredEvent, snapshot workflow.Snapshot, publicationEdges []publicationEdge) error {
 	for index := range linked {
 		item := &linked[index]
 		if err := validateNormalizedDeliveryID(item.record.Payload, item.record.DeliveryID); err != nil {
@@ -441,14 +463,26 @@ func prepareLinkedDeferredEvents(linked []linkedDeferredEvent, snapshot workflow
 			strings.TrimSpace(normalized.Repository.Owner) != "" && normalized.Repository.Owner == item.envelope.repositoryOwner &&
 			strings.TrimSpace(normalized.Repository.Name) != "" && normalized.Repository.Name == item.envelope.repositoryName &&
 			pullRequest != nil && pullRequest.ID > 0 && pullRequest.Number > 0 &&
-			strings.TrimSpace(pullRequest.BeforeSHA) != "" && strings.TrimSpace(pullRequest.HeadSHA) != "" &&
-			snapshot.ChangeProposal != nil && pullRequest.ID == snapshot.ChangeProposal.ID && pullRequest.Number == snapshot.ChangeProposal.Number
+			strings.TrimSpace(pullRequest.BeforeSHA) != "" && strings.TrimSpace(pullRequest.HeadSHA) != ""
 		if !valid {
 			return fmt.Errorf("%w: synchronization identity %s contradicts its durable envelope or Workflow", ErrPendingNormalizedEventInvalid, item.record.DeliveryID)
 		}
+		if snapshot.ChangeProposal == nil {
+			return fmt.Errorf("%w: synchronization %s has no internal Change Proposal association", ErrPendingNormalizedEventInvalid, item.record.DeliveryID)
+		}
+		if pullRequest.ID != snapshot.ChangeProposal.ID || pullRequest.Number != snapshot.ChangeProposal.Number {
+			return fmt.Errorf("%w: synchronization identity %s contradicts the Workflow Change Proposal", ErrPendingNormalizedEventInvalid, item.record.DeliveryID)
+		}
 		item.synchronization = &linkedSynchronization{beforeSHA: pullRequest.BeforeSHA, headSHA: pullRequest.HeadSHA}
 	}
-	return prepareLinkedSynchronizationOrder(linked, snapshot)
+	// Reuse the existing causal validation. Only exact successful post-open
+	// publication edges from this settlement can bridge undelivered webhooks.
+	// Synthetic edges are validation evidence, never acknowledged deliveries.
+	all := append([]linkedDeferredEvent(nil), linked...)
+	for _, edge := range publicationEdges {
+		all = append(all, linkedDeferredEvent{synchronization: &linkedSynchronization{beforeSHA: edge.BeforeSHA, headSHA: edge.HeadSHA}})
+	}
+	return prepareLinkedSynchronizationOrder(all, snapshot)
 }
 
 type linkedSynchronizationEdge struct {

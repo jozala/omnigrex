@@ -1,12 +1,12 @@
 FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS toolchain
 
-# SDK 0.7.6 supports an external agentd payload. Keep execs in a leaf while
+# SDK 0.7.11 supports an external agentd payload. Keep execs in a leaf while
 # retaining the original domain root as the aggregate freezer and PID budget.
 FROM toolchain AS agentd-source
 WORKDIR /src
 RUN curl --fail --silent --show-error --location \
-      https://codeload.github.com/superradcompany/microsandbox/tar.gz/09df3d4b9d832adaede1fb9a198cfc660bfab8cd -o /tmp/microsandbox.tar.gz && \
-    echo '3d076d83211e9755b17c0a1b93fadb3f201fcc4073e311ca139636ebebf827bb  /tmp/microsandbox.tar.gz' | sha256sum -c - && \
+      https://codeload.github.com/superradcompany/microsandbox/tar.gz/df3e0f7dd69280b88f6e28d6d3cf5fe4bb4a87a0 -o /tmp/microsandbox.tar.gz && \
+    echo 'c79dcdfbc262d487dd595e26dab832de3b77f0bc08321ef642a02ff4861d8a41  /tmp/microsandbox.tar.gz' | sha256sum -c - && \
     tar -xzf /tmp/microsandbox.tar.gz --strip-components=1 -C /src && rm /tmp/microsandbox.tar.gz
 COPY agent/microsandbox/agentd-domain-cgroups.patch /tmp/agentd.patch
 RUN git apply --check /tmp/agentd.patch && git apply /tmp/agentd.patch
@@ -20,21 +20,6 @@ RUN test "$TARGETARCH" = amd64 && \
     cargo test --locked --jobs 2 --target x86_64-unknown-linux-musl -p microsandbox-agentd --lib workload::tests && \
     cargo build --locked --jobs 2 --target x86_64-unknown-linux-musl --release -p microsandbox-agentd
 
-# Download packages only; Debian build-stage executables never enter Ubuntu.
-FROM toolchain AS git-download
-ARG TARGETARCH
-COPY agent/microsandbox/deb-packages.sha256 /tmp/deb-packages.sha256
-RUN test "$TARGETARCH" = amd64 && mkdir /debs && \
-    packages=0 && \
-    while read -r checksum asset; do \
-      case "$checksum" in ''|'#'*) continue ;; esac; \
-      file="/debs/${asset##*/}"; \
-      curl --fail --silent --show-error --location "https://archive.ubuntu.com/ubuntu/$asset" -o "$file" || exit 1; \
-      echo "$checksum  $file" | sha256sum -c - || exit 1; \
-      packages=$((packages + 1)); \
-    done < /tmp/deb-packages.sha256 && \
-    test "$packages" -eq 24
-
 FROM toolchain AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -45,21 +30,24 @@ COPY agent/pi ./agent/pi
 ARG VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -tags=microsandbox -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/omnigrex ./cmd/omnigrex
 
+FROM toolchain AS catalog-v076-build
+WORKDIR /src
+COPY internal/runtime/microsandbox/testdata/catalog-v076/ ./
+RUN CGO_ENABLED=1 go build -mod=readonly -trimpath -o /out/catalog-v076 .
+
 FROM build AS test-build
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/microsandbox.test ./internal/runtime/microsandbox
 
 FROM build AS pi-test-build
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go test -c -race -tags=integration,microsandbox -o /out/pi.test ./internal/runtime/pi
 
-FROM ghcr.io/superradcompany/microsandbox@sha256:be3d9f5f99b937ac4c4452b2ff33657a4ef74a117fdb584abb6d3c7db53e248f AS git-runtime
+FROM ghcr.io/superradcompany/microsandbox@sha256:bdaca423e18beb4a62a6664935de9457c1b3217e0479efce1cc961ee59448734 AS git-runtime
 # The digest is Ubuntu Noble/amd64 with glibc 2.39 and CA certificates.
-# Install the locked Noble dependency closure without network/package fallback.
-RUN --network=none --mount=type=bind,from=git-download,source=/debs,target=/tmp/debs,readonly \
-    test "$(dpkg --print-architecture)" = amd64 && \
-    . /etc/os-release && test "$ID:$VERSION_ID" = ubuntu:24.04 && \
-    dpkg --install /tmp/debs/*.deb && \
-    test "$(git --version)" = 'git version 2.43.0' && \
-    test "$(dpkg-query -W -f='${Version}' ca-certificates)" = '20260601~24.04.1' && \
+# Resolve Git from the base image's signed Ubuntu repositories.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/* && \
+    git --version && \
     test -s /etc/ssl/certs/ca-certificates.crt && \
     test -x /usr/lib/git-core/git-remote-https
 
@@ -67,6 +55,7 @@ FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
 COPY --from=agentd-build /src/target/x86_64-unknown-linux-musl/release/agentd /usr/local/lib/omnigrex/agentd
 COPY --from=agentd-source /src/LICENSE /usr/share/licenses/omnigrex/microsandbox-agentd/LICENSE
+RUN mkdir -p /usr/share/omnigrex && printf '%s\n' 'df3e0f7dd69280b88f6e28d6d3cf5fe4bb4a87a0 patched-domain-cgroups' > /usr/share/omnigrex/microsandbox-agentd-source
 RUN mkdir -p /var/lib/omnigrex/msb/tmp /var/lib/omnigrex/workspaces /var/lib/omnigrex/runtime-state /var/lib/omnigrex/mise /var/lib/omnigrex/provider-auth && chown -R 10001:10001 /var/lib/omnigrex
 ENV OMNIGREX_EXECUTION_BACKEND=microsandbox
 ENV MSB_AGENTD_PATH=/usr/local/lib/omnigrex/agentd
@@ -74,6 +63,10 @@ USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/omnigrex"]
 
 FROM runtime AS qualification
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 && rm -rf /var/lib/apt/lists/*
+USER 10001:10001
+COPY --from=catalog-v076-build /out/catalog-v076 /usr/local/bin/catalog-v076
 COPY --from=test-build /out/microsandbox.test /usr/local/bin/microsandbox.test
 COPY internal/runtime/microsandbox/testdata/nested /fixtures
 ENV HOME=/tmp OMNIGREX_MICROSANDBOX_INTEGRATION=1

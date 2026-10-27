@@ -23,9 +23,10 @@ const (
 type Outcome struct {
 	// Admitted records positive evidence that this prompt started. False with
 	// Unknown status means admission is unconfirmed, not proven absent.
-	Admitted     bool
-	Status       Status
-	FailureClass string
+	Admitted          bool
+	Status            Status
+	FailureClass      string
+	FailureDiagnostic *ProviderDiagnostic
 	// FailureGeneration identifies the credential generation, never a token.
 	FailureGeneration string
 	// LimitReached retains the pre-existing output/token-length limit.

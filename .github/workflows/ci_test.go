@@ -196,9 +196,9 @@ func TestCIDevelopmentQualificationBuildsItsOwnGoldenAndPropagatesFailures(t *te
 			stub := `#!/bin/sh
 set -eu
 case "$*" in
-  'build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.0.4 .')
+  'build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .')
     stage=golden ;;
-  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.0.4 --tag omnigrex/development:dev .')
+  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.4.0 --tag omnigrex/development:dev .')
     test -f golden
     stage=development ;;
   *) echo "unexpected Docker command: $*" >&2; exit 2 ;;

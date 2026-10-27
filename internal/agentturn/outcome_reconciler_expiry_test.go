@@ -285,7 +285,7 @@ func TestOutcomeReconcilerUsesCurrentDeveloperCredentialAfterExpiry(t *testing.T
 	ledger := []store.MutationReservation{
 		outcomeSucceededMutation(1, mcp.ToolOpenPR, "open-1",
 			`{"operation_id":"open-1","title":"Change","body":"Ready"}`,
-			`{"pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
+			`{"version":1,"repository_id":41,"repository_owner":"acme","repository_name":"widgets","base_ref":"main","base_sha":"0123456789abcdef0123456789abcdef01234567","head_ref":"feature/work","status":"OPEN","pull_request_id":901,"node_id":"PR_node","number":23,"html_url":"https://github.test/acme/widgets/pull/23","head_sha":"`+outcomeHead+`"}`,
 			"github", "41:feature/work:main", outcomeHead),
 		outcomeSucceededMutation(2, mcp.ToolRequestReview, "review-1",
 			`{"operation_id":"review-1","summary":"Ready"}`,

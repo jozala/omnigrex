@@ -21,12 +21,13 @@ const (
 )
 
 var (
-	ErrAuthentication = errors.New("subscription_auth: run omnigrex auth login")
-	ErrQuota          = errors.New("subscription_quota: check ChatGPT Settings > Usage, then run omnigrex auth unblock and explicitly resume affected Work Items")
-	ErrTemporary      = errors.New("subscription_temporary: ChatGPT authentication is temporarily unavailable")
-	ErrStorage        = errors.New("ChatGPT credential storage is unavailable")
-	ErrLogin          = errors.New("ChatGPT sign-in could not be verified; start a fresh login")
-	ErrConfiguration  = errors.New("subscription_configuration: the selected model or request is not supported by this ChatGPT account; check the Agent Profile and provider configuration")
+	ErrAuthentication   = errors.New("subscription_auth: run omnigrex auth login")
+	ErrQuota            = errors.New("subscription_quota: check ChatGPT Settings > Usage, then run omnigrex auth unblock and explicitly resume affected Work Items")
+	ErrRequestTemporary = errors.New("subscription_temporary: subscription request failed; source not established by classification")
+	ErrTemporary        = errors.New("subscription_temporary: ChatGPT authentication is temporarily unavailable")
+	ErrStorage          = errors.New("ChatGPT credential storage is unavailable")
+	ErrLogin            = errors.New("ChatGPT sign-in could not be verified; start a fresh login")
+	ErrConfiguration    = errors.New("subscription_configuration: the selected model or request is not supported by this ChatGPT account; check the Agent Profile and provider configuration")
 )
 
 // Failure returns only closed-vocabulary, credential-free failure codes.

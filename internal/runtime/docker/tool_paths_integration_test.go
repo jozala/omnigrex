@@ -35,7 +35,7 @@ func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
 	if target != workspace.TurnPathMount || target == contract.Workspace || strings.HasPrefix(target, contract.Workspace+"/") {
 		t.Fatalf("tool data mount %q must be the Runtime Profile's path outside workspace %q", target, contract.Workspace)
 	}
-	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.0.4")
+	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.4.0")
 	volume := fmt.Sprintf("omnigrex-tool-paths-%d", time.Now().UnixNano())
 	dockerCommand(t, "volume", "create", volume)
 	t.Cleanup(func() { dockerCleanup(t, "volume", "rm", "--force", volume) })

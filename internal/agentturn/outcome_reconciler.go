@@ -17,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/providerauth"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
@@ -135,6 +136,7 @@ type OutcomeReconciliation struct {
 	PromptResponse               *agent.Outcome
 	PromptError                  PromptErrorClassification
 	PromptDiagnostic             string
+	PromptProviderDiagnostic     *agent.ProviderDiagnostic
 	RepositoryCredential         string
 	ReviewerRepositoryCredential string
 	Capture                      execution.CaptureRef
@@ -934,17 +936,11 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 		Title       string `json:"title"`
 		Body        string `json:"body"`
 	}
-	var result struct {
-		PullRequestID int64  `json:"pull_request_id"`
-		NodeID        string `json:"node_id"`
-		Number        int64  `json:"number"`
-		HTMLURL       string `json:"html_url"`
-		HeadSHA       string `json:"head_sha"`
-	}
+	result, resultErr := publication.DecodeOpenResult(mutation.Result)
 	head, base, resourceOK := exactOpenPullRequestResource(mutation.ExternalResourceID, repositoryID)
 	if mutation.ExternalService != "github" || !resourceOK || !decodeExactObject(mutation.Request, &arguments) ||
 		arguments.OperationID != mutation.OperationID || strings.TrimSpace(arguments.Title) == "" ||
-		!decodeExactObject(mutation.Result, &result) || result.PullRequestID <= 0 || result.Number <= 0 ||
+		resultErr != nil || result.RepositoryID != repositoryID || result.HeadRef != head || result.BaseRef != base ||
 		strings.TrimSpace(result.NodeID) == "" || strings.TrimSpace(result.HeadSHA) == "" || mutation.ExpectedSHA != result.HeadSHA {
 		return openPullRequestEvidence{}, false
 	}
@@ -1071,11 +1067,11 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 		case PromptErrorInvalidResponse:
 			diagnostic = "Agent prompt returned an invalid outcome"
 		case PromptErrorSubscriptionQuota:
-			return providerauth.ErrQuota.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrQuota, request.PromptProviderDiagnostic)
 		case PromptErrorSubscriptionAuth:
-			return providerauth.ErrAuthentication.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrAuthentication, request.PromptProviderDiagnostic)
 		case PromptErrorSubscriptionConfiguration:
-			return providerauth.ErrConfiguration.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrConfiguration, request.PromptProviderDiagnostic)
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
@@ -1092,7 +1088,20 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 		}
 		return ""
 	case agent.Aborted:
-		return "Agent prompt was cancelled"
+		diagnostic := request.PromptProviderDiagnostic
+		if diagnostic == nil {
+			diagnostic = request.PromptResponse.FailureDiagnostic
+		}
+		if diagnostic == nil {
+			return "Agent prompt was cancelled"
+		}
+		raw, _ := json.Marshal(diagnostic)
+		validated := agent.ParseProviderDiagnostic(raw)
+		summary := "Agent prompt was cancelled"
+		if validated.Cause == "timeout" {
+			summary = "Agent provider request timed out"
+		}
+		return summary + " (" + validated.Summary() + ")"
 	case agent.Failed, agent.Rejected:
 		return "Agent prompt failed"
 	case agent.Unknown:
@@ -1304,4 +1313,14 @@ func budgetExhaustionObservation(at time.Time, outcome json.RawMessage, request 
 	evidence.StepBudgetExhausted = true
 	outcome, _ = json.Marshal(evidence)
 	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
+}
+
+// Do not append arbitrary PromptDiagnostic to prerequisite Human Handoffs.
+// Revalidate separately carried structured evidence before including its summary.
+func subscriptionFailureDiagnostic(cause error, diagnostic *agent.ProviderDiagnostic) string {
+	if diagnostic == nil {
+		return cause.Error()
+	}
+	raw, _ := json.Marshal(diagnostic)
+	return cause.Error() + " (" + agent.ParseProviderDiagnostic(raw).Summary() + ")"
 }
