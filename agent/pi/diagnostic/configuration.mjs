@@ -36,7 +36,7 @@ try {
   if (process.env.OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/diagnostic/control-events.test.mjs', '/opt/omnigrex/pi/diagnostic/control-rpc.test.mjs']);
   if (process.env.OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/session-state.test.mjs']);
   if (process.env.OMNIGREX_PI_MCP_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/mcp-boundary.test.mjs']);
-  if (process.env.OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/failure-boundary.test.mjs', '/opt/omnigrex/pi/diagnostic/subscription.test.mjs']);
+  if (process.env.OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE === '1') await runFixture('/usr/local/bin/node', ['--test', '/opt/omnigrex/pi/failure-boundary.test.mjs', '/opt/omnigrex/pi/diagnostic/subscription.test.mjs', '/opt/omnigrex/pi/diagnostic/provider-diagnostic.test.mjs']);
   for (let attempt = 0;; attempt++) {
     try { await fetch('http://127.0.0.1:8844/audit'); break; }
     catch { if (attempt > 100) throw new Error('gateway unavailable'); await new Promise(r => setTimeout(r, 20)); }

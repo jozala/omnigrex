@@ -6,7 +6,8 @@ import http from 'node:http';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { generateBranchSummary } from '@earendil-works/pi-coding-agent';
 import { prepareRuntime } from '../runner.mjs';
 import { openDurableSession } from '../session-state.mjs';
 import { controlRuntime } from '../control-events.mjs';
@@ -20,7 +21,7 @@ const usage = input => ({ input, output: 1, cacheRead: 0, cacheWrite: 0, totalTo
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 const text = content => typeof content === 'string' ? content : content?.filter(b => b.type === 'text').map(b => b.text).join('') ?? '';
 
-async function fixture(t, mode) {
+async function fixture(t, mode, subscriptionFetch) {
   const root = await mkdtemp(join(tmpdir(), 'pi-native-compaction-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const id = randomUUID();
@@ -77,11 +78,12 @@ async function fixture(t, mode) {
     models: [{ id: 'controlled', name: 'Controlled', reasoning: false, input: ['text'], contextWindow: 65536, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } };
   const agentDir = join(root, 'agent');
-  const config = instructions => ({ auth: { diagnostic: { type: 'api_key', key: `fixture-${mode}` } },
-    instructions, selection: { model: 'diagnostic/controlled', thinking: 'off' }, repositorySkills: false,
+  const config = instructions => ({ auth: subscriptionFetch ? {} : { diagnostic: { type: 'api_key', key: `fixture-${mode}` } },
+    subscription: !!subscriptionFetch,
+    instructions, selection: { model: subscriptionFetch ? 'openai/gpt-6.1-sol' : 'diagnostic/controlled', thinking: 'off' }, repositorySkills: false,
     tools: [], mcpTools: [], mcp: { url: `${url}/mcp`, headers: [] } });
   async function open(manager, instructions) {
-    runtime = await prepareRuntime(config(instructions), manager, models, { agentDir });
+    runtime = await prepareRuntime(config(instructions), manager, subscriptionFetch ? undefined : models, { agentDir, subscriptionFetch });
     controlRuntime(runtime).session.subscribe(e => wire.push(e));
     return runtime;
   }
@@ -219,5 +221,62 @@ for (const mode of ['threshold', 'overflow', 'overflow-guard', 'summary-failure'
     assert.equal(systems.includes('CURRENT_DEPLOYMENT_INSTRUCTIONS'), false);
     assert.equal(systems.includes('OLD_DEPLOYMENT_HINT'), false);
     assert.ok(JSON.stringify(latest).includes(summary));
+  });
+}
+
+for (const trigger of ['threshold', 'branch']) {
+  test(`subscription ${trigger} summary failure retains its own bounded control evidence`, { timeout: 30000 }, async t => {
+    let f;
+    let summaries = 0;
+    const requestID = 'SYNTHETIC_HEADER_SECRET';
+    const fetcher = async (url, init) => {
+      if (new URL(url).pathname === '/runtime/provider-auth') {
+        return Response.json({ access_token: secret, generation: '00000000-0000-4000-8000-000000000001', expires_at: new Date(Date.now() + 3600000).toISOString() });
+      }
+      assert.equal(String(url), 'https://api.openai.com/v1/responses');
+      const body = JSON.parse(init.body);
+      const maintenance = JSON.stringify(body.input).includes('You are a context summarization assistant');
+      if (maintenance) {
+        summaries++;
+        return Response.json({ error: { code: 'subscription_sharing_usage_unavailable', message: `${secret} https://secret.invalid/?token=${secret}` } },
+          { status: 502, headers: { 'x-request-id': requestID, 'set-cookie': secret } });
+      }
+      const model = f.runtime.services.modelRuntime.getModel('openai', 'gpt-6.1-sol');
+      const item = { type: 'message', id: 'msg_fixture', role: 'assistant', content: [{ type: 'output_text', text: 'complete', annotations: [] }] };
+      const events = [
+        { type: 'response.created', response: { id: 'resp_fixture', model: body.model } },
+        { type: 'response.output_item.done', output_index: 0, item },
+        { type: 'response.completed', response: { id: 'resp_fixture', status: 'completed', output: [item], usage: { input_tokens: model.contextWindow - 1000, output_tokens: 1, total_tokens: model.contextWindow - 999 } } },
+      ];
+      return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    f = await fixture(t, 'subscription-summary-failure', fetcher);
+    if (trigger === 'threshold') {
+      await f.runtime.session.prompt('complete then compact');
+      assert.ok(f.wire.some(e => e.type === 'compaction_end' && e.errorMessage === 'Omnigrex compaction_failed'));
+      assert.ok(f.wire.some(e => e.type === 'agent_settled'));
+    } else {
+      const modelRuntime = f.runtime.services.modelRuntime;
+      await generateBranchSummary(f.manager.getBranch(), { model: modelRuntime.getModel('openai', 'gpt-6.1-sol'),
+        streamFn: modelRuntime.streamSimple.bind(modelRuntime), retry: { enabled: false } });
+    }
+    assert.ok(summaries > 0, 'the native summary path must actually request the model');
+    assert.equal(f.wire.some(e => e.type === 'message_end' && e.message.role === 'assistant' && e.message.stopReason === 'error'), false);
+    const failures = f.wire.filter(e => e.type === 'omnigrex_provider_request_failed');
+    assert.equal(failures.length, summaries, 'summary errors must not depend on conversational message_end');
+    for (const event of failures) {
+      assert.equal(event.failureClass, 'subscription_temporary');
+      assert.equal(event.diagnostic.stage, 'provider_http');
+      assert.equal(event.diagnostic.cause, 'http');
+      assert.equal(event.diagnostic.http_status, 502);
+      assert.equal(event.diagnostic.code, 'subscription_sharing_usage_unavailable');
+      assert.match(event.diagnostic.attempt, /^[0-9a-f-]{36}$/u);
+      assert.equal(event.diagnostic.request_id_hash, createHash('sha256').update(requestID).digest('hex'));
+    }
+    const durable = await readFile(f.manager.getSessionFile(), 'utf8');
+    for (const value of [secret, requestID, 'secret.invalid']) {
+      assert.ok(!JSON.stringify(f.wire).includes(value), 'raw summary error escaped onto control wire');
+      assert.ok(!durable.includes(value), 'raw summary error reached durable Session');
+    }
   });
 }

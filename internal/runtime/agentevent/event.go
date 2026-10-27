@@ -9,6 +9,8 @@ import (
 type Kind string
 
 type Context struct {
+	WorkflowID      string
+	RetryOfTurnID   string
 	AssignmentID    string
 	AgentSessionID  string
 	TurnID          string
@@ -17,6 +19,8 @@ type Context struct {
 }
 
 type AgentEvent struct {
+	WorkflowID      string
+	RetryOfTurnID   string
 	AssignmentID    string
 	AgentSessionID  string
 	TurnID          string

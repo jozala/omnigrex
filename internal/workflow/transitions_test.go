@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1408,5 +1409,30 @@ func assertActionCount[T workflow.Action](t *testing.T, actions []workflow.Actio
 	count := actionCount[T](actions)
 	if count != want {
 		t.Errorf("%T action count = %d, want %d in %#v", *new(T), count, want, actions)
+	}
+}
+
+func TestInterruptionThenSubscriptionFailureExplainsExhaustion(t *testing.T) {
+	snapshot := developingSnapshot(nil)
+	first := settledEvent(snapshot, "interrupted", workflow.TurnOutcomeInfrastructureFailed)
+	first.Diagnostic = "Agent prompt was cancelled"
+	retry := reduce(snapshot, first)
+	assertDecision(t, retry, workflow.DispositionApplied, workflow.ReasonInfrastructureRetry, workflow.StateDeveloping, snapshot.Revision+1)
+	intent := onlyAction[workflow.EnqueueTurnAction](t, retry.Actions)
+	if intent.RetryOfTurnID != first.Turn.TurnID {
+		t.Fatal("lost interruption lineage")
+	}
+	// The successor is allocated by the action executor, not the reducer.
+	next := developingSnapshot(nil)
+	next.CurrentAttempt.InfrastructureRetryBudget = retry.Snapshot.CurrentAttempt.InfrastructureRetryBudget
+	second := settledEvent(next, "subscription", workflow.TurnOutcomeInfrastructureFailed)
+	second.Turn.RetryOfTurnID = intent.RetryOfTurnID
+	second.Diagnostic = "subscription_temporary: stage=transport cause=network http_status=unavailable"
+	exhausted := reduce(next, second)
+	handoff := onlyAction[workflow.MarkHumanHandoffAction](t, exhausted.Actions)
+	for _, want := range []string{"subscription_temporary", "stage=transport", "infrastructure_retry_budget=1/1", "retry_of_turn_id=" + first.Turn.TurnID, "agent_turn_id=" + second.Turn.TurnID} {
+		if !strings.Contains(handoff.Diagnostic, want) {
+			t.Errorf("missing %s: %s", want, handoff.Diagnostic)
+		}
 	}
 }

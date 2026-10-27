@@ -64,7 +64,7 @@ async function skillPaths(enabled) {
 
 // In-process fixtures must isolate credentials and model files from the agent
 // running the tests. Production callers retain the disposable bootstrap path.
-export async function prepareRuntime(configuration, sessionManager, models, { agentDir = '/run/pi-agent' } = {}) {
+export async function prepareRuntime(configuration, sessionManager, models, { agentDir = '/run/pi-agent', subscriptionFetch = fetch } = {}) {
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await writeFile(join(agentDir, 'auth.json'), JSON.stringify(configuration.auth), { mode: 0o600 });
   // Only the disposable controlled-provider fixture supplies models here.
@@ -76,7 +76,7 @@ export async function prepareRuntime(configuration, sessionManager, models, { ag
     enableAnalytics: false, enableInstallTelemetry: false, enableSkillCommands: true,
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {
-    const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null) : undefined;
+    const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null, subscriptionFetch) : undefined;
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager, modelRuntimeSignal: AbortSignal.timeout(15000),
       modelRuntime: subscription?.runtime,
@@ -101,7 +101,7 @@ export async function prepareRuntime(configuration, sessionManager, models, { ag
     const result = await createAgentSessionFromServices({ services, sessionManager: manager, model, tools,
       thinkingLevel: configuration.selection.thinking || undefined });
     if (result.modelFallbackMessage) throw new Error('model fallback rejected');
-    return { ...result, services, diagnostics: services.diagnostics };
+    return { ...result, services: { ...services, subscribeProviderFailures: subscription?.subscribeFailures }, diagnostics: services.diagnostics };
   };
   return createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
 }

@@ -1,3 +1,4 @@
+import { safeDiagnostic } from './provider-diagnostic.mjs';
 import { isRetryableAssistantError, isContextOverflow } from '@earendil-works/pi-ai/compat';
 
 const counter = value => Number.isFinite(value) ? value : 0;
@@ -43,17 +44,18 @@ export function failureExtension(pi, subscription) {
         : retryable ? 'Provider returned error' : 'Provider request failed',
       timestamp: Number.isFinite(source.timestamp) ? source.timestamp : Date.now(),
     } };
-    if (!subscription || source.stopReason !== 'error') return sanitized;
-    return subscription.failure(source).then(({ failure, generation, allowContextOverflow }) => {
-      // Structured subscription quota/auth/configuration evidence wins over
-      // provider prose, even when that prose looks like context overflow.
-      if (overflow && allowContextOverflow) return sanitized;
-      sanitized.message.errorMessage = `Omnigrex ${failure}`;
+    sanitized.message.omnigrexProviderDiagnostic = safeDiagnostic(undefined);
+    if (!subscription) return sanitized;
+    return Promise.resolve().then(() => subscription.failure(source)).then(({ failure, generation, diagnostic, allowContextOverflow }) => {
+      sanitized.message.omnigrexProviderDiagnostic = safeDiagnostic(diagnostic);
       sanitized.message.omnigrexProviderGeneration = generation;
+      // Structured account evidence still wins over overflow-looking prose.
+      if (overflow && allowContextOverflow) return sanitized;
+      if (source.stopReason === 'error') sanitized.message.errorMessage = `Omnigrex ${['subscription_quota', 'subscription_auth', 'subscription_configuration', 'subscription_temporary'].includes(failure) ? failure : 'subscription_temporary'}`;
       return sanitized;
     }).catch(() => {
       // An extension exception would let Pi persist the unsanitized source.
-      sanitized.message.errorMessage = 'Omnigrex subscription_temporary';
+      if (source.stopReason === 'error') sanitized.message.errorMessage = 'Omnigrex subscription_temporary';
       return sanitized;
     });
   });

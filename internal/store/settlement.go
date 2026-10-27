@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode"
@@ -193,7 +194,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 			WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 		},
 		Turn: workflow.TurnGuard{
-			TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
+			TurnID: turn.ID, RetryOfTurnID: turn.RetryOfTurnID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 			Stage: turn.Stage, Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 			ChangeProposalID: snapshot.ActiveTurn.ChangeProposalID,
 			ExpectedHeadSHA:  turn.ExpectedHeadSHA,
@@ -286,6 +287,10 @@ WHERE id = $1 AND settled_at IS NULL`, settlementID, nullableString(result.Succe
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("commit Agent Turn settlement: %w", err)
+	}
+
+	if decision.Reason == workflow.ReasonInfrastructureRetry || decision.Reason == workflow.ReasonInfrastructureRetriesExhausted {
+		slog.WarnContext(ctx, "Agent Turn infrastructure retry decision", "workflow_id", job.WorkflowID, "agent_participant_id", job.AgentParticipantID, "agent_session_id", job.AgentSessionID, "agent_turn_id", turn.ID, "execution_epoch", turn.ExecutionEpoch, "retry_of_turn_id", turn.RetryOfTurnID, "retry_budget_used", decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used, "retry_budget_limit", decision.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Limit, "reason", decision.Reason)
 	}
 	return result, nil
 }
@@ -431,7 +436,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 		}
 	}
 	guard := workflow.TurnGuard{
-		TurnID: turn.ID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
+		TurnID: turn.ID, RetryOfTurnID: turn.RetryOfTurnID, SessionID: turn.AgentSessionID, AttemptID: turn.WorkflowAttemptID,
 		Stage: turn.Stage, Role: role, Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),
 		ChangeProposalID: changeProposalID, ExpectedHeadSHA: turn.ExpectedHeadSHA,
 	}

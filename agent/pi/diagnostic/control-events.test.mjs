@@ -71,7 +71,7 @@ test('transcript-heavy activity has explicit compact projections without mutatin
 
 test('outcome evidence, retry and unknown required fields are not truncated', () => {
   const end = { type: 'message_end', message: { ...message, stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation' } };
-  assert.deepEqual(controlEvent(end).message, { role: 'assistant', stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation' });
+  assert.deepEqual(controlEvent(end).message, { role: 'assistant', stopReason: 'error', errorMessage: 'Omnigrex subscription_auth', omnigrexProviderGeneration: 'generation', omnigrexProviderDiagnostic: undefined });
   for (const source of [
     { type: 'agent_settled' },
     { type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 10, errorMessage: 'temporary' },
@@ -89,4 +89,48 @@ test('compaction failures and rejected-request starts cannot leak provider text'
     errorMessage: `Context overflow recovery failed: ${secret}`, result: { summary: secret } });
   assert.deepEqual(end, { type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false, errorMessage: 'Omnigrex compaction_failed' });
   assert.equal(JSON.stringify(end).includes(secret), false);
+});
+
+test('request observations have a closed projection, including hostile metadata', () => {
+  let reads = 0;
+  const event = { type: 'omnigrex_provider_request_failed',
+    get failureClass() { return reads++ === 0 ? 'subscription_temporary' : 'SENTINEL'; },
+    diagnostic: { stage: 'provider_http', http_status: 502, code: 'SENTINEL', message: transcript },
+    error: transcript, headers: { authorization: 'SENTINEL' } };
+  const projected = controlEvent(event);
+  assert.equal(projected.failureClass, 'subscription_temporary');
+  assert.equal(projected.diagnostic.http_status, 502);
+  assert.equal(projected.diagnostic.code, 'unknown');
+  assert.ok(Buffer.byteLength(JSON.stringify(projected)) < 512);
+  assert.ok(!JSON.stringify(projected).includes('SENTINEL'));
+  assert.equal(controlEvent({ type: event.type, failureClass: 'SENTINEL', diagnostic: new Proxy({}, { get() { throw Error('SENTINEL'); } }) }).diagnostic.stage, 'unknown');
+});
+
+test('owned request subscriptions are isolated across rebinds and unsubscribe with the Session view', () => {
+  const source = () => {
+    const listeners = new Set();
+    return { session: { subscribe() { return () => {}; } },
+      services: { subscribeProviderFailures(listener) { listeners.add(listener); return () => listeners.delete(listener); } },
+      emit() { for (const listener of listeners) listener({ type: 'omnigrex_provider_request_failed', failureClass: 'subscription_temporary', diagnostic: { stage: 'credential' } }); },
+      get count() { return listeners.size; } };
+  };
+  const first = source(), second = source();
+  const runtime = { session: first.session, services: first.services };
+  const view = controlRuntime(runtime), old = view.session;
+  const wire = [], replacement = [], late = [];
+  const unsubscribe = old.subscribe(event => wire.push(event));
+  runtime.session = second.session;
+  runtime.services = second.services;
+  const unsubscribeNew = view.session.subscribe(event => replacement.push(event));
+  const unsubscribeOld = old.subscribe(event => late.push(event));
+  first.emit();
+  assert.equal(wire.length, 1);
+  assert.equal(late.length, 1);
+  assert.equal(replacement.length, 0);
+  second.emit();
+  assert.equal(replacement.length, 1);
+  assert.equal(wire.length, 1);
+  unsubscribe(); unsubscribeNew(); unsubscribeOld();
+  assert.equal(first.count, 0);
+  assert.equal(second.count, 0);
 });

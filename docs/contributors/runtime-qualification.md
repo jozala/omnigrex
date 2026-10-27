@@ -63,10 +63,11 @@ Only the RPC subscriber receives projected events; the real Session, extensions,
 | --- | --- |
 | `agent_end` | Type and `willRetry`; no `messages` access or serialization |
 | `message_start` | Type and role only; a rejected request can contain unsanitized error text before finalization |
-| `message_end` | Type, message role, stop reason, sanitized error marker, provider generation |
+| `message_end` | Type, message role, stop reason, sanitized error marker, provider generation, bounded provider diagnostic |
 | `message_update` | Type, role, delta kind/index; stock Pi conversion retains tool-call start identity without the partial message; no text/thinking/argument deltas |
 | `turn_end`, `entry_appended`, `queue_update`, `bash_execution_update` | Event type only; redundant message/tool/entry/queued-text/output bodies stay in the Session owner |
 | `tool_execution_start/update/end` | Type, tool-call identity/name, parent identity, error flag; no arguments/results |
+| `omnigrex_provider_request_failed` (owned request observer) | Closed failure class and revalidated diagnostic only; delivered to the RPC subscriber without adding Session messages, including native summary requests |
 | `compaction_start`, `compaction_end` | Type and reason; end includes aborted/retry flags and a fixed failure marker, never a summary or raw provider error |
 | Retry, settlement, other lifecycle and unknown events | Unchanged; required fields are not truncated |
 

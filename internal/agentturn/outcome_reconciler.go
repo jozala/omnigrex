@@ -136,6 +136,7 @@ type OutcomeReconciliation struct {
 	PromptResponse               *agent.Outcome
 	PromptError                  PromptErrorClassification
 	PromptDiagnostic             string
+	PromptProviderDiagnostic     *agent.ProviderDiagnostic
 	RepositoryCredential         string
 	ReviewerRepositoryCredential string
 	Capture                      execution.CaptureRef
@@ -1054,11 +1055,11 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 		case PromptErrorInvalidResponse:
 			diagnostic = "Agent prompt returned an invalid outcome"
 		case PromptErrorSubscriptionQuota:
-			return providerauth.ErrQuota.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrQuota, request.PromptProviderDiagnostic)
 		case PromptErrorSubscriptionAuth:
-			return providerauth.ErrAuthentication.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrAuthentication, request.PromptProviderDiagnostic)
 		case PromptErrorSubscriptionConfiguration:
-			return providerauth.ErrConfiguration.Error()
+			return subscriptionFailureDiagnostic(providerauth.ErrConfiguration, request.PromptProviderDiagnostic)
 		}
 		if strings.TrimSpace(request.PromptDiagnostic) != "" {
 			diagnostic += ": " + request.PromptDiagnostic
@@ -1075,7 +1076,20 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 		}
 		return ""
 	case agent.Aborted:
-		return "Agent prompt was cancelled"
+		diagnostic := request.PromptProviderDiagnostic
+		if diagnostic == nil {
+			diagnostic = request.PromptResponse.FailureDiagnostic
+		}
+		if diagnostic == nil {
+			return "Agent prompt was cancelled"
+		}
+		raw, _ := json.Marshal(diagnostic)
+		validated := agent.ParseProviderDiagnostic(raw)
+		summary := "Agent prompt was cancelled"
+		if validated.Cause == "timeout" {
+			summary = "Agent provider request timed out"
+		}
+		return summary + " (" + validated.Summary() + ")"
 	case agent.Failed, agent.Rejected:
 		return "Agent prompt failed"
 	case agent.Unknown:
@@ -1271,4 +1285,14 @@ func containsAnyCredentialInReview(review *workflow.ReviewIdentity, fresh *[]str
 
 func containsCredential(value, credential string) bool {
 	return credential != "" && strings.Contains(value, credential)
+}
+
+// Do not append arbitrary PromptDiagnostic to prerequisite Human Handoffs.
+// Revalidate separately carried structured evidence before including its summary.
+func subscriptionFailureDiagnostic(cause error, diagnostic *agent.ProviderDiagnostic) string {
+	if diagnostic == nil {
+		return cause.Error()
+	}
+	raw, _ := json.Marshal(diagnostic)
+	return cause.Error() + " (" + agent.ParseProviderDiagnostic(raw).Summary() + ")"
 }

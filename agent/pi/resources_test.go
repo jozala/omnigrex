@@ -71,3 +71,30 @@ func TestResourceContractsRejectExecutableOrIncompleteInventory(t *testing.T) {
 		t.Fatal("unknown resource command accepted")
 	}
 }
+
+func TestProviderDiagnosticResourceKeepsHistoricalInventoriesValid(t *testing.T) {
+	const name = "provider-diagnostic.mjs"
+	var current ResourceContract
+	if err := json.Unmarshal(CurrentContract("amd64"), &current); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
+		t.Fatal("current runtime does not qualify the provider diagnostic module")
+	}
+	script, err := QualificationScript("amd64", CurrentContract("amd64"))
+	if err != nil || !strings.Contains(script, name) {
+		t.Fatalf("current qualification omits diagnostics: %v", err)
+	}
+	current.Files = slices.DeleteFunc(current.Files, func(file ResourceFile) bool { return file.Name == name })
+	retained, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical, err := QualificationScript("amd64", retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(historical, name) {
+		t.Fatal("historical runtime was rebound to a new diagnostic module")
+	}
+}

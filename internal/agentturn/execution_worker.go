@@ -392,6 +392,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 
 	var promptResponse *agent.Outcome
 	var promptClassification PromptErrorClassification
+	var promptProviderDiagnostic *agent.ProviderDiagnostic
 	if operationErr == nil {
 		currentHead := defaultBranch.CommitSHA
 		if execution.ChangeProposal != nil {
@@ -410,6 +411,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 					operationErr = errors.Join(operationErr, reportErr)
 				}
 			}
+			promptProviderDiagnostic = outcome.FailureDiagnostic
 			response, promptErr := normalizedPromptEvidence(outcome, promptErr)
 			if promptErr == nil && response.Status == agent.Aborted && promptCtx.Err() == context.DeadlineExceeded {
 				promptErr = context.DeadlineExceeded
@@ -442,7 +444,7 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 	if promptClassification == "" && subscriptionPromptFailure(ClassifyPromptError(operationErr)) {
 		promptClassification = ClassifyPromptError(operationErr)
 	}
-	return worker.finalize(leaseCtx, *lease, execution, repositoryCredential, *secrets, runtime, promptResponse, promptClassification, operationErr)
+	return worker.finalize(leaseCtx, *lease, execution, repositoryCredential, *secrets, runtime, promptResponse, promptClassification, promptProviderDiagnostic, operationErr)
 }
 
 func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, lease store.AgentTurnLease) (bool, error) {
@@ -468,7 +470,7 @@ func (worker *ExecutionWorker) finalizePublicationConflict(ctx context.Context, 
 	return true, nil
 }
 
-func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryCredential string, diagnosticSecrets []string, runtime ExecutionRuntime, promptResponse *agent.Outcome, promptClassification PromptErrorClassification, operationErr error) (bool, error) {
+func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.AgentTurnLease, execution store.AgentTurnExecutionContext, repositoryCredential string, diagnosticSecrets []string, runtime ExecutionRuntime, promptResponse *agent.Outcome, promptClassification PromptErrorClassification, promptProviderDiagnostic *agent.ProviderDiagnostic, operationErr error) (bool, error) {
 	if lostLease(leaseCtx, operationErr) {
 		return false, errors.Join(operationErr, worker.cleanupWithoutFence(leaseCtx, runtime))
 	}
@@ -546,6 +548,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
 		corroborationFailure = &failure
 	}
+	reconciliation.PromptProviderDiagnostic = promptProviderDiagnostic
 	if promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
 	} else {
