@@ -90,16 +90,39 @@ func TestSubscriptionTemporarySummaryRetainsObservationInsteadOfRuntimeRejection
 	}
 }
 
-func TestSummaryProviderDiagnosticSurvivesGenericFailureNormalization(t *testing.T) {
-	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
-	fixture.runtime.agent = &neutralPromptFixture{outcome: agent.Outcome{Admitted: true, Status: agent.Failed, FailureClass: "provider_failure", FailureDiagnostic: agent.ParseProviderDiagnostic([]byte(`{"stage":"provider_http","cause":"http","http_status":502,"code":"subscription_sharing_usage_unavailable"}`))}}
-	_, err := fixture.worker(t).ProcessNext(t.Context())
-	if err == nil || fixture.outcomes.request.PromptError != agentturn.PromptErrorFailure {
-		t.Fatalf("generic failure policy changed: %v, %s", err, fixture.outcomes.request.PromptError)
-	}
-	for _, want := range []string{"stage=provider_http", "cause=http", "http_status=502", "code=subscription_sharing_usage_unavailable"} {
-		if !strings.Contains(fixture.outcomes.request.PromptDiagnostic, want) {
-			t.Errorf("summary diagnostic lost %s: %s", want, fixture.outcomes.request.PromptDiagnostic)
-		}
+func TestSummaryProviderCategorySurvivesWithoutChangingFailurePolicy(t *testing.T) {
+	for _, category := range []string{"subscription_temporary", "subscription_quota", "subscription_auth", "subscription_configuration", "SENTINEL"} {
+		t.Run(category, func(t *testing.T) {
+			fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+			diagnostic := agent.ParseProviderDiagnostic([]byte(`{"category":"` + category + `","stage":"provider_http","cause":"http","http_status":502,"code":"subscription_sharing_usage_unavailable"}`))
+			fixture.runtime.agent = &neutralPromptFixture{outcome: agent.Outcome{Admitted: true, Status: agent.Failed, FailureClass: "provider_failure", FailureDiagnostic: diagnostic}}
+			_, err := fixture.worker(t).ProcessNext(t.Context())
+			if err == nil || fixture.outcomes.request.PromptError != agentturn.PromptErrorFailure {
+				t.Fatalf("summary failure policy changed: %v, %s", err, fixture.outcomes.request.PromptError)
+			}
+			request := outcomeRequest(t, workflow.RoleDeveloper, true)
+			request.PromptResponse = nil
+			request.PromptError = fixture.outcomes.request.PromptError
+			request.PromptDiagnostic = fixture.outcomes.request.PromptDiagnostic
+			request.PromptProviderDiagnostic = fixture.outcomes.request.PromptProviderDiagnostic
+			observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(t.Context(), request)
+			if err != nil || observation.Outcome != workflow.TurnOutcomeInfrastructureFailed || observation.Completion.Status != store.AgentTurnFailed {
+				t.Fatalf("summary changed settlement/retry route: %+v, %v", observation, err)
+			}
+			wants := []string{"provider_failure", "stage=provider_http", "cause=http", "http_status=502", "code=subscription_sharing_usage_unavailable"}
+			if category != "SENTINEL" {
+				wants = append(wants, "category="+category)
+			}
+			for _, diagnostic := range []string{fixture.outcomes.request.PromptDiagnostic, observation.Diagnostic, observation.Completion.LastError} {
+				for _, want := range wants {
+					if !strings.Contains(diagnostic, want) {
+						t.Errorf("summary diagnostic lost %s: %s", want, diagnostic)
+					}
+				}
+				if strings.Contains(diagnostic, "runtime rejected") || strings.Contains(diagnostic, "SENTINEL") {
+					t.Errorf("misleading/unsafe diagnostic: %s", diagnostic)
+				}
+			}
+		})
 	}
 }

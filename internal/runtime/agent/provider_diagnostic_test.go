@@ -26,3 +26,19 @@ func TestProviderDiagnosticDropsUntrustedFieldsWithoutErasingKnownEvidence(t *te
 		}
 	}
 }
+
+func TestProviderDiagnosticCategoryIsClosedAndRevalidated(t *testing.T) {
+	for _, category := range []string{"subscription_temporary", "subscription_quota", "subscription_auth", "subscription_configuration", "SENTINEL"} {
+		d := agent.ParseProviderDiagnostic(json.RawMessage(`{"category":"` + category + `","stage":"provider_http","http_status":502}`))
+		if d.Stage != "provider_http" || d.HTTPStatus == nil || *d.HTTPStatus != 502 {
+			t.Fatalf("category erased HTTP evidence: %+v", d)
+		}
+		if category == "SENTINEL" {
+			if d.Category != "" || strings.Contains(d.Summary(), "SENTINEL") {
+				t.Fatalf("unsafe category: %+v", d)
+			}
+		} else if d.Category != category || !strings.Contains(d.Summary(), "category="+category) {
+			t.Fatalf("lost category: %+v", d)
+		}
+	}
+}

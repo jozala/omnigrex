@@ -2,11 +2,17 @@ package agentturn
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 )
+
+// An admitted failed model request is not a rejected runtime operation. Keep
+// this generic failure distinct from subscription prerequisite sentinels: an
+// observed summary category is diagnostic evidence, not authority to reroute it.
+var errProviderRequest = errors.New("provider_failure: model request failed")
 
 // Only positively admitted completion or abort evidence is a terminal response.
 // Uncertain admission and settlement remain failures and never prove execution stopped.
@@ -32,7 +38,7 @@ func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, 
 			case providerauth.ConfigurationFailure:
 				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrConfiguration)
 			}
-			return agent.Outcome{}, promptProviderError(outcome, agent.ErrRuntime)
+			return agent.Outcome{}, promptProviderError(outcome, errProviderRequest)
 		}
 		return agent.Outcome{}, agent.ErrRuntime
 	case agent.Unknown:

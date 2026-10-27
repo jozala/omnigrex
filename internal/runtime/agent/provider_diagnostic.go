@@ -10,6 +10,9 @@ import (
 // Nil numeric/correlation fields mean unavailable. Retryability is observed,
 // never inferred from the broad subscription_temporary fallback.
 type ProviderDiagnostic struct {
+	// Category is observed request evidence, not the Outcome.FailureClass
+	// that controls prerequisite handling and retry/settlement policy.
+	Category      string `json:"category,omitempty"`
 	Attempt       string `json:"attempt,omitempty"`
 	Stage         string `json:"stage"`
 	Cause         string `json:"cause"`
@@ -31,6 +34,10 @@ func ParseProviderDiagnostic(raw json.RawMessage) *ProviderDiagnostic {
 	var input ProviderDiagnostic
 	if len(raw) > 2048 || json.Unmarshal(raw, &input) != nil {
 		return d
+	}
+	switch input.Category {
+	case "subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary":
+		d.Category = input.Category
 	}
 	switch input.Stage {
 	case "credential", "payload", "provider_http", "provider_stream", "transport", "local":
@@ -75,5 +82,9 @@ func (d *ProviderDiagnostic) Summary() string {
 	if d.HTTPStatus != nil {
 		status = fmt.Sprint(*d.HTTPStatus)
 	}
-	return fmt.Sprintf("stage=%s cause=%s http_status=%s code=%s retryability=%s", d.Stage, d.Cause, status, d.Code, d.Retryability)
+	summary := fmt.Sprintf("stage=%s cause=%s http_status=%s code=%s retryability=%s", d.Stage, d.Cause, status, d.Code, d.Retryability)
+	if d.Category != "" {
+		return "category=" + d.Category + " " + summary
+	}
+	return summary
 }

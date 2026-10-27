@@ -16,6 +16,7 @@ Capture subscription observations within one asynchronous request context, inclu
 Native compaction and branch-summary requests bypass conversational message events, so also deliver each failed request’s closed observation through a Session-scoped owned control subscription, without adding Session messages or replacing Pi’s lifecycle events.
 Revalidate the schema in the Go adapter and emit ordinary correlated controller events for each failed request and terminal settlement.
 Retain only a SHA-256 fingerprint of a bounded `x-request-id` header, never its original value.
+Retain summary request categories as diagnostic evidence separately from the lifecycle classification that governs prerequisite handling and retries.
 Keep unknown evidence explicit and preserve the broad subscription failure in returned diagnostics without changing retry or settlement policy.
 
 ## Rationale

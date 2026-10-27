@@ -17,6 +17,7 @@ The `runtime` field is a JSON object, with `selected_model` (the configured prov
 | Field | Meaning |
 | --- | --- |
 | `attempt` | Locally generated UUID for one model request, not a provider ID; absent when unavailable. |
+| `category` | Controller-validated observed subscription category (`subscription_quota`, `subscription_auth`, `subscription_configuration`, or `subscription_temporary`); absent when unavailable. Diagnostic evidence, not a retry-policy decision. |
 | `auth_mode` | `subscription` for the observed controller-managed path, otherwise `unknown`. |
 | `stage` | `credential`, `payload`, `provider_http`, `provider_stream`, `transport`, `local`, or `unknown`. |
 | `cause` | `http`, `stream_error`, `network`, `timeout`, `cancelled`, `validation`, `protocol`, or `unknown`. |
@@ -33,6 +34,9 @@ For example, `stage=transport, cause=network, http_status=null` establishes no H
 A genuinely unobserved local/SDK cause remains unknown rather than being inferred from error prose.
 Native summary requests emit their own bounded request observation even though they do not produce conversational assistant messages.
 A generic `Omnigrex compaction_failed` lifecycle marker is not the only evidence: search the same Turn for `provider_request_failed` and its attempt UUID.
+For native summary failures, `runtime.provider_failure.category` survives into the settlement diagnostic and Human Handoff text, while the lifecycle failure class remains `provider_failure`.
+For example, a failed summary can report `provider_failure: model request failed (category=subscription_temporary stage=provider_http cause=http http_status=502 ...)`, not a runtime admission rejection.
+Observed quota/auth/configuration categories on summary requests do not by themselves reroute settlement into a prerequisite failure or change retries.
 An admitted aborted outcome with observed `cause=timeout` retains that cause in settlement and Human Handoff diagnostics; its interrupted status and existing retry policy are unchanged.
 Other providers currently retain unknown observations through the shared boundary; do not infer subscription evidence for them.
 

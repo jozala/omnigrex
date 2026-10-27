@@ -696,12 +696,16 @@ func (c *connection) record(content []byte) error {
 		// Native summary calls do not emit conversational message_end. This
 		// owned request observation is diagnostic only, never settlement proof.
 		t.lastDiagnostic = agent.ParseProviderDiagnostic(record.Diagnostic)
+		// Only the separately validated request marker establishes its category.
+		// Do not turn this observation into a prerequisite or retry-policy input.
+		t.lastDiagnostic.Category = ""
 		failure := "provider_failure"
 		var observedClass string
 		_ = json.Unmarshal(record.FailureClass, &observedClass)
 		switch observedClass {
 		case "subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary":
 			failure = observedClass
+			t.lastDiagnostic.Category = observedClass
 		}
 		select {
 		case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, "", false):
@@ -746,12 +750,17 @@ func (c *connection) record(content []byte) error {
 			}
 			t.lastReason = message.StopReason
 			if message.StopReason == "error" || message.StopReason == "aborted" {
+				observed := t.lastDiagnostic
 				t.lastDiagnostic = agent.ParseProviderDiagnostic(message.Diagnostic)
+				if observed != nil && observed.Attempt != "" && observed.Attempt == t.lastDiagnostic.Attempt {
+					t.lastDiagnostic.Category = observed.Category
+				}
 			}
 			if message.StopReason == "error" {
 				switch message.ErrorMessage {
 				case "Omnigrex subscription_quota", "Omnigrex subscription_auth", "Omnigrex subscription_configuration", "Omnigrex subscription_temporary":
 					t.lastFailure = strings.TrimPrefix(message.ErrorMessage, "Omnigrex ")
+					t.lastDiagnostic.Category = t.lastFailure
 					if len(message.Generation) == 36 && !strings.ContainsAny(message.Generation, "\x00\r\n") {
 						t.lastGeneration = message.Generation
 					}
