@@ -861,9 +861,9 @@ func (c *connection) record(content []byte) error {
 			outcome.StepBudget = &copy
 			outcome.BudgetSummary = t.budgetSummary
 		}
-		if t.cancelRequested && t.budget != nil && t.budget.Stopped && t.lastReason != "error" {
-			outcome.Status = agent.Aborted
-		} else if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
+		// A budget stop is not cancellation evidence. Preserve the native
+		// receipt's authority even when cancellation races a reserved summary.
+		if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
 			outcome.Status = agent.Aborted
 		} else if t.compactionFailed {
 			// Reuse bounded provider-failure handling; compaction is not completion.

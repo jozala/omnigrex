@@ -72,3 +72,39 @@ func TestPiTransportLossRetainsPartialUsageInsteadOfInventingZero(t *testing.T) 
 		t.Fatalf("lost transport usage = %+v %v", got, err)
 	}
 }
+
+func TestBudgetStopDoesNotReplaceCancellationSettlementAuthority(t *testing.T) {
+	for _, confirmed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "completion wins race", true: "confirmed cancellation"}[confirmed], func(t *testing.T) {
+			limit, _ := stepbudget.Parse("1")
+			ready := make(chan struct{})
+			c, ctx := fixture(t, pi.Options{StepBudget: &limit}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]string{"role": "assistant", "stopReason": "stop"}})
+				writeRecord(runtime, map[string]any{"type": "omnigrex_step_budget", "data": stepbudget.Observation{Limit: limit, Used: 1, Responses: 1, Summary: true, Stopped: true, Complete: true}})
+				close(ready)
+			}, func(runtime net.Conn, id string) {
+				writeRecord(runtime, map[string]any{"type": "agent_settled", "aborted": confirmed})
+				writeRecord(runtime, map[string]any{"type": "response", "id": id, "command": "abort", "success": true})
+			})
+			done := make(chan agent.Outcome, 1)
+			go func() { outcome, _ := c.Prompt(ctx, "work", nil); done <- outcome }()
+			<-ready
+			if err := c.Cancel(ctx); err != nil {
+				t.Fatal(err)
+			}
+			want := agent.Completed
+			if confirmed {
+				want = agent.Aborted
+			}
+			select {
+			case outcome := <-done:
+				if outcome.Status != want || outcome.StepBudget == nil || !outcome.StepBudget.Complete {
+					t.Fatalf("settlement = %+v; want %s", outcome, want)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		})
+	}
+}
