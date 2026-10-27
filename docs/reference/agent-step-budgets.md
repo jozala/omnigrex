@@ -93,7 +93,7 @@ No metric export or provider/tool payload is required for enforcement or settlem
 For an admitted terminal response the existing Turn outcome retains the minimal budget observation alongside admission/status evidence.
 Failed or uncertain transport outcomes report the last observation through correlated usage diagnostics, without inventing complete durable prompt evidence.
 Only an incomplete-work budget handoff records `step_budget_exhausted: true`; successful terminal corroboration preserves success without that flag.
-No new usage-history database, exporter, backend credentials, or aggregate instruments are introduced.
+No new usage-history database, in-Pi exporter, or backend credentials are introduced.
 
 ## Per-Turn diagnostics
 
@@ -103,7 +103,7 @@ A crash or transport failure can leave only a partial lower bound; `complete=fal
 No observation means usage is unknown, not zero.
 Use the correlated settlement domain outcome to distinguish successful completion from `step_budget_exhausted` Human Handoff.
 Do not classify every summary entry as a failed Turn or an exhausted-work handoff.
-Aggregate operator metrics are a separate delivery in [Work Item 112](https://github.com/jozala/omnigrex/issues/112).
+See the [aggregate telemetry contract](../observability/application.md#agent-turn-step-budget-metrics) for controller-side instruments, bounded labels, and partial/unknown usage.
 
 ## Runtime compatibility and qualification
 

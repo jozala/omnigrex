@@ -124,3 +124,60 @@ Use an authorized deployment agent to perform and record the following work outs
    Verify idle and busy ingestion, actual added series, and upgrade churn, allowing for reporting delay rather than using month-to-date cost as an immediate signal.
 
 Record dashboard and alert identifiers, thresholds and their rationale, observed series/ingestion, tested workloads, and any remaining live verification in the deployment's own records.
+
+## Agent Turn step-budget metrics
+
+The controller consumes runtime-neutral Agent Events from the existing live Pi RPC path through the same optional OpenTelemetry provider.
+Pi contains no exporter or telemetry credentials.
+The owned budget module remains the only iteration counter; failed/cancelled requests and the reserved summary iteration retain the [step-budget accounting semantics](../reference/agent-step-budgets.md).
+
+| Instrument | Kind / unit | Dimensions | Meaning |
+| --- | --- | --- | --- |
+| `omnigrex.agent_turn.step_limit` | Histogram / `{iteration}` | `role` | Effective finite ceiling, once per observed prompt ending; never a label. |
+| `omnigrex.agent_turn.model_iterations` | Histogram / `{iteration}` | `role`, `budget_mode`, `completeness` | Admitted iterations including summary; partial counts are lower bounds. |
+| `omnigrex.agent_turn.budget_utilization` | Histogram / `1` | Same | Per-Turn consumed/limit ratio, finite budgets only. |
+| `omnigrex.agent_turn.budget_observations` | Counter / `{turn}` | Same plus `termination` | Usage coverage and runtime ending, including unknown usage. |
+| `omnigrex.agent_turn.budget_summary` | Counter / `{turn}` | `role` | Summary-only entry, independent of completion verdict. |
+| `omnigrex.agent_turn.budget_handoffs` | Counter / `{turn}` | `role` | Successfully settled incomplete-work step-budget Human Handoffs. |
+
+Role is `DEVELOPER`, `REVIEWER`, or `unknown`, never a Profile name.
+Budget mode is `finite`, `unlimited`, or `unknown`; completeness is `complete`, `partial`, or `unknown`.
+Unknown usage produces a coverage counter but no synthetic zero usage or ratio; known finite configuration can still produce a ceiling value.
+Unlimited budgets expose actual usage without a fabricated ceiling or utilization.
+Termination is `completed`, `failed`, `cancelled` (including caller deadline), `transport`, or `unknown`; this is the runtime prompt ending, not the Work Item verdict.
+A successful summary can still settle successfully through terminal MCP corroboration.
+Missing final observation leaves a partial lower bound even when the last known value is zero.
+A controller crash can prevent even the coverage counter: compare with durable active Turns and diagnostics, not an assumed complete usage ledger.
+
+Usage/limit histogram boundaries are `1, 2, 5, 10, 20, 50, 100, 200, 500, 1000` iterations.
+Utilization boundaries are `0.1, 0.25, 0.5, 0.75, 0.9, 1`.
+The utilization histogram aggregates equally weighted per-Turn ratios; sum/count is mean per-Turn utilization, not total consumed divided by total allowance.
+Filter `completeness=complete` for exact usage distributions and inspect partial distributions separately.
+High complete utilization and rising summary entry indicate pressure even without handoffs; ordinary low-utilization early completion does not imply a constraining ceiling.
+Compare handoff rate and correlated settlement logs before increasing ceilings; rising `transport`/`failed` endings call for a different investigation.
+Use correlated logs for individual configuration values and Turn/Session/Participant identities.
+No raw provider/tool content, arbitrary metadata, credentials, summaries, Profile names, repository names, or domain IDs are metric attributes.
+
+### Delivery and retention
+
+Delivery is best-effort live observation, not durable or exactly-once accounting.
+The adapter validates the existing six-field schema (1024-byte data bound, closed fields, safe integer ranges and monotonic lifecycle); the full control-frame bound remains 1 MiB.
+Critical completion/exhaustion evidence remains independent in the adapter's outcome snapshot and existing settlement evidence.
+A separate one-slot coalescing observation queue cannot displace critical events; consumers may lose intermediate observations without changing enforcement.
+The controller uses the final critical snapshot to recover missed summary pressure and usage.
+Each per-prompt consumer retains only two flags, deduplicates summary and final usage within that lifetime, and records SDK aggregates without network export waits.
+Disabled or failing export does not change settlement or enforcement.
+Ordinary downstream event-sink failures retain their existing behavior; the metric consumer introduces no exporter into that critical path.
+History Replay emits separate `history_*` events, never live budget observations; it neither reconstructs the counter nor duplicates metrics.
+No observations are appended to Pi Session history, avoiding per-iteration persistence and additional retained volume.
+Future observation kinds can use the same transport-to-neutral-event boundary and controller consumers without another service.
+Abrupt controller death, exporter failure, and uncertain settlement acknowledgement can lose samples, including handoff counts.
+
+### Extended series budget
+
+The earlier 171-series subtotal remains the non-budget baseline.
+This extension adds at most 360 classic series per resource: 105 coverage categories (3 Roles × 7 mode/completeness combinations × 5 terminations), 156 usage series (12 combinations × 13), 39 finite-ceiling series (3 × 13), 54 ratio series (6 × 9), and 6 summary/handoff counters.
+The seven coverage combinations are finite/unlimited with complete/partial/unknown usage, plus unknown mode and unknown usage.
+The application subtotal is now **531**, replacing the earlier 200-series target with a **600-series target**, allowing 69 backend metadata series.
+Termination is deliberately excluded from histogram dimensions; compare ending-category counts and correlated logs rather than individually joining aggregate histogram samples.
+Resource identity churn still multiplies retained backend series.
