@@ -15,7 +15,7 @@ docker compose ps
 
 Use the configured host port if different.
 Startup verifies configured golden resources before Workflow workers begin.
-Readiness continuously checks PostgreSQL, the selected backend, configured/protected exact images, retained state, and pending compatibility evidence.
+Readiness continuously checks PostgreSQL, the selected backend, configured/protected exact images, retained state, and supported Runtime Profile history.
 Docker writable-path probes use the selected immutable Runtime Profile.
 Liveness may remain healthy during a dependency readiness failure.
 
@@ -37,6 +37,8 @@ Exit code 1 means a prerequisite failed; 2 means invalid command arguments.
 Configuration errors are reported together before external checks, and independent checks continue after failures.
 
 Checks cover configuration/secrets, PostgreSQL, backend resources, exact configured/protected images and state, GitHub Apps/installations, repository environments, Profiles, effective instructions/permissions, and authenticated runtime-to-MCP compatibility.
+The optional compatibility-artifact check accepts an unset file; when configured, evidence must match the exact target/backend contract as described in [upgrades](upgrades.md#runtime-profile-image-change).
+It does not require cross-image Session migration evidence for fresh Participants or waive protected-image/resource checks.
 The PostgreSQL check is read-only and applies no migrations.
 Resource inspection does not write named volumes.
 GitHub checks create short-lived tokens but do not modify content or start a Workflow.

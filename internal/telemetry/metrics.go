@@ -103,11 +103,13 @@ func RegisterStateObserver(observe func(context.Context) (DurableState, error)) 
 			defer func() { <-gate }()
 		case <-ctx.Done():
 			failures.Add(ctx, 1)
+			logTelemetryFailure(ctx.Err(), "metrics", "collection")
 			return nil
 		}
 		state, err := observe(ctx)
 		if err != nil {
 			failures.Add(ctx, 1)
+			logTelemetryFailure(err, "metrics", "collection")
 			return nil
 		}
 		for _, name := range workflowStates {

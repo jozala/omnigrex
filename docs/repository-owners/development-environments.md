@@ -64,6 +64,8 @@ For agents developing Omnigrex itself, use the qualified [Omnigrex development i
 Environment and Profiles use the same trusted default-branch snapshot.
 Each Participant retains its selected exact image, platform, and full contract; later Participants can choose newer images even in one Assignment Generation.
 Existing Participants never rebind when the file or deployment golden image changes.
+An explicit repository image pin is not updated by changing the installation golden image: qualify and promote its replacement separately on the default branch, including for new Participants.
+Fresh independent Sessions require no historical source-to-candidate compatibility artifact; this does not replace image/resource validation or the promotion and doctor steps above.
 Keep their images available through Session collection and include canonical contracts in PostgreSQL recovery sets.
 Source-to-candidate qualification on copied state does not authorize Session rebinding.
 

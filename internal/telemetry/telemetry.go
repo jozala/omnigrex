@@ -4,7 +4,6 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math"
 	"net/url"
 	"os"
@@ -65,7 +64,7 @@ func Init(ctx context.Context, version string) (func(context.Context) error, err
 			return nil, errors.New("initialize OTLP/HTTP metrics exporter")
 		}
 		// The SDK default is 60 seconds; standard interval/timeout overrides apply.
-		meterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res), sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)), sdkmetric.WithView(applicationMetricView))
+		meterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res), sdkmetric.WithReader(sdkmetric.NewPeriodicReader(diagnosticMetricExporter{exporter})), sdkmetric.WithView(applicationMetricView))
 	}
 	if traces {
 		exporter, err := otlptracehttp.New(ctx)
@@ -77,7 +76,7 @@ func Init(ctx context.Context, version string) (func(context.Context) error, err
 			}
 			return nil, errors.New("initialize OTLP/HTTP trace exporter")
 		}
-		traceProvider = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(exporter))
+		traceProvider = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(diagnosticTraceExporter{exporter}))
 		otel.SetTracerProvider(traceProvider)
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	}
@@ -85,8 +84,8 @@ func Init(ctx context.Context, version string) (func(context.Context) error, err
 		otel.SetMeterProvider(meterProvider)
 		metricsActive.Store(true)
 	}
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {
-		slog.Warn("telemetry delivery failed", "failure_category", "export_failed")
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		logTelemetryFailure(err, "unknown", "unknown")
 	}))
 	return func(ctx context.Context) error {
 		// Give both providers the same fresh bounded budget, concurrently, so an
@@ -94,14 +93,18 @@ func Init(ctx context.Context, version string) (func(context.Context) error, err
 		results := make(chan error, 2)
 		go func() {
 			if traceProvider != nil {
-				results <- traceProvider.Shutdown(ctx)
+				err := traceProvider.Shutdown(ctx)
+				logTelemetryFailure(err, "traces", "shutdown")
+				results <- err
 			} else {
 				results <- nil
 			}
 		}()
 		go func() {
 			if meterProvider != nil {
-				results <- meterProvider.Shutdown(ctx)
+				err := meterProvider.Shutdown(ctx)
+				logTelemetryFailure(err, "metrics", "shutdown")
+				results <- err
 			} else {
 				results <- nil
 			}
