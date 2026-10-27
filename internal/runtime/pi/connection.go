@@ -84,6 +84,7 @@ type turn struct {
 	budget            *stepbudget.Observation
 	budgetSummary     string
 	events            chan agentevent.AgentEvent
+	observations      chan agentevent.AgentEvent
 	settled           chan struct{}
 	settledOK         bool
 	lastReason        string
@@ -344,7 +345,7 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		c.mu.Unlock()
 		return agent.Outcome{Status: agent.Rejected}, err
 	}
-	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), settled: make(chan struct{})}
+	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), observations: make(chan agentevent.AgentEvent, 1), settled: make(chan struct{})}
 	if c.options.StepBudget != nil {
 		t.budget = &stepbudget.Observation{Limit: *c.options.StepBudget}
 	}
@@ -444,6 +445,7 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		default:
 			select {
 			case event = <-t.events:
+			case event = <-t.observations:
 			case <-c.done:
 				// Settlement enqueues the terminal event before closing its signal.
 				// Continue through that event so neither EOF nor a queue-empty race
@@ -727,9 +729,18 @@ func (c *connection) record(content []byte) error {
 		copy := observation
 		event.Metadata.StepBudget = &copy
 		select {
-		case t.events <- event:
+		case t.observations <- event:
 		default:
-			return agent.ErrBackpressure
+			// A separate coalescing slot cannot displace critical runtime
+			// events. The snapshot above remains authoritative on every exit.
+			select {
+			case <-t.observations:
+			default:
+			}
+			select {
+			case t.observations <- event:
+			default:
+			}
 		}
 		return nil
 	case "omnigrex_provider_request_failed":

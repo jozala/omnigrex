@@ -406,7 +406,24 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
 			promptCtx := workCtx
-			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, worker.agentEventSink)
+			observer := telemetry.NewAgentTurnObserver(string(execution.Participant.Role), worker.agentEventSink)
+			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, observer)
+			termination := "unknown"
+			switch outcome.Status {
+			case agent.Completed:
+				termination = "completed"
+			case agent.Failed:
+				termination = "failed"
+			case agent.Aborted:
+				termination = "cancelled"
+			}
+			if promptErr != nil {
+				termination = "transport"
+				if errors.Is(promptErr, context.Canceled) || errors.Is(promptErr, context.DeadlineExceeded) {
+					termination = "cancelled"
+				}
+			}
+			observer.Finish(context.WithoutCancel(promptCtx), outcome.StepBudget, termination)
 			if usingSubscription && outcome.Admitted && outcome.Status == agent.Failed && outcome.FailureGeneration != "" && (outcome.FailureClass == providerauth.QuotaFailure || outcome.FailureClass == providerauth.AuthFailure) {
 				if reportErr := worker.subscription.Report(outcome.FailureGeneration, outcome.FailureClass); reportErr != nil {
 					operationErr = errors.Join(operationErr, reportErr)
@@ -630,6 +647,10 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			fmt.Errorf("settle Agent Turn: %w", settleErr),
 			wrapExecutionError("begin Agent Turn recovery", recoveryErr),
 		)
+	}
+	var budgetEvidence agent.OutcomeEvidence
+	if json.Unmarshal(observation.Completion.Outcome, &budgetEvidence) == nil && budgetEvidence.StepBudgetExhausted {
+		telemetry.RecordBudgetHandoff(leaseCtx, string(execution.Participant.Role))
 	}
 	return true, combinedErr
 }
