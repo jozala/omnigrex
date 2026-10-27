@@ -1076,7 +1076,20 @@ func promptFailureDiagnostic(request OutcomeReconciliation) string {
 		}
 		return ""
 	case agent.Aborted:
-		return "Agent prompt was cancelled"
+		diagnostic := request.PromptProviderDiagnostic
+		if diagnostic == nil {
+			diagnostic = request.PromptResponse.FailureDiagnostic
+		}
+		if diagnostic == nil {
+			return "Agent prompt was cancelled"
+		}
+		raw, _ := json.Marshal(diagnostic)
+		validated := agent.ParseProviderDiagnostic(raw)
+		summary := "Agent prompt was cancelled"
+		if validated.Cause == "timeout" {
+			summary = "Agent provider request timed out"
+		}
+		return summary + " (" + validated.Summary() + ")"
 	case agent.Failed, agent.Rejected:
 		return "Agent prompt failed"
 	case agent.Unknown:

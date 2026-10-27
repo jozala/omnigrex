@@ -1,6 +1,7 @@
 package agentturn
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/jozala/omnigrex/internal/providerauth"
@@ -31,6 +32,7 @@ func normalizedPromptEvidence(outcome agent.Outcome, err error) (agent.Outcome, 
 			case providerauth.ConfigurationFailure:
 				return agent.Outcome{}, promptProviderError(outcome, providerauth.ErrConfiguration)
 			}
+			return agent.Outcome{}, promptProviderError(outcome, agent.ErrRuntime)
 		}
 		return agent.Outcome{}, agent.ErrRuntime
 	case agent.Unknown:
@@ -44,5 +46,6 @@ func promptProviderError(outcome agent.Outcome, cause error) error {
 	if outcome.FailureDiagnostic == nil {
 		return cause
 	}
-	return fmt.Errorf("%w (%s)", cause, outcome.FailureDiagnostic.Summary())
+	raw, _ := json.Marshal(outcome.FailureDiagnostic)
+	return fmt.Errorf("%w (%s)", cause, agent.ParseProviderDiagnostic(raw).Summary())
 }

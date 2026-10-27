@@ -227,3 +227,69 @@ func TestCompactionFailureCannotInheritEarlierRequestDiagnostic(t *testing.T) {
 		t.Fatalf("summary inherited previous request evidence: %s", terminal.Metadata.Runtime)
 	}
 }
+
+func TestSummaryRequestDiagnosticReachesOperationalEvent(t *testing.T) {
+	for _, nextSummary := range []bool{false, true} {
+		t.Run(map[bool]string{false: "own evidence", true: "no stale summary evidence"}[nextSummary], func(t *testing.T) {
+			c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+				admit(runtime, id)
+				writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]string{"role": "assistant", "stopReason": "stop"}})
+				writeRecord(runtime, map[string]any{"type": "compaction_start", "reason": "threshold"})
+				writeRecord(runtime, map[string]any{"type": "omnigrex_provider_request_failed", "failureClass": "subscription_temporary", "diagnostic": map[string]any{
+					"stage": "provider_http", "cause": "http", "http_status": 502, "code": "subscription_sharing_usage_unavailable",
+					"attempt": "00000000-0000-4000-8000-000000000001", "request_id_hash": strings.Repeat("a", 64), "message": "SENTINEL",
+				}})
+				writeRecord(runtime, map[string]any{"type": "compaction_end", "reason": "threshold", "errorMessage": "Omnigrex compaction_failed"})
+				if nextSummary {
+					writeRecord(runtime, map[string]any{"type": "compaction_start", "reason": "threshold"})
+					writeRecord(runtime, map[string]any{"type": "compaction_end", "reason": "threshold", "errorMessage": "Omnigrex compaction_failed"})
+				}
+				writeRecord(runtime, map[string]any{"type": "agent_settled"})
+			})
+			requests := 0
+			outcome, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+				if strings.Contains(string(event.Metadata.Runtime), "SENTINEL") {
+					t.Fatal("raw summary metadata escaped")
+				}
+				if event.Kind == "provider_request_failed" {
+					requests++
+					for _, want := range []string{`"stage":"provider_http"`, `"http_status":502`, `"code":"subscription_sharing_usage_unavailable"`, `"attempt":"00000000-0000-4000-8000-000000000001"`, `"request_id_hash":"` + strings.Repeat("a", 64) + `"`} {
+						if !strings.Contains(string(event.Metadata.Runtime), want) {
+							t.Errorf("summary event lost %s: %s", want, event.Metadata.Runtime)
+						}
+					}
+				}
+			}))
+			if err != nil || outcome.Status != agent.Failed || outcome.FailureClass != "provider_failure" || requests != 1 {
+				t.Fatalf("summary failure = %+v, %v; operational requests=%d", outcome, err, requests)
+			}
+			if nextSummary {
+				if outcome.FailureDiagnostic != nil {
+					t.Fatalf("stale summary evidence: %+v", outcome.FailureDiagnostic)
+				}
+			} else if outcome.FailureDiagnostic == nil || outcome.FailureDiagnostic.HTTPStatus == nil || *outcome.FailureDiagnostic.HTTPStatus != 502 {
+				t.Fatalf("lost summary evidence: %+v", outcome.FailureDiagnostic)
+			}
+		})
+	}
+}
+
+func TestRequestObservationDoesNotDuplicateConversationalFailure(t *testing.T) {
+	diagnostic := map[string]any{"attempt": "00000000-0000-4000-8000-000000000001", "stage": "transport", "cause": "timeout"}
+	c, ctx := fixture(t, pi.Options{}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		writeRecord(runtime, map[string]any{"type": "message_start", "message": map[string]string{"role": "assistant"}})
+		writeRecord(runtime, map[string]any{"type": "omnigrex_provider_request_failed", "failureClass": "subscription_temporary", "diagnostic": diagnostic})
+		writeRecord(runtime, map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": "aborted", "omnigrexProviderDiagnostic": diagnostic}})
+		writeRecord(runtime, map[string]any{"type": "agent_settled"})
+	})
+	requests := 0
+	outcome, err := c.Prompt(ctx, "work", eventSinkFunc(func(event agentevent.AgentEvent) {
+		if event.Kind == "provider_request_failed" {
+			requests++
+		}
+	}))
+	if err != nil || outcome.Status != agent.Aborted || outcome.FailureDiagnostic == nil || outcome.FailureDiagnostic.Cause != "timeout" || requests != 1 {
+		t.Fatalf("admitted timeout: %+v, %v; requests=%d", outcome, err, requests)
+	}
+}

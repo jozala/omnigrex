@@ -92,6 +92,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   const headers = Object.fromEntries(configuration.mcp.headers.map(header => [header.name, header.value]));
   const calls = new AsyncLocalStorage();
   const evidence = new WeakMap();
+  const failureListeners = new Set();
   const state = () => calls.getStore();
   const request = async (method, body, signal) => fetcher(endpoint.href, {
     method, headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -197,6 +198,13 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
                   else if (call.diagnostic.cause !== 'timeout') call.diagnostic.cause = 'cancelled';
                 }
                 evidence.set(event.error, call);
+                // Native compaction/branch summaries consume result() without
+                // conversational message_end. Deliver only our closed evidence
+                // to the owned control subscriber, never through Session state.
+                for (const listener of failureListeners) {
+                  try { listener({ type: 'omnigrex_provider_request_failed', failureClass: call.failure || 'subscription_temporary', diagnostic: safeDiagnostic(call.diagnostic) }); }
+                  catch { /* Diagnostic consumers must not change model settlement. */ }
+                }
               }
               yield event;
             }
@@ -208,6 +216,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
     };
   }
   return { runtime,
+    subscribeFailures(listener) { failureListeners.add(listener); return () => failureListeners.delete(listener); },
     async failure(source) {
       const call = evidence.get(source);
       const failure = call?.failure || 'subscription_temporary';

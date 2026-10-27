@@ -548,6 +548,7 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 	reconciliation.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
 		corroborationFailure = &failure
 	}
+	reconciliation.PromptProviderDiagnostic = promptProviderDiagnostic
 	if promptResponse != nil {
 		reconciliation.PromptResponse = promptResponse
 	} else {
@@ -559,7 +560,6 @@ func (worker *ExecutionWorker) finalize(leaseCtx context.Context, lease store.Ag
 			}
 		}
 		reconciliation.PromptError = classification
-		reconciliation.PromptProviderDiagnostic = promptProviderDiagnostic
 		if errors.Is(operationErr, ErrRuntimeOOMKilled) {
 			reconciliation.PromptDiagnostic = store.RuntimeOOMDiagnostic
 		} else {

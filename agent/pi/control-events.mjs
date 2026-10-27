@@ -1,8 +1,15 @@
+import { safeDiagnostic } from './provider-diagnostic.mjs';
+
 // Pi's public Session subscription is the projection boundary. Only the
 // RPC consumer sees this view; persistence, extensions and the agent keep the
 // original events. Do not intercept stdout or replace Pi's RPC implementation.
 export function controlEvent(event) {
   switch (event.type) {
+    case 'omnigrex_provider_request_failed': {
+      const { diagnostic, failureClass } = event;
+      return { type: event.type, diagnostic: safeDiagnostic(diagnostic),
+        failureClass: ['subscription_quota', 'subscription_auth', 'subscription_configuration', 'subscription_temporary'].includes(failureClass) ? failureClass : 'provider_failure' };
+    }
     case 'agent_end':
       return { type: event.type, willRetry: event.willRetry };
     case 'message_start':
@@ -58,13 +65,23 @@ export function controlRuntime(runtime) {
     get(target, property) {
       if (property === 'session') {
         const session = target.session;
-        if (!sessions.has(session)) sessions.set(session, new Proxy(session, {
-          get(owner, key) {
-            if (key === 'subscribe') return listener => owner.subscribe(event => listener(controlEvent(event)));
-            const value = Reflect.get(owner, key, owner);
-            return typeof value === 'function' ? value.bind(owner) : value;
-          },
-        }));
+        if (!sessions.has(session)) {
+          // Capture this Session's source, not whatever runtime.services might
+          // point to after a rebind. Both subscriptions share one lifetime.
+          const subscribeFailures = target.services?.subscribeProviderFailures;
+          sessions.set(session, new Proxy(session, {
+            get(owner, key) {
+              if (key === 'subscribe') return listener => {
+                const deliver = event => listener(controlEvent(event));
+                const unsubscribe = owner.subscribe(deliver);
+                const unsubscribeFailures = subscribeFailures?.(deliver);
+                return () => { unsubscribe(); unsubscribeFailures?.(); };
+              };
+              const value = Reflect.get(owner, key, owner);
+              return typeof value === 'function' ? value.bind(owner) : value;
+            },
+          }));
+        }
         return sessions.get(session);
       }
       const value = Reflect.get(target, property, target);

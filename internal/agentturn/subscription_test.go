@@ -99,3 +99,58 @@ func TestSubscriptionHandoffIncludesOnlyValidatedStructuredEvidence(t *testing.T
 		t.Fatal("untrusted detail persisted")
 	}
 }
+
+func TestAdmittedProviderAbortRetainsValidatedCauseInSettlement(t *testing.T) {
+	for _, separate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "response evidence", true: "separately carried evidence"}[separate], func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleDeveloper, true)
+			diagnostic := &agent.ProviderDiagnostic{Stage: "transport", Cause: "timeout", Code: "SENTINEL", RequestIDHash: "SENTINEL", Attempt: "SENTINEL"}
+			request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Aborted, FailureDiagnostic: diagnostic}
+			if separate {
+				request.PromptProviderDiagnostic = diagnostic
+			}
+			observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != workflow.TurnOutcomeInfrastructureFailed || observation.Completion.Status != store.AgentTurnInterrupted {
+				t.Fatalf("abort settlement changed: %+v, %v", observation, err)
+			}
+			for _, want := range []string{"timed out", "stage=transport", "cause=timeout", "http_status=unavailable", "code=unknown"} {
+				if !strings.Contains(observation.Diagnostic, want) || !strings.Contains(observation.Completion.LastError, want) {
+					t.Errorf("lost %s in settlement: %+v", want, observation)
+				}
+			}
+			if strings.Contains(observation.Diagnostic, "SENTINEL") || strings.Contains(observation.Diagnostic, "was cancelled") {
+				t.Fatalf("unsafe or misleading abort diagnostic: %s", observation.Diagnostic)
+			}
+		})
+	}
+}
+
+func TestExecutionWorkerCarriesAdmittedAbortDiagnostic(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	diagnostic := agent.ParseProviderDiagnostic(json.RawMessage(`{"stage":"transport","cause":"timeout"}`))
+	fixture.prompter.prompt = func(context.Context) (agent.Outcome, error) {
+		return agent.Outcome{Admitted: true, Status: agent.Aborted, FailureDiagnostic: diagnostic}, nil
+	}
+	fixture.outcomes.reconcile = func(request agentturn.OutcomeReconciliation) store.AgentTurnSettlementObservation {
+		if request.PromptProviderDiagnostic == nil || request.PromptProviderDiagnostic.Cause != "timeout" || request.PromptResponse == nil || request.PromptResponse.Status != agent.Aborted || request.PromptError != "" {
+			t.Fatalf("lost admitted abort evidence: %+v", request)
+		}
+		return executionObservation(workflow.TurnOutcomeInfrastructureFailed, store.AgentTurnInterrupted)
+	}
+	processed, err := fixture.worker(t).ProcessNext(context.Background())
+	if !processed || err != nil || fixture.store.settled.Completion.Status != store.AgentTurnInterrupted {
+		t.Fatalf("abort policy changed: processed=%t, err=%v, settlement=%+v", processed, err, fixture.store.settled)
+	}
+}
+
+func TestAdmittedAbortDoesNotInferTimeoutFromUntrustedEvidence(t *testing.T) {
+	for _, cause := range []string{"cancelled", "SENTINEL"} {
+		request := outcomeRequest(t, workflow.RoleDeveloper, true)
+		request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Aborted,
+			FailureDiagnostic: &agent.ProviderDiagnostic{Stage: "SENTINEL", Cause: cause, Code: "SENTINEL"}}
+		observation, err := newOutcomeReconciler(t, &outcomeStore{}, &outcomeGitHub{}).Reconcile(context.Background(), request)
+		if err != nil || observation.Completion.Status != store.AgentTurnInterrupted || !strings.Contains(observation.Diagnostic, "was cancelled") || strings.Contains(observation.Diagnostic, "timed out") || strings.Contains(observation.Diagnostic, "SENTINEL") {
+			t.Fatalf("invalid abort explanation: %+v, %v", observation, err)
+		}
+	}
+}

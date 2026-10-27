@@ -89,3 +89,17 @@ func TestSubscriptionTemporarySummaryRetainsObservationInsteadOfRuntimeRejection
 		t.Fatalf("misleading rejection: %s", diagnostic)
 	}
 }
+
+func TestSummaryProviderDiagnosticSurvivesGenericFailureNormalization(t *testing.T) {
+	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
+	fixture.runtime.agent = &neutralPromptFixture{outcome: agent.Outcome{Admitted: true, Status: agent.Failed, FailureClass: "provider_failure", FailureDiagnostic: agent.ParseProviderDiagnostic([]byte(`{"stage":"provider_http","cause":"http","http_status":502,"code":"subscription_sharing_usage_unavailable"}`))}}
+	_, err := fixture.worker(t).ProcessNext(t.Context())
+	if err == nil || fixture.outcomes.request.PromptError != agentturn.PromptErrorFailure {
+		t.Fatalf("generic failure policy changed: %v, %s", err, fixture.outcomes.request.PromptError)
+	}
+	for _, want := range []string{"stage=provider_http", "cause=http", "http_status=502", "code=subscription_sharing_usage_unavailable"} {
+		if !strings.Contains(fixture.outcomes.request.PromptDiagnostic, want) {
+			t.Errorf("summary diagnostic lost %s: %s", want, fixture.outcomes.request.PromptDiagnostic)
+		}
+	}
+}

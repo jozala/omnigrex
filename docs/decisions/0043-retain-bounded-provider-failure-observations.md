@@ -13,6 +13,7 @@ Request IDs and exception properties are untrusted and can contain credentials e
 ## Decision
 Retain a closed diagnostic vocabulary, bounded status/timing fields, and locally generated request-attempt IDs through the existing pre-persistence sanitation boundary.
 Capture subscription observations within one asynchronous request context, including controller authentication before provider streaming, and bind them to the actual terminal assistant message with a weak reference.
+Native compaction and branch-summary requests bypass conversational message events, so also deliver each failed request’s closed observation through a Session-scoped owned control subscription, without adding Session messages or replacing Pi’s lifecycle events.
 Revalidate the schema in the Go adapter and emit ordinary correlated controller events for each failed request and terminal settlement.
 Retain only a SHA-256 fingerprint of a bounded `x-request-id` header, never its original value.
 Keep unknown evidence explicit and preserve the broad subscription failure in returned diagnostics without changing retry or settlement policy.

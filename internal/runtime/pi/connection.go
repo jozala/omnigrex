@@ -86,6 +86,7 @@ type turn struct {
 	lastFailure       string
 	lastGeneration    string
 	lastDiagnostic    *agent.ProviderDiagnostic
+	lastLoggedAttempt string
 	outcome           agent.Outcome
 	retryBackoff      bool
 	cancelRequested   bool
@@ -641,6 +642,8 @@ func (c *connection) record(content []byte) error {
 		Message      json.RawMessage `json:"message"`
 		FinalError   string          `json:"finalError"`
 		ErrorMessage string          `json:"errorMessage"`
+		Diagnostic   json.RawMessage `json:"diagnostic"`
+		FailureClass string          `json:"failureClass"`
 		Aborted      bool            `json:"aborted"`
 		SessionID    string          `json:"sessionId"`
 		Disposition  string          `json:"disposition"`
@@ -689,6 +692,22 @@ func (c *connection) record(content []byte) error {
 	}
 	status := "running"
 	switch record.Type {
+	case "omnigrex_provider_request_failed":
+		// Native summary calls do not emit conversational message_end. This
+		// owned request observation is diagnostic only, never settlement proof.
+		t.lastDiagnostic = agent.ParseProviderDiagnostic(record.Diagnostic)
+		failure := "provider_failure"
+		switch record.FailureClass {
+		case "subscription_quota", "subscription_auth", "subscription_configuration", "subscription_temporary":
+			failure = record.FailureClass
+		}
+		select {
+		case t.events <- c.runtimeEvent("provider_request_failed", "failed", failure, record.Type, "", false):
+			t.lastLoggedAttempt = t.lastDiagnostic.Attempt
+		default:
+			return agent.ErrBackpressure
+		}
+		return nil
 	case "message_start":
 		var message struct {
 			Role string `json:"role"`
@@ -738,7 +757,7 @@ func (c *connection) record(content []byte) error {
 			}
 		}
 
-		if message.Role == "assistant" && (message.StopReason == "error" || message.StopReason == "aborted") && t.lastDiagnostic != nil {
+		if message.Role == "assistant" && (message.StopReason == "error" || message.StopReason == "aborted") && t.lastDiagnostic != nil && (t.lastDiagnostic.Attempt == "" || t.lastDiagnostic.Attempt != t.lastLoggedAttempt) {
 			failure := t.lastFailure
 			if failure == "" {
 				failure = "provider_failure"

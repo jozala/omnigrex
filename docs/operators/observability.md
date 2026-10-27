@@ -8,7 +8,7 @@ There is no direct OpenTelemetry log export or public metrics endpoint.
 
 ## Provider and subscription request failures
 
-`Agent Session observation` records with `kind=provider_request_failed` describe an observed failed assistant request; `kind=prompt_settled` records why the Agent Turn ended.
+`Agent Session observation` records with `kind=provider_request_failed` describe an observed failed model request, including native compaction and branch-summary requests; `kind=prompt_settled` records why the Agent Turn ended.
 These WARN records use the existing controller stdout logging pipeline and survive Runtime Process cleanup.
 Join them by `workflow_id`, `agent_participant_id`, `agent_session_id`, `agent_turn_id`, `execution_epoch`, and trace/span fields when available.
 `retry_of_turn_id` links a retried Turn to the earlier failed or interrupted Turn.
@@ -31,6 +31,9 @@ For example, `stage=transport, cause=network, http_status=null` establishes no H
 `stage=provider_stream, http_status=200, cause=stream_error` identifies a later structured SSE error; a stream read failure can instead carry `network`, `timeout`, or `unknown`.
 `payload/validation` is local request preparation, while `provider_stream/protocol` can indicate an unexpected non-SSE response.
 A genuinely unobserved local/SDK cause remains unknown rather than being inferred from error prose.
+Native summary requests emit their own bounded request observation even though they do not produce conversational assistant messages.
+A generic `Omnigrex compaction_failed` lifecycle marker is not the only evidence: search the same Turn for `provider_request_failed` and its attempt UUID.
+An admitted aborted outcome with observed `cause=timeout` retains that cause in settlement and Human Handoff diagnostics; its interrupted status and existing retry policy are unchanged.
 Other providers currently retain unknown observations through the shared boundary; do not infer subscription evidence for them.
 
 For JSON controller logs collected into a file:
