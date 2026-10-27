@@ -21,6 +21,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/stepbudget"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -138,6 +139,8 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
 				t.Fatalf("continuation: %+v %v", ready, err)
 			}
+			verifyBudget := budgetMetricExport(t)
+			observer := telemetry.NewAgentTurnObserver("DEVELOPER", nil, nil)
 			sink := &historySink{}
 			cursor, err := continued.Replay(ctx, agent.HistoryCursor{}, sink)
 			if err != nil || cursor.RuntimeSessionID != sessionID || len(sink.events) < 2 {
@@ -166,7 +169,9 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if got, err := continued.Replay(ctx, cursor, sink); err != nil || got != cursor || len(sink.events) != before {
 				t.Fatalf("cursor replay: %+v %v", got, err)
 			}
-			outcome, err = continued.Prompt(ctx, "configuration-continuation", nil)
+			outcome, err = continued.Prompt(ctx, "configuration-continuation", observer)
+			observer.Finish(ctx, outcome.StepBudget, "completed")
+			verifyBudget(1, false, false)
 			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
 				t.Fatalf("continued context or provider-free replay: %+v %v", outcome, err)
 			}

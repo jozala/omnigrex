@@ -16,13 +16,19 @@ import (
 // Deduplication is local to this lifetime, not a durable exactly-once guarantee.
 type AgentTurnObserver struct {
 	downstream        agentevent.Sink
+	configured        *stepbudget.Limit
 	role              string
 	mu                sync.Mutex
 	summary, finished bool
 }
 
-func NewAgentTurnObserver(role string, downstream agentevent.Sink) *AgentTurnObserver {
-	return &AgentTurnObserver{role: budgetRole(role), downstream: downstream}
+func NewAgentTurnObserver(role string, configured *stepbudget.Limit, downstream agentevent.Sink) *AgentTurnObserver {
+	o := &AgentTurnObserver{role: budgetRole(role), downstream: downstream}
+	if configured != nil {
+		copy := *configured
+		o.configured = &copy
+	}
+	return o
 }
 func budgetRole(role string) string {
 	switch role {
@@ -71,6 +77,16 @@ func (o *AgentTurnObserver) Finish(ctx context.Context, b *stepbudget.Observatio
 		termination = "unknown"
 	}
 	mode, completeness := "unknown", "unknown"
+	limit := o.configured
+	if b != nil && b.Valid() {
+		limit = &b.Limit
+	}
+	if limit != nil {
+		mode = "unlimited"
+		if limit.Finite() {
+			mode = "finite"
+		}
+	}
 	if b != nil && b.Valid() {
 		mode, completeness = "unlimited", "partial"
 		if b.Limit.Finite() {
@@ -84,6 +100,10 @@ func (o *AgentTurnObserver) Finish(ctx context.Context, b *stepbudget.Observatio
 	meter := otel.Meter(Scope)
 	turns, _ := meter.Int64Counter("omnigrex.agent_turn.budget_observations", metric.WithUnit("{turn}"))
 	turns.Add(ctx, 1, metric.WithAttributes(append(dimensions, attribute.String("termination", termination))...))
+	if limit != nil && limit.Finite() {
+		instrument, _ := meter.Float64Histogram("omnigrex.agent_turn.step_limit", metric.WithUnit("{iteration}"))
+		instrument.Record(ctx, float64(limit.Steps()), metric.WithAttributes(attribute.String("role", o.role)))
+	}
 	if b == nil || !b.Valid() {
 		return
 	}
@@ -91,8 +111,6 @@ func (o *AgentTurnObserver) Finish(ctx context.Context, b *stepbudget.Observatio
 	used, _ := meter.Float64Histogram("omnigrex.agent_turn.model_iterations", metric.WithUnit("{iteration}"))
 	used.Record(ctx, float64(b.Used), attrs)
 	if b.Limit.Finite() {
-		limit, _ := meter.Float64Histogram("omnigrex.agent_turn.step_limit", metric.WithUnit("{iteration}"))
-		limit.Record(ctx, float64(b.Limit.Steps()), attrs)
 		utilization, _ := meter.Float64Histogram("omnigrex.agent_turn.budget_utilization", metric.WithUnit("1"))
 		utilization.Record(ctx, float64(b.Used)/float64(b.Limit.Steps()), attrs)
 	}

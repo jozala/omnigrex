@@ -43,7 +43,10 @@ func applicationMetricView(instrument sdkmetric.Instrument) (sdkmetric.Stream, b
 		return stream, true
 	}
 	switch instrument.Name {
-	case "omnigrex.agent_turn.model_iterations", "omnigrex.agent_turn.step_limit":
+	case "omnigrex.agent_turn.step_limit":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role")
+	case "omnigrex.agent_turn.model_iterations":
 		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}, NoMinMax: true}
 		stream.AttributeFilter = attribute.NewAllowKeysFilter("role", "budget_mode", "completeness")
 	case "omnigrex.agent_turn.budget_utilization":

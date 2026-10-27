@@ -14,6 +14,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/stepbudget"
+	"github.com/jozala/omnigrex/internal/telemetry"
 )
 
 func TestPiConfigurationAndRoleAuthority(t *testing.T) {
@@ -138,7 +139,16 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				if _, err := c.Prepare(ctx); err != nil {
 					t.Fatalf("prepare: %v; stderr: %s", err, stderr.String())
 				}
-				got, err := c.Prompt(ctx, tc.prompt, nil)
+				var verifyBudget func(uint64, bool, bool)
+				if inputs.StepBudget != nil {
+					verifyBudget = budgetMetricExport(t)
+				}
+				observer := telemetry.NewAgentTurnObserver(string(tc.role), inputs.StepBudget, nil)
+				got, err := c.Prompt(ctx, tc.prompt, observer)
+				observer.Finish(ctx, got.StepBudget, "completed")
+				if verifyBudget != nil {
+					verifyBudget(uint64(inputs.StepBudget.Steps()), true, true)
+				}
 				if tc.prompt == "configuration-provider-error" || tc.prompt == "configuration-provider-stream-error" {
 					if err != nil || !got.Admitted || got.Status != agent.Failed || got.FailureClass != "provider_failure" {
 						t.Fatalf("provider failure classification: %+v %v", got, err)

@@ -21,6 +21,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
+	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
@@ -406,7 +407,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			operationErr = fmt.Errorf("build Agent Turn event envelope: %w", envelopeErr)
 		} else {
 			promptCtx := workCtx
-			observer := telemetry.NewAgentTurnObserver(string(execution.Participant.Role), worker.agentEventSink)
+			var budgetConfiguration turnconfig.Configuration
+			_ = json.Unmarshal(execution.Turn.TurnConfiguration, &budgetConfiguration)
+			observer := telemetry.NewAgentTurnObserver(string(execution.Participant.Role), budgetConfiguration.StepBudget, worker.agentEventSink)
 			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, observer)
 			termination := "unknown"
 			switch outcome.Status {
