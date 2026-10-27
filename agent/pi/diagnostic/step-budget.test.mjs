@@ -6,10 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager } from '@earendil-works/pi-coding-agent';
 import { stepBudget, summaryInstruction } from './step-budget.mjs';
+import { failureExtension } from './failure-extension.mjs';
+import { compactionCompatibilityExtension } from './compaction-compat-extension.mjs';
 
 async function fixture(t, limit, response, outer = false, compactionMode = undefined) {
   const root = await mkdtemp(join(tmpdir(), 'omnigrex-budget-'));
-  const requests = [], calls = [], observations = [];
+  const requests = [], calls = [], observations = [], events = [], accounting = [];
   let session, pending = 0, summaries = 0;
   const budget = stepBudget(limit, (data, summary) => observations.push({ ...data, text: summary }));
   const server = http.createServer(async (req, res) => {
@@ -17,6 +19,7 @@ async function fixture(t, limit, response, outer = false, compactionMode = undef
     const data = JSON.parse(raw);
     const maintenance = data.messages.some(m => m.role === 'system' && JSON.stringify(m.content).includes('You are a context summarization assistant'));
     if (maintenance) summaries++; else requests.push(data);
+    accounting.push({ kind: maintenance ? 'maintenance' : 'conversation', used: observations.at(-1).used });
     assert.equal(pending, 0, 'preceding tool batch must finish before next request');
     const result = maintenance ? { text: 'Checkpoint: continue the original assignment.' } : response(requests.length, data);
     if (result.hold) return;
@@ -32,7 +35,7 @@ async function fixture(t, limit, response, outer = false, compactionMode = undef
   await writeFile(join(root, 'models.json'), JSON.stringify({ providers: { controlled: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', models: [{ id: 'controlled', name: 'controlled', reasoning: false, input: ['text'], contextWindow: 65536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
   const services = await createAgentSessionServices({ cwd: root, agentDir: root,
     settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: !!compactionMode }, cacheWarming: 'off' }, { projectTrusted: false }),
-    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, disabledBuiltinExtensions: ['mcp'], systemPromptOverride: () => 'FORCED_SYSTEM', extensionFactories: [budget.extension, pi => {
+    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, disabledBuiltinExtensions: ['mcp'], systemPromptOverride: () => 'FORCED_SYSTEM', extensionFactories: [failureExtension, compactionCompatibilityExtension, budget.extension, pi => {
       for (const name of ['probe', 'omnigrex_fixture', 'deferred_fixture']) pi.registerTool({ name, label: name, description: name, ...(name === 'deferred_fixture' ? { exposure: 'deferred' } : {}), parameters: { type: 'object', properties: {} }, async execute(_id, _args, _signal, _update, ctx) {
         if (name === 'probe') await ctx.executeTool('deferred_fixture', {});
         pending++; await new Promise(r => setTimeout(r, 5)); calls.push(name); pending--;
@@ -53,7 +56,8 @@ async function fixture(t, limit, response, outer = false, compactionMode = undef
   ({ session } = await createAgentSessionFromServices({ services, sessionManager: manager, model: services.modelRuntime.getModel('controlled', 'controlled'), tools: ['probe', 'omnigrex_fixture', 'deferred_fixture'] }));
   budget.attach(session, ['probe', 'omnigrex_fixture']);
   await session.bindExtensions({});
-  return { session, requests, calls, observations, get summaries() { return summaries; } };
+  session.subscribe(event => events.push(event));
+  return { session, requests, calls, observations, events, accounting, get summaries() { return summaries; } };
 }
 
 for (const limit of [1, 3]) test(`limit ${limit}: no N+1, no executable or declared summary tools, outer continuations fenced`, async t => {
@@ -157,5 +161,50 @@ for (const [mode, limit] of [['preprompt', 1], ['threshold', 3], ['overflow', 2]
   assert.equal(f.requests.at(-1).tools?.length ?? 0, 0);
   assert.ok(JSON.stringify(f.requests.at(-1).messages).includes(summaryInstruction));
   assert.equal(f.calls.length, mode === 'threshold' ? 6 : 0);
+  if (mode === 'overflow') assert.deepEqual(f.accounting, [
+    { kind: 'conversation', used: 1 }, { kind: 'maintenance', used: 1 },
+    { kind: 'conversation', used: 2 },
+  ]);
   assert.deepEqual(f.observations.at(-1), { limit, used: limit, responses: limit, summary: true, stopped: true, complete: true, text: '' });
+});
+
+// Reuse the native SDK fixture above: maintenance goes through Pi's real
+// summarizer, and all continuations pass through the production budget hooks.
+test('overflow recovery retains tool-capable allowance before the reserved final iteration', async t => {
+  const f = await fixture(t, 4, n => n === 2 ? { failure: true, overflow: true } : { tools: ['probe', 'omnigrex_fixture', 'deferred_fixture'] }, true, 'overflow');
+  await f.session.prompt('continue original assignment');
+  assert.equal(f.summaries, 1);
+  assert.deepEqual(f.accounting, [
+    { kind: 'conversation', used: 1 }, { kind: 'conversation', used: 2 },
+    { kind: 'maintenance', used: 2 }, { kind: 'conversation', used: 3 },
+    { kind: 'conversation', used: 4 },
+  ]);
+  assert.equal(f.requests.length, 4);
+  assert.equal(f.requests[2].tools.length, 2, 'recovery before the final step still permits configured tools');
+  assert.equal(f.requests[3].tools?.length ?? 0, 0);
+  assert.ok(JSON.stringify(f.requests[3].messages).includes(summaryInstruction));
+  // The adversarial provider returns direct, MCP-like and deferred calls even
+  // when no tools are advertised. Only steps 1 and 3 may execute them.
+  assert.deepEqual([...f.calls].sort(), ['probe', 'omnigrex_fixture', 'deferred_fixture', 'probe', 'omnigrex_fixture', 'deferred_fixture'].sort());
+  assert.deepEqual(f.observations.at(-1), { limit: 4, used: 4, responses: 4, summary: true, stopped: true, complete: true, text: '' });
+  assert.equal(f.events.filter(e => e.type === 'agent_settled').length, 1);
+  assert.equal(f.session.agent.hasQueuedMessages(), false);
+});
+
+for (const limit of [1, 3]) test(`overflow on final step ${limit} preserves failure without recovery or positive exhaustion`, async t => {
+  const f = await fixture(t, limit, n => n === limit ? { failure: true, overflow: true } : { tools: ['probe', 'omnigrex_fixture', 'deferred_fixture'] }, true, 'overflow');
+  await f.session.prompt('continue original assignment');
+  assert.equal(f.requests.length, limit, 'neither native recovery nor outer continuations may issue N+1');
+  assert.equal(f.summaries, 0, 'final overflow may remain unrecovered');
+  assert.equal(f.requests.at(-1).tools?.length ?? 0, 0);
+  assert.ok(JSON.stringify(f.requests.at(-1).messages).includes(summaryInstruction));
+  assert.equal(f.calls.length, (limit - 1) * 3);
+  assert.deepEqual(f.observations.at(-1), { limit, used: limit, responses: limit, summary: true, stopped: false, complete: true, text: '' });
+  assert.ok(f.observations.every(o => !o.stopped), 'a failed final response is not confirmed step exhaustion');
+  const assistants = f.events.filter(e => e.type === 'message_end' && e.message.role === 'assistant');
+  assert.equal(assistants.length, limit);
+  assert.equal(assistants.at(-1).message.stopReason, 'error');
+  assert.equal(assistants.at(-1).message.errorMessage, 'Context length exceeded');
+  assert.equal(f.events.filter(e => e.type === 'agent_settled').length, 1);
+  assert.equal(f.session.agent.hasQueuedMessages(), false);
 });
