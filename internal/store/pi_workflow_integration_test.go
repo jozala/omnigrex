@@ -403,7 +403,8 @@ func (e workflowFixtureEngine) Create(ctx context.Context, _ execution.Request, 
 			_ = process.Transport().Close()
 			return nil, execution.ErrUnknownEffect
 		}
-		if e.fault.mode == "cleanup-failure" || e.fault.mode == "startup-timeout" {
+		if e.fault.mode == "cleanup-failure" || e.fault.mode == "startup-timeout" ||
+			e.fault.mode == "post-publication-cleanup" && len(e.fault.executions) == 1 {
 			process = piFaultProcess{Process: process}
 		}
 	}

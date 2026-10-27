@@ -43,11 +43,13 @@ func TestPiFailureRecovery(t *testing.T) {
 	for _, mode := range []string{
 		"restart-during-creation", "restart-during-prompt", "lost-transport",
 		"runtime-exit-137", "resource-exhaustion", "lease-expiry", "mcp-expiry",
-		"cleanup-failure", "interrupted-publication-capture", "lost-terminal-mutation-response", "concurrent-turns", "startup-timeout",
+		"cleanup-failure", "post-publication-cleanup", "interrupted-publication-capture", "lost-terminal-mutation-response", "concurrent-turns", "startup-timeout",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPiWorkflowFixture(t, mode)
 			switch mode {
+			case "post-publication-cleanup":
+				f.testPostPublicationCleanupRecovery(t)
 			case "startup-timeout":
 				f.testStartupTimeout(t)
 			case "interrupted-publication-capture", "lost-terminal-mutation-response":
@@ -665,4 +667,49 @@ func (s *piAdmissionSink) Emit(_ context.Context, event agentevent.AgentEvent) e
 		s.once.Do(s.admitted)
 	}
 	return nil
+}
+
+// The incident happened after request_review succeeded, not during publication
+// or an unfinished prompt. A terminal intent must survive cleanup failure, but
+// it cannot release the Reviewer before exact stop/capture/removal is proven.
+func (f *piWorkflowFixture) testPostPublicationCleanupRecovery(t *testing.T) {
+	prepared := f.prepare(t)
+	processed, err := f.worker.ProcessNext(f.ctx)
+	if !processed || !errors.Is(err, execution.ErrUnknownEffect) {
+		t.Fatalf("post-publication cleanup fault: processed=%t, %v", processed, err)
+	}
+	lease := store.AgentTurnLease{AgentTurn: prepared.Commit.Turn}
+	var succeeded int
+	if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$1 AND tool_name IN ('publish_changes','request_review') AND state='SUCCEEDED'`, lease.ID).Scan(&succeeded); err != nil || succeeded != 2 || f.github.openCalls != 1 {
+		t.Fatalf("cleanup failed before acknowledged publication/handoff: succeeded=%d opened=%d, %v", succeeded, f.github.openCalls, err)
+	}
+	f.assertRecoveryBarrier(t, lease)
+	f.recover(t, lease, true)
+	// Successful mutations still have a durable reconciliation job. Complete
+	// that barrier before terminal corroboration can be enqueued.
+	f.reconcileMutations(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: f.database, GitHub: f.github, Workspace: f.workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := agentturn.NewTerminalCorroborationWorker(f.database, outcomes, &integrationCredentialProvider{credential: "developer-token"}, &integrationCredentialProvider{credential: "reviewer-token"}, f.workspaces, agentturn.TerminalCorroborationWorkerConfig{ClaimOwner: "post-publication-recovery", Window: time.Minute, PollInterval: time.Millisecond, LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := terminal.ProcessOne(f.ctx); !processed || err != nil {
+		t.Fatalf("terminal intent recovery: %t, %v", processed, err)
+	}
+	f.assertState(t, workflow.StateReviewing)
+	if err := f.backend.Cleaner.EnsureKeyAbsent(f.ctx, f.fault.executions[0].key); err != nil {
+		t.Fatalf("idempotent recovered cleanup: %v", err)
+	}
+	f.prepare(t)
+	if processed, err := f.worker.ProcessNext(f.ctx); !processed || err != nil {
+		t.Fatalf("Reviewer launch after cleanup recovery: %t, %v", processed, err)
+	}
+	f.assertState(t, workflow.StatePRReady)
+	if f.github.openCalls != 1 || f.github.reviewCalls != 1 {
+		t.Fatalf("publication/review replayed: opened=%d reviews=%d", f.github.openCalls, f.github.reviewCalls)
+	}
+	t.Log("POST-PUBLICATION RECOVERY PASS: publish_changes=request_review=acknowledged cleanup=unknown reviewer_before_confirmed_stop=blocked durable_terminal_intent=recovered exact_cleanup=idempotent reviewer_launch=pass external_effect_replay=none")
 }
