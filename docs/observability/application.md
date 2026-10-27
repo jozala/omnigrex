@@ -95,7 +95,8 @@ For one resource identity and classic histogram translation:
 
 The calculation includes all possible outcome combinations even though attempt series appear only after observation.
 Durable categories and the observation-failure counter emit zeros when healthy and empty.
-Allow approximately 29 additional series for backend-generated metadata within the 200-series target; inspect actual translation, histogram format, and metadata before accepting deployment.
+This baseline originally targeted 200 series including backend metadata; the [step-budget extension](#extended-series-budget) defines the current combined target.
+Inspect actual translation, histogram format, and metadata before accepting deployment.
 Resource-label changes, including build versions, can temporarily retain multiple sets of series across upgrades.
 The 60-second interval reduces sample volume, not cardinality.
 

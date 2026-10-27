@@ -40,7 +40,8 @@ func budgetMetricExport(t *testing.T) func(uint64, uint64, bool, bool) {
 	}
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", server.URL+"/v1/metrics")
 	t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
-	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "60000")
+	// Collect once at explicit shutdown, including on slower KVM CI hosts.
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
 	previous := otel.GetMeterProvider()
 	shutdown, err := telemetry.Init(context.Background(), "budget-qualification")
 	if err != nil {
