@@ -36,7 +36,7 @@ Iteration N removes all provider-visible tool declarations and executable local/
 Only this reserved iteration receives the summary instruction: completed work, unfinished work, blockers, permission to be incomplete, and a prohibition on claiming unfinished work is complete.
 Ordinary requests receive no numeric allowance, countdown, or urgency instruction.
 A limit of one permits only a tool-free summary.
-Early completion does not force another request.
+Early conversational completion does not force a reserved budget-summary request.
 
 The owned runner chains Pi's supported SDK hooks; it does not fork the loop or introduce a runtime service.
 At the final response boundary it ends the inner loop and synchronously requests public Session abort without awaiting idle inside the callback.
@@ -59,6 +59,7 @@ See [Human Handoffs](../users/human-handoffs.md).
 
 Provider errors, explicit cancellation, transport loss, and token-length limits are not positive step exhaustion.
 They retain existing failure/recovery policies even when summary-only mode was entered.
+Unavailable GitHub, database, or workspace corroboration and not-yet-visible reviews remain uncertain completion under the existing corroboration-recovery policy, not positive evidence of incomplete-work exhaustion.
 A request admitted at the SDK request-preparation boundary consumes an iteration even if routing/provider transport fails or cancellation prevents a successful response.
 Finalized error/cancelled responses increment the response count; missing responses never count as successful work.
 

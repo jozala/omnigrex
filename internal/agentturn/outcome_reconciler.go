@@ -316,6 +316,17 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent prompt ended without a successful terminal mutation intent"), nil
 	}
 	intent := intents[0]
+	// Missing observations are not positive evidence of unfinished work. Keep
+	// existing corroboration recovery (and its callback) authoritative even
+	// when the conversational allowance ended at a successful summary.
+	corroborationUnavailable := false
+	onCorroborationFailure := request.OnCorroborationFailure
+	request.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
+		corroborationUnavailable = true
+		if onCorroborationFailure != nil {
+			onCorroborationFailure(failure)
+		}
+	}
 	var result store.AgentTurnSettlementObservation
 	if intent.ToolName == mcp.ToolReportBlocked {
 		result = blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID)
@@ -377,7 +388,7 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
 		}
 	}
-	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && stepBudgetExhausted(request) {
+	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && !corroborationUnavailable && stepBudgetExhausted(request) {
 		return budgetExhaustionObservation(observedAt, promptOutcome, request, result.Diagnostic), nil
 	}
 	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && request.PromptError != "" {

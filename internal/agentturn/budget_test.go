@@ -3,6 +3,7 @@ package agentturn_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -164,5 +165,39 @@ func TestBudgetHandoffSummaryIsBoundedAndCredentialRedacted(t *testing.T) {
 	got, err := reconciler.ReconcileRecorded(context.Background(), request, nil)
 	if err != nil || got.Outcome != workflow.TurnOutcomeBlocked || strings.Contains(got.Diagnostic, outcomeCredential) || strings.Contains(got.Diagnostic, "provider-budget-secret") || strings.Contains(got.Diagnostic, "\n") || len([]rune(got.Diagnostic)) > 4096 {
 		t.Fatalf("unsafe handoff diagnostic %v", err)
+	}
+}
+
+func TestBudgetPressureDoesNotTurnUnavailableCorroborationIntoExhaustion(t *testing.T) {
+	for _, mode := range []string{"github", "review-visibility", "database"} {
+		for _, callback := range []bool{false, true} {
+			t.Run(mode+map[bool]string{false: "/without-callback", true: "/with-callback"}[callback], func(t *testing.T) {
+				request := outcomeRequest(t, workflow.RoleReviewer, true)
+				limit, _ := stepbudget.Parse("1")
+				request.PromptResponse = &agent.Outcome{Admitted: true, Status: agent.Completed, StepBudget: &stepbudget.Observation{Limit: limit, Used: 1, Responses: 1, Summary: true, Stopped: true, Complete: true}}
+				mutation := outcomeSubmitReviewMutation(1, "APPROVE", "APPROVED", outcomeHead, 701)
+				database := &outcomeStore{mutations: []store.MutationReservation{mutation}}
+				github := &outcomeGitHub{pullRequest: outcomePullRequest(outcomeHead), reviews: []githubapi.Review{outcomeReview(outcomeHead, 701)}}
+				switch mode {
+				case "github":
+					github.getErr = &githubapi.PermissionError{APIError: &githubapi.APIError{StatusCode: 403}}
+				case "review-visibility":
+					github.reviews = nil
+				case "database":
+					database.reviewErr = errors.New("database unavailable")
+				}
+				var observed *agentturn.TerminalCorroborationFailure
+				if callback {
+					request.OnCorroborationFailure = func(f agentturn.TerminalCorroborationFailure) { observed = &f }
+				}
+				got, err := newOutcomeReconciler(t, database, github).Reconcile(context.Background(), request)
+				if err != nil || got.Outcome != workflow.TurnOutcomeInfrastructureFailed || strings.Contains(string(got.Completion.Outcome), `"step_budget_exhausted":true`) {
+					t.Fatalf("uncertain completion attributed to exhaustion: %+v %v", got, err)
+				}
+				if callback && (observed == nil || observed.SourceInvocationID != mutation.ID || observed.Code == "") {
+					t.Fatal("corroboration recovery evidence was lost", observed)
+				}
+			})
+		}
 	}
 }
