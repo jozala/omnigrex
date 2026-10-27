@@ -52,6 +52,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0043: Coordinate Microsandbox payload and catalog upgrades](0043-coordinate-microsandbox-catalog-upgrades.md) | Accepted | 2026-10-25 |
 | [0044: Retain bounded provider-failure observations](0044-retain-bounded-provider-failure-observations.md) | Accepted | 2026-10-25 |
 | [0045: Enforce hidden per-Turn model-iteration ceilings](0045-enforce-hidden-per-turn-step-budgets.md) | Accepted | 2026-10-24 |
+| [0046: Classify telemetry failures without error prose](0046-classify-telemetry-failures-without-error-prose.md) | Accepted | 2026-10-28 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.
