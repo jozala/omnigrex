@@ -22,7 +22,7 @@ func cacheEnvironment(t *testing.T) []string {
 		t.Skip("run mise run test-development-image-cache")
 	}
 	root := t.TempDir()
-	return []string{
+	environment := []string{
 		"PATH=/opt/qualification/go/bin:/usr/local/bin:/usr/bin:/bin",
 		"HOME=" + root, "TMPDIR=" + root,
 		"GOPATH=" + filepath.Join(root, "gopath"),
@@ -35,6 +35,10 @@ func cacheEnvironment(t *testing.T) []string {
 		"MISE_GLOBAL_CONFIG_FILE=/nonexistent", "MISE_SYSTEM_CONFIG_FILE=/nonexistent",
 		"MISE_TRUSTED_CONFIG_PATHS=" + root,
 	}
+	// Go's telemetry sidecar can outlive a command and race TempDir cleanup.
+	// Disable it in this disposable HOME before running any other Go commands.
+	run(t, root, environment, "go", "telemetry", "off")
+	return environment
 }
 
 func run(t *testing.T, directory string, environment []string, program string, args ...string) []byte {
@@ -49,6 +53,14 @@ func run(t *testing.T, directory string, environment []string, program string, a
 		t.Fatalf("%s %v: %v\n%s", program, args, err, output)
 	}
 	return output
+}
+
+func TestCacheEnvironmentDisablesGoTelemetry(t *testing.T) {
+	environment := cacheEnvironment(t)
+	output := run(t, t.TempDir(), environment, "go", "env", "GOTELEMETRY")
+	if got := strings.TrimSpace(string(output)); got != "off" {
+		t.Fatalf("Go telemetry mode = %q; want off", got)
+	}
 }
 
 func TestProjectModulesComeFromImageAndRemainCached(t *testing.T) {
