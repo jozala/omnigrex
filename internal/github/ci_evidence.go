@@ -216,9 +216,13 @@ func (client *APIClient) DiscoverRequiredCI(ctx context.Context, token, owner, r
 			} `json:"checks"`
 		}
 		err = client.doJSON(ctx, http.MethodGet, root+"/branches/"+url.PathEscape(branch)+"/protection", token, nil, &protection)
-		// A 404 is ambiguous (ruleset-only protection, absent classic checks or
-		// inaccessible policy). Keep it explicit rather than asserting no classic CI.
-		if err != nil {
+		// Only GitHub's explicit no-classic-protection response establishes
+		// absence on a readable branch (including ruleset-only protection).
+		// Generic 404s remain inaccessible, never an asserted empty policy.
+		var apiError *APIError
+		noClassic := errors.As(err, &apiError) && apiError.StatusCode == http.StatusNotFound && strings.EqualFold(strings.TrimSpace(apiError.Message), "Branch not protected")
+		if noClassic {
+		} else if err != nil {
 			fail("classic", err)
 		} else if len(protection.RequiredStatusChecks) == 0 {
 			fail("classic", ErrInvalidAPIResponse)

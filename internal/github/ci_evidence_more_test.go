@@ -143,3 +143,32 @@ func TestCIEvidenceBoundedContinuationPreservesAllCollections(t *testing.T) {
 		t.Fatal("malformed cursor accepted")
 	}
 }
+
+func TestRulesetOnlyProtectionDistinguishesExplicitAbsenceFromInaccessibleClassic(t *testing.T) {
+	for _, message := range []string{"Branch not protected", "Not Found"} {
+		t.Run(message, func(t *testing.T) {
+			client, done := ciClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/acme/widgets/branches/main":
+					fmt.Fprintf(w, `{"name":"main","protected":true,"commit":{"sha":%q}}`, ciHeadSHA)
+				case "/repos/acme/widgets/branches/main/protection":
+					w.WriteHeader(404)
+					fmt.Fprintf(w, `{"message":%q}`, message)
+				case "/repos/acme/widgets/rules/branches/main":
+					fmt.Fprint(w, `[{"type":"required_status_checks","ruleset_id":12,"ruleset_source_type":"Organization","ruleset_source":"acme","parameters":{"required_status_checks":[{"context":"build","integration_id":7}]}}]`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer done()
+			inventory := client.DiscoverRequiredCI(context.Background(), "token", "acme", "widgets", "main")
+			want := githubapi.CIAvailable
+			if message != "Branch not protected" {
+				want = githubapi.CIPartial
+			}
+			if inventory.Availability != want || len(inventory.Requirements) != 1 || inventory.Requirements[0].RulesetID != 12 {
+				t.Fatalf("inventory=%+v", inventory)
+			}
+		})
+	}
+}

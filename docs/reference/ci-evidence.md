@@ -30,6 +30,7 @@ In particular, a green head result does not satisfy a failing or pending test-me
 Availability (`available`, `partial`, `unavailable`) is independent of these result states.
 A successful unprotected branch observation plus an empty effective rule set is an available empty policy.
 An explicit null `required_status_checks` in a successful full classic protection response also means no classic CI requirements.
+For a readable branch protected only by rulesets, GitHub's explicit `Branch not protected` response establishes absence of classic protection; a generic 404 remains inaccessible.
 Inaccessible protection, permission denial, rate limits, transient errors, malformed responses and incomplete pagination do not mean no requirements.
 Required workflow rules and unknown rule types remain in `unresolved`; there is no invented workflow-to-check completion mapping.
 The effective-branch-rules endpoint supplies applicable active repository and inherited organization rules; GitHub excludes disabled/evaluate rules from that endpoint.

@@ -15,6 +15,7 @@ Requiredness, availability, completion and success also answer different diagnos
 
 Extend the existing CI tools with a shared inventory, observation and pure matching contract.
 Discover current classic protection and effective active branch rules independently of result observation.
+Accept an explicit provider no-classic-protection response on a readable branch as absence, but never infer absence from a generic inaccessible 404.
 Preserve every source and App constraint; unsupported workflows and unknown rule types remain unresolved.
 Legacy statuses do not prove an integration App identity.
 Select the newest resource per context/producer without turning terminal non-success into success.
