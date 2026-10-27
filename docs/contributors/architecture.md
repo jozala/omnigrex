@@ -45,7 +45,7 @@ Other fully validated historical rows leave the target unchanged, including olde
 Reviewer reads, Issue reads, handoff lookup, and mutation actions retain their original targeting rules.
 See [decision 0038](../decisions/0038-derive-publication-read-targets-from-the-turn-ledger.md) for the authority boundary.
 
-Collection responses identify the queried commit even when empty: `get_check_runs` returns `{head_sha, check_runs}`, `list_pull_request_reviews` returns `{head_sha, reviews}`, and `list_review_threads` returns `{head_sha, threads}`.
+Collection responses identify the queried commit even when empty: `get_check_runs` retains `{head_sha, check_runs}` and extends it with bounded [required-CI evidence and target provenance](../reference/ci-evidence.md), `list_pull_request_reviews` returns `{head_sha, reviews}`, and `list_review_threads` returns `{head_sha, threads}`.
 PR metadata identifies it in `head.sha`; existing CI diagnostic responses retain their head metadata.
 These collection tools previously returned bare arrays; consumers must read the named collection field.
 

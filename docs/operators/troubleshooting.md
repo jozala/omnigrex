@@ -159,3 +159,15 @@ docker compose restart orchestrator
 Startup fences stale processes and resumes durable work under retry policy.
 Use `docker compose up -d --force-recreate orchestrator` when configuration or images changed.
 Inspect logs for private content and identifiers before sharing them; application redaction does not cover every operator-added proxy/platform log.
+
+## Required CI evidence is incomplete
+
+Inspect `required_policy.availability`, `required_policy.failures`, `required_policy.unresolved`, each target's observation failures, and `target_mapping.state` before interpreting results.
+A successful empty collection on a continuation is not an empty complete policy.
+For `insufficient_permissions`, confirm the exact [App and installation permissions](github-apps.md) and rerun preflight after installation approval.
+Retry rate-limited or transient observations after the provider recovers; do not treat them as no requirements.
+A protected branch returning inaccessible classic protection remains incomplete even if effective rules were readable.
+Unknown required workflow/rule mappings remain unresolved and require direct human interpretation of GitHub policy.
+A stale head/base/merge mapping grants no new test-merge diagnostic access; it does not retarget the Reviewer or require rebasing the Change Proposal.
+Restart a stale continuation from the first page to observe a coherent current result set.
+See the [CI read contract](../reference/ci-evidence.md) for states, bounds and target semantics.

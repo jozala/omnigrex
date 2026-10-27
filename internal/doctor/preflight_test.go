@@ -131,3 +131,27 @@ func TestValidateReviewerWebhookConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiredCIAppPolicyPreflightEquality(t *testing.T) {
+	required := githubapi.DeveloperAppPermissions()
+	expected := githubapi.InstallationPermissions{"metadata": "read", "checks": "read", "actions": "read", "statuses": "read", "administration": "read", "contents": "write", "issues": "write", "pull_requests": "write", "workflows": "write"}
+	if !sameStringMap(required, expected) {
+		t.Fatalf("Developer permission policy drifted: %v", required)
+	}
+	for _, permission := range []string{"statuses", "administration"} {
+		legacy := githubapi.DeveloperAppPermissions()
+		delete(legacy, permission)
+		if sameStringMap(legacy, required) {
+			t.Fatalf("doctor admitted missing %s", permission)
+		}
+		broader := githubapi.DeveloperAppPermissions()
+		broader[permission] = "write"
+		if sameStringMap(broader, required) {
+			t.Fatalf("doctor admitted %s write", permission)
+		}
+	}
+	reviewer := githubapi.ReviewerAppPermissions()
+	if !sameStringMap(reviewer, githubapi.InstallationPermissions{"metadata": "read", "contents": "read", "pull_requests": "write"}) {
+		t.Fatalf("native Reviewer authority expanded: %v", reviewer)
+	}
+}

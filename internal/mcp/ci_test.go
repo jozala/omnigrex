@@ -301,6 +301,8 @@ func TestCIStepSelectorReturnsExplicitUnsupported(t *testing.T) {
 	var logBytesRequested int
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/runs/%d", ciRegressionRun):
+			fmt.Fprintf(w, `{"id":%d,"head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/run","run_number":10,"run_attempt":1}`, ciRegressionRun, ciRegressionHead)
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
 			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run Docker-backed integration tests","number":13,"status":"completed","conclusion":"failure"}]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
 		case strings.HasSuffix(r.URL.Path, "/logs"):
@@ -354,6 +356,8 @@ func TestCISearchBudgetPaginatesThroughMCP(t *testing.T) {
 			return
 		}
 		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/runs/%d", ciRegressionRun):
+			fmt.Fprintf(w, `{"id":%d,"head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/run","run_number":10,"run_attempt":1}`, ciRegressionRun, ciRegressionHead)
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
 			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
 		case strings.HasSuffix(r.URL.Path, "/logs"):

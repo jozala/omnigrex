@@ -61,8 +61,13 @@ try {
       if (step === 2) { name = 'omnigrex_open_pr'; args = { operation_id: 'controlled-open', title: 'Controlled Pi Change Proposal', body: 'Ready for review.' }; }
       if (step === 3) { name = 'omnigrex_request_review'; args = { operation_id: 'controlled-handoff', head_sha: result(1).head_sha, summary: 'Two committed changes are ready for review.' }; }
     } else if (role === 'REVIEWER') {
-      if (step === 0) { name = 'omnigrex_get_pull_request'; args = {}; }
-      if (step === 1) { name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'The controlled changes are correct.', comments: [] }; }
+      if (step === 0) { name = 'omnigrex_get_check_runs'; args = {}; }
+      if (step === 1) {
+        const evidence = result(0);
+        if (evidence.required_policy?.availability !== 'available' || evidence.targets?.[0]?.observation?.statuses?.[0]?.state !== 'failure' || evidence.head_sha !== envelope.current_head_sha) throw new Error('missing scoped required-CI evidence');
+        name = 'omnigrex_get_pull_request'; args = {};
+      }
+      if (step === 2) { name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'The controlled changes are correct.', comments: [] }; }
     } else throw new Error('unexpected Workflow Role');
     if (results.some(m => text(m.content).includes('"isError":true') || text(m.content).includes('Omnigrex MCP operation failed or was rejected'))) {
       if (!fault) throw new Error('controlled capability failed');

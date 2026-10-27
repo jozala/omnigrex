@@ -57,7 +57,7 @@ func (err *CIDiagnosticError) Error() string {
 
 func ciToolError(tool string, err error) string {
 	switch tool {
-	case ToolGetCheckRunDiagnostics, ToolListCIRuns, ToolGetCIRun, ToolGetCIJobLogs, ToolSearchCIJobLogs:
+	case ToolGetCheckRuns, ToolGetCheckRunDiagnostics, ToolListCIRuns, ToolGetCIRun, ToolGetCIJobLogs, ToolSearchCIJobLogs:
 	default:
 		return ""
 	}
@@ -234,18 +234,26 @@ func (backend *ProductionBackend) getCheckRunDiagnostics(ctx context.Context, in
 	if err != nil {
 		return nil, err
 	}
-	diagnostics, err := backend.github.GetCheckRunDiagnostics(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.CheckRunID, arguments.Cursor, invocation.Scope.Repository.ID, invocation.Scope.HeadSHA)
+	mapping := backend.ciMapping(ctx, credential, invocation.Scope)
+	actualHead := invocation.Scope.HeadSHA
+	if api, ok := backend.github.(ciEvidenceAPI); ok {
+		check, callErr := api.GetCheckRunMetadata(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.CheckRunID)
+		if callErr != nil {
+			return nil, mapCIError(callErr)
+		}
+		if check.ID != arguments.CheckRunID || !allowsCIHead(mapping, check.HeadSHA) {
+			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
+		}
+		actualHead = check.HeadSHA
+	}
+	diagnostics, err := backend.github.GetCheckRunDiagnostics(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.CheckRunID, arguments.Cursor, invocation.Scope.Repository.ID, actualHead)
 	if err != nil {
 		return nil, mapCIError(err)
 	}
-	if diagnostics.HeadSHA != invocation.Scope.HeadSHA {
+	if diagnostics.CheckID != arguments.CheckRunID || diagnostics.HeadSHA != actualHead {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	encoded, err := json.Marshal(diagnostics)
-	if err != nil {
-		return nil, newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
-	}
-	return encoded, nil
+	return marshalCIResult(diagnostics, mapping)
 }
 
 func (backend *ProductionBackend) listCIRuns(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -257,18 +265,51 @@ func (backend *ProductionBackend) listCIRuns(ctx context.Context, invocation Inv
 	if err != nil {
 		return nil, err
 	}
-	list, err := backend.github.ListWorkflowRunsForHead(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, invocation.Scope.HeadSHA, arguments.Cursor, invocation.Scope.Repository.ID)
+	scope := invocation.Scope
+	mapping := backend.ciMapping(ctx, credential, scope)
+	head, err := githubapi.CICursorReadHead(arguments.Cursor, mapping)
 	if err != nil {
 		return nil, mapCIError(err)
 	}
-	if list.HeadSHA != invocation.Scope.HeadSHA {
+	list, err := backend.github.ListWorkflowRunsForHead(ctx, credential, scope.Repository.Owner, scope.Repository.Name, head, arguments.Cursor, scope.Repository.ID)
+	if err != nil {
+		return nil, mapCIError(err)
+	}
+	validate := func(list githubapi.CIRunList, head string) bool {
+		if list.HeadSHA != head {
+			return false
+		}
+		for _, run := range list.Runs {
+			if run.HeadSHA != head || !allowsCIRun(mapping, run) {
+				return false
+			}
+		}
+		return true
+	}
+	if !validate(list, head) {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	encoded, err := json.Marshal(list)
-	if err != nil {
-		return nil, newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
+	type response struct {
+		githubapi.CIRunList
+		TestMerge        *githubapi.CIRunList `json:"test_merge,omitempty"`
+		TestMergeFailure string               `json:"test_merge_failure,omitempty"`
 	}
-	return encoded, nil
+	result := response{CIRunList: list}
+	if arguments.Cursor == "" && mapping.State == "verified" {
+		merge, callErr := backend.github.ListWorkflowRunsForHead(ctx, credential, scope.Repository.Owner, scope.Repository.Name, mapping.TestMergeSHA, "", scope.Repository.ID)
+		if callErr != nil {
+			result.TestMergeFailure = CIDiagnosticUnavailable
+			var diagnostic *CIDiagnosticError
+			if errors.As(mapCIError(callErr), &diagnostic) {
+				result.TestMergeFailure = diagnostic.Code
+			}
+		} else if !validate(merge, mapping.TestMergeSHA) {
+			result.TestMergeFailure = "scope_rejected"
+		} else {
+			result.TestMerge = &merge
+		}
+	}
+	return marshalCIResult(result, mapping)
 }
 
 func (backend *ProductionBackend) getCIRun(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -287,26 +328,31 @@ func (backend *ProductionBackend) getCIRun(ctx context.Context, invocation Invoc
 	if err != nil {
 		return nil, err
 	}
-	detail, err := backend.github.GetWorkflowRunDetail(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.RunID, attempt, arguments.Cursor, invocation.Scope.Repository.ID, invocation.Scope.HeadSHA)
+	mapping := backend.ciMapping(ctx, credential, invocation.Scope)
+	run, err := backend.github.GetWorkflowRun(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.RunID)
 	if err != nil {
 		return nil, mapCIError(err)
 	}
-	if detail.Run.HeadSHA != invocation.Scope.HeadSHA {
+	if run.ID != arguments.RunID || !allowsCIRun(mapping, run) {
+		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
+	}
+	actualHead := run.HeadSHA
+	detail, err := backend.github.GetWorkflowRunDetail(ctx, credential, invocation.Scope.Repository.Owner, invocation.Scope.Repository.Name, arguments.RunID, attempt, arguments.Cursor, invocation.Scope.Repository.ID, actualHead)
+	if err != nil {
+		return nil, mapCIError(err)
+	}
+	if detail.Run.ID != arguments.RunID || detail.Run.HeadSHA != actualHead || !allowsCIRun(mapping, detail.Run) {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
 	for _, job := range detail.Jobs {
-		if job.HeadSHA != "" && job.HeadSHA != invocation.Scope.HeadSHA {
+		if job.HeadSHA != "" && job.HeadSHA != actualHead {
 			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 		}
 		if job.RunID != arguments.RunID {
 			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 		}
 	}
-	encoded, err := json.Marshal(detail)
-	if err != nil {
-		return nil, newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
-	}
-	return encoded, nil
+	return marshalCIResult(detail, mapping)
 }
 
 func (backend *ProductionBackend) getCIJobLogs(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -334,19 +380,15 @@ func (backend *ProductionBackend) getCIJobLogs(ctx context.Context, invocation I
 	if err != nil {
 		return nil, mapCIError(err)
 	}
-	if job.HeadSHA != "" && job.HeadSHA != invocation.Scope.HeadSHA {
+	mapping := backend.ciMapping(ctx, credential, invocation.Scope)
+	run, runErr := backend.github.GetWorkflowRun(ctx, credential, owner, repository, job.RunID)
+	if runErr != nil {
+		return nil, mapCIError(runErr)
+	}
+	if job.ID != arguments.JobID || run.ID != job.RunID || !allowsCIRun(mapping, run) || job.HeadSHA != "" && job.HeadSHA != run.HeadSHA || job.RunAttempt <= 0 || run.RunAttempt < job.RunAttempt {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	if job.HeadSHA == "" {
-		run, runErr := backend.github.GetWorkflowRun(ctx, credential, owner, repository, job.RunID)
-		if runErr != nil {
-			return nil, mapCIError(runErr)
-		}
-		if run.HeadSHA != invocation.Scope.HeadSHA {
-			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
-		}
-		job.HeadSHA = run.HeadSHA
-	}
+	actualHead := run.HeadSHA
 	if arguments.StepNumber != nil {
 		found := false
 		for _, step := range job.Steps {
@@ -365,7 +407,7 @@ func (backend *ProductionBackend) getCIJobLogs(ctx context.Context, invocation I
 		// through get_ci_run metadata and fetch whole-job excerpts.
 		return nil, newCIDiagnosticError(CIDiagnosticStepFilterUnsupported, "step_filter_unsupported", 0, "")
 	}
-	scope := githubapi.JobScope{ID: job.ID, RunID: job.RunID, RunAttempt: job.RunAttempt, HeadSHA: invocation.Scope.HeadSHA}
+	scope := githubapi.JobScope{ID: job.ID, RunID: job.RunID, RunAttempt: job.RunAttempt, HeadSHA: actualHead}
 	excerpt, err := backend.github.GetCIJobLogExcerpt(ctx, credential, owner, repository, scope, arguments.Cursor, maxBytes, invocation.Scope.Repository.ID)
 	if err != nil {
 		mapped := mapCIError(err)
@@ -377,14 +419,10 @@ func (backend *ProductionBackend) getCIJobLogs(ctx context.Context, invocation I
 		}
 		return nil, mapped
 	}
-	if excerpt.HeadSHA != invocation.Scope.HeadSHA || excerpt.JobID != arguments.JobID {
+	if excerpt.HeadSHA != actualHead || excerpt.JobID != arguments.JobID {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	encoded, err := json.Marshal(excerpt)
-	if err != nil {
-		return nil, newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
-	}
-	return encoded, nil
+	return marshalCIResult(excerpt, mapping)
 }
 
 func (backend *ProductionBackend) searchCIJobLogs(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -412,20 +450,16 @@ func (backend *ProductionBackend) searchCIJobLogs(ctx context.Context, invocatio
 	if err != nil {
 		return nil, mapCIError(err)
 	}
-	if job.HeadSHA != "" && job.HeadSHA != invocation.Scope.HeadSHA {
+	mapping := backend.ciMapping(ctx, credential, invocation.Scope)
+	run, runErr := backend.github.GetWorkflowRun(ctx, credential, owner, repository, job.RunID)
+	if runErr != nil {
+		return nil, mapCIError(runErr)
+	}
+	if job.ID != arguments.JobID || run.ID != job.RunID || !allowsCIRun(mapping, run) || job.HeadSHA != "" && job.HeadSHA != run.HeadSHA || job.RunAttempt <= 0 || run.RunAttempt < job.RunAttempt {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	if job.HeadSHA == "" {
-		run, runErr := backend.github.GetWorkflowRun(ctx, credential, owner, repository, job.RunID)
-		if runErr != nil {
-			return nil, mapCIError(runErr)
-		}
-		if run.HeadSHA != invocation.Scope.HeadSHA {
-			return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
-		}
-		job.HeadSHA = run.HeadSHA
-	}
-	scope := githubapi.JobScope{ID: job.ID, RunID: job.RunID, RunAttempt: job.RunAttempt, HeadSHA: invocation.Scope.HeadSHA}
+	actualHead := run.HeadSHA
+	scope := githubapi.JobScope{ID: job.ID, RunID: job.RunID, RunAttempt: job.RunAttempt, HeadSHA: actualHead}
 	result, err := backend.github.SearchCIJobLogs(ctx, credential, owner, repository, scope, arguments.Query, contextLines, arguments.Cursor, invocation.Scope.Repository.ID)
 	if err != nil {
 		mapped := mapCIError(err)
@@ -437,12 +471,8 @@ func (backend *ProductionBackend) searchCIJobLogs(ctx context.Context, invocatio
 		}
 		return nil, mapped
 	}
-	if result.HeadSHA != invocation.Scope.HeadSHA || result.JobID != arguments.JobID {
+	if result.HeadSHA != actualHead || result.JobID != arguments.JobID {
 		return nil, newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
 	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return nil, newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
-	}
-	return encoded, nil
+	return marshalCIResult(result, mapping)
 }
