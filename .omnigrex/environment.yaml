@@ -1,5 +1,5 @@
 version: 1
-image: ghcr.io/jozala/omnigrex/development@sha256:28f2c84cfda0c80d26e38a77a57b68f592935b4fc5df7096e4d0f4093dc0a7d8
+image: ghcr.io/jozala/omnigrex/development@sha256:419ea44491d5e5545746434734cf93134000f19433a3cbe13d328aa354b89673
 platform: linux/amd64
 requirements:
   - hardware-isolation
