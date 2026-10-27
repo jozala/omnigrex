@@ -76,24 +76,30 @@ type IssueComment struct {
 }
 
 type PullRequestBranch struct {
-	Label string `json:"label"`
-	Ref   string `json:"ref"`
-	SHA   string `json:"sha"`
+	Label      string `json:"label"`
+	Ref        string `json:"ref"`
+	SHA        string `json:"sha"`
+	Repository *struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repo,omitempty"`
 }
 
 type PullRequest struct {
-	ID      int64             `json:"id"`
-	NodeID  string            `json:"node_id"`
-	Number  int               `json:"number"`
-	Title   string            `json:"title"`
-	Body    string            `json:"body"`
-	State   string            `json:"state"`
-	HTMLURL string            `json:"html_url"`
-	User    User              `json:"user"`
-	Head    PullRequestBranch `json:"head"`
-	Base    PullRequestBranch `json:"base"`
-	Draft   bool              `json:"draft"`
-	Merged  bool              `json:"merged"`
+	ID             int64             `json:"id"`
+	NodeID         string            `json:"node_id"`
+	Number         int               `json:"number"`
+	Title          string            `json:"title"`
+	Body           string            `json:"body"`
+	State          string            `json:"state"`
+	HTMLURL        string            `json:"html_url"`
+	User           User              `json:"user"`
+	Head           PullRequestBranch `json:"head"`
+	Base           PullRequestBranch `json:"base"`
+	Draft          bool              `json:"draft"`
+	Merged         bool              `json:"merged"`
+	Mergeable      *bool             `json:"mergeable,omitempty"`
+	MergeCommitSHA *string           `json:"merge_commit_sha,omitempty"`
 }
 
 type PullRequestFileStatus string
@@ -149,6 +155,11 @@ type ReviewThread struct {
 }
 
 type CheckRun struct {
+	App        *CheckApp `json:"app,omitempty"`
+	CheckSuite *struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite,omitempty"`
+	ExternalID  string     `json:"external_id,omitempty"`
 	ID          int64      `json:"id"`
 	NodeID      string     `json:"node_id"`
 	Name        string     `json:"name"`
@@ -1213,13 +1224,14 @@ func (client *APIClient) GetCheckRuns(ctx context.Context, installationToken, ow
 	if !validCommitSHA(commitSHA) {
 		return nil, &ConfigurationError{Cause: ErrInvalidCommitSHA}
 	}
-	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", url.PathEscape(owner), url.PathEscape(repository), commitSHA)
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100&filter=all", url.PathEscape(owner), url.PathEscape(repository), commitSHA)
+	firstPath := path
 	checks := make([]CheckRun, 0)
 	seenPages := make(map[string]struct{})
 	seenChecks := make(map[int64]struct{})
 	totalCount := -1
 	for path != "" {
-		if _, exists := seenPages[path]; exists {
+		if _, exists := seenPages[path]; exists || len(seenPages) >= 100 {
 			return nil, fmt.Errorf("%w: repeated pagination link", ErrInvalidAPIResponse)
 		}
 		seenPages[path] = struct{}{}
@@ -1231,7 +1243,7 @@ func (client *APIClient) GetCheckRuns(ctx context.Context, installationToken, ow
 		if err != nil {
 			return nil, err
 		}
-		if page.TotalCount == nil || *page.TotalCount < len(page.CheckRuns) || totalCount > *page.TotalCount {
+		if page.CheckRuns == nil || page.TotalCount == nil || *page.TotalCount < len(page.CheckRuns) || totalCount >= 0 && totalCount != *page.TotalCount {
 			return nil, fmt.Errorf("%w: check-run count is invalid", ErrInvalidAPIResponse)
 		}
 		totalCount = *page.TotalCount
@@ -1249,7 +1261,7 @@ func (client *APIClient) GetCheckRuns(ctx context.Context, installationToken, ow
 		if next == "" {
 			break
 		}
-		path, err = client.paginationPath(next)
+		path, err = client.ciPaginationPath(firstPath, next)
 		if err != nil {
 			return nil, err
 		}

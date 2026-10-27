@@ -234,6 +234,8 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 			return nil, ErrToolDependency
 		}
 		return json.Marshal(handoff)
+	case ToolGetCheckRuns:
+		return backend.getCIEvidence(ctx, invocation)
 	case ToolGetCheckRunDiagnostics:
 		return backend.getCheckRunDiagnostics(ctx, invocation)
 	case ToolListCIRuns:
@@ -320,20 +322,6 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 			return nil, newGitHubReadError(callErr)
 		}
 		result = map[string]any{"head_sha": invocation.Scope.HeadSHA, "threads": threads}
-	case ToolGetCheckRuns:
-		checks, callErr := backend.github.GetCheckRuns(ctx, credential, owner, repository, invocation.Scope.HeadSHA)
-		if callErr != nil {
-			return nil, newGitHubReadError(callErr)
-		}
-		for _, check := range checks {
-			if check.HeadSHA != invocation.Scope.HeadSHA {
-				return nil, ErrToolPrecondition
-			}
-		}
-		result = struct {
-			HeadSHA   string               `json:"head_sha"`
-			CheckRuns []githubapi.CheckRun `json:"check_runs"`
-		}{invocation.Scope.HeadSHA, checks}
 	case ToolPublishChanges:
 		return backend.publishChanges(ctx, invocation, credential)
 	case ToolOpenPR:

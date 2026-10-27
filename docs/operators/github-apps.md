@@ -16,6 +16,8 @@ Configure these repository permissions:
 | Metadata | Read-only |
 | Checks | Read-only |
 | Actions | Read-only |
+| Commit statuses | Read-only |
+| Administration | Read-only |
 | Contents | Read and write |
 | Issues | Read and write |
 | Pull requests | Read and write |
@@ -47,7 +49,12 @@ Use public HTTPS and exactly `/webhooks/github`, with no URL credentials, query,
 Select no webhook events and disable its webhook.
 Do not reuse the Developer identity or key.
 CI diagnostic reads use the Developer App, not expanded Reviewer permissions.
-After an upgrade adding scoped CI diagnostics, approve the Developer installation's Actions read permission and rerun preflight before agents use those capabilities.
+After an upgrade adding required-CI evidence, add Commit statuses and Administration read permissions to the Developer App, approve the updated installation permissions, and rerun preflight before starting Agent Turns.
+Administration read is needed for complete classic branch-protection reads; no administration write, Checks write, or CI-completion webhook subscription is required.
+App configuration and installation tokens must match the exact permission tables, so updating only the App or only its installation is insufficient.
+Doctor rejects missing permissions and broader permissions such as Administration write.
+Required-policy permission failures remain explicit unavailable/partial evidence, never an empty requirement set.
+See [CI evidence](../reference/ci-evidence.md) for the read contract and recovery guidance.
 
 ## Keys and installation
 

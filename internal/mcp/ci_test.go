@@ -52,6 +52,9 @@ func ciRegressionServer(t *testing.T, logContent string) (*httptest.Server, *git
 	// server variable would race with the test goroutine's assignment under
 	// -race, since the handler runs on server goroutines.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		if r.URL.Path != "/log-bytes" && r.Header.Get("Authorization") != "Bearer developer-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -257,6 +260,9 @@ func TestCIScopeRejectionForgedAndCrossHead(t *testing.T) {
 		})
 	}
 	crossHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		if r.URL.Path == "/repos/acme/widgets/check-runs/501" {
 			fmt.Fprint(w, `{"id":501,"node_id":"CR_501","name":"CI","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"completed","conclusion":"failure","html_url":"https://github.test/x","completed_at":"2026-10-06T10:00:00Z","output":{}}`)
 			return
@@ -300,7 +306,12 @@ func TestCIStepSelectorReturnsExplicitUnsupported(t *testing.T) {
 	// text labeled with the requested step number.
 	var logBytesRequested int
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/runs/%d", ciRegressionRun):
+			fmt.Fprintf(w, `{"id":%d,"head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/run","run_number":10,"run_attempt":1}`, ciRegressionRun, ciRegressionHead)
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
 			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run Docker-backed integration tests","number":13,"status":"completed","conclusion":"failure"}]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
 		case strings.HasSuffix(r.URL.Path, "/logs"):
@@ -349,11 +360,16 @@ func TestCISearchBudgetPaginatesThroughMCP(t *testing.T) {
 	}
 	logContent := builder.String()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		if r.URL.Path != "/log-bytes" && r.Header.Get("Authorization") != "Bearer developer-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		switch {
+		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/runs/%d", ciRegressionRun):
+			fmt.Fprintf(w, `{"id":%d,"head_sha":%q,"status":"completed","conclusion":"failure","html_url":"https://github.test/run","run_number":10,"run_attempt":1}`, ciRegressionRun, ciRegressionHead)
 		case r.URL.Path == fmt.Sprintf("/repos/acme/widgets/actions/jobs/%d", ciRegressionJob):
 			fmt.Fprintf(w, `{"id":%d,"run_id":%d,"run_attempt":1,"head_sha":%q,"node_id":"J_1","name":"integration","status":"completed","conclusion":"failure","html_url":"https://github.test/actions/jobs/%d","started_at":"2026-10-06T10:00:00Z","completed_at":"2026-10-06T10:05:00Z","steps":[]}`, ciRegressionJob, ciRegressionRun, ciRegressionHead, ciRegressionJob)
 		case strings.HasSuffix(r.URL.Path, "/logs"):
@@ -424,6 +440,9 @@ func TestCICheckAnnotationsBudgetPaginatesThroughMCP(t *testing.T) {
 		annotations = append(annotations, fmt.Sprintf(`{"path":"a.go","start_line":%d,"end_line":%d,"annotation_level":"failure","message":%s}`, i, i, body))
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer developer-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -490,6 +509,9 @@ func TestCICheckAnnotationsBudgetPaginatesThroughMCP(t *testing.T) {
 
 func TestCIDiagnosticStatesAndPermissionsAreDistinguishable(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveCIRepositoryIdentity(w, r) {
+			return
+		}
 		w.Header().Set("X-GitHub-Request-Id", "A41A:2AF0FB:6AAAD0:6A71D9:6ABC2962")
 		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
 	})
@@ -553,4 +575,16 @@ func TestCIGatewayExposesDistinctErrorsWithoutRawLogs(t *testing.T) {
 			t.Fatalf("operational logs disclosed %s: %s", secret, logs.String())
 		}
 	}
+}
+
+func serveCIRepositoryIdentity(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/repos/acme/widgets" {
+		return false
+	}
+	if r.Header.Get("Authorization") != "Bearer developer-secret" {
+		w.WriteHeader(http.StatusForbidden)
+		return true
+	}
+	fmt.Fprint(w, `{"id":9123,"name":"widgets","full_name":"acme/widgets","owner":{"login":"acme"}}`)
+	return true
 }

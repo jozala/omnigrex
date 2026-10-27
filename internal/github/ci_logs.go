@@ -599,7 +599,7 @@ var maxEncodedCursorLength = len(encodeCICursor(ciCursor{
 	Version: 1, Kind: "check_annotations",
 	RepoID: 9223372036854775807, Head: strings.Repeat("a", 64),
 	ID: 9223372036854775807, Offset: 9223372036854775807,
-	Extra: strings.Repeat("\x01", MaxCIQueryLength),
+	Extra: strings.Repeat("\x01", MaxCIQueryLength), Fingerprint: strings.Repeat("a", 64),
 }))
 
 // searchPageFits probes whether a match page fits the serialized response

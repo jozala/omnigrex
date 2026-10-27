@@ -116,6 +116,9 @@ func TestPiControlledWorkflow(t *testing.T) {
 			}
 		}
 	}
+	if github.ciReads != 1 {
+		t.Fatalf("existing Reviewer CI read was not exercised: %d", github.ciReads)
+	}
 	if github.openCalls != 1 || github.reviewCalls != 1 || github.review.ID == 0 || github.review.State != "APPROVED" {
 		t.Fatalf("publication/review counts: opened=%d submitted=%d %+v", github.openCalls, github.reviewCalls, github.review)
 	}
@@ -508,6 +511,7 @@ type workflowQualificationGitHub struct {
 	bare, base         string
 	review             githubapi.Review
 	reviewCalls        int
+	ciReads            int
 	loseReviewResponse bool
 }
 
@@ -574,4 +578,26 @@ func (g *workflowQualificationGitHub) ListPullRequestReviews(context.Context, st
 
 func (*workflowQualificationGitHub) ListPullRequestFiles(context.Context, string, string, string, int) ([]githubapi.PullRequestFile, error) {
 	return nil, nil
+}
+
+func (g *workflowQualificationGitHub) DiscoverRequiredCI(_ context.Context, token, _, _, branch string) githubapi.CIInventory {
+	if token != "developer-token" {
+		return githubapi.CIInventory{Availability: githubapi.CIUnavailable}
+	}
+	return githubapi.CIInventory{Availability: githubapi.CIAvailable, Branch: branch, Requirements: []githubapi.CIRequirement{{Context: "build", Source: "classic"}}}
+}
+func (g *workflowQualificationGitHub) ObserveCI(_ context.Context, token, _, _, head string, repo int64) githubapi.CIObservation {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	if token != "developer-token" {
+		return githubapi.CIObservation{Availability: githubapi.CIUnavailable}
+	}
+	g.ciReads++
+	return githubapi.CIObservation{Availability: githubapi.CIAvailable, RepositoryID: repo, HeadSHA: head, Statuses: []githubapi.CommitStatus{{ID: 1, Context: "build", State: "failure"}}}
+}
+func (g *workflowQualificationGitHub) VerifyCITarget(_ context.Context, _, _, _ string, repo, pr int64, number int, head, _, _ string) githubapi.CITargetMapping {
+	return githubapi.CITargetMapping{RepositoryID: repo, PullRequestID: pr, PullRequestNumber: number, ReviewedHead: head, State: "head_only"}
+}
+func (*workflowQualificationGitHub) GetCheckRunMetadata(context.Context, string, string, string, int64) (githubapi.CheckRun, error) {
+	return githubapi.CheckRun{}, errors.New("unexpected check metadata read")
 }
