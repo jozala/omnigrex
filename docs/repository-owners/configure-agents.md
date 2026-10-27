@@ -68,3 +68,9 @@ Never put credentials or private endpoint secrets in a Profile.
 
 Ask the operator to run repository preflight after publishing configuration.
 Next: [Repository skills](repository-skills.md).
+
+## Set a per-Turn safety ceiling
+
+Use optional `max_steps: 100` in Profile front matter, or `max_steps: unlimited` to override a finite operator fallback.
+Omission inherits the operator setting captured when each Agent Turn is prepared.
+See [Agent Turn step budgets](../reference/agent-step-budgets.md) for the reserved tool-free summary, validation bounds, lifecycle, diagnostics, and Human Handoff behavior.

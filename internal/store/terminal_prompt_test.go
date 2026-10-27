@@ -55,3 +55,25 @@ func TestCorroborationRequiresAdmittedUnlimitedCompletion(t *testing.T) {
 		})
 	}
 }
+
+func TestBudgetPressureDoesNotDisqualifyCorroborationButExhaustionDoes(t *testing.T) {
+	for _, tc := range []struct {
+		budget    string
+		exhausted bool
+		eligible  bool
+	}{
+		{`{"limit":1,"used":1,"responses":1,"summary":true,"stopped":true,"complete":true}`, false, true},
+		{`{"limit":"unlimited","used":4,"responses":4,"summary":false,"stopped":false,"complete":true}`, false, true},
+		{`{"limit":1,"used":1,"responses":1,"summary":true,"stopped":true,"complete":false}`, false, false},
+		{`{"limit":1,"used":1,"responses":1,"summary":true,"stopped":true,"complete":true}`, true, false},
+	} {
+		raw := `{"admitted":true,"status":"completed","step_budget":` + tc.budget
+		if tc.exhausted {
+			raw += `,"step_budget_exhausted":true`
+		}
+		raw += `}`
+		if got := validCorroborationPrompt(json.RawMessage(raw), ""); got != tc.eligible {
+			t.Fatalf("eligibility %t for %s", got, raw)
+		}
+	}
+}

@@ -24,12 +24,13 @@ Unknown configuration is rejected rather than silently ignored.
 | `runtime` | `pi-rpc/v2` |
 | `model` | Exact `provider/model` supported by the image and supplied credentials |
 | `thinking` | Optional `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; vocabulary validity is distinct from model-specific support, verified against the actual Pi runtime |
+| `max_steps` | Optional positive decimal integer (1..2147483647) or `unlimited`; omission inherits the operator default; see [step budgets](agent-step-budgets.md) |
 | `permissions` | Nonempty map of supported local permission names to `allow` or `deny` |
 
 Supported local permissions are `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`, and `skill`.
 Omitted permissions default to deny; Reviewer `edit`/`write` cannot be allowed.
 MCP capabilities are authorized independently.
-Delegation, unknown Profile fields, unknown permissions, and per-step limits are unsupported.
+Delegation, unknown Profile fields, and unknown permissions are unsupported.
 Every direct lowercase Markdown child of `.omnigrex/team/` is treated as configuration.
 The current selector requires exactly one Profile per Workflow Role.
 

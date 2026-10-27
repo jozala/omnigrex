@@ -57,11 +57,11 @@ func main() {
 		case "doctor":
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction))
+			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction, os.LookupEnv))
 		case "state":
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+			os.Exit(runStateCommand(ctx, os.Args[2:], os.Getenv, os.Stdin, os.Stdout, os.Stderr, os.LookupEnv))
 		case "auth":
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -78,7 +78,7 @@ func main() {
 
 	logger := slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	slog.SetDefault(logger)
-	settings, err := config.Load(os.Getenv)
+	settings, err := config.Load(os.Getenv, os.LookupEnv)
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(2)
@@ -97,7 +97,7 @@ func main() {
 
 type doctorExecutor func(context.Context, config.Config, doctor.Repository) ([]doctor.Result, error)
 
-func runDoctorCommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, execute doctorExecutor) int {
+func runDoctorCommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, execute doctorExecutor, lookup ...func(string) (string, bool)) int {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	repositoryValue := flags.String("repository", "", "repository to validate in OWNER/REPOSITORY form")
@@ -116,7 +116,7 @@ func runDoctorCommand(ctx context.Context, args []string, getenv func(string) st
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	settings, err := config.Load(getenv)
+	settings, err := config.Load(getenv, lookup...)
 	if err != nil {
 		problems := []error{err}
 		var validation *config.ValidationError
@@ -234,6 +234,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
 	preparer := agentturn.NewPreparerWithChangeProposalVerifier(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database, githubServices.api)
+	preparer.SetDefaultMaxSteps(settings.AgentMaxSteps)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
 		LeaseDuration:     settings.AgentTurnPreparationLeaseDuration,
@@ -607,6 +608,10 @@ type loggingAgentEventSink struct {
 
 func (sink loggingAgentEventSink) Emit(ctx context.Context, event agentevent.AgentEvent) error {
 	if sink.logger == nil {
+		return nil
+	}
+	if event.Metadata.StepBudget != nil {
+		sink.logger.InfoContext(ctx, "Agent Turn step budget", "agent_participant_id", event.AssignmentID, "agent_session_id", event.AgentSessionID, "agent_turn_id", event.TurnID, "execution_epoch", event.ExecutionEpoch, "control_revision", event.ControlRevision, "limit", event.Metadata.StepBudget.Limit.String(), "used", event.Metadata.StepBudget.Used, "responses", event.Metadata.StepBudget.Responses, "summary_only", event.Metadata.StepBudget.Summary, "budget_stopped", event.Metadata.StepBudget.Stopped, "observation_complete", event.Metadata.StepBudget.Complete)
 		return nil
 	}
 	if event.Metadata.ToolCallID == "" {

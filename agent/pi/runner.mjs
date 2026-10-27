@@ -6,6 +6,7 @@ import { failureExtension } from './failure-extension.mjs';
 import { compactionCompatibilityExtension } from './compaction-compat-extension.mjs';
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
+import { stepBudget } from './step-budget.mjs';
 import { controlRuntime } from './control-events.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
@@ -65,6 +66,8 @@ async function skillPaths(enabled) {
 // In-process fixtures must isolate credentials and model files from the agent
 // running the tests. Production callers retain the disposable bootstrap path.
 export async function prepareRuntime(configuration, sessionManager, models, { agentDir = '/run/pi-agent', subscriptionFetch = fetch } = {}) {
+  // Capture the owned framed writer before RPC redirects extension stdout.
+  const write = process.stdout.write.bind(process.stdout);
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await writeFile(join(agentDir, 'auth.json'), JSON.stringify(configuration.auth), { mode: 0o600 });
   // Only the disposable controlled-provider fixture supplies models here.
@@ -77,12 +80,15 @@ export async function prepareRuntime(configuration, sessionManager, models, { ag
   }, { projectTrusted: false });
   const createRuntime = async ({ sessionManager: manager }) => {
     const subscription = configuration.subscription ? await subscriptionRuntime(configuration, agentDir, models ? join(agentDir, 'models.json') : null, subscriptionFetch) : undefined;
+    const budget = configuration.stepBudget === undefined ? undefined : stepBudget(configuration.stepBudget, (data, summary) => {
+      write(JSON.stringify({ type: 'omnigrex_step_budget', data, ...(summary ? { summary } : {}) }) + '\n');
+    });
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager, modelRuntimeSignal: AbortSignal.timeout(15000),
       modelRuntime: subscription?.runtime,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), compactionCompatibilityExtension, mcpExtension(configuration)],
+        disabledBuiltinExtensions: ['mcp'], extensionFactories: [pi => failureExtension(pi, subscription), compactionCompatibilityExtension, mcpExtension(configuration), ...(budget ? [budget.extension] : [])],
         additionalSkillPaths: skills,
         // Overrides avoid interpreting instruction text as a file path and
         // prevent even reading automatic SYSTEM/APPEND_SYSTEM sources.
@@ -100,6 +106,7 @@ export async function prepareRuntime(configuration, sessionManager, models, { ag
     const tools = [...configuration.tools, ...configuration.mcpTools.map(name => `omnigrex_${name}`)];
     const result = await createAgentSessionFromServices({ services, sessionManager: manager, model, tools,
       thinkingLevel: configuration.selection.thinking || undefined });
+    budget?.attach(result.session, tools);
     if (result.modelFallbackMessage) throw new Error('model fallback rejected');
     return { ...result, services: { ...services, subscribeProviderFailures: subscription?.subscribeFailures }, diagnostics: services.diagnostics };
   };

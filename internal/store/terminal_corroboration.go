@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 )
 
 const VerifyTerminalIntentJobKind = "VERIFY_TERMINAL_INTENT"
@@ -435,11 +436,17 @@ func validCorroborationPrompt(outcome json.RawMessage, promptError string) bool 
 		return false
 	}
 	var response map[string]json.RawMessage
-	if json.Unmarshal(outcome, &response) != nil || len(response) < 2 || len(response) > 3 {
+	if json.Unmarshal(outcome, &response) != nil || len(response) < 2 || len(response) > 4 {
 		return false
 	}
 	for key := range response {
-		if key != "admitted" && key != "status" && key != "limit_reached" {
+		if key != "admitted" && key != "status" && key != "limit_reached" && key != "step_budget" {
+			return false
+		}
+	}
+	if raw, ok := response["step_budget"]; ok {
+		b, err := stepbudget.Decode(raw)
+		if err != nil || !b.Complete {
 			return false
 		}
 	}

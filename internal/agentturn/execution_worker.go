@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -410,6 +411,9 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 				if reportErr := worker.subscription.Report(outcome.FailureGeneration, outcome.FailureClass); reportErr != nil {
 					operationErr = errors.Join(operationErr, reportErr)
 				}
+			}
+			if b := outcome.StepBudget; b != nil {
+				slog.InfoContext(promptCtx, "Agent Turn model iteration usage", "workflow_id", execution.WorkflowID, "agent_turn_id", lease.ID, "agent_session_id", execution.Session.ID, "execution_epoch", lease.ExecutionEpoch, "limit", b.Limit.String(), "used", b.Used, "responses", b.Responses, "summary_only", b.Summary, "budget_stopped", b.Stopped, "observation_complete", b.Complete, "termination_status", outcome.Status, "failure_class", outcome.FailureClass)
 			}
 			promptProviderDiagnostic = outcome.FailureDiagnostic
 			response, promptErr := normalizedPromptEvidence(outcome, promptErr)

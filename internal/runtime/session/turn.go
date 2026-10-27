@@ -11,6 +11,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -26,6 +27,7 @@ type TurnPreparation struct {
 	Session     store.AgentSession
 	State       execution.StateRef
 	Transport   io.ReadWriteCloser
+	StepBudget  *stepbudget.Limit
 	Profile     json.RawMessage
 	ProfileName string
 	Policy      role.Policy

@@ -36,11 +36,13 @@ COPY agent/pi/subscription-auth.mjs agent/pi/provider-diagnostic.mjs ./
 COPY agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/control-rpc.test.mjs agent/pi/diagnostic/control-rpc-fixture.mjs ./diagnostic/
 COPY agent/pi/diagnostic/compaction.test.mjs ./diagnostic/
 COPY agent/pi/diagnostic/compaction-compat.test.mjs ./diagnostic/
+COPY agent/pi/step-budget.mjs ./
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs
 COPY agent/pi/diagnostic/failure-boundary.test.mjs ./failure-boundary.test.mjs
 COPY agent/pi/diagnostic/subscription.test.mjs ./diagnostic/subscription.test.mjs
+COPY agent/pi/diagnostic/step-budget.test.mjs ./step-budget.test.mjs
 COPY agent/pi/diagnostic/provider-diagnostic.test.mjs ./diagnostic/provider-diagnostic.test.mjs
 COPY agent/pi/diagnostic/session-state.test.mjs ./session-state.test.mjs
 COPY --from=fixture-build /out/pi-mcp-fixture /usr/local/bin/pi-mcp-fixture

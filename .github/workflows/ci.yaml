@@ -33,6 +33,9 @@ jobs:
       - name: Run static analysis
         run: go vet ./...
 
+      - name: Run pinned dead-code gate
+        run: sh scripts/deadcode.sh go run golang.org/x/tools/cmd/deadcode@v0.50.0
+
       - name: Build test timing tool
         run: go build -o "$RUNNER_TEMP/omnigrex-test-timings" ./scripts/test-timings
 

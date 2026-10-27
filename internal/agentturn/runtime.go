@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"io"
 	"reflect"
 	"strings"
@@ -492,8 +493,15 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if !ok || stage.Role != rolePolicy.Role || !launcher.definition.AcceptsPurpose(stage.ID, execution.Turn.Purpose) {
 		return nil, ErrRuntimeBinding
 	}
+	runtimeBudget := turnConfiguration.StepBudget
+	if runtimeBudget != nil && !piresources.SupportsStepBudget(runtimeProfile.Contract().GoldenResourceContract) {
+		if runtimeBudget.Finite() {
+			return nil, fmt.Errorf("%w: finite step budget requires qualified budget-capable Runtime Profile resources", ErrRuntimeBinding)
+		}
+		runtimeBudget = nil // Historical unlimited runtime: usage remains unknown.
+	}
 	resources.sessionPreparationAttempted = true
-	prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Participant.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
+	prepared, prepareErr := adapter.Prepare(ctx, session.TurnPreparation{StepBudget: runtimeBudget, Lease: request.Lease, Session: execution.Session, State: stateRef, Transport: transport, Profile: execution.Turn.AgentProfileConfig, ProfileName: execution.Participant.AgentProfileName, Policy: rolePolicy, Stage: stage, Purpose: execution.Turn.Purpose, Operator: launcher.operatorInstructions, MCP: registration.Server, Credentials: request.ProviderCredentialJSON})
 	resources.agent = prepared
 	if prepareErr != nil {
 		return nil, fmt.Errorf("prepare Agent Session: %w", prepareErr)

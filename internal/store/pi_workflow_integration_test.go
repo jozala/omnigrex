@@ -32,6 +32,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -119,6 +120,45 @@ func TestPiControlledWorkflow(t *testing.T) {
 		t.Fatalf("publication/review counts: opened=%d submitted=%d %+v", github.openCalls, github.reviewCalls, github.review)
 	}
 	t.Log("PASS: production Pi launch, fenced MCP publication, native Reviewer review and durable human-review transition")
+	// These subtests are deliberately part of the existing both-backend CI
+	// selection, not a new test name omitted by qualification regex filters.
+	for _, value := range []string{"1", "3", "5"} {
+		t.Run("step-budget-"+value, func(t *testing.T) {
+			bounded := newPiWorkflowFixture(t, "")
+			limit, _ := stepbudget.Parse(value)
+			bounded.preparer.SetDefaultMaxSteps(limit)
+			prepared := bounded.prepare(t)
+			processed, err := bounded.worker.ProcessNext(bounded.ctx)
+			if err != nil || !processed {
+				t.Fatalf("bounded execution: %t %v", processed, err)
+			}
+			wanted := workflow.StateNeedsHuman
+			if value == "5" {
+				wanted = workflow.StateReviewing
+			}
+			bounded.assertState(t, wanted)
+			var outcome []byte
+			if err := bounded.pool(t).QueryRow(bounded.ctx, "SELECT outcome FROM agent_turns WHERE id=$1", prepared.Commit.Turn.ID).Scan(&outcome); err != nil {
+				t.Fatal(err)
+			}
+			var evidence struct {
+				Budget    stepbudget.Observation `json:"step_budget"`
+				Exhausted bool                   `json:"step_budget_exhausted"`
+			}
+			if err := json.Unmarshal(outcome, &evidence); err != nil {
+				t.Fatal(err)
+			}
+			if evidence.Budget.Used != uint64(limit.Steps()) || !evidence.Budget.Summary || !evidence.Budget.Stopped || !evidence.Budget.Complete || evidence.Exhausted != (value != "5") {
+				t.Fatalf("budget settlement %s", outcome)
+			}
+			if value != "5" {
+				if next, err := bounded.worker.ProcessNext(bounded.ctx); err != nil || next {
+					t.Fatalf("exhaustion retried: %t %v", next, err)
+				}
+			}
+		})
+	}
+
 }
 
 // Both backends run the real environment bootstrap from the working checkout.

@@ -13,6 +13,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 )
 
 func TestPiConfigurationAndRoleAuthority(t *testing.T) {
@@ -45,6 +46,9 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 		{"compact control event boundaries", role.Developer, "configuration-audit", "control-boundary"},
 		{"native compaction boundaries", role.Developer, "configuration-audit", "compaction-boundary"},
 		{"durable file safety boundaries", role.Developer, "configuration-audit", "session-boundary"},
+		{"step budget SDK boundaries", role.Developer, "configuration-audit", "budget-boundary"},
+		{"production budget 1", role.Developer, "configuration-budget", "budget-1"},
+		{"production budget N", role.Developer, "configuration-budget", "budget-3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -85,6 +89,11 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_MCP_BOUNDARY_FIXTURE=1")
 			case "failure-boundary":
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_FAILURE_BOUNDARY_FIXTURE=1")
+			case "budget-1", "budget-3":
+				limit, _ := stepbudget.Parse(tc.corrupt[len("budget-"):])
+				inputs.StepBudget = &limit
+			case "budget-boundary":
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_BUDGET_BOUNDARY_FIXTURE=1")
 			case "session-boundary":
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_SESSION_BOUNDARY_FIXTURE=1")
 			}
@@ -112,7 +121,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = c.Close() }()
-			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "control-boundary" && tc.corrupt != "compaction-boundary" {
+			if tc.corrupt != "" && tc.corrupt != "skills-off" && tc.corrupt != "no-local-tools" && tc.corrupt != "retained" && tc.corrupt != "mcp-redirect" && tc.corrupt != "failure-boundary" && tc.corrupt != "session-boundary" && tc.corrupt != "control-boundary" && tc.corrupt != "compaction-boundary" && tc.corrupt != "budget-boundary" && tc.corrupt != "budget-1" && tc.corrupt != "budget-3" {
 				if _, err := c.Prepare(ctx); !errors.Is(err, pi.ErrConfiguration) {
 					t.Fatalf("invalid preparation did not report a configuration failure: %v", err)
 				}
@@ -136,8 +145,17 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 					}
 					got, err = c.Prompt(ctx, "configuration-provider-error-audit", nil)
 				}
+				if inputs.StepBudget != nil && (got.StepBudget == nil || !got.StepBudget.Stopped || !got.StepBudget.Complete || got.StepBudget.Used != uint64(inputs.StepBudget.Steps())) {
+					t.Fatalf("budget outcome = %+v; evidence=%+v error=%v; stderr: %s", got, got.StepBudget, err, stderr.String())
+				}
 				if err != nil || got.Status != agent.Completed {
 					t.Fatalf("prompt: %+v %v; stderr: %s", got, err, stderr.String())
+				}
+				if inputs.StepBudget != nil {
+					next, err := c.Prompt(ctx, "configuration-budget-audit", nil)
+					if err != nil || next.Status != agent.Completed || next.StepBudget == nil || next.StepBudget.Used != 1 || !next.StepBudget.Complete || next.StepBudget.Summary != (inputs.StepBudget.Steps() == 1) {
+						t.Fatalf("continued budget/audit: %+v %v; stderr: %s", next, err, stderr.String())
+					}
 				}
 			}
 		})

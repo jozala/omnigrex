@@ -15,6 +15,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/agentevent"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 )
 
 const maxRecordBytes = 1 << 20
@@ -22,6 +23,7 @@ const queueCapacity = 128
 const maxRequests = 32
 
 type Options struct {
+	StepBudget        *stepbudget.Limit
 	EventContext      agentevent.Context
 	Logger            *slog.Logger
 	ExpectedSessionID string
@@ -79,6 +81,8 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
+	budget            *stepbudget.Observation
+	budgetSummary     string
 	events            chan agentevent.AgentEvent
 	settled           chan struct{}
 	settledOK         bool
@@ -98,6 +102,10 @@ type turn struct {
 // Connect starts reading immediately, including events emitted before a waiter.
 // No raw protocol objects, messages, provider errors, or stderr escape the adapter.
 func Connect(transport io.ReadWriteCloser, options Options) agent.Connection {
+	if options.StepBudget != nil {
+		copy := *options.StepBudget
+		options.StepBudget = &copy
+	}
 	if options.Selection != nil {
 		selection := *options.Selection
 		options.Selection = &selection
@@ -337,8 +345,20 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		return agent.Outcome{Status: agent.Rejected}, err
 	}
 	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), settled: make(chan struct{})}
+	if c.options.StepBudget != nil {
+		t.budget = &stepbudget.Observation{Limit: *c.options.StepBudget}
+	}
 	c.active = t
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if t.budget != nil {
+			copy := *t.budget
+			outcome.StepBudget = &copy
+			outcome.BudgetSummary = t.budgetSummary
+		}
+	}()
 	defer func() { c.mu.Lock(); c.active = nil; c.mu.Unlock() }()
 	if sink == nil {
 		sink = agentevent.NoopSink{}
@@ -648,6 +668,7 @@ func (c *connection) record(content []byte) error {
 		SessionID    string          `json:"sessionId"`
 		Disposition  string          `json:"disposition"`
 		Capabilities json.RawMessage `json:"capabilities"`
+		Summary      string          `json:"summary"`
 	}
 	if json.Unmarshal(content, &record) != nil || record.Type == "" {
 		return agent.ErrProtocol
@@ -692,6 +713,25 @@ func (c *connection) record(content []byte) error {
 	}
 	status := "running"
 	switch record.Type {
+	case "omnigrex_step_budget":
+		observation, err := stepbudget.Decode(record.Data)
+		if err != nil || c.options.StepBudget == nil || observation.Limit != *c.options.StepBudget || len(record.Summary) > 2048 {
+			return agent.ErrProtocol
+		}
+		if old := t.budget; old != nil && (old.Complete || observation.Used < old.Used || observation.Responses < old.Responses || old.Summary && !observation.Summary || old.Stopped && !observation.Stopped) {
+			return agent.ErrProtocol
+		}
+		t.budget = &observation
+		t.budgetSummary = record.Summary
+		event := c.eventLocked("step_budget", "running", "")
+		copy := observation
+		event.Metadata.StepBudget = &copy
+		select {
+		case t.events <- event:
+		default:
+			return agent.ErrBackpressure
+		}
+		return nil
 	case "omnigrex_provider_request_failed":
 		// Native summary calls do not emit conversational message_end. This
 		// owned request observation is diagnostic only, never settlement proof.
@@ -809,8 +849,20 @@ func (c *connection) record(content []byte) error {
 		return nil
 	case "agent_settled":
 		outcome := agent.Outcome{Admitted: true, FailureDiagnostic: t.lastDiagnostic}
-		// Preserve native compaction cancellation authority; a request to cancel
-		// alone is not proof that a completed run was aborted.
+		if c.options.StepBudget != nil && (t.budget == nil || !t.budget.Complete) {
+			return agent.ErrProtocol
+		}
+		if t.budget != nil {
+			success := t.lastReason == "stop" || t.lastReason == "toolUse"
+			if t.budget.Stopped != (t.budget.Summary && success) {
+				return agent.ErrProtocol
+			}
+			copy := *t.budget
+			outcome.StepBudget = &copy
+			outcome.BudgetSummary = t.budgetSummary
+		}
+		// A budget stop is not cancellation evidence. Preserve the native
+		// receipt's authority even when cancellation races a reserved summary.
 		if t.compactionAborted || t.retryCancelled || t.cancelRequested && record.Aborted {
 			outcome.Status = agent.Aborted
 		} else if t.compactionFailed {
@@ -821,6 +873,11 @@ func (c *connection) record(content []byte) error {
 			case "stop", "length":
 				outcome.Status = agent.Completed
 				outcome.LimitReached = t.lastReason == "length"
+			case "toolUse":
+				if t.budget == nil || !t.budget.Stopped {
+					return agent.ErrProtocol
+				}
+				outcome.Status = agent.Completed
 			case "error":
 				outcome.Status, outcome.FailureClass = agent.Failed, "provider_failure"
 				if t.lastFailure != "" {

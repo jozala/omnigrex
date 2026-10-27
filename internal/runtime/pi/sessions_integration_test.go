@@ -20,6 +20,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/docker"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
+	"github.com/jozala/omnigrex/internal/stepbudget"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -62,6 +63,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			inputs.StepBudget = &stepbudget.Limit{}
 			start := func(epoch int64, mustExist bool) (agent.Connection, func()) {
 				t.Helper()
 				key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
@@ -127,8 +129,8 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 				t.Fatalf("multi-megabyte normal completion: %+v %v", outcome, err)
 			}
 			outcome, err = recovered.Prompt(ctx, "configuration-audit", nil)
-			if err != nil || outcome.Status != agent.Completed {
-				t.Fatalf("first prompt: %+v %v", outcome, err)
+			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
+				t.Fatalf("first prompt: %+v evidence=%+v %v", outcome, outcome.StepBudget, err)
 			}
 			removeRecovered()
 			continued, removeContinued := start(3, true)
@@ -165,7 +167,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 				t.Fatalf("cursor replay: %+v %v", got, err)
 			}
 			outcome, err = continued.Prompt(ctx, "configuration-continuation", nil)
-			if err != nil || outcome.Status != agent.Completed {
+			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
 				t.Fatalf("continued context or provider-free replay: %+v %v", outcome, err)
 			}
 			_, err = continued.Replay(ctx, agent.HistoryCursor{RuntimeSessionID: uuid.NewString()}, sink)

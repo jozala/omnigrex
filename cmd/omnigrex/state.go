@@ -19,7 +19,7 @@ import (
 
 // state export/restore operates on an offline Participant Session-data artifact.
 // Standard coordinated backups additionally retain PostgreSQL and captures.
-func runStateCommand(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+func runStateCommand(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, lookup ...func(string) (string, bool)) int {
 	flags := flag.NewFlagSet("state", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	participant := flags.String("participant", "", "exact Agent Participant UUID")
@@ -54,7 +54,7 @@ func runStateCommand(ctx context.Context, args []string, getenv func(string) str
 		}
 	})
 	defer stopIO()
-	settings, err := config.Load(getenv)
+	settings, err := config.Load(getenv, lookup...)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1

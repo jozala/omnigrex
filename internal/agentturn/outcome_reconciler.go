@@ -261,6 +261,12 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		secrets = append(secrets, request.RepositoryCredential, request.ReviewerRepositoryCredential)
 		secrets = append(secrets, freshCredentials...)
 		observation = reconciler.sanitizeObservation(observation, secrets)
+		if reconciler.logger != nil && request.PromptResponse != nil && request.PromptResponse.StepBudget != nil {
+			b := request.PromptResponse.StepBudget
+			var evidence agent.OutcomeEvidence
+			_ = json.Unmarshal(observation.Completion.Outcome, &evidence)
+			reconciler.logger.InfoContext(ctx, "Agent Turn step budget settlement", "workflow_id", request.Execution.WorkflowID, "agent_turn_id", request.Lease.ID, "agent_session_id", request.Lease.AgentSessionID, "execution_epoch", request.Lease.ExecutionEpoch, "limit", b.Limit.String(), "used", b.Used, "responses", b.Responses, "observation_complete", b.Complete, "summary_only", b.Summary, "step_budget_exhausted", evidence.StepBudgetExhausted, "domain_outcome", observation.Outcome, "termination_status", observation.Completion.Status)
+		}
 	}()
 	observedAt := reconciler.clock.Now().UTC()
 	if observedAt.IsZero() {
@@ -301,12 +307,26 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 				}
 			}
 		}
+		if stepBudgetExhausted(request) {
+			return budgetExhaustionObservation(observedAt, promptOutcome, request, "required terminal evidence is absent"), nil
+		}
 		if promptDiagnostic != "" {
 			return infrastructureObservation(observedAt, promptTerminalStatus(request), promptOutcome, promptDiagnostic), nil
 		}
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "Agent prompt ended without a successful terminal mutation intent"), nil
 	}
 	intent := intents[0]
+	// Missing observations are not positive evidence of unfinished work. Keep
+	// existing corroboration recovery (and its callback) authoritative even
+	// when the conversational allowance ended at a successful summary.
+	corroborationUnavailable := false
+	onCorroborationFailure := request.OnCorroborationFailure
+	request.OnCorroborationFailure = func(failure TerminalCorroborationFailure) {
+		corroborationUnavailable = true
+		if onCorroborationFailure != nil {
+			onCorroborationFailure(failure)
+		}
+	}
 	var result store.AgentTurnSettlementObservation
 	if intent.ToolName == mcp.ToolReportBlocked {
 		result = blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID)
@@ -367,6 +387,9 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		default:
 			return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "mutation ledger contains an unsupported terminal evidence kind"), nil
 		}
+	}
+	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && !corroborationUnavailable && stepBudgetExhausted(request) {
+		return budgetExhaustionObservation(observedAt, promptOutcome, request, result.Diagnostic), nil
 	}
 	if result.Outcome == workflow.TurnOutcomeInfrastructureFailed && request.PromptError != "" {
 		result.Completion.Status = promptTerminalStatus(request)
@@ -1113,11 +1136,7 @@ func encodedPromptOutcome(response *agent.Outcome) json.RawMessage {
 	if response == nil {
 		return nil
 	}
-	encoded, _ := json.Marshal(struct {
-		Admitted     bool         `json:"admitted"`
-		Status       agent.Status `json:"status"`
-		LimitReached bool         `json:"limit_reached,omitempty"`
-	}{response.Admitted, response.Status, response.LimitReached})
+	encoded, _ := json.Marshal(agent.OutcomeEvidence{Admitted: response.Admitted, Status: response.Status, LimitReached: response.LimitReached, StepBudget: response.StepBudget})
 	return encoded
 }
 
@@ -1285,6 +1304,26 @@ func containsAnyCredentialInReview(review *workflow.ReviewIdentity, fresh *[]str
 
 func containsCredential(value, credential string) bool {
 	return credential != "" && strings.Contains(value, credential)
+}
+
+// Summary pressure is not failure. Only positive, complete, successful budget
+// settlement can classify incomplete work as exhaustion rather than transport,
+// provider, cancellation, token limit, or uncertain failure.
+func stepBudgetExhausted(request OutcomeReconciliation) bool {
+	r := request.PromptResponse
+	return request.PromptError == "" && r != nil && r.Admitted && r.Status == agent.Completed && !r.LimitReached && r.StepBudget != nil && r.StepBudget.Valid() && r.StepBudget.Complete && r.StepBudget.Stopped
+}
+func budgetExhaustionObservation(at time.Time, outcome json.RawMessage, request OutcomeReconciliation, reason string) store.AgentTurnSettlementObservation {
+	b := request.PromptResponse.StepBudget
+	diagnostic := fmt.Sprintf("step_budget_exhausted: limit=%s used=%d responses=%d complete=true; %s", b.Limit.String(), b.Used, b.Responses, reason)
+	if summary := strings.TrimSpace(request.PromptResponse.BudgetSummary); summary != "" {
+		diagnostic += "; agent summary: " + summary
+	}
+	var evidence agent.OutcomeEvidence
+	_ = json.Unmarshal(outcome, &evidence)
+	evidence.StepBudgetExhausted = true
+	outcome, _ = json.Marshal(evidence)
+	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
 }
 
 // Do not append arbitrary PromptDiagnostic to prerequisite Human Handoffs.

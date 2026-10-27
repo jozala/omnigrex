@@ -5,6 +5,7 @@ RUN go mod download
 COPY cmd/omnigrex-environment ./cmd/omnigrex-environment
 COPY internal/runtime/environment ./internal/runtime/environment
 COPY internal/turnconfig ./internal/turnconfig
+COPY internal/stepbudget ./internal/stepbudget
 COPY agent/pi ./agent/pi
 RUN CGO_ENABLED=0 go build -trimpath -o /out/omnigrex-environment ./cmd/omnigrex-environment
 
