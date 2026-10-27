@@ -1091,7 +1091,7 @@ WHERE job.id = $1 AND source.id = $2 AND source.workflow_id = $3
 				return ErrWorkflowDecisionInvalid
 			}
 			if _, err := tx.Exec(ctx, `
-UPDATE agent_participants SET status = 'ACTIVE', updated_at = clock_timestamp()
+UPDATE agent_participants SET status = 'ACTIVE', waiting_handoff_attempt_id = NULL, updated_at = clock_timestamp()
 WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
   AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL`, jobID); err != nil {
 				return err
@@ -1108,8 +1108,8 @@ WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
 			if _, err := tx.Exec(ctx, `
 UPDATE agent_participants
 SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID); err != nil {
+    waiting_handoff_attempt_id = $2, updated_at = clock_timestamp()
+WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID, nullableString(currentAttemptID(decision.Snapshot))); err != nil {
 				return fmt.Errorf("mark current Agent Assignments waiting for Human Handoff: %w", err)
 			}
 			if decision.Snapshot.CurrentAttempt != nil {
