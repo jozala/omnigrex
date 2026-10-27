@@ -31,6 +31,12 @@ func evidenceBackend(t *testing.T) (*mcp.ProductionBackend, mcp.ToolScope, *atom
 		}
 		root := "/repos/acme/widgets"
 		switch {
+		case r.URL.Path == root:
+			id := 9123
+			if mode.Load() == 14 {
+				id = 999
+			}
+			fmt.Fprintf(w, `{"id":%d,"name":"widgets","full_name":"acme/widgets","owner":{"login":"acme"}}`, id)
 		case r.URL.Path == root+"/pulls/23":
 			head := ciRegressionHead
 			prID := 654
@@ -209,5 +215,18 @@ func TestActionsReportedHeadIsNotRewrittenToMergeCheckout(t *testing.T) {
 	var excerpt githubapi.CILogExcerpt
 	if json.Unmarshal(raw, &excerpt) != nil || excerpt.HeadSHA != ciRegressionHead {
 		t.Fatalf("reported identity was rewritten: %s", raw)
+	}
+}
+
+func TestCIReadsRejectReusedRepositoryNameWithDifferentIdentity(t *testing.T) {
+	backend, scope, mode := evidenceBackend(t)
+	mode.Store(14)
+	for _, tool := range []struct{ name, args string }{
+		{mcp.ToolGetCheckRuns, `{}`}, {mcp.ToolGetCheckRunDiagnostics, `{"check_run_id":501}`}, {mcp.ToolListCIRuns, `{}`}, {mcp.ToolGetCIRun, `{"run_id":601}`}, {mcp.ToolGetCIJobLogs, `{"job_id":701}`}, {mcp.ToolSearchCIJobLogs, `{"job_id":701,"query":"FAIL"}`},
+	} {
+		_, err := backend.Execute(context.Background(), mcp.Invocation{Name: tool.name, Arguments: json.RawMessage(tool.args), Scope: scope, Class: mcp.ReadTool})
+		if err == nil || !strings.Contains(err.Error(), "scope_rejected") {
+			t.Fatalf("%s accepted a different repository ID at the scoped name: %v", tool.name, err)
+		}
 	}
 }

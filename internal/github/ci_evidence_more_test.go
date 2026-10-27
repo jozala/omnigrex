@@ -172,3 +172,28 @@ func TestRulesetOnlyProtectionDistinguishesExplicitAbsenceFromInaccessibleClassi
 		})
 	}
 }
+
+func TestObserverRejectsRepositoryIdentityBeforeCollectingCI(t *testing.T) {
+	client, done := ciClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/widgets" {
+			t.Errorf("fetched CI from unrelated repository: %s", r.URL.Path)
+			http.Error(w, "unexpected", 500)
+			return
+		}
+		fmt.Fprint(w, `{"id":99,"name":"widgets","full_name":"acme/widgets","owner":{"login":"acme"}}`)
+	}))
+	defer done()
+	observed := client.ObserveCI(context.Background(), "token", "acme", "widgets", ciHeadSHA, 1)
+	if observed.Availability != githubapi.CIUnavailable || len(observed.Failures) != 1 || observed.Failures[0].Operation != "repository" {
+		t.Fatalf("observation=%+v", observed)
+	}
+	results := githubapi.MatchRequiredCI(githubapi.CIInventory{Availability: githubapi.CIAvailable, Requirements: []githubapi.CIRequirement{{Context: "build"}}}, observed)
+	if len(results) == 0 {
+		t.Fatal("missing unavailable results")
+	}
+	for _, result := range results {
+		if result.State != githubapi.CIResultUnavailable {
+			t.Fatalf("unavailable repository became missing CI: %+v", results)
+		}
+	}
+}

@@ -20,6 +20,7 @@ Preserve every source and App constraint; unsupported workflows and unknown rule
 Legacy statuses do not prove an integration App identity.
 Select the newest resource per context/producer without turning terminal non-success into success.
 
+Verify the current repository identity for every CI tool path, including head-only reads, rather than treating a reusable repository name as its immutable ID.
 Derive additional CI read access only after verifying the same PR identity and reviewed head, its observed base repository and branch, the current base tip, and the test-merge commit's ordered base/head parents.
 Reobserve the PR mapping before granting access and repeat verification for each diagnostic request.
 Reject queue/group Actions sources and inconsistent repository, parent, attempt or continuation metadata.

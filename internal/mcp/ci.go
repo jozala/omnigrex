@@ -184,6 +184,19 @@ func (backend *ProductionBackend) ciCredential(ctx context.Context, scope ToolSc
 	if err != nil {
 		return "", newCIDiagnosticError(CIDiagnosticUnavailable, "unavailable", 0, "")
 	}
+	// Names can be reused after a transfer/deletion. A commit SHA and a
+	// repository-relative resource ID do not establish repository identity.
+	if api, ok := backend.github.(interface {
+		GetRepository(context.Context, string, string, string) (githubapi.InstallationRepository, error)
+	}); ok {
+		repository, callErr := api.GetRepository(ctx, credential, scope.Repository.Owner, scope.Repository.Name)
+		if callErr != nil {
+			return "", mapCIError(callErr)
+		}
+		if repository.ID != scope.Repository.ID {
+			return "", newCIDiagnosticError(CIDiagnosticScopeRejected, "scope_rejected", 0, "")
+		}
+	}
 	return credential, nil
 }
 

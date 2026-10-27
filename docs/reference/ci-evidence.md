@@ -70,6 +70,8 @@ Changed head, base or merge mapping invalidates alternative access, including ol
 Historical response provenance remains historical; it is not proof for a newer merge candidate and cannot authorize new reads after invalidation.
 A frozen Reviewer cannot follow a new PR head through these tools.
 
+All CI tool paths first verify the current repository ID at the scoped owner/name, so a transferred or deleted repository name cannot authorize reads from a different repository with the same commit SHA.
+`ObserveCI` also verifies repository identity for direct controller consumers.
 `get_check_run_diagnostics`, `get_ci_run`, whole-job logs and log search authorize the resource's actual reported commit against this mapping before returning diagnostics.
 Job paths validate the parent run even when the job reports a head, and reject conflicting repository, source, head or attempt metadata.
 Distinct test-merge Actions resources must report the scoped repository and `pull_request` event; missing producer/source identity cannot prove alternate authority.

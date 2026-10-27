@@ -358,6 +358,15 @@ func (client *APIClient) GetCommitStatuses(ctx context.Context, token, owner, re
 // Observation deliberately accepts no inventory and never rediscovers policy.
 func (client *APIClient) ObserveCI(ctx context.Context, token, owner, repository, head string, repoID int64) CIObservation {
 	observed := CIObservation{Availability: CIAvailable, RepositoryID: repoID, HeadSHA: head, ObservedAt: time.Now().UTC(), Checks: []CheckRun{}, Statuses: []CommitStatus{}, Failures: []CIEvidenceFailure{}}
+	identity, identityErr := client.GetRepository(ctx, token, owner, repository)
+	if identityErr != nil || identity.ID != repoID {
+		observed.Availability = CIUnavailable
+		if identityErr == nil {
+			identityErr = fmt.Errorf("%w: repository identity mismatch", ErrInvalidAPIResponse)
+		}
+		observed.Failures = append(observed.Failures, evidenceFailure("repository", identityErr))
+		return observed
+	}
 	var err error
 	observed.Checks, err = client.GetCheckRuns(ctx, token, owner, repository, head)
 	if err != nil {
@@ -382,8 +391,11 @@ func (client *APIClient) ObserveCI(ctx context.Context, token, owner, repository
 func MatchRequiredCI(inventory CIInventory, observed CIObservation) []CIRequirementResult {
 	results := make([]CIRequirementResult, 0)
 	failed := func(source string) bool {
+		if observed.Availability == CIUnavailable || observed.Availability == CIPartial && len(observed.Failures) == 0 {
+			return true
+		}
 		for _, failure := range observed.Failures {
-			if failure.Operation == source {
+			if failure.Operation == source || failure.Operation == "repository" {
 				return true
 			}
 		}
