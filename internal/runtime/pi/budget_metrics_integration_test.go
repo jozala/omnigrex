@@ -19,7 +19,7 @@ import (
 
 // Shared by configuration and retained-Session tests selected on both backends.
 // The only exporter is in the controller test process, never inside Pi.
-func budgetMetricExport(t *testing.T) func(uint64, bool, bool) {
+func budgetMetricExport(t *testing.T) func(uint64, uint64, bool, bool) {
 	t.Helper()
 	received := make(chan *collector.ExportMetricsServiceRequest, 10)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +58,7 @@ func budgetMetricExport(t *testing.T) func(uint64, bool, bool) {
 		})
 	}
 	t.Cleanup(stop)
-	return func(used uint64, finite, summary bool) {
+	return func(used, turns uint64, finite, summary bool) {
 		t.Helper()
 		stop()
 		select {
@@ -70,7 +70,13 @@ func budgetMetricExport(t *testing.T) func(uint64, bool, bool) {
 						names[m.Name] = true
 						if m.Name == "omnigrex.agent_turn.model_iterations" {
 							points := m.GetHistogram().DataPoints
-							if len(points) != 1 || points[0].GetSum() != float64(used) || points[0].Count != 1 {
+							var sum float64
+							var count uint64
+							for _, point := range points {
+								sum += point.GetSum()
+								count += point.Count
+							}
+							if sum != float64(used) || count != turns {
 								t.Fatalf("incorrect usage instrument: %v", m)
 							}
 						}

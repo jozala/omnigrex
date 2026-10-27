@@ -53,6 +53,8 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 		factory = docker.ExecutionFactory{Network: "none", WorkspaceVolume: volume, RuntimeStateVolume: volume, MiseVolume: volume}
 	}
 	ledger := conformance.NewLedger()
+	verifyBudget := budgetMetricExport(t)
+	t.Cleanup(func() { verifyBudget(2, 2, false, false) })
 	for _, roleID := range []role.ID{role.Developer, role.Reviewer} {
 		t.Run(string(roleID), func(t *testing.T) {
 			t.Parallel()
@@ -139,8 +141,7 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			if err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
 				t.Fatalf("continuation: %+v %v", ready, err)
 			}
-			verifyBudget := budgetMetricExport(t)
-			observer := telemetry.NewAgentTurnObserver("DEVELOPER", nil, nil)
+			observer := telemetry.NewAgentTurnObserver(string(roleID), nil, nil)
 			sink := &historySink{}
 			replaySink := historySinkFunc(func(ctx context.Context, event agentevent.AgentEvent) error {
 				if err := observer.Emit(ctx, event); err != nil {
@@ -177,7 +178,6 @@ func TestPiDurableSessionsAcrossFreshEnvironments(t *testing.T) {
 			}
 			outcome, err = continued.Prompt(ctx, "configuration-continuation", observer)
 			observer.Finish(ctx, outcome.StepBudget, "completed")
-			verifyBudget(1, false, false)
 			if err != nil || outcome.Status != agent.Completed || outcome.StepBudget == nil || outcome.StepBudget.Used != 1 || !outcome.StepBudget.Complete || outcome.StepBudget.Summary || outcome.StepBudget.Limit.Finite() {
 				t.Fatalf("continued context or provider-free replay: %+v %v", outcome, err)
 			}

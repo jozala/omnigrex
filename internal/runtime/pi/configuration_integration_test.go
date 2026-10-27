@@ -139,7 +139,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				if _, err := c.Prepare(ctx); err != nil {
 					t.Fatalf("prepare: %v; stderr: %s", err, stderr.String())
 				}
-				var verifyBudget func(uint64, bool, bool)
+				var verifyBudget func(uint64, uint64, bool, bool)
 				if inputs.StepBudget != nil {
 					verifyBudget = budgetMetricExport(t)
 				}
@@ -147,7 +147,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				got, err := c.Prompt(ctx, tc.prompt, observer)
 				observer.Finish(ctx, got.StepBudget, "completed")
 				if verifyBudget != nil {
-					verifyBudget(uint64(inputs.StepBudget.Steps()), true, true)
+					verifyBudget(uint64(inputs.StepBudget.Steps()), 1, true, true)
 				}
 				if tc.prompt == "configuration-provider-error" || tc.prompt == "configuration-provider-stream-error" {
 					if err != nil || !got.Admitted || got.Status != agent.Failed || got.FailureClass != "provider_failure" {
