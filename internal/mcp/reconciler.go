@@ -104,6 +104,11 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 	}
 
 	switch mutation.ToolName {
+	case ToolRefreshDefaultBranch:
+		// Local installation has no externally discoverable receipt. A partial
+		// ref or pack is not fresh observation evidence; never refetch or bind
+		// an interrupted operation to a newer base during recovery.
+		return unresolvedReconciliation(), nil
 	case ToolPublishChanges:
 		return reconciler.reconcilePublication(ctx, reconciliation, mutation)
 	case ToolOpenPR:
@@ -650,7 +655,7 @@ func retiredRoleRecoveryAuthority(roleID role.ID, tool string) (role.CredentialA
 	switch tool {
 	case ToolSubmitReview:
 		return role.ReviewerAuthority, true
-	case ToolPublishChanges, ToolOpenPR, ToolCommentOnIssue, ToolCommentOnPullRequest, ToolRequestReview, ToolReportBlocked:
+	case ToolRefreshDefaultBranch, ToolPublishChanges, ToolOpenPR, ToolCommentOnIssue, ToolCommentOnPullRequest, ToolRequestReview, ToolReportBlocked:
 		return role.OrchestratorAuthority, true
 	default:
 		return "", false

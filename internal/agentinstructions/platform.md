@@ -26,3 +26,10 @@ Git identity is configured during workspace preparation.
 `open_pr` creates a new Pull Request; it does not edit an already bound PR.
 `request_review` publishes its supplied summary to the PR before recording a successful handoff, including after requested changes.
 Supply concise changes, observed verification commands/results, and material limitations; omit empty sections and do not duplicate the summary with a separate comment.
+
+Use `refresh_default_branch` to acquire current default-branch Git objects through the controller; do not fetch GitHub directly or reuse workspace preparation during a Turn.
+The capability only adds Git objects and an immutable snapshot ref, including for a Reviewer; it does not authorize source edits, publication, or a change to the reviewed head.
+Use a new operation ID for a fresh observation: replay returns the original result and observation time, not renewed freshness.
+A `current` result identifies a verified snapshot at its returned observation times, not a promise that the branch cannot subsequently move.
+A `stale` result provides the acquired snapshot but requires a new call for final freshness; `default_branch_changed` must not silently rebind Turn authority.
+An `unavailable` result or unresolved/failed call is not freshness or mergeability evidence; use existing blocker handling when required verification cannot be established safely.

@@ -55,6 +55,27 @@ try {
       name = 'omnigrex_get_issue'; args = {};
     } else if (fault === 'long-blocked') {
       if (step === 0) { name = 'omnigrex_report_blocked'; args = { operation_id: 'controlled-blocked', reason: 'Controlled prerequisite unavailable', details: 'Synthetic long-Turn blocked completion.' }; }
+    } else if (fault === 'default-branch-refresh') {
+      if (!names.includes('omnigrex_refresh_default_branch')) throw new Error('refresh missing from production MCP discovery');
+      const check = index => {
+        const snapshot = result(index);
+        if (snapshot.status !== 'current' || !/^[0-9a-f]{40}$/.test(snapshot.sha) || !/^refs\/omnigrex\/default\/[0-9a-f]{64}$/.test(snapshot.ref)) throw new Error('missing fresh snapshot');
+        return `git cat-file -e ${snapshot.sha}^{commit} && git merge-base HEAD ${snapshot.ref} && git merge-tree --write-tree HEAD ${snapshot.ref}`;
+      };
+      if (role === 'DEVELOPER') {
+        if (step === 0) { name = 'bash'; args = { command: "printf 'one\n' > feature.txt; git add feature.txt; git commit -m 'Controlled change'" }; }
+        if (step === 1) { name = 'omnigrex_refresh_default_branch'; args = { operation_id: 'initial-base' }; }
+        if (step === 2) { name = 'bash'; args = { command: `${check(1)} && git merge --no-edit ${result(1).ref} && printf SNAPSHOT_VERIFIED` }; }
+        if (step === 3) { if (!text(results[2].content).includes('SNAPSHOT_VERIFIED')) throw new Error('Developer local verification failed'); name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }
+        if (step === 4) { name = 'omnigrex_open_pr'; args = { operation_id: 'controlled-open', title: 'Controlled refresh', body: 'Verified current default branch.' }; }
+        if (step === 5) { name = 'omnigrex_refresh_default_branch'; args = { operation_id: 'final-base' }; }
+        if (step === 6) { name = 'bash'; args = { command: `${check(5)} && printf SNAPSHOT_VERIFIED` }; }
+        if (step === 7) { if (!text(results[6].content).includes('SNAPSHOT_VERIFIED')) throw new Error('final local verification failed'); name = 'omnigrex_request_review'; args = { operation_id: 'controlled-handoff', summary: 'Acquired and locally checked current default snapshot.' }; }
+      } else {
+        if (step === 0) { name = 'omnigrex_refresh_default_branch'; args = { operation_id: 'review-base' }; }
+        if (step === 1) { name = 'bash'; args = { command: `test "$(git rev-parse HEAD)" = "${envelope.current_head_sha}" && ${check(0)} && test -z "$(git status --porcelain)" && printf SNAPSHOT_VERIFIED` }; }
+        if (step === 2) { if (!text(results[1].content).includes('SNAPSHOT_VERIFIED')) throw new Error('Reviewer local verification failed'); name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'Current default snapshot verified locally.', comments: [] }; }
+      }
     } else if (role === 'DEVELOPER') {
       if (step === 0) { name = 'bash'; args = { command: "printf 'one\\n' > feature.txt; git add feature.txt; git commit -m 'Add first change'; printf 'two\\n' >> feature.txt; git add feature.txt; git commit -m 'Complete change'" }; }
       if (step === 1) { name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }

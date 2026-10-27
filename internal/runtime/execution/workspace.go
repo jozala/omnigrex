@@ -51,3 +51,19 @@ type CaptureLedger interface {
 	LoadCapture(context.Context, CaptureRequest) (CaptureRef, bool, error)
 	SealCapture(context.Context, CaptureRef) error
 }
+
+// GitSnapshot is credential-free, complete Git object data and its immutable
+// operation reference. Validation and transport belong to the installer.
+type GitSnapshot struct {
+	SHA, PackName, Ref string
+	Pack, Index        []byte
+}
+
+// SnapshotInstaller performs an explicit controller-owned additive Git-data
+// operation, including for read-only Reviewers. It must hold all writers
+// quiescent across validation and installation and resume before returning.
+// Callers hold the durable Turn fence for the complete bounded operation.
+// Errors after installation begins are ambiguous, never verification evidence.
+type SnapshotInstaller interface {
+	InstallSnapshot(context.Context, WorkspaceRef, GitSnapshot) error
+}

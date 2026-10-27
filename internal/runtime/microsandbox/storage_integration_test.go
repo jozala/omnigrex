@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/conformance"
 	"github.com/jozala/omnigrex/internal/runtime/dirstate"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
+	workspaceapi "github.com/jozala/omnigrex/internal/workspace"
 )
 
 func nativeFixture(t *testing.T) (*Backend, execution.Request, context.Context) {
@@ -128,7 +130,37 @@ func TestWorkspaceCaptureDuringAuthenticatedOutstandingCallAndRetainedState(t *t
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		t.Fatal(err)
 	}
-	request.Workspace = execution.WorkspaceRef{Key: request.Key, Seed: strings.Repeat("a", 40)}
+	// Prepare A in the active checkout, with an independent trusted remote.
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid")
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture Git: %v %s", err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	git(workspace, "init", "--initial-branch=trunk", "--template=")
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("A\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git(workspace, "add", "tracked.txt")
+	git(workspace, "commit", "-m", "A")
+	a := git(workspace, "rev-parse", "HEAD")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	git(workspace, "clone", "--bare", "--no-hardlinks", workspace, remote)
+	git(workspace, "config", "remote.origin.url", "https://untrusted.invalid/wrong.git")
+	git(workspace, "config", "credential.helper", "!touch /workspace/credential-helper-used")
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("dirty tracked\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	indexBefore, err := os.ReadFile(filepath.Join(workspace, ".git", "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Workspace = execution.WorkspaceRef{Key: request.Key, Seed: a}
 	ref := execution.StateRef{ID: request.Key.AssignmentID, ParticipantID: request.Key.AssignmentID, SessionID: request.Key.AgentSessionID, Backend: backend.Binding(), Format: "pi-session/v3", Image: request.Image, RuntimeProfileSHA256: strings.Repeat("b", 64)}
 	source := &stateFixtureSource{ref: ref}
 	states, err := dirstate.New(backend.options.StateRoot, backend.Binding(), source)
@@ -178,6 +210,43 @@ sleep 300
 	content, _ := json.Marshal(actual)
 	if bytes.Contains(content, []byte("provider-fixture-secret")) {
 		t.Fatal("provider credentials entered inventory")
+	}
+	// Acquire B only while the authenticated call is outstanding. All Git
+	// installation happens under the backend's pause/flush/resume boundary.
+	tree := git(remote, "rev-parse", a+"^{tree}")
+	b := git(remote, "commit-tree", tree, "-p", a, "-m", "B after launch")
+	git(remote, "update-ref", "refs/heads/trunk", b)
+	root := t.TempDir()
+	acquirer, err := workspaceapi.New(workspaceapi.Options{WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "private"), MiseRoot: filepath.Join(root, "mise")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := acquirer.AcquireSnapshot(ctx, remote, "", b, "refs/omnigrex/default/"+strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := backend.InstallSnapshot(ctx, request.Workspace, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := git(workspace, "rev-parse", "HEAD"); got != a {
+		t.Fatal("HEAD changed")
+	}
+	if got := git(workspace, "merge-base", "HEAD", snapshot.Ref); got != a {
+		t.Fatal("missing ancestry")
+	}
+	git(workspace, "merge-tree", "--write-tree", "HEAD", snapshot.Ref)
+	if _, err := os.Lstat(filepath.Join(workspace, "credential-helper-used")); !os.IsNotExist(err) {
+		t.Fatal("installer executed untrusted Git configuration", err)
+	}
+	indexAfter, err := os.ReadFile(filepath.Join(workspace, ".git", "index"))
+	if err != nil || !bytes.Equal(indexBefore, indexAfter) {
+		t.Fatal("index changed", err)
+	}
+	tracked, err := os.ReadFile(filepath.Join(workspace, "tracked.txt"))
+	if err != nil || string(tracked) != "dirty tracked\n" {
+		t.Fatal("tracked content changed", err)
 	}
 	captureRequest := execution.CaptureRequest{Workspace: request.Workspace, OperationID: "40000000-0000-4000-8000-000000000001", Purpose: execution.PublicationCapture}
 	var captured []byte
