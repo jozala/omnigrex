@@ -143,6 +143,7 @@ func TestMetricsEnablementMatrix(t *testing.T) {
 
 func TestDurableObservationFailureOmitsGaugesAndRecovers(t *testing.T) {
 	cleanEnvironment(t)
+	logs := captureDiagnosticLogs(t)
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(applicationMetricView))
 	otel.SetMeterProvider(provider)
@@ -188,6 +189,10 @@ func TestDurableObservationFailureOmitsGaugesAndRecovers(t *testing.T) {
 		if failed && gauges != 0 || !failed && gauges != 26 {
 			t.Fatalf("gauges=%d after failure=%v", gauges, failed)
 		}
+	}
+	text := logs.String()
+	if !strings.Contains(text, `"signal":"metrics"`) || !strings.Contains(text, `"stage":"collection"`) || !strings.Contains(text, `"error_kind":"unknown"`) || strings.Contains(text, "secret-database-error") || strings.Contains(text, "export") {
+		t.Fatalf("incorrect collection diagnostic: %s", text)
 	}
 }
 

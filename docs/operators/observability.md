@@ -162,6 +162,40 @@ Keep it longer than service draining and Turn cleanup plus a separate telemetry 
 Increase it when those budgets grow.
 Exporter failures report safe categories without stopping Workflow processing.
 
+### Telemetry SDK diagnostics
+
+`telemetry SDK failure` WARN records use the controller's existing local JSON stdout route, not telemetry export.
+They remain available when the collector is unreachable; no debug payload logging is required.
+
+| Field | Meaning |
+| --- | --- |
+| `signal` | `metrics`, `traces`, or explicitly `unknown`. |
+| `stage` | `collection` at the durable-state observation callback, `export` at the signal-specific exporter boundary, `response` for a typed partial-success response, `shutdown` at provider shutdown, or `unknown` for remaining SDK reports. |
+| `error_kind` | `eof`, `unexpected_eof`, `connection_reset`, `connection_refused`, `timeout`, `cancelled`, `partial_success`, or `unknown`, derived from typed evidence rather than error prose. |
+| `rejected_items` | Nonnegative integer from the pinned SDK's typed partial-success response; absent otherwise. |
+
+For example, `signal=metrics, stage=export, error_kind=eof` establishes a metrics export that ended in EOF, not the reason the peer disconnected.
+It does not establish an idle-timeout race or change exporter retries.
+`error_kind=partial_success, stage=response` describes an HTTP success response with partial rejection or a server warning, not a failed export; `rejected_items` can be zero when only a warning was returned.
+The arbitrary server message is discarded.
+Durable-state observation failures still omit gauges and increment the existing failure counter; the local collection diagnostic adds no telemetry instruments.
+
+The pinned Go HTTP exporters do not expose typed HTTP rejection status to this boundary.
+Such failures retain their known signal and `stage=export`, but `error_kind=unknown`; no `http_status` is emitted or inferred from the SDK's secret-bearing formatted error.
+Malformed successful responses also remain unknown unless a typed underlying cause survives.
+Other SDK collection callbacks may fail before export without retaining signal/stage context; their global record explicitly remains unknown, never an assumed delivery failure.
+Partial-success extraction is pinned to the exact SDK types and safely degrades to unknown if their shape changes.
+
+A failed export may have both a signal-aware boundary record and an unknown global SDK record, and a shutdown flush may also report a shutdown record.
+These are not independent failed requests or a reliable loss counter; do not correlate unknown reports to a signal solely by timing.
+No URLs, headers, raw errors/stacks, response bodies, or telemetry content are included.
+Keep these fields out of metric/stream labels and use parsed JSON log queries instead.
+
+To investigate, select the existing controller log stream and filter `msg="telemetry SDK failure"`, then examine `signal`, `stage`, and `error_kind`.
+Check collector reachability and independently available collector diagnostics for unknown exports; do not enable unrestricted HTTP/SDK logging to recover status or remote text.
+After correcting the underlying configuration or collector problem, verify subsequent samples/spans arrive using the existing backend, since absence of warnings alone does not prove delivery.
+These records do not stop Workflows, change Agent Turn outcomes, or automatically recover missing samples.
+
 ## Dashboards and alerts
 
 Use the [application observability contract](../observability/application.md) for instrument names, queue eligibility, semantics, series budget, dashboard/alert requirements, and pending live verification.
