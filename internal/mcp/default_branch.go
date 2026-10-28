@@ -88,12 +88,10 @@ func (backend *ProductionBackend) refreshDefaultBranch(ctx context.Context, invo
 	if snapshot.SHA != first.CommitSHA || snapshot.Ref != ref {
 		return nil, ErrToolPrecondition
 	}
-	key := execution.Key{AssignmentID: scope.AgentParticipantID, AgentSessionID: scope.AgentSessionID, AgentTurnID: scope.AgentTurnID, ExecutionEpoch: scope.ExecutionEpoch, RuntimeProfileName: scope.RuntimeProfileName, RuntimeProfileVersion: scope.RuntimeProfileVersion}
+	key := snapshotExecutionKey(scope)
 	installCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 	defer stop()
-	err = invocation.installFence(installCtx, func(ctx context.Context) error {
-		return backend.installer.InstallSnapshot(ctx, execution.WorkspaceRef{Key: key}, snapshot)
-	})
+	err = backend.installer.InstallSnapshot(installCtx, execution.WorkspaceRef{Key: key}, snapshot, invocation.installFence)
 	// Installation/resumption errors may leave additive bytes behind. They never
 	// become usable success evidence, even if the reference happens to exist.
 	if err != nil {
@@ -128,4 +126,8 @@ func (backend *ProductionBackend) refreshDefaultBranch(ctx context.Context, invo
 		result.Status = "current"
 	}
 	return finish()
+}
+
+func snapshotExecutionKey(scope ToolScope) execution.Key {
+	return execution.Key{AssignmentID: scope.AgentParticipantID, AgentSessionID: scope.AgentSessionID, AgentTurnID: scope.AgentTurnID, ExecutionEpoch: scope.ExecutionEpoch, RuntimeProfileName: scope.RuntimeProfileName, RuntimeProfileVersion: scope.RuntimeProfileVersion}
 }

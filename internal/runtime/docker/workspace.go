@@ -142,12 +142,17 @@ func (source *WorkspaceSource) withWorkspace(ctx context.Context, request execut
 	return nil
 }
 
-func (source *WorkspaceSource) InstallSnapshot(ctx context.Context, ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot) error {
+func (source *WorkspaceSource) InstallSnapshot(ctx context.Context, ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot, fence execution.WorkspaceFence) error {
 	if err := source.lock(ctx); err != nil {
 		return err
 	}
 	defer source.mutex.Unlock()
-	return source.withWorkspace(ctx, execution.CaptureRequest{Workspace: ref, Purpose: execution.PublicationCapture}, nil, &snapshot)
+	if fence == nil {
+		return execution.ErrInvalidSpec
+	}
+	return fence(ctx, func(ctx context.Context) error {
+		return source.withWorkspace(ctx, execution.CaptureRequest{Workspace: ref, Purpose: execution.PublicationCapture}, nil, &snapshot)
+	})
 }
 
 func (source *WorkspaceSource) lock(ctx context.Context) error {

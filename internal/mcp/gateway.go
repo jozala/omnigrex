@@ -22,6 +22,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -1160,10 +1161,10 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 
 	if invocation.Name == ToolRefreshDefaultBranch {
 		if fenced, ok := gateway.store.(interface {
-			WithAgentTurnFence(context.Context, store.AgentTurnLease, func(context.Context) error) error
+			WithSnapshotInstallationFence(context.Context, store.AgentTurnLease, execution.Key, func(context.Context) error) error
 		}); ok {
 			invocation.installFence = func(ctx context.Context, apply func(context.Context) error) error {
-				return fenced.WithAgentTurnFence(ctx, lease, apply)
+				return fenced.WithSnapshotInstallationFence(ctx, lease, snapshotExecutionKey(invocation.Scope), apply)
 			}
 		}
 	}

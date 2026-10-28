@@ -49,3 +49,7 @@ Native backend and Pi-discovery qualification remains required before delivery i
 - [MCP authority](../adr/0004-mediate-agent-capabilities-through-mcp.md)
 - [Operation-selected credentials](../adr/0009-select-github-app-credentials-by-operation.md)
 - [Location-independent workspace evidence](0008-keep-workspace-capture-separate-from-publication-policy.md)
+
+## Installation-fence refinement
+
+[Decision 0049](0049-exclude-execution-cleanup-without-locking-turn-leases.md) replaces the original long-held Turn row-lock fence with an execution-reservation guard so heartbeats can continue during installation.

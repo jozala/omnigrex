@@ -83,7 +83,7 @@ func TestDeltaOnlyAddsAbsentGitData(t *testing.T) {
 	}
 }
 func TestDeltaRejectsHostileMetadata(t *testing.T) {
-	for _, name := range []string{".git/objects/info/alternates", ".git/objects/info/http-alternates", ".git/commondir", ".git/shallow", ".git/info/grafts", ".git/refs/replace/abc", ".git/index.lock"} {
+	for _, name := range []string{".git/objects/info/alternates", ".git/objects/info/http-alternates", ".git/commondir", ".git/shallow", ".git/info/grafts", ".git/refs/replace/abc", ".git/index.lock", ".git/reftable", ".git/reftable/tables.list"} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Delta(fixtureArchive(t, &tar.Header{Name: "workspace/" + name, Typeflag: tar.TypeReg}), testSnapshot()); err == nil {
 				t.Fatal("accepted history indirection or active writer")
@@ -160,6 +160,30 @@ func TestDeltaReplayAndInterruptedInstallationAreFailClosed(t *testing.T) {
 	for i := range files {
 		if _, err := Delta(archive(i), snapshot); err == nil {
 			t.Fatal("partial installation accepted", i)
+		}
+	}
+}
+
+func TestDeltaRejectsHiddenRefStorageConfiguration(t *testing.T) {
+	for _, config := range []string{"[extensions]\nrefStorage = reftable\n", "\xef\xbb\xbf[extensions]\nrefStorage=reftable\n", "[  ExTenSions ]\n refStorage = reftable\n", "[include]\npath = /outside/config\n", "[includeIf \"gitdir:/workspace/\"]\npath=/outside/config\n"} {
+		var b bytes.Buffer
+		w := tar.NewWriter(&b)
+		for _, name := range []string{".git", ".git/objects", ".git/refs"} {
+			if err := w.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeDir, Mode: 0700}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.WriteHeader(&tar.Header{Name: ".git/config", Mode: 0600, Size: int64(len(config))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, config); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Delta(&b, testSnapshot()); err == nil {
+			t.Fatal("accepted unsupported ref storage configuration", config)
 		}
 	}
 }

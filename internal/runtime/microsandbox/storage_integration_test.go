@@ -226,7 +226,7 @@ sleep 300
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := backend.InstallSnapshot(ctx, request.Workspace, snapshot); err != nil {
+		if err := backend.InstallSnapshot(ctx, request.Workspace, snapshot, func(ctx context.Context, apply func(context.Context) error) error { return apply(ctx) }); err != nil {
 			t.Fatal(err)
 		}
 	}

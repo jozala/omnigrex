@@ -30,13 +30,20 @@ Use a new operation ID when freshness is needed; there is no fixed Stage call-co
 Acquisition uses a fresh controller-owned bare repository, strict object validation, SHA-1 pack/index checksum validation, and a complete non-shallow fetch.
 Individual pack and index payloads are limited to 256 MiB; the trusted Git subprocess also has a bounded output-file size and a two-minute acquisition deadline.
 The complete call has a three-minute deadline, with thirty seconds for installation and a separate bounded ten-second resumption attempt.
-Workspace validation streams at most 1 GiB and 200,000 archive entries; packed-ref inspection is limited to 16 MiB.
+Workspace validation streams at most 1 GiB and 200,000 archive entries; packed-ref inspection is limited to 16 MiB, and Git configuration inspection to 1 MiB.
 Repositories exceeding these limits are explicitly unavailable rather than partially successful.
 
 Installation quiesces writers, validates destination ancestry, and adds only absent pack/index/ref files, or verifies identical existing bytes.
+Only the ordinary files reference backend is supported.
+Reftable storage and Git configuration includes/extensions are rejected before any files are installed rather than advertising an unusable loose ref.
 It rejects symlinked or hardlinked Git metadata, alternate/common object stores, replacement refs, grafts, shallow history, active Git lock files, corrupt payloads, and conflicting destinations.
 Do not bypass a rejection with credentialed Git in the active checkout or rerun workspace preparation.
 Let an ordinary concurrent local Git command finish before making a new call; unsupported or unsafe metadata requires existing blocker handling, not destructive repair by the tool.
+
+The backend acquires its execution lock before the controller guards its exact execution reservation against cleanup/revocation.
+Live Turn authority is checked before and after installation without holding lease rows, allowing execution heartbeats and MCP authority renewal to continue during delivery.
+Cleanup waits for installation/resumption to finish; successor admission still requires confirmed prior execution stop.
+See [installation fencing](../decisions/0049-exclude-execution-cleanup-without-locking-turn-leases.md).
 
 The mutation ledger pins replay to its original execution identity and prevents an uncertain operation from fetching a newer base.
 Lost HTTP responses can replay a completed result without reinstallation.

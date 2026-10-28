@@ -57,7 +57,7 @@ func TestDefaultSnapshotDockerInstallsMidRequestAndPreservesWorkspace(t *testing
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := source.InstallSnapshot(ctx, execution.WorkspaceRef{Key: fixture.key}, snapshot); err != nil {
+		if err := source.InstallSnapshot(ctx, execution.WorkspaceRef{Key: fixture.key}, snapshot, func(ctx context.Context, apply func(context.Context) error) error { return apply(ctx) }); err != nil {
 			t.Fatal(err)
 		}
 	}

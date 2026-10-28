@@ -165,3 +165,86 @@ func TestDefaultSnapshotDoesNotHideConflictsOrChangeLocalWork(t *testing.T) {
 		t.Fatal("dirty work lost", err)
 	}
 }
+
+func TestDefaultSnapshotResolvesFilesRefAndRejectsReftable(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote")
+	target := filepath.Join(root, "workspace")
+	if err := os.Mkdir(remote, 0700); err != nil {
+		t.Fatal(err)
+	}
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(commandEnvironment("", ""), "GIT_AUTHOR_NAME=fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid")
+		b, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Git %v: %v %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	git(remote, "init", "--initial-branch=trunk", "--template=")
+	git(remote, "commit", "--allow-empty", "-m", "A")
+	git(root, "clone", "--no-hardlinks", remote, target)
+	git(remote, "commit", "--allow-empty", "-m", "B")
+	b := git(remote, "rev-parse", "HEAD")
+	lifecycle, err := New(Options{WorkspaceRoot: filepath.Join(root, "workspaces"), PublicationRoot: filepath.Join(root, "private"), MiseRoot: filepath.Join(root, "mise")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := lifecycle.AcquireSnapshot(t.Context(), remote, "", b, "refs/omnigrex/default/"+strings.Repeat("e", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta := func() ([]gitdelivery.File, error) {
+		t.Helper()
+		archive, err := exec.Command("tar", "-C", root, "-cf", "-", "workspace").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gitdelivery.Delta(bytes.NewReader(archive), snapshot)
+	}
+	files, err := delta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		p := filepath.Join(target, file.Name)
+		if file.Directory {
+			if err := os.Mkdir(p, 0755); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(p, file.Content, 0444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(target, "cat-file", "-e", snapshot.Ref+"^{commit}")
+	if got := git(target, "rev-parse", snapshot.Ref); got != b {
+		t.Fatalf("unusable advertised ref: %s", got)
+	}
+	t.Run("config-only-reftable", func(t *testing.T) {
+		config := filepath.Join(target, ".git", "config")
+		original, err := os.ReadFile(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.WriteFile(config, original, 0600) }()
+		git(target, "config", "core.repositoryformatversion", "1")
+		git(target, "config", "extensions.refStorage", "reftable")
+		if _, err := delta(); err == nil {
+			t.Fatal("accepted ref storage that cannot use advertised loose ref")
+		}
+	})
+	t.Run("migrated-reftable", func(t *testing.T) {
+		probe := exec.Command("git", "refs", "-h")
+		out, _ := probe.CombinedOutput()
+		if strings.Contains(string(out), "is not a git command") {
+			t.Skip("installed Git predates reftable migration; metadata rejection covered independently")
+		}
+		git(target, "refs", "migrate", "--ref-format=reftable")
+		if _, err := delta(); err == nil {
+			t.Fatal("accepted migrated reftable checkout")
+		}
+	})
+}

@@ -55,6 +55,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0046: Classify telemetry failures without error prose](0046-classify-telemetry-failures-without-error-prose.md) | Accepted | 2026-10-28 |
 | [0047: Verify CI read provenance independently of review authority](0047-verify-ci-read-provenance.md) | Accepted | 2026-10-27 |
 | [0048: Deliver default-branch snapshots as additive Git data](0048-deliver-default-branch-snapshots-as-additive-git-data.md) | Accepted | 2026-10-27 |
+| [0049: Exclude execution cleanup without locking Turn leases](0049-exclude-execution-cleanup-without-locking-turn-leases.md) | Accepted | 2026-10-28 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

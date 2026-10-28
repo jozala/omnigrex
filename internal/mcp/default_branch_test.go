@@ -24,7 +24,7 @@ type refreshStore struct {
 	fences   int
 }
 
-func (s *refreshStore) WithAgentTurnFence(ctx context.Context, lease store.AgentTurnLease, apply func(context.Context) error) error {
+func (s *refreshStore) WithSnapshotInstallationFence(ctx context.Context, lease store.AgentTurnLease, key execution.Key, apply func(context.Context) error) error {
 	s.fences++
 	if s.fenceErr != nil {
 		return s.fenceErr
@@ -80,7 +80,10 @@ type refreshInstaller struct {
 	release  <-chan struct{}
 }
 
-func (i *refreshInstaller) InstallSnapshot(_ context.Context, ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot) error {
+func (i *refreshInstaller) InstallSnapshot(ctx context.Context, ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot, fence execution.WorkspaceFence) error {
+	return fence(ctx, func(context.Context) error { return i.install(ref, snapshot) })
+}
+func (i *refreshInstaller) install(ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot) error {
 	i.calls++
 	i.ref = ref
 	i.snapshot = snapshot

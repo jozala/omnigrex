@@ -62,8 +62,13 @@ type GitSnapshot struct {
 // SnapshotInstaller performs an explicit controller-owned additive Git-data
 // operation, including for read-only Reviewers. It must hold all writers
 // quiescent across validation and installation and resume before returning.
-// Callers hold the durable Turn fence for the complete bounded operation.
+// The backend acquires its execution lock before calling the supplied fence,
+// and holds that fence across pause, validation, installation, and resumption.
 // Errors after installation begins are ambiguous, never verification evidence.
 type SnapshotInstaller interface {
-	InstallSnapshot(context.Context, WorkspaceRef, GitSnapshot) error
+	InstallSnapshot(context.Context, WorkspaceRef, GitSnapshot, WorkspaceFence) error
 }
+
+// WorkspaceFence admits an operation and excludes execution cleanup without
+// blocking lease renewal. It is supplied by verified controller scope.
+type WorkspaceFence func(context.Context, func(context.Context) error) error

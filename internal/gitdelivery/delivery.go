@@ -12,11 +12,17 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 )
 
 const MaxPackBytes = 256 << 20
 const MaxArchiveBytes = 1 << 30
+
+// Loose-ref delivery supports only the controller-prepared files backend.
+// Includes can hide an extension declaration, so reject them rather than parse
+// or follow agent-controlled configuration paths.
+var unsupportedGitSection = regexp.MustCompile(`(?im)^\s*\[\s*(extensions|include|includeif)(\s|\]|")`)
 
 var ErrUnsafe = errors.New("unsafe or unsupported workspace Git metadata")
 
@@ -104,8 +110,19 @@ func Delta(input io.Reader, snapshot Snapshot) ([]File, error) {
 		if h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeReg {
 			return nil, ErrUnsafe
 		}
-		if strings.HasSuffix(name, ".lock") || name == ".git/commondir" || name == ".git/gitdir" || name == ".git/shallow" || name == ".git/info/grafts" || name == ".git/objects/info/alternates" || name == ".git/objects/info/http-alternates" || name == ".git/refs/replace" || strings.HasPrefix(name, ".git/refs/replace/") {
+		if strings.HasSuffix(name, ".lock") || name == ".git/commondir" || name == ".git/gitdir" || name == ".git/shallow" || name == ".git/reftable" || strings.HasPrefix(name, ".git/reftable/") || name == ".git/info/grafts" || name == ".git/objects/info/alternates" || name == ".git/objects/info/http-alternates" || name == ".git/refs/replace" || strings.HasPrefix(name, ".git/refs/replace/") {
 			return nil, ErrUnsafe
+		}
+		if name == ".git/config" {
+			if h.Typeflag != tar.TypeReg || h.Size > 1<<20 {
+				return nil, ErrUnsafe
+			}
+			config, err := io.ReadAll(reader)
+			config = bytes.TrimPrefix(config, []byte{0xef, 0xbb, 0xbf})
+			config = bytes.ReplaceAll(config, []byte("\\\n"), nil)
+			if err != nil || unsupportedGitSection.Match(config) {
+				return nil, ErrUnsafe
+			}
 		}
 		if name == ".git/packed-refs" {
 			if h.Size > 16<<20 {
