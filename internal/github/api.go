@@ -1926,3 +1926,34 @@ func parseRateLimitReset(value string) time.Time {
 	}
 	return time.Unix(seconds, 0)
 }
+
+// UpdateIssueComment edits a controller-owned progress comment at a verified
+// Issue/PR location. It is not exposed as an Agent mutation capability.
+func (client *APIClient) UpdateIssueComment(ctx context.Context, token, owner, repository string, number int, id int64, input CommentRequest) (IssueComment, error) {
+	if err := validateRepository(owner, repository); err != nil {
+		return IssueComment{}, err
+	}
+	if number <= 0 || id <= 0 || strings.TrimSpace(input.Body) == "" || !validMarker(input.Marker) {
+		return IssueComment{}, &ConfigurationError{Cause: ErrInvalidComment}
+	}
+	body := JoinBodyParts(input.Body, input.Marker)
+	var comment IssueComment
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", url.PathEscape(owner), url.PathEscape(repository), id)
+	var original IssueComment
+	if err := client.doJSON(ctx, http.MethodGet, path, token, nil, &original); err != nil {
+		return IssueComment{}, err
+	}
+	expected := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repository), number)
+	if original.ID != id || !resourcePathMatches(original.IssueURL, expected) || !strings.Contains(original.Body, input.Marker) {
+		return IssueComment{}, ErrInvalidAPIResponse
+	}
+	if err := client.doJSON(ctx, http.MethodPatch, path, token, struct {
+		Body string `json:"body"`
+	}{body}, &comment); err != nil {
+		return IssueComment{}, err
+	}
+	if comment.ID != id || comment.NodeID == "" || comment.Body != body || !validResponseURL(comment.HTMLURL) || !resourcePathMatches(comment.IssueURL, expected) || comment.CreatedAt.IsZero() || comment.UpdatedAt.IsZero() {
+		return IssueComment{}, ErrInvalidAPIResponse
+	}
+	return comment, nil
+}

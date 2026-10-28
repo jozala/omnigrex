@@ -56,8 +56,38 @@ func TestPiControlledWorkflow(t *testing.T) {
 	f := newPiWorkflowFixture(t, "")
 	ctx, database, settings := f.ctx, f.database, f.settings
 	worker, workspaces, github, authority := f.worker, f.workspaces, f.github, f.authority
+	gateCIReads := 0
 	for _, wanted := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
+		if wanted == workflow.StatePRReady {
+			github.mutex.Lock()
+			github.ciPending = true
+			github.mutex.Unlock()
+			lease := claimPreparationJob(t, database, ctx)
+			_, err := f.preparer.Prepare(ctx, agentturn.Request{Lease: lease, InstallationCredential: "developer-token", RepositoryOwner: "owner", RepositoryName: "repo"})
+			if !errors.Is(err, store.ErrReviewAdmissionPending) {
+				t.Fatalf("pending CI admitted Reviewer: %v", err)
+			}
+			var reviewers, turns, executions int
+			if err := f.pool(t).QueryRow(ctx, `SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id=$1 AND role='REVIEWER'),(SELECT count(*) FROM agent_turns WHERE workflow_id=$1 AND active),(SELECT count(*) FROM jobs WHERE workflow_id=$1 AND kind='RUN_AGENT_TURN')`, f.workflowID).Scan(&reviewers, &turns, &executions); err != nil {
+				t.Fatal(err)
+			}
+			if reviewers != 0 || turns != 0 || executions != 1 || len(f.fault.executions) != 1 {
+				t.Fatalf("CI wait allocated runtime work: reviewers=%d turns=%d executions=%d runtime processes=%d", reviewers, turns, executions, len(f.fault.executions))
+			}
+			if err := database.DeferReviewAdmission(ctx, lease, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.pool(t).Exec(ctx, `UPDATE jobs SET available_at=clock_timestamp() WHERE id=$1`, lease.ID); err != nil {
+				t.Fatal(err)
+			}
+			github.mutex.Lock()
+			github.ciPending = false
+			github.mutex.Unlock()
+		}
 		prepared := f.prepare(t)
+		if wanted == workflow.StatePRReady {
+			gateCIReads = github.ciReads
+		}
 		processed, err := worker.ProcessNext(ctx)
 		if err != nil || !processed {
 			t.Fatalf("real Pi execution: %t %v", processed, err)
@@ -110,13 +140,17 @@ func TestPiControlledWorkflow(t *testing.T) {
 			}
 		}
 		if participant.Role == workflow.RoleReviewer {
+			if !strings.Contains(string(bytes), "review_start") || !strings.Contains(string(bytes), "completed_ci") || !strings.Contains(string(bytes), "terminal_non_success") {
+				t.Fatal("Reviewer prompt did not receive the actual non-success admission context")
+			}
+
 			paths, _ := workspaces.Paths(participant.ID)
 			if _, err := os.Lstat(paths.Workspace); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("Reviewer workspace was not discarded")
 			}
 		}
 	}
-	if github.ciReads != 1 {
+	if github.ciReads-gateCIReads != 1 {
 		t.Fatalf("existing Reviewer CI read was not exercised: %d", github.ciReads)
 	}
 	if github.openCalls != 1 || github.reviewCalls != 1 || github.review.ID == 0 || github.review.State != "APPROVED" {
@@ -332,6 +366,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	github.branch = fmt.Sprintf("omnigrex/issue-%d", workflowLocator().IssueNumber)
 	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies, allowedPaths...)
 	preparer := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database)
+	preparer.SetReviewGate(&agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: head}, Observer: github})
 	f := &piWorkflowFixture{ctx: ctx, database: database, databaseURL: url, password: secret, settings: settings, runtime: p, backend: backend, fault: fault, launcher: launcher, preparer: preparer, worker: worker, workspaces: workspaces, github: github, authority: authority, workflowID: application.WorkflowID, head: head, git: git}
 	t.Cleanup(func() {
 		f.cleanup(t)
@@ -512,6 +547,7 @@ type workflowQualificationGitHub struct {
 	review             githubapi.Review
 	reviewCalls        int
 	ciReads            int
+	ciPending          bool
 	loseReviewResponse bool
 }
 
@@ -521,6 +557,10 @@ func (g *workflowQualificationGitHub) pull() githubapi.PullRequest {
 	g.head = strings.TrimSpace(string(bytes))
 	pr := g.pullRequest()
 	pr.Base.SHA = g.base
+	pr.Base.Repository = &struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	}{ID: 9123, FullName: "owner/repo"}
 	return pr
 }
 func (g *workflowQualificationGitHub) GetPullRequest(context.Context, string, string, string, int) (githubapi.PullRequest, error) {
@@ -593,7 +633,11 @@ func (g *workflowQualificationGitHub) ObserveCI(_ context.Context, token, _, _, 
 		return githubapi.CIObservation{Availability: githubapi.CIUnavailable}
 	}
 	g.ciReads++
-	return githubapi.CIObservation{Availability: githubapi.CIAvailable, RepositoryID: repo, HeadSHA: head, Statuses: []githubapi.CommitStatus{{ID: 1, Context: "build", State: "failure"}}}
+	state := "failure"
+	if g.ciPending {
+		state = "pending"
+	}
+	return githubapi.CIObservation{Availability: githubapi.CIAvailable, RepositoryID: repo, HeadSHA: head, Statuses: []githubapi.CommitStatus{{ID: 1, Context: "build", State: state}}}
 }
 func (g *workflowQualificationGitHub) VerifyCITarget(_ context.Context, _, _, _ string, repo, pr int64, number int, head, _, _ string) githubapi.CITargetMapping {
 	return githubapi.CITargetMapping{RepositoryID: repo, PullRequestID: pr, PullRequestNumber: number, ReviewedHead: head, State: "head_only"}

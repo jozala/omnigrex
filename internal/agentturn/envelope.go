@@ -42,6 +42,7 @@ type priorUnconfirmableReviewEvent struct {
 }
 
 type eventEnvelope struct {
+	ReviewStart              json.RawMessage                `json:"review_start,omitempty"`
 	SchemaVersion            int                            `json:"schema_version"`
 	WorkflowID               string                         `json:"workflow_id"`
 	IssueNumber              int64                          `json:"issue_number"`
@@ -83,6 +84,15 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		TriggeringEvent: triggeringEvent{Stage: execution.Turn.Stage, Role: execution.Participant.Role, TurnPurpose: execution.Turn.Purpose},
 		CurrentHeadSHA:  currentHeadSHA, ExpectedHeadSHA: execution.Turn.ExpectedHeadSHA,
 		ExpectedOutcomes: expectedOutcomes, AllowedOutcomes: allowedOutcomes, MCPCapabilities: capabilities,
+	}
+	if len(execution.Turn.TurnConfiguration) > 0 && execution.Participant.Role == workflow.RoleReviewer {
+		var configuration struct {
+			ReviewStart json.RawMessage `json:"review_start"`
+		}
+		if err := json.Unmarshal(execution.Turn.TurnConfiguration, &configuration); err != nil {
+			return "", ErrInvalidEventEnvelope
+		}
+		envelope.ReviewStart = configuration.ReviewStart
 	}
 	if execution.ChangeProposal != nil {
 		number := execution.ChangeProposal.PullRequestNumber

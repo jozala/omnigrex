@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `.omnigrex/team/*.md` | One pinned latest default-branch commit before each Turn | Required Agent Profiles |
 | `.omnigrex/environment.yaml` | Same commit as Profiles | Optional image/platform/capability request for new Participants |
+| `.omnigrex/review-policy.yaml` | One trusted default-branch revision per logical admission request | Optional Reviewer scheduling policy |
 | `.omnigrex/turn-configuration.yaml` | Same commit as Profiles | Optional disk-backed tool-path requests for both Roles |
 | `.agents/skills/<name>/SKILL.md` | Prepared working checkout | Explicitly authorized engineering procedures |
 | `mise.toml` and its scripts/hooks | Actual working checkout | Repository tool installation and activation |
@@ -82,3 +83,68 @@ The successor Stage waits for confirmed publication, and uncertain responses rec
 `get_handoff` returns the latest successful scoped handoff for the Workflow/PR/head or `null`, including ID, head, summary, time, and `publication_confirmed`.
 Historical internal-only handoffs remain readable with `publication_confirmed=false` and are not retroactively described as published.
 Reviewer summaries are claims to verify; inline findings use `submit_review.comments` and bodies hold findings without valid diff locations.
+
+## Review scheduling
+
+`.omnigrex/review-policy.yaml` is optional and is read from one trusted default-branch revision for each new logical review-admission request, never from the PR head.
+An accepted Developer handoff, synchronization after a previous Reviewer Turn, or explicit human reactivation creates a new request.
+Infrastructure retries reuse the existing policy, selected inventory, and absolute deadline, with fresh CI observations.
+Configuration edits affect new requests, not a wait already in progress; Profiles, tools, credentials, and Runtime Profiles keep their separate revision rules above.
+
+Default configuration:
+
+```yaml
+version: 1
+review:
+  start: after_ci
+  ci:
+    selection: github_required
+    timeout: 30m
+    registration-grace: 60s
+```
+
+`start: immediate` is the explicit bypass: it skips CI observations, registration grace, and CI waiting.
+`after_ci` waits for completion, not success.
+Terminal failure, cancellation, timeout, skipped, and neutral results release review without establishing passing qualification.
+At the absolute deadline, review is admitted with explicit incomplete evidence rather than exhausting infrastructure retries.
+
+`selection: github_required` discovers current effective classic protection and active/inherited branch rules once, retaining source and App constraints.
+Only successfully confirmed empty requirements fall back to all relevant observed CI.
+That fallback cannot release before registration grace, even after a fast terminal check; no observed CI after successful grace produces an explicit no-CI reason.
+Missing required checks remain required after grace.
+Unreadable or unsupported requirements are never treated as empty.
+
+To choose an explicit inventory:
+
+```yaml
+version: 1
+review:
+  start: after_ci
+  ci:
+    selection: explicit
+    timeout: 45m
+    registration-grace: 60s
+    checks:
+      - context: build
+        source: check
+        app-id: 15368
+      - context: external-validation
+        source: status
+```
+
+`checks` must contain 1..100 unique selectors for explicit selection and must be absent otherwise.
+`context` is a nonempty exact context name, at most 256 bytes, without surrounding whitespace, line breaks, or NUL.
+`source` is `check` or `status`; optional positive `app-id` restricts check producer identity.
+Statuses do not prove an integration App identity and cannot specify `app-id`.
+Check and status contexts are distinct selectors, not interchangeable names.
+
+Durations use Go duration syntax, resolve to whole seconds, and are not silently clamped.
+Timeout must be 1 second..2 hours; grace must be 0..5 minutes and no longer than timeout.
+These are controller safety ceilings, not repository-granted execution capabilities.
+The file must be one nonempty YAML document of at most 64 KiB with `version: 1`; unknown fields, null/empty scalar values, aliases, invalid selectors, and malformed durations are rejected.
+Invalid configuration produces an actionable preparation failure, not a successful no-CI observation.
+
+A waiting PR-head or verified test-merge change replaces the pending target, discards obsolete evidence, and restarts grace without extending the deadline or creating a second pending review.
+No already-running Reviewer is restarted solely for same-head CI reruns or base movement.
+The controller never merges or rebases the Change Proposal to manufacture a CI run.
+See [review scheduling operations](../operators/review-scheduling.md) and [Workflow visibility](../users/workflow-and-labels.md).

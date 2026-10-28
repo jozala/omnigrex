@@ -96,12 +96,15 @@ type CIObservation struct {
 	Failures     []CIEvidenceFailure `json:"failures"`
 }
 type CIRequirementResult struct {
-	Requirement CIRequirement `json:"requirement"`
-	Source      string        `json:"source"`
-	State       CIResultState `json:"state"`
-	ResultID    int64         `json:"result_id,omitempty"`
-	Conclusion  string        `json:"conclusion,omitempty"`
-	Reason      string        `json:"reason,omitempty"`
+	ProducerAppID int64         `json:"producer_app_id,omitempty"`
+	CheckSuiteID  int64         `json:"check_suite_id,omitempty"`
+	ResultAt      *time.Time    `json:"result_at,omitempty"`
+	Requirement   CIRequirement `json:"requirement"`
+	Source        string        `json:"source"`
+	State         CIResultState `json:"state"`
+	ResultID      int64         `json:"result_id,omitempty"`
+	Conclusion    string        `json:"conclusion,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
 }
 
 func evidenceFailure(operation string, err error) CIEvidenceFailure {
@@ -440,7 +443,11 @@ func MatchRequiredCI(inventory CIInventory, observed CIObservation) []CIRequirem
 					state = CITerminalSuccess
 				}
 			}
-			results = append(results, CIRequirementResult{Requirement: required, Source: "check", State: state, ResultID: check.ID, Conclusion: check.Conclusion})
+			result := CIRequirementResult{Requirement: required, Source: "check", State: state, ResultID: check.ID, Conclusion: check.Conclusion, ProducerAppID: app, ResultAt: check.CompletedAt}
+			if check.CheckSuite != nil {
+				result.CheckSuiteID = check.CheckSuite.ID
+			}
+			results = append(results, result)
 		}
 		if unknown {
 			results = append(results, CIRequirementResult{Requirement: required, Source: "check", State: CIUnresolved, Reason: "producer_identity_unavailable"})
@@ -449,7 +456,7 @@ func MatchRequiredCI(inventory CIInventory, observed CIObservation) []CIRequirem
 			results = append(results, CIRequirementResult{Requirement: required, Source: "check", State: CIResultUnavailable, Reason: "observation_failed"})
 		}
 		if status != nil {
-			result := CIRequirementResult{Requirement: required, Source: "status", ResultID: status.ID, Conclusion: status.State}
+			result := CIRequirementResult{Requirement: required, Source: "status", ResultID: status.ID, Conclusion: status.State, ResultAt: &status.UpdatedAt}
 			switch {
 			case required.AppID != 0:
 				result.State = CIUnresolved

@@ -51,7 +51,18 @@ func (client *APIClient) VerifyCITarget(ctx context.Context, token, owner, repos
 	}
 	mapping.BaseSHA = pr.Base.SHA
 	mapping.BaseRef = pr.Base.Ref
-	if pr.State != "open" || pr.Merged || pr.Mergeable == nil || !*pr.Mergeable || pr.MergeCommitSHA == nil || !validCommitSHA(*pr.MergeCommitSHA) || *pr.MergeCommitSHA == head {
+	if pr.State != "open" || pr.Merged {
+		return mapping
+	}
+	if pr.Mergeable == nil {
+		mapping.Failures = []CIEvidenceFailure{{Operation: "test_merge_mapping", Code: "mergeability_pending"}}
+		return mapping
+	}
+	if !*pr.Mergeable {
+		return mapping
+	}
+	if pr.MergeCommitSHA == nil || !validCommitSHA(*pr.MergeCommitSHA) || *pr.MergeCommitSHA == head {
+		mapping.Failures = []CIEvidenceFailure{{Operation: "test_merge_mapping", Code: "test_merge_unavailable"}}
 		return mapping
 	}
 	root := fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(repository))

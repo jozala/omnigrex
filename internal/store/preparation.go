@@ -108,6 +108,7 @@ type ParticipantPreparation struct {
 // A nonempty value repairs a stale stored head transactionally before Turn
 // creation and scopes the new Turn to the verified head.
 type AgentTurnPreparationSpec struct {
+	ReviewAdmission  *ReviewAdmission
 	Stages           map[workflow.StageID]ParticipantPreparation
 	VerifiedHeadSHA  string
 	VerifiedPRNumber int64
@@ -266,7 +267,7 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
-	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
+	job, err := lockPreparationJobTx(ctx, tx, lease)
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
@@ -377,6 +378,10 @@ SELECT EXISTS (
 	if mutationsUnsettled {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnMutationsUnsettled
 	}
+	reviewStart, err := consumeReviewAdmissionTx(ctx, tx, job, payload, preparation.ExpectedHeadSHA, spec.ReviewAdmission)
+	if err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
 	turnID, err := randomUUID()
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
@@ -392,6 +397,14 @@ SELECT EXISTS (
 	turnConfiguration := participantPreparation.TurnConfiguration
 	if len(turnConfiguration) == 0 {
 		turnConfiguration = json.RawMessage(`{}`)
+	}
+	if len(reviewStart) > 0 {
+		var configuration map[string]json.RawMessage
+		if json.Unmarshal(turnConfiguration, &configuration) != nil || configuration == nil {
+			return AgentTurnPreparationCommit{}, errors.New("invalid turn configuration")
+		}
+		configuration["review_start"] = reviewStart
+		turnConfiguration, _ = json.Marshal(configuration)
 	}
 	turnConfiguration, err = canonicalJSON(turnConfiguration)
 	if err != nil || turnConfiguration[0] != '{' {
@@ -424,6 +437,14 @@ RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.TurnConfiguration, turn.Stage, turn.Purpose,
 		nullableString(turn.ChangeProposalID), nullableString(turn.ExpectedHeadSHA)).Scan(&turn.CreatedAt); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("insert prepared Agent Turn: %w", err)
+	}
+	if payload.Role == workflow.RoleReviewer {
+		if _, err := tx.Exec(ctx, `UPDATE review_admission_requests SET status='ADMITTED',admitted_turn_id=$2,updated_at=clock_timestamp() WHERE id=$1`, spec.ReviewAdmission.ID, turn.ID); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+		if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
 	}
 	result, err := tx.Exec(ctx, `
 UPDATE agent_sessions
@@ -897,6 +918,11 @@ WHERE id = $1 AND control_revision = $2`, sessionID, expectedRevision, owner, co
 	session, err = scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1`, sessionID))
 	if err != nil {
 		return AgentSession{}, err
+	}
+	if owner == SessionControlHuman {
+		if err := cancelReviewAdmissionForHumanControlTx(ctx, tx, workflowID); err != nil {
+			return AgentSession{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentSession{}, fmt.Errorf("commit Agent Session control transfer: %w", err)

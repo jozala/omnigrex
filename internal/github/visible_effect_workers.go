@@ -211,7 +211,7 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 			acknowledged = true
 			return nil
 		}
-		if kind == store.ReconcileGitHubLabelsJobKind && effect.VerificationPending {
+		if kind == store.ReconcileGitHubLabelsJobKind && effect.VerificationPending && effect.ReviewAdmission == nil {
 			// Authoritative verification has not succeeded for the current
 			// attempt yet: applying current active-state labels now would
 			// advertise Developer/Reviewer activity prematurely. Complete this
@@ -395,7 +395,11 @@ func (worker *LabelWorker) reconcile(ctx context.Context, credential string, eff
 			return nil, err
 		}
 	}
-	return json.Marshal(map[string]any{"state": effect.State, "revision": effect.Revision, "targets": len(targets)})
+	progress, err := worker.reconcileReviewProgress(ctx, credential, effect, targets)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"state": effect.State, "revision": effect.Revision, "targets": len(targets), "progress_comments": progress, "review_presentation_revision": effect.ReviewPresentationRevision})
 }
 
 func managedLabelState(state workflow.State) (WorkflowState, error) {
