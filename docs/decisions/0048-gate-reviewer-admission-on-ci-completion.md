@@ -19,7 +19,9 @@ Freeze the logical request's policy and inventory; infrastructure retries retain
 A waiting head or verified test-merge replacement invalidates old evidence and restarts only registration grace, bounded by that deadline.
 
 Use the shared inventory, observation, and verified-target contract from decision 0047, retaining decision 0038's separation of read provenance from mutation authority.
+The shared contract now reports pending mergeability as an explicit mapping failure without granting alternate-SHA access, and includes result timestamps and producer/suite identity in matched results.
 Terminal non-success releases the wait just as terminal success does.
+Incomplete inventory discovery is retried under the original deadline until a complete snapshot can be frozen.
 Unavailable discovery is not empty policy; missing, pending, and unresolved evidence waits until completion or explicit incomplete-evidence timeout admission.
 Keep the code-defined Stage graph and existing Review Cycle and infrastructure budgets unchanged.
 

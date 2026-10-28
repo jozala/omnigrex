@@ -29,6 +29,7 @@ Controller restart reclaims leases and resumes durable delayed observations rath
 
 Check the deadline and progress comment before treating review-stage inactivity as a stuck Runtime Process.
 A missing expected check remains missing after registration grace; a provider error or unsupported required workflow remains explicit rather than proving empty requirements.
+Incomplete discovery is retried until a complete inventory is selected or the original deadline releases with incomplete evidence.
 The selected inventory is frozen, so newly added required checks affect new requests rather than an existing wait.
 A PR-head or verified merge-target replacement invalidates old evidence and restarts grace without extending the original deadline.
 

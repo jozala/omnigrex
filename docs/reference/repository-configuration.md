@@ -108,7 +108,8 @@ review:
 Terminal failure, cancellation, timeout, skipped, and neutral results release review without establishing passing qualification.
 At the absolute deadline, review is admitted with explicit incomplete evidence rather than exhausting infrastructure retries.
 
-`selection: github_required` discovers current effective classic protection and active/inherited branch rules once, retaining source and App constraints.
+`selection: github_required` freezes the first complete discovery of current effective classic protection and active/inherited branch rules, retaining source and App constraints.
+Unavailable or incomplete discovery is retried under the original deadline; it cannot establish a frozen empty inventory.
 Only successfully confirmed empty requirements fall back to all relevant observed CI.
 That fallback cannot release before registration grace, even after a fast terminal check; no observed CI after successful grace produces an explicit no-CI reason.
 Missing required checks remain required after grace.

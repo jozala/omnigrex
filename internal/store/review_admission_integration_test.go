@@ -169,10 +169,11 @@ func TestReviewGateSharedObserverPersistsAndFencesTargets(t *testing.T) {
 }
 
 type admissionProvider struct {
-	mu                sync.Mutex
-	head, base, merge string
-	pending           bool
-	discoveries       int
+	mu                   sync.Mutex
+	head, base, merge    string
+	pending              bool
+	discoveryUnavailable bool
+	discoveries          int
 }
 
 func (p *admissionProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +189,11 @@ func (p *admissionProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"name":"main","protected":true,"commit":{"sha":%q}}`, p.base)
 	case root + "/branches/main/protection":
 		p.discoveries++
+		if p.discoveryUnavailable {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
+			return
+		}
 		fmt.Fprint(w, `{"required_status_checks":{"contexts":["build"],"checks":[]}}`)
 	case root + "/rules/branches/main":
 		fmt.Fprint(w, `[]`)
@@ -423,4 +429,47 @@ func (p *admissionProvider) discoveryCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.discoveries
+}
+
+func TestReviewGateRetriesUnavailableDiscoveryThenFreezesInventory(t *testing.T) {
+	database, _, ctx, lease := reviewAdmissionFixture(t)
+	provider := &admissionProvider{head: strings.Repeat("a", 40), base: strings.Repeat("b", 40), merge: strings.Repeat("c", 40), pending: true, discoveryUnavailable: true}
+	server := httptest.NewServer(provider)
+	defer server.Close()
+	client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: strings.Repeat("d", 40)}, Observer: client}
+	request, err := database.BeginReviewAdmission(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := request.Deadline
+	check := func() {
+		t.Helper()
+		request, err = gate.Check(ctx, agentturn.Request{Lease: lease, InstallationCredential: "fixture", RepositoryOwner: "owner", RepositoryName: "repo"}, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	check()
+	if request.Status != "WAITING" || len(request.Policy) == 0 || len(request.Inventory) > 0 || !strings.Contains(string(request.Observation), "insufficient_permissions") {
+		t.Fatalf("failed discovery became empty frozen policy: %+v", request)
+	}
+	provider.mu.Lock()
+	provider.discoveryUnavailable = false
+	provider.mu.Unlock()
+	check()
+	if request.Status != "WAITING" || len(request.Inventory) == 0 || !strings.Contains(string(request.Inventory), "build") || !request.Deadline.Equal(deadline) {
+		t.Fatalf("discovery recovery lost request anchor: %+v", request)
+	}
+	provider.mu.Lock()
+	provider.discoveryUnavailable = true
+	provider.pending = false
+	provider.mu.Unlock()
+	check()
+	if request.Status != "RELEASED" || provider.discoveryCount() != 2 {
+		t.Fatalf("complete snapshot was not frozen: %+v discoveries=%d", request, provider.discoveryCount())
+	}
 }
