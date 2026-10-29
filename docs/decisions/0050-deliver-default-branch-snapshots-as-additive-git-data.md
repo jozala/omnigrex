@@ -52,4 +52,4 @@ Native backend and Pi-discovery qualification remains required before delivery i
 
 ## Installation-fence refinement
 
-[Decision 0049](0049-exclude-execution-cleanup-without-locking-turn-leases.md) replaces the original long-held Turn row-lock fence with an execution-reservation guard so heartbeats can continue during installation.
+[Decision 0051](0051-exclude-execution-cleanup-without-locking-turn-leases.md) replaces the original long-held Turn row-lock fence with an execution-reservation guard so heartbeats can continue during installation.

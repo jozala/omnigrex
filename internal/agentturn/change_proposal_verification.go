@@ -20,7 +20,7 @@ func VerifyObservedChangeProposal(pullRequestID, pullRequestNumber int64, headRe
 		return "", fmt.Errorf("%w: Pull Request identity changed (durable %d/%d, observed %d/%d); do not adopt, reopen, or retarget",
 			ErrChangeProposalVerificationFailed, pullRequestID, pullRequestNumber, observed.ID, observed.Number)
 	}
-	if observed.State != "open" {
+	if observed.State != "open" || observed.Merged {
 		return "", fmt.Errorf("%w: Pull Request %d is not open (state %q, merged=%v); do not adopt, reopen, or retarget",
 			ErrChangeProposalVerificationFailed, observed.Number, observed.State, observed.Merged)
 	}

@@ -43,7 +43,7 @@ Let an ordinary concurrent local Git command finish before making a new call; un
 The backend acquires its execution lock before the controller guards its exact execution reservation against cleanup/revocation.
 Live Turn authority is checked before and after installation without holding lease rows, allowing execution heartbeats and MCP authority renewal to continue during delivery.
 Cleanup waits for installation/resumption to finish; successor admission still requires confirmed prior execution stop.
-See [installation fencing](../decisions/0049-exclude-execution-cleanup-without-locking-turn-leases.md).
+See [installation fencing](../decisions/0051-exclude-execution-cleanup-without-locking-turn-leases.md).
 
 The mutation ledger pins replay to its original execution identity and prevents an uncertain operation from fetching a newer base.
 Lost HTTP responses can replay a completed result without reinstallation.

@@ -1017,6 +1017,9 @@ WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
 	if result.RowsAffected() != 1 {
 		return errors.New("persist workflow snapshot: workflow not found")
 	}
+	if _, err := tx.Exec(ctx, `UPDATE review_admission_requests SET status='CANCELLED',release_evidence=NULL,updated_at=clock_timestamp() WHERE workflow_id=$1 AND status IN ('WAITING','RELEASED') AND ($2<>'REVIEWING' OR workflow_attempt_id::text<>$3)`, workflowID, string(snapshot.State), currentAttemptID(snapshot)); err != nil {
+		return err
+	}
 	if err := persistChangeProposal(ctx, tx, workflowID, snapshot); err != nil {
 		return err
 	}
@@ -1321,6 +1324,36 @@ func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, de
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode %s action: %w", actionKey, err)
+	}
+	if kind == PrepareAgentTurnJobKind {
+		incoming, decodeErr := decodeAgentTurnPreparationPayload(payload)
+		if decodeErr == nil && incoming.Role == workflow.RoleReviewer && incoming.Purpose == workflow.TurnPurposeSynchronization {
+			var pendingID string
+			var pendingPayload []byte
+			err := tx.QueryRow(ctx, `SELECT id::text,payload FROM jobs WHERE workflow_id=$1 AND workflow_attempt_id=$2 AND kind=$3 AND status IN ('AVAILABLE','LEASED') FOR UPDATE`, workflowID, attemptID, kind).Scan(&pendingID, &pendingPayload)
+			if err == nil {
+				pending, e := decodeAgentTurnPreparationPayload(pendingPayload)
+				if e != nil {
+					return "", e
+				}
+				if pending.Role != incoming.Role || pending.Stage != incoming.Stage {
+					return "", ErrWorkflowDecisionInvalid
+				}
+				pending.ExpectedHeadSHA = incoming.ExpectedHeadSHA
+				pending.Revision = incoming.Revision
+				updated, _ := json.Marshal(pending)
+				if _, err = tx.Exec(ctx, `UPDATE jobs SET payload=$2,available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`, pendingID, updated); err != nil {
+					return "", err
+				}
+				if _, err = tx.Exec(ctx, `UPDATE review_admission_requests SET head_sha=$2,base_sha='',test_merge_sha='',generation=generation+1,grace_anchor=LEAST(clock_timestamp(),deadline),last_observation=NULL,release_evidence=NULL,status='WAITING',updated_at=clock_timestamp() WHERE id=(SELECT request_id FROM review_admission_jobs WHERE job_id=$1) AND status IN ('WAITING','RELEASED')`, pendingID, incoming.ExpectedHeadSHA); err != nil {
+					return "", err
+				}
+				return pendingID, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return "", err
+			}
+		}
 	}
 	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey)
 	provenanceActionKey := actionKey

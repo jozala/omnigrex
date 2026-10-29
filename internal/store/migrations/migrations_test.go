@@ -42,3 +42,9 @@ func TestDiscoverRejectsInvalidMigrationNamesAndDuplicateVersions(t *testing.T) 
 		})
 	}
 }
+
+func TestEmbeddedMigrationsCanBeDiscovered(t *testing.T) {
+	if _, err := discover(Files); err != nil {
+		t.Fatalf("embedded migrations prevent controller startup: %v", err)
+	}
+}
