@@ -15,6 +15,7 @@ You may perform both responsibilities yourself.
 - [Repository skills](repository-skills.md): engineering procedures loaded from the working checkout.
 - [Development environments](development-environments.md): prebuilt images, required capabilities, and tool installation.
 - [Tool paths and caches](tool-paths-and-caches.md): disk-backed scratch and reusable caches.
+- [Review scheduling](../reference/repository-configuration.md#review-scheduling): controller-side CI waits or immediate concurrent review.
 - [Repository configuration reference](../reference/repository-configuration.md): supported files, schemas, and provenance.
 - [Troubleshooting](troubleshooting.md): configuration and onboarding failures.
 

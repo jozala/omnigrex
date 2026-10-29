@@ -104,6 +104,7 @@ type Preparer struct {
 	store           PreparationStore
 	verifier        ChangeProposalVerifier
 	defaultMaxSteps stepbudget.Limit
+	reviewGate      *ReviewGate
 }
 
 func NewPreparer(loader ProfileLoader, selector agentprofile.Selector, registry RuntimeRegistry, preparationStore PreparationStore) *Preparer {
@@ -118,6 +119,9 @@ func NewPreparerWithChangeProposalVerifier(loader ProfileLoader, selector agentp
 	preparer.verifier = verifier
 	return preparer
 }
+
+// SetReviewGate installs mandatory controller CI scheduling for Reviewer preparations.
+func (preparer *Preparer) SetReviewGate(gate *ReviewGate) { preparer.reviewGate = gate }
 
 // SetDefaultMaxSteps supplies the operator fallback for subsequently prepared
 // Turns. Configure before starting preparation workers.
@@ -146,6 +150,23 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		return Result{}, fmt.Errorf("read Agent Turn Runtime Profile bindings: %w", err)
 	}
 	telemetry.AddAttributes(ctx, attribute.String("role", string(bindings.Role)), attribute.String("stage", string(bindings.Stage)))
+	var admission store.ReviewAdmission
+	if bindings.Role == workflow.RoleReviewer && preparer.reviewGate != nil {
+		if err := preparer.reviewGate.validate(); err != nil {
+			return Result{}, err
+		}
+		admission, err = preparer.reviewGate.Store.BeginReviewAdmission(ctx, request.Lease)
+		if err != nil {
+			return Result{}, err
+		}
+		admission, err = preparer.reviewGate.Check(ctx, request, admission)
+		if err != nil {
+			return Result{}, err
+		}
+		if admission.Status != "RELEASED" {
+			return Result{}, store.ErrReviewAdmissionPending
+		}
+	}
 	snapshot, err := preparer.loader.Load(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName)
 	if err != nil {
 		return Result{}, fmt.Errorf("load Agent Profiles: %w", err)
@@ -194,6 +215,16 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		spec.VerifiedPRNumber = prNumber
 	}
 
+	if bindings.Role == workflow.RoleReviewer && preparer.reviewGate != nil {
+		admission, err = preparer.reviewGate.Check(ctx, request, admission)
+		if err != nil {
+			return Result{}, err
+		}
+		if admission.Status != "RELEASED" {
+			return Result{}, store.ErrReviewAdmissionPending
+		}
+		spec.ReviewAdmission = &admission
+	}
 	commit, err := preparer.store.PrepareAgentTurn(ctx, request.Lease, spec)
 	if err != nil {
 		if errors.Is(err, store.ErrParticipantConfigurationConflict) {
@@ -315,6 +346,9 @@ func (err credentialSafeError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
 }
 
 func sanitizePreparationError(err error, credential string) error {
+	if errors.Is(err, store.ErrReviewAdmissionPending) {
+		return store.ErrReviewAdmissionPending
+	}
 	var conflict *ParticipantConfigurationConflictError
 	if errors.As(err, &conflict) {
 		return &ParticipantConfigurationConflictError{

@@ -17,6 +17,7 @@ import (
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/providerauth"
+	"github.com/jozala/omnigrex/internal/reviewpolicy"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
@@ -469,6 +470,9 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	snapshot, err := agentprofile.NewLoader(api, role.BuiltinPolicyCatalog(), state.settings.AgentPathEnvironmentAllowlist...).Load(ctx, state.developerToken, state.repo.Owner, state.repo.Name)
 	if err != nil {
 		return err
+	}
+	if _, err := reviewpolicy.LoadAtCommit(ctx, api, state.developerToken, state.repo.Owner, state.repo.Name, snapshot.CommitSHA()); err != nil {
+		return fmt.Errorf("review scheduling policy: %w", err)
 	}
 	selection, err := snapshot.Select(agentprofile.SingletonSelector{})
 	if err != nil {

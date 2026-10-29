@@ -20,6 +20,7 @@ For a personal installation you may have all three responsibilities.
 | Sign in with ChatGPT or select OpenAI API-key authentication | [Provider authentication](provider-authentication.md) |
 | Understand execution and native storage constraints | [Backends](backends.md) |
 | Supply deployment-owned agent instructions and approved tool paths | [Agent policy](agent-policy.md) |
+| Diagnose controller-side CI waiting | [Review scheduling](review-scheduling.md) |
 | Understand long-running context compaction and runtime compatibility | [Context compaction](context-compaction.md) |
 | Verify readiness and diagnose onboarding | [Health and diagnostics](health-and-diagnostics.md) |
 | Collect logs, traces, and application metrics | [Observability](observability.md) |

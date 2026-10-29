@@ -299,6 +299,7 @@ func (f *piWorkflowFixture) assertSuccessorAllowed(t *testing.T, lease store.Age
 		t.Fatal(err)
 	}
 	f.preparer = agentturn.NewPreparer(agentprofile.NewLoader(workflowQualificationProfiles{head: f.head}, builtinStoreConfig(t).Policies, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"), agentprofile.SingletonSelector{}, registry, f.database)
+	f.preparer.SetReviewGate(&agentturn.ReviewGate{Store: f.database, Source: workflowQualificationProfiles{head: f.head}, Observer: f.github})
 	prepared := f.prepare(t)
 	if prepared.Commit.Participant.ID != lease.AgentParticipantID || prepared.Commit.Session.ID != lease.AgentSessionID || prepared.Commit.Turn.ExecutionEpoch <= lease.ExecutionEpoch {
 		t.Fatal("successor changed retained ownership or reused stale epoch")
