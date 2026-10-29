@@ -508,6 +508,47 @@ func TestHumanHandoffWorkerRetriesCleanupAfterPostAcknowledgementCrash(t *testin
 	}
 }
 
+// A replacement with the same reason is not authority for the old job. Even
+// cleanup recovered after a crash must remove only that job's own markers.
+func TestHumanHandoffSameReasonReplacementSurvivesStaleJobCleanup(t *testing.T) {
+	oldEffect := testEffect(workflow.StateNeedsHuman, 5)
+	oldEffect.HandoffReason = string(workflow.ReasonAgentBlocked)
+	oldEffect.HandoffDiagnostic = "obsolete blocker"
+	api := newFakeVisibleEffectAPI()
+	firstStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, oldEffect)
+	firstStore.ackErr = errors.New("crash after publication before acknowledgement")
+	if _, err := newTestHandoffWorker(t, firstStore, api, testWorkerConfig()).ProcessNext(context.Background()); err == nil {
+		t.Fatal("expected acknowledgement crash")
+	}
+
+	currentEffect := testEffect(workflow.StateNeedsHuman, 6)
+	currentEffect.HandoffReason = oldEffect.HandoffReason
+	currentEffect.HandoffDiagnostic = "replacement blocker with the same reason"
+	currentStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, currentEffect)
+	currentStore.lease.ID = "replacement-job"
+	for range 2 { // duplicate execution/retry must reuse the replacement marker
+		if _, err := newTestHandoffWorker(t, currentStore, api, testWorkerConfig()).ProcessNext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleEffect := currentEffect
+	staleEffect.JobRevision = 5
+	retryStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, staleEffect)
+	retryStore.ackAcknowledgement = store.WorkflowGitHubEffectAcknowledgement{Superseded: true, CleanupRequired: true}
+	if _, err := newTestHandoffWorker(t, retryStore, api, testWorkerConfig()).ProcessNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, number := range []int{17, 23} {
+		comments := api.comments[number]
+		if len(comments) != 1 || !strings.Contains(comments[0].Body, currentEffect.HandoffDiagnostic) || strings.Contains(comments[0].Body, oldEffect.HandoffDiagnostic) {
+			t.Errorf("artifact %d after stale cleanup = %#v", number, comments)
+		}
+	}
+	if api.issueCreates != 2 || api.pullRequestCreates != 2 || !retryStore.cleanupAcknowledged {
+		t.Errorf("creates = %d/%d, cleanup acknowledged = %t", api.issueCreates, api.pullRequestCreates, retryStore.cleanupAcknowledged)
+	}
+}
+
 func TestHumanHandoffWorkerRetriesAfterCleanupBeforeCleanupAcknowledgementCrash(t *testing.T) {
 	effect := testEffect(workflow.StateNeedsHuman, 5)
 	effect.HandoffReason = string(workflow.ReasonAgentBlocked)

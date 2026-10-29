@@ -931,6 +931,9 @@ func TestSynchronizationInHumanHandoffIsTrackingOnly(t *testing.T) {
 	}
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
 	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 0)
+	if action := onlyAction[workflow.PreserveHumanHandoffAction](t, decision.Actions); action.SourceRevision != snapshot.Revision {
+		t.Errorf("preserved revision = %d, want %d", action.SourceRevision, snapshot.Revision)
+	}
 	if actionCount[workflow.ReconcileLabelsAction](decision.Actions) != 1 {
 		t.Errorf("actions = %#v, want one needs-human label reconciliation", decision.Actions)
 	}

@@ -1080,3 +1080,64 @@ FROM jobs WHERE id = $1`, jobA, original.LeaseExpiresAt).Scan(&renewed); err != 
 		}
 	}
 }
+
+func TestNormalHandoffDiagnosticsRequireExactRevisionAndExcludeSafetyJobs(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	const workflowID = "7a000000-0000-4000-8000-000000000099"
+	if _, err := pool.Exec(ctx, `INSERT INTO workflows (
+    id, repository_id, repository_owner, repository_name, issue_id, issue_number,
+    status, state_revision, human_handoff_reason
+) VALUES ($1, 91, 'acme', 'widgets', 92, 17, 'NEEDS_HUMAN', 7, 'agent_blocked')`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	enqueue := func(key, payload string) string {
+		t.Helper()
+		return insertJob(t, pool, ctx, jobSeed{
+			Queue: store.WorkflowActionQueue, Kind: store.PublishHumanHandoffJobKind,
+			Payload: json.RawMessage(payload), MaxAttempts: 3, IdempotencyKey: key, WorkflowID: workflowID,
+		})
+	}
+	oldID := enqueue("old-normal", `{"reason":"agent_blocked","diagnostic":"obsolete blocker","revision":7}`)
+	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff", 10*time.Second)
+	if err != nil || lease == nil || lease.ID != oldID {
+		t.Fatalf("claim old normal job = (%#v, %v)", lease, err)
+	}
+	observed, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET state_revision = 8 WHERE id = $1`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	currentID := enqueue("current-normal", `{"reason":"agent_blocked","diagnostic":"replacement blocker","revision":8}`)
+	safetyID := enqueue("current-safety", `{"reason":"agent_blocked","diagnostic":"independent safety report","revision":8,"safety_diagnostic":true}`)
+	current, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
+	if err != nil || current.JobRevision != 7 || current.Revision != 8 || current.HandoffDiagnostic != "replacement blocker" {
+		t.Fatalf("current explanation = (%#v, %v)", current, err)
+	}
+	ack, err := databases[0].AcknowledgeWorkflowGitHubEffect(ctx, *lease, observed, json.RawMessage(`{}`))
+	if err != nil || !ack.Superseded || !ack.CleanupRequired {
+		t.Fatalf("same-reason replacement acknowledgement = (%#v, %v)", ack, err)
+	}
+	if _, err := databases[0].AcknowledgeWorkflowGitHubEffectCleanup(ctx, *lease); err != nil {
+		t.Fatal(err)
+	}
+	// Missing current normal evidence must not fall back to an older blocker,
+	// even when its reason matches or a current safety report is available.
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET state_revision = 9 WHERE id = $1`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'SUCCEEDED' WHERE id = $1`, safetyID); err != nil {
+		t.Fatal(err)
+	}
+	lease, err = databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.PublishHumanHandoffJobKind, "handoff", 10*time.Second)
+	if err != nil || lease == nil || lease.ID != currentID {
+		t.Fatalf("claim stale replacement = (%#v, %v)", lease, err)
+	}
+	current, err = databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
+	if err != nil || current.HandoffDiagnostic != "" {
+		t.Fatalf("missing current explanation = (%#v, %v)", current, err)
+	}
+}
