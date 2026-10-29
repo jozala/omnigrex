@@ -29,22 +29,24 @@ type WorkflowGitHubChangeProposal struct {
 
 // WorkflowGitHubEffectContext is the latest durable Workflow state observed under a live job fence.
 type WorkflowGitHubEffectContext struct {
-	WorkflowID               string
-	JobRevision              uint64
-	RepositoryID             int64
-	RepositoryOwner          string
-	RepositoryName           string
-	IssueNumber              int64
-	State                    workflow.State
-	Revision                 uint64
-	ReadyForSHA              string
-	HandoffReason            string
-	HandoffDiagnostic        string
-	SafetyDiagnostic         bool
-	ChangeProposal           *WorkflowGitHubChangeProposal
-	CleanupRequired          bool
-	CleanupIssueNumber       int64
-	CleanupPullRequestNumber int64
+	ReviewAdmission            *ReviewAdmission
+	ReviewPresentationRevision int64
+	WorkflowID                 string
+	JobRevision                uint64
+	RepositoryID               int64
+	RepositoryOwner            string
+	RepositoryName             string
+	IssueNumber                int64
+	State                      workflow.State
+	Revision                   uint64
+	ReadyForSHA                string
+	HandoffReason              string
+	HandoffDiagnostic          string
+	SafetyDiagnostic           bool
+	ChangeProposal             *WorkflowGitHubChangeProposal
+	CleanupRequired            bool
+	CleanupIssueNumber         int64
+	CleanupPullRequestNumber   int64
 	// VerificationPending reports that an active-state Workflow still has a
 	// preparation in flight for its current attempt that no successful
 	// preparation has yet validated. Visible-state reconciliation must not
@@ -243,6 +245,15 @@ SELECT EXISTS (
 		}
 	}
 
+	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&effect.ReviewPresentationRevision); err != nil {
+		return effect, err
+	}
+	admission, admissionErr := scanAdmission(tx.QueryRow(ctx, admissionSelect+` WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, job.WorkflowID))
+	if admissionErr == nil {
+		effect.ReviewAdmission = &admission
+	} else if !errors.Is(admissionErr, pgx.ErrNoRows) {
+		return effect, admissionErr
+	}
 	if payload.SafetyDiagnostic {
 		if strings.TrimSpace(payload.Reason) == "" || strings.TrimSpace(payload.Diagnostic) == "" {
 			return WorkflowGitHubEffectContext{}, ErrWorkflowGitHubEffectFenceLost
@@ -336,7 +347,11 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 		return WorkflowGitHubEffectAcknowledgement{}, ErrWorkflowGitHubEffectFenceLost
 	}
 
-	superseded := currentRevision != observed.Revision || currentState != observed.State
+	var presentationRevision int64
+	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&presentationRevision); err != nil {
+		return WorkflowGitHubEffectAcknowledgement{}, err
+	}
+	superseded := currentRevision != observed.Revision || currentState != observed.State || expectedKind == ReconcileGitHubLabelsJobKind && presentationRevision != observed.ReviewPresentationRevision
 	if payload.SafetyDiagnostic {
 		superseded = false
 	}
@@ -369,6 +384,12 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 		acknowledgement.Superseded = true
 		acknowledgement.CleanupRequired = true
 	} else if acknowledgement.Superseded && !cleanupPending {
+		if expectedKind == ReconcileGitHubLabelsJobKind {
+			if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
+				return WorkflowGitHubEffectAcknowledgement{}, err
+			}
+		}
+
 		supersededResult, _ := json.Marshal(map[string]any{
 			"superseded": true, "observed_revision": observed.Revision,
 			"current_revision": currentRevision, "current_state": currentState,

@@ -36,6 +36,7 @@ const (
 	ToolGetCIRun                   = "get_ci_run"
 	ToolGetCIJobLogs               = "get_ci_job_logs"
 	ToolSearchCIJobLogs            = "search_ci_job_logs"
+	ToolRefreshDefaultBranch       = "refresh_default_branch"
 	ToolPublishChanges             = "publish_changes"
 	ToolOpenPR                     = "open_pr"
 	ToolRequestReview              = "request_review"
@@ -54,6 +55,7 @@ type ToolDefinition struct {
 }
 
 var toolCatalog = []ToolDefinition{
+	{Name: ToolRefreshDefaultBranch, Description: "Acquire a verified default-branch snapshot into this live workspace without changing HEAD/index/source. Use a new operation_id for each fresh observation; replay returns the original snapshot, not a new observation. Check the returned ref/SHA locally. Only status current satisfies final freshness guidance; stale is usable but requires a fresh call, default_branch_changed/unavailable do not establish freshness. This is a local side effect, not publication or mergeability certification.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema()}, "operation_id"), Class: MutationTool},
 	{Name: ToolGetIssue, Description: "Get the scoped Issue and its current metadata.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolListIssueComments, Description: "List comments on the scoped Issue.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolGetPullRequest, Description: "Get the scoped Pull Request at the read target: the latest durably published head in this Developer Turn, otherwise the starting head.", InputSchema: emptyObjectSchema(), Class: ReadTool},

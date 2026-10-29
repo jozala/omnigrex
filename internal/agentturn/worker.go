@@ -142,6 +142,15 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 				attribute.String("role", string(result.Commit.Participant.Role)), attribute.String("stage", string(result.Commit.Turn.Stage)))
 			return nil
 		}
+		if errors.Is(err, store.ErrReviewAdmissionPending) {
+			gateStore, ok := worker.store.(interface {
+				DeferReviewAdmission(context.Context, store.JobLease, time.Duration) error
+			})
+			if !ok {
+				return permanentError{cause: errors.New("CI wait store unavailable")}
+			}
+			return gateStore.DeferReviewAdmission(workCtx, *lease, 15*time.Second)
+		}
 		if errors.Is(err, ErrParticipantConfigurationConflict) {
 			var conflict *ParticipantConfigurationConflictError
 			if !errors.As(err, &conflict) {

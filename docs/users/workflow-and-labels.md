@@ -62,3 +62,21 @@ After collection, a new trigger creates new Agent Participants and Agent Session
 Ask the operator about installation-specific [retention settings](../operators/retention.md).
 
 Next: [Human handoffs](human-handoffs.md).
+
+## Waiting for CI before review
+
+By default, the controller queues each new Reviewer Turn until relevant CI finishes.
+The separate `omnigrex:waiting-for-ci` label appears alongside the review-stage label on both the Work Item Issue and current Change Proposal.
+It is a scheduling observation, not a command or an approval state.
+No Reviewer Agent Turn or Runtime Process is running for this wait.
+
+One editable progress comment per location shows the reviewed head, CI state, deadline, and release reason.
+Failed, cancelled, skipped, neutral, and timed-out checks can finish the wait: release does not mean passing CI.
+When no CI is observed after successful discovery and registration grace, or when the absolute deadline expires with incomplete evidence, review can still begin with that limitation explicitly identified.
+Missing required checks do not become optional just because registration grace expires.
+
+Repository owners can select [immediate concurrent review or an explicit expected-check set](../reference/repository-configuration.md#review-scheduling).
+This does not change GitHub branch protection, review approval requirements, or local verification responsibilities.
+The waiting label is removed when review is admitted or the wait is cancelled; review queued is distinct from actual Turn allocation.
+New heads replace one pending target without extending its deadline.
+CI completion never resumes a closed Workflow or existing Human Handoff without explicit human reactivation.

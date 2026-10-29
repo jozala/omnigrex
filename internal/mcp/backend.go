@@ -126,6 +126,8 @@ func (LedgerWorkflowMutations) ReportBlocked(_ context.Context, request ReportBl
 var _ WorkflowMutations = LedgerWorkflowMutations{}
 
 type ProductionBackendConfig struct {
+	Snapshots        SnapshotAcquirer
+	Installer        execution.SnapshotInstaller
 	GitHub           GitHubAPI
 	Credentials      RepositoryCredentials
 	Publisher        WorkspacePublisher
@@ -138,6 +140,8 @@ type ProductionBackendConfig struct {
 }
 
 type ProductionBackend struct {
+	snapshots    SnapshotAcquirer
+	installer    execution.SnapshotInstaller
 	github       GitHubAPI
 	credentials  RepositoryCredentials
 	publisher    WorkspacePublisher
@@ -200,7 +204,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 		return nil, ErrInvalidBackendConfiguration
 	}
 	return &ProductionBackend{
-		github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
+		snapshots: config.Snapshots, installer: config.Installer, github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
 		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
 		handoffs:         config.Handoffs,
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
@@ -225,6 +229,8 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return nil, err
 	}
 	switch tool.Name {
+	case ToolRefreshDefaultBranch:
+		return backend.refreshDefaultBranch(ctx, invocation)
 	case ToolGetHandoff:
 		if backend.handoffs == nil {
 			return nil, ErrToolDependency
@@ -376,6 +382,9 @@ func (backend *ProductionBackend) PlanMutation(_ context.Context, invocation Inv
 
 // RestoreMutationReplay validates durable ancestor evidence and restores only exact-turn derived publication state.
 func (backend *ProductionBackend) RestoreMutationReplay(_ context.Context, invocation Invocation, source store.MutationReservation) error {
+	if invocation.Name == ToolRefreshDefaultBranch {
+		return ErrToolPrecondition
+	}
 	tool, err := backend.validateMutationReplay(invocation, source)
 	if err != nil {
 		return err

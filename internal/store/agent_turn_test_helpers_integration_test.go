@@ -20,7 +20,7 @@ func prepareFixtureAgentTurn(t *testing.T, database *store.Store, pool *pgxpool.
 	if err != nil {
 		return store.AgentTurn{}, err
 	}
-	prepared, err := database.PrepareAgentTurn(ctx, preparationLease, preparation)
+	prepared, err := prepareWithFixtureAdmission(t, database, ctx, preparationLease, preparation)
 	if err != nil {
 		if _, cleanupErr := pool.Exec(ctx, `DELETE FROM job_attempts WHERE job_id = $1`, preparationLease.ID); cleanupErr != nil {
 			return store.AgentTurn{}, errors.Join(err, cleanupErr)
@@ -193,4 +193,29 @@ RETURNING id::text`, workflowID, headSHA).Scan(&proposalID); err != nil {
 		t.Fatal(err)
 	}
 	return proposalID
+}
+
+// Non-scheduling fixtures opt into immediate scheduling explicitly. Gate-specific
+// regressions call the production store boundary directly instead.
+func prepareWithFixtureAdmission(t *testing.T, database *store.Store, ctx context.Context, lease store.JobLease, spec store.AgentTurnPreparationSpec) (store.AgentTurnPreparationCommit, error) {
+	t.Helper()
+	var payload struct {
+		Role workflow.Role `json:"role"`
+		Head string        `json:"expected_head_sha"`
+	}
+	_ = json.Unmarshal(lease.Payload, &payload)
+	if payload.Role == workflow.RoleReviewer {
+		request, err := database.BeginReviewAdmission(ctx, lease)
+		if err != nil {
+			t.Logf("fixture admission not applicable: %v", err)
+		}
+		if err == nil {
+			request, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: payload.Head, Policy: json.RawMessage(`{"start":"immediate","selection":"github_required","timeout":1800000000000,"registration_grace":60000000000}`), Inventory: json.RawMessage(`{"availability":"available"}`), Evidence: json.RawMessage(`{"release_reason":"immediate","fixture":true}`), Release: true})
+			if err != nil {
+				return store.AgentTurnPreparationCommit{}, err
+			}
+			spec.ReviewAdmission = &request
+		}
+	}
+	return database.PrepareAgentTurn(ctx, lease, spec)
 }

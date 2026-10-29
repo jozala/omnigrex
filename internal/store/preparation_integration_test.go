@@ -630,7 +630,7 @@ VALUES ($1, $2, 9123, 'owner', 'repo', 10, 10, 'OPEN', 'main', 'base', 'feature'
 	}
 
 	lease := claimPreparationJob(t, database, ctx)
-	prepared, err := database.PrepareAgentTurn(ctx, lease, preparationSpec("profile-set", "openai/developer"))
+	prepared, err := prepareWithFixtureAdmission(t, database, ctx, lease, preparationSpec("profile-set", "openai/developer"))
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() Reviewer error = %v", err)
 	}
@@ -2839,7 +2839,7 @@ func (preparer *integrationTurnPreparer) Prepare(context.Context, agentturn.Requ
 
 func prepareTurn(t *testing.T, database *store.Store, ctx context.Context, lease store.JobLease, commitSHA, model string) store.AgentTurnPreparationCommit {
 	t.Helper()
-	prepared, err := database.PrepareAgentTurn(ctx, lease, preparationSpec(commitSHA, model))
+	prepared, err := prepareWithFixtureAdmission(t, database, ctx, lease, preparationSpec(commitSHA, model))
 	if err != nil {
 		t.Fatalf("PrepareAgentTurn() error = %v", err)
 	}

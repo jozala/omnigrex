@@ -171,3 +171,10 @@ Unknown required workflow/rule mappings remain unresolved and require direct hum
 A stale head/base/merge mapping grants no new test-merge diagnostic access; it does not retarget the Reviewer or require rebasing the Change Proposal.
 Restart a stale continuation from the first page to observe a coherent current result set.
 See the [CI read contract](../reference/ci-evidence.md) for states, bounds and target semantics.
+
+## Default-branch snapshot acquisition
+
+If an agent reports unavailable current-base verification, consult the [snapshot result and recovery contract](../reference/default-branch-snapshots.md#limits-failures-and-recovery).
+Do not inject credentials into an active checkout or replace a live Session to bypass acquisition failures.
+A stale result needs a new operation identity and local verification of the newly returned pair; ambiguous local installation is not evidence that acquisition succeeded.
+Use the existing execution/storage recovery procedures on this page for infrastructure failures, preserving affected workspace evidence before replacement.
