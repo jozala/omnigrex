@@ -55,4 +55,4 @@ See [operator troubleshooting](../operators/troubleshooting.md) for existing exe
 The new capability is discovered from the current controller catalog through the existing Pi MCP extension; compatible retained Sessions keep their original Runtime Profile binding.
 Native Docker and Microsandbox qualification, including controlled-provider Pi discovery, runs in the existing backend gates described in [testing](../contributors/testing.md).
 
-[Reference index](README.md) · [Decision](../decisions/0048-deliver-default-branch-snapshots-as-additive-git-data.md)
+[Reference index](README.md) · [Decision](../decisions/0050-deliver-default-branch-snapshots-as-additive-git-data.md)

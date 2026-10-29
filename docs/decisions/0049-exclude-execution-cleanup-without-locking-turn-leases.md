@@ -13,7 +13,7 @@ Delivery must exclude cleanup and successor workspace replacement without stoppi
 
 ## Decision
 
-Refine the installation-fencing mechanism in [decision 0048](0048-deliver-default-branch-snapshots-as-additive-git-data.md), leaving its acquisition, delivery, and replay choices unchanged.
+Refine the installation-fencing mechanism in [decision 0050](0050-deliver-default-branch-snapshots-as-additive-git-data.md), leaving its acquisition, delivery, and replay choices unchanged.
 After acquiring its execution lock, the backend invokes a controller-supplied installation fence around pause, validation, delivery, and resumption.
 The fence holds a shared lock on the exact, settled, unrevoked main execution reservation.
 Both supported cleanup implementations revoke that reservation before stopping or removing the execution; successor admission still requires confirmed prior stop.

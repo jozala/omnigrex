@@ -1626,7 +1626,7 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 	allowed := mode == workflow.AssignmentGenerationRetained && participant.Status == AgentParticipantCompleted
 	if mode == workflow.AssignmentGenerationCurrent && participant.Status == AgentParticipantWaitingForHuman {
 		var err error
-		allowed, err = previousHandoffAllowsParticipantReactivation(ctx, tx, preparationJobID, participant.WorkflowID)
+		allowed, err = participantHandoffAllowsReactivation(ctx, tx, preparationJobID, participant.ID)
 		if err != nil {
 			return AgentParticipant{}, err
 		}
@@ -1637,7 +1637,7 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 	if _, err := tx.Exec(ctx, `
 UPDATE agent_participants
 SET status = 'ACTIVE', completed_at = NULL, retention_until = NULL,
-    reactivated_by_preparation_job_id = $2, updated_at = clock_timestamp()
+    waiting_handoff_attempt_id = NULL, reactivated_by_preparation_job_id = $2, updated_at = clock_timestamp()
 WHERE id = $1`, participant.ID, preparationJobID); err != nil {
 		return AgentParticipant{}, err
 	}
@@ -1653,9 +1653,10 @@ func runtimeBinding(binding ParticipantRuntimeBinding) runtimeprofile.Binding {
 	}
 }
 
-// A waiting Participant can be reactivated only for the first active Attempt
-// after the durable Human Handoff that put it under human responsibility.
-func previousHandoffAllowsParticipantReactivation(ctx context.Context, tx pgx.Tx, preparationJobID, workflowID string) (bool, error) {
+// Waiting is Participant-local: an unused Participant may remain waiting through
+// several successful Attempts. Its own Handoff, not the previous Attempt, is
+// the provenance required for a later human-authorized continuation.
+func participantHandoffAllowsReactivation(ctx context.Context, tx pgx.Tx, preparationJobID, participantID string) (bool, error) {
 	var allowed bool
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
@@ -1664,15 +1665,18 @@ SELECT EXISTS (
     JOIN workflow_attempts AS current_attempt
       ON current_attempt.id = preparation.workflow_attempt_id
      AND current_attempt.workflow_id = preparation.workflow_id
+    JOIN agent_participants AS participant ON participant.workflow_id = current_attempt.workflow_id
     JOIN workflow_attempts AS handoff_attempt
-      ON handoff_attempt.workflow_id = current_attempt.workflow_id
-     AND handoff_attempt.attempt_number = current_attempt.attempt_number - 1
-    WHERE preparation.id = $1 AND preparation.workflow_id = $2
+      ON handoff_attempt.id = participant.waiting_handoff_attempt_id
+     AND handoff_attempt.workflow_id = participant.workflow_id
+    WHERE preparation.id = $1 AND participant.id = $2
       AND preparation.kind = 'PREPARE_AGENT_TURN' AND current_attempt.active
+      AND current_attempt.trigger_delivery_id IS NOT NULL
+      AND handoff_attempt.attempt_number < current_attempt.attempt_number
       AND NOT handoff_attempt.active
       AND handoff_attempt.human_handoff_reason IS NOT NULL
-)`, preparationJobID, workflowID).Scan(&allowed); err != nil {
-		return false, fmt.Errorf("verify preceding Human Handoff for Participant reactivation: %w", err)
+)`, preparationJobID, participantID).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("verify Participant Human Handoff for reactivation: %w", err)
 	}
 	return allowed, nil
 }
