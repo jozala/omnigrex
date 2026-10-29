@@ -22,6 +22,7 @@ import (
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
@@ -172,6 +173,7 @@ type Invocation struct {
 	lease             store.AgentTurnLease
 	recordProposedTip func(context.Context, string) error
 	readTarget        *publicationReadTarget
+	installFence      func(context.Context, func(context.Context) error) error
 }
 
 func (Invocation) String() string   { return "MCP tool invocation" }
@@ -1157,6 +1159,15 @@ func (gateway *Gateway) executeMutation(operationContext context.Context, lease 
 		}
 	}()
 
+	if invocation.Name == ToolRefreshDefaultBranch {
+		if fenced, ok := gateway.store.(interface {
+			WithSnapshotInstallationFence(context.Context, store.AgentTurnLease, execution.Key, func(context.Context) error) error
+		}); ok {
+			invocation.installFence = func(ctx context.Context, apply func(context.Context) error) error {
+				return fenced.WithSnapshotInstallationFence(ctx, lease, snapshotExecutionKey(invocation.Scope), apply)
+			}
+		}
+	}
 	if invocation.Name == ToolPublishChanges {
 		invocation.recordProposedTip = func(ctx context.Context, head string) error {
 			return gateway.store.RecordProposedPublicationTip(ctx, lease, reservation.ID, head)
@@ -1279,6 +1290,9 @@ func asciiAlphaNumeric(value byte) bool {
 func mutationMetadata(tool string, scope TokenScope) MutationMetadata {
 	metadata := MutationMetadata{ExternalService: "github"}
 	switch tool {
+	case ToolRefreshDefaultBranch:
+		metadata.ExternalService = "workspace"
+		metadata.ExternalResourceID = fmt.Sprintf("%d:%s:%s:%s:%d", scope.Repository.ID, scope.Lease.AgentParticipantID, scope.Lease.AgentSessionID, scope.Lease.ID, scope.Lease.ExecutionEpoch)
 	case ToolPublishChanges:
 		metadata.ExternalService = "git"
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)

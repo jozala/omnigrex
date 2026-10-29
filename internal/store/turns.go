@@ -1550,19 +1550,23 @@ type lockedTurn struct {
 }
 
 func lockHierarchy(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, attemptID string) (lockedHierarchy, error) {
+	return lockHierarchyWithLock(ctx, tx, hierarchy, attemptID, " FOR UPDATE")
+}
+
+func lockHierarchyWithLock(ctx context.Context, tx pgx.Tx, hierarchy hierarchyIdentity, attemptID string, clause string) (lockedHierarchy, error) {
 	var locked lockedHierarchy
-	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1 FOR UPDATE`, hierarchy.workflowID).Scan(&locked.workflowStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1 `+clause, hierarchy.workflowID).Scan(&locked.workflowStatus); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("workflow", err)
 	}
-	if err := tx.QueryRow(ctx, `SELECT active FROM workflow_attempts WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, attemptID, hierarchy.workflowID).Scan(&locked.attemptActive); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT active FROM workflow_attempts WHERE id = $1 AND workflow_id = $2 `+clause, attemptID, hierarchy.workflowID).Scan(&locked.attemptActive); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("workflow attempt", err)
 	}
-	if err := tx.QueryRow(ctx, `SELECT status FROM agent_participants WHERE id = $1 AND workflow_id = $2 FOR UPDATE`, hierarchy.assignmentID, hierarchy.workflowID).Scan(&locked.assignmentStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status FROM agent_participants WHERE id = $1 AND workflow_id = $2 `+clause, hierarchy.assignmentID, hierarchy.workflowID).Scan(&locked.assignmentStatus); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent assignment", err)
 	}
 	if err := tx.QueryRow(ctx, `
 SELECT status, control_owner, control_revision
-FROM agent_sessions WHERE id = $1 AND agent_participant_id = $2 FOR UPDATE`,
+FROM agent_sessions WHERE id = $1 AND agent_participant_id = $2 `+clause,
 		hierarchy.sessionID, hierarchy.assignmentID).Scan(&locked.sessionStatus, &locked.controlOwner,
 		&locked.controlRevision); err != nil {
 		return lockedHierarchy{}, hierarchyLockError("agent session", err)
@@ -1607,10 +1611,14 @@ func validAgentTurnJobPayload(payload agentTurnJobPayload, job Job) bool {
 }
 
 func lockAgentTurnJob(ctx context.Context, tx pgx.Tx, lease JobLease, requireLive bool) (Job, error) {
+	return lockAgentTurnJobWithLock(ctx, tx, lease, requireLive, " FOR UPDATE")
+}
+
+func lockAgentTurnJobWithLock(ctx context.Context, tx pgx.Tx, lease JobLease, requireLive bool, clause string) (Job, error) {
 	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 {
 		return Job{}, ErrAgentTurnFenceLost
 	}
-	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, lease.ID))
+	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 `+clause, lease.ID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Job{}, ErrAgentTurnFenceLost
 	}
@@ -1625,7 +1633,7 @@ func lockAgentTurnJob(ctx context.Context, tx pgx.Tx, lease JobLease, requireLiv
 	var attemptOwner string
 	err = tx.QueryRow(ctx, `
 SELECT status = 'LEASED' AND lease_token = $3 AND lease_expires_at > clock_timestamp(), lease_owner
-FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 FOR UPDATE`,
+FROM job_attempts WHERE job_id = $1 AND attempt_number = $2 `+clause,
 		job.ID, lease.Attempt, lease.LeaseToken).Scan(&attemptLive, &attemptOwner)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && requireLive && (!attemptLive || job.LeaseExpiresAt == nil) {
 		return Job{}, ErrAgentTurnFenceLost
@@ -1930,6 +1938,10 @@ func isAgentTurnRecoveryJob(kind string) bool {
 }
 
 func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, error) {
+	return lockAgentTurnWithLock(ctx, tx, turnID, " FOR UPDATE")
+}
+
+func lockAgentTurnWithLock(ctx context.Context, tx pgx.Tx, turnID string, clause string) (lockedTurn, error) {
 	var turn lockedTurn
 	var profileConfig []byte
 	err := tx.QueryRow(ctx, `
@@ -1939,7 +1951,7 @@ func lockAgentTurn(ctx context.Context, tx pgx.Tx, turnID string) (lockedTurn, e
 	COALESCE(lease_expires_at > clock_timestamp(), FALSE), COALESCE(retry_of_turn_id::text, ''),
 	stage_id, purpose, COALESCE(change_proposal_id::text, ''), COALESCE(expected_head_sha, ''),
 	agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration, created_at
-FROM agent_turns WHERE id = $1 FOR UPDATE`, turnID).Scan(
+FROM agent_turns WHERE id = $1 `+clause, turnID).Scan(
 		&turn.ID, &turn.AgentSessionID, &turn.WorkflowAttemptID, &turn.operationLineageID, &turn.TurnNumber,
 		&turn.ExecutionEpoch, &turn.ControlRevision, &turn.Status, &turn.MutationAdmissionOpen,
 		&turn.active, &turn.ownerID, &turn.ownerToken, &turn.leasePresent, &turn.leaseLive,
@@ -1982,52 +1994,9 @@ func (store *Store) withLockedAgentTurnLeaseOptions(ctx context.Context, lease A
 		return fmt.Errorf("begin %s: %w", action, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	job, err := lockAgentTurnJob(ctx, tx, lease.JobLease, true)
-	if err != nil {
-		return ErrAgentTurnFenceLost
-	}
-	if requireExact && (job.LeaseOwner != lease.JobLease.LeaseOwner || !sameAgentTurnExecutionIdentity(job, lease)) {
-		return ErrAgentTurnFenceLost
-	}
-	if job.AgentTurnID != lease.ID || job.AgentSessionID != lease.AgentSessionID || job.ExecutionEpoch != lease.ExecutionEpoch {
-		return ErrAgentTurnFenceLost
-	}
-	lockedHierarchy, err := lockHierarchy(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID)
+	turn, err := validateAgentTurnLeaseTx(ctx, tx, lease, action, allowCreating, requireExact, " FOR UPDATE")
 	if err != nil {
 		return err
-	}
-	turn, err := lockAgentTurn(ctx, tx, lease.ID)
-	if err != nil {
-		return err
-	}
-	turn.AgentParticipantID = job.AgentParticipantID
-	if requireExact && (turn.AgentParticipantID != lease.AgentParticipantID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
-		return ErrAgentTurnFenceLost
-	}
-	if !lockedHierarchy.allowsActiveTurn() && !(allowCreating && lockedHierarchy.allowsAcquisition(turn.AgentTurn)) {
-		return ErrAgentTurnFenceLost
-	}
-	if !turn.active || lockedHierarchy.controlRevision != lease.ControlRevision ||
-		turn.AgentSessionID != lease.AgentSessionID || turn.ExecutionEpoch != lease.ExecutionEpoch ||
-		turn.ControlRevision != lease.ControlRevision || turn.ownerID != lease.OwnerID ||
-		turn.ownerToken != lease.OwnerToken || !turn.leaseLive {
-		return ErrAgentTurnFenceLost
-	}
-	if err := lockAgentTurnSlots(ctx, tx); err != nil {
-		return err
-	}
-	var slotLive bool
-	err = tx.QueryRow(ctx, `
-SELECT lease_expires_at > clock_timestamp() FROM agent_turn_slots
-WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
-AND control_revision = $4 AND owner_id = $5 AND owner_token = $6 FOR UPDATE`,
-		lease.ID, lease.AgentSessionID, lease.ExecutionEpoch, lease.ControlRevision,
-		lease.OwnerID, lease.OwnerToken).Scan(&slotLive)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && !slotLive {
-		return ErrAgentTurnFenceLost
-	}
-	if err != nil {
-		return fmt.Errorf("lock slot for %s: %w", action, err)
 	}
 	if err := operation(tx, turn); err != nil {
 		return err
@@ -2368,3 +2337,58 @@ SELECT EXISTS (
     SELECT 1 FROM tool_invocations WHERE agent_turn_id = $1 AND execution_epoch = $2
     AND kind = 'MUTATION' AND state IN ('RESERVED', 'IN_FLIGHT', 'UNKNOWN', 'RECONCILING')
 )`
+
+// validateAgentTurnLeaseTx retains the same checks for both locked authority
+// transactions and non-locking observations under an execution installation guard.
+func validateAgentTurnLeaseTx(ctx context.Context, tx pgx.Tx, lease AgentTurnLease, action string, allowCreating, requireExact bool, clause string) (lockedTurn, error) {
+	job, err := lockAgentTurnJobWithLock(ctx, tx, lease.JobLease, true, clause)
+	if err != nil {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if requireExact && (job.LeaseOwner != lease.JobLease.LeaseOwner || !sameAgentTurnExecutionIdentity(job, lease)) {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if job.AgentTurnID != lease.ID || job.AgentSessionID != lease.AgentSessionID || job.ExecutionEpoch != lease.ExecutionEpoch {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	lockedHierarchy, err := lockHierarchyWithLock(ctx, tx, hierarchyFromJob(job), job.WorkflowAttemptID, clause)
+	if err != nil {
+		return lockedTurn{}, err
+	}
+	turn, err := lockAgentTurnWithLock(ctx, tx, lease.ID, clause)
+	if err != nil {
+		return lockedTurn{}, err
+	}
+	turn.AgentParticipantID = job.AgentParticipantID
+	if requireExact && (turn.AgentParticipantID != lease.AgentParticipantID || turn.WorkflowAttemptID != lease.WorkflowAttemptID) {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if !lockedHierarchy.allowsActiveTurn() && !(allowCreating && lockedHierarchy.allowsAcquisition(turn.AgentTurn)) {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if !turn.active || lockedHierarchy.controlRevision != lease.ControlRevision ||
+		turn.AgentSessionID != lease.AgentSessionID || turn.ExecutionEpoch != lease.ExecutionEpoch ||
+		turn.ControlRevision != lease.ControlRevision || turn.ownerID != lease.OwnerID ||
+		turn.ownerToken != lease.OwnerToken || !turn.leaseLive {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if clause != "" {
+		if err := lockAgentTurnSlots(ctx, tx); err != nil {
+			return lockedTurn{}, err
+		}
+	}
+	var slotLive bool
+	err = tx.QueryRow(ctx, `
+SELECT lease_expires_at > clock_timestamp() FROM agent_turn_slots
+WHERE agent_turn_id = $1 AND agent_session_id = $2 AND execution_epoch = $3
+AND control_revision = $4 AND owner_id = $5 AND owner_token = $6 `+clause,
+		lease.ID, lease.AgentSessionID, lease.ExecutionEpoch, lease.ControlRevision,
+		lease.OwnerID, lease.OwnerToken).Scan(&slotLive)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && !slotLive {
+		return lockedTurn{}, ErrAgentTurnFenceLost
+	}
+	if err != nil {
+		return lockedTurn{}, fmt.Errorf("lock slot for %s: %w", action, err)
+	}
+	return turn, nil
+}

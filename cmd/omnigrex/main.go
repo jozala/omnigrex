@@ -272,6 +272,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
 		GitHub:           githubServices.api,
+		Snapshots:        workspaces,
+		Installer:        backend.Snapshots,
 		Credentials:      repositoryCredentials,
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},

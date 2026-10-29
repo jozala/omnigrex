@@ -217,6 +217,8 @@ func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, led
 			return noExecutionEffectsError{cause: err}
 		}
 		options.Config.Cmd[0] += script
+		options.HostConfig.Resources.Memory = goldenResourceProbeMemoryBytes
+		options.HostConfig.Resources.MemorySwap = goldenResourceProbeMemoryBytes
 	}
 	options.Name = spec.Name + "-setup"
 	if err := ledger.BeginExecutionPhase(ctx, key, execution.Setup); err != nil {

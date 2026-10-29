@@ -383,3 +383,38 @@ func (ledger *executionTestLedger) RevokeExecution(_ context.Context, key execut
 	ledger.records[key] = record
 	return record, true, nil
 }
+
+// The real Pi-discovery qualification exposed setup OOMs at the storage-only
+// helper's 128 MiB limit. Golden checks load Node's pinned package catalog, like
+// the standalone diagnostic probe, and need its existing bounded 256 MiB budget.
+func TestGoldenSetupUsesProbeBudgetWithoutChangingStorageOnlyHelpers(t *testing.T) {
+	for _, golden := range []bool{false, true} {
+		key := executionTestRequest().Key
+		ledger := newExecutionTestLedger()
+		_, _, _ = ledger.ReserveExecution(t.Context(), key, strings.Repeat("a", 64))
+		spec := runtimeProcessSpec()
+		spec.Volumes = []VolumeMount{{Name: "state", Subpath: "assignment-" + key.AssignmentID + "/runtime-state", Target: "/state"}}
+		api := &probeBudgetAPI{runtimeAPIFake: newRuntimeAPIFake()}
+		_ = prepareExecutionSubpaths(t.Context(), api, spec, ledger, key, golden, nil)
+		if api.options.HostConfig == nil {
+			t.Fatal("probe not dispatched")
+		}
+		memory, swap := int64(128<<20), int64(0)
+		if golden {
+			memory, swap = 256<<20, 256<<20
+		}
+		if api.options.HostConfig.Resources.Memory != memory || api.options.HostConfig.Resources.MemorySwap != swap {
+			t.Fatalf("golden %t: setup resources %+v", golden, api.options.HostConfig.Resources)
+		}
+	}
+}
+
+type probeBudgetAPI struct {
+	*runtimeAPIFake
+	options mobyclient.ContainerCreateOptions
+}
+
+func (api *probeBudgetAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
+	api.options = options
+	return mobyclient.ContainerCreateResult{}, errors.New("fixture stops after recording dispatch")
+}

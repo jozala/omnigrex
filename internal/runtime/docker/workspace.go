@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/gitdelivery"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
@@ -14,7 +17,10 @@ import (
 
 // WorkspaceSource reads only an exact managed environment. No guest command or
 // prompt completion is needed to suspend every container writer and transfer.
-type WorkspaceSource struct{ client *mobyclient.Client }
+type WorkspaceSource struct {
+	client *mobyclient.Client
+	mutex  sync.Mutex
+}
 
 func NewWorkspaceSource() (*WorkspaceSource, error) {
 	client, err := mobyclient.New(mobyclient.FromEnv)
@@ -27,6 +33,14 @@ func NewWorkspaceSource() (*WorkspaceSource, error) {
 func (source *WorkspaceSource) Close() error { return source.client.Close() }
 
 func (source *WorkspaceSource) ReadWorkspace(ctx context.Context, request execution.CaptureRequest, seal func(io.Reader) error) (err error) {
+	if err := source.lock(ctx); err != nil {
+		return err
+	}
+	defer source.mutex.Unlock()
+	return source.withWorkspace(ctx, request, seal, nil)
+}
+
+func (source *WorkspaceSource) withWorkspace(ctx context.Context, request execution.CaptureRequest, seal func(io.Reader) error, snapshot *gitdelivery.Snapshot) (err error) {
 	key := request.Workspace.Key
 	if !validCanonicalRuntimeUUID(key.AgentTurnID) || key.ExecutionEpoch <= 0 || key.RuntimeProfileName == "" || key.RuntimeProfileVersion == "" {
 		return execution.ErrInvalidSpec
@@ -82,7 +96,9 @@ func (source *WorkspaceSource) ReadWorkspace(ctx context.Context, request execut
 			resumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			_, resumeErr := source.client.ContainerUnpause(resumeCtx, actual.ID, mobyclient.ContainerUnpauseOptions{})
-			err = errors.Join(err, resumeErr)
+			if resumeErr != nil {
+				err = errors.Join(execution.ErrUnknownEffect, err, resumeErr)
+			}
 		}()
 		if _, err := source.client.ContainerPause(ctx, actual.ID, mobyclient.ContainerPauseOptions{}); err != nil {
 			return err
@@ -99,6 +115,57 @@ func (source *WorkspaceSource) ReadWorkspace(ctx context.Context, request execut
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, archive.Content.Close()) }()
-	return seal(archive.Content)
+	if snapshot == nil {
+		defer func() { err = errors.Join(err, archive.Content.Close()) }()
+		return seal(archive.Content)
+	}
+	files, validationErr := gitdelivery.Delta(archive.Content, *snapshot)
+	closeErr := archive.Content.Close()
+	if err := errors.Join(validationErr, closeErr); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	payload, err := gitdelivery.Archive(files)
+	if err != nil {
+		return err
+	}
+	defer payload.Close()
+	_, err = source.client.CopyToContainer(ctx, actual.ID, mobyclient.CopyToContainerOptions{DestinationPath: "/workspace", Content: payload, CopyUIDGID: true})
+	if err != nil {
+		return errors.Join(execution.ErrUnknownEffect, err)
+	}
+	return nil
+}
+
+func (source *WorkspaceSource) InstallSnapshot(ctx context.Context, ref execution.WorkspaceRef, snapshot gitdelivery.Snapshot, fence execution.WorkspaceFence) error {
+	if err := source.lock(ctx); err != nil {
+		return err
+	}
+	defer source.mutex.Unlock()
+	if fence == nil {
+		return execution.ErrInvalidSpec
+	}
+	return fence(ctx, func(ctx context.Context) error {
+		return source.withWorkspace(ctx, execution.CaptureRequest{Workspace: ref, Purpose: execution.PublicationCapture}, nil, &snapshot)
+	})
+}
+
+func (source *WorkspaceSource) lock(ctx context.Context) error {
+	for !source.mutex.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		source.mutex.Unlock()
+		return err
+	}
+	return nil
 }

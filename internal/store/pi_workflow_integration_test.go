@@ -40,6 +40,75 @@ import (
 )
 
 func TestPiControlledWorkflow(t *testing.T) {
+	t.Run("default-branch-refresh", func(t *testing.T) {
+		f := newPiWorkflowFixture(t, "long-blocked")
+		source := f.prepare(t)
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatalf("retained source Turn: %t %v", processed, err)
+		}
+		f.assertState(t, workflow.StateNeedsHuman)
+		retained, err := f.database.GetAgentSessionForParticipant(f.ctx, source.Commit.Participant.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.fault.mode = "default-branch-refresh"
+		f.github.advanceDefault = true
+		delivery := workflowDelivery(uuid.NewString())
+		delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+		claim := claimWorkflowDelivery(t, f.database, f.ctx, delivery)
+		if _, err := f.database.CompleteWebhookTransition(f.ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(eventContext store.WorkflowEventContext) (workflow.Event, error) {
+			return workflow.TriggerEvent{EventMetadata: eventContext.Metadata, AttemptID: uuid.NewString(), AttemptNumber: 2}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, wanted := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
+			prepared := f.prepare(t)
+			if wanted == workflow.StateReviewing {
+				if prepared.Commit.Participant.ID != source.Commit.Participant.ID {
+					t.Fatal("refresh replaced retained Participant")
+				}
+				current, err := f.database.GetAgentSessionForParticipant(f.ctx, prepared.Commit.Participant.ID)
+				if err != nil || current.ID != retained.ID || current.RuntimeSessionID != retained.RuntimeSessionID {
+					t.Fatal("refresh replaced retained Session", err)
+				}
+			}
+			processed, err := f.worker.ProcessNext(f.ctx)
+			if err != nil || !processed {
+				t.Fatalf("refresh Turn: %t %v", processed, err)
+			}
+			f.assertState(t, wanted)
+			var count int
+			if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$1 AND tool_name='refresh_default_branch' AND state='SUCCEEDED' AND result->>'status'='current'`, prepared.Commit.Turn.ID).Scan(&count); err != nil || count < 1 {
+				t.Fatalf("refresh not reached through Pi MCP discovery: %d %v", count, err)
+			}
+		}
+		participants, err := f.database.ListAgentParticipants(f.ctx, f.workflowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, participant := range participants {
+			session, err := f.database.GetAgentSessionForParticipant(f.ctx, participant.ID)
+			if err != nil || session.RuntimeSessionID != session.ID {
+				t.Fatal("Session binding changed", err)
+			}
+			if participant.RuntimeImageDigest != f.runtime.Binding().Image {
+				t.Fatal("snapshot capability rebound Runtime Profile")
+			}
+			history, err := os.ReadFile(filepath.Join(f.settings.RuntimeStateRoot, "assignment-"+participant.ID, "runtime-state", "sessions", session.ID, "session.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range append([]string{"developer-token", "reviewer-token", "workflow-only-provider-key"}, f.authority.tokens...) {
+				if strings.Contains(string(history), secret) {
+					t.Fatal("snapshot credentials retained in Session")
+				}
+			}
+		}
+		if f.github.base == f.head {
+			t.Fatal("default branch did not advance after preparation")
+		}
+		t.Log("PASS: Developer acquisition before PR and after publication, Developer merge and Reviewer read-only verification of acquired ancestry, ordinary handoff/verdict")
+	})
 	t.Run("long blocked completion", func(t *testing.T) {
 		f := newPiWorkflowFixture(t, "long-blocked")
 		prepared := f.prepare(t)
@@ -318,8 +387,8 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	github := &workflowQualificationGitHub{replayGatewayGitHub: &replayGatewayGitHub{branch: "omnigrex/issue-123", base: "main"}, bare: bare, base: head, loseReviewResponse: mode == "lost-terminal-mutation-response"}
-	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: workspaces, Workflow: mcp.LedgerWorkflowMutations{}, PriorIntents: database, Handoffs: database, Policies: configuration.Policies})
+	github := &workflowQualificationGitHub{replayGatewayGitHub: &replayGatewayGitHub{branch: "omnigrex/issue-123", base: "main"}, bare: bare, base: head, advanceDefault: mode == "default-branch-refresh", loseReviewResponse: mode == "lost-terminal-mutation-response"}
+	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: workspaces, Snapshots: workspaces, Installer: backend.Snapshots, Workflow: mcp.LedgerWorkflowMutations{}, PriorIntents: database, Handoffs: database, Policies: configuration.Policies})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,12 +612,47 @@ func (b workflowQualificationBranch) ResolveDefaultBranch(context.Context, strin
 
 type workflowQualificationGitHub struct {
 	*replayGatewayGitHub
-	bare, base         string
-	review             githubapi.Review
-	reviewCalls        int
-	ciReads            int
-	ciPending          bool
-	loseReviewResponse bool
+	bare, base          string
+	review              githubapi.Review
+	reviewCalls         int
+	ciReads             int
+	ciPending           bool
+	loseReviewResponse  bool
+	advanceDefault      bool
+	refreshObservations int
+}
+
+func (g *workflowQualificationGitHub) GetRepository(_ context.Context, _ string, owner, repo string) (githubapi.InstallationRepository, error) {
+	return githubapi.InstallationRepository{ID: workflowLocator().RepositoryID, Owner: owner, Name: repo}, nil
+}
+
+func (g *workflowQualificationGitHub) ResolveDefaultBranch(ctx context.Context, credential, owner, repo string) (githubapi.DefaultBranch, error) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	if credential != "developer-token" {
+		return githubapi.DefaultBranch{}, errors.New("wrong acquisition authority")
+	}
+	if g.advanceDefault && g.refreshObservations == 0 {
+		run := func(args ...string) (string, error) {
+			cmd := exec.CommandContext(ctx, "/usr/bin/git", append([]string{"--git-dir", g.bare}, args...)...)
+			b, err := cmd.CombinedOutput()
+			return strings.TrimSpace(string(b)), err
+		}
+		tree, err := run("rev-parse", g.base+"^{tree}")
+		if err != nil {
+			return githubapi.DefaultBranch{}, err
+		}
+		b, err := run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", g.base, "-m", "Advance default after workspace preparation")
+		if err != nil {
+			return githubapi.DefaultBranch{}, err
+		}
+		if _, err := run("update-ref", "refs/heads/main", b); err != nil {
+			return githubapi.DefaultBranch{}, err
+		}
+		g.base = b
+	}
+	g.refreshObservations++
+	return githubapi.DefaultBranch{Name: "main", CommitSHA: g.base}, nil
 }
 
 func (g *workflowQualificationGitHub) pull() githubapi.PullRequest {
