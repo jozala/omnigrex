@@ -1110,6 +1110,8 @@ UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 UPDATE agent_participants SET github_app_actor_id = $2 WHERE id = $1`, fixture.assignmentID, actorID); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if role == workflow.RoleReviewer || head != "" {
 		proposalRowID = fmt.Sprintf("79%04d00-0000-4000-8000-000000000001", number)
 		proposal = settlementProposal(fixture, number, head)
 		if _, err := pool.Exec(ctx, `
@@ -1131,9 +1133,11 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 	if role == workflow.RoleReviewer {
 		spec.Stage = workflow.StageReview
 		spec.Purpose = workflow.TurnPurposeReview
+		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
+	}
+	if proposalRowID != "" {
 		spec.ChangeProposalID = proposalRowID
 		spec.ExpectedHeadSHA = head
-		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
 	}
 	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
 	if err != nil {

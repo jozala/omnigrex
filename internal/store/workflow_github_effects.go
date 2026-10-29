@@ -267,6 +267,7 @@ FROM jobs
 WHERE workflow_id = $1 AND kind = $2
   AND payload->>'revision' = $3
   AND payload->>'reason' = $4
+  AND COALESCE((payload->>'safety_diagnostic')::boolean, false) = false
 ORDER BY created_at DESC, id DESC
 LIMIT 1`, job.WorkflowID, PublishHumanHandoffJobKind, fmt.Sprint(effect.Revision), effect.HandoffReason).Scan(&effect.HandoffDiagnostic)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {

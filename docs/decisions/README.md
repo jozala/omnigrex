@@ -58,11 +58,13 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0049: Gate Reviewer admission on CI completion](0049-gate-reviewer-admission-on-ci-completion.md) | Accepted | 2026-10-27 |
 | [0050: Deliver default-branch snapshots as additive Git data](0050-deliver-default-branch-snapshots-as-additive-git-data.md) | Accepted | 2026-10-27 |
 | [0051: Exclude execution cleanup without locking Turn leases](0051-exclude-execution-cleanup-without-locking-turn-leases.md) | Accepted | 2026-10-28 |
+| [0052: Carry current Human Handoff publication across tracking revisions](0052-carry-current-handoff-publication-across-tracking-revisions.md) | Accepted | 2026-10-28 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.
 Record 0050 similarly retains the default-branch delivery decision independently numbered 0048 before the Participant provenance decision merged.
 Record 0051 retains the installation-fencing decision independently numbered 0049 before the Reviewer admission decision merged.
+Record 0052 retains the Human Handoff publication decision independently numbered 0049 before the Reviewer admission decision merged.
 
 ## Existing architectural decisions
 

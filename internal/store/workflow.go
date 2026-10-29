@@ -1107,6 +1107,38 @@ WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
 			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, action); err != nil {
 				return err
 			}
+		case workflow.PreserveHumanHandoffAction:
+			if decision.Snapshot.State != workflow.StateNeedsHuman || action.SourceRevision+1 != decision.Snapshot.Revision {
+				return ErrWorkflowDecisionInvalid
+			}
+			// Copy only the immediately preceding revision's normal handoff.
+			// Equal state/reason never authorizes an arbitrary historical diagnostic.
+			var reason string
+			var diagnostic string
+			if err := tx.QueryRow(ctx, `
+SELECT COALESCE(workflow.human_handoff_reason, ''), COALESCE((
+    SELECT payload->>'diagnostic' FROM jobs
+    WHERE workflow_id = workflow.id AND kind = 'PUBLISH_HUMAN_HANDOFF'
+      AND payload->>'revision' = $2
+      AND payload->>'reason' = workflow.human_handoff_reason
+      AND COALESCE((payload->>'safety_diagnostic')::boolean, false) = false
+    ORDER BY created_at DESC, id DESC LIMIT 1
+), '')
+FROM workflows AS workflow WHERE id = $1`, workflowID, fmt.Sprint(action.SourceRevision)).Scan(&reason, &diagnostic); err != nil {
+				return fmt.Errorf("preserve current Human Handoff publication: %w", err)
+			}
+			if reason == "" {
+				return ErrWorkflowDecisionInvalid
+			}
+			handoffPayload := map[string]any{
+				"reason": reason, "diagnostic": diagnostic, "revision": decision.Snapshot.Revision,
+			}
+			if decision.Snapshot.ChangeProposal != nil {
+				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
+			}
+			if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), PublishHumanHandoffJobKind, handoffPayload); err != nil {
+				return err
+			}
 		case workflow.MarkHumanHandoffAction:
 			if _, err := tx.Exec(ctx, `
 UPDATE agent_participants
