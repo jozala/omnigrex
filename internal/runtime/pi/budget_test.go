@@ -3,6 +3,7 @@ package pi_test
 import (
 	"errors"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/stepbudget"
 	"net"
@@ -106,5 +107,33 @@ func TestBudgetStopDoesNotReplaceCancellationSettlementAuthority(t *testing.T) {
 				t.Fatal(ctx.Err())
 			}
 		})
+	}
+}
+
+func TestBudgetObservationFloodCannotDisplaceSettlement(t *testing.T) {
+	limit, _ := stepbudget.Parse("2000")
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	c, ctx := fixture(t, pi.Options{StepBudget: &limit}, func(runtime net.Conn, id string) {
+		admit(runtime, id)
+		<-ready
+		for used := uint64(1); used <= 1000; used++ {
+			writeRecord(runtime, map[string]any{"type": "omnigrex_step_budget", "data": stepbudget.Observation{Limit: limit, Used: used, Responses: used}})
+		}
+		writeRecord(runtime, map[string]any{"type": "omnigrex_step_budget", "data": stepbudget.Observation{Limit: limit, Used: 1000, Responses: 1000, Complete: true}})
+		settle(runtime, "stop")
+		close(release)
+	})
+	first := true
+	sink := eventSinkFunc(func(event agentevent.AgentEvent) {
+		if first {
+			first = false
+			close(ready)
+			<-release
+		}
+	})
+	got, err := c.Prompt(ctx, "work", sink)
+	if err != nil || got.Status != agent.Completed || got.StepBudget == nil || got.StepBudget.Used != 1000 || !got.StepBudget.Complete {
+		t.Fatalf("observation flood: %+v %v", got, err)
 	}
 }
