@@ -2,6 +2,8 @@
 
 [Operator guide](README.md) · [Backup](backup.md) · [Restore](restore.md)
 
+Read the selected Release notes, breaking changes, and explicit upgrade requirements before every upgrade.
+A fresh-install smoke does not prove historical upgrade compatibility; follow a fresh-install requirement when declared, and treat unknown paths as unqualified.
 Create a coordinated backup before every application, PostgreSQL, or Runtime Profile upgrade.
 Use the same backend, logical namespace, protected images, and selected Compose file set throughout.
 
@@ -21,7 +23,7 @@ Historical repair requires separate authorization; never reset the database or d
 ## Orchestrator-only upgrade
 
 Keep the configured agent digest/platform and protected historical images, but account for possible changes to the default contract selected for new Participants.
-Record the current commit and images, download the target qualified commit's common bundle, selected overlay, and environment example, then update the controller digest.
+Record the current commit and images, download and checksum the target Release assets, then stage its common bundle, selected overlay, and environment example, then update the controller digest.
 Reconcile configuration changes against [deployment settings](../reference/deployment-configuration.md).
 
 Preserve historical compatibility artifacts as recovery evidence.

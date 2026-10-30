@@ -13,3 +13,5 @@ For deployment maintenance, use the authoritative [operator procedures](../opera
 For accepted intent and delivery evidence, use the [plans index](../plans/README.md) and [decision log](../decisions/README.md).
 
 [Documentation hub](../README.md)
+
+- [Publish a product release](releases.md): select qualified candidates, publish alphas, and promote without rebuilding.

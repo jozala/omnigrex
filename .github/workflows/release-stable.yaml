@@ -1,0 +1,43 @@
+name: Promote to stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Full stable version without v
+        required: true
+        type: string
+      notes:
+        description: Human release notes (stable may finalize alpha notes)
+        required: true
+        type: string
+      alpha:
+        description: Published alpha version without v (stable target must match)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize both entry points; never cancel a partially published release.
+concurrency:
+  group: product-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out trusted main release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Designate already-tested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+          ALPHA: ${{ inputs.alpha }}
+        run: python3 scripts/release/release.py stable release-assets

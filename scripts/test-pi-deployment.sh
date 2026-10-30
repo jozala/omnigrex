@@ -82,7 +82,8 @@ else
   docker pull --platform linux/amd64 "$pi"
 fi
 arch="$(docker image inspect "$pi" --format '{{.Architecture}}')"
-cp deploy/compose.pi.yaml deploy/compose.pi-"$backend".yaml "$directory/"
+payload_deploy=${OMNIGREX_PI_DEPLOY_FILES:-deploy}
+cp "$payload_deploy/compose.pi.yaml" "$payload_deploy/compose.pi-$backend.yaml" "$directory/"
 mkdir "$directory/secrets"
 openssl rand -hex 32 > "$directory/secrets/database-password"
 openssl rand -hex 32 > "$directory/secrets/github-webhook-secret"

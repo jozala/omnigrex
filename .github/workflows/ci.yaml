@@ -162,6 +162,9 @@ jobs:
       packages: write
     outputs:
       development_image: ${{ steps.images.outputs.development_image }}
+      orchestrator_image: ${{ steps.images.outputs.orchestrator_image }}
+      orchestrator_microsandbox_image: ${{ steps.images.outputs.orchestrator_microsandbox_image }}
+      pi_image: ${{ steps.images.outputs.pi_image }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -174,6 +177,19 @@ jobs:
         env:
           OMNIGREX_RELEASE_COMMIT: "${{ github.sha }}"
         run: sh scripts/publish-pi-images.sh
+      - name: Package exact deployment payload
+        env:
+          ORCHESTRATOR_IMAGE: ${{ steps.images.outputs.orchestrator_image }}
+          ORCHESTRATOR_MICROSANDBOX_IMAGE: ${{ steps.images.outputs.orchestrator_microsandbox_image }}
+          PI_IMAGE: ${{ steps.images.outputs.pi_image }}
+        run: python3 scripts/release/release.py pack candidate
+      - name: Upload unqualified deployment payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: deployment-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 14
 
   deploy-smoke:
     needs: publish
@@ -189,13 +205,22 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      - name: Download packaged deployment payload
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: deployment-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate
       - name: Smoke-test the published Pi Docker deployment
+        env:
+          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE: ${{ needs.publish.outputs.orchestrator_image }}
+          OMNIGREX_PI_DEPLOY_IMAGE: ${{ needs.publish.outputs.pi_image }}
+          OMNIGREX_PI_DEPLOY_FILES: ${{ github.workspace }}/extracted/deploy
+          OMNIGREX_PI_BACKEND: docker
         run: |
-          docker pull "ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}"
-          docker pull "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}"
-          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/orchestrator:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
-          OMNIGREX_PI_DEPLOY_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
-          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh
+          python3 scripts/release/release.py verify candidate
+          mkdir extracted
+          tar -xzf candidate/payload.tar.gz -C extracted
+          sh scripts/test-pi-deployment.sh
 
   deploy-smoke-microsandbox:
     needs: publish
@@ -217,13 +242,22 @@ jobs:
           echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Download packaged deployment payload
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: deployment-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate
       - name: Smoke-test the published Pi Microsandbox deployment
+        env:
+          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE: ${{ needs.publish.outputs.orchestrator_microsandbox_image }}
+          OMNIGREX_PI_DEPLOY_IMAGE: ${{ needs.publish.outputs.pi_image }}
+          OMNIGREX_PI_DEPLOY_FILES: ${{ github.workspace }}/extracted/deploy
+          OMNIGREX_PI_BACKEND: microsandbox
         run: |
-          docker pull "ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-${{ github.sha }}"
-          docker pull "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}"
-          OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/orchestrator-microsandbox:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
-          OMNIGREX_PI_DEPLOY_IMAGE="$(docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${{ github.sha }}" --format '{{index .RepoDigests 0}}')" \
-          OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-deployment.sh
+          python3 scripts/release/release.py verify candidate
+          mkdir extracted
+          tar -xzf candidate/payload.tar.gz -C extracted
+          sh scripts/test-pi-deployment.sh
 
   development-smoke-microsandbox:
     needs: [publish, deploy-smoke, deploy-smoke-microsandbox]
@@ -264,3 +298,30 @@ jobs:
           name: development-environment
           path: development-environment.yaml
           if-no-files-found: error
+
+  release-candidate:
+    needs: [publish, deploy-smoke, deploy-smoke-microsandbox, development-smoke-microsandbox]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download tested deployment payload
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: deployment-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate
+      - name: Record complete qualification evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/release.py ready candidate
+      - name: Upload ready candidate (not a public release)
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 14
