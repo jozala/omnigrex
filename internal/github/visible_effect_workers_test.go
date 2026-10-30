@@ -508,6 +508,47 @@ func TestHumanHandoffWorkerRetriesCleanupAfterPostAcknowledgementCrash(t *testin
 	}
 }
 
+// A replacement with the same reason is not authority for the old job. Even
+// cleanup recovered after a crash must remove only that job's own markers.
+func TestHumanHandoffSameReasonReplacementSurvivesStaleJobCleanup(t *testing.T) {
+	oldEffect := testEffect(workflow.StateNeedsHuman, 5)
+	oldEffect.HandoffReason = string(workflow.ReasonAgentBlocked)
+	oldEffect.HandoffDiagnostic = "obsolete blocker"
+	api := newFakeVisibleEffectAPI()
+	firstStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, oldEffect)
+	firstStore.ackErr = errors.New("crash after publication before acknowledgement")
+	if _, err := newTestHandoffWorker(t, firstStore, api, testWorkerConfig()).ProcessNext(context.Background()); err == nil {
+		t.Fatal("expected acknowledgement crash")
+	}
+
+	currentEffect := testEffect(workflow.StateNeedsHuman, 6)
+	currentEffect.HandoffReason = oldEffect.HandoffReason
+	currentEffect.HandoffDiagnostic = "replacement blocker with the same reason"
+	currentStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, currentEffect)
+	currentStore.lease.ID = "replacement-job"
+	for range 2 { // duplicate execution/retry must reuse the replacement marker
+		if _, err := newTestHandoffWorker(t, currentStore, api, testWorkerConfig()).ProcessNext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleEffect := currentEffect
+	staleEffect.JobRevision = 5
+	retryStore := newFakeVisibleEffectStore(store.PublishHumanHandoffJobKind, staleEffect)
+	retryStore.ackAcknowledgement = store.WorkflowGitHubEffectAcknowledgement{Superseded: true, CleanupRequired: true}
+	if _, err := newTestHandoffWorker(t, retryStore, api, testWorkerConfig()).ProcessNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, number := range []int{17, 23} {
+		comments := api.comments[number]
+		if len(comments) != 1 || !strings.Contains(comments[0].Body, currentEffect.HandoffDiagnostic) || strings.Contains(comments[0].Body, oldEffect.HandoffDiagnostic) {
+			t.Errorf("artifact %d after stale cleanup = %#v", number, comments)
+		}
+	}
+	if api.issueCreates != 2 || api.pullRequestCreates != 2 || !retryStore.cleanupAcknowledged {
+		t.Errorf("creates = %d/%d, cleanup acknowledged = %t", api.issueCreates, api.pullRequestCreates, retryStore.cleanupAcknowledged)
+	}
+}
+
 func TestHumanHandoffWorkerRetriesAfterCleanupBeforeCleanupAcknowledgementCrash(t *testing.T) {
 	effect := testEffect(workflow.StateNeedsHuman, 5)
 	effect.HandoffReason = string(workflow.ReasonAgentBlocked)
@@ -813,7 +854,7 @@ func (fake *fakeVisibleEffectAPI) DeleteIssueComment(_ context.Context, _, _, _ 
 
 func (fake *fakeVisibleEffectAPI) createComment(number int, request CommentRequest) (IssueComment, error) {
 	fake.nextCommentID++
-	comment := IssueComment{ID: fake.nextCommentID, Body: request.Body + "\n\n" + request.Marker, HTMLURL: fmt.Sprintf("https://github.com/acme/widgets/issues/%d#issuecomment-%d", number, fake.nextCommentID)}
+	comment := IssueComment{ID: fake.nextCommentID, Body: JoinBodyParts(request.Body, request.Marker), HTMLURL: fmt.Sprintf("https://github.com/acme/widgets/issues/%d#issuecomment-%d", number, fake.nextCommentID)}
 	err := fake.createErrors[number]
 	if err == nil || fake.ambiguousCreate[number] {
 		fake.comments[number] = append(fake.comments[number], comment)
@@ -828,4 +869,86 @@ func fakeHasLabel(labels []Label, name string) bool {
 		}
 	}
 	return false
+}
+
+func (fake *fakeVisibleEffectAPI) UpdateIssueComment(_ context.Context, _, _, _ string, number int, id int64, request CommentRequest) (IssueComment, error) {
+	for i, comment := range fake.comments[number] {
+		if comment.ID == id {
+			comment.Body = JoinBodyParts(request.Body, request.Marker)
+			fake.comments[number][i] = comment
+			return comment, nil
+		}
+	}
+	return IssueComment{}, errors.New("comment missing")
+}
+
+func TestReviewWaitingPresentationConvergesWithoutPollingSpam(t *testing.T) {
+	effect := testEffect(workflow.StateReviewing, 3)
+	effect.WorkflowID = "11111111-1111-4111-8111-111111111111"
+	effect.VerificationPending = true // Waiting visibility must survive the normal pre-Turn label barrier.
+	effect.ReviewAdmission = &store.ReviewAdmission{ID: "request", PullRequestNumber: 23, HeadSHA: testReadySHA, Status: "WAITING", Deadline: time.Date(2026, 10, 27, 12, 30, 0, 0, time.UTC), Observation: json.RawMessage(`{"release_reason":"waiting","targets":[{"commit":"head","results":[{"requirement":{"context":"build"},"source":"status","state":"pending"}]}]}`)}
+	api := newFakeVisibleEffectAPI()
+	api.issueLabels[17] = []Label{{Name: "priority:high"}}
+	worker := newTestLabelWorker(t, newFakeVisibleEffectStore(store.ReconcileGitHubLabelsJobKind, effect), api, testWorkerConfig())
+	for i := 0; i < 3; i++ {
+		if _, err := worker.reconcile(context.Background(), testCredential, effect, store.JobLease{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if api.issueCreates != 2 || len(api.comments[17]) != 1 || len(api.comments[23]) != 1 {
+		t.Fatalf("per-poll comments created: %d", api.issueCreates)
+	}
+	for _, target := range []int{17, 23} {
+		if !fakeHasLabel(api.issueLabels[target], WaitingForCI) || !fakeHasLabel(api.issueLabels[target], string(StateReviewing)) {
+			t.Fatalf("waiting label missing: %+v", api.issueLabels[target])
+		}
+		if !strings.Contains(api.comments[target][0].Body, "No Reviewer Agent Turn is running") {
+			t.Fatal("waiting presentation falsely advertised execution")
+		}
+	}
+	issueID, prID := api.comments[17][0].ID, api.comments[23][0].ID
+	effect.ReviewAdmission.Status = "ADMITTED"
+	effect.ReviewAdmission.Observation = json.RawMessage(`{"release_reason":"timeout_incomplete","failures":[{"operation":"policy","code":"insufficient_permissions"}]}`)
+	if _, err := worker.reconcile(context.Background(), testCredential, effect, store.JobLease{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []int{17, 23} {
+		if fakeHasLabel(api.issueLabels[target], WaitingForCI) {
+			t.Fatal("admission left waiting label")
+		}
+		if !strings.Contains(api.comments[target][0].Body, "timeout_incomplete") || !strings.Contains(api.comments[target][0].Body, "insufficient_permissions") {
+			t.Fatal("incomplete release lost its reason")
+		}
+	}
+	if api.comments[17][0].ID != issueID || api.comments[23][0].ID != prID || api.issueCreates != 2 {
+		t.Fatal("release replaced stable comment")
+	}
+	effect.State = workflow.StateClosed
+	effect.ReviewAdmission.Status = "CANCELLED"
+	if _, err := worker.reconcile(context.Background(), testCredential, effect, store.JobLease{}); err != nil {
+		t.Fatal(err)
+	}
+	if fakeHasLabel(api.issueLabels[17], WaitingForCI) || !fakeHasLabel(api.issueLabels[17], "priority:high") {
+		t.Fatal("cancellation corrupted unrelated labels")
+	}
+}
+
+func TestReviewProgressRecoversLostCreateResponse(t *testing.T) {
+	effect := testEffect(workflow.StateReviewing, 3)
+	effect.WorkflowID = "11111111-1111-4111-8111-111111111111"
+	effect.ReviewAdmission = &store.ReviewAdmission{Status: "WAITING", HeadSHA: testReadySHA, PullRequestNumber: 23}
+	api := newFakeVisibleEffectAPI()
+	api.createErrors[17] = errors.New("lost response")
+	api.ambiguousCreate[17] = true
+	worker := newTestLabelWorker(t, newFakeVisibleEffectStore(store.ReconcileGitHubLabelsJobKind, effect), api, testWorkerConfig())
+	if _, err := worker.reconcile(context.Background(), testCredential, effect, store.JobLease{}); err == nil {
+		t.Fatal("lost response unexpectedly succeeded")
+	}
+	delete(api.createErrors, 17)
+	if _, err := worker.reconcile(context.Background(), testCredential, effect, store.JobLease{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.comments[17]) != 1 || api.issueCreates != 2 {
+		t.Fatalf("lost response duplicated progress comment: %d", api.issueCreates)
+	}
 }

@@ -83,8 +83,18 @@ func TestRepositoryInstallationCredentialProviderRequiresExactRolePermissions(t 
 			},
 			wantError: true,
 		},
+		{name: "Developer missing legacy status reads", required: githubapi.DeveloperAppPermissions(), permissions: func() githubapi.InstallationPermissions {
+			p := githubapi.DeveloperAppPermissions()
+			delete(p, "statuses")
+			return p
+		}(), wantError: true},
+		{name: "Developer missing policy reads", required: githubapi.DeveloperAppPermissions(), permissions: func() githubapi.InstallationPermissions {
+			p := githubapi.DeveloperAppPermissions()
+			delete(p, "administration")
+			return p
+		}(), wantError: true},
 		{
-			name:     "Developer has an undeclared administration permission",
+			name:     "Developer has administration write instead of read",
 			required: githubapi.DeveloperAppPermissions(),
 			permissions: func() githubapi.InstallationPermissions {
 				permissions := githubapi.DeveloperAppPermissions()

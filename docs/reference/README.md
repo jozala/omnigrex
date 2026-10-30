@@ -13,3 +13,7 @@ Task instructions stay in the user, repository-owner, operator, and contributor 
 [Documentation hub](../README.md)
 
 - [Agent step budgets](agent-step-budgets.md): configuration, preparation lifecycle, typed evidence, and per-Turn diagnosis.
+
+- [CI evidence](ci-evidence.md): required policy, observations, verified test-merge reads and continuations.
+
+- [Default-branch snapshots](default-branch-snapshots.md): scoped in-Turn acquisition, freshness, limits, and recovery.

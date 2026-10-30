@@ -108,6 +108,7 @@ type ParticipantPreparation struct {
 // A nonempty value repairs a stale stored head transactionally before Turn
 // creation and scopes the new Turn to the verified head.
 type AgentTurnPreparationSpec struct {
+	ReviewAdmission  *ReviewAdmission
 	Stages           map[workflow.StageID]ParticipantPreparation
 	VerifiedHeadSHA  string
 	VerifiedPRNumber int64
@@ -266,7 +267,7 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if err := lockAgentTurnPreparationWorkflow(ctx, tx, lease.WorkflowID); err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
-	job, err := lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
+	job, err := lockPreparationJobTx(ctx, tx, lease)
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
 	}
@@ -377,6 +378,10 @@ SELECT EXISTS (
 	if mutationsUnsettled {
 		return AgentTurnPreparationCommit{}, ErrAgentTurnMutationsUnsettled
 	}
+	reviewStart, err := consumeReviewAdmissionTx(ctx, tx, job, payload, preparation.ExpectedHeadSHA, spec.ReviewAdmission)
+	if err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
 	turnID, err := randomUUID()
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
@@ -392,6 +397,14 @@ SELECT EXISTS (
 	turnConfiguration := participantPreparation.TurnConfiguration
 	if len(turnConfiguration) == 0 {
 		turnConfiguration = json.RawMessage(`{}`)
+	}
+	if len(reviewStart) > 0 {
+		var configuration map[string]json.RawMessage
+		if json.Unmarshal(turnConfiguration, &configuration) != nil || configuration == nil {
+			return AgentTurnPreparationCommit{}, errors.New("invalid turn configuration")
+		}
+		configuration["review_start"] = reviewStart
+		turnConfiguration, _ = json.Marshal(configuration)
 	}
 	turnConfiguration, err = canonicalJSON(turnConfiguration)
 	if err != nil || turnConfiguration[0] != '{' {
@@ -424,6 +437,14 @@ RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.TurnConfiguration, turn.Stage, turn.Purpose,
 		nullableString(turn.ChangeProposalID), nullableString(turn.ExpectedHeadSHA)).Scan(&turn.CreatedAt); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("insert prepared Agent Turn: %w", err)
+	}
+	if payload.Role == workflow.RoleReviewer {
+		if _, err := tx.Exec(ctx, `UPDATE review_admission_requests SET status='ADMITTED',admitted_turn_id=$2,updated_at=clock_timestamp() WHERE id=$1`, spec.ReviewAdmission.ID, turn.ID); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+		if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
 	}
 	result, err := tx.Exec(ctx, `
 UPDATE agent_sessions
@@ -897,6 +918,11 @@ WHERE id = $1 AND control_revision = $2`, sessionID, expectedRevision, owner, co
 	session, err = scanAgentSession(tx.QueryRow(ctx, agentSessionSelect+` WHERE id = $1`, sessionID))
 	if err != nil {
 		return AgentSession{}, err
+	}
+	if owner == SessionControlHuman {
+		if err := cancelReviewAdmissionForHumanControlTx(ctx, tx, workflowID); err != nil {
+			return AgentSession{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentSession{}, fmt.Errorf("commit Agent Session control transfer: %w", err)
@@ -1626,7 +1652,7 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 	allowed := mode == workflow.AssignmentGenerationRetained && participant.Status == AgentParticipantCompleted
 	if mode == workflow.AssignmentGenerationCurrent && participant.Status == AgentParticipantWaitingForHuman {
 		var err error
-		allowed, err = previousHandoffAllowsParticipantReactivation(ctx, tx, preparationJobID, participant.WorkflowID)
+		allowed, err = participantHandoffAllowsReactivation(ctx, tx, preparationJobID, participant.ID)
 		if err != nil {
 			return AgentParticipant{}, err
 		}
@@ -1637,7 +1663,7 @@ func reactivatePreparationParticipant(ctx context.Context, tx pgx.Tx, participan
 	if _, err := tx.Exec(ctx, `
 UPDATE agent_participants
 SET status = 'ACTIVE', completed_at = NULL, retention_until = NULL,
-    reactivated_by_preparation_job_id = $2, updated_at = clock_timestamp()
+    waiting_handoff_attempt_id = NULL, reactivated_by_preparation_job_id = $2, updated_at = clock_timestamp()
 WHERE id = $1`, participant.ID, preparationJobID); err != nil {
 		return AgentParticipant{}, err
 	}
@@ -1653,9 +1679,10 @@ func runtimeBinding(binding ParticipantRuntimeBinding) runtimeprofile.Binding {
 	}
 }
 
-// A waiting Participant can be reactivated only for the first active Attempt
-// after the durable Human Handoff that put it under human responsibility.
-func previousHandoffAllowsParticipantReactivation(ctx context.Context, tx pgx.Tx, preparationJobID, workflowID string) (bool, error) {
+// Waiting is Participant-local: an unused Participant may remain waiting through
+// several successful Attempts. Its own Handoff, not the previous Attempt, is
+// the provenance required for a later human-authorized continuation.
+func participantHandoffAllowsReactivation(ctx context.Context, tx pgx.Tx, preparationJobID, participantID string) (bool, error) {
 	var allowed bool
 	if err := tx.QueryRow(ctx, `
 SELECT EXISTS (
@@ -1664,15 +1691,18 @@ SELECT EXISTS (
     JOIN workflow_attempts AS current_attempt
       ON current_attempt.id = preparation.workflow_attempt_id
      AND current_attempt.workflow_id = preparation.workflow_id
+    JOIN agent_participants AS participant ON participant.workflow_id = current_attempt.workflow_id
     JOIN workflow_attempts AS handoff_attempt
-      ON handoff_attempt.workflow_id = current_attempt.workflow_id
-     AND handoff_attempt.attempt_number = current_attempt.attempt_number - 1
-    WHERE preparation.id = $1 AND preparation.workflow_id = $2
+      ON handoff_attempt.id = participant.waiting_handoff_attempt_id
+     AND handoff_attempt.workflow_id = participant.workflow_id
+    WHERE preparation.id = $1 AND participant.id = $2
       AND preparation.kind = 'PREPARE_AGENT_TURN' AND current_attempt.active
+      AND current_attempt.trigger_delivery_id IS NOT NULL
+      AND handoff_attempt.attempt_number < current_attempt.attempt_number
       AND NOT handoff_attempt.active
       AND handoff_attempt.human_handoff_reason IS NOT NULL
-)`, preparationJobID, workflowID).Scan(&allowed); err != nil {
-		return false, fmt.Errorf("verify preceding Human Handoff for Participant reactivation: %w", err)
+)`, preparationJobID, participantID).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("verify Participant Human Handoff for reactivation: %w", err)
 	}
 	return allowed, nil
 }

@@ -27,6 +27,12 @@ Do not assume an unset binary default equals the value supplied by Compose.
 | `OMNIGREX_GITHUB_DEVELOPER_APP_ID`, `OMNIGREX_GITHUB_REVIEWER_APP_ID` | Distinct numeric App identities |
 | `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` | Optional private absolute host path mounted for exact backend-scoped qualification results |
 
+A normal supported Pi image rollout without Session migration does not require `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE`.
+When configured, the artifact must match the exact target image/platform, Runtime Profile contract, and backend family/contract version; startup and doctor reject stale evidence.
+Clear an obsolete optional import setting or replace it with separately qualified matching results while preserving historical private artifacts and ledger evidence.
+Import records compatibility only, not Session migration or Participant rebinding authority.
+See [normal rollout and optional qualification](../operators/upgrades.md#runtime-profile-image-change).
+
 See [release/image selection](../operators/installation.md), [App permissions](../operators/github-apps.md), and [secret placement](../operators/secrets.md).
 `OMNIGREX_DATABASE_PASSWORD_FILE`, App private-key files, webhook-secret file, and provider-credentials file identify Compose host secret sources.
 The controller reads mounted secrets, including `OMNIGREX_DATABASE_PASSWORD_SECRET_FILE` for its PostgreSQL password path.

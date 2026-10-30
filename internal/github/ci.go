@@ -2,7 +2,9 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,31 +55,35 @@ type CheckAnnotation struct {
 }
 
 type CheckDiagnostics struct {
-	CheckID     int64             `json:"check_run_id"`
-	Name        string            `json:"name"`
-	HeadSHA     string            `json:"head_sha"`
-	Status      string            `json:"status"`
-	Conclusion  string            `json:"conclusion,omitempty"`
-	HTMLURL     string            `json:"html_url"`
-	Output      CheckOutput       `json:"output"`
-	Annotations []CheckAnnotation `json:"annotations"`
-	HasMore     bool              `json:"has_more"`
-	NextCursor  string            `json:"next_cursor,omitempty"`
-	Truncated   bool              `json:"truncated"`
+	App          *CheckApp         `json:"app,omitempty"`
+	CheckSuiteID int64             `json:"check_suite_id,omitempty"`
+	CheckID      int64             `json:"check_run_id"`
+	Name         string            `json:"name"`
+	HeadSHA      string            `json:"head_sha"`
+	Status       string            `json:"status"`
+	Conclusion   string            `json:"conclusion,omitempty"`
+	HTMLURL      string            `json:"html_url"`
+	Output       CheckOutput       `json:"output"`
+	Annotations  []CheckAnnotation `json:"annotations"`
+	HasMore      bool              `json:"has_more"`
+	NextCursor   string            `json:"next_cursor,omitempty"`
+	Truncated    bool              `json:"truncated"`
 }
 
 type CIRun struct {
-	ID         int64      `json:"run_id"`
-	Name       string     `json:"name,omitempty"`
-	HeadSHA    string     `json:"head_sha"`
-	HeadBranch string     `json:"head_branch,omitempty"`
-	Status     string     `json:"status"`
-	Conclusion string     `json:"conclusion,omitempty"`
-	HTMLURL    string     `json:"html_url"`
-	RunNumber  int64      `json:"run_number"`
-	RunAttempt int        `json:"run_attempt,omitempty"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+	RepositoryID int64      `json:"repository_id,omitempty"`
+	Event        string     `json:"event,omitempty"`
+	ID           int64      `json:"run_id"`
+	Name         string     `json:"name,omitempty"`
+	HeadSHA      string     `json:"head_sha"`
+	HeadBranch   string     `json:"head_branch,omitempty"`
+	Status       string     `json:"status"`
+	Conclusion   string     `json:"conclusion,omitempty"`
+	HTMLURL      string     `json:"html_url"`
+	RunNumber    int64      `json:"run_number"`
+	RunAttempt   int        `json:"run_attempt,omitempty"`
+	CreatedAt    *time.Time `json:"created_at,omitempty"`
+	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 }
 
 type CIRunList struct {
@@ -160,14 +166,15 @@ type JobScope struct {
 }
 
 type ciCursor struct {
-	Version int    `json:"v"`
-	Kind    string `json:"kind"`
-	RepoID  int64  `json:"repo"`
-	Head    string `json:"head"`
-	ID      int64  `json:"id"`
-	Attempt int    `json:"attempt,omitempty"`
-	Offset  int64  `json:"offset"`
-	Extra   string `json:"extra,omitempty"`
+	Version     int    `json:"v"`
+	Kind        string `json:"kind"`
+	RepoID      int64  `json:"repo"`
+	Head        string `json:"head"`
+	ID          int64  `json:"id"`
+	Attempt     int    `json:"attempt,omitempty"`
+	Offset      int64  `json:"offset"`
+	Extra       string `json:"extra,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 func encodeCICursor(cursor ciCursor) string {
@@ -255,6 +262,17 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 	if err != nil {
 		return CheckDiagnostics{}, err
 	}
+	fingerprint := ciFingerprint(struct {
+		Check       CheckRun
+		Output      CheckOutput
+		Annotations []CheckAnnotation
+	}{check, output, annotations})
+	if cursor != "" {
+		prior, _ := decodeCICursor(cursor)
+		if prior.Fingerprint != fingerprint {
+			return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+		}
+	}
 	if annotationOffset > int64(len(annotations)) {
 		return CheckDiagnostics{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 	}
@@ -287,14 +305,17 @@ func (client *APIClient) GetCheckRunDiagnostics(ctx context.Context, installatio
 	moreAnn := nextAnnIdx < int64(len(annotations))
 	hasMore := moreAnn || summaryMore || textMore
 	result := CheckDiagnostics{
-		CheckID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA,
+		App: check.App, CheckID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA,
 		Status: check.Status, Conclusion: check.Conclusion, HTMLURL: check.HTMLURL,
 		Output:      CheckOutput{Title: title, Summary: summaryChunk, Text: textChunk},
 		Annotations: page, HasMore: hasMore,
 		Truncated: summaryMore || textMore || moreAnn || anyAnnotationTruncated(page),
 	}
+	if check.CheckSuite != nil {
+		result.CheckSuiteID = check.CheckSuite.ID
+	}
 	if hasMore {
-		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "check_annotations", RepoID: repoID, Head: headSHA, ID: checkID, Offset: nextAnnIdx, Extra: formatOutputOffsets(summaryNext, textNext, nextMsgOff)})
+		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "check_annotations", RepoID: repoID, Head: headSHA, ID: checkID, Offset: nextAnnIdx, Extra: formatOutputOffsets(summaryNext, textNext, nextMsgOff), Fingerprint: fingerprint})
 	}
 	if err := ensureCISerializedBound(result); err != nil {
 		return CheckDiagnostics{}, err
@@ -417,6 +438,11 @@ func anyAnnotationTruncated(page []CheckAnnotation) bool {
 }
 
 type rawCheckRun struct {
+	App        *CheckApp `json:"app"`
+	CheckSuite *struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+	ExternalID  string     `json:"external_id"`
 	ID          int64      `json:"id"`
 	NodeID      string     `json:"node_id"`
 	Name        string     `json:"name"`
@@ -448,7 +474,7 @@ func (client *APIClient) getCheckRun(ctx context.Context, installationToken, own
 	if raw.Conclusion != nil {
 		conclusion = *raw.Conclusion
 	}
-	check := CheckRun{ID: raw.ID, NodeID: raw.NodeID, Name: raw.Name, HeadSHA: raw.HeadSHA, Status: raw.Status, Conclusion: conclusion, HTMLURL: raw.HTMLURL, DetailsURL: raw.DetailsURL, StartedAt: raw.StartedAt, CompletedAt: raw.CompletedAt}
+	check := CheckRun{App: raw.App, CheckSuite: raw.CheckSuite, ExternalID: raw.ExternalID, ID: raw.ID, NodeID: raw.NodeID, Name: raw.Name, HeadSHA: raw.HeadSHA, Status: raw.Status, Conclusion: conclusion, HTMLURL: raw.HTMLURL, DetailsURL: raw.DetailsURL, StartedAt: raw.StartedAt, CompletedAt: raw.CompletedAt}
 	if !validCheckRunResult(check) || !validResponseURL(check.HTMLURL) || check.DetailsURL != "" && !validResponseURL(check.DetailsURL) {
 		return CheckRun{}, CheckOutput{}, responseFailure(metadata, "ci_check_validation", "invalid_state", ErrInvalidAPIResponse)
 	}
@@ -477,7 +503,13 @@ func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installati
 	path := fmt.Sprintf("/repos/%s/%s/check-runs/%d/annotations?per_page=100", url.PathEscape(owner), url.PathEscape(repository), checkID)
 	annotations := make([]CheckAnnotation, 0)
 	seen := make(map[string]struct{})
+	firstPath := path
+	seenPages := map[string]bool{}
 	for path != "" {
+		if seenPages[path] || len(seenPages) >= 100 {
+			return nil, fmt.Errorf("%w: repeated or excessive CI pagination", ErrInvalidAPIResponse)
+		}
+		seenPages[path] = true
 		var page []struct {
 			Path            string  `json:"path"`
 			StartLine       *int    `json:"start_line"`
@@ -526,7 +558,7 @@ func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installati
 		if next == "" {
 			break
 		}
-		nextPath, paginationErr := client.paginationPath(next)
+		nextPath, paginationErr := client.ciPaginationPath(firstPath, next)
 		if paginationErr != nil {
 			return nil, paginationErr
 		}
@@ -536,6 +568,10 @@ func (client *APIClient) ListCheckRunAnnotations(ctx context.Context, installati
 }
 
 type rawWorkflowRun struct {
+	Repository *struct {
+		ID int64 `json:"id"`
+	} `json:"repository"`
+	Event      string     `json:"event"`
 	ID         int64      `json:"id"`
 	Name       *string    `json:"name"`
 	HeadBranch *string    `json:"head_branch"`
@@ -594,7 +630,11 @@ func rawRunToCIRun(raw rawWorkflowRun) (CIRun, error) {
 	if raw.RunAttempt != nil {
 		attempt = *raw.RunAttempt
 	}
-	return CIRun{
+	repoID := int64(0)
+	if raw.Repository != nil {
+		repoID = raw.Repository.ID
+	}
+	return CIRun{RepositoryID: repoID, Event: raw.Event,
 		ID: raw.ID, Name: name, HeadSHA: raw.HeadSHA, HeadBranch: branch,
 		Status: status, Conclusion: conclusion, HTMLURL: raw.HTMLURL,
 		RunNumber: raw.RunNumber, RunAttempt: attempt,
@@ -624,7 +664,13 @@ func (client *APIClient) ListWorkflowRunsForHead(ctx context.Context, installati
 	runs := make([]CIRun, 0)
 	seen := make(map[int64]struct{})
 	total := -1
+	firstPath := path
+	seenPages := map[string]bool{}
 	for path != "" {
+		if seenPages[path] || len(seenPages) >= 100 {
+			return CIRunList{}, fmt.Errorf("%w: repeated or excessive CI pagination", ErrInvalidAPIResponse)
+		}
+		seenPages[path] = true
 		var page struct {
 			TotalCount   *int             `json:"total_count"`
 			WorkflowRuns []rawWorkflowRun `json:"workflow_runs"`
@@ -633,7 +679,7 @@ func (client *APIClient) ListWorkflowRunsForHead(ctx context.Context, installati
 		if err != nil {
 			return CIRunList{}, err
 		}
-		if page.TotalCount == nil || *page.TotalCount < 0 {
+		if page.WorkflowRuns == nil || page.TotalCount == nil || *page.TotalCount < 0 {
 			return CIRunList{}, fmt.Errorf("%w: workflow run count is invalid", ErrInvalidAPIResponse)
 		}
 		if total < 0 {
@@ -659,11 +705,21 @@ func (client *APIClient) ListWorkflowRunsForHead(ctx context.Context, installati
 		if next == "" {
 			break
 		}
-		nextPath, paginationErr := client.paginationPath(next)
+		nextPath, paginationErr := client.ciPaginationPath(firstPath, next)
 		if paginationErr != nil {
 			return CIRunList{}, paginationErr
 		}
 		path = nextPath
+	}
+	if len(runs) != total {
+		return CIRunList{}, fmt.Errorf("%w: incomplete workflow runs", ErrInvalidAPIResponse)
+	}
+	fingerprint := ciFingerprint(runs)
+	if cursor != "" {
+		prior, _ := decodeCICursor(cursor)
+		if prior.Fingerprint != fingerprint {
+			return CIRunList{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+		}
 	}
 	if offset > int64(len(runs)) {
 		return CIRunList{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
@@ -681,7 +737,7 @@ func (client *APIClient) ListWorkflowRunsForHead(ctx context.Context, installati
 	}
 	result := CIRunList{HeadSHA: headSHA, Runs: window, HasMore: hasMore}
 	if hasMore {
-		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "ci_runs", RepoID: repoID, Head: headSHA, Offset: end})
+		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "ci_runs", RepoID: repoID, Head: headSHA, Offset: end, Fingerprint: fingerprint})
 	}
 	if err := ensureCISerializedBound(result); err != nil {
 		return CIRunList{}, err
@@ -819,23 +875,30 @@ func (client *APIClient) GetWorkflowRunDetail(ctx context.Context, installationT
 	if !validCommitSHA(headSHA) {
 		return CIRunDetail{}, &ConfigurationError{Cause: ErrInvalidCommitSHA}
 	}
-	var offset int64
-	if cursor != "" {
-		decoded, err := decodeCICursor(cursor)
-		if err != nil {
-			return CIRunDetail{}, &ConfigurationError{Cause: err}
-		}
-		if decoded.Kind != "ci_jobs" || decoded.ID != runID || decoded.RepoID != repoID || decoded.Head != headSHA || decoded.Attempt != attempt {
-			return CIRunDetail{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
-		}
-		offset = decoded.Offset
-	}
 	run, err := client.GetWorkflowRun(ctx, installationToken, owner, repository, runID)
 	if err != nil {
 		return CIRunDetail{}, err
 	}
 	if run.HeadSHA != headSHA {
 		return CIRunDetail{}, fmt.Errorf("%w: workflow run head does not match scoped head", ErrInvalidAPIResponse)
+	}
+	effectiveAttempt := attempt
+	if effectiveAttempt == 0 {
+		effectiveAttempt = run.RunAttempt
+	}
+	if effectiveAttempt <= 0 || effectiveAttempt > run.RunAttempt {
+		return CIRunDetail{}, fmt.Errorf("%w: workflow attempt unavailable", ErrInvalidAPIResponse)
+	}
+	var offset int64
+	if cursor != "" {
+		decoded, err := decodeCICursor(cursor)
+		if err != nil {
+			return CIRunDetail{}, &ConfigurationError{Cause: err}
+		}
+		if decoded.Kind != "ci_jobs" || decoded.ID != runID || decoded.RepoID != repoID || decoded.Head != headSHA || decoded.Attempt != effectiveAttempt {
+			return CIRunDetail{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
+		}
+		offset = decoded.Offset
 	}
 	jobs, err := client.listJobsForRun(ctx, installationToken, owner, repository, runID, attempt)
 	if err != nil {
@@ -845,11 +908,21 @@ func (client *APIClient) GetWorkflowRunDetail(ctx context.Context, installationT
 		if job.RunID != runID {
 			return CIRunDetail{}, fmt.Errorf("%w: job run identity mismatch", ErrInvalidAPIResponse)
 		}
-		if attempt != 0 && job.RunAttempt != attempt {
+		if job.RunAttempt != effectiveAttempt {
 			return CIRunDetail{}, fmt.Errorf("%w: job attempt mismatch", ErrInvalidAPIResponse)
 		}
 		if job.HeadSHA != "" && job.HeadSHA != headSHA {
 			return CIRunDetail{}, fmt.Errorf("%w: job head does not match scoped head", ErrInvalidAPIResponse)
+		}
+	}
+	fingerprint := ciFingerprint(struct {
+		Run  CIRun
+		Jobs []CIJob
+	}{run, jobs})
+	if cursor != "" {
+		prior, _ := decodeCICursor(cursor)
+		if prior.Fingerprint != fingerprint {
+			return CIRunDetail{}, &ConfigurationError{Cause: fmt.Errorf("stale continuation")}
 		}
 	}
 	if offset > int64(len(jobs)) {
@@ -868,7 +941,7 @@ func (client *APIClient) GetWorkflowRunDetail(ctx context.Context, installationT
 	}
 	result := CIRunDetail{Run: run, Jobs: window, HasMore: hasMore}
 	if hasMore {
-		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "ci_jobs", RepoID: repoID, Head: headSHA, ID: runID, Attempt: attempt, Offset: end})
+		result.NextCursor = encodeCICursor(ciCursor{Version: 1, Kind: "ci_jobs", RepoID: repoID, Head: headSHA, ID: runID, Attempt: effectiveAttempt, Offset: end, Fingerprint: fingerprint})
 	}
 	if err := ensureCISerializedBound(result); err != nil {
 		return CIRunDetail{}, err
@@ -884,8 +957,15 @@ func (client *APIClient) listJobsForRun(ctx context.Context, installationToken, 
 		path = fmt.Sprintf("/repos/%s/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", url.PathEscape(owner), url.PathEscape(repository), runID, attempt)
 	}
 	jobs := make([]CIJob, 0)
+	total := -1
 	seen := make(map[int64]struct{})
+	firstPath := path
+	seenPages := map[string]bool{}
 	for path != "" {
+		if seenPages[path] || len(seenPages) >= 100 {
+			return nil, fmt.Errorf("%w: repeated or excessive CI pagination", ErrInvalidAPIResponse)
+		}
+		seenPages[path] = true
 		var page struct {
 			TotalCount *int       `json:"total_count"`
 			Jobs       []rawCIJob `json:"jobs"`
@@ -894,9 +974,10 @@ func (client *APIClient) listJobsForRun(ctx context.Context, installationToken, 
 		if err != nil {
 			return nil, err
 		}
-		if page.TotalCount == nil || *page.TotalCount < len(page.Jobs) {
+		if page.Jobs == nil || page.TotalCount == nil || *page.TotalCount < len(page.Jobs) || total >= 0 && total != *page.TotalCount {
 			return nil, fmt.Errorf("%w: job count is invalid", ErrInvalidAPIResponse)
 		}
+		total = *page.TotalCount
 		for _, raw := range page.Jobs {
 			job, err := rawJobToCIJob(raw)
 			if err != nil {
@@ -912,11 +993,14 @@ func (client *APIClient) listJobsForRun(ctx context.Context, installationToken, 
 		if next == "" {
 			break
 		}
-		nextPath, paginationErr := client.paginationPath(next)
+		nextPath, paginationErr := client.ciPaginationPath(firstPath, next)
 		if paginationErr != nil {
 			return nil, paginationErr
 		}
 		path = nextPath
+	}
+	if total != len(jobs) {
+		return nil, fmt.Errorf("%w: incomplete CI job collection", ErrInvalidAPIResponse)
 	}
 	return jobs, nil
 }
@@ -949,11 +1033,18 @@ func ensureCISerializedBound(value any) error {
 	if err != nil {
 		return fmt.Errorf("%w: diagnostics encoding failed", ErrInvalidAPIResponse)
 	}
-	if len(encoded) > MaxCISerializedResponseBytes {
+	// Reserve room for controller-added target provenance at the MCP boundary.
+	if len(encoded) > MaxCISerializedResponseBytes-2048 {
 		// A defensive guard: page builders above keep every response
 		// within budget, so reaching here maps to resource exhaustion
 		// rather than an unavailable diagnostic.
 		return &ConfigurationError{Cause: fmt.Errorf("%w: diagnostics response exceeds size limit", ErrInvalidAPIResponse)}
 	}
 	return nil
+}
+
+func ciFingerprint(value any) string {
+	encoded, _ := json.Marshal(value)
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }

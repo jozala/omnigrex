@@ -1017,6 +1017,9 @@ WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
 	if result.RowsAffected() != 1 {
 		return errors.New("persist workflow snapshot: workflow not found")
 	}
+	if _, err := tx.Exec(ctx, `UPDATE review_admission_requests SET status='CANCELLED',release_evidence=NULL,updated_at=clock_timestamp() WHERE workflow_id=$1 AND status IN ('WAITING','RELEASED') AND ($2<>'REVIEWING' OR workflow_attempt_id::text<>$3)`, workflowID, string(snapshot.State), currentAttemptID(snapshot)); err != nil {
+		return err
+	}
 	if err := persistChangeProposal(ctx, tx, workflowID, snapshot); err != nil {
 		return err
 	}
@@ -1091,7 +1094,7 @@ WHERE job.id = $1 AND source.id = $2 AND source.workflow_id = $3
 				return ErrWorkflowDecisionInvalid
 			}
 			if _, err := tx.Exec(ctx, `
-UPDATE agent_participants SET status = 'ACTIVE', updated_at = clock_timestamp()
+UPDATE agent_participants SET status = 'ACTIVE', waiting_handoff_attempt_id = NULL, updated_at = clock_timestamp()
 WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
   AND status = 'WAITING_FOR_HUMAN' AND state_deleted_at IS NULL`, jobID); err != nil {
 				return err
@@ -1104,12 +1107,44 @@ WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
 			if err := recordChangeProposalReview(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, action); err != nil {
 				return err
 			}
+		case workflow.PreserveHumanHandoffAction:
+			if decision.Snapshot.State != workflow.StateNeedsHuman || action.SourceRevision+1 != decision.Snapshot.Revision {
+				return ErrWorkflowDecisionInvalid
+			}
+			// Copy only the immediately preceding revision's normal handoff.
+			// Equal state/reason never authorizes an arbitrary historical diagnostic.
+			var reason string
+			var diagnostic string
+			if err := tx.QueryRow(ctx, `
+SELECT COALESCE(workflow.human_handoff_reason, ''), COALESCE((
+    SELECT payload->>'diagnostic' FROM jobs
+    WHERE workflow_id = workflow.id AND kind = 'PUBLISH_HUMAN_HANDOFF'
+      AND payload->>'revision' = $2
+      AND payload->>'reason' = workflow.human_handoff_reason
+      AND COALESCE((payload->>'safety_diagnostic')::boolean, false) = false
+    ORDER BY created_at DESC, id DESC LIMIT 1
+), '')
+FROM workflows AS workflow WHERE id = $1`, workflowID, fmt.Sprint(action.SourceRevision)).Scan(&reason, &diagnostic); err != nil {
+				return fmt.Errorf("preserve current Human Handoff publication: %w", err)
+			}
+			if reason == "" {
+				return ErrWorkflowDecisionInvalid
+			}
+			handoffPayload := map[string]any{
+				"reason": reason, "diagnostic": diagnostic, "revision": decision.Snapshot.Revision,
+			}
+			if decision.Snapshot.ChangeProposal != nil {
+				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
+			}
+			if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), namespacedWorkflowActionKey(actionNamespace, "publish-human-handoff"), PublishHumanHandoffJobKind, handoffPayload); err != nil {
+				return err
+			}
 		case workflow.MarkHumanHandoffAction:
 			if _, err := tx.Exec(ctx, `
 UPDATE agent_participants
 SET status = 'WAITING_FOR_HUMAN', completed_at = NULL, retention_until = NULL,
-    updated_at = clock_timestamp()
-WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID); err != nil {
+    waiting_handoff_attempt_id = $2, updated_at = clock_timestamp()
+WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`, workflowID, nullableString(currentAttemptID(decision.Snapshot))); err != nil {
 				return fmt.Errorf("mark current Agent Assignments waiting for Human Handoff: %w", err)
 			}
 			if decision.Snapshot.CurrentAttempt != nil {
@@ -1321,6 +1356,36 @@ func enqueueWorkflowJobWithInternalProvenance(ctx context.Context, tx pgx.Tx, de
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode %s action: %w", actionKey, err)
+	}
+	if kind == PrepareAgentTurnJobKind {
+		incoming, decodeErr := decodeAgentTurnPreparationPayload(payload)
+		if decodeErr == nil && incoming.Role == workflow.RoleReviewer && incoming.Purpose == workflow.TurnPurposeSynchronization {
+			var pendingID string
+			var pendingPayload []byte
+			err := tx.QueryRow(ctx, `SELECT id::text,payload FROM jobs WHERE workflow_id=$1 AND workflow_attempt_id=$2 AND kind=$3 AND status IN ('AVAILABLE','LEASED') FOR UPDATE`, workflowID, attemptID, kind).Scan(&pendingID, &pendingPayload)
+			if err == nil {
+				pending, e := decodeAgentTurnPreparationPayload(pendingPayload)
+				if e != nil {
+					return "", e
+				}
+				if pending.Role != incoming.Role || pending.Stage != incoming.Stage {
+					return "", ErrWorkflowDecisionInvalid
+				}
+				pending.ExpectedHeadSHA = incoming.ExpectedHeadSHA
+				pending.Revision = incoming.Revision
+				updated, _ := json.Marshal(pending)
+				if _, err = tx.Exec(ctx, `UPDATE jobs SET payload=$2,available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`, pendingID, updated); err != nil {
+					return "", err
+				}
+				if _, err = tx.Exec(ctx, `UPDATE review_admission_requests SET head_sha=$2,base_sha='',test_merge_sha='',generation=generation+1,grace_anchor=LEAST(clock_timestamp(),deadline),last_observation=NULL,release_evidence=NULL,status='WAITING',updated_at=clock_timestamp() WHERE id=(SELECT request_id FROM review_admission_jobs WHERE job_id=$1) AND status IN ('WAITING','RELEASED')`, pendingID, incoming.ExpectedHeadSHA); err != nil {
+					return "", err
+				}
+				return pendingID, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return "", err
+			}
+		}
 	}
 	idempotencyKey := workflowActionIdempotencyKey(workflowID, deliveryID, settlementID, internalEventID, actionKey)
 	provenanceActionKey := actionKey

@@ -506,6 +506,14 @@ type RecordReviewAction struct {
 
 func (RecordReviewAction) isWorkflowAction() {}
 
+// PreserveHumanHandoffAction carries the current publication obligation across a
+// tracking-only revision change, without establishing a new blocker or resuming work.
+type PreserveHumanHandoffAction struct {
+	SourceRevision uint64
+}
+
+func (PreserveHumanHandoffAction) isWorkflowAction() {}
+
 // MarkHumanHandoffAction records that autonomous progress has returned to a human.
 type MarkHumanHandoffAction struct {
 	Reason     Reason

@@ -621,7 +621,7 @@ func (fixture *workspaceDockerFixture) copyFile(t *testing.T, ctx context.Contex
 	}
 }
 
-func (fixture *workspaceDockerFixture) git(t *testing.T, ctx context.Context, arguments ...string) {
+func (fixture *workspaceDockerFixture) git(t *testing.T, ctx context.Context, arguments ...string) string {
 	t.Helper()
 	created, err := fixture.client.ExecCreate(ctx, fixture.id, mobyclient.ExecCreateOptions{WorkingDir: "/workspace", AttachStdout: true, AttachStderr: true, Cmd: append([]string{"git"}, arguments...)})
 	if err != nil {
@@ -640,6 +640,7 @@ func (fixture *workspaceDockerFixture) git(t *testing.T, ctx context.Context, ar
 	if err != nil || inspected.Running || inspected.ExitCode != 0 {
 		t.Fatalf("guest git %v: running=%t exit=%d error=%v\n%s", arguments, inspected.Running, inspected.ExitCode, err, &output)
 	}
+	return output.String()
 }
 
 func streamWorkspaceFixtureSeed(root string, destination io.Writer) error {

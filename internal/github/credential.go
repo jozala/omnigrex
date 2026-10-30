@@ -12,13 +12,15 @@ var ErrInstallationPermissions = errors.New("GitHub App installation permissions
 // DeveloperAppPermissions returns the exact least-privilege repository permissions required by the Developer App.
 func DeveloperAppPermissions() InstallationPermissions {
 	return InstallationPermissions{
-		"metadata":      "read",
-		"checks":        "read",
-		"actions":       "read",
-		"contents":      "write",
-		"issues":        "write",
-		"pull_requests": "write",
-		"workflows":     "write",
+		"metadata":       "read",
+		"checks":         "read",
+		"actions":        "read",
+		"statuses":       "read",
+		"administration": "read",
+		"contents":       "write",
+		"issues":         "write",
+		"pull_requests":  "write",
+		"workflows":      "write",
 	}
 }
 

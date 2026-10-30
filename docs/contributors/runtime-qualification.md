@@ -78,7 +78,8 @@ Diagnostics use closed-vocabulary runtime observations, never transcript bodies 
 An infrastructure protocol failure is not repaired by accepting a terminal intent without valid outcome evidence.
 
 New Runtime Profiles include the projection module in their owned-resource hash inventory.
-Historical inventories remain valid and retain their original behavior; upgrade and both-backend qualification are still required before selecting a new deployment.
+Historical inventories remain valid and retain their original behavior; release images still require both-backend qualification before deployment selection.
+That release gate is distinct from optional qualification of an installation's historical source image against a candidate.
 If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
 Run `node --test agent/pi/diagnostic/control-events.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
 The configuration gate also runs `control-rpc.test.mjs` against the pinned SDK for long normal/retry/error/cancel completion, correlated commands during streaming, stdout backpressure, EOF cleanup, and fresh-process continuation.
@@ -171,8 +172,9 @@ See [Agent Turn evidence](../plans/2026-10-09-complete-pi-agent-turns.md) and [r
 
 ## Pi upgrade and state recovery qualification
 
-Qualify source-to-candidate Session Continuation and History Replay on isolated copies before changing the configured image.
-Retained Participants do not rebind.
+This optional gate qualifies source-to-candidate Session Continuation and History Replay on isolated copies, including separately restored archives.
+A [normal supported Pi image rollout](../operators/upgrades.md#normal-rollout-without-session-migration) creates independent Sessions for new Participants and requires neither this historical source-to-candidate evidence nor artifact import.
+Retained Participants keep their exact original image and contract; mandatory image/resource validation, historical-image availability, backup, backend provisioning, and repository doctor checks still apply.
 Read [upgrade evidence](../plans/2026-10-10-pi-upgrades-and-state-recovery.md) and [backend-scoped qualification policy](../decisions/0017-bind-pi-qualification-to-backend-contracts.md).
 
 ```sh
@@ -184,7 +186,7 @@ Fixture gates use controlled provider/MCP servers, private volumes, and independ
 The default fixtures test the frozen Pi 1.0.4 dependency bundle against Pi 1.4.0 with the current owned runner; they do not substitute for qualification of historical release images and their retained contracts.
 Synthetic aliases are test evidence and cannot emit deployment artifacts.
 
-For actual release qualification, provision both exact registry images and choose an absent private absolute output path:
+To produce compatibility evidence for actual source/candidate release images, provision both exact registry images and choose an absent private absolute output path:
 
 ```sh
 OMNIGREX_PI_UPGRADE_SOURCE_IMAGE='REGISTRY/PI@sha256:SOURCE_DIGEST' \
@@ -207,7 +209,10 @@ The gate does not automatically pull them or use real credentials.
 Publication requires a complete pass, refuses overwrite, validates staged JSON or checksummed Session archives, and atomically writes mode-0600 output.
 Failed transfer/validation leaves no partial final artifact.
 Use version-2 backend-scoped results in the [operator upgrade procedure](../operators/upgrades.md#runtime-profile-image-change).
-Direction matters and does not establish rollback compatibility.
+Evidence is direction-sensitive and scoped to exact image/platform and Runtime Profile contracts, state format, and backend family/contract version; a forward pass does not establish reverse rollback compatibility.
+Importing it records compatibility, not permission or machinery to migrate live Sessions, rebind Participants, convert state in place, or restore source state into a candidate-bound Participant.
+No supported command performs those operations.
+If import is configured, startup and doctor require evidence matching the exact configured target/backend contract; clear an obsolete optional import setting or replace it with separately qualified matching results, preserving historical artifacts and ledger evidence.
 
 ### Compatible-host restore drills
 

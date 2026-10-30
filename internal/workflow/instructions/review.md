@@ -15,3 +15,9 @@ Optional cleanup and personal style preferences are Non-blocking Findings.
 For findings at valid diff locations, use the native `submit_review.comments` array with path, line, side, and body, plus start_line/start_side for ranges.
 Use the review body for missing behavior or cross-cutting findings without a valid diff location, rather than publishing every finding as a regular PR conversation comment.
 Apply the Agent Profile's communication style to the review output.
+
+Before approval, obtain a fresh `current` default-branch observation using `refresh_default_branch` with a new operation ID.
+Perform the read-only local mergeability check against the exact returned ref/SHA and the frozen reviewed head, not a cached `origin/<default>` ref.
+Earlier verification applies only if both SHAs are unchanged; otherwise repeat the check without merging or editing the Change Proposal.
+Request a new observation for a stale snapshot as needed within the Turn budget, without a fixed Stage refresh-count limit.
+A default-branch rename must not rebind the reviewed head or Turn authority; report a blocker if safe verification is impossible.

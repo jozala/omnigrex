@@ -1148,14 +1148,14 @@ func TestAPIClientGetsCheckRunsForExactCommitAcrossAllPages(t *testing.T) {
 	const headSHA = "0123456789abcdef0123456789abcdef01234567"
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet || request.URL.Path != "/repos/acme/widgets/commits/"+headSHA+"/check-runs" || request.URL.Query().Get("per_page") != "100" {
+		if request.Method != http.MethodGet || request.URL.Path != "/repos/acme/widgets/commits/"+headSHA+"/check-runs" || request.URL.Query().Get("per_page") != "100" || request.URL.Query().Get("filter") != "all" {
 			t.Errorf("request = %s %s?%s", request.Method, request.URL.Path, request.URL.RawQuery)
 		}
 		if request.URL.Query().Get("page") == "2" {
 			_, _ = fmt.Fprintf(writer, `{"total_count":2,"check_runs":[{"id":502,"node_id":"CR_502","name":"lint","head_sha":%q,"status":"completed","conclusion":"success","html_url":"https://github.test/acme/widgets/runs/502","details_url":"https://ci.test/502","completed_at":"2026-09-03T11:00:00Z"}]}`, headSHA)
 			return
 		}
-		writer.Header().Set("Link", fmt.Sprintf(`<%s/repos/acme/widgets/commits/%s/check-runs?per_page=100&page=2>; rel="next"`, server.URL, headSHA))
+		writer.Header().Set("Link", fmt.Sprintf(`<%s/repos/acme/widgets/commits/%s/check-runs?per_page=100&filter=all&page=2>; rel="next"`, server.URL, headSHA))
 		_, _ = fmt.Fprintf(writer, `{"total_count":2,"check_runs":[{"id":501,"node_id":"CR_501","name":"test","head_sha":%q,"status":"in_progress","conclusion":null,"html_url":"https://github.test/acme/widgets/runs/501","details_url":"https://ci.test/501"}]}`, headSHA)
 	}))
 	defer server.Close()

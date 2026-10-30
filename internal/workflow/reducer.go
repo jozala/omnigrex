@@ -793,6 +793,7 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 		}
 		next.Revision++
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
+			PreserveHumanHandoffAction{SourceRevision: snapshot.Revision},
 			ReconcileLabelsAction{State: StateNeedsHuman},
 		}}
 	}

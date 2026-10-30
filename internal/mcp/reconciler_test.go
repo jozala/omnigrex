@@ -773,3 +773,17 @@ func (publications *reconciliationPublications) ReconcilePublication(_ context.C
 	publications.input = input
 	return publications.result, publications.err
 }
+
+func TestInterruptedDefaultSnapshotRecoveryDoesNotReobserveOrInferSuccess(t *testing.T) {
+	api := &reconciliationGitHub{}
+	reconciler := newProductionReconciler(t, api, &reconciliationPublications{})
+	mutation := reconciliationMutation(mcp.ToolRefreshDefaultBranch, `{"operation_id":"caller-key"}`)
+	mutation.ExternalService = "workspace"
+	result, err := reconciler.Reconcile(t.Context(), reconciliationContext(), mutation)
+	if err != nil || result.Disposition != mcp.ReconciliationUnresolved || len(result.Outcome.Result) != 0 {
+		t.Fatalf("interrupted installation became evidence: %+v %v", result, err)
+	}
+	if api.credential != "" {
+		t.Fatal("recovery fetched or reobserved a newer snapshot")
+	}
+}

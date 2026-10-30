@@ -259,6 +259,9 @@ func (api *publicationReadGitHub) ListWorkflowRunsForHead(_ context.Context, _, 
 func (api *publicationReadGitHub) GetCheckRunDiagnostics(_ context.Context, _, _, _ string, id int64, _ string, _ int64, head string) (githubapi.CheckDiagnostics, error) {
 	return githubapi.CheckDiagnostics{CheckID: id, HeadSHA: head}, nil
 }
+func (api *publicationReadGitHub) GetWorkflowRun(_ context.Context, _, _, _ string, id int64) (githubapi.CIRun, error) {
+	return githubapi.CIRun{ID: id, HeadSHA: api.head, RunAttempt: 1}, nil
+}
 func (api *publicationReadGitHub) GetWorkflowRunDetail(_ context.Context, _, _, _ string, id int64, attempt int, _ string, _ int64, head string) (githubapi.CIRunDetail, error) {
 	return githubapi.CIRunDetail{Run: githubapi.CIRun{ID: id, HeadSHA: head, RunAttempt: attempt}}, nil
 }

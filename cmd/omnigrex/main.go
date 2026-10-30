@@ -234,6 +234,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	profileLoader := agentprofile.NewLoader(githubServices.api, rolePolicies, settings.AgentPathEnvironmentAllowlist...)
 	preparer := agentturn.NewPreparerWithChangeProposalVerifier(profileLoader, agentprofile.SingletonSelector{}, runtimeRegistry, database, githubServices.api)
+	preparer.SetReviewGate(&agentturn.ReviewGate{Store: database, Source: githubServices.api, Observer: githubServices.api})
 	preparer.SetDefaultMaxSteps(settings.AgentMaxSteps)
 	preparationWorker, err := agentturn.NewWorker(database, developerRepositoryCredentials, preparer, agentturn.WorkerConfig{
 		ClaimOwner:        githubServices.claimOwner + ":prepare-agent-turn",
@@ -271,6 +272,8 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
 		GitHub:           githubServices.api,
+		Snapshots:        workspaces,
+		Installer:        backend.Snapshots,
 		Credentials:      repositoryCredentials,
 		Publisher:        workspaces,
 		Workflow:         mcp.LedgerWorkflowMutations{},

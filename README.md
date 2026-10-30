@@ -18,6 +18,7 @@ GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human review
 - Separate GitHub Apps for development and independent native reviews.
 - Persistent Agent Sessions across disposable execution environments.
 - Bounded retries and Review Cycles, with explicit Human Handoff when automation cannot continue.
+- Durable controller-side CI completion waits before review, with repository-owned immediate-review and expected-check policy.
 - Docker or Linux/KVM Microsandbox execution, with a Docker Compose control plane and PostgreSQL ledger.
 
 Omnigrex is in active early development toward its first dogfooding iteration.

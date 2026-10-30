@@ -33,6 +33,7 @@ type States interface {
 type Backend struct {
 	Factory    execution.Factory
 	Workspaces execution.WorkspaceSource
+	Snapshots  execution.SnapshotInstaller
 	Cleaner    Cleanup
 	Recovery   Recovery
 	States     States
@@ -74,6 +75,7 @@ func NewBackend(ctx context.Context, settings config.Config, runtime profile.Pro
 			return result, err
 		}
 		result.Factory, result.Workspaces, result.Cleaner, result.Recovery, result.Images, result.Check = native, native, native, native, native, native.Check
+		result.Snapshots = native
 		result.States = state
 		result.close = append(result.close, native.Close, state.Close)
 	case "", "docker":
@@ -82,6 +84,7 @@ func NewBackend(ctx context.Context, settings config.Config, runtime profile.Pro
 			return result, err
 		}
 		result.Workspaces = workspaces
+		result.Snapshots = workspaces
 		result.close = append(result.close, workspaces.Close)
 		cleaner, err := docker.NewExactLabelCleaner(docker.ExactLabelCleanerOptions{StopTimeout: settings.ShutdownTimeout, Ledger: ledger, DiagnosticNamespace: settings.RuntimeStateVolume})
 		if err != nil {
