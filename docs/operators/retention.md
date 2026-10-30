@@ -60,3 +60,10 @@ At most four active scans retain 32 directory handles and 8192 hardlink identiti
 Collection, cache replacement, fatal error, completion, and shutdown release handles.
 Unreadable/unsafe entries and depth or hardlink limits produce partial measurements, which cannot clear warnings based on a below-threshold partial sum.
 Use the warning to investigate growth rather than deleting active cache directories manually.
+
+## Release evidence
+
+Unreleased CI candidate artifacts expire after 14 days and then cannot be directly designated as an alpha.
+Published alpha and stable assets retain the exact deployment payload and evidence needed for promotion, independent of Actions retention.
+There is no automatic Release/asset or runtime-image deletion; preserve exact images required by retained Participants.
+See [release operations](../contributors/releases.md).

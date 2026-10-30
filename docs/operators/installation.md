@@ -8,67 +8,63 @@ Use a fresh installation for the supported baseline.
 
 ## 1. Select a qualified commit
 
-Choose a `main` CI run that published matching images and passed both Docker and Microsandbox post-publication deployment smoke jobs.
-Read its **Published Omnigrex images** summary for the commit SHA, tags, and resolved registry digests.
-Do not infer release qualification from a source build or pre-publication fixtures.
-
-The release publishes Linux/amd64 images under `ghcr.io/jozala/omnigrex/`:
-
-| Image | Purpose |
-| --- | --- |
-| `orchestrator:sha-<full-commit-SHA>` | Docker control plane |
-| `orchestrator-microsandbox:sha-<full-commit-SHA>` | Native SDK/KVM control plane |
-| `pi:sha-<full-commit-SHA>` | Pi 1.4.0 / Node 24.14.1 golden environment |
-| `development:sha-<full-commit-SHA>` | Omnigrex's own derived development environment; separately qualified before repository promotion |
-
-No `latest` tag is published, and Pull Request runs publish no images.
-A package administrator must make newly published packages public and verify unauthenticated pulls before advertising no-login deployment.
-Do not add registry credentials to the deployment bundle.
-There is no GitHub Release for every merge; commit-pinned raw files are the distribution mechanism.
+Select a stable [GitHub Release](https://github.com/jozala/omnigrex/releases) recommended for users, or explicitly opt into an alpha prerelease.
+Both are pre-1.0: stable does not promise production readiness or permanent backward compatibility.
+Read its human notes, breaking-change declaration, upgrade requirements, and `release.json` before proceeding.
+Use a fresh installation unless a compatible upgrade path and its manual prerequisites have been established.
+See [release publication](../contributors/releases.md) for candidate selection and retained qualification evidence.
 
 ## 2. Stage deployment files
 
-In an empty parent directory, replace `COMMIT` with the full qualified commit SHA:
+Download `payload.tar.gz`, `candidate.json`, `SHA256SUMS`, and `release.json` from the **same Release** into an empty directory; no checkout is needed.
+For example, after replacing `VERSION` with the selected version:
 
 ```sh
-COMMIT=<full-successfully-published-commit-SHA>
+VERSION=0.1.0
 mkdir omnigrex-pi-deploy
 cd omnigrex-pi-deploy
-curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/compose.pi.yaml"
-curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/compose.pi-docker.yaml"
-curl -fsSLO "https://raw.githubusercontent.com/jozala/omnigrex/${COMMIT}/deploy/.env.pi.example"
+for asset in payload.tar.gz candidate.json SHA256SUMS release.json; do
+  curl -fSLO "https://github.com/jozala/omnigrex/releases/download/v${VERSION}/${asset}"
+done
+sha256sum -c SHA256SUMS
+tar -xzf payload.tar.gz
+cat build.json
+cd deploy
 cp .env.pi.example .env
 chmod 0600 .env
 install -m 0700 -d secrets
 export COMPOSE_FILE=compose.pi.yaml:compose.pi-docker.yaml
 ```
 
-For Microsandbox, download `compose.pi-microsandbox.yaml` instead and export `COMPOSE_FILE=compose.pi.yaml:compose.pi-microsandbox.yaml`.
-The common file supplies PostgreSQL, image validation, and the orchestrator; exactly one overlay supplies backend authority and settings.
-These files contain no build contexts or checkout dependencies.
+For Microsandbox export `COMPOSE_FILE=compose.pi.yaml:compose.pi-microsandbox.yaml` instead.
+The archive contains both overlays, the common Compose file, environment example, and channel-independent build identity/product digests.
+It contains no secrets, installation `.env`, private compatibility evidence, or backups.
+`candidate.json` records the exact source commit, CI run/attempt and qualification job IDs; `release.json` records alpha/stable identity separately.
+Checksums detect corruption, not an independent signature; trust GitHub repository access controls and the selected Release.
 
 Keep this exact `COMPOSE_FILE` exported in every deployment, diagnostic, rotation, backup, and restore shell.
-Append any storage or instruction overrides to the same file set.
-Leaving it unset can omit the overlay or select the source-built developer `compose.yaml` in a checkout.
-The default volume and network names are fixed: a different Compose project name alone does not isolate another installation.
+Append storage or instruction overrides to the same file set.
+Leaving it unset can omit the overlay or select a source-built developer stack in a checkout.
+The default volume/network names are fixed: another project name alone does not isolate another installation.
 Parallel installations must override every storage/network name and matching volume, agent-network, and native namespace setting.
 
 ## 3. Resolve and provision images
 
-Pull the selected controller and golden image, then inspect their registry references:
+Read the exact product digest references from `../build.json` (`images.orchestrator`, `images.orchestrator-microsandbox`, and `images.pi`).
+Set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend controller, `OMNIGREX_PI_IMAGE` to generic Pi, and `OMNIGREX_PI_PLATFORM=linux/amd64` in the private `.env`.
+Pull those **exact digest references**, not the mutable commit tags:
 
 ```sh
-CONTROL_PLANE=orchestrator # use orchestrator-microsandbox for the native backend
-docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/${CONTROL_PLANE}:sha-${COMMIT}"
-docker pull --platform=linux/amd64 "ghcr.io/jozala/omnigrex/pi:sha-${COMMIT}"
-docker image inspect "ghcr.io/jozala/omnigrex/${CONTROL_PLANE}:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
-docker image inspect "ghcr.io/jozala/omnigrex/pi:sha-${COMMIT}" --format '{{index .RepoDigests 0}}'
+docker pull --platform=linux/amd64 'ghcr.io/jozala/omnigrex/orchestrator@sha256:REPLACE_FROM_BUILD_JSON'
+docker pull --platform=linux/amd64 'ghcr.io/jozala/omnigrex/pi@sha256:REPLACE_FROM_BUILD_JSON'
 ```
 
-Verify that the inspected digests match the workflow summary.
-In the private `.env`, set `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_IMAGE` to those untagged `REGISTRY/IMAGE@sha256:DIGEST` references and set `OMNIGREX_PI_PLATFORM=linux/amd64`.
-The backend overlay does not replace the controller image: Docker needs `orchestrator`, while Microsandbox needs `orchestrator-microsandbox`.
-For Microsandbox, a host Docker pull is insufficient; also provision the native cache in step 6.
+For Microsandbox use the `orchestrator-microsandbox` digest and also provision its native cache in step 6.
+No `latest` image tag is published.
+All product images are Linux/amd64.
+Package visibility must support anonymous pulls; contact the package administrator if a no-login pull fails, rather than inserting registry credentials in the bundle.
+The `development` image is Omnigrex's own repository environment, **not a product release artifact** or a general environment required by other repositories.
+Its adoption through `.omnigrex/environment.yaml` is independent of product release publication and does not change retained Participant bindings.
 
 ## 4. Configure Apps, secrets, and ingress
 
