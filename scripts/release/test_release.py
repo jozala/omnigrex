@@ -99,6 +99,8 @@ class ReleaseTest(unittest.TestCase):
         for value, alpha, breaking, tags in [('0.1.0', False, False, set()), ('0.1.1-alpha.1', True, True, set()), ('0.1.1-alpha.1', True, False, {'v0.1.1-alpha.1'}), ('0.0.9', False, False, set())]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 r.progression(value, alpha, breaking, stable, tags)
+        with self.assertRaisesRegex(ValueError, 'move forward'):
+            r.progression('0.2.5', False, False, [dict(tag_name='v0.3.0', draft=False, prerelease=False)], set())
         old = stable + [dict(tag_name='v0.2.0-alpha.3', draft=False, prerelease=True)]
         with self.assertRaisesRegex(ValueError, 'sequence'):
             r.progression('0.2.0-alpha.2', True, False, old, set())
