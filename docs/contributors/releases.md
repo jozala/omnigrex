@@ -3,7 +3,7 @@
 [Contributor testing](testing.md) · [Installation](../operators/installation.md)
 
 Releases designate existing qualified builds; they do not deploy anything.
-The accepted [release policy](../decisions/0053-manual-product-releases.md) is pre-1.0: stable means recommended for users, not production-ready or permanently backward-compatible.
+The accepted [release policy](../decisions/0054-manual-product-releases.md) is pre-1.0: stable means recommended for users, not production-ready or permanently backward-compatible.
 Only Linux/amd64 is supported.
 
 ## Select an exact candidate

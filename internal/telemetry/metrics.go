@@ -43,6 +43,21 @@ func applicationMetricView(instrument sdkmetric.Instrument) (sdkmetric.Stream, b
 		return stream, true
 	}
 	switch instrument.Name {
+	case "omnigrex.agent_turn.step_limit":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role")
+	case "omnigrex.agent_turn.model_iterations":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role", "budget_mode", "completeness")
+	case "omnigrex.agent_turn.budget_utilization":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{0.1, 0.25, 0.5, 0.75, 0.9, 1}, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role", "budget_mode", "completeness")
+	case "omnigrex.agent_turn.budget_observations":
+		stream.Aggregation = sdkmetric.AggregationDefault{}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role", "budget_mode", "completeness", "termination")
+	case "omnigrex.agent_turn.budget_summary", "omnigrex.agent_turn.budget_handoffs":
+		stream.Aggregation = sdkmetric.AggregationDefault{}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("role")
 	case "omnigrex.operation.duration":
 		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: durationBuckets, NoMinMax: true}
 		stream.AttributeFilter = attribute.NewAllowKeysFilter("operation")
