@@ -61,10 +61,45 @@ It creates a separate normal Release/tag at the same commit, retaining the alpha
 No expensive backend suite or image build is repeated.
 Releases and their assets are retained indefinitely; never prune exact images merely because a newer release exists.
 
+## One-time dedicated release App setup
+
+Mariusz approved this authorization amendment in [Issue #160](https://github.com/jozala/omnigrex/issues/160#issuecomment-6550576581).
+His supplied live probe found that the ordinary workflow token could create a current-tip ref but received HTTP 403 for an unreferenced older main ancestor with different workflow contents.
+The failed response advertised Contents/Workflows write as an accepted permission combination.
+This is maintainer-supplied evidence for that tested historical case, not a claim that every older commit fails or that the App path has already been live-verified.
+Adding `workflows: write` to `GITHUB_TOKEN` YAML permissions cannot grant this authority.
+
+Before the first live release, Mariusz or an administrator must:
+
+1. Create a **dedicated release GitHub App** owned by the repository owner, separate from the controller's Developer and Reviewer Apps.
+   Give it repository **Contents: read and write**, **Workflows: read and write**, and GitHub's mandatory **Metadata: read** permissions only.
+   It needs no organization permissions, webhook subscriptions, or controller/deployment access; disable its webhook if unused.
+2. Install it with **Only select repositories**, selecting only `jozala/omnigrex`.
+   Approve the installation's requested permissions, including Workflows write; after future permission changes explicitly review/approve the installation update.
+3. Record the App's numeric **App ID** (not client ID or installation ID) as repository Actions variable `OMNIGREX_RELEASE_APP_ID`.
+   Generate/download a private key and store the complete PEM as repository Actions secret `OMNIGREX_RELEASE_APP_PRIVATE_KEY`.
+   Keep the private key out of source, release assets, logs, deployment configuration, and documentation.
+   Never reuse the controller's existing App keys or introduce a PAT.
+4. Keep repository workflow/secret access limited to trusted maintainers.
+   The App's Workflows-write authority is consequential even though this command uses it only for tags.
+   Rotate the private key by replacing the Actions secret and revoking the old App key; uninstall/revoke the dedicated App if release authorization is withdrawn.
+
+At publication, the Go helper signs a short-lived App JWT, locates this repository's installation, and requests an installation token restricted to `omnigrex` with Contents/Workflows write.
+It validates the returned repository scope, permissions, and expiry, creates only the selected exact lightweight tag without force, and revokes the token on success or failure.
+Tokens expire within one hour even if runner termination prevents revocation.
+The normal workflow token performs all remaining GitHub operations; the App token is never passed to `gh release upload`, stored as an artifact, or used as a fallback credential for other operations.
+Missing configuration, permission rejection, or a scope mismatch fails clearly; it never selects a different commit, substitutes image tags, or rebuilds.
+
+Both release workflows are manual and main-only; CI push events select only the main branch.
+Unlike `GITHUB_TOKEN`, App-created tags can trigger Actions, so do not add tag-triggered build/release jobs without reviewing this boundary.
+App provisioning and actual historical-tag permission verification are external acceptance, not prerequisites for implementing fixture tests.
+
 ## Failure and manual retry
 
 Both entry points serialize through one concurrency group and never cancel an in-progress publication.
-They use the Actions token with job-scoped `contents: write` and `actions: read`; no PAT or approval environment is required.
+They use the Actions token with job-scoped `contents: write` and `actions: read` for evidence, Release/assets, and tag reads.
+Only exact tag creation uses a short-lived, repository-scoped token from the dedicated release GitHub App described below.
+No PAT or approval environment is required.
 A duplicate version, draft, or existing tag fails rather than being overwritten or moved.
 If upload/verification fails, inspect the incomplete draft and any associated tag manually.
 Delete only the unpublished draft and its unused tag after confirming no published release or retained consumer depends on it, then rerun with the same inputs.
@@ -73,13 +108,17 @@ There is no automatic resume, cleanup, deployment, or package-visibility adminis
 
 ## Verification and first live acceptance
 
-Local fixture tests cover qualification/provenance failures, versions, archive validation, no-checkout Compose, redesignation, and byte-preserving promotion with expired CI artifacts.
+The release command and ordinary Go behavior tests live under `scripts/release/` and run through `go test ./...` / `mise run check`.
+Focused verification is `mise exec -- go test -race ./scripts/release`.
+Fixtures cover qualification/provenance failures, versions, archive validation, no-checkout Compose, redesignation, byte-preserving promotion with expired CI artifacts, and rejection/successful routing of historical tag authorization.
+They are not independent proof of live GitHub permission behavior.
 Run `mise exec -- go test -race ./.github/workflows` explicitly (hidden directories are excluded by `go test ./...`).
 Use `mise run check` and `mise run test-integration`; KVM qualification remains in CI.
 
 After merge and a new main candidate qualifies, **Mariusz or an explicitly authorized external agent** must:
 
-1. Confirm both manual workflows appear and their actual token permissions work.
+1. Provision and approve the dedicated release App, confirm both manual workflows appear, and verify actual historical tag creation for a qualified older main commit whose workflows differ from current main and which has no direct branch/tag reference.
+   This requires explicit authorization for a live tag; fixture tests alone do not establish that the App permissions work.
 2. Intentionally publish `v0.1.0-alpha.1` from an explicitly selected qualified run.
 3. Download and checksum the assets without a checkout, configure both overlays, and verify anonymous pulls of all product images.
    Existing post-publication smoke logs into GHCR and does not prove anonymous availability; package visibility is an administrator responsibility.

@@ -148,6 +148,6 @@ Never attempt nested Microsandbox qualification inside a Microsandbox Execution 
 ## Manual release designation
 
 See [release publication](releases.md) for candidate evidence, finite artifact retention, manual alpha publication, and no-rebuild stable promotion.
-Run `mise exec -- go test -race ./.github/workflows` explicitly: the hidden-directory suite executes release fixture tests and validates workflow boundaries.
+Run `mise exec -- go test -race ./.github/workflows` explicitly: the hidden-directory suite validates workflow boundaries; ordinary Go release behavior tests live in `scripts/release/` and are included in the normal unit gate.
 Product post-publication smoke now verifies and extracts the CI deployment archive before testing its Compose files with captured exact digests.
-Live token permissions, first publication, anonymous GHCR access, and first promotion remain separately authorized post-merge acceptance.
+Dedicated release App setup and live historical-tag authorization, first publication, anonymous GHCR access, and first promotion remain separately authorized post-merge acceptance.
