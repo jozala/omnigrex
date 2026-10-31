@@ -207,4 +207,6 @@ Application instrumentation tests do not establish successful live collector del
 
 Use the correlated per-Turn observations and settlement outcome described in the [step-budget contract](../reference/agent-step-budgets.md#per-turn-diagnostics).
 Summary-only entry is pressure, not a failure verdict.
-Aggregate step-budget instruments are deferred to Work Item #112.
+Use the [step-budget instruments](../observability/application.md#agent-turn-step-budget-metrics) to compare effective ceilings, complete usage distributions, summary pressure, and settled incomplete-work handoffs.
+Keep partial/unknown usage separate and distinguish infrastructure endings from ordinary early completion.
+Delivery is best-effort live telemetry, not a historical usage ledger.
