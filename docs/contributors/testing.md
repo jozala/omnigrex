@@ -144,3 +144,10 @@ It then exercises completed-with-failure admission through the real Reviewer lau
 The existing default Docker and Microsandbox Workflow script selectors both include that scenario.
 Run `mise run check`, `mise run test-integration`, and `mise run test-pi-workflow`, and inspect the same-head Linux/KVM CI result for `mise run test-pi-microsandbox-workflow` before claiming backend qualification.
 Never attempt nested Microsandbox qualification inside a Microsandbox Execution Environment.
+
+## Manual release designation
+
+See [release publication](releases.md) for candidate evidence, finite artifact retention, manual alpha publication, and no-rebuild stable promotion.
+Run `mise exec -- go test -race ./.github/workflows` explicitly: the hidden-directory suite validates workflow boundaries; ordinary Go release behavior tests live in `scripts/release/` and are included in the normal unit gate.
+Product post-publication smoke now verifies and extracts the CI deployment archive before testing its Compose files with captured exact digests.
+Dedicated release App setup and live historical-tag authorization, first publication, anonymous GHCR access, and first promotion remain separately authorized post-merge acceptance.
