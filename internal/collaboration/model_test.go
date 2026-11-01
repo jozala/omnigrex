@@ -240,3 +240,33 @@ func TestAmendmentOfEarlierDecisionOmittedFromCurrentQuestionSet(t *testing.T) {
 		t.Fatal("correction lost or unnecessary round added")
 	}
 }
+
+func TestReplacementRoundPreservesAnsweredDecisionAndCarriesUnansweredQuestion(t *testing.T) {
+	var s collaboration.State
+	questions := []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}}
+	s.Request("R1", "developer", "T1", "h1", questions)
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub1"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep compatibility"}, admission("compatibility"))
+	s.Prepare("developer", "T2")
+	if err := s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Keep compatibility"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request("R2", "developer", "T2", "h2", questions); err != nil {
+		t.Fatal(err)
+	}
+	s.Publish("R2", collaboration.Source{Channel: "fixture", ID: "pub2"})
+	if !s.Unresolved("developer") {
+		t.Fatal("unanswered Q2 was silently settled")
+	}
+	s.Accept("A2", collaboration.Command{Kind: "answer", Target: "R2", Body: "Seven days retention"}, admission("retention"))
+	s.Prepare("developer", "T3")
+	if err := s.Resolve("R2", "T3", []collaboration.Resolution{{QuestionID: "Q2", ResponseIDs: []string{"A2"}, Explanation: "Seven days"}}); err != nil {
+		t.Fatal(err)
+	}
+	if s.Unresolved("developer") {
+		t.Fatal("unchanged Q1 requires a redundant human answer")
+	}
+	if s.Rounds[1].Resolutions[0].ResponseIDs[0] != "A1" || s.Inputs[0].RoundID != "R1" || s.Inputs[0].Source.ID != "compatibility" {
+		t.Fatal("inherited decision lost its original evidence")
+	}
+}
