@@ -80,7 +80,6 @@ Use separate diagnostic storage, not protected Participant state.
 Mise tasks are development entry points, not installed administrative commands.
 See [testing](../contributors/testing.md) and [mise.toml](../../mise.toml) for exact task definitions and required host capabilities.
 
-
 ## Work Item collaboration commands
 
 On the first nonblank line of a new Work Item Issue comment, use `/omnigrex answer <round-id>`, `/omnigrex amend <response-id>`, or `/omnigrex steer`, followed by natural-language content.
