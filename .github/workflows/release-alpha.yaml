@@ -1,0 +1,60 @@
+name: Publish alpha
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Full alpha version without v
+        required: true
+        type: string
+      notes:
+        description: Human release notes (stable may finalize alpha notes)
+        required: true
+        type: string
+      source_run:
+        description: Exact successful main CI run ID
+        required: true
+        type: string
+      breaking:
+        description: Breaking changes (explicit None if absent)
+        required: true
+        type: string
+      upgrades:
+        description: Upgrade prerequisites or fresh-install requirement (explicit None if absent)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize both entry points; never cancel a partially published release.
+concurrency:
+  group: product-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out trusted main release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Designate already-tested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OMNIGREX_RELEASE_APP_ID: ${{ vars.OMNIGREX_RELEASE_APP_ID }}
+          OMNIGREX_RELEASE_APP_PRIVATE_KEY: ${{ secrets.OMNIGREX_RELEASE_APP_PRIVATE_KEY }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+          BREAKING: ${{ inputs.breaking }}
+          UPGRADES: ${{ inputs.upgrades }}
+        run: go run ./scripts/release alpha release-assets

@@ -32,8 +32,9 @@ for name in pi orchestrator orchestrator-microsandbox development; do
   # shellcheck disable=SC2016 # Backticks delimit Markdown, not shell commands.
   printf '| %s | `%s` | `%s` |\n' "$name" "$tag" "$digest" >> "$GITHUB_STEP_SUMMARY"
   if [ "$name" = pi ]; then golden_image="$digest"; fi
-  if [ "$name" = development ] && [ -n "${GITHUB_OUTPUT:-}" ]; then
-    printf 'development_image=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    key="$(printf '%s' "$name" | tr '-' '_')"
+    printf '%s_image=%s\n' "$key" "$digest" >> "$GITHUB_OUTPUT"
   fi
 done
 # shellcheck disable=SC2016 # Backticks delimit Markdown, not shell commands.
