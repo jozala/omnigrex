@@ -151,3 +151,20 @@ func TestClarificationMCPUsesAlternatePublisherForExecutionAndRecovery(t *testin
 		t.Fatal(result, err)
 	}
 }
+
+func (f *clarificationLedger) GetCollaborationRecord(_ context.Context, _, _, _, collection string, index, offset int) (collaboration.RecordPage, error) {
+	if collection != "human_input" || index != 1 || offset != 4096 {
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	return collaboration.RecordPage{Content: "second record, second chunk", Index: index, Total: 2}, nil
+}
+func TestCollaborationReadAdmitsNonzeroRecordAndChunkOffsets(t *testing.T) {
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: &clarificationLedger{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolGetCollaborationRecord, Class: mcp.ReadTool, Scope: productionToolScope(workflow.RoleDeveloper), Arguments: json.RawMessage(`{"collection":"human_input","index":1,"offset":4096}`)})
+	if err != nil || !strings.Contains(string(result), "second record, second chunk") {
+		t.Fatalf("pagination rejected: %s %v", result, err)
+	}
+}
