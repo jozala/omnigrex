@@ -23,7 +23,8 @@ Configure these repository permissions:
 | Pull requests | Read and write |
 | Workflows | Read and write |
 
-Subscribe to exactly **Issues**, **Pull request**, **Pull request review**, and **Repository** events.
+Subscribe to exactly **Issues**, **Issue comment**, **Pull request**, **Pull request review**, and **Repository** events.
+After upgrading to human clarification support, add **Issue comment** to the Developer App subscriptions and rerun preflight.
 The Repository subscription supplies `repository.created` for onboarding.
 GitHub also supplies the default `installation.created` and `installation_repositories.added` deliveries.
 

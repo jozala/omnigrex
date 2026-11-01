@@ -694,12 +694,12 @@ SELECT status, state_revision, repository_id, issue_id, issue_number,
        COALESCE(resume_role, ''), COALESCE(desired_assignment_status, ''),
        COALESCE(desired_runtime_state, ''), COALESCE(closure_id, ''), closure_deadline,
 	       COALESCE(closure_retention_token, ''), closure_reopen_requested,
-	       retention_deadline, COALESCE(retention_token, ''), COALESCE(continuation_stage, '')
+	       retention_deadline, COALESCE(retention_token, ''), COALESCE(continuation_stage, ''), clarification_waiting
 FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 		&snapshot.State, &snapshot.Revision, &snapshot.WorkItem.RepositoryID,
 		&snapshot.WorkItem.IssueID, &snapshot.WorkItem.IssueNumber, &resumeRole,
 		&assignmentStatus, &runtimeState, &closureID, &closureDeadline, &closureToken,
-		&closureReopen, &retentionDeadline, &retentionToken, &continuationStage,
+		&closureReopen, &retentionDeadline, &retentionToken, &continuationStage, &snapshot.ClarificationWaiting,
 	)
 	if err != nil {
 		return workflow.Snapshot{}, fmt.Errorf("lock workflow: %w", err)
@@ -1003,14 +1003,14 @@ UPDATE workflows SET status = $2, state_revision = $3, resume_role = $4,
 	    desired_assignment_status = $5, desired_runtime_state = $6,
 	    closure_id = $7, closure_deadline = $8, closure_retention_token = $9,
 	    closure_reopen_requested = $10, retention_deadline = $11, retention_token = $12,
-	    human_handoff_reason = $13, continuation_stage = $14, updated_at = clock_timestamp(),
+	    human_handoff_reason = $13, continuation_stage = $14, clarification_waiting=$15, updated_at = clock_timestamp(),
     closed_at = CASE WHEN $2 = 'CLOSED' THEN COALESCE(closed_at, clock_timestamp()) ELSE NULL END
 WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
 		nullableString(string(snapshot.ResumeRole)), nullableString(string(snapshot.Assignments.Status)),
 		nullableString(string(snapshot.Assignments.RuntimeState)), nullableString(closureID), closureDeadline,
 		nullableString(closureToken), closureReopen, retentionDeadline,
 		nullableString(snapshot.Assignments.RetentionToken), handoffReason,
-		nullableString(string(snapshot.ContinuationStage)))
+		nullableString(string(snapshot.ContinuationStage)), snapshot.ClarificationWaiting)
 	if err != nil {
 		return fmt.Errorf("persist workflow snapshot: %w", err)
 	}

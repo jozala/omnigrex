@@ -204,6 +204,9 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		AuthorizedReviewerActorID: canonicalObservation.AuthorizedReviewerActorID,
 		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic,
 	}
+	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
+		return AgentTurnSettlement{}, err
+	}
 	decision := store.reducer.DefinitionIncompatible(snapshot)
 	if compatible {
 		decision = store.reducer.Reduce(snapshot, event)
@@ -619,7 +622,7 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 	}
 	successful := result.Outcome == workflow.TurnOutcomeChangeProposalReady ||
 		result.Outcome == workflow.TurnOutcomeChangesRequested || result.Outcome == workflow.TurnOutcomeApproved ||
-		result.Outcome == workflow.TurnOutcomeBlocked
+		result.Outcome == workflow.TurnOutcomeBlocked || result.Outcome == workflow.TurnOutcomeClarificationWait
 	if successful && (result.TerminalStatus != AgentTurnSucceeded || result.TerminalLastError != "") {
 		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: successful Workflow outcome requires a successful terminal Turn", ErrAgentTurnSettlementInvalid)
 	}
@@ -639,7 +642,7 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 		if result.ChangeProposal == nil || result.Review == nil || result.AuthorizedReviewerActorID <= 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: Reviewer outcome shape", ErrAgentTurnSettlementInvalid)
 		}
-	case workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed, workflow.TurnOutcomeInfrastructureFailed:
+	case workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed, workflow.TurnOutcomeInfrastructureFailed:
 		if result.ChangeProposal != nil || result.Review != nil || result.ExistingReview != nil || result.AuthorizedReviewerActorID != 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: terminal outcome has unrelated review evidence", ErrAgentTurnSettlementInvalid)
 		}

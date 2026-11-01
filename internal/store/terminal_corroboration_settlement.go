@@ -255,6 +255,9 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 		PendingEvents:             pending, Diagnostic: canonical.Diagnostic,
 		CorroborationHandoffReason: handoffReason,
 	}
+	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
+		return AgentTurnSettlement{}, err
+	}
 	decision := store.reducer.CorroborationDefinitionIncompatible(snapshot)
 	if compatible {
 		decision = store.reducer.Reduce(snapshot, event)

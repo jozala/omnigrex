@@ -126,6 +126,7 @@ func (LedgerWorkflowMutations) ReportBlocked(_ context.Context, request ReportBl
 var _ WorkflowMutations = LedgerWorkflowMutations{}
 
 type ProductionBackendConfig struct {
+	Clarifications   ClarificationStore
 	Snapshots        SnapshotAcquirer
 	Installer        execution.SnapshotInstaller
 	GitHub           GitHubAPI
@@ -140,17 +141,18 @@ type ProductionBackendConfig struct {
 }
 
 type ProductionBackend struct {
-	snapshots    SnapshotAcquirer
-	installer    execution.SnapshotInstaller
-	github       GitHubAPI
-	credentials  RepositoryCredentials
-	publisher    WorkspacePublisher
-	workflow     WorkflowMutations
-	priorIntents PriorTerminalIntentReader
-	handoffs     HandoffReader
-	remoteBase   gitremote.BaseURL
-	policies     role.PolicyCatalog
-	roleCatalog  role.Catalog
+	clarifications ClarificationStore
+	snapshots      SnapshotAcquirer
+	installer      execution.SnapshotInstaller
+	github         GitHubAPI
+	credentials    RepositoryCredentials
+	publisher      WorkspacePublisher
+	workflow       WorkflowMutations
+	priorIntents   PriorTerminalIntentReader
+	handoffs       HandoffReader
+	remoteBase     gitremote.BaseURL
+	policies       role.PolicyCatalog
+	roleCatalog    role.Catalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -206,7 +208,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	return &ProductionBackend{
 		snapshots: config.Snapshots, installer: config.Installer, github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
 		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
-		handoffs:         config.Handoffs,
+		handoffs: config.Handoffs, clarifications: config.Clarifications,
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
 		restoredMutations: make(map[publicationTurn]map[string][sha256.Size]byte),
@@ -254,6 +256,10 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return backend.searchCIJobLogs(ctx, invocation)
 	case ToolRequestReview:
 		return backend.requestReview(ctx, invocation)
+	case ToolRequestClarification:
+		return backend.requestClarification(ctx, invocation)
+	case ToolResolveClarification:
+		return backend.resolveClarification(ctx, invocation)
 	case ToolReportBlocked:
 		return backend.reportBlocked(ctx, invocation)
 	case ToolConfirmPriorTerminalIntent:
@@ -1030,7 +1036,7 @@ func markerFree(body string) bool {
 // reservations reach the backend with it present. Identity comparison shares
 // the store's canonical interpretation via store.WithoutReservationSignature.
 func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
-	if invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview && invocation.Name != ToolRequestReview {
+	if invocation.Name != ToolRequestClarification && invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview && invocation.Name != ToolRequestReview {
 		return invocation.Arguments
 	}
 	stripped := store.WithoutReservationSignature(invocation.Name, invocation.Arguments)
@@ -1295,7 +1301,7 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolReportBlocked:
+	case ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 	case ToolSubmitReview, ToolCommentOnPullRequest:
@@ -1303,8 +1309,11 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 			metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.PullRequest.ID)
 		}
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolCommentOnIssue:
+	case ToolRequestClarification, ToolCommentOnIssue:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.Issue.ID)
+		if tool == ToolRequestClarification {
+			metadata.ExpectedSHA = scope.HeadSHA
+		}
 	}
 	return metadata
 }

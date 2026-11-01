@@ -42,6 +42,7 @@ type InstallationEnumerator interface {
 
 // ProcessorConfig controls claim ownership, lease duration, and idle polling.
 type ProcessorConfig struct {
+	Collaboration               CollaborationHandler
 	ClaimOwner                  string
 	LeaseDuration               time.Duration
 	IdlePollInterval            time.Duration
@@ -53,6 +54,7 @@ type ProcessorConfig struct {
 
 // Processor claims and normalizes durable GitHub webhook deliveries.
 type Processor struct {
+	collaboration               CollaborationHandler
 	store                       ProcessorStore
 	claimOwner                  string
 	leaseDuration               time.Duration
@@ -95,6 +97,7 @@ func newProcessor(processorStore ProcessorStore, config ProcessorConfig, provisi
 	}
 	return &Processor{
 		store:                       processorStore,
+		collaboration:               config.Collaboration,
 		claimOwner:                  config.ClaimOwner,
 		leaseDuration:               config.LeaseDuration,
 		idlePollInterval:            config.IdlePollInterval,
@@ -132,6 +135,16 @@ func (processor *Processor) ProcessNext(ctx context.Context) (processed bool, er
 	ctx, operation := telemetry.StartOperation(ctx, telemetry.WebhookProcess, attribute.String("delivery_id", claim.DeliveryID))
 	defer operation.Finish(&err)
 
+	if processor.collaboration != nil && !processor.provisioning {
+		handled, handleErr := processor.collaboration.HandleCollaboration(ctx, *claim)
+		if handleErr != nil {
+			return true, processor.acknowledgeFailure(ctx, claim, handleErr, !errors.Is(handleErr, ErrMalformedPayload))
+		}
+		if handled {
+			err = processor.store.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored})
+			return true, err
+		}
+	}
 	normalization, err := Normalize(Delivery{
 		DeliveryID: claim.DeliveryID,
 		EventName:  claim.EventName,

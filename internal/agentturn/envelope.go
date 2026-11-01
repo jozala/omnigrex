@@ -42,6 +42,9 @@ type priorUnconfirmableReviewEvent struct {
 }
 
 type eventEnvelope struct {
+	HumanInputHistory        json.RawMessage                `json:"human_input_history,omitempty"`
+	HumanInput               json.RawMessage                `json:"human_input,omitempty"`
+	ClarificationHistory     json.RawMessage                `json:"clarification_history,omitempty"`
 	ReviewStart              json.RawMessage                `json:"review_start,omitempty"`
 	SchemaVersion            int                            `json:"schema_version"`
 	WorkflowID               string                         `json:"workflow_id"`
@@ -74,7 +77,7 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	}
 
 	expectedOutcomes := definition.ExpectedOutcomes(execution.Turn.Stage)
-	allowedOutcomes := append(append([]workflow.TurnOutcome(nil), expectedOutcomes...), workflow.TurnOutcomeBlocked)
+	allowedOutcomes := append(append([]workflow.TurnOutcome(nil), expectedOutcomes...), workflow.TurnOutcomeBlocked, workflow.TurnOutcomeClarificationWait)
 	capabilities := append([]string(nil), policy.MCPTools...)
 	envelope := eventEnvelope{
 		SchemaVersion: EventEnvelopeSchemaVersion,
@@ -84,6 +87,19 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		TriggeringEvent: triggeringEvent{Stage: execution.Turn.Stage, Role: execution.Participant.Role, TurnPurpose: execution.Turn.Purpose},
 		CurrentHeadSHA:  currentHeadSHA, ExpectedHeadSHA: execution.Turn.ExpectedHeadSHA,
 		ExpectedOutcomes: expectedOutcomes, AllowedOutcomes: allowedOutcomes, MCPCapabilities: capabilities,
+	}
+	if len(execution.Turn.TurnConfiguration) > 0 {
+		var configuration struct {
+			HumanInput        json.RawMessage `json:"human_input"`
+			HumanInputHistory json.RawMessage `json:"human_input_history"`
+			History           json.RawMessage `json:"clarification_history"`
+		}
+		if json.Unmarshal(execution.Turn.TurnConfiguration, &configuration) != nil {
+			return "", ErrInvalidEventEnvelope
+		}
+		envelope.HumanInput = configuration.HumanInput
+		envelope.HumanInputHistory = configuration.HumanInputHistory
+		envelope.ClarificationHistory = configuration.History
 	}
 	if len(execution.Turn.TurnConfiguration) > 0 && execution.Participant.Role == workflow.RoleReviewer {
 		var configuration struct {

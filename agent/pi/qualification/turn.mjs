@@ -53,6 +53,29 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
+    } else if (fault === 'clarification') {
+      const rounds = (envelope.clarification_history ?? []).filter(r => r.participant_id === envelope.agent_participant_id);
+      const input = envelope.human_input ?? [];
+      const prefix = rounds.length > 0 ? 1 : 0;
+      if (step === 0 && prefix) {
+        if (!input.length || input.some(i => !i.id || !i.actor?.id || !i.source?.id)) throw new Error('missing correlated human input');
+        const round = rounds.at(-1);
+        name = 'omnigrex_resolve_clarification'; args = { operation_id: `resolve-${round.id}`, round_id: round.id, resolutions: [{question_id: round.questions[0].id, response_ids: input.map(i=>i.id), explanation: 'The explicit fixture answer resolves this question.'}] };
+      } else if (rounds.length < 2 && step === prefix) {
+        name = 'omnigrex_request_clarification'; args = { operation_id: `ask-${rounds.length+1}`, questions: [{id:`${role}-Q${rounds.length+1}`,body:'Which fixture option should govern?'}] };
+      } else if (rounds.length >= 2) {
+        const normal = step-prefix;
+        if (role === 'DEVELOPER') {
+          if (normal === 0) { name='bash'; args={command: "printf 'clarified\\n' > feature.txt; git add feature.txt; git commit -m 'Implement clarified choice'"}; }
+          if (normal === 1) { name='omnigrex_publish_changes'; args={operation_id:'controlled-publish'}; }
+          if (normal === 2) { name='omnigrex_open_pr'; args={operation_id:'controlled-open',title:'Clarified Change Proposal',body:'Two clarification rounds completed.'}; }
+          if (normal === 3) { name='omnigrex_request_review'; args={operation_id:'controlled-handoff',summary:'Two clarified choices verified.'}; }
+        } else {
+          if (normal === 0) { name='omnigrex_get_check_runs'; args={}; }
+          if (normal === 1) { name='omnigrex_get_pull_request'; args={}; }
+          if (normal === 2) { name='omnigrex_submit_review'; args={operation_id:'controlled-review',event:'APPROVE',body:'Current code reviewed after clarification.',comments:[]}; }
+        }
+      }
     } else if (fault === 'long-blocked') {
       if (step === 0) { name = 'omnigrex_report_blocked'; args = { operation_id: 'controlled-blocked', reason: 'Controlled prerequisite unavailable', details: 'Synthetic long-Turn blocked completion.' }; }
     } else if (fault === 'default-branch-refresh') {

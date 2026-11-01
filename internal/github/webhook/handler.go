@@ -151,7 +151,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 }
 
 func workflowEvent(eventName string) bool {
-	return eventName == "issues" || eventName == "pull_request" || eventName == "pull_request_review"
+	return eventName == "issue_comment" || eventName == "issues" || eventName == "pull_request" || eventName == "pull_request_review"
 }
 
 func validSignature(secret, body []byte, signature string) bool {

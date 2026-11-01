@@ -2,6 +2,7 @@
 
 [User guide](README.md) · [Documentation hub](../README.md)
 
+For ordinary agent questions, use [clarification](clarification.md), which preserves the current Workflow Attempt without `omnigrex:run`.
 A Human Handoff means autonomous progress has stopped and a person must resolve the reported condition.
 Start with the `omnigrex:needs-human` explanation on the Issue rather than repeatedly adding the command label.
 

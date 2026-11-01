@@ -43,6 +43,8 @@ const (
 	ToolSubmitReview               = "submit_review"
 	ToolCommentOnIssue             = "comment_on_issue"
 	ToolCommentOnPullRequest       = "comment_on_pull_request"
+	ToolRequestClarification       = "request_clarification"
+	ToolResolveClarification       = "resolve_clarification"
 	ToolReportBlocked              = "report_blocked"
 	ToolConfirmPriorTerminalIntent = "confirm_prior_terminal_intent"
 )
@@ -55,6 +57,9 @@ type ToolDefinition struct {
 }
 
 var toolCatalog = []ToolDefinition{
+	{Name: ToolRequestClarification, Description: "Publish a new immutable clarification round on the Work Item and end this Turn in expected waiting. Supply stable question IDs; carry unresolved questions forward and use new IDs for materially revised questions. Use empty questions only to yield to already queued human input after a handoff fence. This does not create a Human Handoff or authorize implementation.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "questions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"id": stringSchema(1, 128), "body": stringSchema(1, 8192), "replaces": stringSchema(1, 128)}, "id", "body")}}, "operation_id", "questions"), Class: MutationTool},
+	{Name: ToolResolveClarification, Description: "Record explicit interpretation of delivered human responses for individual questions. Leave incomplete, ambiguous or conflicting questions unresolved and ask again before dependent action.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "round_id": stringSchema(1, 128), "resolutions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"question_id": stringSchema(1, 128), "response_ids": map[string]any{"type": "array", "maxItems": 100, "items": stringSchema(1, 128)}, "explanation": stringSchema(1, 8192), "obsolete": map[string]any{"type": "boolean"}}, "question_id", "response_ids", "explanation")}}, "operation_id", "round_id", "resolutions"), Class: MutationTool},
+
 	{Name: ToolRefreshDefaultBranch, Description: "Acquire a verified default-branch snapshot into this live workspace without changing HEAD/index/source. Use a new operation_id for each fresh observation; replay returns the original snapshot, not a new observation. Check the returned ref/SHA locally. Only status current satisfies final freshness guidance; stale is usable but requires a fresh call, default_branch_changed/unavailable do not establish freshness. This is a local side effect, not publication or mergeability certification.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema()}, "operation_id"), Class: MutationTool},
 	{Name: ToolGetIssue, Description: "Get the scoped Issue and its current metadata.", InputSchema: emptyObjectSchema(), Class: ReadTool},
 	{Name: ToolListIssueComments, Description: "List comments on the scoped Issue.", InputSchema: emptyObjectSchema(), Class: ReadTool},
@@ -289,6 +294,10 @@ func validateSchemaValue(value any, schema map[string]any) error {
 			if validateSchemaValue(item, itemSchema) != nil {
 				return errInvalidArguments
 			}
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return errInvalidArguments
 		}
 	default:
 		return errInvalidArguments

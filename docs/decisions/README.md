@@ -59,6 +59,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0050: Deliver default-branch snapshots as additive Git data](0050-deliver-default-branch-snapshots-as-additive-git-data.md) | Accepted | 2026-10-27 |
 | [0051: Exclude execution cleanup without locking Turn leases](0051-exclude-execution-cleanup-without-locking-turn-leases.md) | Accepted | 2026-10-28 |
 | [0052: Carry current Human Handoff publication across tracking revisions](0052-carry-current-handoff-publication-across-tracking-revisions.md) | Accepted | 2026-10-28 |
+| [0054: Serialize Work Item clarification at Turn boundaries](0055-serialize-work-item-clarification-at-turn-boundaries.md) | Accepted | 2026-11-01 |
 | [0053: Export live budget observations in the controller](0053-export-live-budget-observations-in-the-controller.md) | Accepted | 2026-10-27 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
