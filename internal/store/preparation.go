@@ -406,6 +406,13 @@ SELECT EXISTS (
 		configuration["review_start"] = reviewStart
 		turnConfiguration, _ = json.Marshal(configuration)
 	}
+	turnConfiguration, err = prepareCollaborationTx(ctx, tx, job.WorkflowID, participant.ID, turnID, job.WorkflowAttemptID+":"+string(payload.Stage), turnConfiguration)
+	if err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE workflows SET clarification_waiting=FALSE WHERE id=$1`, job.WorkflowID); err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
 	turnConfiguration, err = canonicalJSON(turnConfiguration)
 	if err != nil || turnConfiguration[0] != '{' {
 		return AgentTurnPreparationCommit{}, errors.New("prepare Agent Turn: invalid turn configuration snapshot")

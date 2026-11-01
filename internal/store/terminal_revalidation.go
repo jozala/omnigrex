@@ -20,7 +20,7 @@ func (store *Store) SettleTerminalRevalidation(ctx context.Context, lease JobLea
 	if err != nil {
 		return err
 	}
-	if canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
+	if canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
 		canonical.Outcome != workflow.TurnOutcomeApproved && canonical.Outcome != workflow.TurnOutcomeChangesRequested {
 		return ErrAgentTurnSettlementInvalid
 	}
@@ -226,11 +226,21 @@ SELECT accepted FROM change_proposal_reviews WHERE repository_id = $1 AND review
 		if err != nil || pending.Count != 0 {
 			return ErrAgentTurnMutationsUnsettled
 		}
+		collaborationState, err := readCollaborationTx(ctx, tx, job.WorkflowID)
+		if err != nil {
+			return err
+		}
+		if canonical.Outcome == workflow.TurnOutcomeClarificationWait {
+			collaborationState.Waiting = true
+			if err = saveCollaborationTx(ctx, tx, job.WorkflowID, collaborationState); err != nil {
+				return err
+			}
+		}
 		eventKind = workflow.EventKindTerminalIntentRevalidated
 		decision = store.reducer.Reduce(snapshot, workflow.TerminalIntentRevalidatedEvent{
 			EventMetadata: workflow.EventMetadata{ID: eventID, ObservedAt: canonical.ObservedAt,
 				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
-			AttemptID: job.WorkflowAttemptID,
+			AttemptID: job.WorkflowAttemptID, HumanInputPending: collaborationState.Pending(job.AgentParticipantID),
 			SourceTurn: workflow.TurnGuard{TurnID: turn.ID, SessionID: turn.AgentSessionID,
 				AttemptID: turn.WorkflowAttemptID, Stage: turn.Stage, Role: role,
 				Epoch: uint64(turn.ExecutionEpoch), ControlRevision: uint64(turn.ControlRevision),

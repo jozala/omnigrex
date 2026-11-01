@@ -549,7 +549,7 @@ SELECT count(DISTINCT CASE WHEN terminal.tool_name = 'confirm_prior_terminal_int
 JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
 WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
   AND terminal.tool_name IN
-    ('request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')`,
+    ('request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')`,
 			turn.ID).Scan(&successfulTerminals); err != nil {
 			return err
 		}

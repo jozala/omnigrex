@@ -23,7 +23,8 @@ Configure these repository permissions:
 | Pull requests | Read and write |
 | Workflows | Read and write |
 
-Subscribe to exactly **Issues**, **Pull request**, **Pull request review**, and **Repository** events.
+Subscribe to exactly **Issues**, **Issue comment**, **Pull request**, **Pull request review**, and **Repository** events.
+After upgrading to human clarification support, add **Issue comment** to the Developer App subscriptions and rerun preflight.
 The Repository subscription supplies `repository.created` for onboarding.
 GitHub also supplies the default `installation.created` and `installation_repositories.added` deliveries.
 
@@ -81,3 +82,12 @@ Follow [secret placement and groups](secrets.md) before starting the controller.
 Verify an actual Developer App delivery receives HTTP 202 as described in [installation](installation.md#7-verify-and-hand-over).
 
 See [ADR 0005](../adr/0005-use-separate-developer-and-reviewer-github-apps.md) and [ADR 0009](../adr/0009-select-github-app-credentials-by-operation.md) for identity and credential selection.
+
+## Clarification command delivery
+
+New Work Item Issue comments require the Developer App's `issue_comment` subscription.
+The controller checks the exact human actor's current repository permission through the metadata-read collaborator-permission endpoint; Issue authorship alone is not authority.
+Accepted input is durable before its visible acknowledgment, so delivery retries reconcile the acknowledgment without queueing the response twice.
+If an acknowledgment is missing, inspect webhook-delivery processing and the Developer App's installation, subscription, Metadata-read and Issues-write permissions rather than resubmitting edited comments or resetting the Workflow.
+Normal clarification waiting does not require `omnigrex:run`; only an actual Human Handoff uses [explicit recovery](../users/human-handoffs.md).
+See [clarification and steering](../users/clarification.md) for the user-facing contract.

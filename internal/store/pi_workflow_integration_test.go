@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/config"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/mcp"
@@ -40,6 +41,83 @@ import (
 )
 
 func TestPiControlledWorkflow(t *testing.T) {
+	for _, largeHistory := range []bool{false, true} {
+		name := "clarification"
+		if largeHistory {
+			name = "clarification-large-history"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPiWorkflowFixture(t, "clarification")
+			for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
+				var participant, sessionID, attempt string
+				for round := 0; round < 3; round++ {
+					prepared := f.prepare(t)
+					if round == 0 {
+						participant = prepared.Commit.Participant.ID
+						sessionID = prepared.Commit.Session.ID
+						attempt = prepared.Commit.Turn.WorkflowAttemptID
+					}
+					if participant != prepared.Commit.Participant.ID || sessionID != prepared.Commit.Session.ID || attempt != prepared.Commit.Turn.WorkflowAttemptID {
+						t.Fatal("clarification replaced continuity")
+					}
+					if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+						t.Fatalf("clarification Turn: %t %v", processed, err)
+					}
+					if largeHistory && round > 0 {
+						var reads int
+						if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$1 AND tool_name='get_collaboration_record' AND state='SUCCEEDED'`, prepared.Commit.Turn.ID).Scan(&reads); err != nil || reads == 0 {
+							t.Fatalf("bounded retrieval not exercised: %d %v", reads, err)
+						}
+					}
+					if largeHistory && round > 0 {
+						var undelivered int
+						if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FROM work_item_collaboration collab,LATERAL jsonb_array_elements(collab.state->'inputs') input WHERE collab.workflow_id=$1 AND input->>'delivered_to'=$2 AND input->>'delivery_pending'='true'`, f.workflowID, prepared.Commit.Turn.ID).Scan(&undelivered); err != nil || undelivered != 0 {
+							t.Fatalf("real Pi reads did not durably deliver batch: %d %v", undelivered, err)
+						}
+					}
+					if round == 2 {
+						break
+					}
+					var raw []byte
+					var waiting bool
+					var active, successors, retries int
+					if err := f.pool(t).QueryRow(f.ctx, `SELECT collab.state,workflow.clarification_waiting,(SELECT count(*) FROM agent_turns WHERE workflow_id=workflow.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=workflow.id AND kind IN ('RUN_AGENT_TURN','PREPARE_AGENT_TURN') AND status IN ('AVAILABLE','LEASED')),attempt.infrastructure_failures FROM workflows workflow JOIN work_item_collaboration collab ON collab.workflow_id=workflow.id JOIN workflow_attempts attempt ON attempt.workflow_id=workflow.id AND attempt.active WHERE workflow.id=$1`, f.workflowID).Scan(&raw, &waiting, &active, &successors, &retries); err != nil {
+						t.Fatal(err)
+					}
+					if !waiting || active != 0 || successors != 0 || retries != 0 {
+						t.Fatalf("wait retained execution or consumed retries: %t %d %d %d", waiting, active, successors, retries)
+					}
+					var state collaboration.State
+					if err := json.Unmarshal(raw, &state); err != nil {
+						t.Fatal(err)
+					}
+					if largeHistory && round == 0 {
+						// Seed durable, already-delivered historical fixture records. The actual next
+						// prompt must traverse Pi RPC and retrieve the new answer despite >1 MiB history.
+						for i := 0; i < 20; i++ {
+							state.Inputs = append(state.Inputs, collaboration.Input{ID: fmt.Sprintf("archive-%s-%d", role, i), Kind: "steer", Body: strings.Repeat("old context ", 5500), Actor: collaboration.Actor{ID: "fixture-maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: fmt.Sprintf("archive-%s-%d", role, i)}, ParticipantID: participant, DeliveredTo: prepared.Commit.Turn.ID, AcceptedAt: time.Now()})
+						}
+						historical, _ := json.Marshal(state)
+						if _, err := f.pool(t).Exec(f.ctx, `UPDATE work_item_collaboration SET state=$2 WHERE workflow_id=$1`, f.workflowID, historical); err != nil {
+							t.Fatal(err)
+						}
+					}
+					receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Use option one."}, Actor: collaboration.Actor{ID: "fixture-maintainer", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+					if err != nil || receipt.ResponseID == "" {
+						t.Fatal(receipt, err)
+					}
+				}
+				if role == workflow.RoleDeveloper {
+					f.assertState(t, workflow.StateReviewing)
+				} else {
+					f.assertState(t, workflow.StatePRReady)
+				}
+			}
+			t.Log("PASS: two question/answer rounds in each retained Developer/Reviewer Session, stopped execution while waiting, unchanged Attempt and retry budget, normal publication and native review")
+		})
+
+	}
+
 	t.Run("default-branch-refresh", func(t *testing.T) {
 		f := newPiWorkflowFixture(t, "long-blocked")
 		source := f.prepare(t)
@@ -388,11 +466,15 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 		t.Fatal(err)
 	}
 	github := &workflowQualificationGitHub{replayGatewayGitHub: &replayGatewayGitHub{branch: "omnigrex/issue-123", base: "main"}, bare: bare, base: head, advanceDefault: mode == "default-branch-refresh", loseReviewResponse: mode == "lost-terminal-mutation-response"}
-	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: workspaces, Snapshots: workspaces, Installer: backend.Snapshots, Workflow: mcp.LedgerWorkflowMutations{}, PriorIntents: database, Handoffs: database, Policies: configuration.Policies})
+	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: github, Credentials: replayGatewayCredentials{}, Publisher: workspaces, Snapshots: workspaces, Installer: backend.Snapshots, Workflow: mcp.LedgerWorkflowMutations{}, PriorIntents: database, Handoffs: database, Clarifications: database, Policies: configuration.Policies})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gateway, err := mcp.New(mcp.Config{EndpointURL: endpoint, Store: database, Backend: toolBackend, Policies: configuration.Policies, LifecycleContext: ctx, MutationFinalizationTimeout: 30 * time.Second, Now: fault.now})
+	readLedger, err := mcp.NewStoreReadLedger(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := mcp.New(mcp.Config{EndpointURL: endpoint, Store: database, Ledger: readLedger, Backend: toolBackend, Policies: configuration.Policies, LifecycleContext: ctx, MutationFinalizationTimeout: 30 * time.Second, Now: fault.now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,6 +693,7 @@ func (b workflowQualificationBranch) ResolveDefaultBranch(context.Context, strin
 }
 
 type workflowQualificationGitHub struct {
+	comments []githubapi.IssueComment
 	*replayGatewayGitHub
 	bare, base          string
 	review              githubapi.Review
@@ -748,4 +831,17 @@ func (g *workflowQualificationGitHub) VerifyCITarget(_ context.Context, _, _, _ 
 }
 func (*workflowQualificationGitHub) GetCheckRunMetadata(context.Context, string, string, string, int64) (githubapi.CheckRun, error) {
 	return githubapi.CheckRun{}, errors.New("unexpected check metadata read")
+}
+
+func (g *workflowQualificationGitHub) CreateIssueComment(_ context.Context, _ string, _, _ string, _ int, request githubapi.CommentRequest) (githubapi.IssueComment, error) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	comment := githubapi.IssueComment{ID: int64(1000 + len(g.comments)), NodeID: fmt.Sprint("IC_", len(g.comments)), HTMLURL: "https://github.com/owner/repo/issues/123#comment", Body: githubapi.JoinBodyParts(request.Body, request.Marker)}
+	g.comments = append(g.comments, comment)
+	return comment, nil
+}
+func (g *workflowQualificationGitHub) ListIssueComments(context.Context, string, string, string, int) ([]githubapi.IssueComment, error) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	return append([]githubapi.IssueComment(nil), g.comments...), nil
 }

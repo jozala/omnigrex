@@ -1439,3 +1439,17 @@ func TestInterruptionThenSubscriptionFailureExplainsExhaustion(t *testing.T) {
 		}
 	}
 }
+
+func TestChangedReviewHeadDuringClarificationPreservesAttemptAndBudgets(t *testing.T) {
+	snapshot := reviewingSnapshot(2, "head-old")
+	snapshot.ActiveTurn = nil
+	snapshot.ClarificationWaiting = true
+	event := workflow.SynchronizationEvent{EventMetadata: metadata(snapshot, "sync-while-clarifying"), ChangeProposalID: 64, PreviousHeadSHA: "head-old", HeadSHA: "head-current"}
+	decision := reduce(snapshot, event)
+	assertDecision(t, decision, workflow.DispositionApplied, workflow.ReasonReviewHeadReplaced, workflow.StateReviewing, snapshot.Revision+1)
+	if !decision.Snapshot.ClarificationWaiting || decision.Snapshot.ChangeProposal.HeadSHA != "head-current" || decision.Snapshot.ChangeProposal.ReadyForSHA != "" || decision.Snapshot.CurrentAttempt.ID != snapshot.CurrentAttempt.ID || decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 {
+		t.Fatalf("clarification lost continuity or inherited approval: %+v", decision.Snapshot)
+	}
+	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
+	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 0)
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/publication"
@@ -53,20 +54,24 @@ type MutationReconciler interface {
 }
 
 type ProductionReconcilerConfig struct {
-	GitHub           GitHubAPI
-	Credentials      RepositoryCredentials
-	Publications     PublicationReconciler
-	GitRemoteBaseURL string
-	Policies         role.PolicyCatalog
+	ClarificationPublisher collaboration.Publisher
+	Clarifications         ClarificationStore
+	GitHub                 GitHubAPI
+	Credentials            RepositoryCredentials
+	Publications           PublicationReconciler
+	GitRemoteBaseURL       string
+	Policies               role.PolicyCatalog
 }
 
 // ProductionReconciler finds exact GitHub and Git publication artifacts from durable reservation data.
 type ProductionReconciler struct {
-	github       GitHubAPI
-	credentials  RepositoryCredentials
-	publications PublicationReconciler
-	remoteBase   gitremote.BaseURL
-	policies     role.PolicyCatalog
+	clarificationPublisher collaboration.Publisher
+	clarifications         ClarificationStore
+	github                 GitHubAPI
+	credentials            RepositoryCredentials
+	publications           PublicationReconciler
+	remoteBase             gitremote.BaseURL
+	policies               role.PolicyCatalog
 }
 
 var (
@@ -85,7 +90,7 @@ func NewProductionReconciler(config ProductionReconcilerConfig) (*ProductionReco
 	if err != nil {
 		return nil, ErrInvalidReconcilerConfiguration
 	}
-	return &ProductionReconciler{github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase, policies: config.Policies}, nil
+	return &ProductionReconciler{clarificationPublisher: config.ClarificationPublisher, clarifications: config.Clarifications, github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase, policies: config.Policies}, nil
 }
 
 func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
@@ -113,6 +118,10 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 		return reconciler.reconcilePublication(ctx, reconciliation, mutation)
 	case ToolOpenPR:
 		return reconciler.reconcileOpenPullRequest(ctx, reconciliation, mutation, marker)
+	case ToolResolveClarification:
+		return reconciler.reconcileClarificationResolution(ctx, reconciliation, mutation)
+	case ToolRequestClarification:
+		return reconciler.reconcileClarification(ctx, reconciliation, mutation, marker)
 	case ToolCommentOnIssue:
 		return reconciler.reconcileComment(ctx, reconciliation, mutation, marker, false)
 	case ToolCommentOnPullRequest:
@@ -772,4 +781,81 @@ func interfaceNil(value any) bool {
 	default:
 		return false
 	}
+}
+
+func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Context, scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation, marker string) (MutationReconciliationResult, error) {
+	if reconciler.clarifications == nil {
+		return unresolvedReconciliation(), nil
+	}
+	var args struct {
+		Questions []collaboration.Question `json:"questions"`
+	}
+	if json.Unmarshal(mutation.Request, &args) != nil {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	if len(args.Questions) == 0 {
+		pending, err := reconciler.clarifications.HasPendingHumanInput(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID)
+		if err != nil || !pending {
+			return unresolvedReconciliation(), err
+		}
+		raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": ""})
+		return foundReconciliation(raw), nil
+	}
+	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, "R"+mutation.ID)
+	if err != nil {
+		return unresolvedReconciliation(), nil
+	}
+	var request struct {
+		Signature string `json:"signature"`
+	}
+	if json.Unmarshal(mutation.Request, &request) != nil {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	publisher, err := reconciler.clarificationDelivery(scope, mutation)
+	if err != nil {
+		return MutationReconciliationResult{}, err
+	}
+	operation := collaboration.Publication{WorkflowID: scope.WorkflowID, Publisher: publisher, Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
+		return reconciler.clarifications.ConfirmClarificationPublication(ctx, scope.WorkflowID, id, source)
+	}}
+	found, err := operation.Reconcile(ctx, round, request.Signature)
+	if err != nil || !found {
+		return unresolvedReconciliation(), err
+	}
+	raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID})
+	return foundReconciliation(raw), nil
+}
+
+func (reconciler *ProductionReconciler) reconcileClarificationResolution(ctx context.Context, scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
+	if reconciler.clarifications == nil || mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != scope.WorkflowID {
+		return unresolvedReconciliation(), nil
+	}
+	var request struct {
+		RoundID     string                     `json:"round_id"`
+		Resolutions []collaboration.Resolution `json:"resolutions"`
+	}
+	if json.Unmarshal(mutation.Request, &request) != nil {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, request.RoundID)
+	if err != nil {
+		return unresolvedReconciliation(), nil
+	}
+	for _, resolution := range request.Resolutions {
+		found := false
+		for _, actual := range round.Resolutions {
+			// Reconcile agent intent, not controller-derived delivery coverage.
+			actual.ConsideredResponseIDs = nil
+			resolution.ConsideredResponseIDs = nil
+			if reflect.DeepEqual(resolution, actual) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return unresolvedReconciliation(), nil
+		}
+	}
+	raw, _ := json.Marshal(map[string]any{"round_id": request.RoundID, "recorded": true})
+	return foundReconciliation(raw), nil
 }

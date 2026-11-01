@@ -976,6 +976,10 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 		switch {
 		case errors.Is(err, store.ErrMutationOperationConflict):
 			writeToolError(response, id, "mutation operation identity conflict")
+		case errors.Is(err, store.ErrUnresolvedClarification):
+			writeToolError(response, id, store.ErrUnresolvedClarification.Error())
+		case errors.Is(err, store.ErrPendingHumanInput):
+			writeToolError(response, id, store.ErrPendingHumanInput.Error())
 		case errors.Is(err, store.ErrMutationAdmissionClosed):
 			writeToolError(response, id, "mutation admission is closed")
 		default:
@@ -1303,9 +1307,12 @@ func mutationMetadata(tool string, scope TokenScope) MutationMetadata {
 	case ToolRequestReview:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolReportBlocked:
+	case ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
+		if tool == ToolRequestClarification {
+			metadata.ExpectedSHA = scope.HeadSHA
+		}
 	case ToolSubmitReview, ToolCommentOnPullRequest:
 		if scope.PullRequest != nil {
 			metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.PullRequest.ID)
@@ -1336,7 +1343,7 @@ func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 // posting, and never truncates agent text. Any agent-supplied signature is
 // replaced with the validated participant identity.
 func (gateway *Gateway) signReservationArguments(tool string, args json.RawMessage, scope TokenScope) (json.RawMessage, string) {
-	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
+	if tool != ToolRequestClarification && tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
 		return args, ""
 	}
 	var object map[string]json.RawMessage
@@ -1423,7 +1430,7 @@ const postedBodyTooLongMessage = "comment body with signature exceeds GitHub lim
 // backend publishes them unsigned, exactly as recovery expects. Tools
 // without a signature footer are returned untouched.
 func ensureReservationSignature(tool string, request json.RawMessage) json.RawMessage {
-	if tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
+	if tool != ToolRequestClarification && tool != ToolCommentOnIssue && tool != ToolCommentOnPullRequest && tool != ToolSubmitReview && tool != ToolRequestReview {
 		return request
 	}
 	var object map[string]json.RawMessage

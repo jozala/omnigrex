@@ -317,7 +317,7 @@ func (state *productionState) githubAPI() (*githubapi.APIClient, error) {
 
 func (state *productionState) checkDeveloperInstallation(ctx context.Context) error {
 	if err := state.checkAppConfiguration(ctx, state.developer, state.settings.GitHubDeveloperAppID,
-		githubapi.DeveloperAppPermissions(), []string{"issues", "pull_request", "pull_request_review", "repository"}); err != nil {
+		githubapi.DeveloperAppPermissions(), []string{"issues", "issue_comment", "pull_request", "pull_request_review", "repository"}); err != nil {
 		return err
 	}
 	if err := state.checkDeveloperWebhook(ctx); err != nil {
