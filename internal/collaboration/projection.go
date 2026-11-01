@@ -1,7 +1,9 @@
 package collaboration
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -31,6 +33,9 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 			if collection == "human_input_history" && in.DeliveredTo == turn {
 				continue
 			}
+			// Delivery bookkeeping must not change chunk contents/fingerprints when
+			// the final read commits or when a completed read is retried.
+			in.DeliveryPending = false
 			raw, _ := json.Marshal(in)
 			records = append(records, raw)
 		}
@@ -42,6 +47,9 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 	}
 	return records
 }
+
+// Project prepares the delivery projection. Omitted batch contents remain pending
+// until successful read-ledger coverage. Persist State and projection atomically.
 func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 	object := map[string]json.RawMessage{}
 	projection := Projection{Counts: map[string]int{}}
@@ -59,18 +67,25 @@ func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 			object[name] = json.RawMessage(`[]`)
 		}
 		projection.RetrievalRequired = true
-		projection.Instruction = "Before interpreting input or handing off, retrieve every human_input record with get_collaboration_record, starting index 0 and following next_offset/next_index. All pending input is frozen for this Turn; there is no collection delay. Retrieve older human_input_history and clarification_history as needed. Concatenate content chunks verbatim, then parse the JSON record; receipt is not interpretation."
+		for i := range s.Inputs {
+			in := &s.Inputs[i]
+			if in.ParticipantID == participant && in.DeliveredTo == turn {
+				in.DeliveryPending = true
+			}
+		}
+		projection.Instruction = "Before interpreting input or handing off, retrieve every human_input record with get_collaboration_record, starting index 0 and following next_offset/next_index. All pending input is frozen for this Turn; there is no collection delay. Retrieve older human_input_history and clarification_history as needed. Concatenate content chunks verbatim with one record_sha256 per record, then parse the JSON; receipt is not interpretation. Handoff remains fenced until every required chunk has a successful scoped read record."
 	}
 	object["collaboration_projection"], _ = json.Marshal(projection)
 	return object
 }
 
 type RecordPage struct {
-	Content    string `json:"content"`
-	Index      int    `json:"index"`
-	Total      int    `json:"total"`
-	NextOffset *int   `json:"next_offset,omitempty"`
-	NextIndex  *int   `json:"next_index,omitempty"`
+	RecordSHA256 string `json:"record_sha256"`
+	Content      string `json:"content"`
+	Index        int    `json:"index"`
+	Total        int    `json:"total"`
+	NextOffset   *int   `json:"next_offset,omitempty"`
+	NextIndex    *int   `json:"next_index,omitempty"`
 }
 
 // PageRecord chunks the encoded JSON as Unicode text. JSON escaping is included
@@ -88,7 +103,7 @@ func PageRecord(record json.RawMessage, total, index, offset int) (RecordPage, e
 		return RecordPage{}, ErrInvalid
 	}
 	end := min(len(runes), offset+RecordChunkRunes)
-	page := RecordPage{Content: string(runes[offset:end]), Index: index, Total: total}
+	page := RecordPage{RecordSHA256: fmt.Sprintf("%x", sha256.Sum256(record)), Content: string(runes[offset:end]), Index: index, Total: total}
 	if end < len(runes) {
 		page.NextOffset = &end
 	} else if index+1 < total {

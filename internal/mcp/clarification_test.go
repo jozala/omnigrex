@@ -168,3 +168,28 @@ func TestCollaborationReadAdmitsNonzeroRecordAndChunkOffsets(t *testing.T) {
 		t.Fatalf("pagination rejected: %s %v", result, err)
 	}
 }
+
+func TestResolutionReconciliationMatchesIntentWithControllerCoverage(t *testing.T) {
+	resolution := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A3"}, Explanation: "The explicit correction governs"}
+	actual := resolution
+	actual.ConsideredResponseIDs = []string{"A2", "A3"}
+	ledger := &clarificationLedger{round: collaboration.Round{ID: "R1", Resolutions: []collaboration.Resolution{actual}}}
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(map[string]any{"operation_id": "resolve", "round_id": "R1", "resolutions": []collaboration.Resolution{resolution}})
+	scope := reconciliationContext()
+	mutation := reconciliationMutation("resolve_clarification", string(request))
+	mutation.ExternalService = "omnigrex"
+	mutation.ExternalResourceID = scope.WorkflowID
+	result, err := reconciler.Reconcile(context.Background(), scope, mutation)
+	if err != nil || result.Disposition != mcp.ReconciliationFound {
+		t.Fatalf("derived coverage prevented exact intent recovery: %+v %v", result, err)
+	}
+	ledger.round.Resolutions[0].Explanation = "A different interpretation"
+	result, err = reconciler.Reconcile(context.Background(), scope, mutation)
+	if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
+		t.Fatalf("different interpretation reconciled: %+v %v", result, err)
+	}
+}

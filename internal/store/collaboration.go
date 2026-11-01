@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/collaboration"
@@ -15,7 +17,7 @@ import (
 
 var ErrUnresolvedClarification = errors.New("clarification questions remain unresolved; record explicit interpretation with resolve_clarification or publish a revised round")
 
-var ErrPendingHumanInput = errors.New("pending human input must be delivered before Stage handoff; call request_clarification with empty questions to continue at a safe Turn boundary")
+var ErrPendingHumanInput = errors.New("pending human input must be delivered before Stage handoff; retrieve all frozen human_input chunks, or call request_clarification with empty questions for input accepted after preparation")
 
 func readCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID string) (collaboration.State, error) {
 	var state collaboration.State
@@ -314,30 +316,38 @@ func (s *Store) GetCollaborationRecord(ctx context.Context, workflowID, particip
 		return collaboration.RecordPage{}, err
 	}
 	defer tx.Rollback(ctx)
-	var configuration []byte
-	err = tx.QueryRow(ctx, `SELECT turn.turn_configuration FROM agent_turns turn JOIN agent_sessions session ON session.id=turn.agent_session_id WHERE turn.id=$1 AND turn.workflow_id=$2 AND session.agent_participant_id=$3`, turn, workflowID, participant).Scan(&configuration)
+	raw, total, err := getCollaborationRecordTx(ctx, tx, workflowID, participant, turn, collection, index)
 	if err != nil {
 		return collaboration.RecordPage{}, err
+	}
+	return collaboration.PageRecord(raw, total, index, offset)
+}
+
+func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, participant, turn, collection string, index int) (json.RawMessage, int, error) {
+	var configuration []byte
+	err := tx.QueryRow(ctx, `SELECT turn.turn_configuration FROM agent_turns turn JOIN agent_sessions session ON session.id=turn.agent_session_id WHERE turn.id=$1 AND turn.workflow_id=$2 AND session.agent_participant_id=$3`, turn, workflowID, participant).Scan(&configuration)
+	if err != nil {
+		return nil, 0, err
 	}
 	var object struct {
 		Projection collaboration.Projection `json:"collaboration_projection"`
 	}
 	if err = json.Unmarshal(configuration, &object); err != nil {
-		return collaboration.RecordPage{}, err
+		return nil, 0, err
 	}
 	limit, ok := object.Projection.Counts[collection]
 	if !ok {
-		return collaboration.RecordPage{}, collaboration.ErrInvalid
+		return nil, 0, collaboration.ErrInvalid
 	}
-	if index < 0 || index >= limit || offset < 0 {
-		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	if index < 0 || index >= limit {
+		return nil, 0, collaboration.ErrInvalid
 	}
 	// Select just this record: repeatedly decoding and serializing the entire
 	// aggregate for each chunk makes large discussions unnecessarily expensive.
 	var raw []byte
 	switch collection {
 	case "human_input", "human_input_history":
-		err = tx.QueryRow(ctx, `SELECT item FROM work_item_collaboration collaboration,
+		err = tx.QueryRow(ctx, `SELECT item - 'delivery_pending' FROM work_item_collaboration collaboration,
    LATERAL jsonb_array_elements(collaboration.state->'inputs') WITH ORDINALITY AS records(item,position)
    WHERE collaboration.workflow_id=$1 AND item->>'participant_id'=$2 AND COALESCE(item->>'delivered_to','')<>''
    AND (($3='human_input' AND item->>'delivered_to'=$4) OR ($3='human_input_history' AND item->>'delivered_to'<>$4))
@@ -345,10 +355,76 @@ func (s *Store) GetCollaborationRecord(ctx context.Context, workflowID, particip
 	case "clarification_history":
 		err = tx.QueryRow(ctx, `SELECT state->'rounds'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	default:
-		return collaboration.RecordPage{}, collaboration.ErrInvalid
+		return nil, 0, collaboration.ErrInvalid
 	}
 	if err != nil {
-		return collaboration.RecordPage{}, err
+		return nil, 0, err
 	}
-	return collaboration.PageRecord(raw, limit, index, offset)
+	return raw, limit, nil
+}
+
+// recordCollaborationDeliveryTx admits coverage only from a successful read
+// recorded under the live Turn/Workflow fence. The read ledger is the durable
+// progress log; duplicate, missing, failed, and noncanonical chunks cannot
+// acknowledge an input. No aggregate rewrite is needed for partial reads.
+func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTurn, workflowID string, request, result json.RawMessage) error {
+	var args struct {
+		Collection string `json:"collection"`
+		Index      int    `json:"index"`
+		Offset     int    `json:"offset"`
+	}
+	if err := json.Unmarshal(request, &args); err != nil {
+		return err
+	}
+	if args.Collection != "human_input" {
+		return nil
+	}
+	raw, total, err := getCollaborationRecordTx(ctx, tx, workflowID, turn.AgentParticipantID, turn.ID, args.Collection, args.Index)
+	if err != nil {
+		return err
+	}
+	var input struct {
+		ID string `json:"id"`
+	}
+	if err = json.Unmarshal(raw, &input); err != nil {
+		return err
+	}
+	expected, err := collaboration.PageRecord(raw, total, args.Index, args.Offset)
+	if err != nil {
+		return err
+	}
+	var actual collaboration.RecordPage
+	if err = json.Unmarshal(result, &actual); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(expected, actual) {
+		return collaboration.ErrInvalid
+	}
+	var chunks int
+	length := utf8.RuneCount(raw)
+	err = tx.QueryRow(ctx, `SELECT count(DISTINCT COALESCE((request->>'offset')::bigint,0))
+ FROM tool_invocations WHERE agent_turn_id=$1 AND kind='READ' AND state='SUCCEEDED'
+ AND tool_name='get_collaboration_record' AND request->>'collection'='human_input'
+ AND COALESCE((request->>'index')::bigint,0)=$2 AND result->>'record_sha256'=$3
+ AND COALESCE((request->>'offset')::bigint,0)>=0 AND COALESCE((request->>'offset')::bigint,0)<$4
+ AND COALESCE((request->>'offset')::bigint,0)%$5=0`, turn.ID, args.Index, expected.RecordSHA256, length, collaboration.RecordChunkRunes).Scan(&chunks)
+	if err != nil {
+		return err
+	}
+	if chunks != (length+collaboration.RecordChunkRunes-1)/collaboration.RecordChunkRunes {
+		return nil
+	}
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return err
+	}
+	for _, in := range state.Inputs {
+		if in.ID == input.ID && !in.DeliveryPending {
+			return nil
+		}
+	}
+	if err = state.MarkDelivered(turn.AgentParticipantID, turn.ID, input.ID); err != nil {
+		return err
+	}
+	return saveCollaborationTx(ctx, tx, workflowID, state)
 }

@@ -1,6 +1,7 @@
 package collaboration_test
 
 import (
+	"fmt"
 	"github.com/jozala/omnigrex/internal/collaboration"
 	"testing"
 	"time"
@@ -268,5 +269,78 @@ func TestReplacementRoundPreservesAnsweredDecisionAndCarriesUnansweredQuestion(t
 	}
 	if s.Rounds[1].Resolutions[0].ResponseIDs[0] != "A1" || s.Inputs[0].RoundID != "R1" || s.Inputs[0].Source.ID != "compatibility" {
 		t.Fatal("inherited decision lost its original evidence")
+	}
+}
+
+func TestSiblingAmendmentsInvalidateDecisionUntilExplicitInterpretation(t *testing.T) {
+	var s collaboration.State
+	s.Request("R1", "developer", "T1", "h", []collaboration.Question{{ID: "Q1", Body: "Policy?"}})
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep"}, admission("a1"))
+	s.Prepare("developer", "T2")
+	if err := s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Keep"}}); err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range []string{"A2", "A3", "A4"} {
+		s.Accept(id, collaboration.Command{Kind: "amend", Target: "A1", Body: "Explicit correction " + id}, admission(id))
+		// A correction received after preparation cannot be acknowledged from IDs
+		// alone, even when it addresses the same original evidence.
+		before := len(s.Rounds[0].Resolutions)
+		if err := s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{id}, Explanation: "Not delivered yet"}}); err == nil {
+			t.Fatal("unread correction was interpreted")
+		}
+		if len(s.Rounds[0].Resolutions) != before {
+			t.Fatal("rejected interpretation changed history")
+		}
+		s.Prepare("developer", fmt.Sprint("correction-", i))
+		if !s.Unresolved("developer") {
+			t.Fatal("sibling correction silently retained the prior interpretation")
+		}
+		if err := s.Resolve("R1", fmt.Sprint("correction-", i), []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{id}, Explanation: "This explicit correction governs; earlier corrections remain history"}}); err != nil {
+			t.Fatal(err)
+		}
+		if s.Unresolved("developer") {
+			t.Fatal("explicit superseding interpretation rejected")
+		}
+	}
+	if len(s.Rounds[0].Resolutions) != 4 || s.Inputs[0].Body != "Keep" {
+		t.Fatal("history rewritten")
+	}
+}
+
+func TestResolvedQuestionCanBecomeObsoleteWithoutHumanAmendment(t *testing.T) {
+	var s collaboration.State
+	s.Request("R1", "developer", "T1", "h", []collaboration.Question{{ID: "Q1", Body: "Artifact retention?"}})
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Seven days"}, admission("a1"))
+	s.Prepare("developer", "T2")
+	s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Seven days"}})
+	if err := s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", Obsolete: true, Explanation: "Current code removes the artifact and its retention configuration entirely"}}); err != nil {
+		t.Fatal(err)
+	}
+	if s.Unresolved("developer") || len(s.Rounds[0].Resolutions) != 2 || s.Rounds[0].Resolutions[0].ResponseIDs[0] != "A1" {
+		t.Fatal("obsolescence lost earlier evidence")
+	}
+}
+
+func TestPreviouslyRecordedInterpretationRetainsAllCitedEvidence(t *testing.T) {
+	var s collaboration.State
+	s.Request("R1", "developer", "T1", "h", []collaboration.Question{{ID: "Q1", Body: "Policy?"}})
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep"}, admission("a1"))
+	s.Accept("A2", collaboration.Command{Kind: "amend", Target: "A1", Body: "Keep with qualification"}, admission("a2"))
+	s.Prepare("developer", "T2")
+	if err := s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1", "A2"}, Explanation: "The explicit qualification applies to the original answer"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Interpretations written before coverage metadata existed remain effective
+	// when all competing evidence is explicitly cited or is its ancestor.
+	s.Rounds[0].Resolutions[0].ConsideredResponseIDs = nil
+	if s.Unresolved("developer") {
+		t.Fatal("previously cited evidence was treated as unseen")
+	}
+	s.Accept("A3", collaboration.Command{Kind: "amend", Target: "A1", Body: "Further correction"}, admission("a3"))
+	if !s.Unresolved("developer") {
+		t.Fatal("new sibling correction failed to invalidate legacy evidence")
 	}
 }

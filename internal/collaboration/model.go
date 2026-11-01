@@ -29,10 +29,13 @@ type Question struct {
 	Body     string `json:"body"`
 }
 type Resolution struct {
-	Obsolete    bool     `json:"obsolete,omitempty"`
-	QuestionID  string   `json:"question_id"`
-	ResponseIDs []string `json:"response_ids"`
-	Explanation string   `json:"explanation"`
+	// ConsideredResponseIDs records competing amendments available to this explicit
+	// interpretation. It is controller-owned, not an agent-provided last-answer rule.
+	ConsideredResponseIDs []string `json:"considered_response_ids,omitempty"`
+	Obsolete              bool     `json:"obsolete,omitempty"`
+	QuestionID            string   `json:"question_id"`
+	ResponseIDs           []string `json:"response_ids"`
+	Explanation           string   `json:"explanation"`
 }
 type Round struct {
 	PublicationFailed bool         `json:"publication_failed,omitempty"`
@@ -59,7 +62,10 @@ type Input struct {
 	Source        Source    `json:"source"`
 	AcceptedAt    time.Time `json:"accepted_at"`
 	ParticipantID string    `json:"participant_id"`
-	DeliveredTo   string    `json:"delivered_to,omitempty"`
+	// DeliveredTo identifies the frozen Turn assignment. DeliveryPending distinguishes
+	// assignment from successful delivery when contents are omitted from the envelope.
+	DeliveredTo     string `json:"delivered_to,omitempty"`
+	DeliveryPending bool   `json:"delivery_pending,omitempty"`
 }
 type Receipt struct {
 	ID         string `json:"id"`
@@ -149,6 +155,7 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 			if old := latestResolution(previous, q.ID); old != nil && s.resolutionCurrent(*old) {
 				inherited := *old
 				inherited.ResponseIDs = slices.Clone(old.ResponseIDs)
+				inherited.ConsideredResponseIDs = slices.Clone(old.ConsideredResponseIDs)
 				r.Resolutions = append(r.Resolutions, inherited)
 			}
 		}
@@ -275,7 +282,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 
 func (s *State) Pending(participant string) bool {
 	for _, input := range s.Inputs {
-		if input.ParticipantID == participant && input.DeliveredTo == "" {
+		if input.ParticipantID == participant && (input.DeliveredTo == "" || input.DeliveryPending) {
 			return true
 		}
 	}
@@ -299,8 +306,9 @@ func (s *State) Prepare(participant, turn string) []Input {
 	s.Preparations = append(s.Preparations, Preparation{ParticipantID: participant, TurnID: turn})
 	for i := range s.Inputs {
 		input := &s.Inputs[i]
-		if input.ParticipantID == participant && input.DeliveredTo == "" {
+		if input.ParticipantID == participant && (input.DeliveredTo == "" || input.DeliveryPending) {
 			input.DeliveredTo = turn
+			input.DeliveryPending = false
 			batch = append(batch, *input)
 		}
 	}
@@ -336,30 +344,40 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			if r.SupersededBy != "" && latestResolution(*r, resolution.QuestionID) == nil {
 				return ErrInvalid
 			}
-			if old := latestResolution(*r, resolution.QuestionID); old != nil {
+			if old := latestResolution(*r, resolution.QuestionID); old != nil && !resolution.Obsolete {
 				// A revised interpretation must explicitly cite an amendment of
 				// its earlier evidence, not silently apply last-answer-wins.
 				if !slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool {
-					return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.amends(id, prior) })
+					return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.isAmendmentOfEvidence(id, prior) })
 				}) {
 					return ErrInvalid
 				}
 			}
 			for _, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
-					return in.ID == id && in.DeliveredTo != "" && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID))
+					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID))
 				}) {
 					return ErrInvalid
 				}
 			}
 		}
-		for _, resolution := range resolutions {
-			if !s.resolutionCurrent(resolution) {
+		for index := range resolutions {
+			resolution := &resolutions[index]
+			// Freeze only actually delivered competing evidence. Later or unread input
+			// cannot be silently included in an interpretation's coverage.
+			resolution.ConsideredResponseIDs = nil
+			for _, in := range s.Inputs {
+				if in.DeliveredTo != "" && !in.DeliveryPending && slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) }) {
+					resolution.ConsideredResponseIDs = append(resolution.ConsideredResponseIDs, in.ID)
+				}
+			}
+			if !s.resolutionCurrent(*resolution) {
 				return ErrInvalid
 			}
 		}
 		for _, resolution := range resolutions {
 			resolution.ResponseIDs = slices.Clone(resolution.ResponseIDs)
+			resolution.ConsideredResponseIDs = slices.Clone(resolution.ConsideredResponseIDs)
 			r.Resolutions = append(r.Resolutions, resolution)
 			// A correction to historical evidence also updates the current
 			// unchanged question, if it is still carried by the same owner.
@@ -440,13 +458,51 @@ func (s *State) amends(id, prior string) bool {
 	}
 	return false
 }
-func (s *State) resolutionCurrent(r Resolution) bool {
-	for _, in := range s.Inputs {
-		for _, id := range r.ResponseIDs {
-			if s.amends(in.ID, id) && !slices.Contains(r.ResponseIDs, in.ID) && !slices.ContainsFunc(r.ResponseIDs, func(cited string) bool { return s.amends(cited, in.ID) }) {
-				return false
+
+// evidenceRoot follows explicit amendment links, not text similarity or ordering.
+func (s *State) evidenceRoot(id string) string {
+	for {
+		var parent string
+		for _, in := range s.Inputs {
+			if in.ID == id {
+				parent = in.Amends
+				break
 			}
 		}
+		if parent == "" {
+			return id
+		}
+		id = parent
 	}
+}
+func (s *State) isAmendmentOfEvidence(id, prior string) bool {
+	return slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == id && in.Amends != "" }) && s.evidenceRoot(id) == s.evidenceRoot(prior)
+}
+func (s *State) resolutionCurrent(r Resolution) bool {
+	if r.Obsolete {
+		return true
+	}
+	for _, in := range s.Inputs {
+		if slices.Contains(r.ResponseIDs, in.ID) || slices.Contains(r.ConsideredResponseIDs, in.ID) || slices.ContainsFunc(r.ResponseIDs, func(cited string) bool { return s.amends(cited, in.ID) }) {
+			continue
+		}
+		if slices.ContainsFunc(r.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) }) {
+			return false
+		}
+	}
+
 	return true
+}
+
+// MarkDelivered records full, durable read-ledger coverage for a frozen input.
+// Replaying the same delivery is harmless; a different Turn cannot acknowledge it.
+func (s *State) MarkDelivered(participant, turn, id string) error {
+	for i := range s.Inputs {
+		in := &s.Inputs[i]
+		if in.ID == id && in.ParticipantID == participant && in.DeliveredTo == turn {
+			in.DeliveryPending = false
+			return nil
+		}
+	}
+	return ErrInvalid
 }

@@ -69,6 +69,12 @@ func TestPiControlledWorkflow(t *testing.T) {
 							t.Fatalf("bounded retrieval not exercised: %d %v", reads, err)
 						}
 					}
+					if largeHistory && round > 0 {
+						var undelivered int
+						if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FROM work_item_collaboration collab,LATERAL jsonb_array_elements(collab.state->'inputs') input WHERE collab.workflow_id=$1 AND input->>'delivered_to'=$2 AND input->>'delivery_pending'='true'`, f.workflowID, prepared.Commit.Turn.ID).Scan(&undelivered); err != nil || undelivered != 0 {
+							t.Fatalf("real Pi reads did not durably deliver batch: %d %v", undelivered, err)
+						}
+					}
 					if round == 2 {
 						break
 					}

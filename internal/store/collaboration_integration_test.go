@@ -276,8 +276,8 @@ func TestCollaborationRecordRetrievalPreservesOversizedPreparedBatchAndScope(t *
 		}
 	}
 	state.Prepare(lease.AgentParticipantID, lease.ID)
-	raw, _ := json.Marshal(state)
 	config, _ := json.Marshal(state.Project(lease.AgentParticipantID, lease.ID))
+	raw, _ := json.Marshal(state)
 	if len(config) > collaboration.MaxProjectionBytes {
 		t.Fatal("unbounded configuration")
 	}
@@ -314,5 +314,183 @@ func TestCollaborationRecordRetrievalPreservesOversizedPreparedBatchAndScope(t *
 	}
 	if _, err := databases[0].GetCollaborationRecord(ctx, fixture.workflowID, "00000000-0000-4000-8000-000000000000", lease.ID, "human_input", 0, 0); err == nil {
 		t.Fatal("cross-participant read")
+	}
+}
+
+func TestRetrievalOnlyInputFencesHandoffUntilEveryChunkIsRecorded(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	for n, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
+		t.Run(string(role), func(t *testing.T) {
+			database := databases[0]
+			fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 9930+n, role, "head")
+			var state collaboration.State
+			for _, id := range []string{"A1", "A2"} {
+				receipt := state.Accept(id, collaboration.Command{Kind: "steer", Body: strings.Repeat("\\\"界", 12000)}, collaboration.Admission{Active: true, Authorized: true, ParticipantID: lease.AgentParticipantID, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: id}, At: time.Now()})
+				if receipt.ResponseID == "" {
+					t.Fatal(receipt)
+				}
+			}
+			state.Prepare(lease.AgentParticipantID, lease.ID)
+			config, _ := json.Marshal(state.Project(lease.AgentParticipantID, lease.ID))
+			raw, _ := json.Marshal(state)
+			if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE agent_turns SET turn_configuration=$2 WHERE id=$1`, lease.ID, config); err != nil {
+				t.Fatal(err)
+			}
+			assertFenced := func() {
+				t.Helper()
+				for _, tool := range []string{"request_review", "submit_review", "confirm_prior_terminal_intent"} {
+					_, err := database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: tool, OperationID: "handoff-" + tool, Request: json.RawMessage(`{"operation_id":"handoff"}`), ExternalService: "fixture", ExternalResourceID: "resource"})
+					if !errors.Is(err, store.ErrPendingHumanInput) {
+						t.Fatalf("%s bypassed undelivered input: %v", tool, err)
+					}
+				}
+			}
+			assertFenced()
+			read := func(index, offset int, mode string) collaboration.RecordPage {
+				t.Helper()
+				page, err := database.GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "human_input", index, offset)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args, _ := json.Marshal(map[string]any{"collection": "human_input", "index": index, "offset": offset})
+				result, _ := json.Marshal(page)
+				invocation := store.ReadInvocation{ToolName: "get_collaboration_record", Request: args, Result: result, StartedAt: time.Now(), FinishedAt: time.Now()}
+				if mode == "failed" {
+					invocation.Result = nil
+					invocation.LastError = "read failed"
+				}
+				if mode == "forged" {
+					fake := page
+					fake.Content += "wrong"
+					invocation.Result, _ = json.Marshal(fake)
+				}
+				if mode != "unrecorded" {
+					_, err = databases[1].RecordReadInvocation(ctx, lease, invocation)
+					if mode == "forged" {
+						if err == nil {
+							t.Fatal("forged content acknowledged")
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+				}
+				return page
+			}
+			first := read(0, 0, "unrecorded")
+			assertFenced()
+			if first.NextOffset == nil {
+				t.Fatal("fixture must span several chunks")
+			}
+			read(0, 0, "failed")
+			assertFenced()
+			read(0, 0, "forged")
+			assertFenced()
+			// Last-chunk-first, duplicate reads, and a hole in the middle must not
+			// acknowledge a record, even after every other record is delivered.
+			var length int
+			if err := pool.QueryRow(ctx, `SELECT char_length(((state->'inputs'->0)-'delivery_pending')::text) FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&length); err != nil {
+				t.Fatal(err)
+			}
+			read(0, ((length-1)/collaboration.RecordChunkRunes)*collaboration.RecordChunkRunes, "")
+			assertFenced()
+			read(0, 0, "")
+			read(0, 0, "")
+			assertFenced()
+			for index := 0; index < 2; index++ {
+				offset := 0
+				for {
+					var page collaboration.RecordPage
+					if index == 0 && offset == collaboration.RecordChunkRunes {
+						page = read(index, offset, "unrecorded")
+					} else {
+						page = read(index, offset, "")
+					}
+					if page.NextOffset == nil {
+						break
+					}
+					offset = *page.NextOffset
+				}
+			}
+			assertFenced()
+			read(0, collaboration.RecordChunkRunes, "failed")
+			assertFenced()
+			lastGap := read(0, collaboration.RecordChunkRunes, "")
+			retried := read(0, collaboration.RecordChunkRunes, "")
+			if retried.Content != lastGap.Content || retried.RecordSHA256 != lastGap.RecordSHA256 {
+				t.Fatal("delivery bookkeeping changed retry contents")
+			}
+			pending, err := database.HasPendingHumanInput(ctx, fixture.workflowID, lease.AgentParticipantID)
+			if err != nil || pending {
+				t.Fatalf("complete durable coverage did not clear fence: %t %v", pending, err)
+			}
+			tool := "request_review"
+			if role == workflow.RoleReviewer {
+				tool = "submit_review"
+			}
+			if _, err = database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: tool, OperationID: "complete", Request: json.RawMessage(`{"operation_id":"complete"}`), ExternalService: "fixture", ExternalResourceID: "resource"}); err != nil {
+				t.Fatalf("fully delivered input blocked handoff: %v", err)
+			}
+		})
+	}
+}
+
+func TestRetrievalOnlyInputAlsoFencesSettlementAndReachesRetainedSession(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, lease, proposal := prepareSettlementTurn(t, database, pool, ctx, 9932, workflow.RoleDeveloper, "")
+	var state collaboration.State
+	state.Accept("A1", collaboration.Command{Kind: "steer", Body: strings.Repeat("large direction ", 8000)}, collaboration.Admission{Active: true, Authorized: true, ParticipantID: lease.AgentParticipantID, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "input"}, At: time.Now()})
+	state.Prepare(lease.AgentParticipantID, lease.ID)
+	config, _ := json.Marshal(state.Project(lease.AgentParticipantID, lease.ID))
+	raw, _ := json.Marshal(state)
+	if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET turn_configuration=$2 WHERE id=$1`, lease.ID, config); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := database.SettleAgentTurn(ctx, lease, successfulSettlementObservation(workflow.TurnOutcomeChangeProposalReady, proposal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != workflow.StateDeveloping || settled.SuccessorJobID == "" {
+		t.Fatal("undelivered contents bypassed settlement fence", settled)
+	}
+	job := claimSettlementSuccessorJob(t, database, pool, ctx, settled.SuccessorJobID, "retry-delivery")
+	spec := preparationSpec("head", "provider/test")
+	updateStagePreparation(&spec, workflow.StageImplementation, func(p *store.ParticipantPreparation) {
+		p.Binding.RuntimeImageDigest = "sha256:test"
+		original := fixture.turnSpec()
+		p.Profile = store.AgentProfileSnapshot{CommitSHA: original.AgentProfileCommitSHA, ContentSHA256: original.AgentProfileContentSHA256, Config: original.AgentProfileConfig}
+	})
+	prepared, err := prepareWithFixtureAdmission(t, database, ctx, *job, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Participant.ID != lease.AgentParticipantID || prepared.Session.ID != lease.AgentSessionID || prepared.Turn.WorkflowAttemptID != fixture.attemptID {
+		t.Fatal("undelivered input lost Session/Attempt continuity")
+	}
+	var configObject struct {
+		Projection collaboration.Projection `json:"collaboration_projection"`
+	}
+	if err = json.Unmarshal(prepared.Turn.TurnConfiguration, &configObject); err != nil {
+		t.Fatal(err)
+	}
+	if !configObject.Projection.RetrievalRequired || configObject.Projection.Counts["human_input"] != 1 {
+		t.Fatal("unread input not carried forward", configObject)
+	}
+	if err = pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal(raw, &state)
+	if !state.Pending(lease.AgentParticipantID) || state.Inputs[0].DeliveredTo != prepared.Turn.ID {
+		t.Fatal("re-preparation dropped unread contents")
 	}
 }

@@ -1315,6 +1315,11 @@ VALUES ($1, $2, $3, $4, $5, $6, 'READ', $7, $8, $9, $10, $11, $12, NULLIF($13, '
 		if err != nil {
 			return err
 		}
+		if succeeded && invocation.ToolName == "get_collaboration_record" {
+			if err := recordCollaborationDeliveryTx(ctx, tx, turn, lease.JobLease.WorkflowID, request, result); err != nil {
+				return err
+			}
+		}
 		record = ReadInvocationRecord{
 			ID: id, AgentTurnID: lease.ID, ExecutionEpoch: lease.ExecutionEpoch,
 			InvocationNumber: number, ToolName: invocation.ToolName, Request: request,

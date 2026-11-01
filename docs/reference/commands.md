@@ -93,6 +93,10 @@ Both Developer and Reviewer can call the scoped read capability `get_collaborati
 Its `collection` is `human_input`, `human_input_history`, or `clarification_history`; `index` is zero-based and `offset` defaults to zero.
 Preparation supplies frozen collection counts in `collaboration_projection`.
 When `retrieval_required` is true, every pending `human_input` record must be retrieved before interpretation or handoff; older history is available as needed.
-Each result contains JSON-text `content`, `index`, and `total`, with `next_offset` for another chunk of the same record or `next_index` for the next record.
+Each result contains JSON-text `content`, `record_sha256`, `index`, and `total`, with `next_offset` for another chunk of the same record or `next_index` for the next record.
 Concatenate content chunks verbatim before parsing the record; offsets count Unicode characters in that encoded JSON text, not bytes in the original answer.
+Follow `next_offset` from offset zero and keep one `record_sha256` across the chunks of a record; a changed fingerprint requires restarting that record.
+For retrieval-only pending input, frozen assignment is not delivery: every canonical chunk of every batch record must be successfully recorded by the scoped read ledger before handoff is admitted.
+Failed reads, duplicate chunks, and retrieval of only the final chunk do not clear that fence.
+Unread input is carried to the retained Session's next Turn if execution ends early; successful reads do not reset budgets or interpret the contents.
 Neither retrieval nor command acceptance resolves questions or grants implementation authorization.

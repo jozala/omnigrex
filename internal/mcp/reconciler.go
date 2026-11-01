@@ -844,6 +844,9 @@ func (reconciler *ProductionReconciler) reconcileClarificationResolution(ctx con
 	for _, resolution := range request.Resolutions {
 		found := false
 		for _, actual := range round.Resolutions {
+			// Reconcile agent intent, not controller-derived delivery coverage.
+			actual.ConsideredResponseIDs = nil
+			resolution.ConsideredResponseIDs = nil
 			if reflect.DeepEqual(resolution, actual) {
 				found = true
 				break

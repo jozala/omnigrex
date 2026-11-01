@@ -81,9 +81,14 @@ For an actual `omnigrex:needs-human` condition, follow [explicit Human Handoff r
 
 An explicit amendment can correct an already-interpreted response, including an earlier round's still-relevant decision owned by the same Participant.
 The earlier answer and interpretation remain in history; the agent must explicitly record its revised interpretation against the amendment.
+Repeated amendments may target the same original response: a new correction makes the affected interpretation stale even when its evidence cited a previous correction.
+Competing corrections remain available for disambiguation rather than silently selecting the last answer.
+If current repository or Change Proposal evidence removes a question's premise, the agent may explicitly mark it obsolete with an explanation, retaining the earlier answer and interpretation without requiring a human to amend a formerly valid answer.
 Unchanged questions carried into a replacement round retain their effective accepted evidence; unanswered or amended-but-not-reinterpreted questions remain unresolved.
 Materially revised questions use new identities and need new interpretation rather than inheriting approval.
 
 Long discussions remain durable but are not copied in full into every prompt.
 The agent receives a bounded projection and frozen collection counts, with `get_collaboration_record` available for lossless, ordered retrieval in bounded chunks.
 All input pending at preparation remains available in that Turn without a batching delay; later input still belongs to the next Turn.
+When pending contents are omitted from the envelope, successful handoff remains fenced until every record and chunk has been retrieved through the scoped capability.
+Skipped, partial, or failed retrieval cannot acknowledge delivery; unread input survives an interrupted Turn and is included in the retained Session's continuation.
