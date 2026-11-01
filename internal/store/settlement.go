@@ -207,6 +207,11 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
 		return AgentTurnSettlement{}, err
 	}
+	// Preserve the original observation/hash for replay, but record the applied
+	// outcome in the settlement ledger and execution job result.
+	if compatible {
+		settlementObservation.Outcome = event.Outcome
+	}
 	decision := store.reducer.DefinitionIncompatible(snapshot)
 	if compatible {
 		decision = store.reducer.Reduce(snapshot, event)

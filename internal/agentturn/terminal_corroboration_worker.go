@@ -228,7 +228,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining, *failure)
 	}
 	switch observation.Outcome {
-	case workflow.TurnOutcomeChangeProposalReady, workflow.TurnOutcomeChangesRequested, workflow.TurnOutcomeApproved:
+	case workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeChangeProposalReady, workflow.TurnOutcomeChangesRequested, workflow.TurnOutcomeApproved:
 		if lease.Kind == store.RevalidateTerminalIntentJobKind {
 			err = worker.store.SettleTerminalRevalidation(ctx, *lease, pending.WorkflowRevision, observation)
 		} else {

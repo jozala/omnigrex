@@ -53,7 +53,7 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
-    } else if (fault === 'clarification') {
+    } else if ((fault === 'clarification' || fault === 'clarification-restart')) {
       const rounds = (envelope.clarification_history ?? []).filter(r => r.participant_id === envelope.agent_participant_id);
       const input = envelope.human_input ?? [];
       const prefix = rounds.length > 0 ? 1 : 0;

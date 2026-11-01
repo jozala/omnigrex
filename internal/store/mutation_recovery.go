@@ -269,7 +269,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
   AND (state IN ('UNKNOWN', 'RECONCILING')
        OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
-           ('publish_changes', 'open_pr', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
+           ('publish_changes', 'open_pr', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
 ORDER BY invocation_number`, job.AgentTurnID, job.ExecutionEpoch, skipSucceeded)
 	if err != nil {
 		return nil, fmt.Errorf("list Agent Turn mutations for reconciliation: %w", err)

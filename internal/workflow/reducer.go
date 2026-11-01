@@ -451,6 +451,11 @@ func (reducer Reducer) reduceTerminalIntentRevalidated(snapshot Snapshot, event 
 	if !ok || stage.Role != event.SourceTurn.Role || stage.State != snapshot.State {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
+	if event.Outcome == TurnOutcomeClarificationWait {
+		next := cloneSnapshot(snapshot)
+		next.ResumeRole = ""
+		return clarificationWaitDecision(next, event.SourceTurn, event.HumanInputPending)
+	}
 	if event.HumanInputPending {
 		next := cloneSnapshot(snapshot)
 		next.Revision++
@@ -599,17 +604,7 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 			proposal.ReadyForSHA = ""
 			next.ChangeProposal = &proposal
 		}
-		next.ClarificationWaiting = true
-		next.Revision++
-		var actions []Action
-		if event.HumanInputPending {
-			head := ""
-			if next.ChangeProposal != nil {
-				head = next.ChangeProposal.HeadSHA
-			}
-			actions = append(actions, EnqueueTurnAction{Stage: event.Turn.Stage, Role: event.Turn.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head})
-		}
-		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("clarification_wait"), Actions: actions}
+		return clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
 	case TurnOutcomeChangeProposalReady:
 		return reducer.reduceDeveloperSettled(snapshot, next, event)
 	case TurnOutcomeChangesRequested, TurnOutcomeApproved:
@@ -1070,4 +1065,18 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		clone.Closure = &closure
 	}
 	return clone
+}
+
+func clarificationWaitDecision(next Snapshot, turn TurnGuard, pending bool) Decision {
+	next.ClarificationWaiting = true
+	next.Revision++
+	var actions []Action
+	if pending {
+		head := ""
+		if next.ChangeProposal != nil {
+			head = next.ChangeProposal.HeadSHA
+		}
+		actions = append(actions, EnqueueTurnAction{Stage: turn.Stage, Role: turn.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head})
+	}
+	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("clarification_wait"), Actions: actions}
 }

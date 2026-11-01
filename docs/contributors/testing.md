@@ -145,6 +145,10 @@ The existing default Docker and Microsandbox Workflow script selectors both incl
 Run `mise run check`, `mise run test-integration`, and `mise run test-pi-workflow`, and inspect the same-head Linux/KVM CI result for `mise run test-pi-microsandbox-workflow` before claiming backend qualification.
 Never attempt nested Microsandbox qualification inside a Microsandbox Execution Environment.
 
+`TestPiFailureRecovery/clarification-restart` records a real completed Pi prompt and question publication for each Role, then restarts the controller Store/backend before settlement.
+It verifies corroboration enters clarification waiting without spending an infrastructure retry, stops the Runtime Process, and schedules retained-Session continuation only after a correlated human reply.
+The PostgreSQL clarification recovery matrix additionally covers empty-question yields, input on both sides of the corroboration boundary, unpublished-question rejection, and revalidation after explicit Human Handoff recovery.
+
 ## Manual release designation
 
 See [release publication](releases.md) for candidate evidence, finite artifact retention, manual alpha publication, and no-rebuild stable promotion.

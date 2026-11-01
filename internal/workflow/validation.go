@@ -80,6 +80,8 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 			return false
 		}
 		switch event.Outcome {
+		case TurnOutcomeClarificationWait:
+			return event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangeProposalReady:
 			return validChangeProposal(event.ChangeProposal) && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangesRequested, TurnOutcomeApproved:

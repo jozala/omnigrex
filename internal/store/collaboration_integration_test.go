@@ -198,6 +198,13 @@ func TestHumanInputAcceptedBeforeStageCommitFencesSuccessfulHandoff(t *testing.T
 	if settled.State != workflow.StateDeveloping || settled.SuccessorJobID == "" {
 		t.Fatalf("input was bypassed by handoff: %+v", settled)
 	}
+	var applied, observed, jobOutcome string
+	if err = pool.QueryRow(ctx, `SELECT workflow_outcome,observation->>'outcome',(SELECT result->>'workflow_outcome' FROM jobs WHERE id=$2) FROM agent_turn_settlements WHERE id=$1`, settled.ID, lease.JobLease.ID).Scan(&applied, &observed, &jobOutcome); err != nil {
+		t.Fatal(err)
+	}
+	if applied != "CLARIFICATION_WAIT" || jobOutcome != applied || observed != "CHANGE_PROPOSAL_READY" {
+		t.Fatalf("observation/applied provenance disagrees: %s %s %s", observed, applied, jobOutcome)
+	}
 	job := claimSettlementSuccessorJob(t, database, pool, ctx, settled.SuccessorJobID, "input-preparation")
 	spec := preparationSpec("head", "provider/test")
 	updateStagePreparation(&spec, workflow.StageImplementation, func(p *store.ParticipantPreparation) {
