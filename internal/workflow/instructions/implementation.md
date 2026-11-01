@@ -37,3 +37,5 @@ Use `report_blocked` only when failure or inability to continue safely requires 
 Explicit amendments of an original answer can invalidate interpretations based on any earlier correction of that answer.
 Preserve competing corrections and explicitly explain which evidence governs; do not silently choose the latest response.
 If current repository or Change Proposal evidence removes a question's premise, record an explained `obsolete: true` interpretation without requesting a human amendment of the formerly valid answer.
+
+If current evidence restores an obsolete question's unchanged premise, explicitly renew its interpretation using delivered, read response evidence and an explanation; no amendment of the obsolete entry is required. Keep the question identity and earlier interpretations, including when the obsolete entry was inherited into a replacement round.

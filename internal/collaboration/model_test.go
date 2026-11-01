@@ -3,6 +3,7 @@ package collaboration_test
 import (
 	"fmt"
 	"github.com/jozala/omnigrex/internal/collaboration"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -342,5 +343,136 @@ func TestPreviouslyRecordedInterpretationRetainsAllCitedEvidence(t *testing.T) {
 	s.Accept("A3", collaboration.Command{Kind: "amend", Target: "A1", Body: "Further correction"}, admission("a3"))
 	if !s.Unresolved("developer") {
 		t.Fatal("new sibling correction failed to invalidate legacy evidence")
+	}
+}
+
+// A question's identity follows its unchanged premise, not the temporary fact
+// that repository evidence once made it irrelevant.
+func TestObsoleteQuestionCanReceiveRenewedInterpretation(t *testing.T) {
+	for _, participant := range []string{"developer", "reviewer"} {
+		for _, route := range []string{"same round", "replacement round", "historical round"} {
+			for _, evidence := range []string{"amendment", "new answer", "prior answer"} {
+				t.Run(participant+"/"+route+"/"+evidence, func(t *testing.T) {
+					var s collaboration.State
+					questions := []collaboration.Question{{ID: "Q1", Body: "How long must this artifact be retained?"}}
+					a := admission("original")
+					a.ParticipantID = participant
+					if _, err := s.Request("R1", participant, "T1", "head1", questions); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub1"}); err != nil {
+						t.Fatal(err)
+					}
+					if receipt := s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Seven days"}, a); receipt.ResponseID != "A1" {
+						t.Fatal(receipt)
+					}
+					s.Prepare(participant, "T2")
+					original := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "The maintainer requires seven days"}
+					obsolete := collaboration.Resolution{QuestionID: "Q1", Obsolete: true, Explanation: "Current repository evidence removes the artifact entirely"}
+					for _, resolution := range []collaboration.Resolution{original, obsolete} {
+						if err := s.Resolve("R1", "T2", []collaboration.Resolution{resolution}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					originalInput := s.Inputs[0]
+					target, current := "R1", "R1"
+					if route != "same round" {
+						if _, err := s.Request("R2", participant, "T2", "restored-premise-head", questions); err != nil {
+							t.Fatal(err)
+						}
+						if err := s.Publish("R2", collaboration.Source{Channel: "fixture", ID: "pub2"}); err != nil {
+							t.Fatal(err)
+						}
+						current = "R2"
+						if route == "replacement round" {
+							target = "R2"
+						}
+					}
+					response := "A1"
+					if evidence != "prior answer" {
+						response = "A2"
+						command := collaboration.Command{Kind: "amend", Target: "A1", Body: "The restored artifact must be retained fourteen days"}
+						if evidence == "new answer" {
+							command.Kind = "answer"
+							command.Target = current
+						}
+						a.Source.ID = "renewed"
+						if receipt := s.Accept(response, command, a); receipt.ResponseID != response {
+							t.Fatal(receipt)
+						}
+					}
+					// The renewed interpretation needs evidence and an explanation even though
+					// there is no governing human evidence in the obsolete entry to amend.
+					before := len(s.Rounds[0].Resolutions)
+					if err := s.Resolve(target, "T2", []collaboration.Resolution{{QuestionID: "Q1", Explanation: "The artifact is restored"}}); err == nil {
+						t.Fatal("renewal without supporting evidence was accepted")
+					}
+					renewal := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{response}, Explanation: "The current Change Proposal restores this unchanged artifact; this delivered answer governs retention"}
+					if evidence != "prior answer" {
+						if err := s.Resolve(target, "T2", []collaboration.Resolution{renewal}); err == nil {
+							t.Fatal("undelivered evidence was accepted")
+						}
+					}
+					if len(s.Rounds[0].Resolutions) != before {
+						t.Fatal("rejected renewal changed history")
+					}
+					s.Prepare(participant, "T3")
+					if err := s.Resolve(target, "T3", []collaboration.Resolution{renewal}); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(s.Rounds[0].Resolutions[:2], []collaboration.Resolution{original, obsolete}) || !reflect.DeepEqual(s.Inputs[0], originalInput) {
+						t.Fatal("renewal rewrote original answer or interpretations")
+					}
+					for _, round := range s.Rounds {
+						if round.ID == current {
+							last := round.Resolutions[len(round.Resolutions)-1]
+							if last.Obsolete || !reflect.DeepEqual(last.ResponseIDs, []string{response}) || last.Explanation != renewal.Explanation {
+								t.Fatal("obsolete entry still governs current round", round)
+							}
+						}
+					}
+					// A later replacement must inherit the renewed decision, not the obsolete
+					// one, and an unsupported ordinary answer must not replace live evidence.
+					if _, err := s.Request("R3", participant, "T3", "head3", questions); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.Publish("R3", collaboration.Source{Channel: "fixture", ID: "pub3"}); err != nil {
+						t.Fatal(err)
+					}
+					last := s.Rounds[len(s.Rounds)-1].Resolutions[0]
+					if last.Obsolete || last.ResponseIDs[0] != response || s.Unresolved(participant) {
+						t.Fatal("replacement inherited stale obsolescence")
+					}
+					a.Source.ID = "unrelated"
+					s.Accept("A3", collaboration.Command{Kind: "answer", Target: "R3", Body: "An unrelated new answer"}, a)
+					s.Prepare(participant, "T4")
+					if err := s.Resolve("R3", "T4", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A3"}, Explanation: "Do not silently replace a live decision"}}); err == nil {
+						t.Fatal("renewal relaxed amendment requirements for live decisions")
+					}
+					// An archived obsolete entry must not become a bypass around the
+					// current round's renewed governing evidence through propagation.
+					originalCount, currentCount := len(s.Rounds[0].Resolutions), len(s.Rounds[len(s.Rounds)-1].Resolutions)
+					if err := s.Resolve("R1", "T4", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A3"}, Explanation: "Do not bypass the current live decision through history"}}); err == nil {
+						t.Fatal("archived obsolescence bypassed the current live decision")
+					}
+					if len(s.Rounds[0].Resolutions) != originalCount || len(s.Rounds[len(s.Rounds)-1].Resolutions) != currentCount {
+						t.Fatal("rejected historical interpretation changed history")
+					}
+					a.Source.ID = "supported-correction"
+					if receipt := s.Accept("A4", collaboration.Command{Kind: "amend", Target: response, Body: "An explicit correction to the renewed decision"}, a); receipt.ResponseID != "A4" {
+						t.Fatal(receipt)
+					}
+					s.Prepare(participant, "T5")
+					if err := s.Resolve("R1", "T5", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A4"}, Explanation: "The explicit correction governs both the historical and current unchanged question"}}); err != nil {
+						t.Fatal(err)
+					}
+					latest := s.Rounds[len(s.Rounds)-1].Resolutions[len(s.Rounds[len(s.Rounds)-1].Resolutions)-1]
+					if latest.Obsolete || latest.ResponseIDs[0] != "A4" || s.Unresolved(participant) {
+						t.Fatal("supported historical correction failed to propagate")
+					}
+
+				})
+			}
+		}
 	}
 }

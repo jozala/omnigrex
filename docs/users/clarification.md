@@ -84,6 +84,8 @@ The earlier answer and interpretation remain in history; the agent must explicit
 Repeated amendments may target the same original response: a new correction makes the affected interpretation stale even when its evidence cited a previous correction.
 Competing corrections remain available for disambiguation rather than silently selecting the last answer.
 If current repository or Change Proposal evidence removes a question's premise, the agent may explicitly mark it obsolete with an explanation, retaining the earlier answer and interpretation without requiring a human to amend a formerly valid answer.
+Obsolescence is not permanent: if current evidence restores the unchanged premise, the agent may explicitly renew the interpretation using delivered, read evidence and an explanation.
+The obsolete entry has no governing human decision to amend; the renewed decision becomes effective on the same question identity, including in replacement rounds, while all earlier interpretations remain history.
 Unchanged questions carried into a replacement round retain their effective accepted evidence; unanswered or amended-but-not-reinterpreted questions remain unresolved.
 Materially revised questions use new identities and need new interpretation rather than inheriting approval.
 

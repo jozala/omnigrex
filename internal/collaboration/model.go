@@ -344,13 +344,17 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			if r.SupersededBy != "" && latestResolution(*r, resolution.QuestionID) == nil {
 				return ErrInvalid
 			}
-			if old := latestResolution(*r, resolution.QuestionID); old != nil && !resolution.Obsolete {
-				// A revised interpretation must explicitly cite an amendment of
-				// its earlier evidence, not silently apply last-answer-wins.
-				if !slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool {
-					return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.isAmendmentOfEvidence(id, prior) })
-				}) {
-					return ErrInvalid
+			if !s.canRevise(latestResolution(*r, resolution.QuestionID), resolution) {
+				return ErrInvalid
+			}
+			// A historical interpretation may propagate to the current unchanged
+			// question. Validate its governing decision too, so archived obsolescence
+			// cannot bypass a renewed current decision's amendment requirement.
+			if r.SupersededBy != "" {
+				for _, current := range s.Rounds {
+					if current.ID == s.CurrentRound && current.ParticipantID == r.ParticipantID && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) && !s.canRevise(latestResolution(current, resolution.QuestionID), resolution) {
+						return ErrInvalid
+					}
 				}
 			}
 			for _, id := range resolution.ResponseIDs {
@@ -393,6 +397,18 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 		return nil
 	}
 	return ErrInvalid
+}
+
+// A live decision requires an explicit amendment, not silent last-answer-wins.
+// Obsolescence has no governing human evidence to amend; renewal still requires
+// delivered, scoped evidence and an explicit explanation in Resolve.
+func (s *State) canRevise(old *Resolution, next Resolution) bool {
+	if old == nil || old.Obsolete || next.Obsolete {
+		return true
+	}
+	return slices.ContainsFunc(next.ResponseIDs, func(id string) bool {
+		return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.isAmendmentOfEvidence(id, prior) })
+	})
 }
 
 // Unresolved fences completion without interpreting natural-language answers.

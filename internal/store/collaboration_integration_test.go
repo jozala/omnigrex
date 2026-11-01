@@ -494,3 +494,92 @@ func TestRetrievalOnlyInputAlsoFencesSettlementAndReachesRetainedSession(t *test
 		t.Fatal("re-preparation dropped unread contents")
 	}
 }
+
+func TestObsoleteQuestionRenewalPersistsAfterRequiredEvidenceDelivery(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for n, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
+		t.Run(string(role), func(t *testing.T) {
+			fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 9934+n, role, "restored-premise-head")
+			var state collaboration.State
+			questions := []collaboration.Question{{ID: "Q1", Body: "Artifact retention?"}}
+			if _, err := state.Request("R1", lease.AgentParticipantID, "previous-turn", "old-head", questions); err != nil {
+				t.Fatal(err)
+			}
+			if err := state.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub1"}); err != nil {
+				t.Fatal(err)
+			}
+			admission := collaboration.Admission{Active: true, Authorized: true, ParticipantID: lease.AgentParticipantID, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "answer"}, At: time.Now()}
+			if receipt := state.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Seven days"}, admission); receipt.ResponseID != "A1" {
+				t.Fatal(receipt)
+			}
+			state.Prepare(lease.AgentParticipantID, "previous-interpretation")
+			for _, resolution := range []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Seven days"}, {QuestionID: "Q1", Obsolete: true, Explanation: "Repository removed the artifact"}} {
+				if err := state.Resolve("R1", "previous-interpretation", []collaboration.Resolution{resolution}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := state.Request("R2", lease.AgentParticipantID, "replacement-turn", "restored-premise-head", questions); err != nil {
+				t.Fatal(err)
+			}
+			if err := state.Publish("R2", collaboration.Source{Channel: "fixture", ID: "pub2"}); err != nil {
+				t.Fatal(err)
+			}
+			admission.Source.ID = "amendment"
+			if receipt := state.Accept("A2", collaboration.Command{Kind: "amend", Target: "A1", Body: strings.Repeat("Restored artifact: fourteen days. ", 4000)}, admission); receipt.ResponseID != "A2" {
+				t.Fatal(receipt)
+			}
+			state.Prepare(lease.AgentParticipantID, lease.ID)
+			config, _ := json.Marshal(state.Project(lease.AgentParticipantID, lease.ID))
+			raw, _ := json.Marshal(state)
+			if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE agent_turns SET turn_configuration=$2 WHERE id=$1`, lease.ID, config); err != nil {
+				t.Fatal(err)
+			}
+			resolution := []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A2"}, Explanation: "Current Change Proposal restores the unchanged artifact; the delivered amendment now governs retention"}}
+			if err := database.ResolveClarification(ctx, lease, "R2", resolution); !errors.Is(err, collaboration.ErrInvalid) {
+				t.Fatalf("unread response supported renewal: %v", err)
+			}
+			for offset := 0; ; {
+				page, err := database.GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "human_input", 0, offset)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request, _ := json.Marshal(map[string]any{"collection": "human_input", "index": 0, "offset": offset})
+				result, _ := json.Marshal(page)
+				if _, err = database.RecordReadInvocation(ctx, lease, store.ReadInvocation{ToolName: "get_collaboration_record", Request: request, Result: result, StartedAt: time.Now(), FinishedAt: time.Now()}); err != nil {
+					t.Fatal(err)
+				}
+				if page.NextOffset == nil {
+					break
+				}
+				offset = *page.NextOffset
+			}
+			if err := database.ResolveClarification(ctx, lease, "R2", resolution); err != nil {
+				t.Fatal(err)
+			}
+			first, err := database.GetClarificationRound(ctx, fixture.workflowID, "R1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			renewed, err := database.GetClarificationRound(ctx, fixture.workflowID, "R2")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(first.Resolutions) != 2 || first.Resolutions[0].ResponseIDs[0] != "A1" || !first.Resolutions[1].Obsolete || len(renewed.Resolutions) != 2 || !renewed.Resolutions[0].Obsolete || renewed.Resolutions[1].Obsolete || renewed.Resolutions[1].ResponseIDs[0] != "A2" {
+				t.Fatal("renewal lost append-only history", first, renewed)
+			}
+			tool := "request_review"
+			if role == workflow.RoleReviewer {
+				tool = "submit_review"
+			}
+			if _, err = database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: tool, OperationID: "renewed-handoff", Request: json.RawMessage(`{"operation_id":"renewed-handoff"}`), ExternalService: "fixture", ExternalResourceID: "resource"}); err != nil {
+				t.Fatalf("delivered renewed interpretation failed handoff: %v", err)
+			}
+		})
+	}
+}
