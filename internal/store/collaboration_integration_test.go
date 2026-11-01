@@ -219,3 +219,37 @@ func TestHumanInputAcceptedBeforeStageCommitFencesSuccessfulHandoff(t *testing.T
 		t.Fatalf("continuation did not deliver to retained agent: %+v %+v", prepared, configuration)
 	}
 }
+
+func TestKnownFailedQuestionPublicationDoesNotStrandClarificationRecovery(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 967, workflow.RoleDeveloper, "")
+	request := func(operation string) collaboration.Round {
+		mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: operation, ToolName: "request_clarification", Request: json.RawMessage(`{"questions":[{"id":"Q1","body":"Compatibility policy?"}]}`), ExternalService: "github", ExternalResourceID: "fixture-issue"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
+			t.Fatal(err)
+		}
+		round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility policy?"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = database.FailMutation(ctx, lease, mutation.ID, errors.New("publication definitively rejected")); err != nil {
+			t.Fatal(err)
+		}
+		return round
+	}
+	first := request("failed-publication")
+	second := request("retry-after-proven-failure")
+	restored, err := database.GetClarificationRound(ctx, fixture.workflowID, first.ID)
+	if err != nil || !restored.PublicationFailed || restored.Published || second.ID == first.ID {
+		t.Fatalf("failed publication recovery: %+v %+v %v", restored, second, err)
+	}
+	if err = database.ConfirmClarificationPublication(ctx, fixture.workflowID, first.ID, collaboration.Source{Channel: "fixture", ID: "unexpected"}); err == nil {
+		t.Fatal("failed publication later became current")
+	}
+}

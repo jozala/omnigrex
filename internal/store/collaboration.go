@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,22 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 			if r.ID == id {
 				round = r
 				return nil
+			}
+		}
+		// A proven failed POST must not strand later clarification after explicit
+		// recovery. Unknown effects remain fenced until artifact reconciliation.
+		for _, prior := range state.Rounds {
+			if prior.Published || prior.PublicationFailed {
+				continue
+			}
+			var failed bool
+			if err = tx.QueryRow(ctx, `SELECT state='FAILED' FROM tool_invocations WHERE id=$1`, strings.TrimPrefix(prior.ID, "R")).Scan(&failed); err != nil {
+				return err
+			}
+			if failed {
+				if err = state.FailPublication(prior.ID); err != nil {
+					return err
+				}
 			}
 		}
 		round, err = state.Request(id, turn.AgentParticipantID, turn.ID, head, questions)

@@ -35,17 +35,18 @@ type Resolution struct {
 	Explanation string   `json:"explanation"`
 }
 type Round struct {
-	Supersedes    string       `json:"supersedes,omitempty"`
-	ID            string       `json:"id"`
-	Purpose       Purpose      `json:"purpose"`
-	ParticipantID string       `json:"participant_id"`
-	TurnID        string       `json:"turn_id"`
-	HeadSHA       string       `json:"head_sha"`
-	Questions     []Question   `json:"questions"`
-	Resolutions   []Resolution `json:"resolutions,omitempty"`
-	SupersededBy  string       `json:"superseded_by,omitempty"`
-	Published     bool         `json:"published"`
-	Source        *Source      `json:"source,omitempty"`
+	PublicationFailed bool         `json:"publication_failed,omitempty"`
+	Supersedes        string       `json:"supersedes,omitempty"`
+	ID                string       `json:"id"`
+	Purpose           Purpose      `json:"purpose"`
+	ParticipantID     string       `json:"participant_id"`
+	TurnID            string       `json:"turn_id"`
+	HeadSHA           string       `json:"head_sha"`
+	Questions         []Question   `json:"questions"`
+	Resolutions       []Resolution `json:"resolutions,omitempty"`
+	SupersededBy      string       `json:"superseded_by,omitempty"`
+	Published         bool         `json:"published"`
+	Source            *Source      `json:"source,omitempty"`
 }
 type Input struct {
 	Route         string    `json:"route,omitempty"`
@@ -103,7 +104,7 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 		return Round{}, ErrInvalid
 	}
 	for _, r := range s.Rounds {
-		if !r.Published {
+		if !r.Published && !r.PublicationFailed {
 			return Round{}, ErrInvalid
 		}
 		if r.ID == id {
@@ -148,6 +149,9 @@ func (s *State) Publish(id string, source Source) error {
 		r := &s.Rounds[i]
 		if r.ID != id {
 			continue
+		}
+		if r.PublicationFailed {
+			return ErrInvalid
 		}
 		if r.Published {
 			if r.Source != nil && *r.Source == source {
@@ -210,6 +214,9 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		}
 		if found == nil {
 			return reject("Rejected: unknown round in this Work Item; use the round ID from the current question comment.")
+		}
+		if found.PublicationFailed {
+			return reject("Rejected: this question publication failed; use the current published round after the agent retries.")
 		}
 		if found.SupersededBy != "" || found.Published && s.CurrentRound != found.ID {
 			return reject(fmt.Sprintf("Rejected: round is superseded; answer current round %s.", s.CurrentRound))
@@ -348,4 +355,18 @@ func (s *State) Unresolved(participant string) bool {
 		}
 	}
 	return false
+}
+
+// FailPublication records a proven absent effect, never an uncertain delivery.
+func (s *State) FailPublication(id string) error {
+	for i := range s.Rounds {
+		if s.Rounds[i].ID == id {
+			if s.Rounds[i].Published {
+				return ErrInvalid
+			}
+			s.Rounds[i].PublicationFailed = true
+			return nil
+		}
+	}
+	return ErrInvalid
 }
