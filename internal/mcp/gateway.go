@@ -1307,19 +1307,19 @@ func mutationMetadata(tool string, scope TokenScope) MutationMetadata {
 	case ToolRequestReview:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolResolveClarification, ToolReportBlocked:
+	case ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
+		if tool == ToolRequestClarification {
+			metadata.ExpectedSHA = scope.HeadSHA
+		}
 	case ToolSubmitReview, ToolCommentOnPullRequest:
 		if scope.PullRequest != nil {
 			metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.PullRequest.ID)
 		}
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolRequestClarification, ToolCommentOnIssue:
+	case ToolCommentOnIssue:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.Issue.ID)
-		if tool == ToolRequestClarification {
-			metadata.ExpectedSHA = scope.HeadSHA
-		}
 	}
 	return metadata
 }

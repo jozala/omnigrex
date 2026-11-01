@@ -42,6 +42,7 @@ type priorUnconfirmableReviewEvent struct {
 }
 
 type eventEnvelope struct {
+	CollaborationProjection  json.RawMessage                `json:"collaboration_projection,omitempty"`
 	HumanInputHistory        json.RawMessage                `json:"human_input_history,omitempty"`
 	HumanInput               json.RawMessage                `json:"human_input,omitempty"`
 	ClarificationHistory     json.RawMessage                `json:"clarification_history,omitempty"`
@@ -90,6 +91,7 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	}
 	if len(execution.Turn.TurnConfiguration) > 0 {
 		var configuration struct {
+			Projection        json.RawMessage `json:"collaboration_projection"`
 			HumanInput        json.RawMessage `json:"human_input"`
 			HumanInputHistory json.RawMessage `json:"human_input_history"`
 			History           json.RawMessage `json:"clarification_history"`
@@ -97,6 +99,7 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		if json.Unmarshal(execution.Turn.TurnConfiguration, &configuration) != nil {
 			return "", ErrInvalidEventEnvelope
 		}
+		envelope.CollaborationProjection = configuration.Projection
 		envelope.HumanInput = configuration.HumanInput
 		envelope.HumanInputHistory = configuration.HumanInputHistory
 		envelope.ClarificationHistory = configuration.History

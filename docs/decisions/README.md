@@ -62,6 +62,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0053: Export live budget observations in the controller](0053-export-live-budget-observations-in-the-controller.md) | Accepted | 2026-10-27 |
 | [0054: Designate manual pre-1.0 product releases](0054-manual-product-releases.md) | Accepted | 2026-10-30 |
 | [0055: Serialize Work Item clarification at Turn boundaries](0055-serialize-work-item-clarification-at-turn-boundaries.md) | Accepted | 2026-11-01 |
+| [0056: Bound collaboration prompt projections without truncating history](0056-bound-collaboration-prompt-projections.md) | Accepted | 2026-11-01 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

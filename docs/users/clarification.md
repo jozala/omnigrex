@@ -76,3 +76,14 @@ An earlier answer is not approval of code that was never reviewed.
 Closing/cancelling a Work Item fences continuation.
 Answers, amendments, and steering cannot reactivate completed work, authorize implementation, or recover a Human Handoff.
 For an actual `omnigrex:needs-human` condition, follow [explicit Human Handoff recovery](human-handoffs.md#reactivate-after-resolving-the-cause), which creates a fresh Workflow Attempt and resets its budgets.
+
+### Long discussions and corrected decisions
+
+An explicit amendment can correct an already-interpreted response, including an earlier round's still-relevant decision owned by the same Participant.
+The earlier answer and interpretation remain in history; the agent must explicitly record its revised interpretation against the amendment.
+Unchanged questions carried into a replacement round retain their effective accepted evidence; unanswered or amended-but-not-reinterpreted questions remain unresolved.
+Materially revised questions use new identities and need new interpretation rather than inheriting approval.
+
+Long discussions remain durable but are not copied in full into every prompt.
+The agent receives a bounded projection and frozen collection counts, with `get_collaboration_record` available for lossless, ordered retrieval in bounded chunks.
+All input pending at preparation remains available in that Turn without a batching delay; later input still belongs to the next Turn.

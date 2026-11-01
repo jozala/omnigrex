@@ -129,7 +129,8 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 	for _, previous := range s.Rounds {
 		if previous.ID == s.CurrentRound && previous.ParticipantID == participant {
 			for _, old := range previous.Questions {
-				resolved := slices.ContainsFunc(previous.Resolutions, func(r Resolution) bool { return r.QuestionID == old.ID })
+				resolution := latestResolution(previous, old.ID)
+				resolved := resolution != nil && s.resolutionCurrent(*resolution)
 				carried := slices.ContainsFunc(questions, func(q Question) bool { return q.ID == old.ID || q.Replaces == old.ID })
 				if !resolved && !carried {
 					return Round{}, ErrInvalid
@@ -138,6 +139,20 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 		}
 	}
 	r := Round{ID: id, Supersedes: s.CurrentRound, Purpose: Clarification, ParticipantID: participant, TurnID: turn, HeadSHA: head, Questions: slices.Clone(questions)}
+	// Carry only unchanged decisions owned by this Participant; changed question
+	// identities require new evidence. The source round retains its full history.
+	for _, previous := range s.Rounds {
+		if previous.ID != s.CurrentRound || previous.ParticipantID != participant {
+			continue
+		}
+		for _, q := range questions {
+			if old := latestResolution(previous, q.ID); old != nil && s.resolutionCurrent(*old) {
+				inherited := *old
+				inherited.ResponseIDs = slices.Clone(old.ResponseIDs)
+				r.Resolutions = append(r.Resolutions, inherited)
+			}
+		}
+	}
 	s.Rounds = append(s.Rounds, r)
 	return r, nil
 }
@@ -240,11 +255,6 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 			return reject("Rejected: response belongs to an obsolete Stage; use /omnigrex steer for current work.")
 		}
 		roundID = found.RoundID
-		for _, r := range s.Rounds {
-			if r.ID == roundID && r.SupersededBy != "" {
-				return reject(fmt.Sprintf("Rejected: round is superseded; answer current round %s.", s.CurrentRound))
-			}
-		}
 	case "steer":
 		if c.Target != "" {
 			return reject("Rejected: /omnigrex steer does not take a target.")
@@ -305,7 +315,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 		if r.ID != roundID {
 			continue
 		}
-		if !r.Published || r.SupersededBy != "" {
+		if !r.Published {
 			return ErrInvalid
 		}
 		if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.TurnID == turn && p.ParticipantID == r.ParticipantID }) {
@@ -323,20 +333,44 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			if !slices.ContainsFunc(r.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) {
 				return ErrInvalid
 			}
-			if slices.ContainsFunc(r.Resolutions, func(old Resolution) bool { return old.QuestionID == resolution.QuestionID }) {
+			if r.SupersededBy != "" && latestResolution(*r, resolution.QuestionID) == nil {
 				return ErrInvalid
+			}
+			if old := latestResolution(*r, resolution.QuestionID); old != nil {
+				// A revised interpretation must explicitly cite an amendment of
+				// its earlier evidence, not silently apply last-answer-wins.
+				if !slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool {
+					return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.amends(id, prior) })
+				}) {
+					return ErrInvalid
+				}
 			}
 			for _, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
-					return in.ID == id && in.DeliveredTo != "" && in.ParticipantID == r.ParticipantID && (in.RoundID == roundID || in.RoundID == "")
+					return in.ID == id && in.DeliveredTo != "" && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID))
 				}) {
 					return ErrInvalid
 				}
 			}
 		}
 		for _, resolution := range resolutions {
+			if !s.resolutionCurrent(resolution) {
+				return ErrInvalid
+			}
+		}
+		for _, resolution := range resolutions {
 			resolution.ResponseIDs = slices.Clone(resolution.ResponseIDs)
 			r.Resolutions = append(r.Resolutions, resolution)
+			// A correction to historical evidence also updates the current
+			// unchanged question, if it is still carried by the same owner.
+			if r.SupersededBy != "" {
+				for j := range s.Rounds {
+					current := &s.Rounds[j]
+					if current.ID == s.CurrentRound && current.ParticipantID == r.ParticipantID && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) {
+						current.Resolutions = append(current.Resolutions, resolution)
+					}
+				}
+			}
 		}
 		return nil
 	}
@@ -348,7 +382,7 @@ func (s *State) Unresolved(participant string) bool {
 	for _, round := range s.Rounds {
 		if round.ID == s.CurrentRound && round.ParticipantID == participant {
 			for _, question := range round.Questions {
-				if !slices.ContainsFunc(round.Resolutions, func(r Resolution) bool { return r.QuestionID == question.ID }) {
+				if resolution := latestResolution(round, question.ID); resolution == nil || !s.resolutionCurrent(*resolution) {
 					return true
 				}
 			}
@@ -369,4 +403,50 @@ func (s *State) FailPublication(id string) error {
 		}
 	}
 	return ErrInvalid
+}
+
+// Resolutions are append-only interpretations; the last entry for a question is
+// effective unless a subsequently accepted explicit amendment awaits interpretation.
+func latestResolution(round Round, question string) *Resolution {
+	for i := len(round.Resolutions) - 1; i >= 0; i-- {
+		if round.Resolutions[i].QuestionID == question {
+			return &round.Resolutions[i]
+		}
+	}
+	return nil
+}
+func (s *State) questionInRound(round, question, participant string) bool {
+	return slices.ContainsFunc(s.Rounds, func(r Round) bool {
+		return r.ID == round && r.ParticipantID == participant && slices.ContainsFunc(r.Questions, func(q Question) bool { return q.ID == question })
+	})
+}
+func (s *State) amends(id, prior string) bool {
+	// Accepted amendments refer only to existing records, hence this chain is acyclic.
+	for id != "" {
+		var parent string
+		for _, in := range s.Inputs {
+			if in.ID == id {
+				parent = in.Amends
+				break
+			}
+		}
+		if parent == "" {
+			return false
+		}
+		if parent == prior {
+			return true
+		}
+		id = parent
+	}
+	return false
+}
+func (s *State) resolutionCurrent(r Resolution) bool {
+	for _, in := range s.Inputs {
+		for _, id := range r.ResponseIDs {
+			if s.amends(in.ID, id) && !slices.Contains(r.ResponseIDs, in.ID) && !slices.ContainsFunc(r.ResponseIDs, func(cited string) bool { return s.amends(cited, in.ID) }) {
+				return false
+			}
+		}
+	}
+	return true
 }

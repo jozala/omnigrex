@@ -54,17 +54,44 @@ try {
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
     } else if ((fault === 'clarification' || fault === 'clarification-restart')) {
-      const rounds = (envelope.clarification_history ?? []).filter(r => r.participant_id === envelope.agent_participant_id);
-      const input = envelope.human_input ?? [];
+      // Fetch bounded projected records through the real production MCP bridge.
+      // Historical fixture bodies need not be re-read to interpret this new answer.
+      const projected = envelope.collaboration_projection;
+      let fetchRequest;
+      let fetched = 0;
+      const collections = {};
+      if (projected?.retrieval_required) {
+        for (const collection of ['human_input', 'clarification_history']) {
+          collections[collection] = [];
+          for (let index = 0; index < projected.counts[collection]; index++) {
+            let content = '', offset = 0;
+            while (true) {
+              if (fetched >= results.length) { fetchRequest = { collection, index, offset }; break; }
+              const page = result(fetched++);
+              if (page.index !== index || typeof page.content !== 'string') throw new Error('invalid collaboration retrieval');
+              content += page.content;
+              if (page.next_offset === undefined) break;
+              offset = page.next_offset;
+            }
+            if (fetchRequest) break;
+            collections[collection].push(JSON.parse(content));
+          }
+          if (fetchRequest) break;
+        }
+      }
+      const rounds = (collections.clarification_history ?? envelope.clarification_history ?? []).filter(r => r.participant_id === envelope.agent_participant_id);
+      const input = collections.human_input ?? envelope.human_input ?? [];
+      const actionStep = step - fetched;
       const prefix = rounds.length > 0 ? 1 : 0;
-      if (step === 0 && prefix) {
+      if (fetchRequest) { name = 'omnigrex_get_collaboration_record'; args = fetchRequest; }
+      else if (actionStep === 0 && prefix) {
         if (!input.length || input.some(i => !i.id || !i.actor?.id || !i.source?.id)) throw new Error('missing correlated human input');
         const round = rounds.at(-1);
         name = 'omnigrex_resolve_clarification'; args = { operation_id: `resolve-${round.id}`, round_id: round.id, resolutions: [{question_id: round.questions[0].id, response_ids: input.map(i=>i.id), explanation: 'The explicit fixture answer resolves this question.'}] };
-      } else if (rounds.length < 2 && step === prefix) {
+      } else if (rounds.length < 2 && actionStep === prefix) {
         name = 'omnigrex_request_clarification'; args = { operation_id: `ask-${rounds.length+1}`, questions: [{id:`${role}-Q${rounds.length+1}`,body:'Which fixture option should govern?'}] };
       } else if (rounds.length >= 2) {
-        const normal = step-prefix;
+        const normal = actionStep-prefix;
         if (role === 'DEVELOPER') {
           if (normal === 0) { name='bash'; args={command: "printf 'clarified\\n' > feature.txt; git add feature.txt; git commit -m 'Implement clarified choice'"}; }
           if (normal === 1) { name='omnigrex_publish_changes'; args={operation_id:'controlled-publish'}; }

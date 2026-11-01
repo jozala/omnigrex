@@ -86,3 +86,13 @@ On the first nonblank line of a new Work Item Issue comment, use `/omnigrex answ
 Repository write-or-higher permission and an active Workflow or normal clarification wait are required.
 These commands do not authorize implementation or recover Human Handoff.
 See [clarification and steering](../users/clarification.md) for partial answers, immutable history, acknowledgment identifiers, rejections, and waiting behavior.
+
+## Agent collaboration history
+
+Both Developer and Reviewer can call the scoped read capability `get_collaboration_record`.
+Its `collection` is `human_input`, `human_input_history`, or `clarification_history`; `index` is zero-based and `offset` defaults to zero.
+Preparation supplies frozen collection counts in `collaboration_projection`.
+When `retrieval_required` is true, every pending `human_input` record must be retrieved before interpretation or handoff; older history is available as needed.
+Each result contains JSON-text `content`, `index`, and `total`, with `next_offset` for another chunk of the same record or `next_index` for the next record.
+Concatenate content chunks verbatim before parsing the record; offsets count Unicode characters in that encoded JSON text, not bytes in the original answer.
+Neither retrieval nor command acceptance resolves questions or grants implementation authorization.

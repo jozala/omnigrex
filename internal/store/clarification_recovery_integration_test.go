@@ -45,7 +45,7 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 						admit()
 					}
 					request, _ := json.Marshal(map[string]any{"operation_id": "question", "questions": questions})
-					mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: "question", ToolName: "request_clarification", Request: request, ExternalService: "github", ExternalResourceID: fmt.Sprintf("%d:%d", number, number), ExpectedSHA: "review-head"})
+					mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: "question", ToolName: "request_clarification", Request: request, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID, ExpectedSHA: "review-head"})
 					if err != nil {
 						t.Fatal(err)
 					}

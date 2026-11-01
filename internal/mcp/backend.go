@@ -15,6 +15,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/publication"
@@ -126,33 +127,35 @@ func (LedgerWorkflowMutations) ReportBlocked(_ context.Context, request ReportBl
 var _ WorkflowMutations = LedgerWorkflowMutations{}
 
 type ProductionBackendConfig struct {
-	Clarifications   ClarificationStore
-	Snapshots        SnapshotAcquirer
-	Installer        execution.SnapshotInstaller
-	GitHub           GitHubAPI
-	Credentials      RepositoryCredentials
-	Publisher        WorkspacePublisher
-	Workflow         WorkflowMutations
-	PriorIntents     PriorTerminalIntentReader
-	Handoffs         HandoffReader
-	GitRemoteBaseURL string
-	Policies         role.PolicyCatalog
-	RoleCatalog      role.Catalog
+	ClarificationPublisher collaboration.Publisher
+	Clarifications         ClarificationStore
+	Snapshots              SnapshotAcquirer
+	Installer              execution.SnapshotInstaller
+	GitHub                 GitHubAPI
+	Credentials            RepositoryCredentials
+	Publisher              WorkspacePublisher
+	Workflow               WorkflowMutations
+	PriorIntents           PriorTerminalIntentReader
+	Handoffs               HandoffReader
+	GitRemoteBaseURL       string
+	Policies               role.PolicyCatalog
+	RoleCatalog            role.Catalog
 }
 
 type ProductionBackend struct {
-	clarifications ClarificationStore
-	snapshots      SnapshotAcquirer
-	installer      execution.SnapshotInstaller
-	github         GitHubAPI
-	credentials    RepositoryCredentials
-	publisher      WorkspacePublisher
-	workflow       WorkflowMutations
-	priorIntents   PriorTerminalIntentReader
-	handoffs       HandoffReader
-	remoteBase     gitremote.BaseURL
-	policies       role.PolicyCatalog
-	roleCatalog    role.Catalog
+	clarificationPublisher collaboration.Publisher
+	clarifications         ClarificationStore
+	snapshots              SnapshotAcquirer
+	installer              execution.SnapshotInstaller
+	github                 GitHubAPI
+	credentials            RepositoryCredentials
+	publisher              WorkspacePublisher
+	workflow               WorkflowMutations
+	priorIntents           PriorTerminalIntentReader
+	handoffs               HandoffReader
+	remoteBase             gitremote.BaseURL
+	policies               role.PolicyCatalog
+	roleCatalog            role.Catalog
 
 	publicationMutex  sync.Mutex
 	publicationLocks  map[publicationTurn]*sync.Mutex
@@ -208,7 +211,7 @@ func NewProductionBackend(config ProductionBackendConfig) (*ProductionBackend, e
 	return &ProductionBackend{
 		snapshots: config.Snapshots, installer: config.Installer, github: config.GitHub, credentials: config.Credentials, publisher: config.Publisher,
 		workflow: config.Workflow, priorIntents: config.PriorIntents, remoteBase: remoteBase, policies: config.Policies, roleCatalog: config.RoleCatalog,
-		handoffs: config.Handoffs, clarifications: config.Clarifications,
+		handoffs: config.Handoffs, clarificationPublisher: config.ClarificationPublisher, clarifications: config.Clarifications,
 		publicationLocks: make(map[publicationTurn]*sync.Mutex), publishedHeads: make(map[publicationTurn]publicationHead),
 		plannedHeads:      make(map[publicationPlan]string),
 		restoredMutations: make(map[publicationTurn]map[string][sha256.Size]byte),
@@ -233,6 +236,29 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	switch tool.Name {
 	case ToolRefreshDefaultBranch:
 		return backend.refreshDefaultBranch(ctx, invocation)
+	case ToolGetCollaborationRecord:
+		reader, ok := backend.clarifications.(interface {
+			GetCollaborationRecord(context.Context, string, string, string, string, int, int) (collaboration.RecordPage, error)
+		})
+		if !ok {
+			return nil, ErrToolDependency
+		}
+		var args struct {
+			Collection string `json:"collection"`
+			Index      int    `json:"index"`
+			Offset     int    `json:"offset"`
+		}
+		if json.Unmarshal(invocation.Arguments, &args) != nil {
+			return nil, ErrInvalidInvocation
+		}
+		page, err := reader.GetCollaborationRecord(ctx, invocation.Scope.WorkflowID, invocation.Scope.AgentParticipantID, invocation.Scope.AgentTurnID, args.Collection, args.Index, args.Offset)
+		if errors.Is(err, collaboration.ErrInvalid) {
+			return nil, ErrInvalidInvocation
+		}
+		if err != nil {
+			return nil, ErrToolDependency
+		}
+		return json.Marshal(page)
 	case ToolGetHandoff:
 		if backend.handoffs == nil {
 			return nil, ErrToolDependency
@@ -1301,19 +1327,19 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolResolveClarification, ToolReportBlocked:
+	case ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
+		if tool == ToolRequestClarification {
+			metadata.ExpectedSHA = scope.HeadSHA
+		}
 	case ToolSubmitReview, ToolCommentOnPullRequest:
 		if scope.PullRequest != nil {
 			metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.PullRequest.ID)
 		}
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolRequestClarification, ToolCommentOnIssue:
+	case ToolCommentOnIssue:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%d", scope.Repository.ID, scope.Issue.ID)
-		if tool == ToolRequestClarification {
-			metadata.ExpectedSHA = scope.HeadSHA
-		}
 	}
 	return metadata
 }

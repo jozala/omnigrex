@@ -421,7 +421,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 		return err
 	}
 	if tool == "request_clarification" {
-		if operation == "" || service != "github" || observation.Outcome != workflow.TurnOutcomeClarificationWait {
+		if operation == "" || (service != "github" && service != "omnigrex") || observation.Outcome != workflow.TurnOutcomeClarificationWait {
 			return ErrTerminalCorroborationConflict
 		}
 		var repositoryID, issueID int64
@@ -437,7 +437,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			Outcome string `json:"outcome"`
 			RoundID string `json:"round_id"`
 		}
-		if resource != fmt.Sprintf("%d:%d", repositoryID, issueID) || !decodeCorroborationObject(request, &args) || args.OperationID != operation || !decodeCorroborationObject(result, &evidence) || evidence.Outcome != "CLARIFICATION_WAIT" {
+		if !(service == "omnigrex" && resource == job.WorkflowID || service == "github" && resource == fmt.Sprintf("%d:%d", repositoryID, issueID)) || !decodeCorroborationObject(request, &args) || args.OperationID != operation || !decodeCorroborationObject(result, &evidence) || evidence.Outcome != "CLARIFICATION_WAIT" {
 			return ErrTerminalCorroborationConflict
 		}
 		state, err := readCollaborationTx(ctx, tx, job.WorkflowID)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -258,5 +259,60 @@ func TestKnownFailedQuestionPublicationDoesNotStrandClarificationRecovery(t *tes
 	}
 	if err = database.ConfirmClarificationPublication(ctx, fixture.workflowID, first.ID, collaboration.Source{Channel: "fixture", ID: "unexpected"}); err == nil {
 		t.Fatal("failed publication later became current")
+	}
+}
+
+func TestCollaborationRecordRetrievalPreservesOversizedPreparedBatchAndScope(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	fixture, lease, _ := prepareOpenSettlementTurn(t, databases[0], pool, ctx, 9926, workflow.RoleDeveloper, "head")
+	var state collaboration.State
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprint(i)
+		receipt := state.Accept("A"+id, collaboration.Command{Kind: "steer", Body: strings.Repeat("\"\\\n<界", 12000)}, collaboration.Admission{Active: true, Authorized: true, ParticipantID: lease.AgentParticipantID, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: id}, At: time.Now()})
+		if receipt.ResponseID == "" {
+			t.Fatal(receipt)
+		}
+	}
+	state.Prepare(lease.AgentParticipantID, lease.ID)
+	raw, _ := json.Marshal(state)
+	config, _ := json.Marshal(state.Project(lease.AgentParticipantID, lease.ID))
+	if len(config) > collaboration.MaxProjectionBytes {
+		t.Fatal("unbounded configuration")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2) ON CONFLICT(workflow_id) DO UPDATE SET state=EXCLUDED.state`, fixture.workflowID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET turn_configuration=$2 WHERE id=$1`, lease.ID, config); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		var content strings.Builder
+		offset := 0
+		for {
+			page, err := databases[0].GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "human_input", index, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content.WriteString(page.Content)
+			if page.NextOffset == nil {
+				break
+			}
+			offset = *page.NextOffset
+		}
+		var input collaboration.Input
+		if err := json.Unmarshal([]byte(content.String()), &input); err != nil {
+			t.Fatal(err)
+		}
+		if input.ID != state.Inputs[index].ID || input.Body != state.Inputs[index].Body || input.Source != state.Inputs[index].Source {
+			t.Fatal("accepted record changed")
+		}
+	}
+	if _, err := databases[0].GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "human_input", 20, 0); err == nil {
+		t.Fatal("read beyond frozen batch")
+	}
+	if _, err := databases[0].GetCollaborationRecord(ctx, fixture.workflowID, "00000000-0000-4000-8000-000000000000", lease.ID, "human_input", 0, 0); err == nil {
+		t.Fatal("cross-participant read")
 	}
 }

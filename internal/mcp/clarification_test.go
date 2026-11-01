@@ -20,6 +20,7 @@ func (f *clarificationLedger) HasPendingHumanInput(context.Context, string, stri
 type clarificationLedger struct {
 	round     collaboration.Round
 	published bool
+	source    collaboration.Source
 }
 
 func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
@@ -31,6 +32,7 @@ func (f *clarificationLedger) ConfirmClarificationPublication(_ context.Context,
 		panic("incorrect publication correlation")
 	}
 	f.published = true
+	f.source = source
 	return nil
 }
 func (f *clarificationLedger) GetClarificationRound(context.Context, string, string) (collaboration.Round, error) {
@@ -106,5 +108,46 @@ func TestClarificationLostPublicationResponseReconcilesWithoutAnotherPost(t *tes
 	result, err = reconciler.Reconcile(context.Background(), reconciliationContext(), mutation)
 	if err != nil || result.Disposition != mcp.ReconciliationFound || !ledger.published || api.posts != 1 || !strings.Contains(string(result.Outcome.Result), ledger.round.ID) {
 		t.Fatalf("recovery=%+v %v posts=%d", result, err, api.posts)
+	}
+}
+
+type alternateClarificationPublisher struct {
+	source collaboration.Source
+	posts  int
+}
+
+func (p *alternateClarificationPublisher) Validate(collaboration.PublicationMessage) error {
+	return nil
+}
+func (p *alternateClarificationPublisher) Publish(context.Context, collaboration.PublicationMessage) (collaboration.Source, error) {
+	p.posts++
+	p.source = collaboration.Source{Channel: "web", ID: "question-view"}
+	return p.source, nil
+}
+func (p *alternateClarificationPublisher) Reconcile(context.Context, collaboration.PublicationMessage) (collaboration.Source, bool, error) {
+	return p.source, true, nil
+}
+func TestClarificationMCPUsesAlternatePublisherForExecutionAndRecovery(t *testing.T) {
+	ledger := &clarificationLedger{}
+	publisher := &alternateClarificationPublisher{}
+	// These are required by other backend tools, but must not be used by clarification.
+	api := &backendGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger, ClarificationPublisher: publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := json.RawMessage(`{"operation_id":"ask1","questions":[{"id":"Q1","body":"Policy?"}]}`)
+	_, err = backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: productionToolScope(workflow.RoleDeveloper), OperationID: reconciliationMutationID, Arguments: request})
+	if err != nil || !ledger.published || ledger.source.Channel != "web" || api.issueCommentRequest.Body != "" {
+		t.Fatal("alternate delivery touched GitHub", err)
+	}
+	ledger.published = false
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: api, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger, ClarificationPublisher: publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reconciler.Reconcile(context.Background(), reconciliationContext(), reconciliationMutation(mcp.ToolRequestClarification, string(request)))
+	if err != nil || result.Disposition != mcp.ReconciliationFound || !ledger.published || publisher.posts != 1 {
+		t.Fatal(result, err)
 	}
 }

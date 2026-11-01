@@ -24,6 +24,7 @@ const (
 
 const (
 	ServerName                     = "omnigrex"
+	ToolGetCollaborationRecord     = "get_collaboration_record"
 	ToolGetIssue                   = "get_issue"
 	ToolListIssueComments          = "list_issue_comments"
 	ToolGetPullRequest             = "get_pull_request"
@@ -57,6 +58,7 @@ type ToolDefinition struct {
 }
 
 var toolCatalog = []ToolDefinition{
+	{Name: ToolGetCollaborationRecord, Description: "Read a frozen collaboration record in bounded JSON-text chunks. When collaboration_projection.retrieval_required, retrieve all human_input records before interpretation or handoff. Concatenate content chunks using next_offset; then advance next_index. Older input and rounds remain available by collection and index.", InputSchema: objectSchema(map[string]any{"collection": map[string]any{"type": "string", "enum": []string{"human_input", "human_input_history", "clarification_history"}}, "index": map[string]any{"type": "integer", "minimum": 0}, "offset": map[string]any{"type": "integer", "minimum": 0}}, "collection", "index"), Class: ReadTool},
 	{Name: ToolRequestClarification, Description: "Publish a new immutable clarification round on the Work Item and end this Turn in expected waiting. Supply stable question IDs; carry unresolved questions forward and use new IDs for materially revised questions. Use empty questions only to yield to already queued human input after a handoff fence. This does not create a Human Handoff or authorize implementation.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "questions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"id": stringSchema(1, 128), "body": stringSchema(1, 8192), "replaces": stringSchema(1, 128)}, "id", "body")}}, "operation_id", "questions"), Class: MutationTool},
 	{Name: ToolResolveClarification, Description: "Record explicit interpretation of delivered human responses for individual questions. Leave incomplete, ambiguous or conflicting questions unresolved and ask again before dependent action.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "round_id": stringSchema(1, 128), "resolutions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"question_id": stringSchema(1, 128), "response_ids": map[string]any{"type": "array", "maxItems": 100, "items": stringSchema(1, 128)}, "explanation": stringSchema(1, 8192), "obsolete": map[string]any{"type": "boolean"}}, "question_id", "response_ids", "explanation")}}, "operation_id", "round_id", "resolutions"), Class: MutationTool},
 

@@ -54,22 +54,24 @@ type MutationReconciler interface {
 }
 
 type ProductionReconcilerConfig struct {
-	Clarifications   ClarificationStore
-	GitHub           GitHubAPI
-	Credentials      RepositoryCredentials
-	Publications     PublicationReconciler
-	GitRemoteBaseURL string
-	Policies         role.PolicyCatalog
+	ClarificationPublisher collaboration.Publisher
+	Clarifications         ClarificationStore
+	GitHub                 GitHubAPI
+	Credentials            RepositoryCredentials
+	Publications           PublicationReconciler
+	GitRemoteBaseURL       string
+	Policies               role.PolicyCatalog
 }
 
 // ProductionReconciler finds exact GitHub and Git publication artifacts from durable reservation data.
 type ProductionReconciler struct {
-	clarifications ClarificationStore
-	github         GitHubAPI
-	credentials    RepositoryCredentials
-	publications   PublicationReconciler
-	remoteBase     gitremote.BaseURL
-	policies       role.PolicyCatalog
+	clarificationPublisher collaboration.Publisher
+	clarifications         ClarificationStore
+	github                 GitHubAPI
+	credentials            RepositoryCredentials
+	publications           PublicationReconciler
+	remoteBase             gitremote.BaseURL
+	policies               role.PolicyCatalog
 }
 
 var (
@@ -88,7 +90,7 @@ func NewProductionReconciler(config ProductionReconcilerConfig) (*ProductionReco
 	if err != nil {
 		return nil, ErrInvalidReconcilerConfiguration
 	}
-	return &ProductionReconciler{clarifications: config.Clarifications, github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase, policies: config.Policies}, nil
+	return &ProductionReconciler{clarificationPublisher: config.ClarificationPublisher, clarifications: config.Clarifications, github: config.GitHub, credentials: config.Credentials, publications: config.Publications, remoteBase: remoteBase, policies: config.Policies}, nil
 }
 
 func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconciliation store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
@@ -809,20 +811,15 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 	if json.Unmarshal(mutation.Request, &request) != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
-	synthetic := mutation
-	synthetic.Request, _ = json.Marshal(map[string]any{"body": clarificationBody(round), "signature": request.Signature})
-	result, err := reconciler.reconcileComment(ctx, scope, synthetic, marker, false)
-	if err != nil || result.Disposition != ReconciliationFound {
-		return result, err
+	publisher, err := reconciler.clarificationDelivery(scope, mutation)
+	if err != nil {
+		return MutationReconciliationResult{}, err
 	}
-	var comment struct {
-		ID  int64  `json:"comment_id"`
-		URL string `json:"html_url"`
-	}
-	if json.Unmarshal(result.Outcome.Result, &comment) != nil || comment.ID <= 0 {
-		return unresolvedReconciliation(), nil
-	}
-	if err = reconciler.clarifications.ConfirmClarificationPublication(ctx, scope.WorkflowID, round.ID, collaboration.Source{Channel: "github", ID: fmt.Sprint(comment.ID), URL: comment.URL}); err != nil {
+	operation := collaboration.Publication{WorkflowID: scope.WorkflowID, Publisher: publisher, Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
+		return reconciler.clarifications.ConfirmClarificationPublication(ctx, scope.WorkflowID, id, source)
+	}}
+	found, err := operation.Reconcile(ctx, round, request.Signature)
+	if err != nil || !found {
 		return unresolvedReconciliation(), err
 	}
 	raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID})

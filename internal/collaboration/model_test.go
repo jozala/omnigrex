@@ -140,3 +140,103 @@ func TestUnresolvedQuestionsRequireCarryForwardOrExplicitReplacement(t *testing.
 		t.Fatal("explicit evidence-based obsolescence did not settle question")
 	}
 }
+
+func TestAmendmentSupersedesInterpretationAcrossUnchangedRounds(t *testing.T) {
+	for _, mode := range []string{"same-round", "replacement-round", "historical-round"} {
+		t.Run(mode, func(t *testing.T) {
+			advance := mode != "same-round"
+			var s collaboration.State
+			qs := []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}}
+			s.Request("R1", "developer", "T1", "h", qs)
+			s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+			s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep compatibility"}, admission("answer"))
+			s.Prepare("developer", "T2")
+			original := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Keep compatibility"}
+			if err := s.Resolve("R1", "T2", []collaboration.Resolution{original}); err != nil {
+				t.Fatal(err)
+			}
+			round := "R1"
+			if advance {
+				if _, err := s.Request("R2", "developer", "T2", "h2", qs); err != nil {
+					t.Fatal(err)
+				}
+				s.Publish("R2", collaboration.Source{Channel: "fixture", ID: "pub2"})
+				round = "R2"
+				if len(s.Rounds[1].Resolutions) != 1 {
+					t.Fatal("unchanged resolved Q1 lost its accepted evidence")
+				}
+				if !s.Unresolved("developer") {
+					t.Fatal("unanswered Q2 silently resolved")
+				}
+			}
+			if r := s.Accept("A2", collaboration.Command{Kind: "amend", Target: "A1", Body: "Correction: break compatibility"}, admission("amend")); r.ResponseID != "A2" {
+				t.Fatal(r)
+			}
+			s.Prepare("developer", "T3")
+			resolutionRound := round
+			if mode == "historical-round" {
+				resolutionRound = "R1"
+			}
+			if err := s.Resolve(resolutionRound, "T3", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A2"}, Explanation: "Explicit amendment changes the decision"}}); err != nil {
+				t.Fatal(err)
+			}
+			if s.Rounds[0].Resolutions[0].Explanation != original.Explanation || s.Inputs[0].Body != "Keep compatibility" {
+				t.Fatal("original evidence rewritten")
+			}
+			if err := s.Resolve(round, "T3", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Stale original"}}); err == nil {
+				t.Fatal("old evidence superseded amendment")
+			}
+		})
+	}
+}
+
+func TestAmendedResolvedQuestionMustBeCarriedAndCannotReuseOldEvidence(t *testing.T) {
+	var s collaboration.State
+	s.Request("R1", "developer", "T1", "h", []collaboration.Question{{ID: "Q1", Body: "Policy?"}})
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep"}, admission("a1"))
+	s.Prepare("developer", "T2")
+	s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Keep"}})
+	if s.Unresolved("developer") {
+		t.Fatal("resolved question remains blocking")
+	}
+	s.Accept("A2", collaboration.Command{Kind: "amend", Target: "A1", Body: "Break"}, admission("a2"))
+	s.Prepare("developer", "T3")
+	if !s.Unresolved("developer") {
+		t.Fatal("amendment silently retained stale interpretation")
+	}
+	if _, err := s.Request("R2", "developer", "T3", "h", []collaboration.Question{{ID: "Q2", Body: "Other?"}}); err == nil {
+		t.Fatal("amended unresolved question dropped")
+	}
+	s.Accept("A3", collaboration.Command{Kind: "amend", Target: "A2", Body: "Actually keep"}, admission("a3"))
+	s.Prepare("developer", "T4")
+	if err := s.Resolve("R1", "T4", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1", "A3"}, Explanation: "Latest explicit amendment restores original"}}); err != nil {
+		t.Fatal(err)
+	}
+	if s.Unresolved("developer") {
+		t.Fatal("amendment chain did not settle")
+	}
+}
+
+func TestAmendmentOfEarlierDecisionOmittedFromCurrentQuestionSet(t *testing.T) {
+	var s collaboration.State
+	s.Request("R1", "developer", "T1", "h", []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}})
+	s.Publish("R1", collaboration.Source{Channel: "fixture", ID: "pub"})
+	s.Accept("A1", collaboration.Command{Kind: "answer", Target: "R1", Body: "Keep compatibility"}, admission("a1"))
+	s.Prepare("developer", "T2")
+	s.Resolve("R1", "T2", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "Keep compatibility"}})
+	if _, err := s.Request("R2", "developer", "T2", "h2", []collaboration.Question{{ID: "Q2", Body: "Retention?"}}); err != nil {
+		t.Fatal(err)
+	}
+	s.Publish("R2", collaboration.Source{Channel: "fixture", ID: "pub2"})
+	if r := s.Accept("A2", collaboration.Command{Kind: "amend", Target: "A1", Body: "Correction: break compatibility"}, admission("a2")); r.ResponseID == "" {
+		t.Fatal(r)
+	}
+	s.Prepare("developer", "T3")
+	if err := s.Resolve("R1", "T3", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A2"}, Explanation: "Explicit earlier decision correction"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Rounds[0].Resolutions) != 2 || len(s.Rounds) != 2 {
+		t.Fatal("correction lost or unnecessary round added")
+	}
+}

@@ -222,21 +222,15 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 			state.Inputs[i].ParticipantID = participant
 		}
 	}
-	batch := state.Prepare(participant, turn)
+	state.Prepare(participant, turn)
 	state.Waiting = false
 	var object map[string]json.RawMessage
 	if err = json.Unmarshal(configuration, &object); err != nil || object == nil {
 		return nil, fmt.Errorf("invalid Turn configuration")
 	}
-	object["human_input"], _ = json.Marshal(batch)
-	var history []collaboration.Input
-	for _, input := range state.Inputs {
-		if input.ParticipantID == participant {
-			history = append(history, input)
-		}
+	for name, raw := range state.Project(participant, turn) {
+		object[name] = raw
 	}
-	object["human_input_history"], _ = json.Marshal(history)
-	object["clarification_history"], _ = json.Marshal(state.Rounds)
 	if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
 		return nil, err
 	}
@@ -310,4 +304,51 @@ func (s *Store) HasPendingHumanInput(ctx context.Context, workflowID, participan
 		return false, err
 	}
 	return state.Pending(participant), nil
+}
+
+// GetCollaborationRecord reads immutable accepted contents without projecting an
+// unbounded history into the prompt. Counts are frozen at Turn preparation.
+func (s *Store) GetCollaborationRecord(ctx context.Context, workflowID, participant, turn, collection string, index, offset int) (collaboration.RecordPage, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return collaboration.RecordPage{}, err
+	}
+	defer tx.Rollback(ctx)
+	var configuration []byte
+	err = tx.QueryRow(ctx, `SELECT turn.turn_configuration FROM agent_turns turn JOIN agent_sessions session ON session.id=turn.agent_session_id WHERE turn.id=$1 AND turn.workflow_id=$2 AND session.agent_participant_id=$3`, turn, workflowID, participant).Scan(&configuration)
+	if err != nil {
+		return collaboration.RecordPage{}, err
+	}
+	var object struct {
+		Projection collaboration.Projection `json:"collaboration_projection"`
+	}
+	if err = json.Unmarshal(configuration, &object); err != nil {
+		return collaboration.RecordPage{}, err
+	}
+	limit, ok := object.Projection.Counts[collection]
+	if !ok {
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	if index < 0 || index >= limit || offset < 0 {
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	// Select just this record: repeatedly decoding and serializing the entire
+	// aggregate for each chunk makes large discussions unnecessarily expensive.
+	var raw []byte
+	switch collection {
+	case "human_input", "human_input_history":
+		err = tx.QueryRow(ctx, `SELECT item FROM work_item_collaboration collaboration,
+   LATERAL jsonb_array_elements(collaboration.state->'inputs') WITH ORDINALITY AS records(item,position)
+   WHERE collaboration.workflow_id=$1 AND item->>'participant_id'=$2 AND COALESCE(item->>'delivered_to','')<>''
+   AND (($3='human_input' AND item->>'delivered_to'=$4) OR ($3='human_input_history' AND item->>'delivered_to'<>$4))
+   ORDER BY position OFFSET $5 LIMIT 1`, workflowID, participant, collection, turn, index).Scan(&raw)
+	case "clarification_history":
+		err = tx.QueryRow(ctx, `SELECT state->'rounds'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
+	default:
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	if err != nil {
+		return collaboration.RecordPage{}, err
+	}
+	return collaboration.PageRecord(raw, limit, index, offset)
 }
