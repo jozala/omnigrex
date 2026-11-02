@@ -18,9 +18,10 @@ func (f *clarificationLedger) HasPendingHumanInput(context.Context, string, stri
 }
 
 type clarificationLedger struct {
-	round     collaboration.Round
-	published bool
-	source    collaboration.Source
+	resolutionOperation string
+	round               collaboration.Round
+	published           bool
+	source              collaboration.Source
 }
 
 func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
@@ -38,7 +39,8 @@ func (f *clarificationLedger) ConfirmClarificationPublication(_ context.Context,
 func (f *clarificationLedger) GetClarificationRound(context.Context, string, string) (collaboration.Round, error) {
 	return f.round, nil
 }
-func (f *clarificationLedger) ResolveClarification(context.Context, store.AgentTurnLease, string, []collaboration.Resolution) error {
+func (f *clarificationLedger) ResolveClarification(_ context.Context, _ store.AgentTurnLease, operation, _ string, _ []collaboration.Resolution) error {
+	f.resolutionOperation = operation
 	return nil
 }
 func TestSignedClarificationPublishesBeforeReturningWaiting(t *testing.T) {
@@ -173,7 +175,8 @@ func TestResolutionReconciliationMatchesIntentWithControllerCoverage(t *testing.
 	resolution := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A3"}, Explanation: "The explicit correction governs"}
 	actual := resolution
 	actual.ConsideredResponseIDs = []string{"A2", "A3"}
-	ledger := &clarificationLedger{round: collaboration.Round{ID: "R1", Resolutions: []collaboration.Resolution{actual}}}
+	actual.OriginOperationID = reconciliationMutationID
+	ledger := &clarificationLedger{round: collaboration.Round{ID: "R1", ParticipantID: "assignment-1", Resolutions: []collaboration.Resolution{actual}}}
 	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger})
 	if err != nil {
 		t.Fatal(err)
@@ -191,5 +194,87 @@ func TestResolutionReconciliationMatchesIntentWithControllerCoverage(t *testing.
 	result, err = reconciler.Reconcile(context.Background(), scope, mutation)
 	if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
 		t.Fatalf("different interpretation reconciled: %+v %v", result, err)
+	}
+}
+
+func TestResolutionRecoveryDoesNotBorrowIdenticalHistoricalEffect(t *testing.T) {
+	resolution := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A2"}, Explanation: "The explicit correction governs"}
+	ledger := &clarificationLedger{round: collaboration.Round{ID: "R1", ParticipantID: "assignment-1", Resolutions: []collaboration.Resolution{resolution}}}
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(map[string]any{"operation_id": "cancelled-new-operation", "round_id": "R1", "resolutions": []collaboration.Resolution{resolution}})
+	scope := reconciliationContext()
+	mutation := reconciliationMutation("resolve_clarification", string(request))
+	mutation.ExternalService = "omnigrex"
+	mutation.ExternalResourceID = scope.WorkflowID
+	for _, origin := range []string{"", "00000000-0000-4000-8000-000000000111"} {
+		ledger.round.Resolutions[0].OriginOperationID = origin
+		result, err := reconciler.Reconcile(context.Background(), scope, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
+			t.Fatalf("new operation with no effect borrowed historical origin %q: %+v %v", origin, result, err)
+		}
+	}
+}
+
+func TestResolveClarificationForwardsControllerReservationIdentity(t *testing.T) {
+	ledger := &clarificationLedger{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := mcp.Invocation{Name: mcp.ToolResolveClarification, Class: mcp.MutationTool, Scope: productionToolScope(workflow.RoleDeveloper), OperationID: reconciliationMutationID, Arguments: json.RawMessage(`{"operation_id":"agent-label","round_id":"R1","resolutions":[{"question_id":"Q1","response_ids":["A1"],"explanation":"Explicit interpretation"}]}`)}
+	if _, err := backend.Execute(context.Background(), invocation); err != nil {
+		t.Fatal(err)
+	}
+	if ledger.resolutionOperation != reconciliationMutationID {
+		t.Fatal("caller label was used instead of durable reservation identity")
+	}
+	ledger.resolutionOperation = ""
+	invocation.Arguments = json.RawMessage(`{"operation_id":"empty","round_id":"R1","resolutions":[]}`)
+	if _, err := backend.Execute(context.Background(), invocation); err == nil || ledger.resolutionOperation != "" {
+		t.Fatal("empty interpretation batch was admitted")
+	}
+}
+
+func TestResolutionRecoveryRequiresCompleteScopedBatchProof(t *testing.T) {
+	wanted := []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A1"}, Explanation: "First"}, {QuestionID: "Q2", ResponseIDs: []string{"A2"}, Explanation: "Second"}}
+	for _, scenario := range []string{"complete", "partial", "other participant", "other round", "different intent"} {
+		t.Run(scenario, func(t *testing.T) {
+			actual := append([]collaboration.Resolution(nil), wanted...)
+			for i := range actual {
+				actual[i].OriginOperationID = reconciliationMutationID
+			}
+			round := collaboration.Round{ID: "R1", ParticipantID: "assignment-1", Resolutions: actual}
+			switch scenario {
+			case "partial":
+				round.Resolutions[1].OriginOperationID = "other"
+			case "other participant":
+				round.ParticipantID = "other"
+			case "other round":
+				round.ID = "R2"
+			case "different intent":
+				round.Resolutions[1].Explanation = "Different"
+			}
+			ledger := &clarificationLedger{round: round}
+			reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, _ := json.Marshal(map[string]any{"operation_id": "resolve", "round_id": "R1", "resolutions": wanted})
+			scope := reconciliationContext()
+			mutation := reconciliationMutation("resolve_clarification", string(request))
+			mutation.ExternalService = "omnigrex"
+			mutation.ExternalResourceID = scope.WorkflowID
+			result, err := reconciler.Reconcile(context.Background(), scope, mutation)
+			expected := mcp.ReconciliationUnresolved
+			if scenario == "complete" {
+				expected = mcp.ReconciliationFound
+			}
+			if err != nil || result.Disposition != expected {
+				t.Fatalf("batch proof = %+v %v; want %s", result, err, expected)
+			}
+		})
 	}
 }

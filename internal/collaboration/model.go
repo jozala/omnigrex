@@ -5,6 +5,7 @@ package collaboration
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -29,6 +30,9 @@ type Question struct {
 	Body     string `json:"body"`
 }
 type Resolution struct {
+	// OriginOperationID is the controller reservation identity that applied this
+	// interpretation, never a caller-supplied operation label or inferred content.
+	OriginOperationID string `json:"origin_operation_id,omitempty"`
 	// ConsideredResponseIDs records competing amendments available to this explicit
 	// interpretation. It is controller-owned, not an agent-provided last-answer rule.
 	ConsideredResponseIDs []string `json:"considered_response_ids,omitempty"`
@@ -51,6 +55,36 @@ type Round struct {
 	Published         bool         `json:"published"`
 	Source            *Source      `json:"source,omitempty"`
 }
+
+// HasResolutionEffect proves this operation's complete requested interpretation,
+// not merely equal content from an earlier operation. Coverage and origin are
+// controller metadata; only the origin binds the effect to its reservation.
+func (r Round) HasResolutionEffect(operation string, resolutions []Resolution) bool {
+	if operation == "" || len(resolutions) == 0 {
+		return false
+	}
+	for _, wanted := range resolutions {
+		found := false
+		for _, actual := range r.Resolutions {
+			if actual.OriginOperationID != operation {
+				continue
+			}
+			actual.OriginOperationID = ""
+			wanted.OriginOperationID = ""
+			actual.ConsideredResponseIDs = nil
+			wanted.ConsideredResponseIDs = nil
+			if reflect.DeepEqual(actual, wanted) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 type Input struct {
 	Route         string    `json:"route,omitempty"`
 	ID            string    `json:"id"`

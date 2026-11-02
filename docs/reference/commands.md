@@ -100,3 +100,12 @@ For retrieval-only pending input, frozen assignment is not delivery: every canon
 Failed reads, duplicate chunks, and retrieval of only the final chunk do not clear that fence.
 Unread input is carried to the retained Session's next Turn if execution ends early; successful reads do not reset budgets or interpret the contents.
 Neither retrieval nor command acceptance resolves questions or grants implementation authorization.
+
+### Interpretation recovery evidence
+
+`resolve_clarification` requires a nonempty batch of interpretations.
+Each recorded interpretation carries a controller-owned `origin_operation_id`, identifying its durable mutation reservation rather than the agent's operation label or a GitHub artifact.
+The controller records this origin atomically with the interpretation; agents cannot supply it in resolution arguments.
+Recovery requires matching origin, Work Item, Participant, round, and the complete requested interpretation batch.
+An identical historical interpretation from another operation is not proof that a cancelled or uncertain operation applied its effect.
+Earlier unattributed interpretations remain history but cannot establish operation-specific recovery proof.

@@ -14,7 +14,7 @@ type ClarificationStore interface {
 	RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question) (collaboration.Round, error)
 	ConfirmClarificationPublication(context.Context, string, string, collaboration.Source) error
 	GetClarificationRound(context.Context, string, string) (collaboration.Round, error)
-	ResolveClarification(context.Context, store.AgentTurnLease, string, []collaboration.Resolution) error
+	ResolveClarification(context.Context, store.AgentTurnLease, string, string, []collaboration.Resolution) error
 }
 
 func (backend *ProductionBackend) requestClarification(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
@@ -61,7 +61,7 @@ func (backend *ProductionBackend) resolveClarification(ctx context.Context, invo
 	if json.Unmarshal(invocation.Arguments, &request) != nil {
 		return nil, ErrInvalidInvocation
 	}
-	if err := backend.clarifications.ResolveClarification(ctx, invocation.lease, request.RoundID, request.Resolutions); err != nil {
+	if err := backend.clarifications.ResolveClarification(ctx, invocation.lease, invocation.OperationID, request.RoundID, request.Resolutions); err != nil {
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}

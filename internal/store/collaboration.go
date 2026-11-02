@@ -239,16 +239,51 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 	return json.Marshal(object)
 }
 
-func (s *Store) ResolveClarification(ctx context.Context, lease AgentTurnLease, round string, resolutions []collaboration.Resolution) error {
+func (s *Store) ResolveClarification(ctx context.Context, lease AgentTurnLease, operation, round string, resolutions []collaboration.Resolution) error {
 	return s.withLockedAgentTurnLease(ctx, lease, "resolve clarification", func(tx pgx.Tx, turn lockedTurn) error {
-		if !turn.MutationAdmissionOpen {
+		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return ErrMutationAdmissionClosed
+		}
+		if !validUUID(operation) || len(resolutions) == 0 {
+			return collaboration.ErrInvalid
+		}
+		// Bind to this live reservation's exact requested effect, not an agent label
+		// or an interpretation from another invocation. Save origin and effect in
+		// the same transaction so cancellation cannot leave a receipt without effect.
+		var reserved []byte
+		err := tx.QueryRow(ctx, `SELECT request FROM tool_invocations WHERE id=$1 AND agent_turn_id=$2 AND execution_epoch=$3 AND tool_name='resolve_clarification' AND state='IN_FLIGHT' AND external_service='omnigrex' AND external_resource_id=$4`, operation, turn.ID, turn.ExecutionEpoch, lease.JobLease.WorkflowID).Scan(&reserved)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMutationStateConflict
+		}
+		if err != nil {
+			return err
+		}
+		var intent struct {
+			RoundID     string                     `json:"round_id"`
+			Resolutions []collaboration.Resolution `json:"resolutions"`
+		}
+		if err = json.Unmarshal(reserved, &intent); err != nil {
+			return err
+		}
+		if intent.RoundID != round || !reflect.DeepEqual(intent.Resolutions, resolutions) {
+			return ErrMutationOperationConflict
+		}
+		bound := append([]collaboration.Resolution(nil), resolutions...)
+		for i := range bound {
+			bound[i].OriginOperationID = operation
 		}
 		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
 		if err != nil {
 			return err
 		}
-		if err = state.Resolve(round, turn.ID, resolutions); err != nil {
+		// A duplicate delivery of the same in-flight operation acknowledges its own
+		// committed effect without appending or reinterpreting it a second time.
+		for _, recorded := range state.Rounds {
+			if recorded.ID == round && recorded.HasResolutionEffect(operation, resolutions) {
+				return nil
+			}
+		}
+		if err = state.Resolve(round, turn.ID, bound); err != nil {
 			return err
 		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)

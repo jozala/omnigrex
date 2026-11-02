@@ -541,8 +541,12 @@ func TestObsoleteQuestionRenewalPersistsAfterRequiredEvidenceDelivery(t *testing
 				t.Fatal(err)
 			}
 			resolution := []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"A2"}, Explanation: "Current Change Proposal restores the unchanged artifact; the delivered amendment now governs retention"}}
-			if err := database.ResolveClarification(ctx, lease, "R2", resolution); !errors.Is(err, collaboration.ErrInvalid) {
+			unreadOperation := startClarificationResolutionMutation(t, database, ctx, lease, "unread-renewal", "R2", resolution)
+			if err := database.ResolveClarification(ctx, lease, unreadOperation.ID, "R2", resolution); !errors.Is(err, collaboration.ErrInvalid) {
 				t.Fatalf("unread response supported renewal: %v", err)
+			}
+			if err := database.FailMutation(ctx, lease, unreadOperation.ID, errors.New("unread response")); err != nil {
+				t.Fatal(err)
 			}
 			for offset := 0; ; {
 				page, err := database.GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "human_input", 0, offset)
@@ -559,7 +563,11 @@ func TestObsoleteQuestionRenewalPersistsAfterRequiredEvidenceDelivery(t *testing
 				}
 				offset = *page.NextOffset
 			}
-			if err := database.ResolveClarification(ctx, lease, "R2", resolution); err != nil {
+			appliedOperation := startClarificationResolutionMutation(t, database, ctx, lease, "delivered-renewal", "R2", resolution)
+			if err := database.ResolveClarification(ctx, lease, appliedOperation.ID, "R2", resolution); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteMutation(ctx, lease, appliedOperation.ID, json.RawMessage(`{"round_id":"R2","recorded":true}`)); err != nil {
 				t.Fatal(err)
 			}
 			first, err := database.GetClarificationRound(ctx, fixture.workflowID, "R1")
@@ -570,7 +578,7 @@ func TestObsoleteQuestionRenewalPersistsAfterRequiredEvidenceDelivery(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(first.Resolutions) != 2 || first.Resolutions[0].ResponseIDs[0] != "A1" || !first.Resolutions[1].Obsolete || len(renewed.Resolutions) != 2 || !renewed.Resolutions[0].Obsolete || renewed.Resolutions[1].Obsolete || renewed.Resolutions[1].ResponseIDs[0] != "A2" {
+			if len(first.Resolutions) != 2 || first.Resolutions[0].ResponseIDs[0] != "A1" || !first.Resolutions[1].Obsolete || len(renewed.Resolutions) != 2 || !renewed.Resolutions[0].Obsolete || renewed.Resolutions[1].Obsolete || renewed.Resolutions[1].ResponseIDs[0] != "A2" || renewed.Resolutions[1].OriginOperationID != appliedOperation.ID {
 				t.Fatal("renewal lost append-only history", first, renewed)
 			}
 			tool := "request_review"

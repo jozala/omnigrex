@@ -834,27 +834,17 @@ func (reconciler *ProductionReconciler) reconcileClarificationResolution(ctx con
 		RoundID     string                     `json:"round_id"`
 		Resolutions []collaboration.Resolution `json:"resolutions"`
 	}
-	if json.Unmarshal(mutation.Request, &request) != nil {
+	if json.Unmarshal(mutation.Request, &request) != nil || len(request.Resolutions) == 0 {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, request.RoundID)
-	if err != nil {
+	if err != nil || round.ID != request.RoundID || round.ParticipantID != scope.Turn.AgentParticipantID {
 		return unresolvedReconciliation(), nil
 	}
-	for _, resolution := range request.Resolutions {
-		found := false
-		for _, actual := range round.Resolutions {
-			// Reconcile agent intent, not controller-derived delivery coverage.
-			actual.ConsideredResponseIDs = nil
-			resolution.ConsideredResponseIDs = nil
-			if reflect.DeepEqual(resolution, actual) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return unresolvedReconciliation(), nil
-		}
+	// Legacy unattributed or content-identical historical entries cannot prove
+	// this reservation's effect, including after cancellation before application.
+	if !round.HasResolutionEffect(mutation.ID, request.Resolutions) {
+		return unresolvedReconciliation(), nil
 	}
 	raw, _ := json.Marshal(map[string]any{"round_id": request.RoundID, "recorded": true})
 	return foundReconciliation(raw), nil
