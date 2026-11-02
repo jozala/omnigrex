@@ -61,7 +61,7 @@ func (a httpAPI) call(ctx context.Context, method, path string, body any) ([]byt
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if strings.Contains(path, "releases/assets/") || strings.HasSuffix(path, "/zip") {
+	if strings.Contains(path, "releases/assets/") {
 		req.Header.Set("Accept", "application/octet-stream")
 	}
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
