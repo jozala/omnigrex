@@ -451,6 +451,23 @@ func (reducer Reducer) reduceTerminalIntentRevalidated(snapshot Snapshot, event 
 	if !ok || stage.Role != event.SourceTurn.Role || stage.State != snapshot.State {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
+	if event.Outcome == TurnOutcomeClarificationWait {
+		next := cloneSnapshot(snapshot)
+		next.ResumeRole = ""
+		return clarificationWaitDecision(next, event.SourceTurn, event.HumanInputPending)
+	}
+	if event.HumanInputPending {
+		next := cloneSnapshot(snapshot)
+		next.Revision++
+		head := ""
+		if event.ChangeProposal != nil {
+			proposal := *event.ChangeProposal
+			proposal.ReadyForSHA = ""
+			next.ChangeProposal = &proposal
+			head = proposal.HeadSHA
+		}
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("human_input_pending"), Actions: []Action{EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head}}}
+	}
 	if event.ExistingReview != nil {
 		if event.Review == nil || *event.ExistingReview != *event.Review {
 			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonReviewIdentityConflict}
@@ -572,12 +589,22 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 		next.ChangeProposal = &proposal
 	}
 
-	if event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomePrerequisiteFailed && event.Outcome != TurnOutcomeInfrastructureFailed {
+	if event.Outcome != TurnOutcomeClarificationWait && event.Outcome != TurnOutcomeBlocked && event.Outcome != TurnOutcomePrerequisiteFailed && event.Outcome != TurnOutcomeInfrastructureFailed {
 		if _, ok := reducer.definition.Transition(snapshot.CurrentAttempt.CurrentStage, event.Outcome); !ok {
 			return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 		}
 	}
 	switch event.Outcome {
+	case TurnOutcomeClarificationWait:
+		if event.ChangeProposal != nil {
+			if next.ChangeProposal != nil && next.ChangeProposal.ID != event.ChangeProposal.ID {
+				return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionUnrelated, Reason: ReasonChangeProposalUnrelated}
+			}
+			proposal := *event.ChangeProposal
+			proposal.ReadyForSHA = ""
+			next.ChangeProposal = &proposal
+		}
+		return clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
 	case TurnOutcomeChangeProposalReady:
 		return reducer.reduceDeveloperSettled(snapshot, next, event)
 	case TurnOutcomeChangesRequested, TurnOutcomeApproved:
@@ -801,10 +828,10 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 	if !stageExists {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
 	}
-	if stage.State == StateDeveloping {
+	if stage.State == StateDeveloping || snapshot.ClarificationWaiting {
 		next.Revision++
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{
-			ReconcileLabelsAction{State: StateDeveloping},
+			ReconcileLabelsAction{State: stage.State},
 		}}
 	}
 	if stage.ReviewLimit > 0 && next.CurrentAttempt.ReviewUsage[stage.ID] >= stage.ReviewLimit {
@@ -1038,4 +1065,18 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		clone.Closure = &closure
 	}
 	return clone
+}
+
+func clarificationWaitDecision(next Snapshot, turn TurnGuard, pending bool) Decision {
+	next.ClarificationWaiting = true
+	next.Revision++
+	var actions []Action
+	if pending {
+		head := ""
+		if next.ChangeProposal != nil {
+			head = next.ChangeProposal.HeadSHA
+		}
+		actions = append(actions, EnqueueTurnAction{Stage: turn.Stage, Role: turn.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head})
+	}
+	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("clarification_wait"), Actions: actions}
 }

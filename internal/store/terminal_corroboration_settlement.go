@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -43,7 +44,7 @@ func (store *Store) settleTerminalCorroboration(ctx context.Context, lease JobLe
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
-	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
+	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
 		canonical.Outcome != workflow.TurnOutcomeChangesRequested && canonical.Outcome != workflow.TurnOutcomeApproved {
 		return AgentTurnSettlement{}, ErrAgentTurnSettlementInvalid
 	}
@@ -255,6 +256,9 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 		PendingEvents:             pending, Diagnostic: canonical.Diagnostic,
 		CorroborationHandoffReason: handoffReason,
 	}
+	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
+		return AgentTurnSettlement{}, err
+	}
 	decision := store.reducer.CorroborationDefinitionIncompatible(snapshot)
 	if compatible {
 		decision = store.reducer.Reduce(snapshot, event)
@@ -295,7 +299,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		executionJobID, executionAttempt, executionOwner, executionToken,
 		originalOwnerID, originalOwnerHash, job.ID, job.Kind, job.AttemptCount,
 		job.LeaseOwner, job.LeaseToken, observationJSON, observationHash[:],
-		canonical.Outcome, canonical.TerminalStatus, nullableJSON(canonical.TerminalOutcome),
+		event.Outcome, canonical.TerminalStatus, nullableJSON(canonical.TerminalOutcome),
 		nullableString(canonical.TerminalLastError), int64(pending.Count),
 		nullableString(pending.LatestObservedHeadSHA), decision.Disposition, decision.Reason,
 		decision.Snapshot.State, int64(decision.Snapshot.Revision), nullableString(proposalID))
@@ -415,6 +419,45 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			return ErrTerminalCorroborationConflict
 		}
 		return err
+	}
+	if tool == "request_clarification" {
+		if operation == "" || (service != "github" && service != "omnigrex") || observation.Outcome != workflow.TurnOutcomeClarificationWait {
+			return ErrTerminalCorroborationConflict
+		}
+		var repositoryID, issueID int64
+		if err := tx.QueryRow(ctx, `SELECT repository_id,issue_id FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&repositoryID, &issueID); err != nil {
+			return err
+		}
+		var args struct {
+			OperationID string                   `json:"operation_id"`
+			Questions   []collaboration.Question `json:"questions"`
+			Signature   string                   `json:"signature"`
+		}
+		var evidence struct {
+			Outcome string `json:"outcome"`
+			RoundID string `json:"round_id"`
+		}
+		if !(service == "omnigrex" && resource == job.WorkflowID || service == "github" && resource == fmt.Sprintf("%d:%d", repositoryID, issueID)) || !decodeCorroborationObject(request, &args) || args.OperationID != operation || !decodeCorroborationObject(result, &evidence) || evidence.Outcome != "CLARIFICATION_WAIT" {
+			return ErrTerminalCorroborationConflict
+		}
+		state, err := readCollaborationTx(ctx, tx, job.WorkflowID)
+		if err != nil {
+			return err
+		}
+		if len(args.Questions) == 0 {
+			if evidence.RoundID == "" && state.Pending(job.AgentParticipantID) {
+				return nil
+			}
+			return ErrTerminalCorroborationConflict
+		}
+		for _, round := range state.Rounds {
+			questions, _ := json.Marshal(round.Questions)
+			requested, _ := json.Marshal(args.Questions)
+			if round.ID == "R"+sourceID && evidence.RoundID == round.ID && state.CurrentRound == round.ID && round.Published && !round.PublicationFailed && round.Source != nil && round.Source.ID != "" && round.ParticipantID == job.AgentParticipantID && bytes.Equal(questions, requested) {
+				return nil
+			}
+		}
+		return ErrTerminalCorroborationConflict
 	}
 	if operation == "" || observation.ChangeProposal == nil {
 		return ErrTerminalCorroborationConflict

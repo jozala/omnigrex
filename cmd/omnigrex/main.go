@@ -272,6 +272,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	}
 	toolBackend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{
 		GitHub:           githubServices.api,
+		Clarifications:   database,
 		Snapshots:        workspaces,
 		Installer:        backend.Snapshots,
 		Credentials:      repositoryCredentials,
@@ -311,7 +312,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure MCP Tool Gateway: %w", err)
 	}
 	mutationReconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{
-		GitHub: githubServices.api, Credentials: repositoryCredentials, Publications: workspaces,
+		GitHub: githubServices.api, Credentials: repositoryCredentials, Publications: workspaces, Clarifications: database,
 		GitRemoteBaseURL: settings.GitRemoteBaseURL, Policies: rolePolicies,
 	})
 	if err != nil {
@@ -748,7 +749,12 @@ func configureGitHub(settings config.Config, database *store.Store, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("configure label provisioning enumerator: %w", err)
 	}
+	collaborationCredentials, err := githubapi.NewRepositoryInstallationCredentialProvider(developerSigner, api, githubapi.DeveloperAppPermissions(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("configure collaboration credentials: %w", err)
+	}
 	processorConfig := webhook.ProcessorConfig{
+		Collaboration:               &webhook.IssueCollaboration{Store: database, API: api, Credentials: collaborationCredentials},
 		ClaimOwner:                  claimOwner,
 		LeaseDuration:               settings.WebhookLeaseDuration,
 		IdlePollInterval:            settings.WebhookPollInterval,

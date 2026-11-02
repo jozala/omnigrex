@@ -192,17 +192,18 @@ type Closure struct {
 }
 
 type Snapshot struct {
-	State             State
-	Revision          uint64
-	WorkItem          WorkItem
-	CurrentAttempt    *WorkflowAttempt
-	ChangeProposal    *ChangeProposal
-	ActiveTurn        *ActiveTurn
-	ContinuationStage StageID
-	ResumeRole        Role
-	Assignments       Assignments
-	Closure           *Closure
-	LastAttemptNumber uint64
+	ClarificationWaiting bool
+	State                State
+	Revision             uint64
+	WorkItem             WorkItem
+	CurrentAttempt       *WorkflowAttempt
+	ChangeProposal       *ChangeProposal
+	ActiveTurn           *ActiveTurn
+	ContinuationStage    StageID
+	ResumeRole           Role
+	Assignments          Assignments
+	Closure              *Closure
+	LastAttemptNumber    uint64
 }
 
 type Decision struct {
@@ -246,6 +247,7 @@ func (TriggerEvent) isWorkflowEvent() {}
 type TurnOutcome string
 
 const (
+	TurnOutcomeClarificationWait    TurnOutcome = "CLARIFICATION_WAIT"
 	TurnOutcomeChangeProposalReady  TurnOutcome = "CHANGE_PROPOSAL_READY"
 	TurnOutcomeChangesRequested     TurnOutcome = "CHANGES_REQUESTED"
 	TurnOutcomeApproved             TurnOutcome = "APPROVED"
@@ -271,6 +273,7 @@ type TurnSettledEvent struct {
 	Review                     *ReviewIdentity
 	ExistingReview             *ReviewIdentity
 	AuthorizedReviewerActorID  int64
+	HumanInputPending          bool
 	PendingEvents              PendingEventsObservation
 	Diagnostic                 string
 	CorroborationHandoffReason Reason
@@ -281,6 +284,7 @@ func (TurnSettledEvent) isWorkflowEvent() {}
 // TerminalIntentRevalidatedEvent accepts previously uncorroborated evidence
 // under a new human-triggered Attempt, without fabricating a new Agent Turn.
 type TerminalIntentRevalidatedEvent struct {
+	HumanInputPending bool
 	EventMetadata
 	AttemptID                 string
 	SourceTurn                TurnGuard

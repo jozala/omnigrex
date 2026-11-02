@@ -90,6 +90,11 @@ An absent archive is not a readiness failure, and log contents do not establish 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 Definite failures place safe details in `tool_invocations.last_error`; unknown outcomes remain under reconciliation.
 
+For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's controller-owned `origin_operation_id`, not just its text or response IDs.
+Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.
+Historical entries without an origin remain preserved but cannot prove an uncertain operation's effect; normal reconciliation retries or explicit Human Handoff handle missing proof.
+Do not assign origins or mark mutations successful by matching historical content.
+
 For reads, look for `MCP read failed` with `agent_turn_id` and `tool_name`.
 `failure_stage`, `failure_reason`, and optional `validation_field` narrow the failure beyond `failure_code`.
 Detailed validation initially covers issue lookup and review-thread reads; other failures can remain `unclassified`.

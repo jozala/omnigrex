@@ -20,3 +20,5 @@ The agents have separate persistent Agent Sessions and separate GitHub App ident
 You remain responsible for assessing the result and deciding whether to merge it.
 
 [Documentation hub](../README.md)
+
+For ordinary agent questions or new direction during active work, see [clarification and steering](clarification.md).

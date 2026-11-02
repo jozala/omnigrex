@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
@@ -41,13 +42,17 @@ import (
 // Store, Launcher, MCP gateway, capture/publication service and recovery workers.
 func TestPiFailureRecovery(t *testing.T) {
 	for _, mode := range []string{
-		"restart-during-creation", "restart-during-prompt", "lost-transport",
+		"clarification-restart", "restart-during-creation", "restart-during-prompt", "lost-transport",
 		"runtime-exit-137", "resource-exhaustion", "lease-expiry", "mcp-expiry",
 		"cleanup-failure", "post-publication-cleanup", "interrupted-publication-capture", "lost-terminal-mutation-response", "concurrent-turns", "startup-timeout",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPiWorkflowFixture(t, mode)
 			switch mode {
+			case "clarification-restart":
+				f.testClarificationRestart(t, workflow.RoleDeveloper)
+				reviewerFixture := newPiWorkflowFixture(t, mode)
+				reviewerFixture.testClarificationRestart(t, workflow.RoleReviewer)
 			case "post-publication-cleanup":
 				f.testPostPublicationCleanupRecovery(t)
 			case "startup-timeout":
@@ -400,7 +405,7 @@ func (f *piWorkflowFixture) reconcileMutations(t *testing.T) *mcp.RecoveryWorker
 
 func (f *piWorkflowFixture) mutationWorker(t *testing.T) *mcp.RecoveryWorker {
 	t.Helper()
-	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: f.github, Credentials: replayGatewayCredentials{}, Publications: f.workspaces, Policies: builtinStoreConfig(t).Policies})
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: f.github, Credentials: replayGatewayCredentials{}, Publications: f.workspaces, Clarifications: f.database, Policies: builtinStoreConfig(t).Policies})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,4 +718,108 @@ func (f *piWorkflowFixture) testPostPublicationCleanupRecovery(t *testing.T) {
 		t.Fatalf("publication/review replayed: opened=%d reviews=%d", f.github.openCalls, f.github.reviewCalls)
 	}
 	t.Log("POST-PUBLICATION RECOVERY PASS: publish_changes=request_review=acknowledged cleanup=unknown reviewer_before_confirmed_stop=blocked durable_terminal_intent=recovered exact_cleanup=idempotent reviewer_launch=pass external_effect_replay=none")
+}
+
+// Crash after a real Pi completed its prompt and published a question, before
+// execution settlement. No live controller state is reused by recovery.
+func (f *piWorkflowFixture) testClarificationRestart(t *testing.T, role workflow.Role) {
+	if role == workflow.RoleReviewer {
+		f.fault.mode = ""
+		f.prepare(t)
+		if done, err := f.worker.ProcessNext(f.ctx); err != nil || !done {
+			t.Fatal(done, err)
+		}
+		f.assertState(t, workflow.StateReviewing)
+		f.fault.mode = "clarification-restart"
+	}
+	lease, handle, err := f.launch(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := f.prompt(t, lease, handle, nil)
+	if err != nil || !outcome.Admitted || outcome.Status != agent.Completed {
+		t.Fatal(outcome, err)
+	}
+	if err = f.database.CloseMutationAdmissionWithPromptEvidence(f.ctx, lease, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	expireAgentTurnExecution(t, f.pool(t), f.ctx, lease.JobLease.ID, lease.ID)
+	_ = handle.AgentConnection().Close()
+	f.authority.revokeAll()
+	f.database.Close()
+	if err = f.backend.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.database, err = openTimedStore(t, f.ctx, f.databaseURL, f.password, builtinStoreConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.backend, err = composition.NewBackend(f.ctx, f.settings, f.runtime, f.database, f.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.workspaces, err = workspace.New(workspace.Options{WorkspaceRoot: f.settings.WorkspaceRoot, PublicationRoot: filepath.Join(os.Getenv("OMNIGREX_PI_WORKFLOW_ROOT"), "publication"), MiseRoot: f.settings.MiseRoot, CaptureRoot: filepath.Join(f.settings.RuntimeStateRoot, "captures"), CaptureSource: f.backend.Workspaces, CaptureLedger: f.database, GitExecutable: f.git})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler, err := startup.NewReconciler(f.database, f.backend.Recovery, f.backend.Recovery, f.backend.Recovery, startup.ReconcilerOptions{MaxPasses: 10, MaxRuntimeProcesses: 100, MaxRecoveries: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reconciler.Reconcile(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.recover(t, lease, false)
+	f.reconcileMutations(t)
+	outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: f.database, GitHub: f.github, Workspace: f.workspaces, DeveloperCredentials: &integrationCredentialProvider{credential: "developer-token"}, ReviewerCredentials: &integrationCredentialProvider{credential: "reviewer-token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := agentturn.NewTerminalCorroborationWorker(f.database, outcomes, &integrationCredentialProvider{credential: "developer-token"}, &integrationCredentialProvider{credential: "reviewer-token"}, f.workspaces, agentturn.TerminalCorroborationWorkerConfig{ClaimOwner: "clarification-restart", Window: time.Minute, PollInterval: time.Millisecond, LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done, err := terminal.ProcessOne(f.ctx); err != nil || !done {
+		t.Fatal(done, err)
+	}
+	var raw []byte
+	var waiting bool
+	var active, jobs, retries, rounds int
+	if err = f.pool(t).QueryRow(f.ctx, `SELECT c.state,w.clarification_waiting,a.infrastructure_failures,(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind IN ('RUN_AGENT_TURN','PREPARE_AGENT_TURN') AND status IN ('AVAILABLE','LEASED')),(SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$2 AND tool_name='request_clarification') FROM workflows w JOIN work_item_collaboration c ON c.workflow_id=w.id JOIN workflow_attempts a ON a.id=$3 WHERE w.id=$1`, f.workflowID, lease.ID, lease.WorkflowAttemptID).Scan(&raw, &waiting, &retries, &active, &jobs, &rounds); err != nil {
+		t.Fatal(err)
+	}
+	if !waiting || active != 0 || jobs != 0 || retries != 0 || rounds != 1 {
+		t.Fatalf("restart invented retry or publication: waiting=%t active=%d jobs=%d retries=%d publications=%d", waiting, active, jobs, retries, rounds)
+	}
+	if observation, err := f.backend.Cleaner.ObserveKeyExit(f.ctx, f.fault.executions[len(f.fault.executions)-1].key); err != nil || observation.Running {
+		t.Fatalf("Runtime Process retained during wait: %+v %v", observation, err)
+	}
+	if done, err := terminal.ProcessOne(f.ctx); err != nil || done {
+		t.Fatal("duplicate corroboration", done, err)
+	}
+	var state collaboration.State
+	if err = json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Use option one."}, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+	if err != nil || receipt.ResponseID == "" {
+		t.Fatal(receipt, err)
+	}
+	registry, err := profile.NewRegistry(f.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.preparer = agentturn.NewPreparer(agentprofile.NewLoader(workflowQualificationProfiles{head: f.head}, builtinStoreConfig(t).Policies, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"), agentprofile.SingletonSelector{}, registry, f.database)
+	f.preparer.SetReviewGate(&agentturn.ReviewGate{Store: f.database, Source: workflowQualificationProfiles{head: f.head}, Observer: f.github})
+	next := f.prepare(t)
+	var config struct {
+		Input []collaboration.Input `json:"human_input"`
+	}
+	if err = json.Unmarshal(next.Commit.Turn.TurnConfiguration, &config); err != nil {
+		t.Fatal(err)
+	}
+	if next.Commit.Participant.ID != lease.AgentParticipantID || next.Commit.Session.ID != lease.AgentSessionID || next.Commit.Turn.WorkflowAttemptID != lease.WorkflowAttemptID || len(config.Input) != 1 || config.Input[0].ID != receipt.ResponseID {
+		t.Fatalf("recovered response lost retained ownership: %+v %+v", next, config)
+	}
+	t.Logf("%s: recovered published clarification waits without retry or Runtime Process; only the human reply schedules retained-Session continuation", role)
 }

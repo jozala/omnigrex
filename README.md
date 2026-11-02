@@ -17,6 +17,7 @@ GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human review
 - Repository-owned Agent Profiles, model selection, skills, and development environments.
 - Separate GitHub Apps for development and independent native reviews.
 - Persistent Agent Sessions across disposable execution environments.
+- Durable human clarification and explicitly addressed answers, amendments, and steering on the Work Item Issue.
 - Bounded retries and Review Cycles, with explicit Human Handoff when automation cannot continue.
 - Durable controller-side CI completion waits before review, with repository-owned immediate-review and expected-check policy.
 - Docker or Linux/KVM Microsandbox execution, with a Docker Compose control plane and PostgreSQL ledger.
