@@ -167,6 +167,37 @@ func TestAppScopePermissionExpiryAndRevocation(t *testing.T) {
 		})
 	}
 }
+func TestHTTPAPIDownloadMediaTypes(t *testing.T) {
+	for _, tc := range []struct{ name, path, accept string }{
+		{"Actions artifact", "actions/artifacts/1/zip", "application/vnd.github+json"},
+		{"Release asset", "releases/assets/1", "application/octet-stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const payload = "downloaded\x00bytes"
+			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "" {
+					t.Error("credential forwarded to download host")
+				}
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write([]byte(payload))
+			}))
+			defer destination.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Accept") != tc.accept {
+					http.Error(w, "unsupported Accept header", http.StatusUnsupportedMediaType)
+					return
+				}
+				http.Redirect(w, r, destination.URL+"/download", http.StatusFound)
+			}))
+			defer server.Close()
+			api := httpAPI{token: "workflow-fixture", baseURL: server.URL, client: releaseHTTPClient()}
+			b, e := api.call(context.Background(), "GET", endpoint(tc.path), nil)
+			if e != nil || string(b) != payload {
+				t.Fatalf("download: %q %v", b, e)
+			}
+		})
+	}
+}
 func TestHTTPAPIErrorsAndAssetRedirectsDoNotExposeCredentials(t *testing.T) {
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
