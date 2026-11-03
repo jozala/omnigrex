@@ -63,7 +63,7 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 			}
 			assertHead(mcp.ToolGetPullRequest, first, map[string]any{})
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
-			if handoffs.head != first || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != lease.WorkflowID {
+			if handoffs.head != first || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
 				t.Fatalf("handoff target: %+v", handoffs)
 			}
 			// Duplicate mutation delivery must not duplicate read evidence or move its target.
@@ -73,7 +73,7 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 			assertHead(mcp.ToolGetCheckRuns, final, map[string]any{})
 			assertHead(mcp.ToolGetPullRequest, final, map[string]any{})
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
-			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != lease.WorkflowID {
+			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
 				t.Fatalf("handoff target: %+v", handoffs)
 			}
 			// A new backend and registration must reconstruct reads from PostgreSQL,
@@ -84,7 +84,7 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 			gateway, registration = openReplayGateway(t, database, newBackend(), scope)
 			assertHead(mcp.ToolGetPullRequest, final, map[string]any{})
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
-			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != lease.WorkflowID {
+			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
 				t.Fatalf("handoff target: %+v", handoffs)
 			}
 			assertHead(mcp.ToolGetCheckRuns, final, map[string]any{})
