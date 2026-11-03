@@ -177,7 +177,7 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		profile, ok = snapshot.Profile(agentprofile.Name(bindings.Participant.AgentProfileName))
 		ok = ok && profile.Role() == bindings.Role
 	} else {
-		selection, selectionErr := snapshot.Select(preparer.selector)
+		selection, selectionErr := snapshot.SelectRole(preparer.selector, bindings.Role)
 		if selectionErr != nil {
 			return Result{}, fmt.Errorf("select Agent Profiles: %w", selectionErr)
 		}

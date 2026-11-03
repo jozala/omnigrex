@@ -147,6 +147,36 @@ func (snapshot Snapshot) Select(selector Selector) (Selection, error) {
 	return selector.Select(snapshot.catalog, snapshot.policies)
 }
 
+// SelectRole applies selection only to the Stage being prepared. Optional planning
+// configuration must not become a prerequisite for direct development.
+func (snapshot Snapshot) SelectRole(selector Selector, roleID role.ID) (Selection, error) {
+	if selector == nil {
+		return Selection{}, ErrInvalidSelection
+	}
+	policy, ok := snapshot.policies.Lookup(roleID)
+	if !ok {
+		return Selection{}, fmt.Errorf("%w: no policy for Role %s", ErrInvalidSelection, roleID)
+	}
+	identities := []Identity{}
+	for _, identity := range snapshot.catalog.Identities() {
+		if identity.Role == roleID {
+			identities = append(identities, identity)
+		}
+	}
+	if len(identities) == 0 {
+		return Selection{}, fmt.Errorf("%w: add a %s Agent Profile under .omnigrex/team/ before invoking this Role", ErrInvalidSelection, roleID)
+	}
+	catalog, err := NewCatalog(identities)
+	if err != nil {
+		return Selection{}, err
+	}
+	policies, err := role.NewPolicyCatalog([]role.ID{roleID}, []role.Policy{policy})
+	if err != nil {
+		return Selection{}, err
+	}
+	return selector.Select(catalog, policies)
+}
+
 func validObjectID(value string) bool {
 	if len(value) != 40 && len(value) != 64 {
 		return false

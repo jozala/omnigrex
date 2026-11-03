@@ -210,3 +210,56 @@ func TestLoaderStopsOnSourceFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestStageSelectionDoesNotRequireOptionalPlanner(t *testing.T) {
+	policies, err := role.NewBuiltinPolicyCatalog([]role.ID{role.Developer, role.Reviewer, role.Planner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeSource{commitSHA: strings.Repeat("a", 40), paths: []string{".omnigrex/team/dev.md", ".omnigrex/team/review.md"}, contents: map[string][]byte{
+		".omnigrex/team/dev.md":    validProfileContent("developer", role.Developer, "provider/model", "Implement."),
+		".omnigrex/team/review.md": validProfileContent("reviewer", role.Reviewer, "provider/model", "Review."),
+	}}
+	load := func() agentprofile.Snapshot {
+		t.Helper()
+		s, err := agentprofile.NewLoader(source, policies).Load(context.Background(), "credential", "owner", "repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	snapshot := load()
+	for _, roleID := range []role.ID{role.Developer, role.Reviewer} {
+		selection, err := snapshot.SelectRole(agentprofile.SingletonSelector{}, roleID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := selection.Profile(roleID); !ok {
+			t.Fatal("current Role not selected")
+		}
+		if _, ok := selection.Profile(role.Planner); ok {
+			t.Fatal("optional planning selected")
+		}
+	}
+	if _, err := snapshot.SelectRole(agentprofile.SingletonSelector{}, role.Planner); !errors.Is(err, agentprofile.ErrInvalidSelection) || !strings.Contains(err.Error(), ".omnigrex/team/") {
+		t.Fatalf("missing actionable Planner feedback: %v", err)
+	}
+	source.paths = append(source.paths, ".omnigrex/team/planner.md")
+	source.contents[".omnigrex/team/planner.md"] = validProfileContent("planner", role.Planner, "provider/model", "Plan.")
+	selection, err := load().SelectRole(agentprofile.SingletonSelector{}, role.Planner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, ok := selection.Profile(role.Planner); !ok || name != "planner" {
+		t.Fatal(selection)
+	}
+	source.paths = append(source.paths, ".omnigrex/team/alternate.md")
+	source.contents[".omnigrex/team/alternate.md"] = validProfileContent("alternate", role.Planner, "provider/model", "Plan.")
+	snapshot = load()
+	if _, err := snapshot.SelectRole(agentprofile.SingletonSelector{}, role.Planner); !errors.Is(err, agentprofile.ErrInvalidSelection) {
+		t.Fatal("ambiguous Planner accepted", err)
+	}
+	if _, err := snapshot.SelectRole(agentprofile.SingletonSelector{}, role.Developer); err != nil {
+		t.Fatal("ambiguous optional Planner broke development", err)
+	}
+}
