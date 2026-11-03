@@ -126,7 +126,7 @@ func TestAgentBudgetMetrics(t *testing.T) {
 }
 func TestBudgetSeriesBudgetAndFiltering(t *testing.T) {
 	reader := budgetReader(t)
-	for _, role := range []string{"DEVELOPER", "REVIEWER", "private-profile"} {
+	for _, role := range []string{"DEVELOPER", "REVIEWER", "PLANNER", "private-profile"} {
 		for _, termination := range []string{"completed", "failed", "cancelled", "transport", "private-error"} {
 			for _, limit := range []string{"1", "unlimited", ""} {
 				for _, complete := range []bool{false, true} {
@@ -171,9 +171,9 @@ func TestBudgetSeriesBudgetAndFiltering(t *testing.T) {
 			}
 		}
 	}
-	// 105 coverage + 156 usage + 39 limit + 54 ratio + 6 pressure/handoff.
-	if series != 360 {
-		t.Fatalf("budget series=%d want 360", series)
+	// 140 coverage + 208 usage + 52 limit + 72 ratio + 8 pressure/handoff.
+	if series != 480 {
+		t.Fatalf("budget series=%d want 480", series)
 	}
 }
 func TestBudgetReplayInvalidAndDisabled(t *testing.T) {

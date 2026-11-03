@@ -154,7 +154,7 @@ func TestDurableObservationFailureOmitsGaugesAndRecovers(t *testing.T) {
 		if fail {
 			return DurableState{}, errors.New("secret-database-error")
 		}
-		return DurableState{ActiveTurns: 2, OldestUnresolvedSeconds: -1}, nil
+		return DurableState{Workflows: map[string]int64{"PLANNING": 3, "PLAN_READY": 4}, ActiveTurns: 2, OldestUnresolvedSeconds: -1}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,11 +167,18 @@ func TestDurableObservationFailureOmitsGaugesAndRecovers(t *testing.T) {
 			t.Fatal(err)
 		}
 		gauges := 0
+		planning := map[string]int64{}
 		for _, scope := range data.ScopeMetrics {
 			for _, instrument := range scope.Metrics {
 				switch value := instrument.Data.(type) {
 				case metricdata.Gauge[int64]:
 					gauges += len(value.DataPoints)
+					if instrument.Name == "omnigrex.workflow.count" {
+						for _, p := range value.DataPoints {
+							v, _ := p.Attributes.Value("state")
+							planning[v.AsString()] = p.Value
+						}
+					}
 				case metricdata.Gauge[float64]:
 					gauges += len(value.DataPoints)
 					for _, point := range value.DataPoints {
@@ -186,7 +193,10 @@ func TestDurableObservationFailureOmitsGaugesAndRecovers(t *testing.T) {
 				}
 			}
 		}
-		if failed && gauges != 0 || !failed && gauges != 26 {
+		if !failed && (planning["PLANNING"] != 3 || planning["PLAN_READY"] != 4) {
+			t.Fatalf("planning counts lost: %v", planning)
+		}
+		if failed && gauges != 0 || !failed && gauges != 28 {
 			t.Fatalf("gauges=%d after failure=%v", gauges, failed)
 		}
 	}
@@ -244,9 +254,9 @@ func TestApplicationMetricSeriesBudgetAndAttributeAllowlist(t *testing.T) {
 			}
 		}
 	}
-	// Classic translation: 104 histogram + 40 attempts + 26 gauges + 1 failures.
-	if series != 171 {
-		t.Fatalf("application series=%d, want 171 before backend metadata", series)
+	// Classic translation: 104 histogram + 40 attempts + 28 gauges + 1 failures.
+	if series != 173 {
+		t.Fatalf("application series=%d, want 173 before backend metadata", series)
 	}
 }
 

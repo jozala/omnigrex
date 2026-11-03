@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -154,4 +155,70 @@ func TestRequiredCIAppPolicyPreflightEquality(t *testing.T) {
 	if !sameStringMap(reviewer, githubapi.InstallationPermissions{"metadata": "read", "contents": "read", "pull_requests": "write"}) {
 		t.Fatalf("native Reviewer authority expanded: %v", reviewer)
 	}
+}
+
+// Profile discovery is shared with production preflight; no optional Planner
+// configuration may be required to validate direct-development credentials.
+func TestEffectiveProfilesWithoutOptionalPlanner(t *testing.T) {
+	for _, planner := range []bool{false, true} {
+		t.Run(fmt.Sprint(planner), func(t *testing.T) {
+			state := productionState{settings: config.Config{PiImage: "registry.example/pi@sha256:" + strings.Repeat("a", 64), PiPlatform: runtimeprofile.Platform{OS: "linux", Arch: "amd64"}}, operatorInstructionsLoaded: true}
+			if err := state.checkRuntimeProfile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := agentprofile.NewLoader(doctorProfileSource{planner}, role.BuiltinPolicyCatalog()).Load(context.Background(), "", "fixture", "repository")
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.profiles = snapshot
+			state.profileSelection, err = snapshot.Select(agentprofile.SingletonSelector{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.profilesLoaded = true
+			state.settings.ProviderCredentialsFile = filepath.Join(t.TempDir(), "credentials.json")
+			if err := os.WriteFile(state.settings.ProviderCredentialsFile, []byte(`{"openai":{"type":"api_key","key":"fixture-only"},"anthropic":{"type":"api_key","key":"fixture-only"}}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := state.checkEffectiveProfiles(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !state.effectiveProfilesLoaded {
+				t.Fatal("effective profiles not admitted")
+			}
+			// A configured Planner must still be checked, not ignored as optional.
+			if planner {
+				if err := os.WriteFile(state.settings.ProviderCredentialsFile, []byte(`{"openai":{"type":"api_key","key":"fixture-only"}}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := state.checkEffectiveProfiles(context.Background()); err == nil || !strings.Contains(err.Error(), "PLANNER") {
+					t.Fatalf("Planner credential check missing: %v", err)
+				}
+			}
+		})
+	}
+}
+
+type doctorProfileSource struct{ planner bool }
+
+func (doctorProfileSource) ResolveDefaultBranchCommit(context.Context, string, string, string) (string, error) {
+	return strings.Repeat("a", 40), nil
+}
+func (s doctorProfileSource) ListRepositoryDirectoryFiles(_ context.Context, _, _, _, path, _ string) ([]string, error) {
+	if path != ".omnigrex/team" {
+		return []string{}, nil
+	}
+	paths := []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md"}
+	if s.planner {
+		paths = append(paths, ".omnigrex/team/planner.md")
+	}
+	return paths, nil
+}
+func (doctorProfileSource) FetchRepositoryFile(_ context.Context, _, _, _, path, _ string) ([]byte, error) {
+	name := strings.TrimSuffix(filepath.Base(path), ".md")
+	model := "openai/gpt-4o-mini"
+	if name == "planner" {
+		model = "anthropic/claude-sonnet-4-5"
+	}
+	return []byte(fmt.Sprintf("---\nname: %s\nrole: %s\nruntime: pi-rpc/v2\nmodel: %s\npermissions:\n  read: allow\n---\nRepository preferences.\n", name, strings.ToUpper(name), model)), nil
 }

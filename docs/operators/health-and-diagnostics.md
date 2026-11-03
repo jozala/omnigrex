@@ -57,7 +57,7 @@ Verify actual repository build/tests in controlled work and real ingress through
 
 ## Label provisioning
 
-Developer App access asynchronously provisions five managed labels, creating missing names while preserving existing colors/descriptions and unrelated labels.
+Developer App access asynchronously provisions eight managed labels, creating missing names while preserving existing colors/descriptions and unrelated labels.
 It applies no Workflow state and starts no work.
 Installation-created deliveries enumerate all accessible repositories via paginated installation-token requests, bounded to 100 pages of 100 repositories.
 Explicit additions and repositories created under all-repository access also queue provisioning.

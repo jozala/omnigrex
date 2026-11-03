@@ -30,7 +30,7 @@ Only the listed attributes are exported; resource metadata is additional.
 
 | Instrument | Kind / unit | Attributes | Semantics |
 | --- | --- | --- | --- |
-| `omnigrex.workflow.count` | Observable gauge / Workflows | `state` | All retained Workflow rows in each of the seven persisted domain states, including `NEEDS_HUMAN`, `PR_READY`, and `CLOSED`. |
+| `omnigrex.workflow.count` | Observable gauge / Workflows | `state` | All retained Workflow rows in each of the nine persisted domain states, including `PLANNING`, `PLAN_READY`, `NEEDS_HUMAN`, `PR_READY`, and `CLOSED`. |
 | `omnigrex.agent_turn.active` | Observable gauge / turns | None | Turns in `STARTING`, `RUNNING`, `CANCELLING`, `SETTLING`, `RECONCILING`, or `CORROBORATING`; excludes queued and terminal turns. |
 | `omnigrex.work.pending` | Observable gauge / items | `queue_category` | Due, durably unleased, domain-eligible work in the table below. |
 | `omnigrex.work.oldest_pending_age` | Observable gauge / seconds | `queue_category` | Time since the oldest eligible item's availability; zero when empty. |
@@ -87,11 +87,11 @@ For one resource identity and classic histogram translation:
 | --- | ---: |
 | 8 operations × 5 outcomes | 40 |
 | 8 histograms × (10 finite buckets + infinity bucket + sum + count) | 104 |
-| 7 Workflow states | 7 |
+| 9 Workflow states | 9 |
 | 8 pending categories × count and age | 16 |
 | Active turns and two unresolved-mutation gauges | 3 |
 | Observation failures | 1 |
-| **Application subtotal** | **171** |
+| **Application subtotal** | **173** |
 
 The calculation includes all possible outcome combinations even though attempt series appear only after observation.
 Durable categories and the observation-failure counter emit zeros when healthy and empty.
@@ -141,7 +141,7 @@ The owned budget module remains the only iteration counter; failed/cancelled req
 | `omnigrex.agent_turn.budget_summary` | Counter / `{turn}` | `role` | Summary-only entry, independent of completion verdict. |
 | `omnigrex.agent_turn.budget_handoffs` | Counter / `{turn}` | `role` | Successfully settled incomplete-work step-budget Human Handoffs. |
 
-Role is `DEVELOPER`, `REVIEWER`, or `unknown`, never a Profile name.
+Role is `DEVELOPER`, `REVIEWER`, `PLANNER`, or `unknown`, never a Profile name.
 Budget mode is `finite`, `unlimited`, or `unknown`; completeness is `complete`, `partial`, or `unknown`.
 Unknown usage produces a coverage counter but no synthetic zero usage or ratio; known finite configuration can still produce a ceiling value.
 Unlimited budgets expose actual usage without a fabricated ceiling or utilization.
@@ -176,9 +176,9 @@ Abrupt controller death, exporter failure, and uncertain settlement acknowledgem
 
 ### Extended series budget
 
-The earlier 171-series subtotal remains the non-budget baseline.
-This extension adds at most 360 classic series per resource: 105 coverage categories (3 Roles × 7 mode/completeness combinations × 5 terminations), 156 usage series (12 combinations × 13), 39 finite-ceiling series (3 × 13), 54 ratio series (6 × 9), and 6 summary/handoff counters.
+The 173-series subtotal remains the non-budget baseline.
+This extension adds at most 480 classic series per resource: 140 coverage categories (4 Role categories × 7 mode/completeness combinations × 5 terminations), 208 usage series (16 combinations × 13), 52 finite-ceiling series (4 × 13), 72 ratio series (8 × 9), and 8 summary/handoff counters.
 The seven coverage combinations are finite/unlimited with complete/partial/unknown usage, plus unknown mode and unknown usage.
-The application subtotal is now **531**, replacing the earlier 200-series target with a **600-series target**, allowing 69 backend metadata series.
+The application subtotal is now **653**, replacing the earlier 200-series target with a **750-series target**, allowing 97 backend metadata series.
 Termination is deliberately excluded from histogram dimensions; compare ending-category counts and correlated logs rather than individually joining aggregate histogram samples.
 Resource identity churn still multiplies retained backend series.

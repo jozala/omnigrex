@@ -16,7 +16,7 @@ const ObservationTimeout = 5 * time.Second
 
 // These stable allowlists are shared with the read-only aggregate observer.
 // Adding a category requires updating the series budget and operator contract.
-var workflowStates = [...]string{"DORMANT", "DEVELOPING", "REVIEWING", "PR_READY", "NEEDS_HUMAN", "CLOSING", "CLOSED"}
+var workflowStates = [...]string{"DORMANT", "PLANNING", "PLAN_READY", "DEVELOPING", "REVIEWING", "PR_READY", "NEEDS_HUMAN", "CLOSING", "CLOSED"}
 var queueCategories = [...]string{"preparation", "execution", "runtime_cleanup", "mutation_recovery", "corroboration", "webhooks", "historical_events", "label_provisioning"}
 var operationNames = [...]OperationName{AgentTurnPrepare, AgentTurnExecute, RuntimeProcessLaunch, AgentTurnReconcileOutcome, MCPToolExecute, WebhookProcess, MutationRecover, RuntimeProcessCleanup}
 var durationBuckets = []float64{0.1, 0.5, 1, 5, 15, 60, 300, 900, 3600, 7200}

@@ -32,7 +32,7 @@ func NewAgentTurnObserver(role string, configured *stepbudget.Limit, downstream 
 }
 func budgetRole(role string) string {
 	switch role {
-	case "DEVELOPER", "REVIEWER":
+	case "DEVELOPER", "REVIEWER", "PLANNER":
 		return role
 	default:
 		return "unknown"

@@ -103,7 +103,7 @@ func (state *productionState) checkOpenAISubscription(ctx context.Context) error
 		return errors.New("Agent Profile check did not pass")
 	}
 	selected := false
-	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+	for _, roleID := range state.profileSelection.Roles() {
 		name, ok := state.profileSelection.Profile(roleID)
 		p, found := state.profiles.Profile(name)
 		if ok && found && strings.HasPrefix(p.Model(), "openai/") {
@@ -480,7 +480,7 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 	}
 	state.profiles = snapshot
 	state.profileSelection = selection
-	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+	for _, roleID := range state.profileSelection.Roles() {
 		name, _ := selection.Profile(roleID)
 		p, _ := snapshot.Profile(name)
 		selected, err := state.repositoryRuntime(p)
@@ -533,7 +533,7 @@ func (state *productionState) checkEffectiveProfiles(context.Context) error {
 		return errors.New("provider credentials are unavailable")
 	}
 	defer zero(credentials)
-	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+	for _, roleID := range state.profileSelection.Roles() {
 		name, selected := state.profileSelection.Profile(roleID)
 		profile, ok := state.profiles.Profile(name)
 		if !selected || !ok {
@@ -555,7 +555,7 @@ func (state *productionState) checkEffectiveRuntimes(ctx context.Context) error 
 	if err != nil || endpoint.Hostname() == "" {
 		return errors.New("configured MCP endpoint does not have a host")
 	}
-	for _, roleID := range role.BuiltinPolicyCatalog().Roles() {
+	for _, roleID := range state.profileSelection.Roles() {
 		name, _ := state.profileSelection.Profile(roleID)
 		p, _ := state.profiles.Profile(name)
 		selected, err := state.repositoryRuntime(p)

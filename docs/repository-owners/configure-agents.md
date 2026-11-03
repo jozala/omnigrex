@@ -4,10 +4,12 @@
 
 ## Create the team files
 
-Publish one Profile for each Workflow Role as a direct lowercase `*.md` child of `.omnigrex/team/` on the default branch.
-The initial Workflow uses `DEVELOPER` and `REVIEWER`.
+Publish one Profile for each invoked Workflow Role as a direct lowercase `*.md` child of `.omnigrex/team/` on the default branch.
+Direct development uses `DEVELOPER` and `REVIEWER`; planning uses `PLANNER`.
+A Planner Profile is required only when invoking [planning](../users/planning.md), not for the direct-development path.
 The filename is arbitrary; front matter defines Profile identity and Role.
-The current selector requires exactly one discovered Profile per Workflow Role and rejects additional Profiles for that Role.
+Stage preparation requires exactly one discovered Profile for the current Role and rejects ambiguous selection for that Role.
+Doctor validates the configured Profiles and requires Developer/Reviewer Profiles, but permits an absent optional Planner Profile.
 
 A Developer Profile can start with:
 
