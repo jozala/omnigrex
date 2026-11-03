@@ -1087,6 +1087,10 @@ func prepareOpenSettlementTurn(t *testing.T, database *store.Store, pool *pgxpoo
 	fixture := seedAgentSessionForRole(t, pool, number, role)
 	state := workflow.StateDeveloping
 	stage := workflow.StageImplementation
+	if role == workflow.RolePlanner {
+		state = workflow.StatePlanning
+		stage = workflow.StagePlanning
+	}
 	if role == workflow.RoleReviewer {
 		state = workflow.StateReviewing
 		stage = workflow.StageReview
@@ -1101,6 +1105,11 @@ WHERE id = $1`, fixture.workflowID, state); err != nil {
 UPDATE workflow_attempts SET infrastructure_failure_limit = 1,
 	    current_stage = $2 WHERE id = $1`, fixture.attemptID, stage); err != nil {
 		t.Fatal(err)
+	}
+	if role == workflow.RolePlanner {
+		if _, err := pool.Exec(ctx, `UPDATE workflows SET planning_only=true WHERE id=$1`, fixture.workflowID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var proposal *store.AgentTurnSettlementChangeProposal
 	proposalRowID := ""
@@ -1134,6 +1143,11 @@ VALUES ($1, $2, $3, 'owner', 'repo', $4, $5, $6, 'OPEN', TRUE,
 		spec.Stage = workflow.StageReview
 		spec.Purpose = workflow.TurnPurposeReview
 		spec.AgentProfileConfig = agentProfileConfig("reviewer", workflow.RoleReviewer, "pi-rpc/v2", "provider/test", "", 0, "Review test instructions.", nil)
+	}
+	if role == workflow.RolePlanner {
+		spec.Stage = workflow.StagePlanning
+		spec.Purpose = workflow.TurnPurposeInitialPlanning
+		spec.AgentProfileConfig = agentProfileConfig("planner", workflow.RolePlanner, "pi-rpc/v2", "provider/test", "", 0, "Plan only.", nil)
 	}
 	if proposalRowID != "" {
 		spec.ChangeProposalID = proposalRowID

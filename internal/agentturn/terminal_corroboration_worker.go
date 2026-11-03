@@ -142,7 +142,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	}
 	role := pending.Execution.Participant.Role
 	switch role {
-	case workflow.RoleDeveloper, workflow.RoleReviewer:
+	case workflow.RolePlanner, workflow.RoleDeveloper, workflow.RoleReviewer:
 	default:
 		return true, worker.handoff(ctx, *lease, workflow.ReasonTerminalCorroborationPrerequisite, "invalid_configuration")
 	}
@@ -153,7 +153,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 	if lease.Kind == store.RevalidateTerminalIntentJobKind && worker.pullRequests != nil && pending.Execution.ChangeProposal != nil {
 		var credential string
 		switch role {
-		case workflow.RoleDeveloper:
+		case workflow.RolePlanner, workflow.RoleDeveloper:
 			credential, err = worker.developer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
 		case workflow.RoleReviewer:
 			credential, err = worker.reviewer.RepositoryCredential(ctx, pending.Execution.Repository.Owner, pending.Execution.Repository.Name)
@@ -228,7 +228,7 @@ func (worker *TerminalCorroborationWorker) ProcessOne(ctx context.Context) (proc
 		return true, worker.retryOrHandoff(ctx, *lease, pending.Checkpoint, remaining, *failure)
 	}
 	switch observation.Outcome {
-	case workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeChangeProposalReady, workflow.TurnOutcomeChangesRequested, workflow.TurnOutcomeApproved:
+	case workflow.TurnOutcomePlanningReady, workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeChangeProposalReady, workflow.TurnOutcomeChangesRequested, workflow.TurnOutcomeApproved:
 		if lease.Kind == store.RevalidateTerminalIntentJobKind {
 			err = worker.store.SettleTerminalRevalidation(ctx, *lease, pending.WorkflowRevision, observation)
 		} else {

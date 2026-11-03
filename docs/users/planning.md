@@ -25,7 +25,9 @@ Routine reversible details remain within the Planner's existing authority.
 After meaningful changes, the Planner publishes one readable Issue comment containing a **requirements brief** and a **technical plan**.
 Each complete pair has one immutable revision ID; a new revision supersedes the earlier pair even when only one part changes.
 Drafts distinguish confirmed decisions, assumptions/proposals and unresolved questions.
-The evidence/history section retains repository references, the investigated commit, discovery version, original request and selected accepted input with provenance.
+The evidence/history section shows repository references, the investigated commit, discovery version and bounded, escaped provenance references to the original request and selected accepted input.
+Complete source text stays unchanged in durable collaboration history rather than being copied verbatim into every comment.
+The view explicitly identifies shortened references or additional inputs; full records remain available through `get_collaboration_record` (`planning_request` / `planning_history`) and their original GitHub sources.
 Earlier revisions and the full accepted discussion remain accessible through bounded collaboration retrieval.
 Publication retries reconcile exact operation-marked artifacts rather than posting duplicates; oversized artifacts are rejected, never silently truncated.
 

@@ -1141,3 +1141,56 @@ func TestNormalHandoffDiagnosticsRequireExactRevisionAndExcludeSafetyJobs(t *tes
 		t.Fatalf("missing current explanation = (%#v, %v)", current, err)
 	}
 }
+
+func TestPlanningReadyFinalLabelFailureDrainsEscalation(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSessionForRole(t, pool, 1050, workflow.RolePlanner)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET status = 'PLAN_READY', planning_only=true, state_revision = 2,
+    desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1, current_stage = 'planning' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	jobID := insertJob(t, pool, ctx, jobSeed{
+		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
+		Payload: json.RawMessage(`{"state":"PLAN_READY","revision":2}`), MaxAttempts: 1,
+		IdempotencyKey: "label-final-expiry-50", WorkflowID: fixture.workflowID,
+	})
+	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "crashing-label-worker", 25*time.Millisecond)
+	if err != nil || lease == nil || lease.ID != jobID {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v)", lease, err)
+	}
+	time.Sleep(35 * time.Millisecond)
+	if reclaimed, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "replacement-label-worker", time.Second); err != nil || reclaimed != nil {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() after final expiry = (%#v, %v), want (nil, nil)", reclaimed, err)
+	}
+	escalation, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second)
+	if err != nil || escalation == nil || !escalation.HandoffApplied || escalation.WorkflowRevision != 3 {
+		t.Fatalf("ApplyNextWorkflowActionFailureEscalation() = (%#v, %v)", escalation, err)
+	}
+	var state, assignmentStatus, sourceStatus string
+	var revision, derived int
+	if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.state_revision, workflow.desired_assignment_status, source.status,
+       (SELECT count(*) FROM jobs WHERE workflow_id = workflow.id
+           AND kind IN ('PUBLISH_HUMAN_HANDOFF', 'RECONCILE_GITHUB_LABELS') AND id <> source.id)
+FROM workflows AS workflow JOIN jobs AS source ON source.id = $2
+WHERE workflow.id = $1`, fixture.workflowID, jobID).Scan(&state, &revision, &assignmentStatus, &sourceStatus, &derived); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(workflow.StateNeedsHuman) || revision != 3 || assignmentStatus != string(workflow.AssignmentWaitingForHuman) || sourceStatus != string(store.JobFailed) || derived != 2 {
+		t.Errorf("final expiry = Workflow %s@%d assignment %s source %s derived %d", state, revision, assignmentStatus, sourceStatus, derived)
+	}
+	if next, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second); err != nil || next != nil {
+		t.Fatal("escalation remained pending", next, err)
+	}
+	var successors int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id=$1 AND kind='PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil || successors != 0 {
+		t.Fatal("implementation allocated", successors, err)
+	}
+}

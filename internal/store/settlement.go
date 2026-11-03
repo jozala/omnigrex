@@ -431,7 +431,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
 	if reducer.DefinitionCompatible(snapshot) && continuation == recoveryContinuationPendingInfrastructure &&
-		(snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing) {
+		(snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing) {
 		executionJob, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, identity.ExecutionJobID))
 		if err != nil || executionJob.Kind != RunAgentTurnJobKind || executionJob.AgentTurnID != turn.ID ||
 			executionJob.ExecutionEpoch != turn.ExecutionEpoch || executionJob.WorkflowID != authority.WorkflowID ||

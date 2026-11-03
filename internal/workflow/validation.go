@@ -281,7 +281,7 @@ func legalInState(state State, kind EventKind) bool {
 	case EventKindAgentTurnMutationReconciliationExhausted:
 		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindWorkflowActionExhausted:
-		return state == StatePlanning || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
+		return state == StatePlanReady || state == StatePlanning || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	default:
 		return false
 	}

@@ -3,6 +3,7 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/mcp"
 	"github.com/jozala/omnigrex/internal/role"
@@ -76,5 +77,61 @@ func TestPlanningCheckpointLostResponseUsesExactPairWithoutRepost(t *testing.T) 
 		if !strings.Contains(api.posted.Body, want) {
 			t.Fatal("presentation missing", want)
 		}
+	}
+}
+
+type planningCompletionLedger struct {
+	clarificationLedger
+	validation collaboration.PlanRevalidation
+	calls      int
+	err        error
+}
+
+func (f *planningCompletionLedger) CompletePlanning(_ context.Context, _ store.AgentTurnLease, op, revision, commit, evidence string, _ bool) error {
+	f.calls++
+	if f.err != nil {
+		return f.err
+	}
+	f.validation = collaboration.PlanRevalidation{SourceInvocationID: op, RevisionID: revision, RepositoryCommit: commit, Evidence: evidence, ParticipantID: reconciliationContext().Turn.AgentParticipantID}
+	return errors.New("commit acknowledgment lost")
+}
+func (f *planningCompletionLedger) GetPlanningValidation(context.Context, string, string) (collaboration.PlanRevalidation, error) {
+	return f.validation, nil
+}
+func TestPlanningCompletionLostAcknowledgmentReconcilesWithoutReapplying(t *testing.T) {
+	ledger := &planningCompletionLedger{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "fixture"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(role.Planner)
+	scope.PullRequest = nil
+	request := json.RawMessage(`{"operation_id":"complete","revision_id":"P1","repository_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","evidence":"Only documentation changed.","material_decisions_resolved":true}`)
+	_, err = backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolCompletePlanning, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
+	if !mcp.IsOutcomeUnknown(err) {
+		t.Fatalf("committed effect classified as definite failure: %v", err)
+	}
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{developer: "fixture"}, Publications: &reconciliationPublications{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery := reconciliationContext()
+	recovery.Role = role.Planner
+	mutation := reconciliationMutation(mcp.ToolCompletePlanning, string(request))
+	mutation.ExternalService = "omnigrex"
+	mutation.ExternalResourceID = recovery.WorkflowID
+	for range 2 {
+		result, err := reconciler.Reconcile(t.Context(), recovery, mutation)
+		if err != nil || result.Disposition != mcp.ReconciliationFound {
+			t.Fatal(result, err)
+		}
+	}
+	if ledger.calls != 1 {
+		t.Fatal("completion reapplied", ledger.calls)
+	}
+	ledger.err = collaboration.ErrInvalid
+	_, err = backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolCompletePlanning, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
+	if !errors.Is(err, mcp.ErrInvalidInvocation) || mcp.IsOutcomeUnknown(err) {
+		t.Fatal("invalid completion not definite", err)
 	}
 }

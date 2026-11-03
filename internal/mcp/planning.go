@@ -112,7 +112,7 @@ func (backend *ProductionBackend) completePlanning(ctx context.Context, in Invoc
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}
-		return nil, err
+		return nil, OutcomeUnknown(err)
 	}
 	return json.Marshal(map[string]any{"outcome": "PLANNING_READY", "revision_id": args.RevisionID, "repository_commit": args.Commit})
 }

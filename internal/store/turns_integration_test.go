@@ -2052,6 +2052,9 @@ VALUES ($1, $2, 1, 'ACTIVE')`, fixture.attemptID, fixture.workflowID)
 		t.Fatalf("seed workflow attempt: %v", err)
 	}
 	profileName := "developer"
+	if participantRole == workflow.RolePlanner {
+		profileName = "planner"
+	}
 	if participantRole == workflow.RoleReviewer {
 		profileName = "reviewer"
 	}
