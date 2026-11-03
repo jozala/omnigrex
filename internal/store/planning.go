@@ -146,3 +146,21 @@ func (s *Store) IsAwaitingPlanConfirmation(ctx context.Context, workflowID, part
 	}
 	return state.AwaitingPlanConfirmation(participant), nil
 }
+
+type PlanningActivationState struct {
+	Exists, PlanningOnly bool
+	State                string
+}
+
+func (s *Store) GetPlanningActivationState(ctx context.Context, repositoryID, issueID, issueNumber int64) (PlanningActivationState, error) {
+	var state PlanningActivationState
+	err := s.pool.QueryRow(ctx, `SELECT planning_only,status FROM workflows WHERE repository_id=$1 AND issue_id=$2 AND issue_number=$3`, repositoryID, issueID, issueNumber).Scan(&state.PlanningOnly, &state.State)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	state.Exists = true
+	return state, nil
+}

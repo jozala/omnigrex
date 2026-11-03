@@ -29,7 +29,7 @@ func ParseCollaborationCommand(event, action, body string) (collaboration.Comman
 		if len(fields) == 2 && fields[1] == "steer" {
 			command.Kind = "steer"
 		}
-		if len(fields) == 3 && (fields[1] == "answer" || fields[1] == "amend") {
+		if len(fields) == 3 && (fields[1] == "answer" || fields[1] == "amend" || fields[1] == "confirm-plan") {
 			command.Kind = fields[1]
 			command.Target = fields[2]
 		}

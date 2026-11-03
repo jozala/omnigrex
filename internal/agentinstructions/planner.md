@@ -56,6 +56,9 @@ Do not silently truncate content to fit publication limits.
 
 #### Confirm understanding, then revalidate
 
+Use publish_plan_checkpoint for complete paired revisions and get_collaboration_record for planning_request/planning_history as needed.
+After publishing a proposed pair, use request_clarification with empty questions to enter expected waiting for confirmation.
+Use complete_planning only after a new current refresh_default_branch observation and final evidence-based revalidation.
 When material choices are settled, publish the complete pair and ask an authorized human to submit `/omnigrex confirm-plan <revision-id>` for that exact current published revision.
 Confirmation is shared understanding, not implementation authorization.
 Answers, steering, comments, and inactivity do not confirm the pair or authorize implementation.
