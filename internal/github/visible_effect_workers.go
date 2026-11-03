@@ -15,10 +15,7 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
-const (
-	maximumVisibleEffectWorkerDuration = 365 * 24 * time.Hour
-	maximumHandoffDiagnosticRunes      = 1000
-)
+const maximumVisibleEffectWorkerDuration = 365 * 24 * time.Hour
 
 var (
 	ErrInvalidVisibleEffectWorkerConfiguration = errors.New("invalid GitHub visible-effect Worker configuration")
@@ -598,7 +595,7 @@ func (worker *HumanHandoffWorker) removeSupersededComments(ctx context.Context, 
 
 func handoffCommentBody(reason, diagnostic, credential string) string {
 	reason = sanitizeHandoffText(reason, "", 160)
-	diagnostic = sanitizeHandoffText(diagnostic, credential, maximumHandoffDiagnosticRunes)
+	diagnostic = sanitizeHandoffText(diagnostic, credential, 0)
 	body := "Human handoff required: " + reason + "."
 	if diagnostic != "" {
 		body += "\n\n" + diagnostic
@@ -620,7 +617,7 @@ func sanitizeHandoffText(value, credential string, maximumRunes int) string {
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
-	if len(runes) > maximumRunes {
+	if maximumRunes > 0 && len(runes) > maximumRunes {
 		value = string(runes[:maximumRunes])
 	}
 	return value
