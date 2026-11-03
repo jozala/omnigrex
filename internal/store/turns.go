@@ -2272,7 +2272,7 @@ func sameAgentMutationDefinition(existing MutationReservation, spec MutationSpec
 // by admission, replay, and backend validation.
 func WithoutReservationSignature(toolName string, request json.RawMessage) json.RawMessage {
 	switch toolName {
-	case "request_clarification", "comment_on_issue", "comment_on_pull_request", "submit_review", "request_review":
+	case "publish_plan_checkpoint", "request_clarification", "comment_on_issue", "comment_on_pull_request", "submit_review", "request_review":
 	default:
 		return request
 	}

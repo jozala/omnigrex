@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"go.opentelemetry.io/otel/attribute"
@@ -49,6 +50,7 @@ const (
 
 // WorkflowLocator identifies a Workflow by its Work Item or known Change Proposal relation.
 type WorkflowLocator struct {
+	PlanningRequest       *collaboration.OriginalRequest
 	RepositoryID          int64
 	IssueID               int64
 	IssueNumber           int64
@@ -467,6 +469,18 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, NormalizedEven
 				return WorkflowApplication{}, fmt.Errorf("generate workflow identity: %w", err)
 			}
 			if err := insertWorkflow(ctx, tx, workflowID, envelope, decision.Snapshot); err != nil {
+				return WorkflowApplication{}, err
+			}
+		}
+		if snapshot.State == workflow.StateAbsent && locator.PlanningRequest != nil {
+			state, readErr := readCollaborationTx(ctx, tx, workflowID)
+			if readErr != nil {
+				return WorkflowApplication{}, readErr
+			}
+			if err = state.StartPlanning(*locator.PlanningRequest); err != nil {
+				return WorkflowApplication{}, err
+			}
+			if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
 				return WorkflowApplication{}, err
 			}
 		}

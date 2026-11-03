@@ -88,7 +88,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 	builtin := map[ID]Policy{
 		Planner: {
 			Role:                          Planner,
-			MCPTools:                      []string{"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs", "refresh_default_branch", "comment_on_issue", "request_clarification", "resolve_clarification", "get_collaboration_record", "report_blocked"},
+			MCPTools:                      []string{"publish_plan_checkpoint", "complete_planning", "get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs", "refresh_default_branch", "comment_on_issue", "request_clarification", "resolve_clarification", "get_collaboration_record", "report_blocked"},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
 			AllowFileEdits:                true, DiscardWorkspace: true, AllowHumanSessionControl: true,
 		},

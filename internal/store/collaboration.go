@@ -57,7 +57,7 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 		if err != nil {
 			return err
 		}
-		if len(questions) == 0 && state.Pending(turn.AgentParticipantID) {
+		if len(questions) == 0 && (state.Pending(turn.AgentParticipantID) || state.AwaitingPlanConfirmation(turn.AgentParticipantID)) {
 			return nil
 		}
 		id := "R" + mutationID
@@ -387,6 +387,10 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
    WHERE collaboration.workflow_id=$1 AND item->>'participant_id'=$2 AND COALESCE(item->>'delivered_to','')<>''
    AND (($3='human_input' AND item->>'delivered_to'=$4) OR ($3='human_input_history' AND item->>'delivered_to'<>$4))
    ORDER BY position OFFSET $5 LIMIT 1`, workflowID, participant, collection, turn, index).Scan(&raw)
+	case "planning_request":
+		err = tx.QueryRow(ctx, `SELECT state->'planning'->'original_request' FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw)
+	case "planning_history":
+		err = tx.QueryRow(ctx, `SELECT state->'planning'->'revisions'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	case "clarification_history":
 		err = tx.QueryRow(ctx, `SELECT state->'rounds'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	default:

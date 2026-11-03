@@ -282,6 +282,10 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return backend.searchCIJobLogs(ctx, invocation)
 	case ToolRequestReview:
 		return backend.requestReview(ctx, invocation)
+	case ToolCompletePlanning:
+		return backend.completePlanning(ctx, invocation)
+	case ToolPublishPlanCheckpoint:
+		return backend.publishPlanningCheckpoint(ctx, invocation)
 	case ToolRequestClarification:
 		return backend.requestClarification(ctx, invocation)
 	case ToolResolveClarification:
@@ -1062,7 +1066,7 @@ func markerFree(body string) bool {
 // reservations reach the backend with it present. Identity comparison shares
 // the store's canonical interpretation via store.WithoutReservationSignature.
 func stripReservedSignatureArgument(invocation Invocation) json.RawMessage {
-	if invocation.Name != ToolRequestClarification && invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview && invocation.Name != ToolRequestReview {
+	if invocation.Name != ToolPublishPlanCheckpoint && invocation.Name != ToolRequestClarification && invocation.Name != ToolCommentOnIssue && invocation.Name != ToolCommentOnPullRequest && invocation.Name != ToolSubmitReview && invocation.Name != ToolRequestReview {
 		return invocation.Arguments
 	}
 	stripped := store.WithoutReservationSignature(invocation.Name, invocation.Arguments)
@@ -1327,7 +1331,7 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
+	case ToolCompletePlanning, ToolPublishPlanCheckpoint, ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		if tool == ToolRequestClarification {

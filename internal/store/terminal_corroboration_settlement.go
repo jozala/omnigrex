@@ -445,7 +445,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			return err
 		}
 		if len(args.Questions) == 0 {
-			if evidence.RoundID == "" && state.Pending(job.AgentParticipantID) {
+			if evidence.RoundID == "" && (state.Pending(job.AgentParticipantID) || state.AwaitingPlanConfirmation(job.AgentParticipantID)) {
 				return nil
 			}
 			return ErrTerminalCorroborationConflict
