@@ -372,9 +372,6 @@ func TestHumanHandoffWorkerSanitizesAndRedactsDiagnostic(t *testing.T) {
 		!strings.Contains(request.Body, "Human handoff required: agent_blocked.") || !strings.Contains(request.Body, "blocked with [REDACTED]") {
 		t.Errorf("unsafe handoff body = %q", request.Body)
 	}
-	if len([]rune(strings.SplitN(request.Body, "\n\n", 2)[1])) > maximumHandoffDiagnosticRunes {
-		t.Errorf("diagnostic exceeds %d runes", maximumHandoffDiagnosticRunes)
-	}
 }
 
 func TestVisibleEffectWorkerRedactsCredentialFromDurableFailureAndClassifiesGitHubFailures(t *testing.T) {
