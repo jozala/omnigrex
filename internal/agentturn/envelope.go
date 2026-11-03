@@ -186,7 +186,7 @@ func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, cur
 		}
 		if publication := execution.Publication; publication != nil &&
 			(!validEnvelopeString(publication.HeadSHA) || publication.HeadSHA != currentHeadSHA ||
-				!validEnvelopeString(publication.HeadRef) || (publication.PullRequestID > 0) != (publication.PullRequestNumber > 0)) {
+				!validEnvelopeString(publication.HeadRef) || publication.PullRequestID < 0 || publication.PullRequestNumber < 0 || (publication.PullRequestID > 0) != (publication.PullRequestNumber > 0)) {
 			return ErrInvalidEventEnvelope
 		}
 		return nil

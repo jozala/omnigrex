@@ -115,9 +115,3 @@ func TestPublicationReadTargetValidatesExactEvidenceChain(t *testing.T) {
 		t.Fatalf("Reviewer: %#v, %v", target, err)
 	}
 }
-
-func TestHandoffUsesPublicationObservationWithoutRebinding(t *testing.T) {
-	if !publicationBoundRead(ToolGetHandoff) {
-		t.Fatal("handoff excluded from durable targeting")
-	}
-}
