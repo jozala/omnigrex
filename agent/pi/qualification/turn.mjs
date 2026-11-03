@@ -104,7 +104,7 @@ try {
         }
       }
     } else if (fault === 'no-pr-target') {
-      if (role !== 'DEVELOPER' || envelope.pull_request_context?.status !== 'none' || envelope.pull_request_number !== undefined) throw new Error('missing explicit initial absence');
+      if (envelope.schema_version !== 2 || envelope.triggering_event.turn_purpose !== 'INITIAL_DEVELOPMENT' || role !== 'DEVELOPER' || envelope.pull_request_context?.status !== 'none' || envelope.pull_request_number !== undefined) throw new Error('missing explicit initial absence');
       const reads = ['get_pull_request','list_pull_request_reviews','list_review_threads','get_handoff'];
       for (let i=0; i<Math.min(step,4); i++) {
         if (result(i)?.status !== 'no_pr_target') throw new Error('absence was not a successful scoped response');

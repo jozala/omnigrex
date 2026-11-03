@@ -84,7 +84,8 @@ func TestBuildEventEnvelopeExplainsRecoveredInProgressPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, `"pull_request_number":23`) ||
+	if !strings.Contains(content, `"pull_request_context":{"status":"available","number":23}`) ||
+		!strings.Contains(content, `"pull_request_number":23`) ||
 		!strings.Contains(content, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
 		!strings.Contains(content, "Inspect the recovered publication") ||
 		!strings.Contains(content, `"expected_head_sha":""`) {
