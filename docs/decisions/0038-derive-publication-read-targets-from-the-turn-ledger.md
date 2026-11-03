@@ -33,7 +33,9 @@ The existing durable ledger and replay acknowledgements provide ordered evidence
 Each Developer publication-bound read snapshots the live ledger and identifies its queried SHA in its result, including empty check collections.
 PR reads reject a changed external head rather than following it, while CI reads can still inspect the exact published commit.
 Pending or ambiguous mutations grant no additional access; missing ledger evidence fails closed.
-Issue reads, handoff lookup, and mutation actions retain their existing scopes.
+Issue reads and mutation actions retain their existing scopes.
+Revision for Work Item 168: handoff lookup follows the same validated publication-derived PR/head target, selecting only the exact Workflow/repository/PR/head with no older-head fallback.
+The four PR collaboration reads return successful `{"status":"no_pr_target"}` only after validating admission and publication evidence when no authorized target exists, without changing the settlement association boundary in [decision 0042](0042-associate-publication-at-turn-settlement.md).
 
 ## Links
 

@@ -41,7 +41,13 @@ type priorUnconfirmableReviewEvent struct {
 	Instruction        string `json:"instruction"`
 }
 
+type pullRequestContext struct {
+	Status string `json:"status"`
+	Number *int64 `json:"number,omitempty"`
+}
+
 type eventEnvelope struct {
+	PullRequestContext       pullRequestContext             `json:"pull_request_context"`
 	CollaborationProjection  json.RawMessage                `json:"collaboration_projection,omitempty"`
 	HumanInputHistory        json.RawMessage                `json:"human_input_history,omitempty"`
 	HumanInput               json.RawMessage                `json:"human_input,omitempty"`
@@ -123,8 +129,12 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		}
 		envelope.RecoveredPublication = &recoveredPublicationEvent{
 			HeadSHA: publication.HeadSHA, HeadRef: publication.HeadRef,
-			Instruction: "Inspect the recovered publication and current Pull Request before changing files or requesting review. Its existence alone does not mean it is ready for Reviewer.",
+			Instruction: "Inspect the recovered publication before changing files or requesting review. A recovered commit publication does not necessarily include a PR; inspect PR collaboration state only when pull_request_context is available. Its existence alone does not mean it is ready for Reviewer.",
 		}
+	}
+	envelope.PullRequestContext = pullRequestContext{Status: "none"}
+	if envelope.PullRequestNumber != nil {
+		envelope.PullRequestContext = pullRequestContext{Status: "available", Number: envelope.PullRequestNumber}
 	}
 	if prior := execution.PriorTerminalIntent; prior != nil {
 		envelope.PriorTerminalIntent = &priorTerminalIntentEvent{

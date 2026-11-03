@@ -1469,3 +1469,28 @@ func (workflow *backendWorkflow) ReportBlocked(_ context.Context, mutation mcp.R
 	}
 	return workflow.reportBlockedResult, nil
 }
+
+func TestPRReadAbsenceIsNotAReadFailure(t *testing.T) {
+	api := &backendGitHub{}
+	credentials := &backendCredentials{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: credentials, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(workflow.RoleDeveloper)
+	scope.PullRequest = nil
+	for _, name := range []string{mcp.ToolGetPullRequest, mcp.ToolListPullRequestReviews, mcp.ToolListReviewThreads, mcp.ToolGetHandoff} {
+		invocation := mcp.Invocation{Name: name, Class: mcp.ReadTool, Scope: scope, Arguments: json.RawMessage(`{}`)}
+		result, err := backend.Execute(context.Background(), invocation)
+		if err != nil || string(result) != `{"status":"no_pr_target"}` {
+			t.Fatalf("%s: %s %v", name, result, err)
+		}
+		invocation.Arguments = json.RawMessage(`{"unexpected":true}`)
+		if _, err := backend.Execute(context.Background(), invocation); err == nil {
+			t.Fatal("invalid arguments became absence")
+		}
+	}
+	if len(api.calls) != 0 || credentials.developerCalls != 0 {
+		t.Fatal("absence performed external lookup")
+	}
+}

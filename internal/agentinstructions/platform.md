@@ -33,3 +33,9 @@ Use a new operation ID for a fresh observation: replay returns the original resu
 A `current` result identifies a verified snapshot at its returned observation times, not a promise that the branch cannot subsequently move.
 A `stale` result provides the acquired snapshot but requires a new call for final freshness; `default_branch_changed` must not silently rebind Turn authority.
 An `unavailable` result or unresolved/failed call is not freshness or mergeability evidence; use existing blocker handling when required verification cannot be established safely.
+
+The envelope's `pull_request_context` is a launch-time snapshot: `none` means no authorized PR observation target, and `available` supplies its number.
+Successful `{"status":"no_pr_target"}` PR reads mean expected absence, not a retrieval failure or proof that no related PR exists on GitHub.
+Inspect PR collaboration state conditionally when a target is available; no target is normal initial-development context, not by itself a reason for Human Handoff.
+Successful same-Turn publication/PR creation and subsequent scoped reads supersede the initial snapshot for observation without changing mutation authority.
+If credible evidence of an overlapping external implementation PR is encountered, request human direction rather than silently adopting or ignoring it and duplicating work.

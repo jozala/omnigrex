@@ -233,6 +233,9 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	if err != nil {
 		return nil, err
 	}
+	if prScopedRead(tool.Name) && invocation.Scope.PullRequest == nil {
+		return json.RawMessage(`{"status":"no_pr_target"}`), nil
+	}
 	switch tool.Name {
 	case ToolRefreshDefaultBranch:
 		return backend.refreshDefaultBranch(ctx, invocation)
@@ -1421,8 +1424,7 @@ func validRevision(value string) bool {
 
 func scopeAllowsBackendTool(scope ToolScope, tool string) bool {
 	switch tool {
-	case ToolGetPullRequest, ToolGetHandoff, ToolListPullRequestReviews, ToolListReviewThreads,
-		ToolSubmitReview, ToolCommentOnPullRequest:
+	case ToolSubmitReview, ToolCommentOnPullRequest:
 		return scope.PullRequest != nil && scope.PullRequest.ID > 0 && scope.PullRequest.Number > 0 && scope.PullRequest.Number <= int64(^uint(0)>>1)
 	case ToolOpenPR:
 		return scope.PullRequest == nil
