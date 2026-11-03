@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"slices"
 
@@ -209,6 +210,15 @@ func toolsForScope(policies role.PolicyCatalog, scope TokenScope) ([]ToolDefinit
 	result := make([]ToolDefinition, 0, len(requestedSet))
 	for _, tool := range toolCatalog {
 		if _, ok := requestedSet[tool.Name]; ok {
+			if scope.Role == role.Planner && tool.Name == ToolRequestClarification {
+				// Keep the shared catalog immutable: other Roles retain their existing limit.
+				tool.InputSchema = maps.Clone(tool.InputSchema)
+				properties := maps.Clone(tool.InputSchema["properties"].(map[string]any))
+				questions := maps.Clone(properties["questions"].(map[string]any))
+				questions["maxItems"] = 5
+				properties["questions"] = questions
+				tool.InputSchema["properties"] = properties
+			}
 			result = append(result, tool)
 		}
 	}
