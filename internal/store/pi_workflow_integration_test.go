@@ -874,3 +874,10 @@ func (g *workflowQualificationGitHub) ListIssueComments(context.Context, string,
 	defer g.mutex.Unlock()
 	return append([]githubapi.IssueComment(nil), g.comments...), nil
 }
+
+func (*workflowQualificationGitHub) ListReviewThreads(_ context.Context, credential, _, _ string, _ int) ([]githubapi.ReviewThread, error) {
+	if credential != "developer-token" {
+		return nil, errors.New("wrong read authority")
+	}
+	return []githubapi.ReviewThread{}, nil
+}
