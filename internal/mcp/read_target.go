@@ -17,7 +17,7 @@ type publicationReadTarget struct {
 
 func publicationBoundRead(name string) bool {
 	switch name {
-	case ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads,
+	case ToolGetPullRequest, ToolGetHandoff, ToolListPullRequestReviews, ToolListReviewThreads,
 		ToolGetCheckRuns, ToolGetCheckRunDiagnostics, ToolListCIRuns, ToolGetCIRun,
 		ToolGetCIJobLogs, ToolSearchCIJobLogs:
 		return true
@@ -106,4 +106,14 @@ func (gateway *Gateway) publicationReadTarget(ctx context.Context, resolver publ
 		return nil, err
 	}
 	return &target, nil
+}
+
+// Absence applies only to observation tools, never PR mutations or errors.
+func prScopedRead(name string) bool {
+	switch name {
+	case ToolGetPullRequest, ToolListPullRequestReviews, ToolListReviewThreads, ToolGetHandoff:
+		return true
+	default:
+		return false
+	}
 }

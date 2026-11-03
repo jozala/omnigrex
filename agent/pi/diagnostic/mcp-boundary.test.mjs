@@ -13,7 +13,7 @@ const genericFailure = 'Omnigrex MCP operation failed or was rejected';
 // Exercise the registered owned extension over real HTTP with the pinned MCP
 // client SDK, including initialization and exact per-Turn tool discovery.
 async function registeredMCPTools(t, reply) {
-  const names = [...ciTools, 'get_issue', 'get_check_runs', 'publish_changes'];
+  const names = ['get_pull_request', 'list_pull_request_reviews', 'list_review_threads', 'get_handoff', ...ciTools, 'get_issue', 'get_check_runs', 'publish_changes'];
   const tools = new Map();
   const handlers = new Map();
   const server = http.createServer(async (request, response) => {
@@ -255,3 +255,15 @@ for (const method of ['POST', 'GET']) {
     }
   }
 }
+
+test('PR absence passes through unchanged, errors remain sanitized', async t => {
+  let failed = false;
+  const content = [{ type: 'text', text: '{"status":"no_pr_target"}' }];
+  const execute = await registeredMCPTools(t, () => ({ result: failed ? { isError: true, content: [{type:'text',text:token}] } : { content } }));
+  for (const name of ['get_pull_request','list_pull_request_reviews','list_review_threads','get_handoff']) {
+    assert.deepEqual((await execute(name)).content, content);
+    failed = true;
+    await assert.rejects(execute(name), {message: genericFailure});
+    failed = false;
+  }
+});

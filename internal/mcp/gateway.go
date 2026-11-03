@@ -865,8 +865,7 @@ func validRequestMetadata(raw json.RawMessage) bool {
 
 func scopeAllowsTool(scope TokenScope, tool string) bool {
 	switch tool {
-	case ToolGetPullRequest, ToolGetHandoff, ToolListPullRequestReviews, ToolListReviewThreads,
-		ToolSubmitReview, ToolCommentOnPullRequest:
+	case ToolSubmitReview, ToolCommentOnPullRequest:
 		return scope.PullRequest != nil
 	case ToolOpenPR:
 		return scope.PullRequest == nil

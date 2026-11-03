@@ -28,8 +28,9 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 			const final = "2123456789abcdef0123456789abcdef01234567"
 			publisher := &replayGatewayPublisher{results: []workspace.PublicationResult{{Head: first, Changed: true}, {Head: final, Changed: true}}}
 			api := &publicationReadGitHub{replayGatewayGitHub: &replayGatewayGitHub{head: base, branch: "omnigrex/issue-115", base: "main"}}
+			handoffs := &publicationHandoffReader{}
 			newBackend := func() *mcp.ProductionBackend {
-				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}})
+				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}, Handoffs: handoffs})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -41,7 +42,12 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 				scope.PullRequest = &mcp.PullRequestScope{ID: 654, Number: 23}
 			}
 			gateway, registration := openReplayGateway(t, database, backend, scope)
-			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetPullRequest, map[string]any{}, !existingPR)
+			for _, name := range []string{mcp.ToolGetPullRequest, mcp.ToolListPullRequestReviews, mcp.ToolListReviewThreads, mcp.ToolGetHandoff} {
+				response := callReplayGatewayTool(t, gateway, registration, name, map[string]any{}, false)
+				if !existingPR && !strings.Contains(response, "no_pr_target") {
+					t.Fatal(response)
+				}
+			}
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
 			api.head = first
 			assertHead := func(name, head string, args map[string]any) {
@@ -56,12 +62,20 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 				callReplayGatewayTool(t, gateway, registration, mcp.ToolOpenPR, map[string]any{"operation_id": "open", "title": "Changes", "body": "Ready"}, false)
 			}
 			assertHead(mcp.ToolGetPullRequest, first, map[string]any{})
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
+			if handoffs.head != first || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
+				t.Fatalf("handoff target: %+v", handoffs)
+			}
 			// Duplicate mutation delivery must not duplicate read evidence or move its target.
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-1"}, false)
 			callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-2"}, false)
 			api.head = final
 			assertHead(mcp.ToolGetCheckRuns, final, map[string]any{})
 			assertHead(mcp.ToolGetPullRequest, final, map[string]any{})
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
+			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
+				t.Fatalf("handoff target: %+v", handoffs)
+			}
 			// A new backend and registration must reconstruct reads from PostgreSQL,
 			// without replaying any mutation or depending on the publication maps.
 			if err := gateway.CloseAndDrain(context.Background(), registration); err != nil {
@@ -69,6 +83,10 @@ func TestGatewayReadsDurablePublishedHeadWithoutRebindingAuthority(t *testing.T)
 			}
 			gateway, registration = openReplayGateway(t, database, newBackend(), scope)
 			assertHead(mcp.ToolGetPullRequest, final, map[string]any{})
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolGetHandoff, map[string]any{}, false)
+			if handoffs.head != final || handoffs.pr != 654 || handoffs.repo != scope.Repository.ID || handoffs.workflow != scope.WorkflowID {
+				t.Fatalf("handoff target: %+v", handoffs)
+			}
 			assertHead(mcp.ToolGetCheckRuns, final, map[string]any{})
 			assertHead(mcp.ToolListCIRuns, final, map[string]any{})
 			assertHead(mcp.ToolGetCheckRunDiagnostics, final, map[string]any{"check_run_id": 501})
@@ -132,7 +150,7 @@ func TestGatewayReadsAfterExistingPRRetryRepairsHeadAndReplaysPublication(t *tes
 			api := &publicationReadGitHub{&replayGatewayGitHub{head: base, branch: "omnigrex/issue-116", base: "main"}}
 			publisher := &replayGatewayPublisher{results: results}
 			newBackend := func() *mcp.ProductionBackend {
-				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}})
+				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: &replayGatewayWorkflow{}, Handoffs: database})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -284,4 +302,15 @@ func (api *publicationReadGitHub) GetCIJobLogExcerpt(_ context.Context, _, _, _ 
 }
 func (api *publicationReadGitHub) SearchCIJobLogs(_ context.Context, _, _, _ string, scope githubapi.JobScope, query string, _ int, _ string, _ int64) (githubapi.CILogSearchResult, error) {
 	return githubapi.CILogSearchResult{HeadSHA: scope.HeadSHA, JobID: scope.ID, Query: query}, nil
+}
+
+// Observe the exact handoff lookup key across publication and reconstruction.
+type publicationHandoffReader struct {
+	workflow, head string
+	repo, pr       int64
+}
+
+func (r *publicationHandoffReader) GetReviewHandoff(_ context.Context, w string, repo, pr int64, head string) (*store.ReviewHandoff, error) {
+	r.workflow, r.repo, r.pr, r.head = w, repo, pr, head
+	return nil, nil
 }

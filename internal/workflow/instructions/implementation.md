@@ -1,5 +1,7 @@
 Complete the assigned Work Item and verify the final changes before signaling `CHANGE_PROPOSAL_READY`.
-Inspect the Issue, comments, and any existing PR, findings, and check results through Omnigrex MCP tools.
+Inspect the Issue, comments, and check results through Omnigrex MCP tools.
+Inspect PR collaboration state and findings when an authorized PR target is available.
+Without a PR target, continue implementation, `publish_changes`, `open_pr`, and `request_review` through the existing authorized flow; expected `no_pr_target` absence is not a blocker.
 Use local Git to verify the Change Proposal head merges cleanly with the current default branch before completing this Stage.
 If conflicts remain, merge the default branch, resolve them, commit the merge, and rerun affected verification before publication.
 If mergeability cannot be verified safely, report the blocker.
