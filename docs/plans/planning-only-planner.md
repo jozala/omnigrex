@@ -20,12 +20,12 @@ Keep the existing trusted-repository execution baseline and avoid claims of shel
 
 ## Implementation status
 
-The current draft supplies the built-in procedure and its pinned attribution/license, a canonical Planner identity and explicit opt-in investigation policy, and a five-question bound in Planner tool discovery and clarification execution.
-Instruction-composition tests cover initial, reactivation, and retry launches without repository skill installation.
-The default development Workflow and default Developer/Reviewer policy set are unchanged.
-This draft does not yet enable planning activation or provide planning Stage/outcome support, optional Planner Profile selection, paired checkpoint persistence/publication, confirmation/revalidation, or planning-ready completion.
-It is not a usable planning capability and must not be described as completed #164.
-The remaining delivery steps and the real discovery/human assessment are outstanding.
+The draft now includes authorized planning activation; Stage-local optional Profile selection; planning Stage/outcome and labels; original-request capture; immutable paired checkpoints through shared collaboration, bounded retrieval and the Issue adapter; exact-revision confirmation; snapshot-backed final revalidation; pending-input fences; and planning-only completion.
+The built-in versioned discovery procedure preserves pinned upstream MIT attribution on every launch and caps Planner question rounds at five.
+The controlled Pi fixture covers retained rounds, a changed retention assumption, draft/proposed pairs, confirmation and final validation without implementation allocation/publication.
+These tests establish deterministic orchestration, not reasoning quality or human approval.
+The PR remains WIP pending final verification, exact-head CI/backend qualification, and the required real discovery transcript and actual human assessment.
+Repositories using only the direct Developer/Reviewer path do not need a Planner Profile.
 
 ## Verification
 

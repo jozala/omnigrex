@@ -8,7 +8,8 @@ You do not need deployment access or provider credentials.
 
 1. [Your first Work Item](first-work-item.md): prepare an Issue, start work, and review the result.
 2. [Workflow and labels](workflow-and-labels.md): understand state, review budgets, and closing or reopening work.
-3. [Human handoffs](human-handoffs.md): resolve blockers and explicitly reactivate automation.
+3. [Planning without implementation](planning.md): discuss a rough idea, inspect checkpoints and confirm a plan.
+4. [Human handoffs](human-handoffs.md): resolve blockers and explicitly reactivate automation.
 
 If the repository is not ready, ask its owner to follow [Connect a repository](../repository-owners/connect-a-repository.md).
 
