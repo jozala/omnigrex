@@ -2062,6 +2062,7 @@ type fakeStore struct {
 	validations        int
 	validationLeases   []store.AgentTurnLease
 	validateErr        error
+	publicationErr     error
 	mutations          map[string]store.MutationReservation
 	reserved           int
 	started            int
@@ -2082,7 +2083,7 @@ type fakeStore struct {
 }
 
 func (fake *fakeStore) ListAgentTurnPublicationReads(_ context.Context, _ store.AgentTurnLease, _ bool) ([]store.MutationReservation, error) {
-	return nil, fake.validateErr
+	return nil, errors.Join(fake.validateErr, fake.publicationErr)
 }
 
 type lifecycleContextKey struct{}
@@ -2460,5 +2461,38 @@ func TestPRAbsenceIsRecordedAndRecordingFailureFailsClosed(t *testing.T) {
 				t.Fatal("unnecessary upstream lookup")
 			}
 		})
+	}
+}
+
+func TestMissingPublicationEvidenceNeverBecomesAbsence(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: &backendWorkflow{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fakeStore{publicationErr: errors.New("ledger unavailable")}
+	ledger := &recordingLedger{}
+	gateway, err := mcp.New(mcp.Config{EndpointURL: "https://gateway.internal/mcp", Store: durable, Backend: backend, Ledger: ledger, Now: func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x32}, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	for _, name := range []string{mcp.ToolGetPullRequest, mcp.ToolListPullRequestReviews, mcp.ToolListReviewThreads, mcp.ToolGetHandoff} {
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":%q,"arguments":{}}}`, name)))
+		if !strings.Contains(response.Body.String(), `"isError":true`) || strings.Contains(response.Body.String(), "no_pr_target") {
+			t.Fatal(response.Body.String())
+		}
+	}
+	for _, record := range ledger.records {
+		if record.Succeeded {
+			t.Fatal("ledger failure recorded as success")
+		}
 	}
 }

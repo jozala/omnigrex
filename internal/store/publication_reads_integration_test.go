@@ -304,7 +304,7 @@ func (api *publicationReadGitHub) SearchCIJobLogs(_ context.Context, _, _, _ str
 	return githubapi.CILogSearchResult{HeadSHA: scope.HeadSHA, JobID: scope.ID, Query: query}, nil
 }
 
-// Return a handoff only for the first head: publishing again must not reuse it.
+// Observe the exact handoff lookup key across publication and reconstruction.
 type publicationHandoffReader struct {
 	workflow, head string
 	repo, pr       int64
