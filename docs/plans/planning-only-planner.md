@@ -20,11 +20,13 @@ Keep the existing trusted-repository execution baseline and avoid claims of shel
 
 ## Implementation status
 
-The draft now includes authorized planning activation; Stage-local optional Profile selection; planning Stage/outcome and labels; original-request capture; immutable paired checkpoints through shared collaboration, bounded retrieval and the Issue adapter; exact-revision confirmation; snapshot-backed final revalidation; pending-input fences; and planning-only completion.
+The implementation includes authorized planning activation; Stage-local optional Profile selection; planning Stage/outcome and labels; original-request capture; immutable paired checkpoints through shared collaboration, bounded retrieval and the Issue adapter; exact-revision confirmation; snapshot-backed final revalidation; pending-input fences; and planning-only completion.
 The built-in versioned discovery procedure preserves pinned upstream MIT attribution on every launch and caps Planner question rounds at five.
 The controlled Pi fixture covers retained rounds, a changed retention assumption, draft/proposed pairs, confirmation and final validation without implementation allocation/publication.
 These tests establish deterministic orchestration, not reasoning quality or human approval.
-The PR remains WIP pending final verification, exact-head CI/backend qualification, and the required real discovery transcript and actual human assessment.
+Implementation head `76f6f2a7ebde2984999de76bc933ede381c25733` passed local `mise run check`, `mise run test-integration`, and the controlled Pi planning scenario.
+[Exact-head CI run 41597483301](https://github.com/jozala/omnigrex/actions/runs/41597483301) passed `docker-check`, `development-qualification`, Linux/KVM `microsandbox`, and aggregate `check`.
+The implementation is proceeding to normal code review; these results do not establish deployment or manual evaluation success.
 Repositories using only the direct Developer/Reviewer path do not need a Planner Profile.
 
 ## Verification
@@ -33,4 +35,8 @@ Use behavior-focused tests for instruction composition, permissions, activation 
 Exercise several clarification rounds through controlled Pi Session continuation and recovery with an underspecified idea, repository-discoverable fact, consequential human choice, and changed earlier assumption.
 Run focused tests, `mise run check`, `mise run test-integration`, and applicable controlled Workflow/recovery and backend qualification.
 A controlled provider establishes orchestration behavior, not discovery quality.
-Before acceptance, run a real Planner discovery scenario and obtain a real human assessment of its transcript and outputs against the Issue rubric.
+Per the 2026-11-03 amendment to #164, the real-provider discovery transcript and actual human assessment remain pending in post-deployment follow-up [#172](https://github.com/jozala/omnigrex/issues/172), not as pre-merge requirements for #164 or PR #170.
+After merge and normal deployment, use the existing deployment to exercise an underspecified idea, a repository-discoverable fact, a consequential human choice, and a changed earlier assumption.
+Record conversation/output references and the human assessment in #172, including question usefulness, preserved requirements, traceable decisions and reconsideration, actionable paired outputs, and absence of invented decisions or premature readiness.
+Record discovered defects as separate Issues with their own PRs; evaluation completion is distinct from all checks passing, and linked defects may remain open.
+This timing change does not weaken automated verification, backend qualification, or normal code review, and does not claim the manual trial passed.
