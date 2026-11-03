@@ -1,0 +1,240 @@
+package collaboration
+
+import (
+	"fmt"
+	"reflect"
+	"regexp"
+	"slices"
+	"strings"
+	"unicode/utf8"
+)
+
+const DiscoveryProcedureVersion = "omnigrex-discovery/v1"
+
+type OriginalRequest struct {
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Source Source `json:"source"`
+}
+type PlanningContent struct {
+	Title               string   `json:"title"`
+	Status              string   `json:"status"`
+	Changes             string   `json:"changes"`
+	RequirementsBrief   string   `json:"requirements_brief"`
+	TechnicalPlan       string   `json:"technical_plan"`
+	InvestigatedCommit  string   `json:"investigated_commit"`
+	Evidence            []string `json:"evidence"`
+	DecisionResponseIDs []string `json:"decision_response_ids,omitempty"`
+}
+type PlanningRevision struct {
+	ID                string          `json:"id"`
+	Supersedes        string          `json:"supersedes,omitempty"`
+	ParticipantID     string          `json:"participant_id"`
+	TurnID            string          `json:"turn_id"`
+	ProcedureVersion  string          `json:"procedure_version"`
+	Content           PlanningContent `json:"content"`
+	OriginalRequest   OriginalRequest `json:"original_request"`
+	Decisions         []Input         `json:"decisions,omitempty"`
+	PublicationFailed bool            `json:"publication_failed,omitempty"`
+	Published         bool            `json:"published"`
+	Source            *Source         `json:"source,omitempty"`
+}
+type PlanRevalidation struct {
+	SourceInvocationID  string   `json:"source_invocation_id"`
+	RevisionID          string   `json:"revision_id"`
+	ParticipantID       string   `json:"participant_id"`
+	TurnID              string   `json:"turn_id"`
+	RepositoryCommit    string   `json:"repository_commit"`
+	Evidence            string   `json:"evidence"`
+	ConfirmationInputID string   `json:"confirmation_input_id"`
+	ConsideredInputIDs  []string `json:"considered_input_ids"`
+}
+type PlanningState struct {
+	OriginalRequest OriginalRequest    `json:"original_request"`
+	Revisions       []PlanningRevision `json:"revisions"`
+	CurrentRevision string             `json:"current_revision,omitempty"`
+	ReadyRevision   string             `json:"ready_revision,omitempty"`
+	Revalidations   []PlanRevalidation `json:"revalidations,omitempty"`
+}
+
+var planningCommit = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+func (s *State) StartPlanning(original OriginalRequest) error {
+	if s.Planning != nil {
+		if s.Planning.OriginalRequest == original {
+			return nil
+		}
+		return ErrInvalid
+	}
+	if strings.TrimSpace(original.Title) == "" || original.Source.Channel == "" || original.Source.ID == "" || !utf8.ValidString(original.Title+original.Body) {
+		return ErrInvalid
+	}
+	s.Planning = &PlanningState{OriginalRequest: original}
+	return nil
+}
+func cloneRevision(r PlanningRevision) PlanningRevision {
+	r.Content.Evidence = slices.Clone(r.Content.Evidence)
+	r.Content.DecisionResponseIDs = slices.Clone(r.Content.DecisionResponseIDs)
+	r.Decisions = slices.Clone(r.Decisions)
+	if r.Source != nil {
+		source := *r.Source
+		r.Source = &source
+	}
+	return r
+}
+func (s *State) CurrentCheckpoint() *PlanningRevision {
+	if s.Planning != nil {
+		for _, r := range s.Planning.Revisions {
+			if r.ID == s.Planning.CurrentRevision {
+				copy := cloneRevision(r)
+				return &copy
+			}
+		}
+	}
+	return nil
+}
+
+// ReserveCheckpoint validates structural presence and provenance, never semantic
+// completeness. The full brief and technical plan always share one identity.
+func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningContent) (PlanningRevision, error) {
+	if s.Planning == nil || id == "" || participant == "" || turn == "" || s.Planning.ReadyRevision != "" {
+		return PlanningRevision{}, ErrInvalid
+	}
+	for _, r := range s.Planning.Revisions {
+		if r.ID == id {
+			if r.ParticipantID == participant && r.TurnID == turn && reflect.DeepEqual(r.Content, c) {
+				return cloneRevision(r), nil
+			}
+			return PlanningRevision{}, ErrInvalid
+		}
+		if !r.Published && !r.PublicationFailed {
+			return PlanningRevision{}, ErrInvalid
+		}
+	}
+	for _, v := range []string{c.Title, c.Changes, c.RequirementsBrief, c.TechnicalPlan} {
+		if strings.TrimSpace(v) == "" || !utf8.ValidString(v) || strings.ContainsRune(v, '\x00') {
+			return PlanningRevision{}, ErrInvalid
+		}
+	}
+	if c.Status != "draft" && c.Status != "proposed" || !planningCommit.MatchString(c.InvestigatedCommit) || len(c.Evidence) == 0 {
+		return PlanningRevision{}, ErrInvalid
+	}
+	for _, v := range c.Evidence {
+		if strings.TrimSpace(v) == "" || !utf8.ValidString(v) {
+			return PlanningRevision{}, ErrInvalid
+		}
+	}
+	if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.ParticipantID == participant && p.TurnID == turn }) || s.Pending(participant) {
+		return PlanningRevision{}, ErrInvalid
+	}
+	r := PlanningRevision{ID: id, ParticipantID: participant, TurnID: turn, ProcedureVersion: DiscoveryProcedureVersion, Content: c, OriginalRequest: s.Planning.OriginalRequest, Supersedes: s.Planning.CurrentRevision}
+	seen := map[string]bool{}
+	for _, response := range c.DecisionResponseIDs {
+		if seen[response] {
+			return PlanningRevision{}, ErrInvalid
+		}
+		seen[response] = true
+		i := slices.IndexFunc(s.Inputs, func(in Input) bool {
+			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && !in.DeliveryPending && in.Kind != "confirm-plan"
+		})
+		if i < 0 {
+			return PlanningRevision{}, ErrInvalid
+		}
+		r.Decisions = append(r.Decisions, s.Inputs[i])
+	}
+	s.Planning.Revisions = append(s.Planning.Revisions, cloneRevision(r))
+	return cloneRevision(r), nil
+}
+func (s *State) ConfirmCheckpoint(id string, source Source) error {
+	if s.Planning == nil || source.Channel == "" || source.ID == "" {
+		return ErrInvalid
+	}
+	for i := range s.Planning.Revisions {
+		r := &s.Planning.Revisions[i]
+		if r.ID != id {
+			continue
+		}
+		if r.PublicationFailed {
+			return ErrInvalid
+		}
+		if r.Published {
+			if r.Source != nil && *r.Source == source {
+				return nil
+			}
+			return ErrInvalid
+		}
+		r.Published = true
+		r.Source = &source
+		s.Planning.CurrentRevision = id
+		return nil
+	}
+	return ErrInvalid
+}
+func (s *State) FailCheckpoint(id string) error {
+	if s.Planning != nil {
+		for i := range s.Planning.Revisions {
+			r := &s.Planning.Revisions[i]
+			if r.ID == id && !r.Published {
+				r.PublicationFailed = true
+				return nil
+			}
+		}
+	}
+	return ErrInvalid
+}
+func (s *State) AwaitingPlanConfirmation(participant string) bool {
+	r := s.CurrentCheckpoint()
+	return r != nil && r.Published && r.Content.Status == "proposed" && r.ParticipantID == participant && !s.Unresolved(participant) && s.Planning.ReadyRevision == ""
+}
+func (s *State) planningConfirmationTarget(target, participant string) string {
+	r := s.CurrentCheckpoint()
+	if r == nil || !r.Published || r.Content.Status != "proposed" || r.ID != target || r.ParticipantID != participant || s.Planning.ReadyRevision != "" {
+		id := "none"
+		if r != nil {
+			id = r.ID
+		}
+		return fmt.Sprintf("Rejected: confirm the current published proposed planning revision (%s), not an unknown, draft, stale or completed revision.", id)
+	}
+	return ""
+}
+
+// ValidatePlanning records final assessment; readiness is committed separately
+// at fenced settlement so input arriving after this operation cannot be lost.
+func (s *State) ValidatePlanning(operation, revision, participant, turn, commit, evidence string, resolved bool) error {
+	if operation == "" || !resolved || !planningCommit.MatchString(commit) || strings.TrimSpace(evidence) == "" || !utf8.ValidString(evidence) || s.Pending(participant) || s.Unresolved(participant) {
+		return ErrInvalid
+	}
+	r := s.CurrentCheckpoint()
+	if r == nil || !r.Published || r.ID != revision || r.ParticipantID != participant || r.Content.Status != "proposed" {
+		return ErrInvalid
+	}
+	if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.ParticipantID == participant && p.TurnID == turn }) {
+		return ErrInvalid
+	}
+	v := PlanRevalidation{SourceInvocationID: operation, RevisionID: revision, ParticipantID: participant, TurnID: turn, RepositoryCommit: commit, Evidence: evidence}
+	for _, in := range s.Inputs {
+		if in.ParticipantID != participant || in.DeliveredTo == "" || in.DeliveryPending {
+			continue
+		}
+		v.ConsideredInputIDs = append(v.ConsideredInputIDs, in.ID)
+		if in.Kind == "confirm-plan" && in.Target == revision {
+			v.ConfirmationInputID = in.ID
+		}
+	}
+	if v.ConfirmationInputID == "" {
+		return ErrInvalid
+	}
+	for _, old := range s.Planning.Revalidations {
+		if old.TurnID == turn {
+			if reflect.DeepEqual(old, v) {
+				return nil
+			}
+			return ErrInvalid
+		}
+	}
+	if s.Planning.ReadyRevision != "" {
+		return ErrInvalid
+	}
+	s.Planning.Revalidations = append(s.Planning.Revalidations, v)
+	return nil
+}

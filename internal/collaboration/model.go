@@ -86,6 +86,7 @@ func (r Round) HasResolutionEffect(operation string, resolutions []Resolution) b
 }
 
 type Input struct {
+	Target        string    `json:"target,omitempty"`
 	Route         string    `json:"route,omitempty"`
 	ID            string    `json:"id"`
 	Kind          string    `json:"kind"`
@@ -113,12 +114,13 @@ type Preparation struct {
 }
 
 type State struct {
-	Preparations []Preparation `json:"preparations,omitempty"`
-	Rounds       []Round       `json:"rounds"`
-	Inputs       []Input       `json:"inputs"`
-	Receipts     []Receipt     `json:"receipts"`
-	CurrentRound string        `json:"current_round,omitempty"`
-	Waiting      bool          `json:"waiting"`
+	Planning     *PlanningState `json:"planning,omitempty"`
+	Preparations []Preparation  `json:"preparations,omitempty"`
+	Rounds       []Round        `json:"rounds"`
+	Inputs       []Input        `json:"inputs"`
+	Receipts     []Receipt      `json:"receipts"`
+	CurrentRound string         `json:"current_round,omitempty"`
+	Waiting      bool           `json:"waiting"`
 }
 type Command struct {
 	Kind   string
@@ -250,7 +252,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	if !a.Active || a.ParticipantID == "" && a.Route == "" {
 		return reject("Rejected: this Work Item is not accepting input; resolve Human Handoff or lifecycle state explicitly before retrying.")
 	}
-	if id == "" || strings.TrimSpace(c.Body) == "" || a.Actor.ID == "" || a.Source.ID == "" || a.Source.Channel == "" || a.At.IsZero() {
+	if id == "" || (strings.TrimSpace(c.Body) == "" && c.Kind != "confirm-plan") || a.Actor.ID == "" || a.Source.ID == "" || a.Source.Channel == "" || a.At.IsZero() {
 		return reject("Rejected: provide nonempty content after the command.")
 	}
 	for _, input := range s.Inputs {
@@ -260,6 +262,10 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	}
 	roundID := ""
 	switch c.Kind {
+	case "confirm-plan":
+		if feedback := s.planningConfirmationTarget(c.Target, a.ParticipantID); feedback != "" {
+			return reject(feedback)
+		}
 	case "answer":
 		var found *Round
 		for i := range s.Rounds {
@@ -303,7 +309,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	default:
 		return reject("Rejected: use /omnigrex answer <round-id>, /omnigrex amend <response-id>, or /omnigrex steer.")
 	}
-	input := Input{ID: id, Kind: c.Kind, RoundID: roundID, Body: c.Body, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, ParticipantID: a.ParticipantID, Route: a.Route}
+	input := Input{Target: c.Target, ID: id, Kind: c.Kind, RoundID: roundID, Body: c.Body, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, ParticipantID: a.ParticipantID, Route: a.Route}
 	if c.Kind == "amend" {
 		input.Amends = c.Target
 	}
