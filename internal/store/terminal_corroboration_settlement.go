@@ -44,7 +44,7 @@ func (store *Store) settleTerminalCorroboration(ctx context.Context, lease JobLe
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
-	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
+	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomePlanningReady && canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
 		canonical.Outcome != workflow.TurnOutcomeChangesRequested && canonical.Outcome != workflow.TurnOutcomeApproved {
 		return AgentTurnSettlement{}, ErrAgentTurnSettlementInvalid
 	}
@@ -419,6 +419,36 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			return ErrTerminalCorroborationConflict
 		}
 		return err
+	}
+	if tool == "complete_planning" {
+		var args struct {
+			OperationID string `json:"operation_id"`
+			RevisionID  string `json:"revision_id"`
+			Commit      string `json:"repository_commit"`
+			Evidence    string `json:"evidence"`
+			Resolved    bool   `json:"material_decisions_resolved"`
+		}
+		var evidence struct {
+			Outcome    string `json:"outcome"`
+			RevisionID string `json:"revision_id"`
+			Commit     string `json:"repository_commit"`
+		}
+		if role != workflow.RolePlanner || observation.Outcome != workflow.TurnOutcomePlanningReady || service != "omnigrex" || resource != job.WorkflowID || !decodeCorroborationObject(request, &args) || !decodeCorroborationObject(result, &evidence) || args.OperationID != operation || !args.Resolved || evidence.Outcome != "PLANNING_READY" || args.RevisionID != evidence.RevisionID || args.Commit != evidence.Commit {
+			return ErrTerminalCorroborationConflict
+		}
+		state, err := readCollaborationTx(ctx, tx, job.WorkflowID)
+		if err != nil {
+			return err
+		}
+		if state.Planning == nil {
+			return ErrTerminalCorroborationConflict
+		}
+		for _, v := range state.Planning.Revalidations {
+			if v.SourceInvocationID == sourceID && v.TurnID == job.AgentTurnID && v.ParticipantID == job.AgentParticipantID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.ConfirmationInputID != "" {
+				return nil
+			}
+		}
+		return ErrTerminalCorroborationConflict
 	}
 	if tool == "request_clarification" {
 		if operation == "" || (service != "github" && service != "omnigrex") || observation.Outcome != workflow.TurnOutcomeClarificationWait {

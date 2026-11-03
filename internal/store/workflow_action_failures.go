@@ -73,7 +73,7 @@ func applyWorkflowActionExhaustionTx(ctx context.Context, tx pgx.Tx, reducer wor
 	if err != nil {
 		return workflow.Decision{}, fmt.Errorf("rehydrate exhausted Workflow action: %w", err)
 	}
-	if snapshot.State != workflow.StateDeveloping && snapshot.State != workflow.StateReviewing &&
+	if snapshot.State != workflow.StatePlanning && snapshot.State != workflow.StatePlanReady && snapshot.State != workflow.StateDeveloping && snapshot.State != workflow.StateReviewing &&
 		snapshot.State != workflow.StatePRReady && snapshot.State != workflow.StateNeedsHuman {
 		return workflow.Decision{Snapshot: snapshot, Disposition: workflow.DispositionUnrelated, Reason: workflow.ReasonWorkflowActionExhausted}, nil
 	}
@@ -131,7 +131,7 @@ func requestWorkflowActionFailureEscalationTx(ctx context.Context, tx pgx.Tx, jo
 	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(&state); err != nil {
 		return false, fmt.Errorf("lock Workflow for action failure: %w", err)
 	}
-	shouldEscalate := job.Kind == ReconcilePendingEventsJobKind || state == workflow.StateDeveloping ||
+	shouldEscalate := state == workflow.StatePlanning || state == workflow.StatePlanReady || job.Kind == ReconcilePendingEventsJobKind || state == workflow.StateDeveloping ||
 		state == workflow.StateReviewing || state == workflow.StatePRReady
 	if !shouldEscalate {
 		_, err := tx.Exec(ctx, `

@@ -3,6 +3,7 @@ package workflow
 import "github.com/jozala/omnigrex/internal/role"
 
 const (
+	StagePlanning                   StageID = "planning"
 	StageImplementation             StageID = "implementation"
 	StageReview                     StageID = "review"
 	BuiltinInfrastructureRetryLimit uint8   = 1
@@ -11,6 +12,7 @@ const (
 // NewBuiltinDefinition constructs the deployment-wide initial Workflow Definition.
 func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 	return NewDefinition(catalog, StageEntry{Stage: StageImplementation, Purpose: TurnPurposeInitialDevelopment}, []StageDefinition{
+		{ID: StagePlanning, Role: role.Planner, State: StatePlanning, Instructions: "Investigate and discuss; publish paired checkpoints, await exact-revision human confirmation, revalidate and finish planning only. Never allocate implementation or create a Change Proposal.", AcceptedPurposes: []TurnPurpose{TurnPurposeInitialPlanning, TurnPurposeReactivation, TurnPurposeRetry}, Transitions: []OutcomeTransition{{Outcome: TurnOutcomePlanningReady, TerminalState: StatePlanReady, ContinuationStage: StagePlanning}}},
 		{
 			ID: StageImplementation, Role: role.Developer, State: StateDeveloping,
 			Instructions: implementationInstructions,

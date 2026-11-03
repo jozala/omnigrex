@@ -27,7 +27,7 @@ func TestLabelReconcilerEnsuresMissingLabelsAndConvergesDesiredState(t *testing.
 	if err := reconciler.EnsureManagedLabels(context.Background(), "installation-token", "acme", "widgets"); err != nil {
 		t.Fatalf("EnsureManagedLabels() error = %v", err)
 	}
-	wantCreated := []string{
+	wantCreated := []string{"omnigrex:plan", "omnigrex:planning", "omnigrex:plan-ready",
 		"omnigrex:run",
 		"omnigrex:developing",
 		"omnigrex:pr-ready",
@@ -109,7 +109,7 @@ func TestLabelReconcilerAcceptsConcurrentLabelCreation(t *testing.T) {
 		t.Fatalf("EnsureManagedLabels() concurrent creation error = %v", err)
 	}
 	want := []string{
-		"omnigrex:run", "omnigrex:developing", "omnigrex:reviewing", "omnigrex:pr-ready", "omnigrex:needs-human",
+		"omnigrex:plan", "omnigrex:planning", "omnigrex:plan-ready", "omnigrex:run", "omnigrex:developing", "omnigrex:reviewing", "omnigrex:pr-ready", "omnigrex:needs-human",
 	}
 	if got := labelNames(labels.repositoryLabels); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("repository labels = %v, want %v", got, want)

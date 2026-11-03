@@ -42,7 +42,7 @@ FROM agent_turns WHERE id = $1 AND execution_epoch = $2`, turnID, epoch).Scan(&e
 			continue
 		}
 		switch mutation.ToolName {
-		case "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
+		case "complete_planning", "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
 			count++
 			sourceID, sourceTool = mutation.ID, mutation.ToolName
 		}
@@ -55,7 +55,8 @@ FROM agent_turns WHERE id = $1 AND execution_epoch = $2`, turnID, epoch).Scan(&e
 	if count != 1 || requestedID != "" && requestedID != sourceID ||
 		role == workflow.RoleDeveloper && sourceTool != "request_clarification" && sourceTool != "request_review" && sourceTool != "confirm_prior_terminal_intent" ||
 		role == workflow.RoleReviewer && sourceTool != "request_clarification" && sourceTool != "submit_review" && sourceTool != "confirm_prior_terminal_intent" ||
-		role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
+		role == workflow.RolePlanner && sourceTool != "request_clarification" && sourceTool != "complete_planning" ||
+		role != workflow.RolePlanner && role != workflow.RoleDeveloper && role != workflow.RoleReviewer {
 		return "", false, nil
 	}
 	if sourceTool == "confirm_prior_terminal_intent" {

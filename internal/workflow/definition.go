@@ -61,7 +61,7 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 	for _, stage := range stages {
 		// stage validation
 		if !validStageID(stage.ID) || !catalog.Contains(stage.Role) ||
-			(stage.State != StateDeveloping && stage.State != StateReviewing) || len(stage.AcceptedPurposes) == 0 || len(stage.Transitions) == 0 {
+			(stage.State != StatePlanning && stage.State != StateDeveloping && stage.State != StateReviewing) || len(stage.AcceptedPurposes) == 0 || len(stage.Transitions) == 0 {
 			return Definition{}, fmt.Errorf("%w: invalid Stage %q", ErrInvalidDefinition, stage.ID)
 		}
 		if _, duplicate := definition.stages[stage.ID]; duplicate {
@@ -102,7 +102,7 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 			successor := transition.NextStage != "" || transition.NextPurpose != ""
 			terminal := transition.TerminalState != "" || transition.ContinuationStage != ""
 			if successor == terminal || successor && (!validStageID(transition.NextStage) || !validTurnPurpose(transition.NextPurpose)) ||
-				terminal && (transition.TerminalState != StatePRReady || !validStageID(transition.ContinuationStage)) ||
+				terminal && ((transition.TerminalState != StatePlanReady && transition.TerminalState != StatePRReady) || !validStageID(transition.ContinuationStage)) ||
 				transition.ConsumesReviewCycle && stage.ReviewLimit == 0 {
 				return Definition{}, fmt.Errorf("%w: invalid transition for Stage %q", ErrInvalidDefinition, stage.ID)
 			}
@@ -111,7 +111,7 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 				if !successor {
 					return Definition{}, fmt.Errorf("%w: outcome requires a successor for Stage %q", ErrInvalidDefinition, stage.ID)
 				}
-			case TurnOutcomeApproved:
+			case TurnOutcomePlanningReady, TurnOutcomeApproved:
 				if !terminal {
 					return Definition{}, fmt.Errorf("%w: approval requires a terminal continuation for Stage %q", ErrInvalidDefinition, stage.ID)
 				}
@@ -170,6 +170,8 @@ func (definition Definition) ValidateRolePolicies(policies role.PolicyCatalog) e
 		required := map[string]struct{}{"report_blocked": {}}
 		for _, transition := range stage.Transitions {
 			switch transition.Outcome {
+			case TurnOutcomePlanningReady:
+				required["complete_planning"] = struct{}{}
 			case TurnOutcomeChangeProposalReady:
 				required["request_review"] = struct{}{}
 			case TurnOutcomeChangesRequested, TurnOutcomeApproved:
@@ -282,7 +284,7 @@ func validStageID(id StageID) bool {
 
 func validTurnPurpose(purpose TurnPurpose) bool {
 	switch purpose {
-	case TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
+	case TurnPurposeInitialPlanning, TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
 		TurnPurposeRetry, TurnPurposeSynchronization, TurnPurposeReactivation:
 		return true
 	default:
@@ -292,7 +294,7 @@ func validTurnPurpose(purpose TurnPurpose) bool {
 
 func validDefinitionOutcome(outcome TurnOutcome) bool {
 	switch outcome {
-	case TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested, TurnOutcomeApproved:
+	case TurnOutcomePlanningReady, TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested, TurnOutcomeApproved:
 		return true
 	default:
 		return false

@@ -36,7 +36,7 @@ func (reducer Reducer) DefinitionCompatible(snapshot Snapshot) bool {
 	}
 	if snapshot.CurrentAttempt != nil {
 		stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
-		if !ok || (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) && stage.State != snapshot.State {
+		if !ok || (snapshot.State == StatePlanning || snapshot.State == StateDeveloping || snapshot.State == StateReviewing) && stage.State != snapshot.State {
 			return false
 		}
 		for stageID, used := range snapshot.CurrentAttempt.ReviewUsage {
@@ -331,10 +331,13 @@ func (reducer Reducer) reduceAssignmentConfigurationConflict(snapshot Snapshot, 
 }
 
 func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Decision {
+	if event.PlanningOnly && snapshot.State != StateAbsent || snapshot.PlanningOnly && snapshot.State != StateNeedsHuman {
+		return illegalInState(snapshot)
+	}
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
-	if snapshot.State == StateDeveloping || snapshot.State == StateReviewing {
+	if snapshot.State == StatePlanning || snapshot.State == StateDeveloping || snapshot.State == StateReviewing {
 		if snapshot.ActiveTurn != nil {
 			return deferForActiveTurn(snapshot, event.EventMetadata, EventKindTrigger)
 		}
@@ -359,6 +362,9 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvalidEvent}
 	}
 	entry := reducer.definition.InitialEntry()
+	if event.PlanningOnly {
+		entry = StageEntry{Stage: StagePlanning, Purpose: TurnPurposeInitialPlanning}
+	}
 	purpose := entry.Purpose
 	if snapshot.State != StateAbsent {
 		purpose = TurnPurposeReactivation
@@ -384,6 +390,7 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 		InfrastructureRetryBudget: AttemptBudget{Limit: reducer.infrastructureRetryLimit},
 	}
 	next := cloneSnapshot(snapshot)
+	next.PlanningOnly = snapshot.PlanningOnly || event.PlanningOnly
 	next.WorkItem = event.WorkItem
 	next.CurrentAttempt = &attempt
 	next.LastAttemptNumber = event.AttemptNumber
@@ -444,7 +451,7 @@ func (reducer Reducer) reduceTerminalIntentRevalidated(snapshot Snapshot, event 
 	}
 	if snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != event.AttemptID ||
 		snapshot.ActiveTurn != nil || snapshot.CurrentAttempt.CurrentStage != event.SourceTurn.Stage ||
-		(snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
+		(snapshot.State != StatePlanning && snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	stage, ok := reducer.definition.Stage(event.SourceTurn.Stage)
@@ -542,7 +549,7 @@ func (reducer Reducer) reduceTerminalRevalidationFailed(snapshot Snapshot, event
 		return decision
 	}
 	if snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != event.AttemptID || snapshot.ActiveTurn != nil ||
-		(snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
+		(snapshot.State != StatePlanning && snapshot.State != StateDeveloping && snapshot.State != StateReviewing) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
 	}
 	stage, ok := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
@@ -605,6 +612,16 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 			next.ChangeProposal = &proposal
 		}
 		return clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
+	case TurnOutcomePlanningReady:
+		if !snapshot.PlanningOnly || snapshot.ChangeProposal != nil || event.PublicationAssociation != nil {
+			return illegalInState(snapshot)
+		}
+		if event.HumanInputPending {
+			return clarificationWaitDecision(next, event.Turn, true)
+		}
+		next.State = StatePlanReady
+		next.Revision++
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonApproved, Actions: []Action{ReconcileLabelsAction{State: StatePlanReady}}}
 	case TurnOutcomeChangeProposalReady:
 		return reducer.reduceDeveloperSettled(snapshot, next, event)
 	case TurnOutcomeChangesRequested, TurnOutcomeApproved:
@@ -795,7 +812,7 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
-	if snapshot.ActiveTurn != nil && (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
+	if snapshot.ActiveTurn != nil && (snapshot.State == StatePlanning || snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
 		return deferForActiveTurn(snapshot, event.EventMetadata, EventKindSynchronization)
 	}
 	if !legalInState(snapshot.State, EventKindSynchronization) {
@@ -969,7 +986,7 @@ func reduceIssueReopened(snapshot Snapshot, event IssueReopenedEvent) Decision {
 	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
 		return decision
 	}
-	if snapshot.ActiveTurn != nil && (snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
+	if snapshot.ActiveTurn != nil && (snapshot.State == StatePlanning || snapshot.State == StateDeveloping || snapshot.State == StateReviewing) {
 		return deferForActiveTurn(snapshot, event.EventMetadata, EventKindIssueReopened)
 	}
 	if !legalInState(snapshot.State, EventKindIssueReopened) {

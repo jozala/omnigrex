@@ -29,7 +29,7 @@ func TestPlannerPolicyAllowsInvestigationButNotImplementation(t *testing.T) {
 			t.Errorf("Planner granted %s", tool)
 		}
 	}
-	if role.BuiltinPolicyCatalog().Contains(role.Planner) {
-		t.Fatal("planning unexpectedly required by direct-development policy")
+	if !role.BuiltinPolicyCatalog().Contains(role.Planner) {
+		t.Fatal("Planner policy unavailable")
 	}
 }

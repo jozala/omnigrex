@@ -76,7 +76,7 @@ func NewPolicyCatalog(referenced []ID, policies []Policy) (PolicyCatalog, error)
 
 // BuiltinPolicyCatalog returns the startup policy for the built-in Workflow Definition.
 func BuiltinPolicyCatalog() PolicyCatalog {
-	catalog, err := NewBuiltinPolicyCatalog([]ID{Developer, Reviewer})
+	catalog, err := NewBuiltinPolicyCatalog([]ID{Planner, Developer, Reviewer})
 	if err != nil {
 		panic(err)
 	}

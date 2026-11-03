@@ -357,7 +357,7 @@ func (store *Store) validPendingEventReconciliationPayload(payload pendingEventR
 		return false
 	}
 	switch payload.FallbackPurpose {
-	case workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
+	case workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
 		workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry,
 		workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
 	default:

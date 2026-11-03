@@ -158,7 +158,7 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 	if err != nil {
 		return collaboration.Receipt{}, err
 	}
-	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing)
+	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing)
 	participant := ""
 	if active {
 		err = tx.QueryRow(ctx, `SELECT assignment.agent_participant_id::text FROM stage_assignments assignment JOIN agent_participants participant ON participant.id=assignment.agent_participant_id WHERE assignment.workflow_id=$1 AND assignment.stage_id=$2 AND participant.status='ACTIVE' ORDER BY assignment.assignment_generation DESC LIMIT 1`, input.WorkflowID, snapshot.CurrentAttempt.CurrentStage).Scan(&participant)
@@ -307,11 +307,27 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		return err
 	}
 	event.HumanInputPending = state.Pending(participant)
-	if event.HumanInputPending && (event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
+	if event.HumanInputPending && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
 		event.Outcome = workflow.TurnOutcomeClarificationWait
 		event.Review = nil
 		event.ExistingReview = nil
 		event.AuthorizedReviewerActorID = 0
+	}
+	if event.Outcome == workflow.TurnOutcomePlanningReady {
+		if state.Planning == nil || state.Pending(participant) || state.Unresolved(participant) {
+			return collaboration.ErrInvalid
+		}
+		found := false
+		for _, v := range state.Planning.Revalidations {
+			if v.TurnID == event.Turn.TurnID && v.RevisionID == state.Planning.CurrentRevision {
+				state.Planning.ReadyRevision = v.RevisionID
+				found = true
+			}
+		}
+		if !found {
+			return collaboration.ErrInvalid
+		}
+		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}
 	if event.Outcome == workflow.TurnOutcomeClarificationWait {
 		state.Waiting = true

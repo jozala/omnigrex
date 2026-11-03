@@ -59,6 +59,8 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 			return false
 		}
 		switch event.Outcome {
+		case TurnOutcomePlanningReady:
+			return event.CorroborationHandoffReason == "" && event.Turn.Role == RolePlanner && event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangeProposalReady:
 			return event.CorroborationHandoffReason == "" && validChangeProposal(event.ChangeProposal) && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangesRequested, TurnOutcomeApproved:
@@ -130,6 +132,12 @@ func validSnapshot(definition Definition, infrastructureRetryLimit uint8, snapsh
 	if !validWorkItem(snapshot.WorkItem) || !validAssignments(snapshot) || !validAttempt(definition, infrastructureRetryLimit, snapshot) || !validStateShape(definition, snapshot) {
 		return false
 	}
+	if snapshot.PlanningOnly && (snapshot.ChangeProposal != nil || snapshot.CurrentAttempt != nil && snapshot.CurrentAttempt.CurrentStage != StagePlanning) {
+		return false
+	}
+	if !snapshot.PlanningOnly && snapshot.CurrentAttempt != nil && snapshot.CurrentAttempt.CurrentStage == StagePlanning {
+		return false
+	}
 	if snapshot.ResumeRole != "" && !definition.ContainsRole(snapshot.ResumeRole) {
 		return false
 	}
@@ -142,7 +150,7 @@ func validSnapshot(definition Definition, infrastructureRetryLimit uint8, snapsh
 func validAssignments(snapshot Snapshot) bool {
 	assignments := snapshot.Assignments
 	switch snapshot.State {
-	case StateDeveloping, StateReviewing, StatePRReady:
+	case StatePlanning, StatePlanReady, StateDeveloping, StateReviewing, StatePRReady:
 		return assignments.Status == AssignmentActive && assignments.RuntimeState == RuntimeStateActive && assignments.RetainedUntil.IsZero() && assignments.RetentionToken == ""
 	case StateNeedsHuman:
 		return assignments.Status == AssignmentWaitingForHuman &&
@@ -166,7 +174,7 @@ func validAssignments(snapshot Snapshot) bool {
 }
 
 func validAttempt(definition Definition, infrastructureRetryLimit uint8, snapshot Snapshot) bool {
-	required := snapshot.State == StateDeveloping || snapshot.State == StateReviewing || snapshot.State == StatePRReady || snapshot.State == StateNeedsHuman
+	required := snapshot.State == StatePlanning || snapshot.State == StatePlanReady || snapshot.State == StateDeveloping || snapshot.State == StateReviewing || snapshot.State == StatePRReady || snapshot.State == StateNeedsHuman
 	if required && snapshot.CurrentAttempt == nil {
 		return false
 	}
@@ -196,10 +204,12 @@ func validStateShape(definition Definition, snapshot Snapshot) bool {
 	switch snapshot.State {
 	case StateDormant, StateClosed:
 		return snapshot.CurrentAttempt == nil && snapshot.ActiveTurn == nil && snapshot.Closure == nil
-	case StateDeveloping:
+	case StatePlanning, StateDeveloping:
 		return snapshot.Closure == nil && validActiveStageState(definition, snapshot) && validOptionalActiveTurn(definition, snapshot)
 	case StateReviewing:
 		return snapshot.Closure == nil && validChangeProposal(snapshot.ChangeProposal) && validActiveStageState(definition, snapshot) && validOptionalActiveTurn(definition, snapshot)
+	case StatePlanReady:
+		return snapshot.PlanningOnly && snapshot.CurrentAttempt.CurrentStage == StagePlanning && snapshot.Closure == nil && snapshot.ActiveTurn == nil && snapshot.ChangeProposal == nil
 	case StatePRReady:
 		_, stageExists := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil && validChangeProposal(snapshot.ChangeProposal) && snapshot.ChangeProposal.ReadyForSHA == snapshot.ChangeProposal.HeadSHA
@@ -249,29 +259,29 @@ func legalInState(state State, kind EventKind) bool {
 	case EventKindTrigger:
 		return state == StateAbsent || state == StateDormant || state == StatePRReady || state == StateNeedsHuman
 	case EventKindTurnSettled:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindSynchronization:
-		return state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	case EventKindReviewObserved:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindChangeProposalObserved:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindIssueClosed:
-		return state == StateDormant || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
+		return state == StatePlanning || state == StatePlanReady || state == StateDormant || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	case EventKindClosureSettled:
 		return state == StateClosing
 	case EventKindIssueReopened:
-		return state == StateDeveloping || state == StateReviewing || state == StateClosing || state == StateClosed
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing || state == StateClosing || state == StateClosed
 	case EventKindAssignmentsCollected:
 		return state == StateClosed || state == StateDormant
 	case EventKindAssignmentConfigurationConflict:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindAgentTurnPreparationFailed:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindAgentTurnMutationReconciliationExhausted:
-		return state == StateDeveloping || state == StateReviewing
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing
 	case EventKindWorkflowActionExhausted:
-		return state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
+		return state == StatePlanning || state == StateDeveloping || state == StateReviewing || state == StatePRReady || state == StateNeedsHuman
 	default:
 		return false
 	}
@@ -283,7 +293,7 @@ func validWorkItem(workItem WorkItem) bool {
 
 func validState(state State) bool {
 	switch state {
-	case StateAbsent, StateDormant, StateDeveloping, StateReviewing, StatePRReady, StateNeedsHuman, StateClosing, StateClosed:
+	case StatePlanning, StatePlanReady, StateAbsent, StateDormant, StateDeveloping, StateReviewing, StatePRReady, StateNeedsHuman, StateClosing, StateClosed:
 		return true
 	default:
 		return false

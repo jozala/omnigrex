@@ -35,7 +35,7 @@ func TestBuiltinDefinitionDescribesCurrentWorkflow(t *testing.T) {
 	}) {
 		t.Fatalf("review outcomes = %v", got)
 	}
-	if got := definition.Roles(); !reflect.DeepEqual(got, []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer}) {
+	if got := definition.Roles(); !reflect.DeepEqual(got, []workflow.Role{workflow.RolePlanner, workflow.RoleDeveloper, workflow.RoleReviewer}) {
 		t.Fatalf("Roles() = %v", got)
 	}
 	approved, ok := definition.Transition(workflow.StageReview, workflow.TurnOutcomeApproved)
