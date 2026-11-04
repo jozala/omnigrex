@@ -91,7 +91,7 @@ func validateBuild(b Build) error {
 		return errors.New("invalid candidate schema, repository, commit, run/attempt or platform")
 	}
 	if len(b.Images) != len(products) {
-		return errors.New("product images must exclude development and include both controllers and Pi")
+		return errors.New("product images must exclude development and include both orchestrators and Pi")
 	}
 	for _, n := range products {
 		if !regexp.MustCompile(`^ghcr.io/jozala/omnigrex/` + n + `@sha256:[0-9a-f]{64}$`).MatchString(b.Images[n]) {

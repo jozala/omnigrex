@@ -13,7 +13,7 @@ The Issue discussion selects active-checkout delivery and instruction-level fina
 ## Decision
 
 Expose `refresh_default_branch` as a scoped, ledgered local mutation for both Roles, using Orchestrator credential authority.
-Acquire the exact observed commit and complete ancestry in a fresh controller-owned bare repository.
+Acquire the exact observed commit and complete ancestry in a fresh orchestrator-owned bare repository.
 Deliver only a verified pack, index, and operation-specific `refs/omnigrex/default/<digest>` reference.
 The digest binds the durable mutation UUID to the repository and exact Participant, Session, Turn, and epoch.
 Never reuse preparation or run authenticated Git against agent-controlled metadata.

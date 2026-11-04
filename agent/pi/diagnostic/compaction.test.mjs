@@ -1,5 +1,5 @@
 // Native Pi, production settings/extensions and durable Session state. No paid
-// provider, custom summary hook, threshold override, or controller recovery.
+// provider, custom summary hook, threshold override, or orchestrator recovery.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';

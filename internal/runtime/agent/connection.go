@@ -37,7 +37,7 @@ type Outcome struct {
 	BudgetSummary string
 }
 
-// OutcomeEvidence is the minimal durable controller settlement contract.
+// OutcomeEvidence is the minimal durable orchestrator settlement contract.
 // StepBudgetExhausted is set only by reconciliation for incomplete-work Human
 // Handoff, never by the runtime or the summary's wording.
 type OutcomeEvidence struct {

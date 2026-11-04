@@ -19,7 +19,7 @@ import (
 const MaxPackBytes = 256 << 20
 const MaxArchiveBytes = 1 << 30
 
-// Loose-ref delivery supports only the controller-prepared files backend.
+// Loose-ref delivery supports only the orchestrator-prepared files backend.
 // Includes can hide an extension declaration, so reject them rather than parse
 // or follow agent-controlled configuration paths.
 var unsupportedGitSection = regexp.MustCompile(`(?im)^\s*\[\s*(extensions|include|includeif)(\s|\]|")`)
@@ -27,7 +27,7 @@ var unsupportedGitSection = regexp.MustCompile(`(?im)^\s*\[\s*(extensions|includ
 var ErrUnsafe = errors.New("unsafe or unsupported workspace Git metadata")
 
 // Snapshot contains a complete, independently verified SHA-1 pack and index.
-// Ref is a controller-derived immutable operation reference, never agent input.
+// Ref is an orchestrator-derived immutable operation reference, never agent input.
 type Snapshot = execution.GitSnapshot
 type File struct {
 	Name      string

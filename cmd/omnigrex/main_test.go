@@ -360,7 +360,7 @@ func TestPIDBudgetUpgradeRequiresClearingOrReplacingStaleCompatibilityFile(t *te
 		t.Fatal("stale or cleared artifact was imported for the new budget")
 	}
 	if preserved, err := os.ReadFile(path); err != nil || string(preserved) != string(encoded) {
-		t.Fatal("historical evidence was rewritten during controller upgrade")
+		t.Fatal("historical evidence was rewritten during orchestrator upgrade")
 	}
 	// A separately supplied result must identify the newly qualified exact
 	// source/target contracts, even when the image itself is unchanged.

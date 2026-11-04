@@ -62,7 +62,7 @@ func Render(p agentprofile.Profile, policy role.Policy, operator agentinstructio
 	if json.Unmarshal(bundle[provider], &entry) != nil {
 		return Configuration{}, ErrConfiguration
 	}
-	subscription := provider == "openai" && entry.Type == "controller"
+	subscription := provider == "openai" && entry.Type == "orchestrator"
 	if !subscription && (entry.Type != "api_key" || strings.TrimSpace(entry.Key) == "" || strings.TrimSpace(entry.Key) != entry.Key || strings.HasPrefix(entry.Key, "!") || strings.ContainsAny(entry.Key, "\x00\r\n") || keyReferencesEnvironment(entry.Key)) {
 		return Configuration{}, ErrConfiguration
 	}

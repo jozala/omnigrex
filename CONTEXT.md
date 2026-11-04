@@ -112,8 +112,14 @@ _Avoid_: Log line, transcript entry
 
 ## Control
 
+**Orchestrator**:
+The trusted Omnigrex application that coordinates Workflows, owns Agent Session control, mediates capabilities, and manages execution and recovery through Execution Backends.
+It is distinct from the Runtime Processes that execute Agent Turns.
+_Avoid_: Controller (when naming the application)
+
 **Control Owner**:
 The single actor authorized to submit the next prompt to an Agent Session.
+The actor may be automation or a human; this ownership is distinct from the Orchestrator's role as the control gateway.
 _Avoid_: Session mode, operator
 
 **Role Policy**:

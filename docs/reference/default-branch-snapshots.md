@@ -1,9 +1,9 @@
 # In-Turn default-branch snapshots
 
-`refresh_default_branch` is a controller-mediated local Git-data mutation available to both Developer and Reviewer Roles, before or after a Pull Request exists.
+`refresh_default_branch` is an orchestrator-mediated local Git-data mutation available to both Developer and Reviewer Roles, before or after a Pull Request exists.
 It does not publish, merge, reset, clean, replace a Session, reload repository guidance, or certify mergeability.
 Repository, branch, workspace, and execution identity come from verified Turn scope; the only argument is an idempotency `operation_id`.
-The controller verifies repository identity and uses short-lived Developer/Orchestrator App authority for acquisition, including when a Reviewer calls it.
+The orchestrator verifies repository identity and uses short-lived Developer/Orchestrator App authority for acquisition, including when a Reviewer calls it.
 Credentials and repository configuration from acquisition never enter the Runtime Process.
 
 ## Use the returned snapshot
@@ -27,7 +27,7 @@ Use a new operation ID when freshness is needed; there is no fixed Stage call-co
 
 ## Limits, failures, and recovery
 
-Acquisition uses a fresh controller-owned bare repository, strict object validation, SHA-1 pack/index checksum validation, and a complete non-shallow fetch.
+Acquisition uses a fresh orchestrator-owned bare repository, strict object validation, SHA-1 pack/index checksum validation, and a complete non-shallow fetch.
 Individual pack and index payloads are limited to 256 MiB; the trusted Git subprocess also has a bounded output-file size and a two-minute acquisition deadline.
 The complete call has a three-minute deadline, with thirty seconds for installation and a separate bounded ten-second resumption attempt.
 Workspace validation streams at most 1 GiB and 200,000 archive entries; packed-ref inspection is limited to 16 MiB, and Git configuration inspection to 1 MiB.
@@ -40,7 +40,7 @@ It rejects symlinked or hardlinked Git metadata, alternate/common object stores,
 Do not bypass a rejection with credentialed Git in the active checkout or rerun workspace preparation.
 Let an ordinary concurrent local Git command finish before making a new call; unsupported or unsafe metadata requires existing blocker handling, not destructive repair by the tool.
 
-The backend acquires its execution lock before the controller guards its exact execution reservation against cleanup/revocation.
+The backend acquires its execution lock before the orchestrator guards its exact execution reservation against cleanup/revocation.
 Live Turn authority is checked before and after installation without holding lease rows, allowing execution heartbeats and MCP authority renewal to continue during delivery.
 Cleanup waits for installation/resumption to finish; successor admission still requires confirmed prior execution stop.
 See [installation fencing](../decisions/0051-exclude-execution-cleanup-without-locking-turn-leases.md).
@@ -52,7 +52,7 @@ An ambiguous installation remains unresolved through existing mutation recovery 
 Restart does not reinterpret a local ref as durable capture evidence or rebind publication, CI read targets, or Reviewer authority.
 See [operator troubleshooting](../operators/troubleshooting.md) for existing execution/storage recovery procedures.
 
-The new capability is discovered from the current controller catalog through the existing Pi MCP extension; compatible retained Sessions keep their original Runtime Profile binding.
+The new capability is discovered from the current orchestrator catalog through the existing Pi MCP extension; compatible retained Sessions keep their original Runtime Profile binding.
 Native Docker and Microsandbox qualification, including controlled-provider Pi discovery, runs in the existing backend gates described in [testing](../contributors/testing.md).
 
 [Reference index](README.md) · [Decision](../decisions/0050-deliver-default-branch-snapshots-as-additive-git-data.md)

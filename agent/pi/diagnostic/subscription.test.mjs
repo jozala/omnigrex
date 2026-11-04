@@ -7,7 +7,7 @@ import { subscriptionRuntime, subscriptionPayload } from '../subscription-auth.m
 import { isContextOverflow } from '@earendil-works/pi-ai/compat';
 import { failureExtension } from '../failure-extension.mjs';
 
-const configuration = { mcp: { url: 'http://controller.test:8081/mcp', headers: [{ name: 'Authorization', value: 'Bearer turn-authority' }] } };
+const configuration = { mcp: { url: 'http://orchestrator.test:8081/mcp', headers: [{ name: 'Authorization', value: 'Bearer turn-authority' }] } };
 const generations = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
 
 test('subscription resolves credentials for successive model requests and preserves tool history', async () => {
@@ -17,7 +17,7 @@ test('subscription resolves credentials for successive model requests and preser
   const bodies = [];
   try {
     const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-      if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+      if (String(url) === 'http://orchestrator.test:8081/runtime/provider-auth') {
         assert.equal(init.headers.Authorization, 'Bearer turn-authority');
         assert.equal(init.redirect, 'error');
         const index = tokens++;
@@ -73,7 +73,7 @@ test('quota classification is reported before sanitized failure persistence', as
   const reports = [];
   try {
     const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-      if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+      if (String(url) === 'http://orchestrator.test:8081/runtime/provider-auth') {
         if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
         return Response.json({ access_token: 'access-secret', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
       }
@@ -112,7 +112,7 @@ test('only structured HTTP and SSE codes determine account-wide blocks', async t
       const reports = [];
       try {
         const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-          if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+          if (String(url) === 'http://orchestrator.test:8081/runtime/provider-auth') {
             if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
             return Response.json({ access_token: 'access-fixture', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
           }
@@ -135,7 +135,7 @@ test('only structured HTTP and SSE codes determine account-wide blocks', async t
   }
 });
 
-test('unavailable controller does not fall back to ambient OpenAI credentials', async () => {
+test('unavailable orchestrator does not fall back to ambient OpenAI credentials', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omnigrex-subscription-'));
   const old = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'sk-must-not-be-used';
@@ -239,7 +239,7 @@ for (const [code, wantOverflow] of [['context_length_exceeded', true], ['subscri
     const reports = [];
     try {
       const subscription = await subscriptionRuntime(configuration, directory, null, async (url, init) => {
-        if (String(url) === 'http://controller.test:8081/runtime/provider-auth') {
+        if (String(url) === 'http://orchestrator.test:8081/runtime/provider-auth') {
           if (init.method === 'POST') { reports.push(JSON.parse(init.body)); return Response.json({}); }
           return Response.json({ access_token: 'access-fixture', generation: generations[0], expires_at: new Date(Date.now() + 3600000).toISOString() });
         }

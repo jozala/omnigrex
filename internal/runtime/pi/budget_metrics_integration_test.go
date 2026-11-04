@@ -18,7 +18,7 @@ import (
 )
 
 // Shared by configuration and retained-Session tests selected on both backends.
-// The only exporter is in the controller test process, never inside Pi.
+// The only exporter is in the orchestrator test process, never inside Pi.
 func budgetMetricExport(t *testing.T) func(uint64, uint64, bool, bool) {
 	t.Helper()
 	received := make(chan *collector.ExportMetricsServiceRequest, 10)
@@ -88,7 +88,7 @@ func budgetMetricExport(t *testing.T) func(uint64, uint64, bool, bool) {
 				t.Fatalf("incorrect budget instruments: %v", names)
 			}
 		default:
-			t.Fatal("no controller metric export")
+			t.Fatal("no orchestrator metric export")
 		}
 	}
 }

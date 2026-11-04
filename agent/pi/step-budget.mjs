@@ -73,7 +73,7 @@ export function stepBudget(limit, observe) {
         stopped = reason === 'stop' || reason === 'toolUse';
         if (stopped) {
           const text = turn.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-          // Never truncate or normalize before the controller redacts secrets:
+          // Never truncate or normalize before the orchestrator redacts secrets:
           // either could leave an unrecognizable credential fragment. Omit an
           // oversized summary wholesale; the counter evidence is independent.
           summaryText = Buffer.byteLength(text, 'utf8') <= 2048 ? text : '';

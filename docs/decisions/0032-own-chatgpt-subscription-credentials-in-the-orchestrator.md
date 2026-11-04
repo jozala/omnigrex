@@ -3,7 +3,7 @@ status: accepted
 date: 2026-10-20
 decision-makers: [Mariusz]
 ---
-# Own ChatGPT subscription credentials in the controller
+# Own ChatGPT subscription credentials in the orchestrator
 
 ## Context
 
@@ -14,7 +14,7 @@ The operator selected one ChatGPT account per installation, unattended renewal, 
 ## Decision
 
 Select subscription or API-key authentication explicitly for the `openai` provider without changing Agent Profile model identifiers or falling back to paid API requests.
-The controller owns browser authentication, verified identity, protected persistent credentials, serialized renewal, and renewal during idle periods.
+The orchestrator owns browser authentication, verified identity, protected persistent credentials, serialized renewal, and renewal during idle periods.
 Runtime Processes retrieve access-only tokens through a private, authenticated, execution-fenced interface before model requests and call OpenAI directly.
 Use `/runtime/provider-auth` for this plain HTTP interface, sharing the private listener and Turn authority with `/mcp` while keeping separate protocol paths.
 Keep credentials separate from PostgreSQL Workflow records and Retained Runtime State.
@@ -33,7 +33,7 @@ Login, status, logout, and quota-unblock commands are operator operations.
 Copying full OAuth credentials into each guest loses rotated credentials and races concurrent renewal.
 A shared writable guest credential file weakens ownership and depends on backend-specific sharing semantics.
 A full inference proxy would protect access tokens too, but would add streaming and provider-protocol mediation to this feature.
-Controller-owned refresh preserves direct inference while giving the durable login one owner.
+Orchestrator-owned refresh preserves direct inference while giving the durable login one owner.
 
 ## Consequences
 

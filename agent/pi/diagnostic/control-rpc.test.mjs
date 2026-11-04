@@ -29,7 +29,7 @@ async function prompt(t, root, mode, continued = false) {
       for (;;) {
         const end = pending.indexOf(10);
         if (end < 0) break;
-        assert.ok(end < 1 << 20, 'RPC frame exceeds existing controller limit');
+        assert.ok(end < 1 << 20, 'RPC frame exceeds existing orchestrator limit');
         largest = Math.max(largest, end);
         const record = JSON.parse(pending.subarray(0, end));
         pending = pending.subarray(end + 1);

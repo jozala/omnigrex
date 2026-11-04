@@ -92,7 +92,7 @@ Pi may coerce some argument types before invoking a tool; gateway-side schema va
 
 The Node slim image did not include the system CA bundle needed by Microsandbox's image downloader.
 The experiment copies the CA bundle from the pinned Microsandbox image.
-Microsandbox tmpfs does not accept Docker-style `uid`/`gid` options; the controller establishes guest directory ownership before starting non-root Pi.
+Microsandbox tmpfs does not accept Docker-style `uid`/`gid` options; the orchestrator establishes guest directory ownership before starting non-root Pi.
 Live provider requests required the public-network profile; combining the no-network profile with a public-address rule alone did not pass the live checks.
 The controlled suite instead uses the no-network profile with the exact fixture service IP allowed.
 

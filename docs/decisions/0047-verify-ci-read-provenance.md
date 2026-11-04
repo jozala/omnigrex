@@ -31,7 +31,7 @@ Keep API-reported resource commits unchanged, including resources that report th
 This extends the publication-derived read boundary from decision 0038 instead of replacing the Turn's immutable scope.
 Trusting only `merge_commit_sha` would miss stale base mappings and merged-PR semantics.
 Treating a combined status or a successful workflow as complete required evidence would hide collisions, missing results and provider attribution gaps.
-Controller waiting and selection policy remain separate work.
+Orchestrator waiting and selection policy remain separate work.
 
 ## Consequences
 

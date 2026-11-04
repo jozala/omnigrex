@@ -14,13 +14,13 @@ Main CI produces finite-retention candidates only after all existing qualificati
 A maintainer manually selects an exact source run and supplies a full pre-1.0 alpha version, notes, breaking changes, and upgrade prerequisites.
 Alpha publication creates an immutable `v0.x.y-alpha.N` prerelease without replacing recommended stable discovery.
 Stable promotion removes only that suffix, creating a separate Release/tag at the same commit from retained alpha assets without rebuilding.
-The Linux/amd64 product set contains both controllers, generic Pi, and a tested downloadable deployment payload with exact digests, identity, evidence, and checksums.
+The Linux/amd64 product set contains both orchestrators, generic Pi, and a tested downloadable deployment payload with exact digests, identity, evidence, and checksums.
 The development image remains independently adopted; product publication never changes repository environment configuration or retained Participant bindings.
 Stable targets advance on one current line, with maintainer-declared compatibility judged against the previous stable: breaks require a minor bump, compatible changes permit patches.
 Candidates may receive another alpha designation without altering earlier releases.
 
 A dedicated release App installed only on this repository supplies a short-lived Contents/Workflows-write token exclusively for exact tag creation.
-The workflow token retains other operations; no PAT or controller App credential is used.
+The workflow token retains other operations; no PAT or orchestrator App credential is used.
 Administrators provision the App and Actions variable/private-key secret separately; implementation uses Go and ordinary fixture tests.
 
 ## Rationale

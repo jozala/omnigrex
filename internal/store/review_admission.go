@@ -224,7 +224,7 @@ func (s *Store) RecordReviewAdmission(ctx context.Context, lease JobLease, id st
 	return r, nil
 }
 
-// DeferReviewAdmission releases the controller lease as healthy delayed work.
+// DeferReviewAdmission releases the orchestrator lease as healthy delayed work.
 // Increasing the remaining claim allowance preserves audit attempt numbers without
 // charging healthy CI waits against the ordinary finite failure allowance.
 func (s *Store) DeferReviewAdmission(ctx context.Context, lease JobLease, delay time.Duration) error {

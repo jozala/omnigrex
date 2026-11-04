@@ -30,11 +30,11 @@ type Question struct {
 	Body     string `json:"body"`
 }
 type Resolution struct {
-	// OriginOperationID is the controller reservation identity that applied this
+	// OriginOperationID is the orchestrator reservation identity that applied this
 	// interpretation, never a caller-supplied operation label or inferred content.
 	OriginOperationID string `json:"origin_operation_id,omitempty"`
 	// ConsideredResponseIDs records competing amendments available to this explicit
-	// interpretation. It is controller-owned, not an agent-provided last-answer rule.
+	// interpretation. It is orchestrator-owned, not an agent-provided last-answer rule.
 	ConsideredResponseIDs []string `json:"considered_response_ids,omitempty"`
 	Obsolete              bool     `json:"obsolete,omitempty"`
 	QuestionID            string   `json:"question_id"`
@@ -58,7 +58,7 @@ type Round struct {
 
 // HasResolutionEffect proves this operation's complete requested interpretation,
 // not merely equal content from an earlier operation. Coverage and origin are
-// controller metadata; only the origin binds the effect to its reservation.
+// orchestrator metadata; only the origin binds the effect to its reservation.
 func (r Round) HasResolutionEffect(operation string, resolutions []Resolution) bool {
 	if operation == "" || len(resolutions) == 0 {
 		return false

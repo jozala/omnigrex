@@ -128,7 +128,7 @@ Record dashboard and alert identifiers, thresholds and their rationale, observed
 
 ## Agent Turn step-budget metrics
 
-The controller consumes runtime-neutral Agent Events from the existing live Pi RPC path through the same optional OpenTelemetry provider.
+The orchestrator consumes runtime-neutral Agent Events from the existing live Pi RPC path through the same optional OpenTelemetry provider.
 Pi contains no exporter or telemetry credentials.
 The owned budget module remains the only iteration counter; failed/cancelled requests and the reserved summary iteration retain the [step-budget accounting semantics](../reference/agent-step-budgets.md).
 
@@ -148,7 +148,7 @@ Unlimited budgets expose actual usage without a fabricated ceiling or utilizatio
 Termination is `completed`, `failed`, `cancelled` (including caller deadline), `transport`, or `unknown`; this is the runtime prompt ending, not the Work Item verdict.
 A successful summary can still settle successfully through terminal MCP corroboration.
 Missing final observation leaves a partial lower bound even when the last known value is zero.
-A controller crash can prevent even the coverage counter: compare with durable active Turns and diagnostics, not an assumed complete usage ledger.
+An orchestrator crash can prevent even the coverage counter: compare with durable active Turns and diagnostics, not an assumed complete usage ledger.
 
 Usage/limit histogram boundaries are `1, 2, 5, 10, 20, 50, 100, 200, 500, 1000` iterations.
 Utilization boundaries are `0.1, 0.25, 0.5, 0.75, 0.9, 1`.
@@ -165,14 +165,14 @@ Delivery is best-effort live observation, not durable or exactly-once accounting
 The adapter validates the existing six-field schema (1024-byte data bound, closed fields, safe integer ranges and monotonic lifecycle); the full control-frame bound remains 1 MiB.
 Critical completion/exhaustion evidence remains independent in the adapter's outcome snapshot and existing settlement evidence.
 A separate one-slot coalescing observation queue cannot displace critical events; consumers may lose intermediate observations without changing enforcement.
-The controller uses the final critical snapshot to recover missed summary pressure and usage.
+The orchestrator uses the final critical snapshot to recover missed summary pressure and usage.
 Each per-prompt consumer retains only two flags, deduplicates summary and final usage within that lifetime, and records SDK aggregates without network export waits.
 Disabled or failing export does not change settlement or enforcement.
 Ordinary downstream event-sink failures retain their existing behavior; the metric consumer introduces no exporter into that critical path.
 History Replay emits separate `history_*` events, never live budget observations; it neither reconstructs the counter nor duplicates metrics.
 No observations are appended to Pi Session history, avoiding per-iteration persistence and additional retained volume.
-Future observation kinds can use the same transport-to-neutral-event boundary and controller consumers without another service.
-Abrupt controller death, exporter failure, and uncertain settlement acknowledgement can lose samples, including handoff counts.
+Future observation kinds can use the same transport-to-neutral-event boundary and orchestrator consumers without another service.
+Abrupt orchestrator death, exporter failure, and uncertain settlement acknowledgement can lose samples, including handoff counts.
 
 ### Extended series budget
 

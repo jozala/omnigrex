@@ -20,7 +20,7 @@ func TestSubscriptionBundleOverlaysOpenAIWithoutDeliveringItsAPIKey(t *testing.T
 	for _, path := range []string{"", "/dev/null"} {
 		content, err := SubscriptionBundle(path)
 		var bundle map[string]json.RawMessage
-		if err != nil || json.Unmarshal(content, &bundle) != nil || string(bundle["openai"]) != `{"type":"controller"}` {
+		if err != nil || json.Unmarshal(content, &bundle) != nil || string(bundle["openai"]) != `{"type":"orchestrator"}` {
 			t.Fatal("subscription-only installation requires a placeholder API key")
 		}
 	}

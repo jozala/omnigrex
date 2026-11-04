@@ -22,9 +22,9 @@ The finite implementation bound is 2147483647, representable on 32-bit Go and ex
 
 Preparation selects the named Profile from one pinned latest default-branch snapshot using the existing selection lifecycle.
 The Profile's canonical snapshot preserves omitted `max_steps` versus explicit unlimited.
-The resolved budget is recorded separately in the prepared Turn's `turn_configuration.step_budget`, using the controller fallback in effect at preparation.
+The resolved budget is recorded separately in the prepared Turn's `turn_configuration.step_budget`, using the orchestrator fallback in effect at preparation.
 A running or queued prepared Turn never rereads checkout configuration or recomputes against a changed fallback.
-After changing an operator fallback, restart the controller through the normal deployment procedure; subsequently prepared inherited Turns use it.
+After changing an operator fallback, restart the orchestrator through the normal deployment procedure; subsequently prepared inherited Turns use it.
 Session Continuation receives a fresh counter at the next admitted prompt, regardless of prior history.
 History Replay is metadata presentation and never reconstructs a live budget.
 
@@ -66,11 +66,11 @@ Finalized error/cancelled responses increment the response count; missing respon
 ## Typed observation contract
 
 `internal/stepbudget.Limit` is the validated finite-or-unlimited type.
-`agent.OutcomeEvidence` is the durable settlement schema, including the controller-only `StepBudgetExhausted` fact.
+`agent.OutcomeEvidence` is the durable settlement schema, including the orchestrator-only `StepBudgetExhausted` fact.
 `internal/stepbudget.Observation` is the enforcement counter's bounded source of truth, translated by the Pi adapter into `agent.Outcome.StepBudget` and `agentevent.OperationalMetadata.StepBudget`.
 The neutral event contract exposes the same schema as `agentevent.StepBudgetObservation`, reused by terminal outcomes without coupling the agent interface directly to configuration packages.
 Consumers, including #112, must reuse this evidence rather than parse log text or maintain another counter.
-The owned runner captures its framed writer before Pi installs the extension stdout guard, keeping budget evidence on the controller transport rather than stderr.
+The owned runner captures its framed writer before Pi installs the extension stdout guard, keeping budget evidence on the orchestrator transport rather than stderr.
 Queue cleanup and tool restoration run before the externally visible settlement receipt, so an immediate next prompt cannot race late queue events.
 The owned JSONL record `omnigrex_step_budget` carries a `data` object:
 
@@ -87,8 +87,8 @@ Usage counters are bounded by JavaScript's largest safe integer (900719925474099
 The adapter validates field presence, types, bounds, monotonicity, and agreement with the prepared budget.
 A configured runtime missing settlement evidence is a protocol failure, not invented zero usage or exhaustion.
 The optional `summary` record field accepts at most 2048 UTF-8 bytes of untrusted text, used only by the credential-redacting settlement diagnostic path, never as a completion claim or metric label.
-Oversized summaries are omitted wholesale; runtime truncation or normalization before controller credential redaction could leak a credential fragment.
-The controller redacts full accepted text before control-character normalization and final diagnostic truncation.
+Oversized summaries are omitted wholesale; runtime truncation or normalization before orchestrator credential redaction could leak a credential fragment.
+The orchestrator redacts full accepted text before control-character normalization and final diagnostic truncation.
 No metric export or provider/tool payload is required for enforcement or settlement.
 For an admitted terminal response the existing Turn outcome retains the minimal budget observation alongside admission/status evidence.
 Failed or uncertain transport outcomes report the last observation through correlated usage diagnostics, without inventing complete durable prompt evidence.
@@ -103,7 +103,7 @@ A crash or transport failure can leave only a partial lower bound; `complete=fal
 No observation means usage is unknown, not zero.
 Use the correlated settlement domain outcome to distinguish successful completion from `step_budget_exhausted` Human Handoff.
 Do not classify every summary entry as a failed Turn or an exhausted-work handoff.
-See the [aggregate telemetry contract](../observability/application.md#agent-turn-step-budget-metrics) for controller-side instruments, bounded labels, and partial/unknown usage.
+See the [aggregate telemetry contract](../observability/application.md#agent-turn-step-budget-metrics) for orchestrator-side instruments, bounded labels, and partial/unknown usage.
 
 ## Runtime compatibility and qualification
 

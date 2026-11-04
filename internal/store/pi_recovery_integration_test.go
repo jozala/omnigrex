@@ -721,7 +721,7 @@ func (f *piWorkflowFixture) testPostPublicationCleanupRecovery(t *testing.T) {
 }
 
 // Crash after a real Pi completed its prompt and published a question, before
-// execution settlement. No live controller state is reused by recovery.
+// execution settlement. No live orchestrator state is reused by recovery.
 func (f *piWorkflowFixture) testClarificationRestart(t *testing.T, role workflow.Role) {
 	if role == workflow.RoleReviewer {
 		f.fault.mode = ""

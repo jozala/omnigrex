@@ -21,11 +21,11 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
-func TestReviewerAllocationRequiresControllerAdmission(t *testing.T) {
+func TestReviewerAllocationRequiresOrchestratorAdmission(t *testing.T) {
 	database, pool, ctx, lease := reviewAdmissionFixture(t)
 	_, err := database.PrepareAgentTurn(ctx, lease, preparationSpec("profile-set", "openai/developer"))
 	if err == nil {
-		t.Fatal("Reviewer Turn allocated without a controller CI admission request")
+		t.Fatal("Reviewer Turn allocated without an orchestrator CI admission request")
 	}
 	var turns, executions int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM agent_turns WHERE workflow_id = $1), (SELECT count(*) FROM jobs WHERE workflow_id = $1 AND kind = 'RUN_AGENT_TURN')`, lease.WorkflowID).Scan(&turns, &executions); err != nil {
@@ -124,7 +124,7 @@ func TestReviewGateSharedObserverPersistsAndFencesTargets(t *testing.T) {
 	if provider.discoveryCount() != 1 {
 		t.Fatalf("inventory rediscovered %d times", provider.discoveryCount())
 	}
-	// Reconstruct controller object, retaining the database request and deadline.
+	// Reconstruct orchestrator object, retaining the database request and deadline.
 	gate = &agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: strings.Repeat("e", 40)}, Observer: client, Now: func() time.Time { return now }}
 	old := request
 	provider.mu.Lock()

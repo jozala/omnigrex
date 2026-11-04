@@ -20,7 +20,7 @@ Supplemental Session exports alone are not a complete recovery set.
 
 ## Stop writers
 
-Stop accepting work at ingress and stop the controller gracefully with a grace period covering configured cleanup budgets.
+Stop accepting work at ingress and stop the orchestrator gracefully with a grace period covering configured cleanup budgets.
 Verify no managed Runtime Process remains:
 
 ```sh
@@ -32,7 +32,7 @@ The second command must produce no output.
 If a process remains, investigate and allow unchanged-configuration startup recovery to resolve exact executions, then stop again.
 Do not archive unresolved state.
 
-For Microsandbox, inspect native inventory with the controller stopped:
+For Microsandbox, inspect native inventory with the orchestrator stopped:
 
 ```sh
 docker compose run --rm --no-deps -T --entrypoint /usr/local/bin/msb orchestrator list --quiet
@@ -116,7 +116,7 @@ An existing Turn with an absent journal makes backup fail rather than silently o
 Archive disposable resources separately only if local policy requires a complete host checkpoint.
 
 Back up `.env`, secrets, compatibility artifacts, deployed commit, and every referenced image digest separately in encrypted storage.
-Include the controller-only subscription credential directory using [its stopped-writer backup procedure](provider-authentication.md#renewal-and-storage).
+Include the orchestrator-only subscription credential directory using [its stopped-writer backup procedure](provider-authentication.md#renewal-and-storage).
 Do not put them in the same unencrypted directory as operational exports.
 
 Restart the unchanged deployment, run repository preflight, then reopen ingress and human-trigger admission:
@@ -131,7 +131,7 @@ Use `omnigrex state export --participant UUID` for one Participant's checksummed
 Use the exact Participant UUID from the ledger, not a Role, Profile name, or runtime Session ID.
 It excludes PostgreSQL and protected Workspace Captures, so it does not replace the coordinated recovery set.
 
-Stop the controller and prove managed executions stopped as above.
+Stop the orchestrator and prove managed executions stopped as above.
 Export also rejects active Turns, human-prompt leases, irreversible collection, unresolved creation, and environments without confirmed stop evidence.
 Each command has a ten-minute deadline, including blocked pipes and database operations.
 

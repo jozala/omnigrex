@@ -18,7 +18,7 @@ Do not assume an unset binary default equals the value supplied by Compose.
 
 | Setting | Meaning |
 | --- | --- |
-| `OMNIGREX_ORCHESTRATOR_IMAGE` | Exact qualified selected-backend controller digest for no-clone deployment |
+| `OMNIGREX_ORCHESTRATOR_IMAGE` | Exact qualified selected-backend orchestrator digest for no-clone deployment |
 | `OMNIGREX_PI_IMAGE`, `OMNIGREX_PI_PLATFORM` | Required exact golden registry digest and supported Linux platform |
 | `OMNIGREX_EXECUTION_BACKEND` | One installation backend, `docker` or `microsandbox`; selected by overlay |
 | `OMNIGREX_DOCKER_GID` | Docker socket group, Docker only |
@@ -35,7 +35,7 @@ See [normal rollout and optional qualification](../operators/upgrades.md#runtime
 
 See [release/image selection](../operators/installation.md), [App permissions](../operators/github-apps.md), and [secret placement](../operators/secrets.md).
 `OMNIGREX_DATABASE_PASSWORD_FILE`, App private-key files, webhook-secret file, and provider-credentials file identify Compose host secret sources.
-The controller reads mounted secrets, including `OMNIGREX_DATABASE_PASSWORD_SECRET_FILE` for its PostgreSQL password path.
+The orchestrator reads mounted secrets, including `OMNIGREX_DATABASE_PASSWORD_SECRET_FILE` for its PostgreSQL password path.
 Never put secret contents into examples or command-line values.
 
 ## OpenAI authentication
@@ -44,7 +44,7 @@ Never put secret contents into examples or command-line values.
 | --- | --- |
 | `OMNIGREX_OPENAI_AUTH_MODE` | `api_key` by default, or explicit `subscription`; never automatic paid fallback |
 | `OMNIGREX_PROVIDER_CREDENTIALS_FILE` | Literal API-key bundle; optional/empty for subscription-only use; unrelated provider keys remain selectable |
-| `OMNIGREX_PROVIDER_AUTH_ROOT` | Binary default `/var/lib/omnigrex/provider-auth`; controller-only mutable credentials, separate from workspace, runtime state, and mise roots |
+| `OMNIGREX_PROVIDER_AUTH_ROOT` | Binary default `/var/lib/omnigrex/provider-auth`; orchestrator-only mutable credentials, separate from workspace, runtime state, and mise roots |
 
 Compose mounts its dedicated `provider-auth` volume at the fixed container root above.
 A custom root requires a matching explicit environment/mount override.
@@ -76,7 +76,7 @@ See [installation sizing](../operators/installation.md#5-size-the-installation),
 
 | Setting | Purpose |
 | --- | --- |
-| `OMNIGREX_AGENT_INSTRUCTIONS_DIR` | Optional mounted operator guidance loaded at controller startup |
+| `OMNIGREX_AGENT_INSTRUCTIONS_DIR` | Optional mounted operator guidance loaded at orchestrator startup |
 | `OMNIGREX_AGENT_PATH_ENV_ALLOWLIST` | Approved comma-separated repository path-variable names |
 | `OMNIGREX_HTTP_PORT` | Compose published HTTP port/address, default 8080 |
 | `OMNIGREX_HTTP_ADDR` | Binary HTTP listener, default `:8080` |

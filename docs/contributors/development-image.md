@@ -10,9 +10,9 @@ The derived environment preserves Pi resources, entrypoint, workspace, UID/GID 1
 ## Prerequisites
 
 Use Microsandbox on Linux/amd64 KVM with `hardware-isolation`, `nested-containers`, and `tool-installation` capabilities.
-Use the matching release's native controller with its patched guest agent; changing only the repository image cannot repair memory-controller delegation in an older controller.
+Use the matching release's native orchestrator with its patched guest agent; changing only the repository image cannot repair memory-controller delegation in an older orchestrator.
 New Participants have a 512-PID aggregate workload ceiling, while retained canonical 128-PID contracts keep their budgets and identities.
-Older controllers cannot read new 512-PID contracts; preserve compatible recovery controllers.
+Older orchestrators cannot read new 512-PID contracts; preserve compatible recovery orchestrators.
 See [decisions 0028](../decisions/0028-keep-a-domain-parent-for-nested-containers.md) and [0029](../decisions/0029-preserve-historical-pid-budgets-and-size-new-participants.md).
 
 ## Build and exercise locally

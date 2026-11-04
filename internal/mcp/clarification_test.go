@@ -174,7 +174,7 @@ func TestCollaborationReadAdmitsNonzeroRecordAndChunkOffsets(t *testing.T) {
 	}
 }
 
-func TestResolutionReconciliationMatchesIntentWithControllerCoverage(t *testing.T) {
+func TestResolutionReconciliationMatchesIntentWithOrchestratorCoverage(t *testing.T) {
 	resolution := collaboration.Resolution{QuestionID: "Q1", ResponseIDs: []string{"A3"}, Explanation: "The explicit correction governs"}
 	actual := resolution
 	actual.ConsideredResponseIDs = []string{"A2", "A3"}
@@ -221,7 +221,7 @@ func TestResolutionRecoveryDoesNotBorrowIdenticalHistoricalEffect(t *testing.T) 
 	}
 }
 
-func TestResolveClarificationForwardsControllerReservationIdentity(t *testing.T) {
+func TestResolveClarificationForwardsOrchestratorReservationIdentity(t *testing.T) {
 	ledger := &clarificationLedger{}
 	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
 	if err != nil {

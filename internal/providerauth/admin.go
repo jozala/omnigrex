@@ -122,7 +122,7 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, result any) bool {
 
 type AdminClient struct{ http *http.Client }
 
-// Operator supports the same operations with or without the full controller.
+// Operator supports the same operations with or without the full orchestrator.
 // An offline command must acquire the same exclusive credential-writer lock.
 type Operator interface {
 	Status(context.Context) (Status, error)
@@ -178,7 +178,7 @@ func (c *AdminClient) call(ctx context.Context, method, path string, input, resu
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return errors.New("authentication manager unavailable; run the controller with subscription mode enabled")
+		return errors.New("authentication manager unavailable; run the orchestrator with subscription mode enabled")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

@@ -6,7 +6,7 @@ Compaction-enabled Pi runtime images use Pi 1.4.0's native automatic context com
 Pi estimates context, generates a checkpoint summary, and projects that summary plus retained recent messages into subsequent model requests.
 Successful recovery continues the authorized assignment without a new Session, a workspace reset, or human permission.
 Compaction is maintenance within the same Agent Turn, not a completion receipt or a new retry allowance.
-Ordinary automatic provider retries remain disabled; controller retry and Human Handoff policy are unchanged.
+Ordinary automatic provider retries remain disabled; orchestrator retry and Human Handoff policy are unchanged.
 
 ## Thresholds and capacity
 
@@ -48,6 +48,6 @@ Use a qualified image containing both Pi 1.4.0 and the compaction-enabled owned 
 Pi 1.4.0 fixes cancellation during pre-prompt compaction; the integration must not be transplanted onto the older 1.0.4 runtime.
 New resource hashes are included through the existing owned-resource inventory and image qualification mechanisms.
 Newly qualified images also include a deployment-owned compatibility hook for Pi 1.4.0's same-millisecond compaction/retry timestamp collision; it does not add another recovery attempt or change settlement policy.
-Existing Participants keep their exact pinned runtime images and do not automatically acquire this capability when the controller is upgraded.
+Existing Participants keep their exact pinned runtime images and do not automatically acquire this capability when the orchestrator is upgraded.
 Do not rebind existing Participants or migrate historical failed Sessions as an upgrade shortcut.
 Follow [upgrades](upgrades.md) and select only images with passing [both-backend qualification](../contributors/runtime-qualification.md).

@@ -71,5 +71,5 @@ Assess the relevance of repository changes rather than automatically invalidatin
 If the confirmed revision remains applicable, retain it and record evidence-based revalidation.
 If accepted requirements or material commitments change, publish a new paired revision and require renewed confirmation.
 Unanswered consequential questions require clarification, not premature readiness.
-Finish only in planning-ready after controller-validated confirmation and revalidation; do not allocate implementation, create PRs or child Work Items, publish code, merge, submit native reviews, or use planning confirmation as an implementation transition.
+Finish only in planning-ready after orchestrator-validated confirmation and revalidation; do not allocate implementation, create PRs or child Work Items, publish code, merge, submit native reviews, or use planning confirmation as an implementation transition.
 Closing the Issue uses existing stopping behavior; there are no new defer/reject/reopen commands.

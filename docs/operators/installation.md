@@ -51,7 +51,7 @@ Parallel installations must override every storage/network name and matching vol
 ## 3. Resolve and provision images
 
 Read the exact product digest references from `../build.json` (`images.orchestrator`, `images.orchestrator-microsandbox`, and `images.pi`).
-Set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend controller, `OMNIGREX_PI_IMAGE` to generic Pi, and `OMNIGREX_PI_PLATFORM=linux/amd64` in the private `.env`.
+Set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend orchestrator, `OMNIGREX_PI_IMAGE` to generic Pi, and `OMNIGREX_PI_PLATFORM=linux/amd64` in the private `.env`.
 Pull those **exact digest references**, not the mutable commit tags:
 
 ```sh
@@ -77,7 +77,7 @@ Complete these focused procedures before startup:
 5. Coordinate [repository configuration](../repository-owners/connect-a-repository.md) with each owner.
 
 Exported shell variables override `.env` values.
-Inspect the effective controller selection without printing secrets:
+Inspect the effective orchestrator selection without printing secrets:
 
 ```sh
 docker compose config --format json |
@@ -110,7 +110,7 @@ docker compose up -d --no-build --wait
 docker compose exec orchestrator /usr/local/bin/omnigrex doctor --repository OWNER/REPOSITORY
 ```
 
-The controller alone receives the host Docker socket.
+The orchestrator alone receives the host Docker socket.
 The bundle needs no KVM device or SDK libraries.
 For Docker-backed local macOS development, see [source development](../contributors/development.md).
 
@@ -133,7 +133,7 @@ Preserve its protected journal in [backups](backup.md), not disposable cached im
 ## 7. Verify and hand over
 
 For subscription authentication, complete [ChatGPT login](provider-authentication.md#sign-in) before requiring repository doctor to pass.
-Subscription access is an execution prerequisite; a missing login does not prevent starting the controller to perform authentication.
+Subscription access is an execution prerequisite; a missing login does not prevent starting the orchestrator to perform authentication.
 
 Check local health and dependency readiness, using the configured HTTP port if it differs:
 
