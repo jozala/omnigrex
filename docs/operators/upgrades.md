@@ -9,25 +9,25 @@ Use the same backend, logical namespace, protected images, and selected Compose 
 
 ## Publication association upgrade precondition
 
-Before upgrading across the publication-evidence change in [decision 0042](../decisions/0042-associate-publication-at-turn-settlement.md), finish or explicitly resolve pre-change publication operations and their related Agent Turn settlement, recovery, and deferred-event reconciliation under the old controller.
-Keep the installation quiescent through the controller replacement; do not admit new work that can create pre-change evidence during this boundary.
+Before upgrading across the publication-evidence change in [decision 0042](../decisions/0042-associate-publication-at-turn-settlement.md), finish or explicitly resolve pre-change publication operations and their related Agent Turn settlement, recovery, and deferred-event reconciliation under the old orchestrator.
+Keep the installation quiescent through the orchestrator replacement; do not admit new work that can create pre-change evidence during this boundary.
 A successful old-format `open_pr` result lacks metadata needed for the new settlement-time association path and is unsupported there.
 Do not rely on a restart, another webhook, or another Agent Turn to enrich it.
 If unfinished pre-change processing cannot be resolved, postpone the upgrade and retain its ledger and protected state for operator investigation using [the troubleshooting guide](troubleshooting.md).
 This is a manual upgrade precondition, not an automated drain or migration facility.
 
-The updated controller records PR association independently of review readiness and tracks valid heads without resuming a Human Handoff.
+The updated orchestrator records PR association independently of review readiness and tracks valid heads without resuming a Human Handoff.
 Deploying it does not reopen completed settlements, reset failed reconciliation deliveries, repair historical Workflows, or authorize new work in existing Human Handoffs.
 Historical repair requires separate authorization; never reset the database or delete retained state to bypass this boundary.
 
 ## Orchestrator-only upgrade
 
 Keep the configured agent digest/platform and protected historical images, but account for possible changes to the default contract selected for new Participants.
-Record the current commit and images, download and checksum the target Release assets, then stage its common bundle, selected overlay, and environment example, then update the controller digest.
+Record the current commit and images, download and checksum the target Release assets, then stage its common bundle, selected overlay, and environment example, then update the orchestrator digest.
 Reconcile configuration changes against [deployment settings](../reference/deployment-configuration.md).
 
 Preserve historical compatibility artifacts as recovery evidence.
-Configure `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` only when its results target the exact contract constructed by the new controller.
+Configure `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` only when its results target the exact contract constructed by the new orchestrator.
 For the 128-to-512 PID-default change within `pi-rpc/v2`, an artifact targeting the earlier contract is stale even if image/platform are unchanged.
 Clear the optional import setting or replace it with separately qualified results targeting the exact new contract before deploying.
 Clearing import does not delete ledger results, rebind Participants, or authorize migration.
@@ -85,7 +85,7 @@ See [decision 0017](../decisions/0017-bind-pi-qualification-to-backend-contracts
 
 Do not treat optional qualification, even in the reverse direction, as a supported in-place rollback or Session migration procedure.
 The supported safe rollback is coordinated pre-upgrade restore with the previous deployment configuration.
-New controllers may understand contracts older controllers cannot read; preserve a compatible controller for recovery.
+New orchestrators may understand contracts older orchestrators cannot read; preserve a compatible orchestrator for recovery.
 See [decision 0029](../decisions/0029-preserve-historical-pid-budgets-and-size-new-participants.md).
 
 ## Verify the upgrade

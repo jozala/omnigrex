@@ -195,21 +195,21 @@ func TestWorkspaceSourceDockerTerminalCaptureSurvivesRemovalAndRestart(t *testin
 	// also proves the archive carries a complete usable repository, not just
 	// selected metadata files that happen to satisfy inventory assertions.
 	materializeWorkspaceFixturePublication(t, ctx, paths.Publication, publicationEntries, fixture.head)
-	const controllerCredential = "controller-only-fixture-credential"
+	const orchestratorCredential = "orchestrator-only-fixture-credential"
 	publishedHead := strings.TrimSpace(string(publicationEntries[".git/refs/heads/main"].content))
 	if publishedHead != fixture.head {
 		t.Fatalf("captured publication tip = %q, want %q", publishedHead, fixture.head)
 	}
 	push := exec.CommandContext(ctx, "git", "push", fixture.remote, publishedHead+":refs/heads/published")
 	push.Dir = paths.Publication
-	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+controllerCredential)))
+	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+orchestratorCredential)))
 	if output, err := push.CombinedOutput(); err != nil {
-		t.Fatalf("trusted controller publication: %v\n%s", err, output)
+		t.Fatalf("trusted orchestrator publication: %v\n%s", err, output)
 	}
 	if got := strings.TrimSpace(workspaceFixtureGit(t, ctx, fixture.remote, "rev-parse", "refs/heads/published")); got != publishedHead {
 		t.Fatalf("trusted remote published tip = %q, want %q", got, publishedHead)
 	}
-	observation := workspace.PublicationObservation{RepositoryURL: fixture.remote, Credential: controllerCredential, Revision: publishedHead}
+	observation := workspace.PublicationObservation{RepositoryURL: fixture.remote, Credential: orchestratorCredential, Revision: publishedHead}
 	if equal, err := lifecycle.CaptureTreesEqual(ctx, publication, observation); err != nil || !equal {
 		t.Fatalf("trusted inspection of separately materialized capture = %t, %v", equal, err)
 	}
@@ -219,15 +219,15 @@ func TestWorkspaceSourceDockerTerminalCaptureSurvivesRemovalAndRestart(t *testin
 		t.Fatalf("trusted comparison ignored the pinned revision and used the matching cache = %t, %v", equal, err)
 	}
 	// Comparison must freshly clone the independently authorized pinned remote.
-	// Remove the controller's import/publication cache before further checks.
+	// Remove the orchestrator's import/publication cache before further checks.
 	if err := os.RemoveAll(options.PublicationRoot); err != nil {
 		t.Fatal(err)
 	}
 	if equal, err := lifecycle.CaptureTreesEqual(ctx, publication, observation); err != nil || !equal {
 		t.Fatalf("trusted inspection without publication cache = %t, %v", equal, err)
 	}
-	if strings.Contains(string(publicationEntries[".git/config"].content), controllerCredential) {
-		t.Fatal("controller credential entered the guest repository")
+	if strings.Contains(string(publicationEntries[".git/config"].content), orchestratorCredential) {
+		t.Fatal("orchestrator credential entered the guest repository")
 	}
 	counter, err := strconv.Atoi(strings.TrimSpace(string(publicationEntries["racing.txt"].content)))
 	if err != nil {

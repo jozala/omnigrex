@@ -29,7 +29,7 @@ A new YAML field or mutable override is unnecessary because canonical contracts 
 ## Consequences
 
 Existing Participants remain at 128 and may need a fresh Assignment Generation to use the development environment's larger budget; promotion alone never rebinds them.
-Older controllers reject newly persisted 512-PID contracts, so rollback requires a controller that understands both approved budgets.
+Older orchestrators reject newly persisted 512-PID contracts, so rollback requires an orchestrator that understands both approved budgets.
 An optional startup compatibility file targeting the old budget must be unconfigured or replaced with newly qualified exact-target evidence; preserve the historical file and imported ledger rows.
 Historical source contracts must be supplied explicitly when qualification is intended to exercise the old budget rather than today's constructor defaults.
 

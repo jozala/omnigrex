@@ -1,10 +1,10 @@
 #!/bin/sh
-# Verify a built Omnigrex Docker controller image without pinning package revisions.
+# Verify a built Omnigrex Docker orchestrator image without pinning package revisions.
 # Usage: sh scripts/check-orchestrator-image.sh IMAGE
 # Requires Docker on the daemon host. The image is exercised as its default
 # non-root user; no fixed package count or revision is asserted.
 set -eu
-image="${1:?supply the controller image reference}"
+image="${1:?supply the orchestrator image reference}"
 user="$(docker image inspect "$image" --format '{{.Config.User}}')"
 test "$user" = 10001:10001
 docker run --rm --entrypoint /bin/sh "$image" -ec '
@@ -33,8 +33,8 @@ docker run --rm --entrypoint /bin/sh "$image" -ec '
   done
   apk info -v | sort > /tmp/actual-packages.txt
   diff -u /usr/share/omnigrex/apk-packages.txt /tmp/actual-packages.txt
-  printf "#include <stdio.h>\nint main(void) { return 0; }\n" > /tmp/controller-check.c
-  gcc /tmp/controller-check.c -o /tmp/controller-check
-  /tmp/controller-check
+  printf "#include <stdio.h>\nint main(void) { return 0; }\n" > /tmp/orchestrator-check.c
+  gcc /tmp/orchestrator-check.c -o /tmp/orchestrator-check
+  /tmp/orchestrator-check
 '
-printf 'PASS controller image %s\n' "$image"
+printf 'PASS orchestrator image %s\n' "$image"

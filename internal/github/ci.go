@@ -1033,7 +1033,7 @@ func ensureCISerializedBound(value any) error {
 	if err != nil {
 		return fmt.Errorf("%w: diagnostics encoding failed", ErrInvalidAPIResponse)
 	}
-	// Reserve room for controller-added target provenance at the MCP boundary.
+	// Reserve room for orchestrator-added target provenance at the MCP boundary.
 	if len(encoded) > MaxCISerializedResponseBytes-2048 {
 		// A defensive guard: page builders above keep every response
 		// within budget, so reaching here maps to resource exhaustion

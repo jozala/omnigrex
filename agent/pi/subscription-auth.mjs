@@ -84,7 +84,7 @@ export function subscriptionPayload(source) {
 }
 
 // No credential is stored in Pi. Native provider auth resolves each request
-// through the controller, without ambient keys or local OAuth refresh fallback.
+// through the orchestrator, without ambient keys or local OAuth refresh fallback.
 export async function subscriptionRuntime(configuration, agentDir, modelsPath, fetcher = fetch) {
   const endpoint = new URL(configuration.mcp.url);
   endpoint.pathname = '/runtime/provider-auth';
@@ -100,8 +100,8 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   });
   const credentials = {
     async read() { return undefined; }, async list() { return []; },
-    async modify() { throw new Error('Controller owns subscription credentials'); },
-    async delete() { throw new Error('Controller owns subscription credentials'); },
+    async modify() { throw new Error('Orchestrator owns subscription credentials'); },
+    async delete() { throw new Error('Orchestrator owns subscription credentials'); },
   };
   const runtime = await ModelRuntime.create({ credentials, authPath: `${agentDir}/auth.json`, modelsPath, refreshOnCreate: false });
   const provider = runtime.getProvider('openai');
@@ -119,7 +119,7 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
       }
       if (typeof token.access_token !== 'string' || !token.access_token || token.access_token.startsWith('sk-') || /[\0\r\n]/u.test(token.access_token) || typeof token.generation !== 'string' || !/^[0-9a-f-]{36}$/u.test(token.generation) || !Number.isFinite(Date.parse(token.expires_at)) || Date.parse(token.expires_at) <= Date.now()) throw new Error('Invalid credential response');
       if (call) { call.generation = token.generation; call.diagnostic.http_status = null; call.diagnostic.stage = 'local'; }
-      return { auth: { apiKey: token.access_token }, source: 'ChatGPT subscription (controller-managed)' };
+      return { auth: { apiKey: token.access_token }, source: 'ChatGPT subscription (orchestrator-managed)' };
     } catch (error) {
       if (call) { call.failure ||= 'subscription_temporary'; if (call.diagnostic.cause !== 'http') call.diagnostic.cause = normalizedCause(error, signal); }
       throw new Error(`Omnigrex ${call?.failure ?? 'subscription_temporary'}`);
@@ -171,8 +171,8 @@ export async function subscriptionRuntime(configuration, agentDir, modelsPath, f
   });
   runtime.registerNativeProvider({ ...provider,
     auth: { apiKey: {
-      name: 'ChatGPT subscription (controller-managed)',
-      async check() { return { type: 'api_key', source: 'ChatGPT subscription (controller-managed)' }; },
+      name: 'ChatGPT subscription (orchestrator-managed)',
+      async check() { return { type: 'api_key', source: 'ChatGPT subscription (orchestrator-managed)' }; },
       resolve,
     } },
     stream: wrap(provider.stream), streamSimple: wrap(provider.streamSimple),

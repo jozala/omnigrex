@@ -65,7 +65,7 @@ func TestSubscriptionAdmissionBlockPreventsRuntimeLaunch(t *testing.T) {
 	}
 }
 
-func TestSubscriptionQuotaReportsAreRetriedInsideController(t *testing.T) {
+func TestSubscriptionQuotaReportsAreRetriedInsideOrchestrator(t *testing.T) {
 	fixture := newExecutionWorkerFixture(t, workflow.RoleDeveloper)
 	fixture.store.execution.Turn.AgentProfileConfig = json.RawMessage(`{"model":"openai/fixture"}`)
 	fixture.runtime.agent = &neutralPromptFixture{outcome: agent.Outcome{Admitted: true, Status: agent.Failed, FailureClass: "subscription_quota", FailureGeneration: "fixture-generation"}}
@@ -78,7 +78,7 @@ func TestSubscriptionQuotaReportsAreRetriedInsideController(t *testing.T) {
 	}
 	_, _ = worker.ProcessNext(context.Background())
 	if gate.reports != 1 {
-		t.Fatal("controller did not record observed quota failure")
+		t.Fatal("orchestrator did not record observed quota failure")
 	}
 }
 

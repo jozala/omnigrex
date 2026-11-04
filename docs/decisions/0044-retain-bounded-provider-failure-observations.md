@@ -12,9 +12,9 @@ Request IDs and exception properties are untrusted and can contain credentials e
 
 ## Decision
 Retain a closed diagnostic vocabulary, bounded status/timing fields, and locally generated request-attempt IDs through the existing pre-persistence sanitation boundary.
-Capture subscription observations within one asynchronous request context, including controller authentication before provider streaming, and bind them to the actual terminal assistant message with a weak reference.
+Capture subscription observations within one asynchronous request context, including orchestrator authentication before provider streaming, and bind them to the actual terminal assistant message with a weak reference.
 Native compaction and branch-summary requests bypass conversational message events, so also deliver each failed request’s closed observation through a Session-scoped owned control subscription, without adding Session messages or replacing Pi’s lifecycle events.
-Revalidate the schema in the Go adapter and emit ordinary correlated controller events for each failed request and terminal settlement.
+Revalidate the schema in the Go adapter and emit ordinary correlated orchestrator events for each failed request and terminal settlement.
 Retain only a SHA-256 fingerprint of a bounded `x-request-id` header, never its original value.
 Retain summary request categories as diagnostic evidence separately from the lifecycle classification that governs prerequisite handling and retries.
 Keep unknown evidence explicit and preserve the broad subscription failure in returned diagnostics without changing retry or settlement policy.
@@ -34,5 +34,5 @@ No paid probe, new metric label, credential routing change, or raw debug logging
 
 ## Links
 - [Work Item 127](https://github.com/jozala/omnigrex/issues/127)
-- [Controller-owned credentials](0032-own-chatgpt-subscription-credentials-in-the-controller.md)
+- [Orchestrator-owned credentials](0032-own-chatgpt-subscription-credentials-in-the-orchestrator.md)
 - [RPC event projection](0039-project-pi-control-events.md)

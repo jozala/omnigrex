@@ -9,7 +9,7 @@ There is no direct OpenTelemetry log export or public metrics endpoint.
 ## Provider and subscription request failures
 
 `Agent Session observation` records with `kind=provider_request_failed` describe an observed failed model request, including native compaction and branch-summary requests; `kind=prompt_settled` records why the Agent Turn ended.
-These WARN records use the existing controller stdout logging pipeline and survive Runtime Process cleanup.
+These WARN records use the existing orchestrator stdout logging pipeline and survive Runtime Process cleanup.
 Join them by `workflow_id`, `agent_participant_id`, `agent_session_id`, `agent_turn_id`, `execution_epoch`, and trace/span fields when available.
 `retry_of_turn_id` links a retried Turn to the earlier failed or interrupted Turn.
 The `runtime` field is a JSON object, with `selected_model` (the configured provider/model) and `provider_failure`:
@@ -17,11 +17,11 @@ The `runtime` field is a JSON object, with `selected_model` (the configured prov
 | Field | Meaning |
 | --- | --- |
 | `attempt` | Locally generated UUID for one model request, not a provider ID; absent when unavailable. |
-| `category` | Controller-validated observed subscription category (`subscription_quota`, `subscription_auth`, `subscription_configuration`, or `subscription_temporary`); absent when unavailable. Diagnostic evidence, not a retry-policy decision. |
-| `auth_mode` | `subscription` for the observed controller-managed path, otherwise `unknown`. |
+| `category` | Orchestrator-validated observed subscription category (`subscription_quota`, `subscription_auth`, `subscription_configuration`, or `subscription_temporary`); absent when unavailable. Diagnostic evidence, not a retry-policy decision. |
+| `auth_mode` | `subscription` for the observed orchestrator-managed path, otherwise `unknown`. |
 | `stage` | `credential`, `payload`, `provider_http`, `provider_stream`, `transport`, `local`, or `unknown`. |
 | `cause` | `http`, `stream_error`, `network`, `timeout`, `cancelled`, `validation`, `protocol`, or `unknown`. |
-| `http_status` | Observed status or null. At `credential` this is the **controller auth endpoint**, not OpenAI. At `provider_stream`, 200 describes the initial successful response, not successful inference. |
+| `http_status` | Observed status or null. At `credential` this is the **orchestrator auth endpoint**, not OpenAI. At `provider_stream`, 200 describes the initial successful response, not successful inference. |
 | `code` | Explicitly allowlisted structured provider code, or `unknown`; arbitrary codes/types are discarded. |
 | `retryability` | `yes`, `no`, or `unknown`; currently unknown unless explicitly observed. The broad failure category does not establish retryability. |
 | `elapsed_ms` | Bounded time from request start to terminal observation, including credential resolution; null if unavailable. |
@@ -40,14 +40,14 @@ Observed quota/auth/configuration categories on summary requests do not by thems
 An admitted aborted outcome with observed `cause=timeout` retains that cause in settlement and Human Handoff diagnostics; its interrupted status and existing retry policy are unchanged.
 Other providers currently retain unknown observations through the shared boundary; do not infer subscription evidence for them.
 
-For JSON controller logs collected into a file:
+For JSON orchestrator logs collected into a file:
 
 ```sh
-jq 'select(.agent_turn_id == "TURN-ID" and (.kind == "provider_request_failed" or .kind == "prompt_settled")) | {workflow_id, agent_turn_id, execution_epoch, retry_of_turn_id, failure_class, runtime, trace_id}' controller.jsonl
-jq 'select(.workflow_id == "WORKFLOW-ID" and .msg == "Agent Turn infrastructure retry decision") | {agent_turn_id, retry_of_turn_id, retry_budget_used, retry_budget_limit, reason}' controller.jsonl
+jq 'select(.agent_turn_id == "TURN-ID" and (.kind == "provider_request_failed" or .kind == "prompt_settled")) | {workflow_id, agent_turn_id, execution_epoch, retry_of_turn_id, failure_class, runtime, trace_id}' orchestrator.jsonl
+jq 'select(.workflow_id == "WORKFLOW-ID" and .msg == "Agent Turn infrastructure retry decision") | {agent_turn_id, retry_of_turn_id, retry_budget_used, retry_budget_limit, reason}' orchestrator.jsonl
 ```
 
-In Grafana/Loki, select your existing controller stream and filter parsed fields, for example `{service_name="omnigrex"} | json | agent_turn_id="TURN-ID"` (adapt the stream label to your collector).
+In Grafana/Loki, select your existing orchestrator stream and filter parsed fields, for example `{service_name="omnigrex"} | json | agent_turn_id="TURN-ID"` (adapt the stream label to your collector).
 Do not make Turn IDs, attempt UUIDs, fingerprints, or other correlation values stream/metric labels.
 Start with the Turn reference in the Human Handoff, then search `retry_of_turn_id` to find the interruption or failure that consumed the automatic retry budget.
 `Agent Turn infrastructure retry decision` records the used/limit budget after a committed live settlement and its fixed decision reason.
@@ -91,7 +91,7 @@ Use the collector's HTTP endpoint, not its gRPC endpoint.
 `OTEL_EXPORTER_OTLP_PROTOCOL` is unnecessary and does not select another exporter.
 If authentication is needed, use URL-encoded `key=value` pairs in `OTEL_EXPORTER_OTLP_HEADERS`; `OTEL_EXPORTER_OTLP_TRACES_HEADERS` overrides them for traces.
 Treat authentication headers as [private credentials](secrets.md).
-Recreate the controller after changing environment settings.
+Recreate the orchestrator after changing environment settings.
 
 The collector must listen on a reachable interface and connect its receiver to an export pipeline.
 Container loopback refers to the container, not the Docker host.
@@ -164,7 +164,7 @@ Exporter failures report safe categories without stopping Workflow processing.
 
 ### Telemetry SDK diagnostics
 
-`telemetry SDK failure` WARN records use the controller's existing local JSON stdout route, not telemetry export.
+`telemetry SDK failure` WARN records use the orchestrator's existing local JSON stdout route, not telemetry export.
 They remain available when the collector is unreachable; no debug payload logging is required.
 
 | Field | Meaning |
@@ -191,7 +191,7 @@ These are not independent failed requests or a reliable loss counter; do not cor
 No URLs, headers, raw errors/stacks, response bodies, or telemetry content are included.
 Keep these fields out of metric/stream labels and use parsed JSON log queries instead.
 
-To investigate, select the existing controller log stream and filter `msg="telemetry SDK failure"`, then examine `signal`, `stage`, and `error_kind`.
+To investigate, select the existing orchestrator log stream and filter `msg="telemetry SDK failure"`, then examine `signal`, `stage`, and `error_kind`.
 Check collector reachability and independently available collector diagnostics for unknown exports; do not enable unrestricted HTTP/SDK logging to recover status or remote text.
 After correcting the underlying configuration or collector problem, verify subsequent samples/spans arrive using the existing backend, since absence of warnings alone does not prove delivery.
 These records do not stop Workflows, change Agent Turn outcomes, or automatically recover missing samples.

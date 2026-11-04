@@ -15,7 +15,7 @@ import (
 
 const WaitingForCI = "omnigrex:waiting-for-ci"
 
-var waitingLabel = Label{Name: WaitingForCI, Color: "8250df", Description: "Review Stage queued for controller CI observation; no Reviewer Turn running"}
+var waitingLabel = Label{Name: WaitingForCI, Color: "8250df", Description: "Review Stage queued for orchestrator CI observation; no Reviewer Turn running"}
 
 type reviewProgressAPI interface {
 	ListIssueComments(context.Context, string, string, string, int) ([]IssueComment, error)

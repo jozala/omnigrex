@@ -143,11 +143,11 @@ Check and status contexts are distinct selectors, not interchangeable names.
 
 Durations use Go duration syntax, resolve to whole seconds, and are not silently clamped.
 Timeout must be 1 second..2 hours; grace must be 0..5 minutes and no longer than timeout.
-These are controller safety ceilings, not repository-granted execution capabilities.
+These are orchestrator safety ceilings, not repository-granted execution capabilities.
 The file must be one nonempty YAML document of at most 64 KiB with `version: 1`; unknown fields, null/empty scalar values, aliases, invalid selectors, and malformed durations are rejected.
 Invalid configuration produces an actionable preparation failure, not a successful no-CI observation.
 
 A waiting PR-head or verified test-merge change replaces the pending target, discards obsolete evidence, and restarts grace without extending the deadline or creating a second pending review.
 No already-running Reviewer is restarted solely for same-head CI reruns or base movement.
-The controller never merges or rebases the Change Proposal to manufacture a CI run.
+The orchestrator never merges or rebases the Change Proposal to manufacture a CI run.
 See [review scheduling operations](../operators/review-scheduling.md) and [Workflow visibility](../users/workflow-and-labels.md).

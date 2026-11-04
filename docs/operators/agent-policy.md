@@ -44,7 +44,7 @@ services:
           create_host_path: false
 ```
 
-Create the host directory, make files readable by the controller, and append `:compose.instructions.yaml` to the already selected `COMPOSE_FILE` once.
+Create the host directory, make files readable by the orchestrator, and append `:compose.instructions.yaml` to the already selected `COMPOSE_FILE` once.
 Preserve the common bundle, backend, and storage overrides in the same file set.
 The bundles forward the variable, but you must supply the corresponding mount.
 Only the orchestrator receives the directory; Runtime Processes receive composed text over stdin, not host paths or an environment entry.
@@ -52,7 +52,7 @@ Only the orchestrator receives the directory; Runtime Processes receive composed
 ## Apply guidance changes
 
 Files are loaded once at orchestrator startup.
-After editing them, recreate the controller with the same Compose selection:
+After editing them, recreate the orchestrator with the same Compose selection:
 
 ```sh
 docker compose up -d --force-recreate orchestrator

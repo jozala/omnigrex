@@ -71,9 +71,9 @@ Only the RPC subscriber receives projected events; the real Session, extensions,
 | `compaction_start`, `compaction_end` | Type and reason; end includes aborted/retry flags and a fixed failure marker, never a summary or raw provider error |
 | Retry, settlement, other lifecycle and unknown events | Unchanged; required fields are not truncated |
 
-The controller still bounds every JSONL record to 1 MiB and fails closed on malformed/oversized required records.
+The orchestrator still bounds every JSONL record to 1 MiB and fails closed on malformed/oversized required records.
 Command responses are not filtered or re-correlated; production History Replay uses the separate bounded metadata operation, not native transcript-returning RPC queries.
-Native transcript queries and unknown future events remain subject to the same controller bound, not a promise of arbitrary transcript transfer.
+Native transcript queries and unknown future events remain subject to the same orchestrator bound, not a promise of arbitrary transcript transfer.
 Diagnostics use closed-vocabulary runtime observations, never transcript bodies or new raw-event logging.
 An infrastructure protocol failure is not repaired by accepting a terminal intent without valid outcome evidence.
 
@@ -132,7 +132,7 @@ OAuth/subscription snapshots are unsupported by this API-key gate.
 
 Use a dedicated browser-authorized qualification registration rather than a copied production refresh token.
 The gate builds isolated backend resources, starts the normal Omnigrex login command, prints a browser URL, and accepts the full loopback redirect through stdin when the browser is remote.
-The registration lives only in the isolated controller-side volume and is logged out and remotely revoked on completion where possible.
+The registration lives only in the isolated orchestrator-side volume and is logged out and remotely revoked on completion where possible.
 No OpenAI API key is used or accepted as fallback.
 
 ```sh
@@ -165,7 +165,7 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-rec
 
 The controlled-provider suites create independent PostgreSQL/network/volume resources and remove only their own resources.
 They do not recreate the stable development stack or mutate external GitHub repositories.
-Docker controller wrappers use the daemon socket, while Pi environments never receive it.
+Docker orchestrator wrappers use the daemon socket, while Pi environments never receive it.
 Native wrappers use KVM and transferred image archives without a host Docker socket.
 Fixture images remain cached.
 See [Agent Turn evidence](../plans/2026-10-09-complete-pi-agent-turns.md) and [recovery evidence](../plans/2026-10-10-pi-failure-recovery.md).

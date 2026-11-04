@@ -123,7 +123,7 @@ func (client *APIClient) GetCheckRunMetadata(ctx context.Context, token, owner, 
 	return check, err
 }
 
-// CICursorReadHead returns only a head already authorized by the controller.
+// CICursorReadHead returns only a head already authorized by the orchestrator.
 // The endpoint still validates the cursor kind, resource, attempt and offsets.
 func CICursorReadHead(cursor string, mapping CITargetMapping) (string, error) {
 	if cursor == "" {

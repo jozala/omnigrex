@@ -93,13 +93,13 @@ func TestPackVerifyNoCheckoutCompose(t *testing.T) {
 		env = append(env, "OMNIGREX_"+n+"_FILE=/dev/null")
 	}
 	for _, backend := range []string{"docker", "microsandbox"} {
-		controller := "orchestrator"
+		orchestrator := "orchestrator"
 		if backend == "microsandbox" {
-			controller += "-microsandbox"
+			orchestrator += "-microsandbox"
 		}
 		cmd := exec.Command("docker", "compose", "-f", "compose.pi.yaml", "-f", "compose.pi-"+backend+".yaml", "config", "--quiet")
 		cmd.Dir = filepath.Join(root, "deploy")
-		cmd.Env = append(env, "OMNIGREX_ORCHESTRATOR_IMAGE="+m.Images[controller])
+		cmd.Env = append(env, "OMNIGREX_ORCHESTRATOR_IMAGE="+m.Images[orchestrator])
 		if out, e := cmd.CombinedOutput(); e != nil {
 			t.Fatalf("no-checkout %s configuration: %v %s", backend, e, out)
 		}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/providerauth"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
@@ -334,6 +335,45 @@ func TestOwnedRunnerReportsSafeConfigurationFailure(t *testing.T) {
 	_, err := connection.Prepare(ctx)
 	if !errors.Is(err, pi.ErrConfiguration) || strings.Contains(fmt.Sprintf("%+v %#v", err, err), "secret") {
 		t.Fatalf("configuration failure: %v", err)
+	}
+}
+
+func TestRenderUsesOrchestratorSubscriptionBundleWithoutDeliveringCredentials(t *testing.T) {
+	p, err := agentprofile.Parse(".omnigrex/team/developer.md", []byte("---\nname: developer\nrole: DEVELOPER\nruntime: pi-rpc/v2\nmodel: openai/o4-mini\npermissions:\n  read: allow\n---\nImplement the Work Item.\n"), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, _ := role.BuiltinPolicyCatalog().Lookup(role.Developer)
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ := definition.Stage(workflow.StageImplementation)
+	fixture, err := pi.ConfigurationDiagnostic(role.Developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "api-keys.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"type":"api_key","key":"must-not-be-delivered"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := providerauth.SubscriptionBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := pi.Render(p, policy, agentinstructions.Operator{}, stage, workflow.TurnPurposeInitialDevelopment, fixture.MCP, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configuration.Subscription || string(configuration.Auth) != `{}` {
+		t.Fatal("orchestrator-managed subscription was not selected without runtime credentials")
+	}
+	encoded, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "must-not-be-delivered") || strings.Contains(string(encoded), `"type":"orchestrator"`) {
+		t.Fatal("subscription credentials or internal authentication marker entered the runtime configuration")
 	}
 }
 

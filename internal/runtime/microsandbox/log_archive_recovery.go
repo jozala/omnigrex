@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// flock is tied to this resource directory's inode, across controller processes.
+// flock is tied to this resource directory's inode, across orchestrator processes.
 // No lock file is unlinked/recreated, and a crash releases the lock automatically.
 func lockLogArchive(ctx context.Context, directory *os.File) error {
 	for {

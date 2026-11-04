@@ -50,7 +50,7 @@ export function controlEvent(event) {
         errorMessage: event.errorMessage ? 'Omnigrex compaction_failed' : undefined };
     default:
       // Required lifecycle/retry fields and unknown future events are never
-      // silently discarded. The controller's existing 1 MiB bound fails closed.
+      // silently discarded. The orchestrator's existing 1 MiB bound fails closed.
       return event;
   }
 }

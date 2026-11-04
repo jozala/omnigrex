@@ -120,7 +120,7 @@ func NewPreparerWithChangeProposalVerifier(loader ProfileLoader, selector agentp
 	return preparer
 }
 
-// SetReviewGate installs mandatory controller CI scheduling for Reviewer preparations.
+// SetReviewGate installs mandatory orchestrator CI scheduling for Reviewer preparations.
 func (preparer *Preparer) SetReviewGate(gate *ReviewGate) { preparer.reviewGate = gate }
 
 // SetDefaultMaxSteps supplies the operator fallback for subsequently prepared

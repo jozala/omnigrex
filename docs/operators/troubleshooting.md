@@ -9,7 +9,7 @@ Do not manually edit PostgreSQL or retained Session files.
 ## Recover a blocked Workflow
 
 1. Correct App permissions/access, credentials, exact images, storage, network, provider availability, or repository configuration.
-2. Recreate the controller if image, environment, or mounted configuration changed.
+2. Recreate the orchestrator if image, environment, or mounted configuration changed.
 3. Run repository doctor until every check passes.
 4. Confirm that the Issue is open.
 5. Ask the user to add `omnigrex:run` for a fresh Workflow Attempt.
@@ -42,7 +42,7 @@ Only exact managed identities authorize adoption or cleanup; do not add labels t
 | Pi startup timeout | Turn/Session startup observations, working-revision tool installation, startup budget, and overall Turn timeout |
 | Configuration Human Handoff | Repository owner's [configuration checks](../repository-owners/troubleshooting.md) and operator instruction validation |
 | `subscription_auth` or `subscription_quota` | [Inspect and restore subscription access](provider-authentication.md#recover-access), then explicitly resume Work Items |
-| `subscription_configuration` | Selected model/account entitlement, supported direct Responses capabilities, and matching qualified controller/Pi images |
+| `subscription_configuration` | Selected model/account entitlement, supported direct Responses capabilities, and matching qualified orchestrator/Pi images |
 
 INFO-level `Pi startup readiness started` and `Pi startup readiness completed` include Turn/Session identity, budget, duration, and safe outcome after RPC and durable Session preparation.
 They do not identify a particular tool download or prove an uncertain execution stopped.
@@ -72,13 +72,13 @@ docker compose cp 'orchestrator:/var/lib/omnigrex/runtime-state/assignment-<part
 ```
 
 Replace the angle-bracket placeholders and protect the local destination before sharing any content.
-Archives survive environment removal and controller recreation through the existing runtime-state volume and share [Participant retention](retention.md#session-retention).
+Archives survive environment removal and orchestrator recreation through the existing runtime-state volume and share [Participant retention](retention.md#session-retention).
 Only ordinary Agent Turn resources with valid identity receive Participant archives; diagnostic-only and malformed resources do not.
 
 Copying starts after confirmed stop, before native removal, with a five-second per-resource budget capped at half the remaining cleanup deadline to reserve time for removal.
 `Microsandbox native log archive incomplete` warns when preservation fails, but archival failure does not block safe cleanup.
 Already completed file copies survive retries; partial files are never published as complete logs.
-Archive writers serialize per native resource and reclaim abandoned temporary files on retry after a controller crash, without removing another active writer's staging files.
+Archive writers serialize per native resource and reclaim abandoned temporary files on retry after an orchestrator crash, without removing another active writer's staging files.
 The opened source directory is pinned and revalidated against the exact native identity before copying, rather than trusting a potentially replaced sandbox name.
 The copy budget is cooperative: context checks bound lock waits and work between filesystem calls, but cannot interrupt an operating-system write or `Sync` that stalls.
 Missing source files are recorded rather than synthesized, and native rotation may already have discarded earlier entries.
@@ -90,7 +90,7 @@ An absent archive is not a readiness failure, and log contents do not establish 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 Definite failures place safe details in `tool_invocations.last_error`; unknown outcomes remain under reconciliation.
 
-For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's controller-owned `origin_operation_id`, not just its text or response IDs.
+For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's orchestrator-owned `origin_operation_id`, not just its text or response IDs.
 Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.
 Historical entries without an origin remain preserved but cannot prove an uncertain operation's effect; normal reconciliation retries or explicit Human Handoff handle missing proof.
 Do not assign origins or mark mutations successful by matching historical content.
@@ -127,7 +127,7 @@ After another publication advances the target, restart pagination rather than re
 An external push does not become authorized: PR metadata and collaboration reads reject a mismatched head, while CI reads remain at the published SHA.
 If a publication is still unknown or being reconciled, it grants no new read access until successful durable evidence exists.
 Do not substitute starting-commit checks for current-head verification or bypass MCP with direct GitHub credentials.
-For persistent scope rejection, retain Turn/epoch and mutation identifiers and inspect the publication ledger/recovery outcome before retrying; a compatible controller upgrade is required for deployments that still freeze all reads at the starting head.
+For persistent scope rejection, retain Turn/epoch and mutation identifiers and inspect the publication ledger/recovery outcome before retrying; a compatible orchestrator upgrade is required for deployments that still freeze all reads at the starting head.
 
 ## Publication and terminal verification
 

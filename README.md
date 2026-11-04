@@ -19,7 +19,7 @@ GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human review
 - Persistent Agent Sessions across disposable execution environments.
 - Durable human clarification and explicitly addressed answers, amendments, and steering on the Work Item Issue.
 - Bounded retries and Review Cycles, with explicit Human Handoff when automation cannot continue.
-- Durable controller-side CI completion waits before review, with repository-owned immediate-review and expected-check policy.
+- Durable orchestrator-side CI completion waits before review, with repository-owned immediate-review and expected-check policy.
 - Docker or Linux/KVM Microsandbox execution, with a Docker Compose control plane and PostgreSQL ledger.
 
 Omnigrex is in active early development toward its first dogfooding iteration.

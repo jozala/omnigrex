@@ -56,7 +56,7 @@ func runAuthCommand(ctx context.Context, args []string, getenv func(string) stri
 			}{Mode: mode})
 			return 0
 		}
-		_, _ = fmt.Fprintln(stderr, "set OMNIGREX_OPENAI_AUTH_MODE=subscription and recreate the controller before managing ChatGPT authentication")
+		_, _ = fmt.Fprintln(stderr, "set OMNIGREX_OPENAI_AUTH_MODE=subscription and recreate the orchestrator before managing ChatGPT authentication")
 		return 1
 	}
 	client, closeClient, err := providerauth.OpenOperator(ctx, directory)

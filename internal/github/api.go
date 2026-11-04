@@ -1927,7 +1927,7 @@ func parseRateLimitReset(value string) time.Time {
 	return time.Unix(seconds, 0)
 }
 
-// UpdateIssueComment edits a controller-owned progress comment at a verified
+// UpdateIssueComment edits an orchestrator-owned progress comment at a verified
 // Issue/PR location. It is not exposed as an Agent mutation capability.
 func (client *APIClient) UpdateIssueComment(ctx context.Context, token, owner, repository string, number int, id int64, input CommentRequest) (IssueComment, error) {
 	if err := validateRepository(owner, repository); err != nil {
