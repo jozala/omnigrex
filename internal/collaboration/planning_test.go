@@ -147,6 +147,10 @@ func TestCheckpointNonPublicationIsImmutableAndRetrievalPrecedesYield(t *testing
 	if !errors.As(err, &rejection) || rejection.Reason != "late_input" || len(s.Planning.Revisions) != 1 {
 		t.Fatal(rejection, err)
 	}
+	rejection.Content.Evidence[0] = "caller mutation"
+	if _, err = s.ReserveCheckpoint("P2", "planner", "turn-1", c); !errors.As(err, &rejection) || rejection.Content.Evidence[0] != "README.md" {
+		t.Fatal("rejection aliases immutable evidence", err)
+	}
 	if _, err = s.ReserveCheckpoint("P1", "planner", "turn-1", c); err != nil {
 		t.Fatal("late input invalidated reserved replay", err)
 	}

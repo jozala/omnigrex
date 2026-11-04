@@ -159,6 +159,12 @@ func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T
 			invoke := func() (json.RawMessage, error) {
 				return backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolPublishPlanCheckpoint, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
 			}
+			validRequest := request
+			request = json.RawMessage(`{"operation_id":"malformed","content":{}}`)
+			if _, err = invoke(); !errors.Is(err, mcp.ErrInvalidInvocation) {
+				t.Fatal("malformed request became non-publication success", err)
+			}
+			request = validRequest
 			raw, err := invoke()
 			var result map[string]any
 			if err != nil || json.Unmarshal(raw, &result) != nil || result["status"] != "input_pending" || result["publication"] != "not_applied" || result["reason"] != reason || result["revision_id"] != nil || result["source"] != nil || api.posts != 0 {

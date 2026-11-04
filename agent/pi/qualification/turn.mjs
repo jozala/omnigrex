@@ -63,16 +63,14 @@ try {
       const confirmation=input.find(i=>i.kind==='confirm-plan');
       const amended=input.some(i=>i.kind==='amend');
       const stale=rounds.length===2&&!amended&&!confirmation;
-      const offset=amended?2:rounds.length?1:0;
+      const offset=rounds.length?1:0;
       if(confirmation){
         if(step===0){name='omnigrex_refresh_default_branch';args={operation_id:'planning-final-base'};}
         if(step===1){name='bash';args={command:`git cat-file -e ${result(0).sha}^{commit} && git show ${result(0).sha}:README.md`};}
         if(step===2){name='omnigrex_complete_planning';args={operation_id:'planning-ready',revision_id:confirmation.target,repository_commit:result(0).sha,evidence:'README.md remains a minimal repository. Ephemeral local checklist requires no retention schema or external integration. All delivered human choices remain applicable.',material_decisions_resolved:true};}
       }else if(amended && step===0){
         const amendment=input.find(i=>i.kind==='amend');
-        name='omnigrex_resolve_clarification';args={operation_id:'reinterpret-audience',round_id:rounds[0].id,resolutions:[{question_id:'Q1',response_ids:[amendment.id],explanation:'The explicit amendment replaces the prior audience: users without repository access. Use the steering choice of a standalone operator CLI; no repository plugin or accounts.'}]};
-      }else if(amended && step===1){
-        name='omnigrex_resolve_clarification';args={operation_id:'retain-ephemeral',round_id:rounds[1].id,resolutions:[{question_id:'Q2',response_ids:decisions.filter(i=>i.round_id===rounds[1].id).map(i=>i.id),explanation:'Retain the earlier no-persistence decision; the audience amendment does not authorize retaining personal data.'}]};
+        name='omnigrex_resolve_clarification';args={operation_id:'reinterpret-audience',round_id:rounds[0].id,resolutions:[{question_id:'Q1',response_ids:[amendment.id,...input.filter(i=>i.kind==='steer').map(i=>i.id)],explanation:'The explicit amendment replaces the prior audience: users without repository access. Use the steering choice of a standalone operator CLI; no repository plugin or accounts.'}]};
       }else if(rounds.length&&step===0){
         const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:`resolve-${round.id}`,round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:input.map(i=>i.id),explanation:'Use the explicit human choice; replace proposed retention with ephemeral local status after the second answer.'}]};
       }else if(rounds.length===0){
