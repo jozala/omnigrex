@@ -7,7 +7,9 @@
 Closing an Issue fences new work, settles admitted mutations, completes Participants, and schedules retained Runtime Process state deletion.
 `OMNIGREX_ASSIGNMENT_RETENTION_DURATION` defaults to 30 days (`720h`).
 Reopening before collection cancels deletion but does not resume automation.
-The user must add `omnigrex:run` after reopening.
+For direct-development Work Items, the user must add `omnigrex:run` after reopening.
+Planning Work Items reject that development transition; there is no new completed/closed-planning reopening flow in this increment.
+See [planning](../users/planning.md) for stopping and Human Handoff recovery behavior.
 
 Physical collection is irrevocable once started.
 After collection, a new trigger creates a fresh Assignment Generation with new Participants/Sessions; prior operational history remains in PostgreSQL.

@@ -401,6 +401,10 @@ func (worker *LabelWorker) reconcile(ctx context.Context, credential string, eff
 
 func managedLabelState(state workflow.State) (WorkflowState, error) {
 	switch state {
+	case workflow.StatePlanning:
+		return StatePlanning, nil
+	case workflow.StatePlanReady:
+		return StatePlanReady, nil
 	case workflow.StateDeveloping:
 		return StateDeveloping, nil
 	case workflow.StateReviewing:

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"slices"
 
@@ -18,8 +19,10 @@ var errInvalidArguments = errors.New("invalid tool arguments")
 type ToolClass string
 
 const (
-	ReadTool     ToolClass = "READ"
-	MutationTool ToolClass = "MUTATION"
+	ToolCompletePlanning                = "complete_planning"
+	ToolPublishPlanCheckpoint           = "publish_plan_checkpoint"
+	ReadTool                  ToolClass = "READ"
+	MutationTool              ToolClass = "MUTATION"
 )
 
 const (
@@ -58,8 +61,10 @@ type ToolDefinition struct {
 }
 
 var toolCatalog = []ToolDefinition{
-	{Name: ToolGetCollaborationRecord, Description: "Read a frozen collaboration record in bounded JSON-text chunks. When collaboration_projection.retrieval_required, retrieve all human_input records before interpretation or handoff. Concatenate content chunks using next_offset; then advance next_index. Older input and rounds remain available by collection and index.", InputSchema: objectSchema(map[string]any{"collection": map[string]any{"type": "string", "enum": []string{"human_input", "human_input_history", "clarification_history"}}, "index": integerSchema(0, math.MaxInt32), "offset": integerSchema(0, math.MaxInt32)}, "collection", "index"), Class: ReadTool},
-	{Name: ToolRequestClarification, Description: "Publish a new immutable clarification round on the Work Item and end this Turn in expected waiting. Supply stable question IDs; carry unresolved questions forward and use new IDs for materially revised questions. Use empty questions only to yield to already queued human input after a handoff fence. This does not create a Human Handoff or authorize implementation.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "questions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"id": stringSchema(1, 128), "body": stringSchema(1, 8192), "replaces": stringSchema(1, 128)}, "id", "body")}}, "operation_id", "questions"), Class: MutationTool},
+	{Name: ToolGetCollaborationRecord, Description: "Read a frozen collaboration record in bounded JSON-text chunks. When collaboration_projection.retrieval_required, retrieve all human_input records before interpretation or handoff. Concatenate content chunks using next_offset; then advance next_index. Older input and rounds remain available by collection and index.", InputSchema: objectSchema(map[string]any{"collection": map[string]any{"type": "string", "enum": []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history"}}, "index": integerSchema(0, math.MaxInt32), "offset": integerSchema(0, math.MaxInt32)}, "collection", "index"), Class: ReadTool},
+	{Name: ToolCompletePlanning, Description: "Finish planning only after exact current-pair human confirmation, pending input delivery, and a fresh current repository snapshot with evidence-based relevance revalidation. Changed material commitments require a new pair and renewed confirmation. Does not authorize implementation.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "revision_id": stringSchema(1, 128), "repository_commit": stringSchema(40, 64), "evidence": stringSchema(1, 32768), "material_decisions_resolved": map[string]any{"type": "boolean"}}, "operation_id", "revision_id", "repository_commit", "evidence", "material_decisions_resolved"), Class: MutationTool},
+	{Name: ToolPublishPlanCheckpoint, Description: "Publish one immutable complete requirements brief / technical plan pair after a meaningful change. Proposed is not a human decision. Preserve decision response IDs and repository evidence. Structural presence is not semantic completeness.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "content": objectSchema(map[string]any{"title": stringSchema(1, 512), "status": map[string]any{"type": "string", "enum": []string{"draft", "proposed"}}, "changes": stringSchema(1, 8192), "requirements_brief": stringSchema(1, 32768), "technical_plan": stringSchema(1, 32768), "investigated_commit": stringSchema(40, 64), "evidence": map[string]any{"type": "array", "minItems": 1, "items": stringSchema(1, 8192)}, "decision_response_ids": map[string]any{"type": "array", "items": stringSchema(1, 128)}}, "title", "status", "changes", "requirements_brief", "technical_plan", "investigated_commit", "evidence")}, "operation_id", "content"), Class: MutationTool},
+	{Name: ToolRequestClarification, Description: "Publish a new immutable clarification round on the Work Item and end this Turn in expected waiting. Supply stable question IDs; carry unresolved questions forward and use new IDs for materially revised questions. Use empty questions only to yield to already queued human input after a handoff fence or await exact-revision confirmation of a published proposed plan. This does not create a Human Handoff or authorize implementation.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "questions": map[string]any{"type": "array", "maxItems": 50, "items": objectSchema(map[string]any{"id": stringSchema(1, 128), "body": stringSchema(1, 8192), "replaces": stringSchema(1, 128)}, "id", "body")}}, "operation_id", "questions"), Class: MutationTool},
 	{Name: ToolResolveClarification, Description: "Record explicit interpretation of delivered human responses for individual questions. Leave incomplete, ambiguous or conflicting questions unresolved and ask again before dependent action.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema(), "round_id": stringSchema(1, 128), "resolutions": map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": objectSchema(map[string]any{"question_id": stringSchema(1, 128), "response_ids": map[string]any{"type": "array", "maxItems": 100, "items": stringSchema(1, 128)}, "explanation": stringSchema(1, 8192), "obsolete": map[string]any{"type": "boolean"}}, "question_id", "response_ids", "explanation")}}, "operation_id", "round_id", "resolutions"), Class: MutationTool},
 
 	{Name: ToolRefreshDefaultBranch, Description: "Acquire a verified default-branch snapshot into this live workspace without changing HEAD/index/source. Use a new operation_id for each fresh observation; replay returns the original snapshot, not a new observation. Check the returned ref/SHA locally. Only status current satisfies final freshness guidance; stale is usable but requires a fresh call, default_branch_changed/unavailable do not establish freshness. This is a local side effect, not publication or mergeability certification.", InputSchema: objectSchema(map[string]any{"operation_id": operationIDSchema()}, "operation_id"), Class: MutationTool},
@@ -209,6 +214,15 @@ func toolsForScope(policies role.PolicyCatalog, scope TokenScope) ([]ToolDefinit
 	result := make([]ToolDefinition, 0, len(requestedSet))
 	for _, tool := range toolCatalog {
 		if _, ok := requestedSet[tool.Name]; ok {
+			if scope.Role == role.Planner && tool.Name == ToolRequestClarification {
+				// Keep the shared catalog immutable: other Roles retain their existing limit.
+				tool.InputSchema = maps.Clone(tool.InputSchema)
+				properties := maps.Clone(tool.InputSchema["properties"].(map[string]any))
+				questions := maps.Clone(properties["questions"].(map[string]any))
+				questions["maxItems"] = 5
+				properties["questions"] = questions
+				tool.InputSchema["properties"] = properties
+			}
 			result = append(result, tool)
 		}
 	}

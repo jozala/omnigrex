@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -1140,4 +1142,118 @@ func TestNormalHandoffDiagnosticsRequireExactRevisionAndExcludeSafetyJobs(t *tes
 	if err != nil || current.HandoffDiagnostic != "" {
 		t.Fatalf("missing current explanation = (%#v, %v)", current, err)
 	}
+}
+
+func TestPlanningReadyFinalLabelFailureDrainsEscalation(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	fixture := seedAgentSessionForRole(t, pool, 1050, workflow.RolePlanner)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+UPDATE workflows SET status = 'PLAN_READY', planning_only=true, state_revision = 2,
+    desired_assignment_status = 'ACTIVE', desired_runtime_state = 'ACTIVE'
+WHERE id = $1`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failure_limit = 1, current_stage = 'planning' WHERE id = $1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve genuine immutable completion history through operational recovery.
+	stateHistory := collaboration.State{}
+	if err := stateHistory.StartPlanning(collaboration.OriginalRequest{Title: "Checklist", Body: "Help small teams", Source: collaboration.Source{Channel: "fixture", ID: "original"}}); err != nil {
+		t.Fatal(err)
+	}
+	stateHistory.Prepare(fixture.assignmentID, "planning-turn")
+	content := collaboration.PlanningContent{Title: "Checklist", Status: "proposed", Changes: "Initial plan", RequirementsBrief: "Ephemeral checklist", TechnicalPlan: "Local state and reset tests", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+	if _, err := stateHistory.ReserveCheckpoint("P1", fixture.assignmentID, "planning-turn", content); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateHistory.ConfirmCheckpoint("P1", collaboration.Source{Channel: "fixture", ID: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	receipt := stateHistory.Accept("confirmation", collaboration.Command{Kind: "confirm-plan", Target: "P1"}, collaboration.Admission{Active: true, Authorized: true, ParticipantID: fixture.assignmentID, Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "confirmation"}, At: time.Now()})
+	if receipt.ResponseID == "" {
+		t.Fatal(receipt)
+	}
+	stateHistory.Prepare(fixture.assignmentID, "final-turn")
+	if err := stateHistory.ValidatePlanning("complete", "P1", fixture.assignmentID, "final-turn", strings.Repeat("a", 40), "Still applicable", true); err != nil {
+		t.Fatal(err)
+	}
+	stateHistory.Planning.ReadyRevision = "P1"
+	history, _ := json.Marshal(stateHistory)
+	if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, history); err != nil {
+		t.Fatal(err)
+	}
+	jobID := insertJob(t, pool, ctx, jobSeed{
+		Queue: store.WorkflowActionQueue, Kind: store.ReconcileGitHubLabelsJobKind,
+		Payload: json.RawMessage(`{"state":"PLAN_READY","revision":2}`), MaxAttempts: 1,
+		IdempotencyKey: "label-final-expiry-50", WorkflowID: fixture.workflowID,
+	})
+	lease, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "crashing-label-worker", 25*time.Millisecond)
+	if err != nil || lease == nil || lease.ID != jobID {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() = (%#v, %v)", lease, err)
+	}
+	time.Sleep(35 * time.Millisecond)
+	if reclaimed, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "replacement-label-worker", time.Second); err != nil || reclaimed != nil {
+		t.Fatalf("ClaimWorkflowGitHubEffectJob() after final expiry = (%#v, %v), want (nil, nil)", reclaimed, err)
+	}
+	escalation, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second)
+	if err != nil || escalation == nil || !escalation.HandoffApplied || escalation.WorkflowRevision != 3 {
+		t.Fatalf("ApplyNextWorkflowActionFailureEscalation() = (%#v, %v)", escalation, err)
+	}
+	var state, assignmentStatus, sourceStatus string
+	var revision, derived int
+	if err := pool.QueryRow(ctx, `
+SELECT workflow.status, workflow.state_revision, workflow.desired_assignment_status, source.status,
+       (SELECT count(*) FROM jobs WHERE workflow_id = workflow.id
+           AND kind IN ('PUBLISH_HUMAN_HANDOFF', 'RECONCILE_GITHUB_LABELS') AND id <> source.id)
+FROM workflows AS workflow JOIN jobs AS source ON source.id = $2
+WHERE workflow.id = $1`, fixture.workflowID, jobID).Scan(&state, &revision, &assignmentStatus, &sourceStatus, &derived); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(workflow.StateNeedsHuman) || revision != 3 || assignmentStatus != string(workflow.AssignmentWaitingForHuman) || sourceStatus != string(store.JobFailed) || derived != 2 {
+		t.Errorf("final expiry = Workflow %s@%d assignment %s source %s derived %d", state, revision, assignmentStatus, sourceStatus, derived)
+	}
+	if next, err := databases[0].ApplyNextWorkflowActionFailureEscalation(ctx, "failure-escalation", 5*time.Second); err != nil || next != nil {
+		t.Fatal("escalation remained pending", next, err)
+	}
+	var successors int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id=$1 AND kind='PREPARE_AGENT_TURN'`, fixture.workflowID).Scan(&successors); err != nil || successors != 0 {
+		t.Fatal("implementation allocated", successors, err)
+	}
+	delivery := workflowDelivery(uuid.NewString())
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 1050, 1050, 1050
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
+	recovered, err := databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "labeled"), store.WorkflowLocator{RepositoryID: 1050, IssueID: 1050, IssueNumber: 1050}, func(c store.WorkflowEventContext) (workflow.Event, error) {
+		return workflow.TriggerEvent{EventMetadata: c.Metadata, AttemptID: uuid.NewString(), AttemptNumber: c.Snapshot.LastAttemptNumber + 1}, nil
+	})
+	if err != nil || recovered.State != workflow.StatePlanReady {
+		t.Fatal("completed plan not restored", recovered, err)
+	}
+	var after []byte
+	var attempts, turns int
+	if err = pool.QueryRow(ctx, `SELECT c.state,(SELECT count(*) FROM workflow_attempts WHERE workflow_id=$1),(SELECT count(*) FROM jobs WHERE workflow_id=$1 AND kind IN ('PREPARE_AGENT_TURN','REVALIDATE_TERMINAL_INTENT')) FROM work_item_collaboration c WHERE c.workflow_id=$1`, fixture.workflowID).Scan(&after, &attempts, &turns); err != nil {
+		t.Fatal(err)
+	}
+	var preserved collaboration.State
+	if err = json.Unmarshal(after, &preserved); err != nil {
+		t.Fatal(err)
+	}
+	if preserved.Planning.ReadyRevision != "P1" || len(preserved.Planning.Revalidations) != 1 || len(preserved.Planning.Revisions) != 1 || attempts != 1 || turns != 0 {
+		t.Fatal("completed plan reopened", preserved.Planning, attempts, turns)
+	}
+
+	labels, err := databases[0].ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "restored-labels", time.Minute)
+	if err != nil || labels == nil {
+		t.Fatal(labels, err)
+	}
+	effect, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *labels)
+	if err != nil || effect.State != workflow.StatePlanReady || effect.HandoffReason != "" {
+		t.Fatal(effect, err)
+	}
+	if _, err = databases[0].AcknowledgeWorkflowGitHubEffect(ctx, *labels, effect, json.RawMessage(`{"reconciled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+
 }

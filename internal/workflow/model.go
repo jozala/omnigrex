@@ -9,6 +9,8 @@ import (
 type State string
 
 const (
+	StatePlanning   State = "PLANNING"
+	StatePlanReady  State = "PLAN_READY"
 	StateAbsent     State = "ABSENT"
 	StateDormant    State = "DORMANT"
 	StateDeveloping State = "DEVELOPING"
@@ -22,6 +24,7 @@ const (
 type Role = role.ID
 
 const (
+	RolePlanner   = role.Planner
 	RoleDeveloper = role.Developer
 	RoleReviewer  = role.Reviewer
 )
@@ -192,6 +195,7 @@ type Closure struct {
 }
 
 type Snapshot struct {
+	PlanningOnly         bool
 	ClarificationWaiting bool
 	State                State
 	Revision             uint64
@@ -228,6 +232,10 @@ type EventMetadata struct {
 
 // TriggerEvent records an accepted human command to start a new Workflow Attempt.
 type TriggerEvent struct {
+	// PlanningCompleted is corroborated from immutable collaboration history by the Store.
+	// It restores operational projection only; it cannot reopen discovery.
+	PlanningCompleted bool
+	PlanningOnly      bool
 	EventMetadata
 	AttemptID                   string
 	AttemptNumber               uint64
@@ -247,6 +255,7 @@ func (TriggerEvent) isWorkflowEvent() {}
 type TurnOutcome string
 
 const (
+	TurnOutcomePlanningReady        TurnOutcome = "PLANNING_READY"
 	TurnOutcomeClarificationWait    TurnOutcome = "CLARIFICATION_WAIT"
 	TurnOutcomeChangeProposalReady  TurnOutcome = "CHANGE_PROPOSAL_READY"
 	TurnOutcomeChangesRequested     TurnOutcome = "CHANGES_REQUESTED"
@@ -429,6 +438,7 @@ const (
 type TurnPurpose string
 
 const (
+	TurnPurposeInitialPlanning    TurnPurpose = "INITIAL_PLANNING"
 	TurnPurposeInitialDevelopment TurnPurpose = "INITIAL_DEVELOPMENT"
 	TurnPurposeReview             TurnPurpose = "REVIEW"
 	TurnPurposeRequestedChanges   TurnPurpose = "REQUESTED_CHANGES"

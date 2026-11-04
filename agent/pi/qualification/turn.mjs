@@ -53,6 +53,28 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
+    } else if (fault === 'planning') {
+      if(role!=='PLANNER'||names.some(n=>['omnigrex_publish_changes','omnigrex_open_pr','omnigrex_submit_review','omnigrex_request_review'].includes(n)))throw new Error('planning authority escaped');
+      const system=data.messages.filter(m=>m.role==='system').map(m=>text(m.content)).join('\n');
+      if(!system.includes('omnigrex-discovery/v1'))throw new Error('discovery missing on continuation');
+      const rounds=(envelope.clarification_history??[]).filter(r=>r.participant_id===envelope.agent_participant_id);
+      const input=envelope.human_input??[];
+      const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>i.kind!=='confirm-plan');
+      const confirmation=input.find(i=>i.kind==='confirm-plan');
+      const offset=rounds.length?1:0;
+      if(confirmation){
+        if(step===0){name='omnigrex_refresh_default_branch';args={operation_id:'planning-final-base'};}
+        if(step===1){name='bash';args={command:`git cat-file -e ${result(0).sha}^{commit} && git show ${result(0).sha}:README.md`};}
+        if(step===2){name='omnigrex_complete_planning';args={operation_id:'planning-ready',revision_id:confirmation.target,repository_commit:result(0).sha,evidence:'README.md remains a minimal repository. Ephemeral local checklist requires no retention schema or external integration. All delivered human choices remain applicable.',material_decisions_resolved:true};}
+      }else if(rounds.length&&step===0){
+        const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:`resolve-${round.id}`,round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:input.map(i=>i.id),explanation:'Use the explicit human choice; replace proposed retention with ephemeral local status after the second answer.'}]};
+      }else if(rounds.length===0){
+        if(step===0){name='omnigrex_request_clarification';args={operation_id:'planning-ask-1',questions:[{id:'Q1',body:'README.md establishes a minimal repository, not an existing onboarding service. Should we target small teams without external accounts? I recommend this bounded scope.'}]};}
+      }else{
+        if(step===offset){name='omnigrex_refresh_default_branch';args={operation_id:`planning-base-${rounds.length}`};}
+        if(step===offset+1){name='omnigrex_publish_plan_checkpoint';args={operation_id:`planning-pair-${rounds.length}`,content:{title:'Small-team onboarding',status:rounds.length===1?'draft':'proposed',changes:rounds.length===1?'Scope selected; retention remains an unresolved proposal.':'Replace retention assumption with the human choice: ephemeral local status.',requirements_brief:rounds.length===1?'Users: small teams. Scope: checklist without external accounts. Non-goals: deployment and implementation. Retention is only proposed, not accepted; ask next.':'Problem: small teams need onboarding guidance. Required: ephemeral local checklist, no retained personal data, no external accounts. Accept when a team completes and resets its checklist. Non-goals: deployment and implementation. Human choices are backed by accepted input. Material unresolved questions: none.',technical_plan:'README.md is the current repository baseline. Prefer a local component over hosted integration to avoid external accounts. Separate UI, transient status and tests; no database migration. Deliver tests then a local checklist. Verify reset discards status. If persistence becomes necessary, clarify again; local implementation names are suggestions.',investigated_commit:result(offset).sha,evidence:['README.md at the acquired default commit'],decision_response_ids:decisions.map(i=>i.id)}};}
+        if(step===offset+2){name='omnigrex_request_clarification';args={operation_id:rounds.length===1?'planning-ask-2':'await-confirmation',questions:rounds.length===1?[{id:'Q2',body:'Should onboarding status be retained? I recommend ephemeral local status rather than the earlier persistence proposal, avoiding a new retention obligation.'}]:[]};}
+      }
     } else if ((fault === 'clarification' || fault === 'clarification-restart')) {
       // Fetch bounded projected records through the real production MCP bridge.
       // Historical fixture bodies need not be re-read to interpret this new answer.

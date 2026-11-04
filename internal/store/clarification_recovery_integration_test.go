@@ -21,13 +21,17 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	number := 970
-	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer} {
+	for _, role := range []workflow.Role{workflow.RoleDeveloper, workflow.RoleReviewer, workflow.RolePlanner} {
 		for _, expired := range []bool{false, true} {
 			for _, inputTiming := range []string{"none", "before-checkpoint", "during-corroboration", "empty-yield", "unpublished"} {
 				t.Run(fmt.Sprintf("%s/expired=%t/%s", role, expired, inputTiming), func(t *testing.T) {
 					number++
 					database := databases[0]
-					fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, number, role, "review-head")
+					head := "review-head"
+					if role == workflow.RolePlanner {
+						head = ""
+					}
+					fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, number, role, head)
 					if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET infrastructure_failures=1,review_usage='{"review":2}'::jsonb WHERE id=$1`, fixture.attemptID); err != nil {
 						t.Fatal(err)
 					}

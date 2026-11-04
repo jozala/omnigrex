@@ -57,7 +57,7 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 		if err != nil {
 			return err
 		}
-		if len(questions) == 0 && state.Pending(turn.AgentParticipantID) {
+		if len(questions) == 0 && (state.Pending(turn.AgentParticipantID) || state.AwaitingPlanConfirmation(turn.AgentParticipantID)) {
 			return nil
 		}
 		id := "R" + mutationID
@@ -158,7 +158,7 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 	if err != nil {
 		return collaboration.Receipt{}, err
 	}
-	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing)
+	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing)
 	participant := ""
 	if active {
 		err = tx.QueryRow(ctx, `SELECT assignment.agent_participant_id::text FROM stage_assignments assignment JOIN agent_participants participant ON participant.id=assignment.agent_participant_id WHERE assignment.workflow_id=$1 AND assignment.stage_id=$2 AND participant.status='ACTIVE' ORDER BY assignment.assignment_generation DESC LIMIT 1`, input.WorkflowID, snapshot.CurrentAttempt.CurrentStage).Scan(&participant)
@@ -216,7 +216,7 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 	if err != nil {
 		return nil, err
 	}
-	if len(state.Inputs) == 0 && len(state.Rounds) == 0 {
+	if len(state.Inputs) == 0 && len(state.Rounds) == 0 && state.Planning == nil {
 		return configuration, nil
 	}
 	for i := range state.Inputs {
@@ -307,11 +307,27 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		return err
 	}
 	event.HumanInputPending = state.Pending(participant)
-	if event.HumanInputPending && (event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
+	if event.HumanInputPending && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
 		event.Outcome = workflow.TurnOutcomeClarificationWait
 		event.Review = nil
 		event.ExistingReview = nil
 		event.AuthorizedReviewerActorID = 0
+	}
+	if event.Outcome == workflow.TurnOutcomePlanningReady {
+		if state.Planning == nil || state.Pending(participant) || state.Unresolved(participant) {
+			return collaboration.ErrInvalid
+		}
+		found := false
+		for _, v := range state.Planning.Revalidations {
+			if v.TurnID == event.Turn.TurnID && v.RevisionID == state.Planning.CurrentRevision {
+				state.Planning.ReadyRevision = v.RevisionID
+				found = true
+			}
+		}
+		if !found {
+			return collaboration.ErrInvalid
+		}
+		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}
 	if event.Outcome == workflow.TurnOutcomeClarificationWait {
 		state.Waiting = true
@@ -387,6 +403,10 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
    WHERE collaboration.workflow_id=$1 AND item->>'participant_id'=$2 AND COALESCE(item->>'delivered_to','')<>''
    AND (($3='human_input' AND item->>'delivered_to'=$4) OR ($3='human_input_history' AND item->>'delivered_to'<>$4))
    ORDER BY position OFFSET $5 LIMIT 1`, workflowID, participant, collection, turn, index).Scan(&raw)
+	case "planning_request":
+		err = tx.QueryRow(ctx, `SELECT state->'planning'->'original_request' FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw)
+	case "planning_history":
+		err = tx.QueryRow(ctx, `SELECT state->'planning'->'revisions'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	case "clarification_history":
 		err = tx.QueryRow(ctx, `SELECT state->'rounds'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	default:

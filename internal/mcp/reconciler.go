@@ -120,6 +120,10 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 		return reconciler.reconcileOpenPullRequest(ctx, reconciliation, mutation, marker)
 	case ToolResolveClarification:
 		return reconciler.reconcileClarificationResolution(ctx, reconciliation, mutation)
+	case ToolCompletePlanning:
+		return reconciler.reconcilePlanningCompletion(ctx, reconciliation, mutation)
+	case ToolPublishPlanCheckpoint:
+		return reconciler.reconcilePlanningCheckpoint(ctx, reconciliation, mutation)
 	case ToolRequestClarification:
 		return reconciler.reconcileClarification(ctx, reconciliation, mutation, marker)
 	case ToolCommentOnIssue:
@@ -795,6 +799,16 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 	}
 	if len(args.Questions) == 0 {
 		pending, err := reconciler.clarifications.HasPendingHumanInput(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID)
+		if err != nil {
+			return unresolvedReconciliation(), err
+		}
+		if !pending {
+			if ledger, ok := reconciler.clarifications.(interface {
+				IsAwaitingPlanConfirmation(context.Context, string, string) (bool, error)
+			}); ok {
+				pending, err = ledger.IsAwaitingPlanConfirmation(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID)
+			}
+		}
 		if err != nil || !pending {
 			return unresolvedReconciliation(), err
 		}

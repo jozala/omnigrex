@@ -36,8 +36,11 @@ func clarificationBody(round collaboration.Round) string {
 	return body.String()
 }
 
-func (p ClarificationPublisher) body(round collaboration.Round, signature string) (string, string, error) {
-	body := clarificationBody(round)
+func (p ClarificationPublisher) body(message collaboration.PublicationMessage) (string, string, error) {
+	body := clarificationBody(message.Round)
+	if message.Checkpoint != nil {
+		body = planningCheckpointBody(*message.Checkpoint)
+	}
 	inspection := InspectMarkers(body)
 	if inspection.Untrusted || len(inspection.Markers) > 0 {
 		return "", "", ErrUntrustedMarkerText
@@ -46,7 +49,7 @@ func (p ClarificationPublisher) body(round collaboration.Round, signature string
 	if err != nil {
 		return "", "", err
 	}
-	signed := AppendSignature(body, signature)
+	signed := AppendSignature(body, message.Signature)
 	if err = CheckPostedBodyLength(signed, marker); err != nil {
 		return "", "", err
 	}
@@ -56,14 +59,14 @@ func (p ClarificationPublisher) Validate(message collaboration.PublicationMessag
 	if message.WorkflowID != "" && message.WorkflowID != p.Marker.WorkflowID {
 		return collaboration.ErrInvalid
 	}
-	_, _, err := p.body(message.Round, message.Signature)
+	_, _, err := p.body(message)
 	if err != nil {
 		return fmt.Errorf("%w: %v", collaboration.ErrInvalid, err)
 	}
 	return nil
 }
 func (p ClarificationPublisher) Publish(ctx context.Context, message collaboration.PublicationMessage) (collaboration.Source, error) {
-	body, marker, err := p.body(message.Round, message.Signature)
+	body, marker, err := p.body(message)
 	if err != nil {
 		return collaboration.Source{}, err
 	}
@@ -81,7 +84,7 @@ func (p ClarificationPublisher) Publish(ctx context.Context, message collaborati
 	return collaboration.Source{Channel: "github", ID: fmt.Sprint(comment.ID), URL: comment.HTMLURL}, nil
 }
 func (p ClarificationPublisher) Reconcile(ctx context.Context, message collaboration.PublicationMessage) (collaboration.Source, bool, error) {
-	body, marker, err := p.body(message.Round, message.Signature)
+	body, marker, err := p.body(message)
 	if err != nil {
 		return collaboration.Source{}, false, err
 	}

@@ -1072,7 +1072,7 @@ WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
 	                  ELSE terminal.id::text END) FROM ancestors AS prior_turn
        JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
        WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
-         AND terminal.tool_name IN ('request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
+         AND terminal.tool_name IN ('complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
   AND EXISTS (SELECT 1 FROM agent_turn_settlements AS settlement
               WHERE settlement.agent_turn_id = source.id
                 AND settlement.workflow_outcome = 'INFRASTRUCTURE_FAILED')
@@ -1199,7 +1199,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return ErrMutationAdmissionClosed
 		}
-		if spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
+		if spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
 			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
 			if err != nil {
 				return err
@@ -2198,7 +2198,7 @@ func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source Mutat
 		return nil
 	}
 	switch source.ToolName {
-	case "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
+	case "complete_planning", "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
 	default:
 		return nil
 	}
@@ -2272,7 +2272,7 @@ func sameAgentMutationDefinition(existing MutationReservation, spec MutationSpec
 // by admission, replay, and backend validation.
 func WithoutReservationSignature(toolName string, request json.RawMessage) json.RawMessage {
 	switch toolName {
-	case "request_clarification", "comment_on_issue", "comment_on_pull_request", "submit_review", "request_review":
+	case "publish_plan_checkpoint", "request_clarification", "comment_on_issue", "comment_on_pull_request", "submit_review", "request_review":
 	default:
 		return request
 	}

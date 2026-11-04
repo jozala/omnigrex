@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/jozala/omnigrex/internal/collaboration"
+	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 )
 
@@ -25,7 +26,7 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		Questions []collaboration.Question `json:"questions"`
 		Signature string                   `json:"signature"`
 	}
-	if json.Unmarshal(invocation.Arguments, &request) != nil {
+	if json.Unmarshal(invocation.Arguments, &request) != nil || invocation.Scope.Role == role.Planner && len(request.Questions) > 5 {
 		return nil, ErrInvalidInvocation
 	}
 	publisher := backend.clarificationDelivery(invocation)

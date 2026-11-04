@@ -6,7 +6,10 @@
 
 | Label | Meaning |
 | --- | --- |
-| `omnigrex:run` | Human command to create or reactivate a Workflow Attempt |
+| `omnigrex:run` | Human command to create or reactivate a direct-development Workflow Attempt |
+| `omnigrex:plan` | Authorized human command to start planning on an open, unstarted Work Item |
+| `omnigrex:planning` | Planner work is active, pending, or waiting for discussion/confirmation |
+| `omnigrex:plan-ready` | Confirmed planning completed; implementation is not authorized |
 | `omnigrex:developing` | Developer work is active or pending |
 | `omnigrex:reviewing` | Reviewer work is active or pending |
 | `omnigrex:pr-ready` | The current Change Proposal head is approved and ready for human review |
@@ -25,6 +28,9 @@ A Workflow marker in a Pull Request alone is insufficient.
 An accepted activation creates a new Workflow Attempt and resets retry and review budgets.
 Retained Agent Sessions are reused when their configuration and state remain compatible.
 Rejected Pull Request commands leave labels unchanged.
+
+For [planning-only work](planning.md), use `omnigrex:plan` on an open, unstarted Issue with current write-or-higher repository authority.
+`omnigrex:run` cannot convert planning into development, including after planning-ready; that transition remains follow-up #165.
 
 ## Review and retry budgets
 
@@ -55,7 +61,9 @@ After you explicitly reactivate work, Omnigrex verifies the current Pull Request
 Closing the Issue fences new work, settles admitted mutations, and schedules retained Session data for deletion.
 The default retention period is 30 days.
 Reopening before collection cancels scheduled deletion but does not restart work.
-Add `omnigrex:run` after reopening when you want a new Workflow Attempt.
+For direct-development Work Items, add `omnigrex:run` after reopening when you want a new Workflow Attempt.
+Planning Work Items cannot use that development transition; this increment does not introduce a completed/closed-planning reopening flow.
+See [planning stopping behavior](planning.md#status-stopping-and-boundaries) for the supported boundary.
 
 Once physical collection starts, deletion is irrevocable.
 After collection, a new trigger creates new Agent Participants and Agent Sessions while the operational history remains in PostgreSQL.

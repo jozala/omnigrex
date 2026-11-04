@@ -41,6 +41,7 @@ import (
 )
 
 func TestPiControlledWorkflow(t *testing.T) {
+	t.Run("planning", testPiPlanningWorkflow)
 	t.Run("no-pr-target", func(t *testing.T) {
 		f := newPiWorkflowFixture(t, "no-pr-target")
 		prepared := f.prepare(t)
@@ -537,8 +538,12 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	delivery := workflowDelivery(uuid.NewString())
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
-	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "trigger"), workflowLocator(), func(eventContext store.WorkflowEventContext) (workflow.Event, error) {
-		return workflow.TriggerEvent{EventMetadata: eventContext.Metadata, AttemptID: uuid.NewString(), AttemptNumber: 1}, nil
+	locator := workflowLocator()
+	if mode == "planning" {
+		locator.PlanningRequest = &collaboration.OriginalRequest{Title: "Make onboarding useful", Body: "A rough idea for small teams, with an initially proposed retention assumption.", Source: collaboration.Source{Channel: "qualification", ID: "original", URL: "https://example.invalid/issue"}}
+	}
+	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "trigger"), locator, func(eventContext store.WorkflowEventContext) (workflow.Event, error) {
+		return workflow.TriggerEvent{PlanningOnly: mode == "planning", EventMetadata: eventContext.Metadata, AttemptID: uuid.NewString(), AttemptNumber: 1}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -676,7 +681,7 @@ func (p workflowQualificationProfiles) ResolveDefaultBranchCommit(context.Contex
 }
 func (p workflowQualificationProfiles) ListRepositoryDirectoryFiles(_ context.Context, _, _, _, directory, _ string) ([]string, error) {
 	if directory == ".omnigrex/team" {
-		return []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md"}, nil
+		return []string{".omnigrex/team/developer.md", ".omnigrex/team/reviewer.md", ".omnigrex/team/planner.md"}, nil
 	}
 	if directory == ".omnigrex" {
 		return []string{turnconfig.Path}, nil
@@ -688,6 +693,9 @@ func (p workflowQualificationProfiles) FetchRepositoryFile(_ context.Context, _,
 		return []byte(workflowQualificationTurnConfiguration), nil
 	}
 	role := "DEVELOPER"
+	if strings.Contains(path, "planner") {
+		role = "PLANNER"
+	}
 	if strings.Contains(path, "reviewer") {
 		role = "REVIEWER"
 	}

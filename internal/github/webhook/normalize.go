@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 )
 
@@ -60,16 +61,18 @@ type ProvisioningEvent struct {
 
 // NormalizedEvent contains only GitHub identities and revisions needed by workflow transitions.
 type NormalizedEvent struct {
-	DeliveryID   string        `json:"delivery_id"`
-	EventName    string        `json:"event"`
-	Action       string        `json:"action"`
-	Repository   Repository    `json:"repository"`
-	Installation *Installation `json:"installation,omitempty"`
-	Sender       *Actor        `json:"sender,omitempty"`
-	Issue        *Issue        `json:"issue,omitempty"`
-	Label        string        `json:"label,omitempty"`
-	PullRequest  *PullRequest  `json:"pull_request,omitempty"`
-	Review       *Review       `json:"review,omitempty"`
+	PlanningAuthorized bool                           `json:"planning_authorized,omitempty"`
+	PlanningRequest    *collaboration.OriginalRequest `json:"planning_request,omitempty"`
+	DeliveryID         string                         `json:"delivery_id"`
+	EventName          string                         `json:"event"`
+	Action             string                         `json:"action"`
+	Repository         Repository                     `json:"repository"`
+	Installation       *Installation                  `json:"installation,omitempty"`
+	Sender             *Actor                         `json:"sender,omitempty"`
+	Issue              *Issue                         `json:"issue,omitempty"`
+	Label              string                         `json:"label,omitempty"`
+	PullRequest        *PullRequest                   `json:"pull_request,omitempty"`
+	Review             *Review                        `json:"review,omitempty"`
 }
 
 // Repository is a durable GitHub repository identity.
@@ -195,7 +198,7 @@ func Normalize(delivery Delivery) (Normalization, error) {
 			if payload.Label == nil || strings.TrimSpace(payload.Label.Name) == "" {
 				return Normalization{}, malformed("issues.labeled has no label identity")
 			}
-			if payload.Label.Name != "omnigrex:run" {
+			if payload.Label.Name != "omnigrex:run" && payload.Label.Name != "omnigrex:plan" {
 				return Normalization{Outcome: NormalizationIgnored}, nil
 			}
 		case "closed", "reopened":

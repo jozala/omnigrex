@@ -332,6 +332,15 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		result = blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID)
 	} else {
 		switch intent.ToolName {
+		case mcp.ToolCompletePlanning:
+			var evidence struct {
+				Outcome    string `json:"outcome"`
+				RevisionID string `json:"revision_id"`
+			}
+			if request.Execution.Participant.Role != role.Planner || json.Unmarshal(intent.Result, &evidence) != nil || evidence.Outcome != "PLANNING_READY" || evidence.RevisionID == "" {
+				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "invalid planning completion evidence"), nil
+			}
+			result = store.AgentTurnSettlementObservation{ObservedAt: observedAt, Outcome: workflow.TurnOutcomePlanningReady, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome}}
 		case mcp.ToolRequestClarification:
 			var evidence struct {
 				Outcome string `json:"outcome"`
@@ -1069,7 +1078,7 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 			continue
 		}
 		switch mutation.ToolName {
-		case mcp.ToolRequestClarification, mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview, mcp.ToolConfirmPriorTerminalIntent:
+		case mcp.ToolCompletePlanning, mcp.ToolRequestClarification, mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview, mcp.ToolConfirmPriorTerminalIntent:
 			intents = append(intents, mutation)
 		}
 	}

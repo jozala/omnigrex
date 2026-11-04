@@ -64,6 +64,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0055: Serialize Work Item clarification at Turn boundaries](0055-serialize-work-item-clarification-at-turn-boundaries.md) | Accepted | 2026-11-01 |
 | [0056: Bound collaboration prompt projections without truncating history](0056-bound-collaboration-prompt-projections.md) | Accepted | 2026-11-01 |
 | [0057: Fence retrieval-only input on durable read coverage](0057-fence-retrieval-only-input-on-durable-read-coverage.md) | Accepted | 2026-11-01 |
+| [0058: Retain paired planning checkpoints in collaboration](0058-retain-paired-planning-checkpoints-in-collaboration.md) | Accepted | 2026-11-03 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

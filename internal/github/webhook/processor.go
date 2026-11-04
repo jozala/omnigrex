@@ -162,6 +162,17 @@ func (processor *Processor) ProcessNext(ctx context.Context) (processed bool, er
 			cause := errors.New("normalize webhook delivery: supported outcome has no event")
 			return true, processor.acknowledgeFailure(ctx, claim, cause, false)
 		}
+		if handler, ok := processor.collaboration.(PlanningActivationHandler); ok {
+			allowed, authErr := handler.AuthorizePlanningActivation(ctx, *claim, normalization.Event)
+			if authErr != nil {
+				return true, processor.acknowledgeFailure(ctx, claim, authErr, true)
+			}
+			if !allowed {
+				return true, processor.store.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored})
+			}
+		} else if normalization.Event.Label == "omnigrex:plan" {
+			return true, processor.store.CompleteWebhookDelivery(ctx, claim.DeliveryID, claim.ClaimToken, store.WebhookCompletion{Outcome: store.WebhookOutcomeIgnored})
+		}
 		payload, err := json.Marshal(normalization.Event)
 		if err != nil {
 			cause := fmt.Errorf("encode normalized webhook delivery %s: %w", claim.DeliveryID, err)
@@ -365,7 +376,7 @@ func (processor *Processor) pendingEventFactory(record store.NormalizedEventReco
 }
 
 func (processor *Processor) eventFactory(event NormalizedEvent) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
-	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID}
+	locator := store.WorkflowLocator{RepositoryID: event.Repository.ID, PlanningRequest: event.PlanningRequest}
 	if event.Issue != nil {
 		locator.IssueID, locator.IssueNumber = event.Issue.ID, event.Issue.Number
 	}
@@ -401,10 +412,10 @@ func (processor *Processor) eventFactory(event NormalizedEvent) (store.WorkflowL
 		metadata := context.Metadata
 		switch event.EventName + "." + event.Action {
 		case "issues.labeled":
-			if event.Issue == nil || event.Label != "omnigrex:run" {
+			if event.Issue == nil || (event.Label != "omnigrex:run" && (event.Label != "omnigrex:plan" || !event.PlanningAuthorized || event.PlanningRequest == nil)) {
 				return nil, fmt.Errorf("%w: invalid issues.labeled event", errInvalidPendingNormalizedEvent)
 			}
-			return workflow.TriggerEvent{EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
+			return workflow.TriggerEvent{PlanningOnly: event.Label == "omnigrex:plan", EventMetadata: metadata, AttemptID: attemptID, AttemptNumber: context.Snapshot.LastAttemptNumber + 1}, nil
 		case "pull_request.labeled":
 			if event.PullRequest == nil || event.Label != "omnigrex:run" {
 				return nil, fmt.Errorf("%w: invalid pull_request.labeled event", errInvalidPendingNormalizedEvent)

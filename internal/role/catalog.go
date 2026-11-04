@@ -17,6 +17,7 @@ type ID string
 const (
 	Developer ID = "DEVELOPER"
 	Reviewer  ID = "REVIEWER"
+	Planner   ID = "PLANNER"
 )
 
 // Metadata describes a Role without owning subsystem-specific behavior.
@@ -59,6 +60,7 @@ func BuiltinCatalog() Catalog {
 	catalog, err := NewCatalog([]Metadata{
 		{ID: Developer, DisplayName: "Developer", Description: "Implements and revises the Change Proposal."},
 		{ID: Reviewer, DisplayName: "Reviewer", Description: "Evaluates the current Change Proposal."},
+		{ID: Planner, DisplayName: "Planner", Description: "Investigates and discusses requirements and technical plans without authorizing implementation."},
 	})
 	if err != nil {
 		panic(err)

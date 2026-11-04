@@ -1660,7 +1660,8 @@ func TestHumanControlHonorsRolePolicy(t *testing.T) {
 	developer, _ := builtin.Lookup(role.Developer)
 	reviewer, _ := builtin.Lookup(role.Reviewer)
 	developer.AllowHumanSessionControl = false
-	policies, err := role.NewPolicyCatalog(definition.Roles(), []role.Policy{developer, reviewer})
+	planner, _ := builtin.Lookup(role.Planner)
+	policies, err := role.NewPolicyCatalog(definition.Roles(), []role.Policy{planner, developer, reviewer})
 	if err != nil {
 		t.Fatal(err)
 	}

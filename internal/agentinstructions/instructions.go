@@ -23,6 +23,9 @@ const (
 //go:embed platform.md
 var platform string
 
+//go:embed planner.md
+var plannerDiscovery string
+
 // Operator is an immutable startup-loaded set of deployment instructions.
 // Its zero value adds no operator guidance.
 type Operator struct {
@@ -123,6 +126,9 @@ func (operator Operator) Compose(policy role.Policy, stage workflow.StageDefinit
 	}
 	if policy.DiscardWorkspace {
 		appendSection("Workspace lifetime", "Verification may create temporary files; Omnigrex discards workspace changes after the Agent Turn.")
+	}
+	if policy.Role == role.Planner {
+		appendSection("Built-in Planner discovery", plannerDiscovery)
 	}
 	appendSection("Current Stage: "+string(stage.ID), stage.Instructions)
 	appendSection("Current Turn purpose: "+string(purpose), stage.PurposeInstructions[purpose])

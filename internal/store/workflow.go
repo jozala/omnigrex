@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"go.opentelemetry.io/otel/attribute"
@@ -49,6 +50,7 @@ const (
 
 // WorkflowLocator identifies a Workflow by its Work Item or known Change Proposal relation.
 type WorkflowLocator struct {
+	PlanningRequest       *collaboration.OriginalRequest
 	RepositoryID          int64
 	IssueID               int64
 	IssueNumber           int64
@@ -449,7 +451,7 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, NormalizedEven
 			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
 		}
 	}
-	decision, err := store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+	decision, err := store.reduceWorkflowEvent(ctx, tx, workflowID, snapshot, workflow.EventMetadata{
 		ID: event.DeliveryID, ObservedAt: envelope.receivedAt,
 		WorkItem: workItem, ExpectedRevision: snapshot.Revision,
 	}, eventFactory)
@@ -467,6 +469,18 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, NormalizedEven
 				return WorkflowApplication{}, fmt.Errorf("generate workflow identity: %w", err)
 			}
 			if err := insertWorkflow(ctx, tx, workflowID, envelope, decision.Snapshot); err != nil {
+				return WorkflowApplication{}, err
+			}
+		}
+		if snapshot.State == workflow.StateAbsent && locator.PlanningRequest != nil {
+			state, readErr := readCollaborationTx(ctx, tx, workflowID)
+			if readErr != nil {
+				return WorkflowApplication{}, readErr
+			}
+			if err = state.StartPlanning(*locator.PlanningRequest); err != nil {
+				return WorkflowApplication{}, err
+			}
+			if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
 				return WorkflowApplication{}, err
 			}
 		}
@@ -503,7 +517,7 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
 	}, nil
 }
 
-func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
+func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, workflowID string, snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
 	decision := store.reducer.DefinitionIncompatible(snapshot)
 	if store.reducer.DefinitionCompatible(snapshot) {
 		event, err := factory(WorkflowEventContext{Snapshot: snapshot.Clone(), Metadata: metadata})
@@ -513,7 +527,15 @@ func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot
 		if err := validateWorkflowEventMetadata(event, metadata); err != nil {
 			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
 		}
-		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.State == workflow.StateNeedsHuman && snapshot.CurrentAttempt != nil {
+		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.PlanningOnly && snapshot.State == workflow.StateNeedsHuman {
+			state, err := readCollaborationTx(ctx, tx, workflowID)
+			if err != nil {
+				return workflow.Decision{}, err
+			}
+			trigger.PlanningCompleted = state.Planning != nil && state.Planning.ReadyRevision != ""
+			event = trigger
+		}
+		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.State == workflow.StateNeedsHuman && snapshot.CurrentAttempt != nil && !snapshot.PlanningOnly {
 			var controlOwner SessionControlOwner
 			var sourceExpectedHeadSHA *string
 			err := tx.QueryRow(ctx, `
@@ -690,13 +712,13 @@ func rehydrateWorkflow(ctx context.Context, tx pgx.Tx, workflowID string) (workf
 	var closureDeadline, retentionDeadline *time.Time
 	var closureReopen bool
 	err := tx.QueryRow(ctx, `
-SELECT status, state_revision, repository_id, issue_id, issue_number,
+SELECT planning_only,status, state_revision, repository_id, issue_id, issue_number,
        COALESCE(resume_role, ''), COALESCE(desired_assignment_status, ''),
        COALESCE(desired_runtime_state, ''), COALESCE(closure_id, ''), closure_deadline,
 	       COALESCE(closure_retention_token, ''), closure_reopen_requested,
 	       retention_deadline, COALESCE(retention_token, ''), COALESCE(continuation_stage, ''), clarification_waiting
 FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
-		&snapshot.State, &snapshot.Revision, &snapshot.WorkItem.RepositoryID,
+		&snapshot.PlanningOnly, &snapshot.State, &snapshot.Revision, &snapshot.WorkItem.RepositoryID,
 		&snapshot.WorkItem.IssueID, &snapshot.WorkItem.IssueNumber, &resumeRole,
 		&assignmentStatus, &runtimeState, &closureID, &closureDeadline, &closureToken,
 		&closureReopen, &retentionDeadline, &retentionToken, &continuationStage, &snapshot.ClarificationWaiting,
@@ -1003,14 +1025,14 @@ UPDATE workflows SET status = $2, state_revision = $3, resume_role = $4,
 	    desired_assignment_status = $5, desired_runtime_state = $6,
 	    closure_id = $7, closure_deadline = $8, closure_retention_token = $9,
 	    closure_reopen_requested = $10, retention_deadline = $11, retention_token = $12,
-	    human_handoff_reason = $13, continuation_stage = $14, clarification_waiting=$15, updated_at = clock_timestamp(),
+	    human_handoff_reason = $13, continuation_stage = $14, clarification_waiting=$15, planning_only=$16, updated_at = clock_timestamp(),
     closed_at = CASE WHEN $2 = 'CLOSED' THEN COALESCE(closed_at, clock_timestamp()) ELSE NULL END
 WHERE id = $1`, workflowID, snapshot.State, int64(snapshot.Revision),
 		nullableString(string(snapshot.ResumeRole)), nullableString(string(snapshot.Assignments.Status)),
 		nullableString(string(snapshot.Assignments.RuntimeState)), nullableString(closureID), closureDeadline,
 		nullableString(closureToken), closureReopen, retentionDeadline,
 		nullableString(snapshot.Assignments.RetentionToken), handoffReason,
-		nullableString(string(snapshot.ContinuationStage)), snapshot.ClarificationWaiting)
+		nullableString(string(snapshot.ContinuationStage)), snapshot.ClarificationWaiting, snapshot.PlanningOnly)
 	if err != nil {
 		return fmt.Errorf("persist workflow snapshot: %w", err)
 	}

@@ -3,6 +3,9 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/jozala/omnigrex/internal/role"
 	"strings"
 	"testing"
 
@@ -274,6 +277,39 @@ func TestResolutionRecoveryRequiresCompleteScopedBatchProof(t *testing.T) {
 			}
 			if err != nil || result.Disposition != expected {
 				t.Fatalf("batch proof = %+v %v; want %s", result, err, expected)
+			}
+		})
+	}
+}
+
+func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
+	policies, err := role.NewBuiltinPolicyCatalog([]role.ID{role.Planner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, count := range []int{1, 5, 6} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			ledger := &clarificationLedger{}
+			api := &backendGitHub{}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger, Policies: policies})
+			if err != nil {
+				t.Fatal(err)
+			}
+			questions := make([]collaboration.Question, count)
+			for i := range questions {
+				questions[i] = collaboration.Question{ID: fmt.Sprintf("Q%d", i+1), Body: "Which scope boundary should apply?"}
+			}
+			args, _ := json.Marshal(map[string]any{"operation_id": "ask", "questions": questions, "signature": "persisted-signature"})
+			scope := productionToolScope(role.Planner)
+			scope.PullRequest = nil
+			scope.AgentProfileName, scope.RoleDisplayName = "planner", "Planner"
+			_, err = backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
+			if count > 5 {
+				if !errors.Is(err, mcp.ErrInvalidInvocation) || ledger.round.ID != "" || ledger.published {
+					t.Fatalf("oversized round admitted: %+v %v", ledger, err)
+				}
+			} else if err != nil || !ledger.published {
+				t.Fatalf("bounded round rejected: %+v %v", ledger, err)
 			}
 		})
 	}

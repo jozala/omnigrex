@@ -5,6 +5,7 @@ import "context"
 // PublicationMessage carries application scope without transport identities.
 type PublicationMessage struct {
 	WorkflowID string
+	Checkpoint *PlanningRevision
 	Round      Round
 	Signature  string
 }
@@ -50,4 +51,32 @@ func (p Publication) Reconcile(ctx context.Context, round Round, signature strin
 		return false, err
 	}
 	return true, nil
+}
+
+func (p Publication) PublishCheckpoint(ctx context.Context, reserve func(context.Context) (PlanningRevision, error), signature string) (PlanningRevision, error) {
+	r, err := reserve(ctx)
+	if err != nil {
+		return r, err
+	}
+	m := PublicationMessage{WorkflowID: p.WorkflowID, Checkpoint: &r, Signature: signature}
+	if err = p.Publisher.Validate(m); err != nil {
+		return r, err
+	}
+	source, err := p.Publisher.Publish(ctx, m)
+	if err != nil {
+		return r, err
+	}
+	if err = p.Confirm(ctx, r.ID, source); err != nil {
+		return r, err
+	}
+	r.Published = true
+	r.Source = &source
+	return r, nil
+}
+func (p Publication) ReconcileCheckpoint(ctx context.Context, r PlanningRevision, signature string) (bool, error) {
+	source, found, err := p.Publisher.Reconcile(ctx, PublicationMessage{WorkflowID: p.WorkflowID, Checkpoint: &r, Signature: signature})
+	if err != nil || !found {
+		return false, err
+	}
+	return true, p.Confirm(ctx, r.ID, source)
 }

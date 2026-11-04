@@ -9,7 +9,7 @@
 | `.omnigrex/team/*.md` | One pinned latest default-branch commit before each Turn | Required Agent Profiles |
 | `.omnigrex/environment.yaml` | Same commit as Profiles | Optional image/platform/capability request for new Participants |
 | `.omnigrex/review-policy.yaml` | One trusted default-branch revision per logical admission request | Optional Reviewer scheduling policy |
-| `.omnigrex/turn-configuration.yaml` | Same commit as Profiles | Optional disk-backed tool-path requests for both Roles |
+| `.omnigrex/turn-configuration.yaml` | Same commit as Profiles | Optional disk-backed tool-path requests for configured Roles |
 | `.agents/skills/<name>/SKILL.md` | Prepared working checkout | Explicitly authorized engineering procedures |
 | `mise.toml` and its scripts/hooks | Actual working checkout | Repository tool installation and activation |
 
@@ -21,7 +21,7 @@ Unknown configuration is rejected rather than silently ignored.
 | Field | Contract |
 | --- | --- |
 | `name` | Stable repository-local identity, lowercase letters/digits/hyphens/underscores |
-| `role` | Role ID used by the Workflow Definition, initially `DEVELOPER` or `REVIEWER` |
+| `role` | Role ID used by the Workflow Definition, `DEVELOPER`, `REVIEWER`, or `PLANNER` |
 | `runtime` | `pi-rpc/v2` |
 | `model` | Exact `provider/model` supported by the image and supplied credentials |
 | `thinking` | Optional `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; vocabulary validity is distinct from model-specific support, verified against the actual Pi runtime |
@@ -33,7 +33,9 @@ Omitted permissions default to deny; Reviewer `edit`/`write` cannot be allowed.
 MCP capabilities are authorized independently.
 Delegation, unknown Profile fields, and unknown permissions are unsupported.
 Every direct lowercase Markdown child of `.omnigrex/team/` is treated as configuration.
-The current selector requires exactly one Profile per Workflow Role.
+Stage preparation requires exactly one Profile for the current Role.
+Direct development requires Developer/Reviewer Profiles; a Planner Profile is required only for [planning](../users/planning.md).
+Doctor validates configured Profiles but does not require the optional Planner Profile.
 
 `max` is Pi's native maximum reasoning level and is distinct from `xhigh`; neither is substituted for the other.
 A valid vocabulary value passes discovery, but the selected model must also advertise it through `get_available_thinking_levels`.

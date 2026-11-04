@@ -431,7 +431,7 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 		return false, ErrAgentTurnRecoveryFenceLost
 	}
 	if reducer.DefinitionCompatible(snapshot) && continuation == recoveryContinuationPendingInfrastructure &&
-		(snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing) {
+		(snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing) {
 		executionJob, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE id = $1 FOR UPDATE`, identity.ExecutionJobID))
 		if err != nil || executionJob.Kind != RunAgentTurnJobKind || executionJob.AgentTurnID != turn.ID ||
 			executionJob.ExecutionEpoch != turn.ExecutionEpoch || executionJob.WorkflowID != authority.WorkflowID ||
@@ -625,7 +625,7 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 	if result.ObservedAt.IsZero() {
 		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: observed time is required", ErrAgentTurnSettlementInvalid)
 	}
-	successful := result.Outcome == workflow.TurnOutcomeChangeProposalReady ||
+	successful := result.Outcome == workflow.TurnOutcomePlanningReady || result.Outcome == workflow.TurnOutcomeChangeProposalReady ||
 		result.Outcome == workflow.TurnOutcomeChangesRequested || result.Outcome == workflow.TurnOutcomeApproved ||
 		result.Outcome == workflow.TurnOutcomeBlocked || result.Outcome == workflow.TurnOutcomeClarificationWait
 	if successful && (result.TerminalStatus != AgentTurnSucceeded || result.TerminalLastError != "") {
@@ -647,7 +647,7 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 		if result.ChangeProposal == nil || result.Review == nil || result.AuthorizedReviewerActorID <= 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: Reviewer outcome shape", ErrAgentTurnSettlementInvalid)
 		}
-	case workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed, workflow.TurnOutcomeInfrastructureFailed:
+	case workflow.TurnOutcomePlanningReady, workflow.TurnOutcomeClarificationWait, workflow.TurnOutcomeBlocked, workflow.TurnOutcomePrerequisiteFailed, workflow.TurnOutcomeInfrastructureFailed:
 		if result.ChangeProposal != nil || result.Review != nil || result.ExistingReview != nil || result.AuthorizedReviewerActorID != 0 {
 			return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: terminal outcome has unrelated review evidence", ErrAgentTurnSettlementInvalid)
 		}

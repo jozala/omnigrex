@@ -178,8 +178,8 @@ func TestLabelProvisioningWorkerCreatesOnlyMissingLabels(t *testing.T) {
 	if credentials.verifiedID != 99 || credentials.verifiedOwner != "jozala" || credentials.verifiedName != "omnigrex" || api.byIDCalls != 1 || api.requestedID != 9123 {
 		t.Errorf("repository verification = (%d, %q, %q), by-ID lookup = (%d, %d)", credentials.verifiedID, credentials.verifiedOwner, credentials.verifiedName, api.byIDCalls, api.requestedID)
 	}
-	if len(api.created) != 4 {
-		t.Errorf("created labels = %#v, want four missing labels", api.created)
+	if len(api.created) != 7 {
+		t.Errorf("created labels = %#v, want seven missing labels", api.created)
 	}
 	for _, name := range api.created {
 		if name == "omnigrex:run" {
@@ -208,8 +208,8 @@ func TestLabelProvisioningWorkerResolvesRenamedRepositoryByID(t *testing.T) {
 	if len(durable.completed) != 1 {
 		t.Fatalf("completed = %d, want 1", len(durable.completed))
 	}
-	if len(api.created) != 5 {
-		t.Errorf("created labels = %#v, want all five managed labels under the new name", api.created)
+	if len(api.created) != 8 {
+		t.Errorf("created labels = %#v, want all eight managed labels under the new name", api.created)
 	}
 	if credentials.verifiedName != "renamed" || api.byIDCalls != 1 {
 		t.Errorf("verified name = %q, lookups = %d, want one lookup of current name", credentials.verifiedName, api.byIDCalls)

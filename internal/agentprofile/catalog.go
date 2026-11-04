@@ -119,7 +119,17 @@ func NewSingletonSelection(catalog Catalog, policies role.PolicyCatalog) (Select
 		}
 		selected[identity.Role] = identity.Name
 	}
-	return NewSelection(catalog, policies.Roles(), selected)
+	roles := policies.Roles()
+	if len(roles) > 1 {
+		filtered := make([]role.ID, 0, len(roles))
+		for _, id := range roles {
+			if id != role.Planner || selected[id] != "" {
+				filtered = append(filtered, id)
+			}
+		}
+		roles = filtered
+	}
+	return NewSelection(catalog, roles, selected)
 }
 
 func (selection Selection) Profile(roleID role.ID) (Name, bool) {
