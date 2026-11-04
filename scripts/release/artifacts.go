@@ -20,6 +20,7 @@ const repository = "jozala/omnigrex"
 
 var products = []string{"orchestrator", "orchestrator-microsandbox", "pi"}
 var deploymentFiles = []string{"compose.pi.yaml", "compose.pi-docker.yaml", "compose.pi-microsandbox.yaml", ".env.pi.example"}
+var licenseFiles = []string{"LICENSE", "THIRD_PARTY_NOTICES.md", "third-party/mattpocock-grilling/LICENSE"}
 var requiredJobs = []string{"docker-check", "development-qualification", "microsandbox", "check", "publish", "deploy-smoke", "deploy-smoke-microsandbox", "development-smoke-microsandbox"}
 var candidateAssets = []string{"payload.tar.gz", "candidate.json", "SHA256SUMS"}
 var releaseAssets = []string{"payload.tar.gz", "candidate.json", "SHA256SUMS", "release.json"}
@@ -132,6 +133,13 @@ func pack(dir, sourceDir string, b Build) error {
 		}
 		files["deploy/"+n] = data
 	}
+	for _, n := range licenseFiles {
+		data, e := os.ReadFile(filepath.Join(sourceDir, n))
+		if e != nil {
+			return e
+		}
+		files[n] = data
+	}
 	data, e := encode(b)
 	if e != nil {
 		return e
@@ -145,6 +153,7 @@ func pack(dir, sourceDir string, b Build) error {
 	for _, n := range deploymentFiles {
 		names = append(names, "deploy/"+n)
 	}
+	names = append(names, licenseFiles...)
 	m := Manifest{Build: b, Files: map[string]string{}}
 	for _, n := range names {
 		data := files[n]
@@ -181,6 +190,16 @@ func validatePayload(payload []byte, m Manifest) (map[string][]byte, error) {
 	expected := map[string]bool{"build.json": true}
 	for _, n := range deploymentFiles {
 		expected["deploy/"+n] = true
+	}
+	// Older qualified payloads predate separate notices and remain promotable
+	// without repacking. If any license file is declared, require the entire set.
+	for _, n := range licenseFiles {
+		if _, present := m.Files[n]; present {
+			for _, name := range licenseFiles {
+				expected[name] = true
+			}
+			break
+		}
 	}
 	if len(m.Files) != len(expected) {
 		return nil, errors.New("unexpected deployment file manifest")

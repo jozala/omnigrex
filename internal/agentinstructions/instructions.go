@@ -23,6 +23,8 @@ const (
 //go:embed platform.md
 var platform string
 
+// Attribution and licensing for the adapted procedure live in THIRD_PARTY_NOTICES.md.
+//
 //go:embed planner.md
 var plannerDiscovery string
 

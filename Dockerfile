@@ -28,6 +28,8 @@ RUN apk add --no-cache \
     chown -R 10001:10001 /var/lib/omnigrex
 
 COPY --from=build --chown=10001:10001 /out/omnigrex /usr/local/bin/omnigrex
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/licenses/omnigrex/
+COPY third-party/ /usr/share/licenses/omnigrex/third-party/
 
 LABEL org.opencontainers.image.source="https://github.com/jozala/omnigrex" \
       org.opencontainers.image.title="Omnigrex Orchestrator"

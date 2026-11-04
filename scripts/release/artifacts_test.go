@@ -24,8 +24,21 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 func mustWrite(t *testing.T, dir, name string, b []byte) {
 	t.Helper()
+	if e := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0755); e != nil {
+		t.Fatal(e)
+	}
 	if e := os.WriteFile(filepath.Join(dir, name), b, 0644); e != nil {
 		t.Fatal(e)
+	}
+}
+func copyLicenses(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range licenseFiles {
+		data, err := os.ReadFile(filepath.Join("..", "..", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, dir, name, data)
 	}
 }
 func fixtureBuild() Build {
@@ -72,13 +85,108 @@ func assertError(t *testing.T, e error, contains string) {
 		t.Fatalf("error = %v, want containing %q", e, contains)
 	}
 }
+func TestPackIncludesLicensesAndAttribution(t *testing.T) {
+	dir, _ := packed(t)
+	_, files, err := verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"LICENSE", "THIRD_PARTY_NOTICES.md", "third-party/mattpocock-grilling/LICENSE"} {
+		want, err := os.ReadFile(filepath.Join("..", "..", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(files[name], want) {
+			t.Errorf("payload must preserve %s verbatim", name)
+		}
+	}
+	for _, want := range []string{"4ae2317ddb22b046e26455e4f9c9b3aaaf62212d", "internal/agentinstructions/planner.md", "third-party/mattpocock-grilling/LICENSE"} {
+		if !bytes.Contains(files["THIRD_PARTY_NOTICES.md"], []byte(want)) {
+			t.Errorf("attribution missing %q", want)
+		}
+	}
+	for _, want := range []string{"Copyright (c) 2026 Matt Pocock", "Permission is hereby granted", "THE SOFTWARE IS PROVIDED"} {
+		if !bytes.Contains(files["third-party/mattpocock-grilling/LICENSE"], []byte(want)) {
+			t.Errorf("upstream license missing %q", want)
+		}
+	}
+}
+func TestPackRejectsMissingLicenseFiles(t *testing.T) {
+	for _, missing := range []string{"LICENSE", "THIRD_PARTY_NOTICES.md", "third-party/mattpocock-grilling/LICENSE"} {
+		t.Run(missing, func(t *testing.T) {
+			source := t.TempDir()
+			copyLicenses(t, source)
+			for _, name := range deploymentFiles {
+				data, err := os.ReadFile(filepath.Join("..", "..", "deploy", name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, source, "deploy/"+name, data)
+			}
+			if err := os.Remove(filepath.Join(source, missing)); err != nil {
+				t.Fatal(err)
+			}
+			assertError(t, pack(filepath.Join(t.TempDir(), "candidate"), source, fixtureBuild()), missing)
+		})
+	}
+}
+func TestPayloadLicenseValidationAndLegacyCompatibility(t *testing.T) {
+	for _, kind := range []string{"legacy", "partial-notices", "missing-license", "tampered-license"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, m := packed(t)
+			_, files, err := verify(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "legacy":
+				for _, name := range []string{"LICENSE", "THIRD_PARTY_NOTICES.md", "third-party/mattpocock-grilling/LICENSE"} {
+					delete(m.Files, name)
+					delete(files, name)
+				}
+			case "partial-notices":
+				delete(m.Files, "third-party/mattpocock-grilling/LICENSE")
+				delete(files, "third-party/mattpocock-grilling/LICENSE")
+			case "missing-license":
+				delete(files, "third-party/mattpocock-grilling/LICENSE")
+			case "tampered-license":
+				files["third-party/mattpocock-grilling/LICENSE"] = []byte("altered license")
+			}
+			var payload bytes.Buffer
+			gz := gzip.NewWriter(&payload)
+			tw := tar.NewWriter(gz)
+			for name, data := range files {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write(data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, err = validatePayload(payload.Bytes(), m)
+			if kind == "legacy" {
+				if err != nil {
+					t.Fatalf("historical payload must remain verifiable: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid licensing files accepted")
+			}
+		})
+	}
+}
 func TestPackVerifyNoCheckoutCompose(t *testing.T) {
 	dir, m := packed(t)
 	_, files, e := verify(dir)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(files) != 5 || len(m.Images) != 3 || m.Images["development"] != "" {
+	if len(files) != 8 || len(m.Images) != 3 || m.Images["development"] != "" {
 		t.Fatal("unexpected product artifact set")
 	}
 	root := t.TempDir()
@@ -107,6 +215,7 @@ func TestPackVerifyNoCheckoutCompose(t *testing.T) {
 }
 func TestPackExcludesInstallationSecrets(t *testing.T) {
 	source := t.TempDir()
+	copyLicenses(t, source)
 	if e := os.MkdirAll(filepath.Join(source, "deploy", "secrets"), 0755); e != nil {
 		t.Fatal(e)
 	}
@@ -120,6 +229,7 @@ func TestPackExcludesInstallationSecrets(t *testing.T) {
 	for _, n := range []string{".env", "secrets/key", "compatibility.json", "backup.tar", "private-installation.json"} {
 		mustWrite(t, source, "deploy/"+n, []byte("private-test-sentinel"))
 	}
+	mustWrite(t, source, "third-party/private-installation.json", []byte("private-test-sentinel"))
 	dir := filepath.Join(t.TempDir(), "candidate")
 	if e := pack(dir, source, fixtureBuild()); e != nil {
 		t.Fatal(e)
@@ -282,6 +392,7 @@ func TestReadinessRequiresExactIdentityAndSuccessfulEvidence(t *testing.T) {
 func TestCommandPackAndVerifyUseActualCIEnvironment(t *testing.T) {
 	b := fixtureBuild()
 	root := t.TempDir()
+	copyLicenses(t, root)
 	if e := os.Mkdir(filepath.Join(root, "deploy"), 0755); e != nil {
 		t.Fatal(e)
 	}

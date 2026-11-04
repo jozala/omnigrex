@@ -86,3 +86,4 @@ Include the revision, relevant configuration names, and sanitized diagnostics; k
 ## License
 
 Omnigrex is available under the [MIT License](LICENSE).
+Attribution and licenses for copied or adapted third-party material are recorded in [Third-party notices](THIRD_PARTY_NOTICES.md).
