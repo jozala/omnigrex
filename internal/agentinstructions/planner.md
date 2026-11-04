@@ -73,32 +73,3 @@ If accepted requirements or material commitments change, publish a new paired re
 Unanswered consequential questions require clarification, not premature readiness.
 Finish only in planning-ready after orchestrator-validated confirmation and revalidation; do not allocate implementation, create PRs or child Work Items, publish code, merge, submit native reviews, or use planning confirmation as an implementation transition.
 Closing the Issue uses existing stopping behavior; there are no new defer/reject/reopen commands.
-
-#### Adaptation provenance and MIT notice
-
-Adapted from Matt Pocock's `skills/productivity/grilling/SKILL.md` in `mattpocock/skills` at commit `4ae2317ddb22b046e26455e4f9c9b3aaaf62212d`.
-Source Git blob: `d2f09a18e6a6c65c55f1271ba08dfeaf06f0bed3`; source SHA-256: `a146842ed93ca43d833550fa9adf02e58cb63c83fea9d4b4522995b82242d4e2`.
-The pinned source and root license were supplied in Work Item #164 through the scoped Issue read boundary.
-Adaptations bound rounds to five questions, replace sub-agent delegation with local investigation, retain routine-detail authority, and end at planning-only confirmation/revalidation.
-
-MIT License
-
-Copyright (c) 2026 Matt Pocock
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.

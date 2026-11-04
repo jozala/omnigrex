@@ -28,6 +28,9 @@ docker run --rm --entrypoint /bin/sh "$image" -ec '
   test -x "$(git --exec-path)/git-remote-https"
   test -r /usr/share/omnigrex/apk-packages.txt
   test -s /usr/share/omnigrex/apk-packages.txt
+  test -s /usr/share/licenses/omnigrex/LICENSE
+  grep -q "internal/agentinstructions/planner.md" /usr/share/licenses/omnigrex/THIRD_PARTY_NOTICES.md
+  grep -q "Copyright (c) 2026 Matt Pocock" /usr/share/licenses/omnigrex/third-party/mattpocock-grilling/LICENSE
   for package in bash ca-certificates curl git jq gcc musl-dev openssh-client-default ripgrep; do
     grep -q "^${package}-" /usr/share/omnigrex/apk-packages.txt
   done

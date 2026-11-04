@@ -46,6 +46,14 @@ mise run docs-check
 The documentation check validates repository-local Markdown links and heading anchors without network access.
 Operational shell examples also have focused executable checks; preserve those when moving procedures.
 
+## Third-party material
+
+When copying or adapting third-party code, prompts, or documentation, record the upstream source, pinned revision, affected local files, and modifications in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Preserve the original copyright and license text under `third-party/<component>/LICENSE`, rather than adding legal metadata to agent-facing instructions.
+Add the notice and license paths to the release packager's `licenseFiles` allowlist in `scripts/release/artifacts.go`.
+Both orchestrator images copy the `third-party/` directory and notices to `/usr/share/licenses/omnigrex/`.
+Include the notices and referenced licenses alongside any separately distributed binaries or adapted files as well.
+
 ## Submit a change
 
 Describe what changed, why, and the checks actually run.

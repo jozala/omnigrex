@@ -53,6 +53,8 @@ RUN apt-get update && \
 
 FROM git-runtime AS runtime
 COPY --from=build /out/omnigrex /usr/local/bin/omnigrex
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/licenses/omnigrex/
+COPY third-party/ /usr/share/licenses/omnigrex/third-party/
 COPY --from=agentd-build /src/target/x86_64-unknown-linux-musl/release/agentd /usr/local/lib/omnigrex/agentd
 COPY --from=agentd-source /src/LICENSE /usr/share/licenses/omnigrex/microsandbox-agentd/LICENSE
 RUN mkdir -p /usr/share/omnigrex && printf '%s\n' 'df3e0f7dd69280b88f6e28d6d3cf5fe4bb4a87a0 patched-domain-cgroups' > /usr/share/omnigrex/microsandbox-agentd-source

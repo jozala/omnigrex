@@ -15,6 +15,11 @@ Both product smoke jobs verify and extract that payload and use its packaged Com
 Only afterward does `release-candidate` record job IDs and upload `release-candidate-RUN-ATTEMPT` with a machine-readable `candidate.json`, deployment payload, and checksums.
 Main CI creates no version tag or GitHub Release.
 
+New deployment payloads include `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the explicitly allowlisted third-party license files from `scripts/release/artifacts.go`.
+Both orchestrator images carry the same notices and license tree under `/usr/share/licenses/omnigrex/`.
+Keep these files with redistributed artifacts; see [Third-party notices](../../THIRD_PARTY_NOTICES.md) for attribution and affected files.
+Previously qualified payloads without separate notices remain verifiable and promotable without repacking.
+
 The release workflow verifies the run's repository, workflow ID/path, push event, main branch ancestry, exact commit, latest attempt, successful conclusion, and required job IDs against the manifest.
 Required artifacts have 14-day retention; unavailable, expired, skipped, failed, cancelled, or incomplete evidence is not eligible.
 Older qualified main commits are allowed while this evidence exists.
