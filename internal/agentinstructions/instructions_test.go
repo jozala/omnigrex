@@ -131,3 +131,23 @@ func write(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestInitialDevelopmentExplainsConditionalPRInspection(t *testing.T) {
+	policies := role.BuiltinPolicyCatalog()
+	instructions, err := agentinstructions.Load("", policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ := definition.Stage(workflow.StageImplementation)
+	policy, _ := policies.Lookup(role.Developer)
+	text := instructions.Compose(policy, stage, workflow.TurnPurposeInitialDevelopment, "")
+	for _, want := range []string{"pull_request_context", "launch-time snapshot", "no_pr_target", "publish_changes", "open_pr", "overlapping external implementation PR", "not by itself a reason for Human Handoff"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+}

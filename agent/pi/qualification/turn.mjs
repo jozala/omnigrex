@@ -125,6 +125,24 @@ try {
           if (normal === 2) { name='omnigrex_submit_review'; args={operation_id:'controlled-review',event:'APPROVE',body:'Current code reviewed after clarification.',comments:[]}; }
         }
       }
+    } else if (fault === 'no-pr-target') {
+      if (envelope.schema_version !== 2 || envelope.triggering_event.turn_purpose !== 'INITIAL_DEVELOPMENT' || role !== 'DEVELOPER' || envelope.pull_request_context?.status !== 'none' || envelope.pull_request_number !== undefined) throw new Error('missing explicit initial absence');
+      const reads = ['get_pull_request','list_pull_request_reviews','list_review_threads','get_handoff'];
+      for (let i=0; i<Math.min(step,4); i++) {
+        if (result(i)?.status !== 'no_pr_target') throw new Error('absence was not a successful scoped response');
+      }
+      if (step < 4) { name = `omnigrex_${reads[step]}`; args = {}; }
+      if (step === 4) { name = 'bash'; args = {command: "printf 'implemented\\n' > feature.txt; git add feature.txt; git commit -m 'Implement after explicit absence'"}; }
+      if (step === 5) { name = 'omnigrex_publish_changes'; args = {operation_id:'controlled-publish'}; }
+      if (step === 6) { if (!result(5).head) throw new Error('publication failed'); name='omnigrex_open_pr'; args={operation_id:'controlled-open',title:'Explicit absence continuation',body:'Scoped absence is normal.'}; }
+      if (step >= 7 && step < 11) {
+        if (step > 7 && result(step-1)?.status === 'no_pr_target') throw new Error('PR target did not advance');
+        name=`omnigrex_${reads[step-7]}`; args={};
+      }
+      if (step === 11) {
+        if (result(7).number !== result(6).number || result(8).head_sha !== result(5).head || result(9).head_sha !== result(5).head || result(10) !== null) throw new Error('post-open observations disagree');
+        name='omnigrex_request_review'; args={operation_id:'controlled-handoff',summary:'Validated explicit absence and post-open scoped reads.'};
+      }
     } else if (fault === 'long-blocked') {
       if (step === 0) { name = 'omnigrex_report_blocked'; args = { operation_id: 'controlled-blocked', reason: 'Controlled prerequisite unavailable', details: 'Synthetic long-Turn blocked completion.' }; }
     } else if (fault === 'default-branch-refresh') {

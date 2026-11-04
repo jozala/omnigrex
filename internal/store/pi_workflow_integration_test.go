@@ -42,6 +42,35 @@ import (
 
 func TestPiControlledWorkflow(t *testing.T) {
 	t.Run("planning", testPiPlanningWorkflow)
+	t.Run("no-pr-target", func(t *testing.T) {
+		f := newPiWorkflowFixture(t, "no-pr-target")
+		prepared := f.prepare(t)
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatalf("continuation: %t %v", processed, err)
+		}
+		f.assertState(t, workflow.StateReviewing)
+		if f.github.openCalls != 1 {
+			t.Fatalf("opened %d PRs", f.github.openCalls)
+		}
+		session, err := f.database.GetAgentSessionForParticipant(f.ctx, prepared.Commit.Participant.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err := os.ReadFile(filepath.Join(f.settings.RuntimeStateRoot, "assignment-"+prepared.Commit.Participant.ID, "runtime-state", "sessions", session.ID, "session.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"workflow-only-provider-key", "developer-token", "reviewer-token"} {
+			if strings.Contains(string(history), secret) {
+				t.Fatal("credential retained in Session")
+			}
+		}
+		var absent, blocked int
+		if err := f.pool(t).QueryRow(f.ctx, `SELECT count(*) FILTER (WHERE state='SUCCEEDED' AND result->>'status'='no_pr_target'),count(*) FILTER (WHERE tool_name='report_blocked') FROM tool_invocations WHERE agent_turn_id=$1`, prepared.Commit.Turn.ID).Scan(&absent, &blocked); err != nil || absent != 4 || blocked != 0 {
+			t.Fatalf("reads=%d blocked=%d err=%v", absent, blocked, err)
+		}
+	})
+
 	for _, largeHistory := range []bool{false, true} {
 		name := "clarification"
 		if largeHistory {
@@ -852,4 +881,11 @@ func (g *workflowQualificationGitHub) ListIssueComments(context.Context, string,
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	return append([]githubapi.IssueComment(nil), g.comments...), nil
+}
+
+func (*workflowQualificationGitHub) ListReviewThreads(_ context.Context, credential, _, _ string, _ int) ([]githubapi.ReviewThread, error) {
+	if credential != "developer-token" {
+		return nil, errors.New("wrong read authority")
+	}
+	return []githubapi.ReviewThread{}, nil
 }

@@ -21,7 +21,7 @@ func TestBuildEventEnvelopeReturnsCanonicalDeveloperText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED","CLARIFICATION_WAIT"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","get_check_run_diagnostics","list_ci_runs","get_ci_run","get_ci_job_logs","search_ci_job_logs","refresh_default_branch","publish_changes","open_pr","request_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked","request_clarification","resolve_clarification","get_collaboration_record"]}`
+	const want = `{"pull_request_context":{"status":"none"},"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"implementation","role":"DEVELOPER","turn_purpose":"INITIAL_DEVELOPMENT"},"current_head_sha":"1111111111111111111111111111111111111111","expected_head_sha":"","expected_outcomes":["CHANGE_PROPOSAL_READY"],"allowed_outcomes":["CHANGE_PROPOSAL_READY","BLOCKED","CLARIFICATION_WAIT"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","get_check_run_diagnostics","list_ci_runs","get_ci_run","get_ci_job_logs","search_ci_job_logs","refresh_default_branch","publish_changes","open_pr","request_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked","request_clarification","resolve_clarification","get_collaboration_record"]}`
 	if content != want {
 		t.Fatalf("BuildEventEnvelope() text = %s\nwant = %s", content, want)
 	}
@@ -84,7 +84,8 @@ func TestBuildEventEnvelopeExplainsRecoveredInProgressPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, `"pull_request_number":23`) ||
+	if !strings.Contains(content, `"pull_request_context":{"status":"available","number":23}`) ||
+		!strings.Contains(content, `"pull_request_number":23`) ||
 		!strings.Contains(content, `"recovered_publication":{"head_sha":"2222222222222222222222222222222222222222"`) ||
 		!strings.Contains(content, "Inspect the recovered publication") ||
 		!strings.Contains(content, `"expected_head_sha":""`) {
@@ -103,7 +104,7 @@ func TestBuildEventEnvelopeIncludesReviewerPullRequestAndRoleOutcomes(t *testing
 	if err != nil {
 		t.Fatalf("BuildEventEnvelope() error = %v", err)
 	}
-	const want = `{"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED","CLARIFICATION_WAIT"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","get_check_run_diagnostics","list_ci_runs","get_ci_run","get_ci_job_logs","search_ci_job_logs","refresh_default_branch","submit_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked","request_clarification","resolve_clarification","get_collaboration_record"]}`
+	const want = `{"pull_request_context":{"status":"available","number":23},"schema_version":2,"workflow_id":"40000000-0000-4000-8000-000000000001","issue_number":17,"repository_id":41,"agent_participant_id":"10000000-0000-4000-8000-000000000001","assignment_generation":3,"agent_session_id":"20000000-0000-4000-8000-000000000001","agent_turn_id":"30000000-0000-4000-8000-000000000001","triggering_event":{"stage":"review","role":"REVIEWER","turn_purpose":"REVIEW"},"pull_request_number":23,"current_head_sha":"3333333333333333333333333333333333333333","expected_head_sha":"2222222222222222222222222222222222222222","expected_outcomes":["CHANGES_REQUESTED","APPROVED"],"allowed_outcomes":["CHANGES_REQUESTED","APPROVED","BLOCKED","CLARIFICATION_WAIT"],"mcp_capabilities":["get_issue","list_issue_comments","get_pull_request","list_pull_request_reviews","list_review_threads","get_check_runs","get_handoff","get_check_run_diagnostics","list_ci_runs","get_ci_run","get_ci_job_logs","search_ci_job_logs","refresh_default_branch","submit_review","confirm_prior_terminal_intent","comment_on_issue","comment_on_pull_request","report_blocked","request_clarification","resolve_clarification","get_collaboration_record"]}`
 	if content != want {
 		t.Fatalf("BuildEventEnvelope() = %#v\nwant text = %s", content, want)
 	}
@@ -243,4 +244,23 @@ func builtinDefinition(t *testing.T) workflow.Definition {
 		t.Fatalf("NewBuiltinDefinition() error = %v", err)
 	}
 	return definition
+}
+
+func TestEnvelopePRContextAcrossPRLessTriggersAndRecovery(t *testing.T) {
+	for _, purpose := range []workflow.TurnPurpose{workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeRetry, workflow.TurnPurposeReactivation} {
+		for _, recovered := range []bool{false, true} {
+			execution := envelopeExecutionContext(workflow.RoleDeveloper, purpose, nil)
+			const head = "2222222222222222222222222222222222222222"
+			if recovered {
+				execution.Publication = &store.AgentTurnPublication{HeadRef: "omnigrex/issue-17", HeadSHA: head}
+			}
+			raw, err := agentturn.BuildEventEnvelope(execution, head, builtinDefinition(t), role.BuiltinPolicyCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(raw, `"pull_request_context":{"status":"none"}`) || strings.Contains(raw, `"pull_request_number"`) {
+				t.Fatal(raw)
+			}
+		}
+	}
 }
