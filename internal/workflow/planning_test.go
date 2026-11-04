@@ -48,3 +48,25 @@ func TestPlanningOnlyEntryWaitingCompletionAndClosure(t *testing.T) {
 		t.Fatal(closed)
 	}
 }
+
+func TestCompletedPlanningOperationalRecoveryDoesNotReopenDiscovery(t *testing.T) {
+	start := reduce(workflow.Snapshot{State: workflow.StateAbsent}, workflow.TriggerEvent{PlanningOnly: true, EventMetadata: workflow.EventMetadata{ID: "plan", ObservedAt: time.Now(), WorkItem: workflow.WorkItem{RepositoryID: 1, IssueID: 2, IssueNumber: 3}}, AttemptID: "attempt", AttemptNumber: 1})
+	s := start.Snapshot
+	s.State = workflow.StateNeedsHuman
+	s.Assignments.Status = workflow.AssignmentWaitingForHuman
+	s.ResumeRole = workflow.RolePlanner
+	recovery := reduce(s, workflow.TriggerEvent{EventMetadata: metadata(s, "recover"), PlanningCompleted: true, AttemptID: "must-not-be-created", AttemptNumber: 2})
+	if recovery.Disposition != workflow.DispositionApplied || recovery.Snapshot.State != workflow.StatePlanReady || recovery.Snapshot.CurrentAttempt.ID != "attempt" || recovery.Snapshot.LastAttemptNumber != 1 || recovery.Snapshot.ResumeRole != "" {
+		t.Fatal(recovery)
+	}
+	if len(recovery.Actions) != 2 {
+		t.Fatal(recovery.Actions)
+	}
+	onlyAction[workflow.ConsumeRunLabelAction](t, recovery.Actions)
+	onlyAction[workflow.ReconcileLabelsAction](t, recovery.Actions)
+	// A normal run on PLAN_READY still cannot reopen planning, even with history.
+	duplicate := reduce(recovery.Snapshot, workflow.TriggerEvent{EventMetadata: metadata(recovery.Snapshot, "run-again"), PlanningCompleted: true, AttemptID: "must-not-be-created", AttemptNumber: 2})
+	if duplicate.Disposition == workflow.DispositionApplied {
+		t.Fatal(duplicate)
+	}
+}

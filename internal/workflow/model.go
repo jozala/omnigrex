@@ -232,7 +232,10 @@ type EventMetadata struct {
 
 // TriggerEvent records an accepted human command to start a new Workflow Attempt.
 type TriggerEvent struct {
-	PlanningOnly bool
+	// PlanningCompleted is corroborated from immutable collaboration history by the Store.
+	// It restores operational projection only; it cannot reopen discovery.
+	PlanningCompleted bool
+	PlanningOnly      bool
 	EventMetadata
 	AttemptID                   string
 	AttemptNumber               uint64

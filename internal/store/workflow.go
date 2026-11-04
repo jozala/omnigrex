@@ -451,7 +451,7 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, NormalizedEven
 			workItem.IssueID, workItem.IssueNumber = locator.PullRequestID, locator.PullRequestNumber
 		}
 	}
-	decision, err := store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+	decision, err := store.reduceWorkflowEvent(ctx, tx, workflowID, snapshot, workflow.EventMetadata{
 		ID: event.DeliveryID, ObservedAt: envelope.receivedAt,
 		WorkItem: workItem, ExpectedRevision: snapshot.Revision,
 	}, eventFactory)
@@ -517,7 +517,7 @@ WHERE delivery_id = $1 AND status = 'PENDING'`, event.DeliveryID, status,
 	}, nil
 }
 
-func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
+func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, workflowID string, snapshot workflow.Snapshot, metadata workflow.EventMetadata, factory WorkflowEventFactory) (workflow.Decision, error) {
 	decision := store.reducer.DefinitionIncompatible(snapshot)
 	if store.reducer.DefinitionCompatible(snapshot) {
 		event, err := factory(WorkflowEventContext{Snapshot: snapshot.Clone(), Metadata: metadata})
@@ -526,6 +526,14 @@ func (store *Store) reduceWorkflowEvent(ctx context.Context, tx pgx.Tx, snapshot
 		}
 		if err := validateWorkflowEventMetadata(event, metadata); err != nil {
 			return workflow.Decision{}, fmt.Errorf("build Workflow event: %w", err)
+		}
+		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.PlanningOnly && snapshot.State == workflow.StateNeedsHuman {
+			state, err := readCollaborationTx(ctx, tx, workflowID)
+			if err != nil {
+				return workflow.Decision{}, err
+			}
+			trigger.PlanningCompleted = state.Planning != nil && state.Planning.ReadyRevision != ""
+			event = trigger
 		}
 		if trigger, ok := event.(workflow.TriggerEvent); ok && snapshot.State == workflow.StateNeedsHuman && snapshot.CurrentAttempt != nil && !snapshot.PlanningOnly {
 			var controlOwner SessionControlOwner

@@ -31,6 +31,8 @@ Requiring all Profiles up front would break direct development.
 Both outputs change under one revision identity and material revisions require renewed confirmation.
 Long histories reuse bounded reads; comments are readable views rather than the authoritative model.
 Presence validation does not prove semantic completeness, and controlled orchestration does not replace the required one-time human assessment.
+Operational recovery after a completed plan's final-label failure restores the immutable ready result and reconciles its projection without allocating a new Planner Turn.
+It must not clear the completion marker and reopen discovery merely to retry publication; this follows the [separation of visible Workflow and execution state](../adr/0001-separate-visible-workflow-and-execution-state.md).
 There is no planning-to-development transition, new isolation regime or additional provider authority.
 
 ## Links

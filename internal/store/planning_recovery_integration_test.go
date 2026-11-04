@@ -131,3 +131,108 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanningRetrySurvivesDeferredReopenedEvent(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1120, workflow.RolePlanner, "")
+	delivery := workflowDelivery("11200000-0000-4000-8000-000000000001")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 1120, 1120, 1120
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, database, ctx, delivery)
+	locator := store.WorkflowLocator{RepositoryID: 1120, IssueID: 1120, IssueNumber: 1120}
+	factory := func(c store.WorkflowEventContext) (workflow.Event, error) {
+		return workflow.IssueReopenedEvent{EventMetadata: c.Metadata}, nil
+	}
+	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "reopened"), locator, factory)
+	if err != nil || application.Status != store.NormalizedEventDeferred {
+		t.Fatal(application, err)
+	}
+	if err = database.CloseMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := database.SettleAgentTurn(ctx, lease, failedSettlementObservation("runtime failed"))
+	if err != nil || settled.ReconciliationJobID == "" {
+		t.Fatal(settled, err)
+	}
+	job, err := database.ClaimJobKind(ctx, store.WorkflowActionQueue, store.ReconcilePendingEventsJobKind, "planner-retry", time.Minute)
+	if err != nil || job == nil {
+		t.Fatal(job, err)
+	}
+	ack, err := database.AcknowledgePendingEventReconciliation(ctx, *job, func(store.NormalizedEventRecord) (store.WorkflowLocator, store.WorkflowEventFactory, error) {
+		return locator, factory, nil
+	})
+	if err != nil || ack.SuccessorJobID == "" {
+		t.Fatal("Planner retry dropped", ack, err)
+	}
+	var state, role, purpose string
+	var waiting bool
+	if err = pool.QueryRow(ctx, `SELECT w.status,w.clarification_waiting,j.payload->>'role',j.payload->>'purpose' FROM workflows w JOIN jobs j ON j.id=$2 WHERE w.id=$1`, fixture.workflowID, ack.SuccessorJobID).Scan(&state, &waiting, &role, &purpose); err != nil {
+		t.Fatal(err)
+	}
+	if state != "PLANNING" || waiting || role != "PLANNER" || purpose != "RETRY" {
+		t.Fatal(state, waiting, role, purpose)
+	}
+}
+
+func TestInitialPlanningPreparationSupportsOriginalReadAndCheckpoint(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture := seedAgentSessionForRole(t, pool, 1121, workflow.RolePlanner)
+	state := collaboration.State{}
+	original := collaboration.OriginalRequest{Title: "Checklist", Body: "A rough idea before any questions", Source: collaboration.Source{Channel: "fixture", ID: "original"}}
+	if err := state.StartPlanning(original); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(state)
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET status='PLANNING',planning_only=true WHERE id=$1;`, fixture.workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET current_stage='planning' WHERE id=$1`, fixture.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
+		t.Fatal(err)
+	}
+	spec := fixture.turnSpec()
+	spec.Stage, spec.Purpose = workflow.StagePlanning, workflow.TurnPurposeInitialPlanning
+	spec.AgentProfileConfig = agentProfileConfig("planner", workflow.RolePlanner, "pi-rpc/v2", "provider/test", "", 0, "Plan only", nil)
+	turn, err := prepareFixtureAgentTurn(t, database, pool, ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := agentTurnExecutionJob(t, pool, ctx, turn)
+	lease, err := acquireFixtureAgentTurn(t, database, pool, ctx, job, turn.ControlRevision, "initial-planner", time.Minute, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = database.OpenMutationAdmission(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	page, err := database.GetCollaborationRecord(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, "planning_request", 0, 0)
+	if err != nil {
+		t.Fatal("original request unavailable", err)
+	}
+	var got collaboration.OriginalRequest
+	if err = json.Unmarshal([]byte(page.Content), &got); err != nil || got != original {
+		t.Fatal(got, err)
+	}
+	mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: "initial-pair", ToolName: "publish_plan_checkpoint", Request: json.RawMessage(`{"operation_id":"initial-pair"}`), ExternalService: "github", ExternalResourceID: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := database.ReservePlanningCheckpoint(ctx, lease, mutation.ID, collaboration.PlanningContent{Title: "Checklist", Status: "draft", Changes: "Initial investigation", RequirementsBrief: "Scope proposed, not agreed", TechnicalPlan: "Inspect local checklist approach", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}})
+	if err != nil || revision.ID == "" {
+		t.Fatal("initial checkpoint rejected", revision, err)
+	}
+	if err = database.ConfirmPlanningPublication(ctx, fixture.workflowID, revision.ID, collaboration.Source{Channel: "fixture", ID: "initial-checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+}

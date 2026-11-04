@@ -54,6 +54,9 @@ Normal waiting releases execution resources while preserving the Agent Session, 
 There is no discussion deadline or inactivity-based acceptance.
 Close the Issue to stop unwanted work using the existing [Workflow lifecycle](workflow-and-labels.md).
 This increment does not introduce dedicated defer, reject or completed-plan reopening commands.
+If final label publication fails after planning has completed, resolve the operational problem and use the normal `omnigrex:run` Human Handoff recovery.
+The controller restores the already-completed `omnigrex:plan-ready` result and retries label reconciliation without a new Planner Turn, new confirmation, or changes to the immutable pair.
+This is operational recovery, not reopening planning or authorizing implementation.
 
 **Confirmation is shared understanding, not implementation authorization.**
 Planning does not allocate Developer/Reviewer implementation work, publish code through MCP, create PRs or child Work Items, submit native reviews, or merge.

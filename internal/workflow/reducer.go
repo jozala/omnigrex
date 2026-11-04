@@ -346,6 +346,17 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 	if !legalInState(snapshot.State, EventKindTrigger) {
 		return illegalInState(snapshot)
 	}
+	if snapshot.PlanningOnly && snapshot.State == StateNeedsHuman && event.PlanningCompleted {
+		// Completion is immutable. Retry the operational projection, not discovery
+		// or final validation, and allocate neither an Attempt nor an Agent Turn.
+		next := cloneSnapshot(snapshot)
+		next.State = StatePlanReady
+		next.ResumeRole = ""
+		next.Assignments.Status = AssignmentActive
+		next.Revision++
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonTriggered,
+			Actions: []Action{ConsumeRunLabelAction{}, ReconcileLabelsAction{State: StatePlanReady}}}
+	}
 	if event.PriorTerminalControlBlocked && snapshot.State == StateNeedsHuman {
 		next := cloneSnapshot(snapshot)
 		next.Revision++

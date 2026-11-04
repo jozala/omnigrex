@@ -216,7 +216,7 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 	if err != nil {
 		return nil, err
 	}
-	if len(state.Inputs) == 0 && len(state.Rounds) == 0 {
+	if len(state.Inputs) == 0 && len(state.Rounds) == 0 && state.Planning == nil {
 		return configuration, nil
 	}
 	for i := range state.Inputs {

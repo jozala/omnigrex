@@ -229,7 +229,7 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 					return PendingEventReconciliation{}, err
 				}
 			} else {
-				decision, err = store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+				decision, err = store.reduceWorkflowEvent(ctx, tx, job.WorkflowID, snapshot, workflow.EventMetadata{
 					ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
 					WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 				}, eventFactory)
@@ -238,7 +238,7 @@ WHERE turn.id = $1 FOR UPDATE`, payload.SourceTurnID).Scan(
 				}
 			}
 		} else {
-			decision, err = store.reduceWorkflowEvent(ctx, tx, snapshot, workflow.EventMetadata{
+			decision, err = store.reduceWorkflowEvent(ctx, tx, job.WorkflowID, snapshot, workflow.EventMetadata{
 				ID: linked.record.DeliveryID, ObservedAt: linked.envelope.receivedAt,
 				WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision,
 			}, eventFactory)
@@ -633,7 +633,7 @@ func withoutSuccessorActions(decision workflow.Decision) (workflow.Decision, pre
 }
 
 func workflowStateAllowsSuccessor(state workflow.State) bool {
-	return state == workflow.StateDeveloping || state == workflow.StateReviewing
+	return state == workflow.StatePlanning || state == workflow.StateDeveloping || state == workflow.StateReviewing
 }
 
 func (store *Store) normalizeSuccessorIntent(snapshot workflow.Snapshot, intent *preparedTurnIntent) error {
