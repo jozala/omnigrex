@@ -1,5 +1,5 @@
 // Package providerauth owns the installation's mutable ChatGPT login.
-// Only access tokens cross the controller/runtime boundary.
+// Only access tokens cross the orchestrator/runtime boundary.
 package providerauth
 
 import (

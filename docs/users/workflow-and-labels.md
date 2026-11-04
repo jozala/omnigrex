@@ -73,7 +73,7 @@ Next: [Human handoffs](human-handoffs.md).
 
 ## Waiting for CI before review
 
-By default, the controller queues each new Reviewer Turn until relevant CI finishes.
+By default, the orchestrator queues each new Reviewer Turn until relevant CI finishes.
 The separate `omnigrex:waiting-for-ci` label appears alongside the review-stage label on both the Work Item Issue and current Change Proposal.
 It is a scheduling observation, not a command or an approval state.
 No Reviewer Agent Turn or Runtime Process is running for this wait.

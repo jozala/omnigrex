@@ -16,7 +16,7 @@ Read the latest compaction from the public branch view because the SDK event can
 Bound the hook to 32 asynchronous one-millisecond timer waits and retain native provider-failure handling if an abnormal clock does not advance.
 Keep Pi's native summaries, compact-and-retry allowance, error classification, and settlement authority unchanged.
 Preserve an explicitly requested cancellation confirmed by the native settlement receipt, even when compaction completed successfully before the abort.
-Do not modify retained timestamps, monkey-patch SDK internals, add controller retries, or slow only the test provider.
+Do not modify retained timestamps, monkey-patch SDK internals, add orchestrator retries, or slow only the test provider.
 Include the extension in new Runtime Profiles' owned-resource inventories while accepting historical inventories without it.
 
 ## Rationale

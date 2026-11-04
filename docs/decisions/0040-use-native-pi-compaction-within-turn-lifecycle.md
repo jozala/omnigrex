@@ -23,7 +23,7 @@ A later successful conversational request can supersede a failed pre-prompt comp
 Retain cancellation evidence across Pi's synthetic preflight assistant error when cancellation was requested.
 
 ## Rationale
-A custom summarizer, controller recovery loop, increased retry budget, or Session renewal would duplicate native behavior and risk bypassing existing admission and fencing.
+A custom summarizer, orchestrator recovery loop, increased retry budget, or Session renewal would duplicate native behavior and risk bypassing existing admission and fencing.
 Keeping the ordinary RPC timeout for prompt admission would interrupt legitimate retained-context compaction.
 Safe event projection extends the existing owned subscription boundary rather than logging raw SDK events.
 

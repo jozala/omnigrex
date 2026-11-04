@@ -86,6 +86,6 @@ The SDK's crashed state excludes writers and allows preparation-only cleanup; it
 Include the protected `omnigrex-operations` journal in the coordinated [backup](backup.md) and [restore](restore.md).
 Exclude disposable VM disks, snapshots, and tmpfs credentials from normal retained-state archives.
 Cross-backend archives are rejected, and the original host must stay fenced during compatible-host restore.
-Dispatch journals support recovery cleanup but do not let a restarted controller adopt prior ephemeral registration inputs.
+Dispatch journals support recovery cleanup but do not let a restarted orchestrator adopt prior ephemeral registration inputs.
 
 Next: [Installation](installation.md) or [backend qualification for contributors](../contributors/runtime-qualification.md).

@@ -36,7 +36,7 @@ The bundle is a nonempty JSON object with literal API keys:
 
 The requested `provider/model` must exist in the exact Pi image and work with that key.
 Executable key references, environment references, imported OAuth snapshots, and missing selected API-key providers are unsupported.
-For OpenAI subscription login, use [provider authentication](provider-authentication.md); mutable OAuth credentials are owned separately by the controller, not imported through this bundle.
+For OpenAI subscription login, use [provider authentication](provider-authentication.md); mutable OAuth credentials are owned separately by the orchestrator, not imported through this bundle.
 Only the selected entry is written to mode-0600 `/run/pi-agent/auth.json` in disposable tmpfs; MCP bearer authority stays in memory.
 Normal retained-state, database, image, and diagnostic paths exclude keys.
 Trusted repository code can deliberately copy supplied keys, so this is not credential mediation.
@@ -55,7 +55,7 @@ Microsandbox instead uses the KVM device group as described in [installation](in
 Create a dedicated host group using the operating system's account-management tools.
 Change `secrets/*` to that group and set its numeric ID as `OMNIGREX_SECRET_GID`.
 It must differ from the selected backend's socket or KVM group, and unrelated users must not belong to it.
-The controller runs as UID/GID 10001 and receives supplementary groups through Compose.
+The orchestrator runs as UID/GID 10001 and receives supplementary groups through Compose.
 Socket group membership has host-root authority; mounting the socket read-only does not restrict API operations.
 
 ## Verify credentials
@@ -67,13 +67,13 @@ The separate [live-provider gate](../contributors/runtime-qualification.md#live-
 
 ## Rotation
 
-For a GitHub App key, generate a new key, replace only that App's local PEM file, recreate the controller, run preflight, and delete the old key after success.
+For a GitHub App key, generate a new key, replace only that App's local PEM file, recreate the orchestrator, run preflight, and delete the old key after success.
 Never rotate both App identities to the same key.
 
 Webhook-secret rotation is not atomic across GitHub and the deployment.
-Stop the controller, change the remote and local secret during one maintenance window, recreate the controller, and verify a real delivery before new work.
+Stop the orchestrator, change the remote and local secret during one maintenance window, recreate the orchestrator, and verify a real delivery before new work.
 
-For provider credentials, replace the complete deployment bundle, recreate the controller, run preflight, and verify every configured model with controlled work.
+For provider credentials, replace the complete deployment bundle, recreate the orchestrator, run preflight, and verify every configured model with controlled work.
 ChatGPT subscription rotation and account replacement instead use the [authentication commands](provider-authentication.md#sign-in).
 After suspected repository compromise, rotate the complete provider bundle.
 Securely remove superseded local and backup copies according to the operator's retention policy.

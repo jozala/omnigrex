@@ -20,14 +20,14 @@ For a personal installation you may have all three responsibilities.
 | Sign in with ChatGPT or select OpenAI API-key authentication | [Provider authentication](provider-authentication.md) |
 | Understand execution and native storage constraints | [Backends](backends.md) |
 | Supply deployment-owned agent instructions and approved tool paths | [Agent policy](agent-policy.md) |
-| Diagnose controller-side CI waiting | [Review scheduling](review-scheduling.md) |
+| Diagnose orchestrator-side CI waiting | [Review scheduling](review-scheduling.md) |
 | Understand long-running context compaction and runtime compatibility | [Context compaction](context-compaction.md) |
 | Verify readiness and diagnose onboarding | [Health and diagnostics](health-and-diagnostics.md) |
 | Collect logs, traces, and application metrics | [Observability](observability.md) |
 | Manage retained Sessions, images, and cache storage | [Retention](retention.md) |
 | Create a coordinated recovery set | [Backup](backup.md) |
 | Recover a compatible installation | [Restore](restore.md) |
-| Change the controller or Runtime Profile image | [Upgrades](upgrades.md) |
+| Change the orchestrator or Runtime Profile image | [Upgrades](upgrades.md) |
 | Investigate a failed or stuck deployment | [Troubleshooting](troubleshooting.md) |
 
 Use [deployment configuration](../reference/deployment-configuration.md) and [commands](../reference/commands.md) for lookup.

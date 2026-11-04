@@ -31,7 +31,7 @@ mise exec -- go test -tags=integration ./internal/deployment -run TestPiOperator
 
 The restore test uses stub commands and temporary data.
 The Compose example test renders the documented selections without deploying or changing protected state.
-The Docker-backed gate exercises the controller image check described in [source builds](development.md#docker-controller-package-policy).
+The Docker-backed gate exercises the orchestrator image check described in [source builds](development.md#docker-orchestrator-package-policy).
 
 ## Investigate test duration
 
@@ -135,7 +135,7 @@ See [runtime qualification](runtime-qualification.md) and [release selection](..
 ## Reviewer CI-admission regressions
 
 Use `TestReviewScheduling*` for deterministic completion/grace/deadline evaluation and `internal/reviewpolicy` tests for strict policy validation.
-`TestReviewerAllocationRequiresControllerAdmission` exercises the real PostgreSQL allocation boundary without an admission fence.
+`TestReviewerAllocationRequiresOrchestratorAdmission` exercises the real PostgreSQL allocation boundary without an admission fence.
 `TestReviewGateSharedObserverPersistsAndFencesTargets` uses the production shared CI observer with a deterministic HTTP provider, durable healthy delayed claims, frozen policy/inventory, and verified test-merge replacement.
 Scheduling fixtures must not sleep for registration grace or CI deadlines.
 
@@ -148,7 +148,7 @@ Never attempt nested Microsandbox qualification inside a Microsandbox Execution 
 `TestPiControlledWorkflow/clarification-large-history` seeds more than 1 MiB of durable, already-delivered historical fixture input for each Role, then runs retained-Session continuation through actual Pi RPC and bounded MCP retrieval of the new answer and question rounds.
 The transport-independent projection regression additionally retrieves every content chunk of an oversized pending batch, including JSON escaping and multibyte characters.
 
-`TestPiFailureRecovery/clarification-restart` records a real completed Pi prompt and question publication for each Role, then restarts the controller Store/backend before settlement.
+`TestPiFailureRecovery/clarification-restart` records a real completed Pi prompt and question publication for each Role, then restarts the orchestrator Store/backend before settlement.
 It verifies corroboration enters clarification waiting without spending an infrastructure retry, stops the Runtime Process, and schedules retained-Session continuation only after a correlated human reply.
 The PostgreSQL clarification recovery matrix additionally covers empty-question yields, input on both sides of the corroboration boundary, unpublished-question rejection, and revalidation after explicit Human Handoff recovery.
 

@@ -13,7 +13,7 @@ Acceptance of that design is not evidence of implementation or backend qualifica
 
 ## Decision
 
-Default newly admitted Reviewer Turns to durable controller-side `after_ci` scheduling.
+Default newly admitted Reviewer Turns to durable orchestrator-side `after_ci` scheduling.
 Repository owners may explicitly select `immediate`, expected CI selectors, timeout, and registration grace through a versioned policy read from a trusted default-branch revision.
 Freeze the logical request's policy and inventory; infrastructure retries retain its absolute deadline while refreshing observations.
 A waiting head or verified test-merge replacement invalidates old evidence and restarts only registration grace, bounded by that deadline.
@@ -34,7 +34,7 @@ Freezing unrelated Profiles or automatically merging the target branch would int
 
 ## Consequences
 
-The controller must fence request observations, coalesce waiting synchronizations, and allocate at most one successor Turn per admission intent.
+The orchestrator must fence request observations, coalesce waiting synchronizations, and allocate at most one successor Turn per admission intent.
 GitHub presentation uses a separate waiting label and one editable progress comment per location, not a self-gating check run.
 Admitted review context is a point-in-time observation, never an approval certificate.
 Avoiding idle Agent polling remains a repository-overridable instruction default subject to operator precedence; prose cannot grant capabilities or alter scheduling.

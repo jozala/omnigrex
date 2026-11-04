@@ -85,7 +85,7 @@ func TestNativeRuntimeLogsSurviveCleanup(t *testing.T) {
 		}
 		want[name] = content
 	}
-	// Reconstruct controller-side Backend state from its durable journal.
+	// Reconstruct orchestrator-side Backend state from its durable journal.
 	recovered := &Backend{options: backend.options, platform: backend.platform, ledger: backend.ledger, inputs: newInputBindings()}
 	if err := recovered.EnsureKeyAbsent(ctx, request.Key); err != nil {
 		t.Fatal(err)

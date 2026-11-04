@@ -36,7 +36,7 @@ Do not prune a protected image or rebind a Participant to bypass readiness failu
 
 Set `OMNIGREX_AGENT_TURN_MEMORY_MIB` to a positive MiB value in the deployment `.env`.
 The supplied Compose stacks default to 1024 MiB, while the binary's unset fallback is 512 MiB.
-Recreate the controller and run doctor after changing the setting:
+Recreate the orchestrator and run doctor after changing the setting:
 
 ```sh
 docker compose up -d --force-recreate orchestrator

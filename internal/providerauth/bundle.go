@@ -25,7 +25,7 @@ func SubscriptionBundle(path string) (json.RawMessage, error) {
 			return nil, errors.New("provider API-key bundle must be a JSON object")
 		}
 	}
-	bundle["openai"] = json.RawMessage(`{"type":"controller"}`)
+	bundle["openai"] = json.RawMessage(`{"type":"orchestrator"}`)
 	encoded, err := json.Marshal(bundle)
 	for _, entry := range bundle {
 		clear(entry)

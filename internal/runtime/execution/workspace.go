@@ -59,7 +59,7 @@ type GitSnapshot struct {
 	Pack, Index        []byte
 }
 
-// SnapshotInstaller performs an explicit controller-owned additive Git-data
+// SnapshotInstaller performs an explicit orchestrator-owned additive Git-data
 // operation, including for read-only Reviewers. It must hold all writers
 // quiescent across validation and installation and resume before returning.
 // The backend acquires its execution lock before calling the supplied fence,
@@ -70,5 +70,5 @@ type SnapshotInstaller interface {
 }
 
 // WorkspaceFence admits an operation and excludes execution cleanup without
-// blocking lease renewal. It is supplied by verified controller scope.
+// blocking lease renewal. It is supplied by verified orchestrator scope.
 type WorkspaceFence func(context.Context, func(context.Context) error) error

@@ -16,7 +16,7 @@ Distinguish frozen Turn assignment from delivery with a durable pending-delivery
 Keep that input pending for mutation admission, settlement, and recovery until every canonical JSON-text chunk has a successful scoped read recorded under the live Turn/Workflow fence.
 Use the existing immutable read ledger as progress evidence, bound to the Turn, collection, record index, and full-record SHA-256 fingerprint.
 Count distinct canonical offsets, not call count or receipt of the final chunk.
-Validate each successful chunk against the controller's scoped record before admitting coverage, and commit complete delivery atomically with the read record.
+Validate each successful chunk against the orchestrator's scoped record before admitting coverage, and commit complete delivery atomically with the read record.
 Keep unread records eligible for the retained Session's next preparation if the Turn ends early; preserve normal inline delivery and existing budget semantics.
 
 ## Rationale
@@ -30,7 +30,7 @@ Neither successful retrieval nor its fingerprint constitutes interpretation or i
 ## Consequences
 
 Agents follow canonical offsets from zero and concatenate chunks with one fingerprint per record.
-Controller restart preserves recorded progress; a new Turn conservatively re-delivers unread records, while already delivered records remain history.
+Orchestrator restart preserves recorded progress; a new Turn conservatively re-delivers unread records, while already delivered records remain history.
 The orchestrator remains the sole continuation owner, and human response bodies and provenance remain immutable.
 
 ## Links

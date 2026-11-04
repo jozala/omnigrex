@@ -824,6 +824,7 @@ func (store *Store) GetAgentSessionForParticipant(ctx context.Context, participa
 }
 
 // TransferAgentSessionControl compare-and-sets session authority and advances its revision once.
+// controllerID identifies the Control Owner, including a human, not the Orchestrator process.
 func (store *Store) TransferAgentSessionControl(ctx context.Context, sessionID string, expectedRevision int64, owner SessionControlOwner, controllerID string) (AgentSession, error) {
 	if !validUUID(sessionID) || expectedRevision <= 0 ||
 		(owner != SessionControlAutomation && owner != SessionControlHuman) || strings.TrimSpace(controllerID) == "" {

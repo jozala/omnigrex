@@ -4,7 +4,7 @@
 
 ## Before replacing data
 
-Restore only a PostgreSQL dump, runtime-state archive, and applicable native journal from the same stopped-controller [backup window](backup.md).
+Restore only a PostgreSQL dump, runtime-state archive, and applicable native journal from the same stopped-orchestrator [backup window](backup.md).
 The procedure below replaces current operational and Session state.
 Use the original deployment `COMPOSE_FILE` with matching storage overrides and logical namespaces.
 
@@ -102,7 +102,7 @@ Preserve the original logical namespace instead of remapping state to new names.
 ## Restore a supplemental Session export
 
 After restoring the matching PostgreSQL ledger and backend namespace, restore a supplemental archive only into an absent Participant state resource.
-Keep the controller and all writers stopped under the same offline barrier as [export](backup.md#supplemental-session-exports).
+Keep the orchestrator and all writers stopped under the same offline barrier as [export](backup.md#supplemental-session-exports).
 
 ```sh
 PARTICIPANT='<canonical-Agent-Participant-UUID>'

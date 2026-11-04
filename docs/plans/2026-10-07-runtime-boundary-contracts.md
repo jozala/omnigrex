@@ -174,7 +174,7 @@ Normalize environment state as `Preparing`, `Ready`, `Running`, `Stopped`, `Abse
 Exit observations identify their resource scope, timestamp, optional exit code, and optional cause with provenance.
 An exit code of 137, EOF, or a lost connection does not prove OOM.
 A backend may report an unknown cause; it must not manufacture Docker-equivalent facts it cannot observe.
-Shared controller failure must not be attributed to one guest process without evidence.
+Shared orchestrator failure must not be attributed to one guest process without evidence.
 Resource budgets state their units and enforcement scope; a container PID limit, a VM's guest process count, and its host VMM thread count are not interchangeable guarantees.
 Reject a specifically required limit that cannot be enforced instead of relabeling an approximate guest observation as host-enforced isolation.
 

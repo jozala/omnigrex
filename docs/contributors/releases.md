@@ -39,7 +39,7 @@ Supply:
 The workflow adds the `v` tag prefix and creates a public GitHub prerelease, explicitly not GitHub's recommended latest stable release.
 It reserves an exact lightweight tag without force, creates a draft, uploads assets, downloads and compares their bytes, verifies the tag, then publishes.
 Product images are **orchestrator**, **orchestrator-microsandbox**, and generic **pi**, all pinned by digest in the bundle's `build.json`.
-The controller version remains its source commit.
+The orchestrator version remains its source commit.
 `release.json` carries the designation, channel, breaking-change/upgrade declarations, commit, and payload checksum separately.
 No release operation builds images, alters image labels, creates `latest`, changes `.omnigrex/environment.yaml`, or rebinds retained Agent Participants.
 The Omnigrex-specific `development` image remains independently qualified and adopted by a separate repository change; other repositories supply their own environments, optionally derived from Pi.
@@ -71,15 +71,15 @@ Adding `workflows: write` to `GITHUB_TOKEN` YAML permissions cannot grant this a
 
 Before the first live release, Mariusz or an administrator must:
 
-1. Create a **dedicated release GitHub App** owned by the repository owner, separate from the controller's Developer and Reviewer Apps.
+1. Create a **dedicated release GitHub App** owned by the repository owner, separate from the orchestrator's Developer and Reviewer Apps.
    Give it repository **Contents: read and write**, **Workflows: read and write**, and GitHub's mandatory **Metadata: read** permissions only.
-   It needs no organization permissions, webhook subscriptions, or controller/deployment access; disable its webhook if unused.
+   It needs no organization permissions, webhook subscriptions, or orchestrator/deployment access; disable its webhook if unused.
 2. Install it with **Only select repositories**, selecting only `jozala/omnigrex`.
    Approve the installation's requested permissions, including Workflows write; after future permission changes explicitly review/approve the installation update.
 3. Record the App's numeric **App ID** (not client ID or installation ID) as repository Actions variable `OMNIGREX_RELEASE_APP_ID`.
    Generate/download a private key and store the complete PEM as repository Actions secret `OMNIGREX_RELEASE_APP_PRIVATE_KEY`.
    Keep the private key out of source, release assets, logs, deployment configuration, and documentation.
-   Never reuse the controller's existing App keys or introduce a PAT.
+   Never reuse the orchestrator's existing App keys or introduce a PAT.
 4. Keep repository workflow/secret access limited to trusted maintainers.
    The App's Workflows-write authority is consequential even though this command uses it only for tags.
    Rotate the private key by replacing the Actions secret and revoking the old App key; uninstall/revoke the dedicated App if release authorization is withdrawn.

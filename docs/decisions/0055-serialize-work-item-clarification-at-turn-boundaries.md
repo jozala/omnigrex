@@ -9,7 +9,7 @@ decision-makers: [Omnigrex Developer]
 
 [Work Item 163](https://github.com/jozala/omnigrex/issues/163) requires normal clarification without changing Workflow Attempt identity, Session ownership, or retry/review budgets.
 Question publication and human replies can race with each other, Turn settlement, and successful Stage handoff.
-GitHub is the initial interface, not the domain identity or the Session controller.
+GitHub is the initial interface, not the domain identity or the Agent Session control gateway.
 
 ## Decision
 
@@ -22,7 +22,7 @@ Reserve a round before publication and admit explicitly addressed answers even b
 Only a verified publication supports expected clarification waiting; an uncertain effect uses the existing operation-marked mutation reconciliation path.
 Expected waiting is a successful Turn settlement in the same Stage, with no autonomous successor until input is available.
 Preparation freezes an ordered input batch, and subsequent input fences successful handoff until another safe Turn boundary.
-The controller alone allocates continuation of the retained Session.
+The orchestrator alone allocates continuation of the retained Session.
 
 ## Rationale
 

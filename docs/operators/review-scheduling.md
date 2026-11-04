@@ -1,29 +1,29 @@
-# Operate controller-side review scheduling
+# Operate orchestrator-side review scheduling
 
 [Operator guide](README.md) · [Repository policy reference](../reference/repository-configuration.md#review-scheduling)
 
 ## Prerequisites and limits
 
 Use a release qualified for both the Docker and Linux/KVM controlled Workflow gates.
-Apply its forward-only PostgreSQL migrations with the normal controller startup procedure; old completed Turns and existing Human Handoffs are not reactivated or rewritten.
+Apply its forward-only PostgreSQL migrations with the normal orchestrator startup procedure; old completed Turns and existing Human Handoffs are not reactivated or rewritten.
 The shared CI reader's permissions and strict App preflight requirements are authoritative in [GitHub Apps](github-apps.md#developer-app).
 No Checks write permission or CI-completion webhook subscription is added.
 
-Repository owners control scheduling within controller limits: timeout 1 second..2 hours and registration grace 0..5 minutes, with grace no longer than timeout and whole-second precision.
+Repository owners control scheduling within orchestrator limits: timeout 1 second..2 hours and registration grace 0..5 minutes, with grace no longer than timeout and whole-second precision.
 The defaults are 30 minutes and 60 seconds.
 Policy is structured configuration, not Agent Profile prose, and does not grant execution capabilities or alter the Workflow graph.
 
 ## Recognize healthy waiting
 
 The Workflow stays in its review Stage with the separate `omnigrex:waiting-for-ci` label on the Work Item and current PR.
-A controller-owned editable progress comment identifies the reviewed head, deadline, expected/observed evidence, and release reason.
+An orchestrator-owned editable progress comment identifies the reviewed head, deadline, expected/observed evidence, and release reason.
 Waiting allocates no Reviewer Turn, execution job, Runtime Process, or active execution slot.
 An existing persistent Reviewer Session may remain retained.
 
-The preparation job is delayed between bounded observations and releases its controller lease.
+The preparation job is delayed between bounded observations and releases its orchestrator lease.
 Healthy waits preserve the remaining finite failure allowance by extending claim allowance while retaining monotonic audited claim numbers.
 They do not increment Workflow infrastructure failures, Review Cycles, or Agent step usage.
-Controller restart reclaims leases and resumes durable delayed observations rather than requiring an event or an Agent to poll.
+Orchestrator restart reclaims leases and resumes durable delayed observations rather than requiring an event or an Agent to poll.
 
 ## Investigate a wait or release
 
@@ -50,6 +50,6 @@ Do not merge or rebase a published branch to manufacture CI as part of schedulin
 ## Instruction defaults
 
 Developers may hand off with remote CI pending after appropriate local verification and truthful reporting.
-Reviewers normally perform useful review after immediate, no-CI, or timeout admission instead of rebuilding a controller wait in their Turn.
+Reviewers normally perform useful review after immediate, no-CI, or timeout admission instead of rebuilding an orchestrator wait in their Turn.
 This polling preference is expressly repository-overridable unless explicit operator guidance forbids it.
 The [instruction hierarchy](agent-policy.md) and essential-evidence obligations remain unchanged.

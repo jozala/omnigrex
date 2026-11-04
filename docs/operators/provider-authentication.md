@@ -3,7 +3,7 @@
 [Operator guide](README.md) · [Secret handling](secrets.md)
 
 Start in the private deployment directory with the installation's exact `COMPOSE_FILE` exported.
-Use matching controller and Pi images qualified for subscription inference and tool use on the selected backend.
+Use matching orchestrator and Pi images qualified for subscription inference and tool use on the selected backend.
 The [implementation evidence](../plans/2026-10-20-chatgpt-subscription.md#evidence) distinguishes implemented behavior from completed live qualification.
 
 ## Choose the authentication mode
@@ -41,7 +41,7 @@ If the browser cannot reach the deployment's loopback callback, copy the full fi
 Do not send that one-time URL through an Issue, log, or support transcript.
 No Pi installation or provider key is required on your computer.
 
-The controller verifies OAuth state, PKCE, the ID-token signature, issuer, audience, expiry, nonce, and direct-inference permission before activating the login.
+The orchestrator verifies OAuth state, PKCE, the ID-token signature, issuer, audience, expiry, nonce, and direct-inference permission before activating the login.
 Returning login reuses the saved registration.
 To select another account or workspace, use ordinary login with the account-selection option:
 
@@ -54,25 +54,25 @@ Subsequent model requests from existing Agent Sessions can send their conversati
 Requests already in flight can finish using the previous account.
 A failed login preserves the working credentials.
 
-Commands coordinate through the running controller's owner-only Unix socket.
+Commands coordinate through the running orchestrator's owner-only Unix socket.
 Before initial startup, an offline command can own the same directory exclusively, for example with `docker compose run --rm --no-deps orchestrator auth login`.
-It cannot become a second writer while a controller owns that directory.
+It cannot become a second writer while an orchestrator owns that directory.
 
 ## Renewal and storage
 
-The controller serializes refresh and saves replacement credentials atomically before issuing renewed access tokens.
+The orchestrator serializes refresh and saves replacement credentials atomically before issuing renewed access tokens.
 It also renews while idle; being offline beyond OpenAI's renewable-grant lifetime can require another login.
 An interrupted remote refresh whose replacement was not saved also requires reauthorization.
 Network failures use bounded refresh backoff and do not delete the login.
 
-Compose persists credentials in the controller-only `omnigrex-provider-auth` volume at `/var/lib/omnigrex/provider-auth`.
+Compose persists credentials in the orchestrator-only `omnigrex-provider-auth` volume at `/var/lib/omnigrex/provider-auth`.
 The directory is mode 0700 and the credential file is mode 0600, owned by UID/GID 10001.
 Guests retrieve access-only tokens through the private `/runtime/provider-auth` HTTP endpoint before model requests.
 It shares the listener and per-Turn authorization with `/mcp`, but is separate from the MCP protocol and agent-visible tools.
 The refresh token, ID token, durable credential directory, and administrative socket are never mounted into guests.
 Repository code can still read access tokens intentionally supplied to its Runtime Process.
 
-Back up this directory separately as an encrypted deployment secret, with the controller and offline authentication commands stopped.
+Back up this directory separately as an encrypted deployment secret, with the orchestrator and offline authentication commands stopped.
 Do not include it in Session exports, ordinary runtime-state archives, or unencrypted recovery manifests.
 Restore it only with the original writer fenced; an old backup can contain a superseded refresh token and require login again.
 The host identifier is part of this secret-state directory and remains stable through ordinary restart and logout.
@@ -97,7 +97,7 @@ docker compose exec orchestrator /usr/local/bin/omnigrex auth unblock
 This clears only the quota block and does not prove that capacity is available.
 A repeated limit blocks access again.
 Login clears an authentication block but does not clear an independent quota block.
-Both blocks survive controller recreation.
+Both blocks survive orchestrator recreation.
 
 Confirmed quota and authentication failures prevent new subscription-backed execution and put affected Workflows into Human Handoff without consuming infrastructure retries.
 Other providers remain usable.

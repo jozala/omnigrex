@@ -36,7 +36,7 @@ docker compose exec orchestrator /usr/local/bin/omnigrex auth unblock
 ```
 
 Authentication commands load only the authentication mode and credential-root settings.
-They use the running controller's private administrative socket, or acquire exclusive offline ownership if the controller is absent.
+They use the running orchestrator's private administrative socket, or acquire exclusive offline ownership if the orchestrator is absent.
 `login` supports browser callback and manual full-redirect completion with a ten-minute attempt lifetime.
 `--new-account` registers a different account/workspace through ordinary login, without an active-Turn barrier.
 `status` prints safe JSON, including mode, verified identity, login/storage availability, and independent authentication/quota blocks.
@@ -104,8 +104,8 @@ Neither retrieval nor command acceptance resolves questions or grants implementa
 ### Interpretation recovery evidence
 
 `resolve_clarification` requires a nonempty batch of interpretations.
-Each recorded interpretation carries a controller-owned `origin_operation_id`, identifying its durable mutation reservation rather than the agent's operation label or a GitHub artifact.
-The controller records this origin atomically with the interpretation; agents cannot supply it in resolution arguments.
+Each recorded interpretation carries an orchestrator-owned `origin_operation_id`, identifying its durable mutation reservation rather than the agent's operation label or a GitHub artifact.
+The orchestrator records this origin atomically with the interpretation; agents cannot supply it in resolution arguments.
 Recovery requires matching origin, Work Item, Participant, round, and the complete requested interpretation batch.
 An identical historical interpretation from another operation is not proof that a cancelled or uncertain operation applied its effect.
 Earlier unattributed interpretations remain history but cannot establish operation-specific recovery proof.

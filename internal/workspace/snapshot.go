@@ -15,7 +15,7 @@ import (
 
 var ErrSnapshotUnavailable = errors.New("default-branch snapshot acquisition unavailable")
 
-// AcquireSnapshot uses a fresh controller-owned bare repository, never an
+// AcquireSnapshot uses a fresh orchestrator-owned bare repository, never an
 // agent-modified checkout/config. No credentials or remote configuration are
 // delivered. The pack contains all ancestry, not a shallow verification view.
 func (lifecycle *Lifecycle) AcquireSnapshot(ctx context.Context, remote, credential, sha, ref string) (gitdelivery.Snapshot, error) {
@@ -27,7 +27,7 @@ func (lifecycle *Lifecycle) AcquireSnapshot(ctx context.Context, remote, credent
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	// PublicationRoot is controller-owned and never mounted into the Runtime Process.
+	// PublicationRoot is orchestrator-owned and never mounted into the Runtime Process.
 	if err := os.MkdirAll(lifecycle.publicationRoot, 0700); err != nil {
 		return gitdelivery.Snapshot{}, ErrSnapshotUnavailable
 	}
@@ -38,7 +38,7 @@ func (lifecycle *Lifecycle) AcquireSnapshot(ctx context.Context, remote, credent
 	defer os.RemoveAll(dir)
 	run := func(credential string, args ...string) error {
 		// Bound individual pack/output files even if a server ignores negotiation.
-		// The shell and arguments are controller-owned; diagnostics are discarded.
+		// The shell and arguments are orchestrator-owned; diagnostics are discarded.
 		argv := append([]string{"-c", `ulimit -f 262144; exec "$@"`, "snapshot-git", lifecycle.gitExecutable}, args...)
 		command := exec.CommandContext(ctx, "/bin/sh", argv...)
 		command.Dir = dir

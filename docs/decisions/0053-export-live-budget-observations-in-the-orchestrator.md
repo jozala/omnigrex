@@ -3,7 +3,7 @@ status: accepted
 date: 2026-10-27
 decision-makers: [Implementation agent]
 ---
-# Export live budget observations in the controller
+# Export live budget observations in the orchestrator
 
 ## Context
 
@@ -15,7 +15,7 @@ Persisting SDK custom Session entries would add volume and replay obligations wi
 
 Reuse the live transport and neutral Agent Event boundary without custom Session entries or in-Pi exporters.
 Separate a one-slot coalescing observation queue from critical runtime events and retain the critical snapshot independently.
-Consume events once per prompt in a constant-space controller observer and use the final snapshot for usage and missed summary pressure.
+Consume events once per prompt in a constant-space orchestrator observer and use the final snapshot for usage and missed summary pressure.
 Record incomplete-work handoffs after successful fenced settlement, not speculative reconciliation or summary entry.
 Export through the existing optional OpenTelemetry provider with fixed categories and numeric ceilings as histogram values.
 Retain unknown usage explicitly, including when the effective configuration is known.
@@ -32,7 +32,7 @@ The explicit cardinality increase preserves Role, budget mode and completeness r
 ## Consequences
 
 Telemetry is best-effort live observation, not a usage ledger.
-Controller death, export failure and uncertain settlement acknowledgement can lose samples.
+Orchestrator death, export failure and uncertain settlement acknowledgement can lose samples.
 History Replay never re-emits live metrics or resets the budget.
 No owned runtime resources or immutable Participant bindings change.
 Future observation types can reuse this boundary; unrelated Pi metrics remain out of scope.

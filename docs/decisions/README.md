@@ -39,8 +39,8 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0029: Preserve historical PID budgets and size new Pi Participants for development](0029-preserve-historical-pid-budgets-and-size-new-participants.md) | Accepted | 2026-10-16 |
 | [0030: Cache immutable registry documents for offline verification](0030-cache-immutable-registry-documents-for-offline-verification.md) | Accepted | 2026-10-18 |
 | [0031: Organize documentation around reader responsibilities](0031-organize-documentation-around-reader-responsibilities.md) | Accepted | 2026-10-18 |
-| [0032: Own ChatGPT subscription credentials in the controller](0032-own-chatgpt-subscription-credentials-in-the-controller.md) | Accepted | 2026-10-20 |
-| [0033: Resolve controller packages from signed distribution repositories](0033-resolve-controller-packages-from-signed-alpine-repositories.md) | Accepted | 2026-10-20 |
+| [0032: Own ChatGPT subscription credentials in the orchestrator](0032-own-chatgpt-subscription-credentials-in-the-orchestrator.md) | Accepted | 2026-10-20 |
+| [0033: Resolve orchestrator packages from signed distribution repositories](0033-resolve-orchestrator-packages-from-signed-alpine-repositories.md) | Accepted | 2026-10-20 |
 | [0034: Preserve Microsandbox failure evidence without changing cleanup policy](0034-microsandbox-diagnostics.md) | Accepted | 2026-10-20 |
 | [0036: Aggregate independent CI qualification behind the existing required check](0036-aggregate-parallel-ci-qualification.md) | Accepted | 2026-10-21 |
 | [0037: Reuse PostgreSQL test processes while isolating databases](0037-reuse-postgres-processes-with-isolated-test-databases.md) | Accepted | 2026-10-21 |
@@ -59,7 +59,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0050: Deliver default-branch snapshots as additive Git data](0050-deliver-default-branch-snapshots-as-additive-git-data.md) | Accepted | 2026-10-27 |
 | [0051: Exclude execution cleanup without locking Turn leases](0051-exclude-execution-cleanup-without-locking-turn-leases.md) | Accepted | 2026-10-28 |
 | [0052: Carry current Human Handoff publication across tracking revisions](0052-carry-current-handoff-publication-across-tracking-revisions.md) | Accepted | 2026-10-28 |
-| [0053: Export live budget observations in the controller](0053-export-live-budget-observations-in-the-controller.md) | Accepted | 2026-10-27 |
+| [0053: Export live budget observations in the orchestrator](0053-export-live-budget-observations-in-the-orchestrator.md) | Accepted | 2026-10-27 |
 | [0054: Designate manual pre-1.0 product releases](0054-manual-product-releases.md) | Accepted | 2026-10-30 |
 | [0055: Serialize Work Item clarification at Turn boundaries](0055-serialize-work-item-clarification-at-turn-boundaries.md) | Accepted | 2026-11-01 |
 | [0056: Bound collaboration prompt projections without truncating history](0056-bound-collaboration-prompt-projections.md) | Accepted | 2026-11-01 |

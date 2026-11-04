@@ -91,7 +91,7 @@ func TestPiLiveSubscription(t *testing.T) {
 	if err := manager.Check(); err != nil {
 		t.Fatal(err)
 	}
-	runProviderSmoke(t, []byte(`{"openai":{"type":"controller"}}`), true, manager)
+	runProviderSmoke(t, []byte(`{"openai":{"type":"orchestrator"}}`), true, manager)
 }
 
 func runProviderSmoke(t *testing.T, content []byte, prompt bool, subscription ...*providerauth.Manager) {

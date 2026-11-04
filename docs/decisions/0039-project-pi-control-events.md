@@ -16,7 +16,7 @@ Project transcript-bearing events before the RPC listener serializes them, witho
 Keep `agent_end.type` and `willRetry`, assistant role/stop/error evidence, retry events, and the authoritative `agent_settled` receipt.
 Project redundant message, tool, entry, queue, and compaction bodies to control metadata as documented in the runtime qualification guide.
 Keep Pi's command handling, response correlation, agent backpressure subscription, cancellation, rebinds, and disposal.
-Keep the existing controller frame bound and fail-closed validation for remaining required or unknown records.
+Keep the existing orchestrator frame bound and fail-closed validation for remaining required or unknown records.
 
 ## Rationale
 A subscription view uses the public SDK boundary and avoids patching stdout, modifying installed packages, or forking the RPC implementation.
