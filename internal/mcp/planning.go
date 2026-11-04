@@ -34,11 +34,16 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	}}
 	r, err := op.PublishCheckpoint(ctx, func(ctx context.Context) (collaboration.PlanningRevision, error) {
 		r, err := ledger.ReservePlanningCheckpoint(ctx, in.lease, in.OperationID, args.Content)
-		if err != nil && !errors.Is(err, collaboration.ErrInvalid) {
+		var rejection *collaboration.CheckpointNotApplied
+		if err != nil && !errors.Is(err, collaboration.ErrInvalid) && !errors.As(err, &rejection) {
 			err = OutcomeUnknown(err)
 		}
 		return r, err
 	}, args.Signature)
+	var rejection *collaboration.CheckpointNotApplied
+	if errors.As(err, &rejection) {
+		return planningNonPublicationResult(rejection)
+	}
 	if errors.Is(err, collaboration.ErrInvalid) {
 		return nil, ErrInvalidInvocation
 	}
@@ -47,13 +52,56 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	}
 	return planningCheckpointResult(r)
 }
+func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.RawMessage, error) {
+	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation") {
+		return nil, ErrInvalidInvocation
+	}
+	action, instruction := "request_clarification_empty_questions", "Call request_clarification with empty questions and a fresh operation ID, then end this Turn without report_blocked. The orchestrator will deliver pending input in the retained Session's next Turn; interpret it and reconsider affected decisions before publishing revised content with a new operation ID."
+	status := "input_pending"
+	if r.Reason == "unread_input" {
+		action, instruction = "retrieve_human_input", "Complete every scoped human_input record and chunk required by the frozen projection before dependent action. This operation remains not applied; a new publication attempt needs a new operation ID."
+	}
+	if r.Reason == "interrupted_before_reservation" {
+		status, action, instruction = "not_applied", "publish_checkpoint_new_operation", "Recovery proved publication never reached reservation after fencing and stopping the old Runtime Process. Reconsider current input and use a new operation ID for a fresh attempt."
+	}
+	return json.Marshal(map[string]any{"status": status, "publication": "not_applied", "reason": r.Reason, "next_action": action, "instructions": instruction})
+}
 func planningCheckpointResult(r collaboration.PlanningRevision) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"revision_id": r.ID, "source": r.Source, "status": r.Content.Status})
 }
 func (reconciler *ProductionReconciler) reconcilePlanningCheckpoint(ctx context.Context, scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
+	if scope.Role != "PLANNER" || mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != scope.WorkflowID {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
 	ledger, ok := reconciler.clarifications.(PlanningStore)
 	if !ok {
 		return unresolvedReconciliation(), nil
+	}
+	if evidence, ok := ledger.(interface {
+		ReconcilePlanningNonPublication(context.Context, string, string, string) (*collaboration.CheckpointNotApplied, error)
+	}); ok {
+		rejection, err := evidence.ReconcilePlanningNonPublication(ctx, scope.WorkflowID, mutation.AgentTurnID, mutation.ID)
+		if err != nil {
+			return unresolvedReconciliation(), err
+		}
+		if rejection != nil {
+			var args struct {
+				Content collaboration.PlanningContent `json:"content"`
+			}
+			if json.Unmarshal(mutation.Request, &args) != nil || rejection.OperationID != "P"+mutation.ID || rejection.TurnID != mutation.AgentTurnID || rejection.ParticipantID != scope.Turn.AgentParticipantID {
+				return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+			}
+			expected, _ := json.Marshal(args.Content)
+			actual, _ := json.Marshal(rejection.Content)
+			if string(expected) != string(actual) {
+				return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+			}
+			raw, err := planningNonPublicationResult(rejection)
+			if err != nil {
+				return unresolvedReconciliation(), err
+			}
+			return foundReconciliation(raw), nil
+		}
 	}
 	r, err := ledger.GetPlanningCheckpoint(ctx, scope.WorkflowID, "P"+mutation.ID)
 	if err != nil {

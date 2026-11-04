@@ -135,3 +135,50 @@ func TestPlanningCompletionLostAcknowledgmentReconcilesWithoutReapplying(t *test
 		t.Fatal("invalid completion not definite", err)
 	}
 }
+
+type rejectingPlanningLedger struct {
+	planningLedger
+	err error
+}
+
+func (f *rejectingPlanningLedger) ReservePlanningCheckpoint(context.Context, store.AgentTurnLease, string, collaboration.PlanningContent) (collaboration.PlanningRevision, error) {
+	return collaboration.PlanningRevision{}, f.err
+}
+func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T) {
+	for _, reason := range []string{"late_input", "unread_input"} {
+		t.Run(reason, func(t *testing.T) {
+			ledger := &rejectingPlanningLedger{err: &collaboration.CheckpointNotApplied{Reason: reason}}
+			api := &clarificationLostGitHub{backendGitHub: &backendGitHub{}}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{developer: "fixture"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := productionToolScope(role.Planner)
+			scope.PullRequest = nil
+			request, _ := json.Marshal(map[string]any{"operation_id": "pending", "content": collaboration.PlanningContent{Title: "CLI", Status: "draft", Changes: "Scope", RequirementsBrief: "Users", TechnicalPlan: "Local. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}})
+			invoke := func() (json.RawMessage, error) {
+				return backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolPublishPlanCheckpoint, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
+			}
+			raw, err := invoke()
+			var result map[string]any
+			if err != nil || json.Unmarshal(raw, &result) != nil || result["status"] != "input_pending" || result["publication"] != "not_applied" || result["reason"] != reason || result["revision_id"] != nil || result["source"] != nil || api.posts != 0 {
+				t.Fatal(string(raw), err, api.posts)
+			}
+			want := "request_clarification_empty_questions"
+			if reason == "unread_input" {
+				want = "retrieve_human_input"
+			}
+			if result["next_action"] != want {
+				t.Fatal(result)
+			}
+			ledger.err = collaboration.ErrInvalid
+			if _, err = invoke(); !errors.Is(err, mcp.ErrInvalidInvocation) {
+				t.Fatal("unrelated validation became successful", err)
+			}
+			ledger.err = errors.New("commit acknowledgment lost")
+			if _, err = invoke(); !mcp.IsOutcomeUnknown(err) {
+				t.Fatal("uncertain store result became definite", err)
+			}
+		})
+	}
+}

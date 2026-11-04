@@ -2,6 +2,7 @@ package collaboration_test
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/jozala/omnigrex/internal/collaboration"
 	"strings"
 	"testing"
@@ -127,5 +128,53 @@ func TestMaterialRevisionNeedsRenewedConfirmation(t *testing.T) {
 	r := admitPlanning(s, "stale", collaboration.Command{Kind: "confirm-plan", Target: "P1"})
 	if r.ResponseID != "" || !strings.Contains(r.Feedback, "P2") {
 		t.Fatal(r)
+	}
+}
+
+func TestCheckpointNonPublicationIsImmutableAndRetrievalPrecedesYield(t *testing.T) {
+	s := planningFixture(t)
+	c := planningContent()
+	publishCheckpoint(t, s, "P1", "turn-1", c)
+	// Two accepted comments after preparation, without timing-dependent sleeps.
+	if r := admitPlanning(s, "steer", collaboration.Command{Kind: "steer", Body: "Use a standalone CLI."}); r.ResponseID == "" {
+		t.Fatal(r)
+	}
+	if r := admitPlanning(s, "amend", collaboration.Command{Kind: "amend", Target: "steer", Body: "Users have no repository access."}); r.ResponseID == "" {
+		t.Fatal(r)
+	}
+	_, err := s.ReserveCheckpoint("P2", "planner", "turn-1", c)
+	var rejection *collaboration.CheckpointNotApplied
+	if !errors.As(err, &rejection) || rejection.Reason != "late_input" || len(s.Planning.Revisions) != 1 {
+		t.Fatal(rejection, err)
+	}
+	if _, err = s.ReserveCheckpoint("P1", "planner", "turn-1", c); err != nil {
+		t.Fatal("late input invalidated reserved replay", err)
+	}
+	s.Prepare("planner", "turn-2")
+	raw, _ := json.Marshal(s)
+	var restored collaboration.State
+	if err = json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	_, err = restored.ReserveCheckpoint("P2", "planner", "turn-1", c)
+	if !errors.As(err, &rejection) || rejection.Reason != "late_input" {
+		t.Fatal("replay tried publication again", err)
+	}
+	changed := c
+	changed.Title = "Changed"
+	if _, err = restored.ReserveCheckpoint("P2", "planner", "turn-1", changed); !errors.Is(err, collaboration.ErrInvalid) {
+		t.Fatal(err)
+	}
+	restored.Inputs[0].DeliveryPending = true
+	_, err = restored.ReserveCheckpoint("P3", "planner", "turn-2", c)
+	if !errors.As(err, &rejection) || rejection.Reason != "unread_input" {
+		t.Fatal(err)
+	}
+	restored.Inputs[0].DeliveryPending = false
+	if _, err = restored.ReserveCheckpoint("P4", "planner", "turn-2", c); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Inputs[0].Body != "Use a standalone CLI." || restored.Inputs[1].Amends != "steer" || restored.Planning.Revisions[0].ID != "P1" {
+		t.Fatal("lost immutable history")
 	}
 }

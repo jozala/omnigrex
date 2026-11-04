@@ -30,6 +30,9 @@ Complete source text stays unchanged in durable collaboration history rather tha
 The view explicitly identifies shortened references or additional inputs; full records remain available through `get_collaboration_record` (`planning_request` / `planning_history`) and their original GitHub sources.
 Earlier revisions and the full accepted discussion remain accessible through bounded collaboration retrieval.
 Publication retries reconcile exact operation-marked artifacts rather than posting duplicates; oversized artifacts are rejected, never silently truncated.
+If an accepted amendment or steering arrives after a Turn was prepared but before its checkpoint is reserved, publication is fenced without creating a revision.
+The Planner yields so the orchestrator can deliver that input in the retained Session's next Turn, then reconsiders affected decisions before publishing a revised pair.
+This ordinary discussion path does not require a human recovery command or reset retry/review budgets.
 
 When material choices are settled, inspect the proposed pair and submit its actual revision ID on the first nonblank line of a **new** Issue comment:
 

@@ -8,6 +8,7 @@ import (
 	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ import (
 func testPiPlanningWorkflow(t *testing.T) {
 	f := newPiWorkflowFixture(t, "planning")
 	var participant, sessionID, attempt string
-	for turn := 0; turn < 4; turn++ {
+	for turn := 0; turn < 5; turn++ {
 		prepared := f.prepare(t)
 		if turn == 0 {
 			participant = prepared.Commit.Participant.ID
@@ -25,30 +26,54 @@ func testPiPlanningWorkflow(t *testing.T) {
 		if participant != prepared.Commit.Participant.ID || sessionID != prepared.Commit.Session.ID || attempt != prepared.Commit.Turn.WorkflowAttemptID || prepared.Commit.Participant.Role != workflow.RolePlanner {
 			t.Fatal("lost continuity or allocated another Role")
 		}
+		if turn == 2 {
+			// Preparation has frozen the second answer. These admissions finish
+			// before the provider is released to attempt its stale checkpoint.
+			var raw []byte
+			if err := f.pool(t).QueryRow(f.ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, f.workflowID).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			var state collaboration.State
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			for _, command := range []collaboration.Command{
+				{Kind: "amend", Target: state.Inputs[0].ID, Body: "Change the audience to users without repository access. Keep all status ephemeral."},
+				{Kind: "steer", Body: "Use a standalone operator CLI, not a repository plugin."},
+			} {
+				receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: command, Actor: collaboration.Actor{ID: "human-fixture", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+				if err != nil || receipt.ResponseID == "" {
+					t.Fatal(receipt, err)
+				}
+			}
+		}
 		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
 			t.Fatalf("Planner Turn %d: %t %v", turn, processed, err)
 		}
-		if turn == 3 {
+		if turn == 4 {
 			break
 		}
 		var raw []byte
 		var waiting bool
 		var active, scheduled, failures int
 		err := f.pool(t).QueryRow(f.ctx, `SELECT c.state,w.clarification_waiting,(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind IN ('RUN_AGENT_TURN','PREPARE_AGENT_TURN') AND status IN ('AVAILABLE','LEASED')),a.infrastructure_failures FROM workflows w JOIN work_item_collaboration c ON c.workflow_id=w.id JOIN workflow_attempts a ON a.workflow_id=w.id AND a.active WHERE w.id=$1`, f.workflowID).Scan(&raw, &waiting, &active, &scheduled, &failures)
-		if err != nil || !waiting || active != 0 || scheduled != 0 || failures != 0 {
+		if err != nil || active != 0 || failures != 0 || (turn != 2 && (!waiting || scheduled != 0)) || (turn == 2 && scheduled != 1) {
 			t.Fatal("waiting retained execution or consumed retries", err, waiting, active, scheduled, failures)
 		}
 		var state collaboration.State
 		if err = json.Unmarshal(raw, &state); err != nil {
 			t.Fatal(err)
 		}
+		if turn == 2 {
+			continue
+		} // late input already queued the sole successor
 		command := collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Target small teams without external accounts."}
 		if turn == 1 {
 			command.Body = "Change the proposed retention assumption: retain no personal onboarding data. Use ephemeral local status."
 		}
-		if turn == 2 {
+		if turn == 3 {
 			r := state.CurrentCheckpoint()
-			if r == nil || !r.Published || r.Content.Status != "proposed" || len(r.Decisions) != 2 {
+			if r == nil || !r.Published || r.Content.Status != "proposed" || len(r.Decisions) != 4 {
 				t.Fatal("missing paired proposal or decisions", state.Planning)
 			}
 			command = collaboration.Command{Kind: "confirm-plan", Target: r.ID}
@@ -71,6 +96,27 @@ func testPiPlanningWorkflow(t *testing.T) {
 	}
 	if state.Planning.ReadyRevision == "" || len(state.Planning.Revisions) != 2 || len(state.Planning.Revalidations) != 1 || state.Planning.Revisions[1].Supersedes != state.Planning.Revisions[0].ID {
 		t.Fatal("history missing", state.Planning)
+	}
+	if len(state.Planning.NonPublications) != 1 || state.Planning.NonPublications[0].Reason != "late_input" || !strings.Contains(state.Planning.Revisions[1].Content.RequirementsBrief, "without repository access") || !strings.Contains(state.Planning.Revisions[1].Content.TechnicalPlan, "standalone operator CLI") {
+		t.Fatal("amendment did not change the actual plan", state.Planning)
+	}
+	if len(state.Rounds[0].Resolutions) < 2 || !strings.Contains(state.Rounds[0].Resolutions[len(state.Rounds[0].Resolutions)-1].Explanation, "without repository access") {
+		t.Fatal("missing explicit reinterpretation", state.Rounds[0])
+	}
+	var attempts, failures, reviews int
+	if err = f.pool(t).QueryRow(f.ctx, `SELECT count(*),sum(infrastructure_failures),sum(CASE WHEN review_usage='{}'::jsonb THEN 0 ELSE 1 END) FROM workflow_attempts WHERE workflow_id=$1`, f.workflowID).Scan(&attempts, &failures, &reviews); err != nil || attempts != 1 || failures != 0 || reviews != 0 {
+		t.Fatal("budgets changed", err, attempts, failures, reviews)
+	}
+	checkpointPosts := 0
+	f.github.mutex.Lock()
+	for _, comment := range f.github.comments {
+		if strings.Contains(comment.Body, "Requirements brief") {
+			checkpointPosts++
+		}
+	}
+	f.github.mutex.Unlock()
+	if checkpointPosts != 2 {
+		t.Fatal("duplicate or missing checkpoint publication", checkpointPosts)
 	}
 	t.Log("PASS: controlled retained Planner rounds, changed assumption, paired draft/proposal, exact confirmation and final revalidation; no implementation. This does not assess reasoning quality.")
 }

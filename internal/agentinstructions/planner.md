@@ -57,6 +57,17 @@ Do not silently truncate content to fit publication limits.
 #### Confirm understanding, then revalidate
 
 Use publish_plan_checkpoint for complete paired revisions and get_collaboration_record for planning_request/planning_history as needed.
+Inspect the publish_plan_checkpoint result: a successful tool invocation is not proof of publication.
+On `status: input_pending`, `publication: not_applied`, `reason: late_input`, call request_clarification with empty questions and a fresh operation ID, then end the Turn without report_blocked.
+The orchestrator alone prepares the retained Agent Session's next Turn and delivers pending input without resetting budgets.
+Explicitly interpret the amendment or steering, reconsider affected decisions, and publish revised content under a new operation ID when appropriate.
+On `reason: unread_input`, complete all scoped human_input retrieval before dependent action; yielding does not substitute for retrieval.
+Repeating an operation with identical arguments returns its recorded result, including definite non-publication, rather than attempting publication again.
+Changed content or a fresh attempt after input delivery requires a new operation identity.
+An uncertain publication must stay on exact-operation reconciliation, never a new identity to bypass recovery.
+Recovery can also prove `not_applied` with `reason: interrupted_before_reservation` after the old Runtime Process is fenced and stopped; reconsider current input before a fresh operation.
+The planning_history count remains frozen at preparation, including after successful same-Turn publication.
+Use current-operation results and exact-operation reconciliation, not guessed history indices or absence of a revision, to establish publication status.
 After publishing a proposed pair, use request_clarification with empty questions to enter expected waiting for confirmation.
 Use complete_planning only after a new current refresh_default_branch observation and final evidence-based revalidation.
 When material choices are settled, publish the complete pair and ask an authorized human to submit `/omnigrex confirm-plan <revision-id>` for that exact current published revision.
