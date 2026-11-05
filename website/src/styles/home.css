@@ -97,6 +97,7 @@ h1 span { color: var(--accent); }
 .agent-step { display: flex; gap: 0.9rem; position: relative; align-items: start; }
 .agent-avatar { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 9px; flex-shrink: 0; border: 1px solid var(--line); background: var(--card); }
 .developer { color: var(--accent); }
+.planner { color: var(--cyan); }
 .reviewer { color: #b69bff; }
 .human { color: var(--cyan); font-size: 0.55rem; font-weight: 750; letter-spacing: 0.03em; }
 .step-heading { display: flex; align-items: center; gap: 0.8rem; }
@@ -105,6 +106,8 @@ h1 span { color: var(--accent); }
 .agent-step p { color: var(--muted); font-size: 0.75rem; line-height: 1.65; margin-top: 0.25rem; }
 .review-loop { margin: -0.8rem 0 -0.6rem 3.35rem; font-size: 0.62rem; color: var(--subtle); }
 .review-loop span { color: #b69bff; margin-right: 0.4rem; }
+.plan-checkpoint { margin: -0.8rem 0 -0.6rem 3.35rem; font-size: 0.62rem; color: var(--muted); }
+.plan-checkpoint span { color: var(--cyan); margin-right: 0.4rem; }
 .preview-footer { display: flex; align-items: center; gap: 0.6rem; padding: 0.85rem 1.65rem; border-top: 1px solid var(--line); font-size: 0.65rem; color: var(--muted); background: var(--bg); }
 .foundation-strip { display: flex; gap: 2.3rem; align-items: center; padding-block: 1.5rem; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 0.8rem; }
 .foundation-strip > span { margin-right: auto; font-size: 0.55rem; letter-spacing: 0.14em; color: var(--subtle); }
@@ -122,7 +125,7 @@ h3 { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; line-height:
 .tinted-section { background: var(--surface); border-block: 1px solid var(--line); }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 2rem; }
 .section-heading > p { margin-bottom: 0.1rem; font-size: 0.875rem; }
-.workflow-steps { display: grid; grid-template-columns: repeat(3, 1fr); list-style: none; padding: 0; margin: 3.5rem 0 2rem; }
+.workflow-steps { display: grid; grid-template-columns: repeat(4, 1fr); list-style: none; padding: 0; margin: 3.5rem 0 2rem; }
 .workflow-steps li { padding-right: 2rem; }
 .workflow-steps li + li { padding-left: 2rem; border-left: 1px solid var(--line); }
 .step-number { display: block; color: var(--accent); font-family: ui-monospace, monospace; font-size: 0.75rem; margin-bottom: 1.2rem; }
@@ -138,12 +141,13 @@ code { font-family: ui-monospace, monospace; background: var(--glow); padding: 0
 .arch-control { display: grid; gap: 0.3rem; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 0.85rem; font-size: 0.875rem; }
 .arch-control > span:last-child { color: var(--muted); font-size: 0.7rem; }
 .arch-control b { font-weight: 400; padding-inline: 0.4rem; color: var(--subtle); }
-.arch-agents { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
-.arch-agents > div { display: grid; grid-template-columns: auto auto; align-items: center; justify-content: center; column-gap: 0.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 0.8rem 0.3rem; }
-.arch-agents strong { font-size: 0.75rem; font-weight: 600; }
-.arch-agents span:last-child { grid-column: 1 / -1; color: var(--muted); font-size: 0.6rem; margin-top: 0.3rem; }
+.arch-agents { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
+.arch-agents > div { display: flex; flex-direction: column; align-items: center; justify-content: start; gap: 0.3rem; min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 0.8rem 0.25rem; }
+.arch-agents strong { font-size: 0.7rem; font-weight: 600; }
+.arch-agents span:last-child { color: var(--muted); font-size: 0.6rem; }
 .mini-dot { height: 5px; width: 5px; border-radius: 50%; background: var(--accent); }
 .mini-dot.violet { background: #b69bff; }
+.mini-dot.cyan { background: var(--cyan); }
 .arch-environment { margin-top: 1rem; color: var(--subtle); font-size: 0.6rem; }
 .vision-section { border-block: 1px solid var(--line); background: linear-gradient(120deg, var(--surface), var(--bg)); }
 .vision-inner { display: grid; grid-template-columns: 1.2fr 1fr; gap: 5rem; align-items: center; padding-block: 80px; }
@@ -193,6 +197,8 @@ blockquote cite { display: block; font-size: 0.7rem; color: var(--subtle); margi
   .vision-inner { gap: 3rem; }
   .preview-content { padding-inline: 1.2rem; }
   .step-tag { display: none; }
+  .workflow-steps { grid-template-columns: repeat(2, 1fr); row-gap: 2.5rem; }
+  .workflow-steps li:nth-child(3) { padding-left: 0; border-left: 0; }
 }
 
 @media (max-width: 760px) {

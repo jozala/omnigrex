@@ -8,15 +8,15 @@ import '../styles/home.css';
 
 const github = 'https://github.com/jozala/omnigrex';
 const capabilities = [
-  { icon: 'branch', title: 'A Workflow you can follow', text: 'An Issue becomes a Work Item. A Developer opens a Pull Request, a separate Reviewer evaluates it, and you decide what ships.' },
-  { icon: 'check', title: 'A second pair of eyes', text: 'Developer and Reviewer use separate GitHub Apps. Review findings return to the Developer before the Change Proposal reaches you.' },
-  { icon: 'server', title: 'Your infrastructure', text: 'Run the control plane with Docker Compose and PostgreSQL. Choose Docker or Linux/KVM Microsandbox execution for the agents.' },
+  { icon: 'book', title: 'A rough idea becomes a plan', text: 'The Planner investigates your project, challenges assumptions, and works through the important decisions with you before anyone starts coding.' },
+  { icon: 'check', title: 'Review is part of the work', text: 'The Reviewer checks the result against the agreed plan and sends feedback to the Developer. You get a reviewed change, not just generated code.' },
+  { icon: 'server', title: 'A team built around your project', text: 'Choose your agents, their responsibilities, and the models they use. Keep your code, project knowledge, and infrastructure under your control.' },
 ] as const;
 const principles = [
   ['Meet humans where they are', 'Start work, follow progress, and answer agent questions in GitHub. No separate inbox to watch.'],
   ['Keep knowledge with the project', 'Instructions, requirements, plans, and decisions belong beside the code and the Issues they explain.'],
-  ['Give Roles their own perspective', 'Separate responsibilities and permissions make review more than asking the coding agent to check its own work.'],
-  ['Put limits on autonomy', 'Bound retries and Review Cycles. When the agents need your judgment, hand back a clear question instead of looping.'],
+  ['Give each Role its own perspective', 'Let the Planner question the idea, the Developer build it, and the Reviewer challenge the result. Different perspectives make the work stronger.'],
+  ['Know when to ask for help', 'When progress stalls or a decision needs your judgment, bring back a clear question instead of carrying on with a guess.'],
 ];
 ---
 
@@ -26,7 +26,7 @@ const principles = [
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Omnigrex - build an AI team around your software project</title>
-    <meta name="description" content="A self-hosted, open-source platform for software-development agents. Turn GitHub Issues into independently reviewed Pull Requests, while you decide what ships." />
+    <meta name="description" content="Bring an idea to GitHub. Omnigrex's Planner asks the questions, the Developer builds the change, and the Reviewer checks the result. You decide what ships." />
     <link rel="canonical" href="https://omnigrex.com/" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <ThemeProvider />
@@ -55,7 +55,7 @@ const principles = [
           <div class="hero-copy">
             <a class="eyebrow release-note" href="#status"><span class="status-dot"></span> OPEN SOURCE · SELF-HOSTED · IN DEVELOPMENT</a>
             <h1>Build a team <br />of agents.<br /><span>Keep the lead.</span></h1>
-            <p class="hero-description">Bring software-development agents into your GitHub project. Let them write code and review each other’s work. You set the direction and decide what ships.</p>
+            <p class="hero-description">Bring a rough idea to GitHub. Your Planner asks the questions, your Developer builds the change, and your Reviewer checks the result. You set the direction and decide what ships.</p>
             <div class="hero-actions">
               <a class="button primary" href="/docs/">Get started <Icon name="arrow" size={18} /></a>
               <a class="button secondary" href={github}><Icon name="github" size={18} /> Explore on GitHub</a>
@@ -63,14 +63,16 @@ const principles = [
             <p class="hero-footnote">Your repository. Your models. Your infrastructure.</p>
           </div>
 
-          <div class="workflow-preview" aria-label="Illustration of the current Developer and Reviewer Workflow">
+          <div class="workflow-preview" aria-label="From omnigrex:run through Planner questions and an approved plan, to development, review, and your final decision">
             <div class="preview-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>ONE ISSUE. A TEAM AT WORK.</span><Icon name="branch" size={15} /></div>
             <div class="preview-content">
-              <div class="issue-heading"><span class="issue-symbol"><Icon name="issue" size={24} /></span><div><span class="small-label">YOUR GITHUB ISSUE</span><h2>A small change, ready for the team.</h2></div></div>
+              <div class="issue-heading"><span class="issue-symbol"><Icon name="issue" size={24} /></span><div><span class="small-label">YOUR GITHUB ISSUE</span><h2>A rough idea, ready to explore.</h2></div></div>
               <div class="issue-label"><span class="status-dot"></span><code>omnigrex:run</code></div>
               <div class="agent-timeline">
-                <div class="agent-step"><span class="agent-avatar developer"><Icon name="code" size={20} /></span><div><div class="step-heading"><strong>Developer</strong><span class="step-tag">BUILD</span></div><p>Reads the Work Item, changes the code,<br class="wide-only" /> and opens a Pull Request.</p></div></div>
-                <div class="agent-step"><span class="agent-avatar reviewer"><Icon name="check" size={20} /></span><div><div class="step-heading"><strong>Reviewer</strong><span class="step-tag">REVIEW</span></div><p>Evaluates the Change Proposal<br class="wide-only" /> from an independent perspective.</p></div></div>
+                <div class="agent-step"><span class="agent-avatar planner"><Icon name="book" size={20} /></span><div><div class="step-heading"><strong>Planner</strong><span class="step-tag">PLAN</span></div><p>Investigates the idea, asks questions,<br class="wide-only" /> and shapes a plan with you.</p></div></div>
+                <div class="plan-checkpoint"><span aria-hidden="true">✓</span> You approve the plan before coding starts.</div>
+                <div class="agent-step"><span class="agent-avatar developer"><Icon name="code" size={20} /></span><div><div class="step-heading"><strong>Developer</strong><span class="step-tag">BUILD</span></div><p>Builds the agreed change<br class="wide-only" /> and opens a Pull Request.</p></div></div>
+                <div class="agent-step"><span class="agent-avatar reviewer"><Icon name="check" size={20} /></span><div><div class="step-heading"><strong>Reviewer</strong><span class="step-tag">REVIEW</span></div><p>Checks the result against the plan<br class="wide-only" /> and asks for improvements.</p></div></div>
                 <div class="review-loop"><span aria-hidden="true">↳</span> Findings go back to the Developer.</div>
                 <div class="agent-step"><span class="agent-avatar human">YOU</span><div><div class="step-heading"><strong>Your call</strong><span class="step-tag">DECIDE</span></div><p>Review the result. Merge when you’re ready.</p></div></div>
               </div>
@@ -82,7 +84,7 @@ const principles = [
       </div>
 
       <section class="container section" id="idea">
-        <div class="section-intro"><span class="eyebrow">THE IDEA</span><h2>The team around<br />the code matters.</h2><p>A coding agent is one part of the job. Omnigrex coordinates the work around it: the handoff, the independent review, and the point where a human needs to step in.</p></div>
+        <div class="section-intro"><span class="eyebrow">THE IDEA</span><h2>The team around<br />the code matters.</h2><p>Good software starts before the first line of code. Work out what matters, agree on an approach, and let specialists build and challenge the result together.</p></div>
         <div class="capability-grid">
           {capabilities.map(({ icon, title, text }) => <article class="capability"><span class="feature-icon"><Icon name={icon} size={25} /></span><h3>{title}</h3><p>{text}</p></article>)}
         </div>
@@ -90,30 +92,31 @@ const principles = [
 
       <section class="tinted-section" id="how-it-works">
         <div class="container section">
-          <div class="section-heading"><div><span class="eyebrow">HOW IT WORKS TODAY</span><h2>Start with an Issue.<br />Finish with a decision.</h2></div><p>GitHub is the everyday interface.<br />Omnigrex handles the coordination behind it.</p></div>
+          <div class="section-heading"><div><span class="eyebrow">FROM IDEA TO REVIEWED CHANGE</span><h2>Start with an Issue.<br />Finish with a decision.</h2></div><p>The conversation happens in GitHub.<br />Your team takes it from there.</p></div>
           <ol class="workflow-steps">
-            <li><span class="step-number">01</span><h3>Bring the work</h3><p>Open a focused Issue with acceptance criteria. Add <code>omnigrex:run</code> to start the Workflow.</p></li>
-            <li><span class="step-number">02</span><h3>Let the agents work</h3><p>The Developer prepares a Change Proposal. The Reviewer evaluates it and can request another pass.</p></li>
-            <li><span class="step-number">03</span><h3>Stay in the loop</h3><p>Answer questions when judgment is needed. Review the Pull Request and choose whether to merge.</p></li>
+            <li><span class="step-number">01</span><h3>Bring the idea</h3><p>Open a GitHub Issue. A rough direction is enough. Add <code>omnigrex:run</code> to bring in the team.</p></li>
+            <li><span class="step-number">02</span><h3>Shape the plan</h3><p>The Planner investigates your project and grills the idea with you. Answer its questions, refine the approach, and approve the plan.</p></li>
+            <li><span class="step-number">03</span><h3>Build and review</h3><p>The Developer works from the agreed plan. The Reviewer checks the result and sends feedback back for another pass.</p></li>
+            <li><span class="step-number">04</span><h3>Make the call</h3><p>Follow the work, steer when needed, and review the Pull Request. You decide whether the result belongs in your project.</p></li>
           </ol>
           <a class="text-link" href="/docs/users/first-work-item/">Walk through your first Work Item <Icon name="arrow" size={17} /></a>
         </div>
       </section>
 
       <section class="container section architecture-section" id="architecture">
-        <div class="architecture-copy"><span class="eyebrow">UNDER THE HOOD</span><h2>Your machines.<br />A controlled Workflow.</h2><p>A Go orchestrator owns coordination and recovery. PostgreSQL keeps the durable record. Pi runs Agent Turns in disposable execution environments, while persistent Agent Sessions carry context forward.</p><p>Use Docker execution or Linux/KVM Microsandbox. Configure Agent Profiles, models, skills, and development environments in your repository.</p><a class="text-link" href="/docs/contributors/architecture/">Read the architecture <Icon name="arrow" size={17} /></a></div>
-        <div class="architecture-diagram" role="img" aria-label="GitHub connects to the Omnigrex orchestrator and PostgreSQL ledger. The orchestrator coordinates Developer and Reviewer Pi Runtime Processes in Docker or Microsandbox execution environments.">
+        <div class="architecture-copy"><span class="eyebrow">UNDER THE HOOD</span><h2>Your infrastructure.<br />Shared project context.</h2><p>Omnigrex coordinates the work, keeps decisions with the project, and brings questions to you when your judgment is needed.</p><p>Agents work in isolated environments on infrastructure you control. Their context carries across handoffs, so the next stage builds on what the team has already learned.</p><a class="text-link" href="/docs/contributors/architecture/">Read the architecture <Icon name="arrow" size={17} /></a></div>
+        <div class="architecture-diagram" role="img" aria-label="GitHub connects to Omnigrex, which coordinates a Planner, Developer, and Reviewer with shared project context in isolated environments on your infrastructure.">
           <div class="arch-github"><Icon name="github" size={20} /><strong>GitHub</strong><span>Issues · Pull Requests · Reviews</span></div>
           <div class="arch-connector" aria-hidden="true">↕</div>
-          <div class="arch-control"><span class="small-label">CONTROL PLANE</span><strong>Omnigrex orchestrator</strong><span>Go <b>+</b> PostgreSQL</span></div>
+          <div class="arch-control"><span class="small-label">WORK COORDINATION</span><strong>Omnigrex</strong><span>Shared context · Clear handoffs</span></div>
           <div class="arch-connector" aria-hidden="true">↓</div>
-          <div class="arch-agents"><div><span class="mini-dot blue"></span><strong>Developer</strong><span>Pi Runtime Process</span></div><div><span class="mini-dot violet"></span><strong>Reviewer</strong><span>Pi Runtime Process</span></div></div>
-          <div class="arch-environment">Docker or Linux/KVM Microsandbox</div>
+          <div class="arch-agents"><div><span class="mini-dot cyan"></span><strong>Planner</strong><span>Clarify and plan</span></div><div><span class="mini-dot blue"></span><strong>Developer</strong><span>Build the change</span></div><div><span class="mini-dot violet"></span><strong>Reviewer</strong><span>Check the result</span></div></div>
+          <div class="arch-environment">Isolated environments · Your infrastructure</div>
         </div>
       </section>
 
       <section class="vision-section" id="roles">
-        <div class="container vision-inner"><div><span class="eyebrow">THE LONGER-TERM VISION</span><h2>Grow a project together.</h2><p>The ambition goes beyond coding and review: specialists in product, architecture, and QA working from shared project knowledge. Different work could call for different teams.</p><p class="vision-caveat">That is the direction, not a list of shipped features. The current software provides the Developer/Reviewer Workflow described above.</p><a class="text-link" href={`${github}/blob/main/project-concept.md`}>Explore the project vision on GitHub <Icon name="arrow" size={17} /></a></div><blockquote>“Can we create an autonomous organization of agents that, across many consecutive tasks, can maintain product, architecture, and project-knowledge consistency without constant human supervision?”<cite>The project’s core hypothesis</cite></blockquote></div>
+        <div class="container vision-inner"><div><span class="eyebrow">A TEAM THAT KNOWS YOUR PROJECT</span><h2>Grow a project together.</h2><p>The Planner questions the idea. The Developer turns the agreed plan into a change. The Reviewer challenges the result. You keep the final say.</p><p>Requirements, decisions, and lessons stay with the project. Each piece of work gives the team something to build on next time.</p><a class="text-link" href={`${github}/blob/main/project-concept.md`}>Explore the project vision on GitHub <Icon name="arrow" size={17} /></a></div><blockquote>“Can we create an autonomous organization of agents that, across many consecutive tasks, can maintain product, architecture, and project-knowledge consistency without constant human supervision?”<cite>The project’s core hypothesis</cite></blockquote></div>
       </section>
 
       <section class="container section" id="principles">
@@ -122,11 +125,11 @@ const principles = [
       </section>
 
       <section class="container status-section" id="status">
-        <div class="status-copy"><span class="eyebrow"><span class="status-dot"></span> BUILT IN THE OPEN</span><h2>Early days.<br />Real work.</h2><p>Omnigrex is helping build itself. Its Developer and Reviewer have contributed merged Pull Requests to this repository. The project is in active early development and currently supports trusted repositories only.</p><p>Try it on a project you control, read the code, or help shape what comes next.</p><div class="hero-actions"><a class="button primary" href="/docs/">Get started <Icon name="arrow" size={18} /></a><a class="button secondary" href={github}>View the repository <Icon name="github" size={18} /></a></div></div>
+        <div class="status-copy"><span class="eyebrow"><span class="status-dot"></span> BUILT IN THE OPEN</span><h2>Your next idea.<br />A team to build it.</h2><p>Omnigrex is helping build itself. Its agents have contributed merged Pull Requests to this repository, and the project is growing in the open.</p><p>Bring an idea, explore the code, or help shape what comes next.</p><div class="hero-actions"><a class="button primary" href="/docs/">Get started <Icon name="arrow" size={18} /></a><a class="button secondary" href={github}>View the repository <Icon name="github" size={18} /></a></div></div>
         <div class="getting-started"><span class="small-label">FIND YOUR STARTING POINT</span><a href="/docs/operators/installation/"><span><strong>Deploy an installation</strong><small>For operators</small></span><Icon name="arrow" /></a><a href="/docs/repository-owners/connect-a-repository/"><span><strong>Connect your repository</strong><small>For repository owners</small></span><Icon name="arrow" /></a><a href="/docs/users/first-work-item/"><span><strong>Start your first Work Item</strong><small>For users of a configured repository</small></span><Icon name="arrow" /></a><a href="/docs/contributors/"><span><strong>Build it with us</strong><small>For contributors</small></span><Icon name="arrow" /></a></div>
       </section>
     </main>
 
-    <footer class="home-footer"><div class="container footer-inner"><div><Brand /><p>A software-development team.<br />Built around your project.</p></div><nav aria-label="Footer navigation"><a href="/docs/">Documentation</a><a href={github}>GitHub</a><a href={`${github}/blob/main/LICENSE`}>MIT license</a><a href="/fonts/montserrat-license.txt">Font license</a></nav><span class="footer-note">Self-hosted. Open source.<br />Human-led.</span></div></footer>
+    <footer class="home-footer"><div class="container footer-inner"><div><Brand /><p>A software-development team.<br />Built around your project.</p></div><nav aria-label="Footer navigation"><a href="/docs/">Documentation</a><a href={github}>GitHub</a><a href={`${github}/blob/main/LICENSE`}>MIT license</a></nav><span class="footer-note">Self-hosted. Open source.<br />Human-led.</span></div></footer>
   </body>
 </html>

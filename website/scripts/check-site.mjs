@@ -9,6 +9,10 @@ const dist = path.join(website, 'dist');
 const { pages } = JSON.parse(await readFile(path.join(website, '.generated/publication.json'), 'utf8'));
 const html = new Map();
 const files = new Set();
+function text(node) {
+  if (!node) return '';
+  return node.nodeName === '#text' ? node.value : (node.childNodes ?? []).map(text).join(' ');
+}
 async function scan(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const filename = path.join(directory, entry.name);
@@ -22,9 +26,14 @@ for (const file of files) {
   if (!file.endsWith('.html')) continue;
   const route = '/' + file.replace(/(^|\/)index\.html$/, '$1');
   const document = parse(await readFile(path.join(dist, file), 'utf8'));
-  const page = { ids: new Set(), refs: [], scripts: [] };
+  const page = { ids: new Set(), refs: [], scripts: [], roles: [], footer: '', main: '', preview: '' };
   function visit(node) {
     const attrs = Object.fromEntries((node.attrs ?? []).map(({ name, value }) => [name, value]));
+    const classes = (attrs.class ?? '').split(/\s+/);
+    if (classes.includes('step-heading')) page.roles.push(text(node.childNodes.find(child => child.tagName === 'strong'))?.trim());
+    if (classes.includes('workflow-preview')) page.preview = text(node);
+    if (node.tagName === 'footer') page.footer = text(node);
+    if (node.tagName === 'main') page.main = text(node);
     if (attrs.id) page.ids.add(attrs.id);
     for (const attr of ['href', 'src', 'poster']) if (attrs[attr]) page.refs.push(attrs[attr]);
     if (attrs.srcset) page.refs.push(...attrs.srcset.split(',').map(item => item.trim().split(/\s+/)[0]));
@@ -36,6 +45,11 @@ for (const file of files) {
 }
 
 const errors = [];
+const homepage = html.get('/');
+if (homepage?.roles.join(',') !== 'Planner,Developer,Reviewer,Your call') errors.push('Homepage must present Planner, Developer, Reviewer, and human decision in order');
+if (!homepage?.preview.includes('omnigrex:run') || !/questions/i.test(homepage.preview)) errors.push('Homepage flow must start planning and questions from omnigrex:run');
+if (/font license/i.test(homepage?.footer ?? '')) errors.push('Font attribution must not be a homepage footer navigation item');
+if (/GitHub Apps|PostgreSQL|Pi Runtime Process|Linux\/KVM/i.test(homepage?.main ?? '')) errors.push('Homepage contains low-level implementation details');
 for (const [route, page] of html) {
   if (route.startsWith('/docs/') && page.scripts.some(src => src.includes('analytics.aetas.pl'))) errors.push(`Analytics loaded on ${route}`);
   for (const ref of page.refs) {

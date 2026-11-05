@@ -3,6 +3,9 @@
 The Astro homepage and Starlight documentation are one static website.
 The homepage is a local design proposal based on the existing, untracked `site/index.html`; that file is not modified or published automatically.
 Production deployment is intentionally not implemented until the design is approved.
+The homepage presents the intended product experience, including `omnigrex:run` starting Planner discovery before approved implementation.
+That positioning does not change the current operational contract: planning currently uses `omnigrex:plan`, and the implementation handoff is follow-up [#165](https://github.com/jozala/omnigrex/issues/165).
+The published user guides continue to document current supported behavior.
 
 ## Preview
 
