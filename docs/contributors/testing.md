@@ -152,6 +152,13 @@ The transport-independent projection regression additionally retrieves every con
 It verifies corroboration enters clarification waiting without spending an infrastructure retry, stops the Runtime Process, and schedules retained-Session continuation only after a correlated human reply.
 The PostgreSQL clarification recovery matrix additionally covers empty-question yields, input on both sides of the corroboration boundary, unpublished-question rejection, and revalidation after explicit Human Handoff recovery.
 
+`TestPiControlledWorkflow/planning` also admits an amendment and steering after preparation, verifies actionable checkpoint non-publication and identical-operation replay through the existing Pi bridge, yields with empty questions, and delivers both inputs in the same Participant, Session and Workflow Attempt.
+It asserts explicit audience reinterpretation, a revised standalone CLI plan, immutable paired history, exactly two external checkpoint comments, unchanged budgets and no implementation allocation.
+`TestPlanningNonPublicationRecovery` distinguishes a committed rejection whose acknowledgment was lost from interruption before reservation, and retains a successful-publication control with the same frozen history bounds.
+Recovery may prove absence only after durable Runtime Process stop and closed admission under the Workflow lock; committed reservations still require exact-artifact reconciliation.
+`TestPlanningUnreadInputRequiresDurableCoverage` keeps publication fenced until every frozen input chunk is durably recorded, not merely read.
+These deterministic tests establish the continuation mechanism, not real-model reasoning quality.
+
 ## Manual release designation
 
 See [release publication](releases.md) for candidate evidence, finite artifact retention, manual alpha publication, and no-rebuild stable promotion.
