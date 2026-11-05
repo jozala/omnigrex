@@ -93,7 +93,10 @@ func TestWebsiteWorkflowBoundaries(t *testing.T) {
 			if step.Uses != "" && !regexp.MustCompile(`^[^@]+@[0-9a-f]{40}$`).MatchString(step.Uses) {
 				t.Errorf("action is not commit-pinned: %s", step.Uses)
 			}
-			for _, value := range step.Env {
+			for key, value := range step.Env {
+				if key == "WEBSITE_DEPLOY_PATH" {
+					t.Error("the server must select the website root, not a workflow variable")
+				}
 				if name != "deploy" && strings.Contains(value, "secrets.") {
 					t.Errorf("%s exposes deployment credentials", name)
 				}
@@ -113,6 +116,15 @@ func TestWebsiteWorkflowBoundaries(t *testing.T) {
 	build := workflow.Jobs["build"]
 	if build.If != "needs.changes.outputs.changed == 'true'" {
 		t.Errorf("expensive build must be conditional: %q", build.If)
+	}
+	qualifiedSSH := false
+	for _, step := range build.Steps {
+		if step.Run == "go test -race -tags=integration ./internal/deployment -run '^TestWebsitePublicationWithRestrictedSSH$' -count=1" {
+			qualifiedSSH = true
+		}
+	}
+	if !qualifiedSSH {
+		t.Error("website qualification must exercise restricted SSH publication in Docker")
 	}
 	var uploaded, downloaded string
 	for _, step := range build.Steps {
@@ -221,9 +233,11 @@ esac
 
 func TestWebsiteDeployIsOneDirectRsyncAndCleansCredentials(t *testing.T) {
 	for _, scenario := range []struct {
-		name, port, fail, missingKey string
+		name, port, fail, missingKey, legacyPath string
 	}{
 		{name: "default port"},
+		{name: "restricted account", port: "5000"},
+		{name: "ignore obsolete destination", legacyPath: "/home/operator/"},
 		{name: "upload failure", port: "2222", fail: "23"},
 		{name: "missing configuration", missingKey: "true"},
 	} {
@@ -242,7 +256,8 @@ func TestWebsiteDeployIsOneDirectRsyncAndCleansCredentials(t *testing.T) {
 				key = ""
 			}
 			cmd := exec.Command("sh", filepath.Join(websiteRoot(t), "website/scripts/deploy.sh"), "static-output/")
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "RUNNER_TEMP="+dir, "WEBSITE_SSH_HOST=example.invalid", "WEBSITE_SSH_USER=operator", "WEBSITE_DEPLOY_PATH=/srv/website root/", "WEBSITE_SSH_PORT="+scenario.port, "WEBSITE_SSH_KEY="+key, "WEBSITE_SSH_KNOWN_HOSTS=fixture-known-host", "WEBSITE_TEST_BINARY="+binary, "WEBSITE_TEST_ARGS="+filepath.Join(dir, "arguments"), "WEBSITE_TEST_FAIL="+scenario.fail, "WEBSITE_RSYNC_HELPER=1")
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "RUNNER_TEMP="+dir, "WEBSITE_SSH_HOST=example.invalid", "WEBSITE_SSH_USER=website-deploy", "WEBSITE_SSH_PORT="+scenario.port, "WEBSITE_SSH_KEY="+key, "WEBSITE_SSH_KNOWN_HOSTS=fixture-known-host", "WEBSITE_TEST_BINARY="+binary, "WEBSITE_TEST_ARGS="+filepath.Join(dir, "arguments"), "WEBSITE_TEST_FAIL="+scenario.fail, "WEBSITE_RSYNC_HELPER=1")
+			cmd.Env = append(cmd.Env, "WEBSITE_DEPLOY_PATH="+scenario.legacyPath)
 			output, err := cmd.CombinedOutput()
 			wantSuccess := scenario.fail == "" && scenario.missingKey == ""
 			if (err == nil) != wantSuccess {
@@ -263,15 +278,15 @@ func TestWebsiteDeployIsOneDirectRsyncAndCleansCredentials(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
-			if len(args) != 10 || args[0] != "-az" || args[1] != "--delete" || args[2] != "--protect-args" || args[5] != "-e" || args[7] != "--" || args[8] != "static-output/" || args[9] != "operator@example.invalid:/srv/website root/" {
+			if len(args) != 9 || !reflect.DeepEqual(args[:5], []string{"-az", "--delete", "--no-owner", "--no-group", "-e"}) || !reflect.DeepEqual(args[6:], []string{"--", "static-output/", "website-deploy@example.invalid:./"}) {
 				t.Fatalf("unexpected upload arguments: %q", args)
 			}
 			port := scenario.port
 			if port == "" {
 				port = "22"
 			}
-			for _, option := range []string{"StrictHostKeyChecking=yes", "IdentitiesOnly=yes", "BatchMode=yes", "UserKnownHostsFile=", "-p \"" + port + "\""} {
-				if !strings.Contains(args[6], option) {
+			for _, option := range []string{"ssh -F /dev/null", "StrictHostKeyChecking=yes", "IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "UserKnownHostsFile=", "-p \"" + port + "\""} {
+				if !strings.Contains(args[5], option) {
 					t.Errorf("SSH transport lost %q", option)
 				}
 			}

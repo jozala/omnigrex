@@ -66,6 +66,8 @@ mise run check
 Website checks cover publication boundaries, title and anchor handling, Markdown and reference-style links, image paths, actual generated routes and assets, preserved homepage anchors, search output, and the analytics boundary.
 The normal application gate remains unchanged; the website check is separate.
 The workflow contract tests also cover required-check outcomes, build/export ordering, direct synchronization, and temporary SSH credential handling without contacting a server.
+Website CI also runs `TestWebsitePublicationWithRestrictedSSH` in a disposable Docker fixture with real SSH, rsync, and `rrsync`, without accessing production credentials or servers.
+It verifies publication, obsolete-file deletion, ignored legacy destination settings, symlink munging, and rejection of arbitrary commands, directory traversal, and downloads.
 
 ## CI and publication
 
@@ -80,5 +82,6 @@ Unrelated application changes and excluded historical Markdown skip the expensiv
 Pull Request jobs do not access the production environment or its SSH credentials.
 
 Publication is one direct `rsync --delete` upload into the existing Apache document root.
+The SSH key is restricted server-side to a dedicated account and fixed website directory through `rrsync`; the client destination is always `:./`.
 There are no staging releases, rollback system, backups, or post-deployment checks.
 Configure the GitHub environment and required check before merging; see the [website publication procedure](DEPLOYMENT.md).

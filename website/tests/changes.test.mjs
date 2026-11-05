@@ -19,6 +19,7 @@ test('current documentation, website code and workflow configuration trigger web
     'website/src/pages/index.astro',
     '.github/workflows/website.yaml',
     '.github/workflows/website_test.go',
+    'internal/deployment/website_rsync_integration_test.go',
     'mise.toml',
   ]) assert.equal(affectsWebsite(file), true, file);
 });

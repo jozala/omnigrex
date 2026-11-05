@@ -5,7 +5,6 @@ set -eu
 : "${RUNNER_TEMP:?}"
 : "${WEBSITE_SSH_HOST:?}"
 : "${WEBSITE_SSH_USER:?}"
-: "${WEBSITE_DEPLOY_PATH:?}"
 : "${WEBSITE_SSH_KEY:?}"
 : "${WEBSITE_SSH_KNOWN_HOSTS:?}"
 
@@ -17,9 +16,10 @@ trap 'rm -f "$key" "$known_hosts"; rmdir "$ssh_directory"' EXIT
 printf '%s\n' "$WEBSITE_SSH_KEY" > "$key"
 printf '%s\n' "$WEBSITE_SSH_KNOWN_HOSTS" > "$known_hosts"
 
-transport="ssh -i \"$key\" -p \"${WEBSITE_SSH_PORT:-22}\" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$known_hosts\""
+transport="ssh -F /dev/null -i \"$key\" -p \"${WEBSITE_SSH_PORT:-22}\" -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$known_hosts\""
 
-# Publish directly into the live document root. No staging or rollback.
-rsync -az --delete --protect-args --no-owner --no-group \
+# The server's forced rrsync command selects and confines the live document root.
+# Keep arguments visible to rrsync, which rejects --protect-args.
+rsync -az --delete --no-owner --no-group \
   -e "$transport" -- "${1%/}/" \
-  "$WEBSITE_SSH_USER@$WEBSITE_SSH_HOST:${WEBSITE_DEPLOY_PATH%/}/"
+  "$WEBSITE_SSH_USER@$WEBSITE_SSH_HOST:./"

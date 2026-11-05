@@ -5,20 +5,39 @@
 This procedure maintains `omnigrex.com`, not an Omnigrex application installation.
 The [Website GitHub Actions workflow](../.github/workflows/website.yaml) builds the Astro homepage and Starlight documentation as one static artifact.
 Relevant changes on `main` publish that artifact directly over SSH into the host directory already mounted by the website's Apache container.
-The existing container, reverse proxy, hostname routing, and HTTPS certificate setup do not need to change.
+The existing reverse proxy, hostname routing, and HTTPS certificate setup do not need to change.
 Node and Docker are build tools on the runner, not production website dependencies.
 
 ## Prepare deployment access
 
-Use the existing website login account and a separate SSH key for GitHub Actions, not your personal private key.
-Generate and store the key outside the checkout, and install its public key in that account's `authorized_keys` using your normal server administration process.
-Do not give this job root access or access to the Docker socket.
-The key has the login account's permissions; it is not automatically confined to the website directory.
+Use a dedicated deployment account and a separate SSH key for GitHub Actions, not your personal login account or private key.
+Generate and store the key outside the checkout.
+The account must have no sudo, Docker-group, or Docker-socket access and should have write permission only to the website document root, outside any personal home directory.
+Use a minimal shell such as `/bin/dash` to execute the forced command; `nologin` prevents that command from running, while Bash startup files introduce avoidable execution paths.
+Keep the account's home, `.ssh` directory, and `authorized_keys` root-owned and unwritable by the deployment account.
+The public-key file must remain readable by the account; mode `0644` is appropriate for a root-owned `authorized_keys` file.
+
+Install the public key with a forced [rrsync](https://download.samba.org/pub/rsync/rrsync.1) command, using the installed wrapper's absolute path and the fixed host document root.
+For example, the following is one physical `authorized_keys` line with a placeholder public key and document root:
+
+```text
+restrict,command="/usr/bin/rrsync -wo -munge /srv/website" ssh-ed25519 REPLACE_WITH_PUBLIC_KEY
+```
+
+`restrict` disables PTY allocation, forwarding, and user SSH startup commands.
+`-wo` allows uploads and deletion within the selected directory but rejects downloads.
+`-munge` makes uploaded symlinks unusable, so they cannot redirect access outside that directory.
+The server enforces the directory restriction; a client-side destination check alone would not constrain a compromised deployment key.
+Revoke this key's authorization on any personal or unrestricted account after testing the restricted account, keeping a separate administrative session open until personal login has been verified.
+Configure Apache to mount the selected document root read-only; recreate an existing container if its bind mount changes.
 
 The GitHub-hosted runner must be able to reach the SSH server.
-Both the runner and server need rsync 3 or newer; the deployment uses protected arguments for the remote path.
-The login account needs write and delete access to the Apache host document root.
-Do not deploy to the container-internal path: configure the directory on the host that is mounted there.
+Use maintained standard rsync 3 or newer on the runner and server, with `rrsync` installed on the server.
+macOS's bundled openrsync is not compatible with this wrapper's command parser; use standard rsync for local connection tests.
+The account needs write and delete access to the Apache host document root, including permission to update its directory metadata.
+The client always uploads to `:./`, which the forced command resolves inside the selected directory.
+There is no configurable client destination path, and an obsolete `WEBSITE_DEPLOY_PATH` value is ignored.
+Do not add `--protect-args` or `--secluded-args`: `rrsync` rejects them because it must inspect the requested paths and options.
 
 Obtain the server's SSH host public key through an already trusted connection or the VPS console and verify its fingerprint independently.
 Keep the verified `known_hosts` entry for the exact configured hostname and port.
@@ -33,15 +52,19 @@ The general secret-handling rules are in [Secrets](../docs/operators/secrets.md)
 Create the repository environment **`website-production`** before merging the workflow.
 Restrict its deployment branches to **`main`**.
 Leave required reviewers disabled if publication should be automatic.
+Store the following variables and secrets in this environment, rather than repository-wide Actions settings, to limit credential availability to deployment jobs.
+Repository-wide settings also resolve in this workflow, but migrate and remove duplicate website entries to avoid leaving broader access or confusing fallback values.
 
 Set these environment variables:
 
 | Variable | Value |
 | --- | --- |
 | `WEBSITE_SSH_HOST` | SSH hostname or address reachable by the runner |
-| `WEBSITE_SSH_USER` | Existing website login account |
+| `WEBSITE_SSH_USER` | Dedicated account restricted to the website root through `rrsync` |
 | `WEBSITE_SSH_PORT` | SSH port; empty uses `22` |
-| `WEBSITE_DEPLOY_PATH` | Absolute host document-root directory, entirely managed by the website build |
+
+Delete the former `WEBSITE_DEPLOY_PATH` variable when migrating an existing setup.
+Choose the document root only in the server's forced command, never in GitHub configuration.
 
 Set these environment secrets:
 
@@ -52,6 +75,7 @@ Set these environment secrets:
 
 Use a dedicated CI key that does not require an interactive passphrase; the workflow does not unlock passphrase-protected keys.
 The deployment writes credentials into mode-0600 temporary files and removes them when the upload finishes or fails.
+It ignores SSH client configuration and agents, uses only the supplied identity, and verifies the server against the supplied host-key file.
 Credentials are supplied only to the deployment step, not Pull Request builds.
 
 Push the feature branch and open a Pull Request so the workflow can report **`Website check`** before the changes are merged.

@@ -54,6 +54,8 @@ jobs:
           cache: false
       - name: Check repository links and workflow contracts
         run: go test -race ./internal/documentation ./.github/workflows
+      - name: Qualify restricted SSH publication in Docker
+        run: go test -race -tags=integration ./internal/deployment -run '^TestWebsitePublicationWithRestrictedSSH$' -count=1
       - name: Build and validate static output in Docker
         run: sh website/scripts/build.sh
       - name: Upload validated static output
@@ -114,7 +116,6 @@ jobs:
           WEBSITE_SSH_HOST: ${{ vars.WEBSITE_SSH_HOST }}
           WEBSITE_SSH_USER: ${{ vars.WEBSITE_SSH_USER }}
           WEBSITE_SSH_PORT: ${{ vars.WEBSITE_SSH_PORT }}
-          WEBSITE_DEPLOY_PATH: ${{ vars.WEBSITE_DEPLOY_PATH }}
           WEBSITE_SSH_KEY: ${{ secrets.WEBSITE_SSH_KEY }}
           WEBSITE_SSH_KNOWN_HOSTS: ${{ secrets.WEBSITE_SSH_KNOWN_HOSTS }}
         run: sh website/scripts/deploy.sh website-dist

@@ -67,6 +67,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0058: Retain paired planning checkpoints in collaboration](0058-retain-paired-planning-checkpoints-in-collaboration.md) | Accepted | 2026-11-03 |
 | [0059: Return durable checkpoint non-publication as an expected result](0059-return-durable-checkpoint-nonpublication.md) | Accepted | 2026-11-04 |
 | [0060: Publish one Astro website with Starlight documentation](0060-publish-one-astro-website-with-starlight-documentation.md) | Accepted | 2026-11-05 |
+| [0061: Confine website publication to a server-owned root](0061-confine-website-publication-to-a-server-owned-root.md) | Accepted | 2026-11-05 |
 
 Records 0021-0023 retain the decisions independently numbered 0005-0007 on `main` while the Pi records were developed.
 Their original filename links remain available as pointers to the uniquely numbered canonical records.

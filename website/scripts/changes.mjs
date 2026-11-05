@@ -7,7 +7,7 @@ import { pageName } from './publication.mjs';
 export function affectsWebsite(file) {
   return Boolean(pageName(file))
     || file.startsWith('website/')
-    || ['README.md', 'mise.toml', '.github/workflows/website.yaml', '.github/workflows/website_test.go'].includes(file)
+    || ['README.md', 'mise.toml', '.github/workflows/website.yaml', '.github/workflows/website_test.go', 'internal/deployment/website_rsync_integration_test.go'].includes(file)
     // A published page may reference an image outside its own section.
     || /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(file);
 }
