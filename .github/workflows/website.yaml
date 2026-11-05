@@ -1,0 +1,121 @@
+name: Website
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect website changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.2'
+      - name: Detect changed inputs
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: node website/scripts/changes.mjs
+
+  build:
+    name: Build website
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check repository links and workflow contracts
+        run: go test -race ./internal/documentation ./.github/workflows
+      - name: Qualify restricted SSH publication in Docker
+        run: go test -race -tags=integration ./internal/deployment -run '^TestWebsitePublicationWithRestrictedSSH$' -count=1
+      - name: Build and validate static output in Docker
+        run: sh website/scripts/build.sh
+      - name: Upload validated static output
+        id: artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: website-dist-${{ github.run_id }}-${{ github.run_attempt }}
+          path: website/dist/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  website-check:
+    name: Website check
+    if: always()
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require applicable website qualification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGED: ${{ needs.changes.outputs.changed }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          case "$CHANGED" in
+            true) test "$BUILD_RESULT" = success ;;
+            false) test "$BUILD_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
+
+  deploy:
+    name: Publish website
+    needs: [changes, build, website-check]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: website-production
+      url: https://omnigrex.com
+    concurrency:
+      group: website-production
+      cancel-in-progress: false
+    steps:
+      - name: Check out deployment script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download validated static output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: website-dist
+      - name: Synchronize live document root over SSH
+        env:
+          WEBSITE_SSH_HOST: ${{ vars.WEBSITE_SSH_HOST }}
+          WEBSITE_SSH_USER: ${{ vars.WEBSITE_SSH_USER }}
+          WEBSITE_SSH_PORT: ${{ vars.WEBSITE_SSH_PORT }}
+          WEBSITE_SSH_KEY: ${{ secrets.WEBSITE_SSH_KEY }}
+          WEBSITE_SSH_KNOWN_HOSTS: ${{ secrets.WEBSITE_SSH_KNOWN_HOSTS }}
+        run: sh website/scripts/deploy.sh website-dist

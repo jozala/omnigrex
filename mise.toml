@@ -215,6 +215,18 @@ run = "docker build --tag omnigrex/orchestrator:dev ."
 description = "Check public Markdown links and heading anchors without network access"
 run = "go test ./internal/documentation -run TestDocumentationLinks -count=1"
 
+[tasks.docs-site-preview]
+description = "Build and serve the local Astro and Starlight prototype in Docker"
+run = "docker compose --file website/compose.yaml up --build --detach --force-recreate"
+
+[tasks.docs-site-check]
+description = "Test and build the website and validate generated links in Docker"
+run = "docker compose --file website/compose.yaml run --build --rm --no-deps preview npm run check"
+
+[tasks.docs-site-stop]
+description = "Stop the local website preview"
+run = "docker compose --file website/compose.yaml stop"
+
 [tasks.check]
 description = "Run all local verification checks"
 depends = ["format-check", "lint", "deadcode", "test", "compose-check"]

@@ -1,0 +1,14 @@
+:root {
+  --sl-color-accent-low: #102e4d;
+  --sl-color-accent: #2997ff;
+  --sl-color-accent-high: #b5deff;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e5f3ff;
+  --sl-color-accent: #0069ce;
+  --sl-color-accent-high: #103e6d;
+}
+
+.header .brand { color: var(--sl-color-white); }
+.sl-banner { font-size: 0.875rem; }

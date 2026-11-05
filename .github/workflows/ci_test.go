@@ -20,6 +20,7 @@ type ciJob struct {
 }
 
 type ciStep struct {
+	ID   string            `yaml:"id"`
 	Name string            `yaml:"name"`
 	Run  string            `yaml:"run"`
 	Env  map[string]string `yaml:"env"`

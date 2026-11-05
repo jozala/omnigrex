@@ -11,6 +11,8 @@ mise run check
 This runs formatting checks, `go vet`, dead-code analysis, race-enabled unit tests, Compose validation, and repository-local documentation links.
 Run the narrowest relevant tests during implementation, then this gate for code changes.
 Use `mise run docs-check` for a documentation-only link/anchor pass.
+Use `mise run docs-site-check` for the Astro/Starlight build and generated-site checks.
+Use `mise exec -- go test -race ./.github/workflows` for the website and application CI contracts, which are not included by `go test ./...` because the directory is hidden.
 See [mise.toml](../../mise.toml) for the exact executable commands.
 
 ## Docker-backed integration
