@@ -1,8 +1,8 @@
-# Website prototype
+# Website
 
 The Astro homepage and Starlight documentation are one static website.
-The homepage is a local design proposal based on the existing, untracked `site/index.html`; that file is not modified or published automatically.
-Production deployment is intentionally not implemented until the design is approved.
+The homepage is based on the original, untracked `site/index.html`; that file is not modified or published automatically.
+GitHub Actions validates Pull Requests and publishes relevant `main` changes through SSH after the production environment is configured.
 The homepage presents the intended product experience, including `omnigrex:run` starting Planner discovery before approved implementation.
 That positioning does not change the current operational contract: planning currently uses `omnigrex:plan`, and the implementation handoff is follow-up [#165](https://github.com/jozala/omnigrex/issues/165).
 The published user guides continue to document current supported behavior.
@@ -58,15 +58,26 @@ Analytics are restricted to the production homepage hostnames and are absent fro
 ```sh
 mise run docs-site-check
 mise run docs-check
+mise exec -- go test -race ./.github/workflows
 mise run check
 ```
 
 Website checks cover publication boundaries, title and anchor handling, Markdown and reference-style links, image paths, actual generated routes and assets, preserved homepage anchors, search output, and the analytics boundary.
 The normal application gate remains unchanged; the website check is separate.
+The workflow contract tests also cover required-check outcomes, build/export ordering, direct synchronization, and temporary SSH credential handling without contacting a server.
 
-## Following visual approval
+## CI and publication
 
-Add a dedicated required Pull Request website check and automatic publication for relevant changes on `main`.
-The agreed production mechanism is direct `rsync --delete` over SSH into the existing Apache document root, using a dedicated CI key for the existing login account.
-There will be no staging releases, rollback system, backups, or post-deployment checks.
-Do not configure production credentials or alter the current website as part of this prototype.
+The [Website workflow](../.github/workflows/website.yaml) runs change detection on every Pull Request and `main` push, and supports manual redeployment from `main`.
+It always reports the stable `Website check` result, including when no website inputs changed.
+Relevant changes run repository Markdown checks, workflow contract tests, and the Docker website checks before exporting only the generated `dist/` directory.
+Deployment downloads the artifact by the ID returned by its successful build, including when only a failed deployment is rerun, rather than rebuilding it.
+
+The change detector reuses the publication allowlist, includes website and workflow tooling, and conservatively includes image changes anywhere because published guides may reference them.
+Deleted or renamed public pages also trigger a build.
+Unrelated application changes and excluded historical Markdown skip the expensive build.
+Pull Request jobs do not access the production environment or its SSH credentials.
+
+Publication is one direct `rsync --delete` upload into the existing Apache document root.
+There are no staging releases, rollback system, backups, or post-deployment checks.
+Configure the GitHub environment and required check before merging; see the [website publication procedure](../docs/operators/website.md).

@@ -28,6 +28,7 @@ For a personal installation you may have all three responsibilities.
 | Create a coordinated recovery set | [Backup](backup.md) |
 | Recover a compatible installation | [Restore](restore.md) |
 | Change the orchestrator or Runtime Profile image | [Upgrades](upgrades.md) |
+| Publish the homepage and documentation | [Website publication](website.md) |
 | Investigate a failed or stuck deployment | [Troubleshooting](troubleshooting.md) |
 
 Use [deployment configuration](../reference/deployment-configuration.md) and [commands](../reference/commands.md) for lookup.
