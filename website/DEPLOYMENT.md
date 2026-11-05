@@ -1,8 +1,9 @@
 # Publish the website and documentation
 
-[Operator guide](README.md) · [Local website build and preview](../../website/README.md)
+[Local website build and preview](README.md)
 
-The [Website GitHub Actions workflow](../../.github/workflows/website.yaml) builds the Astro homepage and Starlight documentation as one static artifact.
+This procedure maintains `omnigrex.com`, not an Omnigrex application installation.
+The [Website GitHub Actions workflow](../.github/workflows/website.yaml) builds the Astro homepage and Starlight documentation as one static artifact.
 Relevant changes on `main` publish that artifact directly over SSH into the host directory already mounted by the website's Apache container.
 The existing container, reverse proxy, hostname routing, and HTTPS certificate setup do not need to change.
 Node and Docker are build tools on the runner, not production website dependencies.
@@ -25,7 +26,7 @@ A nondefault port normally needs the `[hostname]:port` form.
 The workflow uses strict host-key checking; it does not discover and trust a key during deployment.
 
 Keep the SSH private key and deployment configuration out of commits, examples, artifacts, and application credentials.
-The general secret-handling rules are in [Secrets](secrets.md).
+The general secret-handling rules are in [Secrets](../docs/operators/secrets.md).
 
 ## Configure GitHub
 
@@ -53,7 +54,12 @@ Use a dedicated CI key that does not require an interactive passphrase; the work
 The deployment writes credentials into mode-0600 temporary files and removes them when the upload finishes or fails.
 Credentials are supplied only to the deployment step, not Pull Request builds.
 
-After the workflow has reported on a Pull Request, add **`Website check`** from GitHub Actions to the required status checks in the repository's `main` ruleset or branch protection.
+Push the feature branch and open a Pull Request so the workflow can report **`Website check`** before the changes are merged.
+After that check has run successfully, add **`Website check`** from GitHub Actions to the required status checks in the repository's `main` ruleset or branch protection.
+For a ruleset, open **Settings → Rules → Rulesets**, edit the rule targeting `main`, enable **Require status checks to pass**, and select **`Website check`**.
+For classic protection, open **Settings → Branches**, edit the protection rule for `main`, and add it under **Require status checks to pass before merging**.
+The check does not need to be merged into `main` first, but it needs a recent successful result to appear in GitHub's check picker.
+GitHub requires a successful result within the past seven days; see [troubleshooting required status checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 Keep the existing product `check` requirement.
 Require the aggregate `Website check`, not the conditional `Build website` job: unchanged website inputs intentionally skip that build.
 The aggregate still reports success for an unchanged site and fails if change detection or a required build fails, is cancelled, or is unexpectedly skipped.

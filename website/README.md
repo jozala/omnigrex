@@ -40,6 +40,7 @@ The allowlist lives in `scripts/publication.mjs`.
 New tracked pages in an approved section appear automatically; other directories require an explicit publication change.
 
 Plans, decisions, experiments, historical evidence, blog drafts, and local notes are not generated or search-indexed.
+Website-maintenance guides such as `DEPLOYMENT.md` stay in `website/`, outside the published documentation allowlist.
 Links to repository files outside the publication allowlist point to GitHub and are labeled accordingly.
 The root README links to the homepage rather than becoming another generated page.
 
@@ -80,4 +81,4 @@ Pull Request jobs do not access the production environment or its SSH credential
 
 Publication is one direct `rsync --delete` upload into the existing Apache document root.
 There are no staging releases, rollback system, backups, or post-deployment checks.
-Configure the GitHub environment and required check before merging; see the [website publication procedure](../docs/operators/website.md).
+Configure the GitHub environment and required check before merging; see the [website publication procedure](DEPLOYMENT.md).

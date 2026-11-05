@@ -36,5 +36,7 @@ test('history and unrelated files are never published', () => {
     'docs/blog/first-omnigrex-run.md',
     'AGENTS.md',
     'site/index.html',
+    'website/README.md',
+    'website/DEPLOYMENT.md',
   ]) assert.equal(pageName(file), undefined, file);
 });

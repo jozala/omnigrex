@@ -44,4 +44,4 @@ The local prototype does not establish that deployment automation has been imple
 
 - [Reader-responsibility documentation structure](0031-organize-documentation-around-reader-responsibilities.md)
 - [Website build and verification](../../website/README.md)
-- [Website publication and GitHub environment setup](../operators/website.md)
+- [Website publication and GitHub environment setup](../../website/DEPLOYMENT.md)
