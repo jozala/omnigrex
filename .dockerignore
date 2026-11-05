@@ -9,6 +9,9 @@ docs
 secrets
 *.local
 **/node_modules
-# Qualification link checks need the maintainer guides, not the frontend build.
+# Qualification checks need maintainer guides and the deployment script, not the frontend build.
 website/*
 !website/*.md
+!website/scripts/
+website/scripts/*
+!website/scripts/deploy.sh
