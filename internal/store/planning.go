@@ -11,6 +11,7 @@ import (
 
 func (s *Store) ReservePlanningCheckpoint(ctx context.Context, lease AgentTurnLease, operation string, c collaboration.PlanningContent) (collaboration.PlanningRevision, error) {
 	var r collaboration.PlanningRevision
+	var rejection *collaboration.CheckpointNotApplied
 	err := s.withLockedAgentTurnLease(ctx, lease, "reserve planning checkpoint", func(tx pgx.Tx, turn lockedTurn) error {
 		if err := planningInvocation(ctx, tx, turn, operation, "publish_plan_checkpoint"); err != nil {
 			return err
@@ -36,11 +37,14 @@ func (s *Store) ReservePlanningCheckpoint(ctx context.Context, lease AgentTurnLe
 			}
 		}
 		r, err = state.ReserveCheckpoint("P"+operation, turn.AgentParticipantID, turn.ID, c)
-		if err != nil {
+		if err != nil && !errors.As(err, &rejection) {
 			return err
 		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
 	})
+	if err == nil && rejection != nil {
+		return r, rejection
+	}
 	return r, err
 }
 func planningInvocation(ctx context.Context, tx pgx.Tx, turn lockedTurn, operation, tool string) error {
@@ -163,4 +167,74 @@ func (s *Store) GetPlanningActivationState(ctx context.Context, repositoryID, is
 	}
 	state.Exists = true
 	return state, nil
+}
+
+// ReconcilePlanningNonPublication reads durable pre-publication evidence. If the
+// reservation transaction never committed, absence is proof ONLY after the old
+// Runtime Process is stopped and mutation admission is closed under the Workflow
+// lock. Publication always requires a committed reservation first.
+func (s *Store) ReconcilePlanningNonPublication(ctx context.Context, workflowID, turnID, operation string) (*collaboration.CheckpointNotApplied, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = rehydrateWorkflow(ctx, tx, workflowID); err != nil {
+		return nil, err
+	}
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	if state.Planning == nil {
+		return nil, collaboration.ErrInvalid
+	}
+	for _, r := range state.Planning.Revisions {
+		if r.ID == "P"+operation {
+			return nil, nil
+		}
+	}
+	for _, r := range state.Planning.NonPublications {
+		if r.OperationID == "P"+operation {
+			return &r, nil
+		}
+	}
+	var stopped bool
+	var participant string
+	var request []byte
+	err = tx.QueryRow(ctx, `
+SELECT t.runtime_stopped_at IS NOT NULL AND NOT t.mutation_admission_open
+       AND t.mutation_admission_closed_at IS NOT NULL,
+       session.agent_participant_id::text, i.request
+FROM agent_turns t
+JOIN agent_sessions session ON session.id=t.agent_session_id
+JOIN tool_invocations i ON i.agent_turn_id=t.id AND i.execution_epoch=t.execution_epoch
+WHERE t.workflow_id=$1 AND t.id=$2 AND i.id=$3
+  AND i.tool_name='publish_plan_checkpoint' AND i.state IN ('UNKNOWN','RECONCILING')
+FOR UPDATE OF t,i`, workflowID, turnID, operation).Scan(&stopped, &participant, &request)
+	if err != nil {
+		return nil, err
+	}
+	if !stopped {
+		return nil, ErrAgentTurnRecoveryUnsettled
+	}
+	var args struct {
+		Content collaboration.PlanningContent `json:"content"`
+	}
+	if json.Unmarshal(request, &args) != nil {
+		return nil, collaboration.ErrInvalid
+	}
+	reason := state.CheckpointInputReason(participant)
+	if reason == "" {
+		reason = "interrupted_before_reservation"
+	}
+	r := collaboration.CheckpointNotApplied{OperationID: "P" + operation, ParticipantID: participant, TurnID: turnID, Content: args.Content, Reason: reason}
+	state.Planning.NonPublications = append(state.Planning.NonPublications, r)
+	if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }

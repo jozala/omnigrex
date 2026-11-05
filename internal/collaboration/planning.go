@@ -49,12 +49,39 @@ type PlanRevalidation struct {
 	ConfirmationInputID string   `json:"confirmation_input_id"`
 	ConsideredInputIDs  []string `json:"considered_input_ids"`
 }
+
+// CheckpointNotApplied is authoritative pre-publication evidence, not a revision.
+type CheckpointNotApplied struct {
+	OperationID   string          `json:"operation_id"`
+	ParticipantID string          `json:"participant_id"`
+	TurnID        string          `json:"turn_id"`
+	Content       PlanningContent `json:"content"`
+	Reason        string          `json:"reason"`
+}
+
+func (e *CheckpointNotApplied) Error() string { return "checkpoint not applied: " + e.Reason }
+
+// CheckpointInputReason gives retrieval precedence: yielding cannot substitute
+// for reading the frozen batch, even when more input has also arrived.
+func (s *State) CheckpointInputReason(participant string) string {
+	for _, in := range s.Inputs {
+		if in.ParticipantID == participant && in.DeliveryPending {
+			return "unread_input"
+		}
+	}
+	if s.Pending(participant) {
+		return "late_input"
+	}
+	return ""
+}
+
 type PlanningState struct {
-	OriginalRequest OriginalRequest    `json:"original_request"`
-	Revisions       []PlanningRevision `json:"revisions"`
-	CurrentRevision string             `json:"current_revision,omitempty"`
-	ReadyRevision   string             `json:"ready_revision,omitempty"`
-	Revalidations   []PlanRevalidation `json:"revalidations,omitempty"`
+	NonPublications []CheckpointNotApplied `json:"non_publications,omitempty"`
+	OriginalRequest OriginalRequest        `json:"original_request"`
+	Revisions       []PlanningRevision     `json:"revisions"`
+	CurrentRevision string                 `json:"current_revision,omitempty"`
+	ReadyRevision   string                 `json:"ready_revision,omitempty"`
+	Revalidations   []PlanRevalidation     `json:"revalidations,omitempty"`
 }
 
 var planningCommit = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -100,6 +127,15 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 	if s.Planning == nil || id == "" || participant == "" || turn == "" || s.Planning.ReadyRevision != "" {
 		return PlanningRevision{}, ErrInvalid
 	}
+	for _, rejection := range s.Planning.NonPublications {
+		if rejection.OperationID == id {
+			if rejection.ParticipantID != participant || rejection.TurnID != turn || !reflect.DeepEqual(rejection.Content, c) {
+				return PlanningRevision{}, ErrInvalid
+			}
+			rejection.Content = cloneRevision(PlanningRevision{Content: rejection.Content}).Content
+			return PlanningRevision{}, &rejection
+		}
+	}
 	for _, r := range s.Planning.Revisions {
 		if r.ID == id {
 			if r.ParticipantID == participant && r.TurnID == turn && reflect.DeepEqual(r.Content, c) {
@@ -124,7 +160,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 			return PlanningRevision{}, ErrInvalid
 		}
 	}
-	if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.ParticipantID == participant && p.TurnID == turn }) || s.Pending(participant) {
+	if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.ParticipantID == participant && p.TurnID == turn }) {
 		return PlanningRevision{}, ErrInvalid
 	}
 	r := PlanningRevision{ID: id, ParticipantID: participant, TurnID: turn, ProcedureVersion: DiscoveryProcedureVersion, Content: c, OriginalRequest: s.Planning.OriginalRequest, Supersedes: s.Planning.CurrentRevision}
@@ -135,12 +171,20 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		}
 		seen[response] = true
 		i := slices.IndexFunc(s.Inputs, func(in Input) bool {
-			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && !in.DeliveryPending && in.Kind != "confirm-plan"
+			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && (!in.DeliveryPending || in.DeliveredTo == turn) && in.Kind != "confirm-plan"
 		})
 		if i < 0 {
 			return PlanningRevision{}, ErrInvalid
 		}
 		r.Decisions = append(r.Decisions, s.Inputs[i])
+	}
+	if reason := s.CheckpointInputReason(participant); reason != "" {
+		rejection := CheckpointNotApplied{OperationID: id, ParticipantID: participant, TurnID: turn, Content: c, Reason: reason}
+		// Deep-copy slices just as for immutable revisions.
+		rejection.Content = cloneRevision(r).Content
+		s.Planning.NonPublications = append(s.Planning.NonPublications, rejection)
+		rejection.Content = cloneRevision(r).Content
+		return PlanningRevision{}, &rejection
 	}
 	s.Planning.Revisions = append(s.Planning.Revisions, cloneRevision(r))
 	return cloneRevision(r), nil

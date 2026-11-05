@@ -9,4 +9,6 @@ docs
 secrets
 *.local
 **/node_modules
-website
+# Qualification link checks need the maintainer guides, not the frontend build.
+website/*
+!website/*.md

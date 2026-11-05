@@ -27,7 +27,7 @@ test('application-only and excluded historical Markdown changes skip the expensi
   for (const file of [
     'internal/config/config.go',
     'docs/plans/first-iteration.md',
-    'docs/decisions/0059-publish-one-astro-website-with-starlight-documentation.md',
+    'docs/decisions/0060-publish-one-astro-website-with-starlight-documentation.md',
     'docs/experiments/pi.md',
     'docs/dogfooding.md',
     'site/index.html',
