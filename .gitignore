@@ -6,3 +6,8 @@ dist/
 secrets/
 *.local
 node_modules/
+website/.astro/
+website/.generated/
+website/src/content/docs/
+website/public/docs-assets/
+website/public/fonts/

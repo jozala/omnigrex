@@ -1,0 +1,25 @@
+{
+  "name": "omnigrex-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "prepare-docs": "node scripts/prepare-docs.mjs",
+    "prebuild": "npm run prepare-docs",
+    "build": "astro build",
+    "check": "npm test && npm run build && node scripts/check-site.mjs",
+    "preview": "astro preview --host 0.0.0.0 --port 4321"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.5",
+    "@astrojs/starlight": "0.42.9",
+    "@fontsource/montserrat": "5.3.0",
+    "astro": "7.4.5",
+    "github-slugger": "2.0.0",
+    "gray-matter": "4.0.3",
+    "mdast-util-to-string": "4.0.0",
+    "parse5": "8.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
+  }
+}

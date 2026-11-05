@@ -1,0 +1,9 @@
+---
+import { Image } from 'astro:assets';
+import logo from '../assets/omnigrex-logo.png';
+---
+
+<a class="brand" href="/" aria-label="Omnigrex home">
+  <Image src={logo} width={64} height={64} format="webp" alt="" loading="eager" class="brand-mark" />
+  <span class="brand-wordmark">OMNIGREX</span>
+</a>

@@ -1,0 +1,15 @@
+name: omnigrex-website
+services:
+  preview:
+    build: .
+    init: true
+    environment:
+      REPOSITORY_ROOT: /repository
+    volumes:
+      - ..:/repository:ro
+    ports:
+      - "127.0.0.1:${WEBSITE_PORT:-4321}:4321"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
