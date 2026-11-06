@@ -12,11 +12,14 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -559,16 +562,24 @@ func (fixture *workspaceDockerFixture) assertState(t *testing.T, ctx context.Con
 
 func (fixture *workspaceDockerFixture) readFile(t *testing.T, ctx context.Context, path string) string {
 	t.Helper()
-	archive, err := fixture.client.CopyFromContainer(ctx, fixture.id, mobyclient.CopyFromContainerOptions{SourcePath: path})
+	content, err := fixture.readFileOnce(ctx, path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return content
+}
+
+func (fixture *workspaceDockerFixture) readFileOnce(ctx context.Context, path string) (string, error) {
+	archive, err := fixture.client.CopyFromContainer(ctx, fixture.id, mobyclient.CopyFromContainerOptions{SourcePath: path})
+	if err != nil {
+		return "", err
 	}
 	defer archive.Content.Close()
 	entries, err := readWorkspaceFixtureArchive(archive.Content, "")
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	return string(entries[filepath.Base(path)].content)
+	return string(entries[filepath.Base(path)].content), nil
 }
 
 func (fixture *workspaceDockerFixture) waitCounter(t *testing.T, ctx context.Context, after int) {
@@ -594,13 +605,22 @@ func (fixture *workspaceDockerFixture) waitCounter(t *testing.T, ctx context.Con
 func (fixture *workspaceDockerFixture) waitFile(t *testing.T, ctx context.Context, path, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) && ctx.Err() == nil {
-		if fixture.readFile(t, ctx, path) == want {
+		content, err := fixture.readFileOnce(ctx, path)
+		if err == nil && content == want {
 			return
 		}
+		// The foreground writer remains live here. A size change between Docker's
+		// stat and archive read can produce a short stream; require a complete,
+		// exact response on a subsequent bounded poll, never accept partial bytes.
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatal(err)
+		}
+		lastErr = err
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("foreground request did not receive response: %v", ctx.Err())
+	t.Fatalf("foreground request did not receive response: %v (last archive error: %v)", ctx.Err(), lastErr)
 }
 
 func (fixture *workspaceDockerFixture) copyFile(t *testing.T, ctx context.Context, directory, name string, content []byte) {
@@ -798,4 +818,53 @@ func workspaceFixtureGit(t *testing.T, ctx context.Context, directory string, ar
 		t.Fatalf("git %v: %v\n%s", arguments, err, output)
 	}
 	return string(output)
+}
+
+func TestWorkspaceFixtureResponsePollingSurvivesChangingArchiveSize(t *testing.T) {
+	// Docker may stat the old, longer file before its atomic replacement and
+	// then stream the shorter response. Only the polling read may retry this;
+	// assertions on the actual quiesced workspace capture remain strict.
+	archive := func(size int64, complete bool) []byte {
+		var b bytes.Buffer
+		w := tar.NewWriter(&b)
+		if err := w.WriteHeader(&tar.Header{Name: "request.txt", Mode: 0644, Size: size}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("delivered\n")); err != nil {
+			t.Fatal(err)
+		}
+		if complete {
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return b.Bytes()
+	}
+	truncated := archive(int64(len("outstanding\n")), false)
+	complete := archive(int64(len("delivered\n")), true)
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.55/containers/fixture/archive" || r.URL.Query().Get("path") != "/workspace/request.txt" {
+			http.Error(w, "unexpected request", 400)
+			return
+		}
+		w.Header().Set("X-Docker-Container-Path-Stat", base64.StdEncoding.EncodeToString([]byte(`{"name":"request.txt","size":12,"mode":420}`)))
+		w.Header().Set("Content-Type", "application/x-tar")
+		if reads.Add(1) == 1 {
+			_, _ = w.Write(truncated)
+		} else {
+			_, _ = w.Write(complete)
+		}
+	}))
+	defer server.Close()
+	client, err := mobyclient.New(mobyclient.WithHost(server.URL), mobyclient.WithHTTPClient(server.Client()), mobyclient.WithAPIVersion("1.55"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	fixture := workspaceDockerFixture{client: client, id: "fixture"}
+	fixture.waitFile(t, t.Context(), "/workspace/request.txt", "delivered\n")
+	if reads.Load() != 2 {
+		t.Fatalf("reads=%d; want one failed read then exact complete response", reads.Load())
+	}
 }
