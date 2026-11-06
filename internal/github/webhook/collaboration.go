@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,7 +20,8 @@ type CollaborationHandler interface {
 type CollaborationStore interface {
 	FindCollaborationWorkItem(context.Context, int64, int64, int64) (string, error)
 	AdmitHumanInput(context.Context, store.HumanInputSubmission) (collaboration.Receipt, error)
-	ReserveCollaborationReceipt(context.Context, string, string, collaboration.RenderedPublication) (collaboration.RenderedPublication, bool, error)
+	ReserveCollaborationReceipt(context.Context, string, string, collaboration.RenderedPublication) (collaboration.RenderedPublication, uint64, error)
+	RejectCollaborationReceipt(context.Context, string, string, uint64) error
 }
 type CollaborationAPI interface {
 	CanDecideWorkItem(context.Context, string, string, string, string, int64) (bool, error)
@@ -117,12 +119,13 @@ func (adapter *IssueCollaboration) HandleCollaboration(ctx context.Context, clai
 	}
 
 	// Read-only failures must not consume POST ownership. Once reserved, a
-	// contender may only reconcile uncertainty, never grant itself another POST.
+	// contender may only reconcile uncertainty. A proven rejection can release
+	// that exact attempt under the same serialized receipt boundary.
 	comments, err := adapter.API.ListIssueComments(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber))
 	if err != nil {
 		return true, err
 	}
-	artifact, owned, err := adapter.Store.ReserveCollaborationReceipt(ctx, workflowID, receipt.ID, collaboration.RenderedPublication{Body: githubapi.JoinPostedBody(receipt.Feedback, marker), Marker: marker})
+	artifact, attempt, err := adapter.Store.ReserveCollaborationReceipt(ctx, workflowID, receipt.ID, collaboration.RenderedPublication{Body: githubapi.JoinPostedBody(receipt.Feedback, marker), Marker: marker})
 	if err != nil {
 		return true, err
 	}
@@ -131,9 +134,25 @@ func (adapter *IssueCollaboration) HandleCollaboration(ctx context.Context, clai
 			return true, nil
 		}
 	}
-	if !owned {
+	if attempt == 0 {
 		return true, errors.New("acknowledgment publication is uncertain; the reserved exact artifact has not been observed")
 	}
 	_, err = adapter.API.CreateIssueComment(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber), githubapi.CommentRequest{Body: artifact.Body})
+	if err != nil && receiptPostDefinitelyRejected(err) {
+		if releaseErr := adapter.Store.RejectCollaborationReceipt(ctx, workflowID, receipt.ID, attempt); releaseErr != nil {
+			return true, errors.Join(err, releaseErr)
+		}
+	}
 	return true, err
+}
+
+// Only explicit client rejections establish non-application. Timeouts, server
+// failures and transport/decoding failures retain uncertainty and POST ownership.
+func receiptPostDefinitelyRejected(err error) bool {
+	switch githubapi.SafeFailureDiagnostics(err).HTTPStatus {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }

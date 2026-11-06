@@ -1,7 +1,6 @@
 package collaboration
 
 import (
-	"reflect"
 	"slices"
 	"strings"
 )
@@ -16,6 +15,15 @@ type Assessment struct {
 	Explanation            string   `json:"explanation"`
 	Corrects               []string `json:"corrects,omitempty"`
 	InvalidateConfirmation bool     `json:"invalidate_confirmation,omitempty"`
+}
+
+// Equal compares persisted meaning: optional empty lists and omitted lists are
+// identical, while operation identity, evidence order and all scalar fields remain exact.
+func (a Assessment) Equal(b Assessment) bool {
+	return a.OriginOperationID == b.OriginOperationID && a.InputID == b.InputID &&
+		slices.Equal(a.EvidenceIDs, b.EvidenceIDs) && a.Disposition == b.Disposition &&
+		a.Explanation == b.Explanation && slices.Equal(a.Corrects, b.Corrects) &&
+		a.InvalidateConfirmation == b.InvalidateConfirmation
 }
 
 func (s *State) latestAssessment(id string) *Assessment {
@@ -33,7 +41,7 @@ func (s *State) HasAssessmentEffect(operation string, wanted []Assessment) bool 
 	}
 	for _, a := range wanted {
 		a.OriginOperationID = operation
-		if !slices.ContainsFunc(s.Assessments, func(actual Assessment) bool { return reflect.DeepEqual(actual, a) }) {
+		if !slices.ContainsFunc(s.Assessments, func(actual Assessment) bool { return actual.Equal(a) }) {
 			return false
 		}
 	}
@@ -89,8 +97,13 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 		}
 		if invalidate && s.Planning != nil && s.Planning.ReadyRevision == "" {
 			for _, in := range s.Inputs {
+				// Admission order bounds affected authority, not semantic precedence.
+				// A later exact confirmation still needs its own explicit assessment.
 				if in.Kind == "confirm-plan" && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) {
 					s.Planning.InvalidatedConfirmations = append(s.Planning.InvalidatedConfirmations, in.ID)
+				}
+				if in.ID == a.InputID {
+					break
 				}
 			}
 		}

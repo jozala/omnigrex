@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"reflect"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/collaboration"
@@ -21,7 +21,7 @@ func (s *Store) AssessHumanInput(ctx context.Context, lease AgentTurnLease, oper
 		var intent struct {
 			Assessments []collaboration.Assessment `json:"assessments"`
 		}
-		if json.Unmarshal(raw, &intent) != nil || !reflect.DeepEqual(intent.Assessments, assessments) {
+		if json.Unmarshal(raw, &intent) != nil || !slices.EqualFunc(intent.Assessments, assessments, collaboration.Assessment.Equal) {
 			return ErrMutationOperationConflict
 		}
 		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)

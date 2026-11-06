@@ -47,8 +47,8 @@ func TestConversationAssessmentFencesAllRoleTerminalAdmissionAndRecoversExactly(
 			}
 			apply := func(label, disposition string) string {
 				t.Helper()
-				batch := []collaboration.Assessment{{InputID: "internal-input", EvidenceIDs: []string{"internal-input"}, Disposition: disposition, Explanation: "The agent explicitly records material uncertainty or its evidence-based resolution."}}
-				request, _ := json.Marshal(map[string]any{"operation_id": label, "assessments": batch})
+				batch := []collaboration.Assessment{{InputID: "internal-input", EvidenceIDs: []string{"internal-input"}, Corrects: []string{}, Disposition: disposition, Explanation: "The agent explicitly records material uncertainty or its evidence-based resolution."}}
+				request, _ := json.Marshal(map[string]any{"operation_id": label, "assessments": []map[string]any{{"input_id": batch[0].InputID, "evidence_ids": batch[0].EvidenceIDs, "corrects": []string{}, "disposition": disposition, "explanation": batch[0].Explanation}}})
 				m, err := databases[0].ReserveMutation(ctx, lease, store.MutationSpec{OperationID: label, ToolName: "assess_human_input", Request: request, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID})
 				if err != nil {
 					t.Fatal(err)
@@ -172,7 +172,7 @@ func TestConcurrentInputReferencesAndReceiptPublicationReservation(t *testing.T)
 			if actual != artifact && err == nil {
 				err = errors.New("receipt payload changed")
 			}
-			acquired <- owned
+			acquired <- owned != 0
 			errs <- err
 		}(i)
 	}
@@ -196,8 +196,23 @@ func TestConcurrentInputReferencesAndReceiptPublicationReservation(t *testing.T)
 	different := artifact
 	different.Marker = "new-renderer-marker"
 	actual, owned, err := databases[1].ReserveCollaborationReceipt(ctx, fixture.workflowID, receipt.ID, different)
-	if err != nil || owned || actual != artifact {
+	if err != nil || owned != 0 || actual != artifact {
 		t.Fatal("restart regenerated receipt payload or granted repost", actual, owned, err)
+	}
+
+	// A proven rejection permits exactly one new owner, retaining frozen bytes.
+	if err = databases[0].RejectCollaborationReceipt(ctx, fixture.workflowID, receipt.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	actual, attempt, err := databases[1].ReserveCollaborationReceipt(ctx, fixture.workflowID, receipt.ID, different)
+	if err != nil || attempt != 2 || actual != artifact {
+		t.Fatal(actual, attempt, err)
+	}
+	if err = databases[0].RejectCollaborationReceipt(ctx, fixture.workflowID, receipt.ID, 1); !errors.Is(err, collaboration.ErrInvalid) {
+		t.Fatal("stale rejection released new owner", err)
+	}
+	if _, attempt, err = databases[0].ReserveCollaborationReceipt(ctx, fixture.workflowID, receipt.ID, different); err != nil || attempt != 0 {
+		t.Fatal("uncertain retry acquired second owner", attempt, err)
 	}
 }
 

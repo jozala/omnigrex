@@ -273,3 +273,123 @@ func TestMissingTargetsGiveUsableExamplesEvenWithoutAnswerContent(t *testing.T) 
 		}
 	}
 }
+
+func TestAmendmentAfterNaturalCorrectionRetainsLineage(t *testing.T) {
+	for _, role := range []string{"planner", "developer", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			var s collaboration.State
+			r, err := s.Request("round", role, "t1", "", []collaboration.Question{{ID: "Q1", Body: "Keep API?"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Publish(r.ID, collaboration.Source{Channel: "fixture", ID: "round"}); err != nil {
+				t.Fatal(err)
+			}
+			a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: role, Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "original"}, At: time.Now()}
+			accept := func(id string, c collaboration.Command) {
+				t.Helper()
+				a.Source.ID = id
+				if receipt := s.Accept(id, c, a); receipt.ResponseID == "" {
+					t.Fatal(receipt)
+				}
+				s.Prepare(role, id)
+			}
+			resolve := func(id string, ids ...string) {
+				t.Helper()
+				if err := s.Resolve(r.ID, id, []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: ids, Explanation: "Explicit governing evidence."}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			accept("original", collaboration.Command{Kind: "answer", Target: "R1", Body: "yes"})
+			if err := s.Resolve(r.ID, "original", []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"original"}, Explanation: "Keep API."}}); err != nil {
+				t.Fatal(err)
+			}
+			accept("correction", collaboration.Command{Kind: "steer", Body: "Actually remove API only."})
+			if err := s.Assess("correct", role, "correction", []collaboration.Assessment{{InputID: "correction", EvidenceIDs: []string{"correction"}, Corrects: []string{"original"}, Disposition: "changed", Explanation: "Self correction."}}); err != nil {
+				t.Fatal(err)
+			}
+			resolve("correction", "correction")
+			accept("amendment", collaboration.Command{Kind: "amend", Target: "A1", Body: "Revise my original answer: keep API."})
+			if err := s.Assess("amend", role, "amendment", []collaboration.Assessment{{InputID: "amendment", EvidenceIDs: []string{"amendment"}, Disposition: "changed", Explanation: "Explicit amendment of the original."}}); err != nil {
+				t.Fatal(err)
+			}
+			if !s.Unresolved(role) {
+				t.Fatal("amendment lost the natural correction lineage")
+			}
+			resolve("amendment", "amendment")
+			if s.Unresolved(role) {
+				t.Fatal("explicit reconciliation remained fenced")
+			}
+			raw, _ := json.Marshal(s)
+			s = collaboration.State{}
+			if err := json.Unmarshal(raw, &s); err != nil {
+				t.Fatal(err)
+			}
+			if s.Unresolved(role) {
+				t.Fatal("lineage lost after persistence")
+			}
+		})
+	}
+}
+
+func TestEmptyCorrectionsRetainAssessmentProofAfterPersistence(t *testing.T) {
+	var s collaboration.State
+	a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: "developer", Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "input"}, At: time.Now()}
+	s.Accept("input", collaboration.Command{Kind: "steer", Body: "Keep scope."}, a)
+	s.Prepare("developer", "turn")
+	batch := []collaboration.Assessment{{InputID: "input", EvidenceIDs: []string{"input"}, Corrects: []string{}, Disposition: "unchanged", Explanation: "No correction."}}
+	if err := s.Assess("operation", "developer", "turn", batch); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(s)
+	s = collaboration.State{}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasAssessmentEffect("operation", batch) {
+		t.Fatal("empty optional corrections lost operation proof")
+	}
+}
+
+func TestRenewalSurvivesEarlierWithdrawalInSharedBatch(t *testing.T) {
+	for _, afterPreparation := range []bool{false, true} {
+		t.Run(fmt.Sprint(afterPreparation), func(t *testing.T) {
+			s := planningFixture(t)
+			publishCheckpoint(t, s, "pair", "turn-1", planningContent())
+			admitPlanning(s, "initial", collaboration.Command{Kind: "confirm-plan", Target: "P1"})
+			s.Prepare("planner", "turn-2")
+			assessment := func(id, disposition string, invalidate bool) collaboration.Assessment {
+				return collaboration.Assessment{InputID: id, EvidenceIDs: []string{id}, Disposition: disposition, Explanation: "Explicit interpretation of exact input.", InvalidateConfirmation: invalidate}
+			}
+			if err := s.Assess("initial", "planner", "turn-2", []collaboration.Assessment{assessment("initial", "confirmed", false)}); err != nil {
+				t.Fatal(err)
+			}
+			admitPlanning(s, "withdrawal", collaboration.Command{Kind: "steer", Body: "Withdraw confirmation."})
+			if afterPreparation {
+				s.Prepare("planner", "turn-3")
+			}
+			admitPlanning(s, "renewal", collaboration.Command{Kind: "confirm-plan", Target: "P1", Body: "I reconsidered; I accept the unchanged complete pair."})
+			s.Prepare("planner", "turn-3")
+			if err := s.Assess("withdraw", "planner", "turn-3", []collaboration.Assessment{assessment("withdrawal", "unchanged", true)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ValidatePlanning("old", "pair", "planner", "turn-3", strings.Repeat("b", 40), "Unchanged.", true); err == nil {
+				t.Fatal("old approval resurrected")
+			}
+			renewalTurn := "turn-3"
+			if afterPreparation {
+				renewalTurn = "turn-4"
+				s.Prepare("planner", renewalTurn)
+			}
+			if err := s.Assess("renew", "planner", renewalTurn, []collaboration.Assessment{assessment("renewal", "confirmed", false)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ValidatePlanning("fresh", "pair", "planner", renewalTurn, strings.Repeat("b", 40), "Unchanged; fresh exact approval.", true); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.Planning.InvalidatedConfirmations) != 1 || s.Planning.InvalidatedConfirmations[0] != "initial" {
+				t.Fatal(s.Planning.InvalidatedConfirmations)
+			}
+		})
+	}
+}

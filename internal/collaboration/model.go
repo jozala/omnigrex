@@ -111,11 +111,15 @@ type Input struct {
 	DeliveryPending bool   `json:"delivery_pending,omitempty"`
 }
 type Receipt struct {
-	Artifact   *RenderedPublication `json:"artifact,omitempty"`
-	ID         string               `json:"id"`
-	Source     Source               `json:"source"`
-	ResponseID string               `json:"response_id,omitempty"`
-	Feedback   string               `json:"feedback"`
+	// Attempt ownership is separate from the immutable artifact. Only a proven
+	// rejection releases that attempt; uncertainty never permits another POST.
+	PublicationAttempt  uint64               `json:"publication_attempt,omitempty"`
+	PublicationRejected bool                 `json:"publication_rejected,omitempty"`
+	Artifact            *RenderedPublication `json:"artifact,omitempty"`
+	ID                  string               `json:"id"`
+	Source              Source               `json:"source"`
+	ResponseID          string               `json:"response_id,omitempty"`
+	Feedback            string               `json:"feedback"`
 }
 type Preparation struct {
 	ParticipantID string `json:"participant_id"`
@@ -571,24 +575,44 @@ func (s *State) amends(id, prior string) bool {
 	return false
 }
 
-// evidenceRoot follows explicit amendment links, not text similarity or ordering.
-func (s *State) evidenceRoot(id string) string {
-	for {
-		var parent string
+// evidenceLineage follows only recorded amendment and natural-correction edges.
+// A visited set also bounds traversal when assessments refer back to each other.
+func (s *State) evidenceLineage(id string) map[string]bool {
+	seen := map[string]bool{}
+	var visit func(string)
+	visit = func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
 		for _, in := range s.Inputs {
 			if in.ID == id {
-				parent = in.Amends
+				visit(in.Amends)
 				break
 			}
 		}
-		if parent == "" {
-			return id
+		for _, a := range s.Assessments {
+			if a.InputID == id && a.Disposition == "changed" {
+				for _, prior := range a.Corrects {
+					visit(prior)
+				}
+			}
 		}
-		id = parent
 	}
+	visit(id)
+	return seen
 }
 func (s *State) isAmendmentOfEvidence(id, prior string) bool {
-	return slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == id && in.Amends != "" }) && s.evidenceRoot(id) == s.evidenceRoot(prior)
+	if !slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == id && in.Amends != "" }) {
+		return false
+	}
+	lineage := s.evidenceLineage(id)
+	for ancestor := range s.evidenceLineage(prior) {
+		if lineage[ancestor] {
+			return true
+		}
+	}
+	return false
 }
 func (s *State) resolutionCurrent(r Resolution) bool {
 	if r.Obsolete {

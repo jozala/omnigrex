@@ -105,3 +105,5 @@ Do not delete history or automatically reactivate completed Workflows.
 Evaluate the new contract on fresh Work Items, including a separately authorized post-deployment real-provider conversation assessment; deterministic fixtures alone do not establish tone or semantic interpretation quality.
 Within the new contract, publication freezes exact rendered payloads before external effects and retains exact-operation recovery after restart.
 An acknowledgment reservation whose POST outcome is uncertain is reconciled against its frozen artifact; absence is not permission to repost, and admission deduplication does not prove visible receipt delivery.
+A proven client rejection (for example a rate-limit response) durably releases only that POST attempt, allowing a delivery retry to reserve the same frozen receipt again.
+Timeouts, server failures, transport failures and lost responses do not release ownership; stale rejection reports cannot release a later attempt.

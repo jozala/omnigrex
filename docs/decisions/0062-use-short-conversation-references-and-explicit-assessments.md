@@ -20,17 +20,20 @@ GitHub admission still requires an explicit target on a newly created comment's 
 Agents interpret natural language, including affirmative answers, natural corrections and incompatible human directions.
 Every delivered input requires an operation-bound assessment with immutable evidence links before proposal or successful completion in any Role.
 Natural corrections explicitly identify earlier input without fabricating an amendment or replacing unaffected decisions.
+Retain that recorded lineage so an explicit amendment of the original input still fences and can revise an interpretation governed by its natural correction.
 Material uncertainty remains blocking outside the current question frontier; the application validates recorded effects, not meaning or human precedence.
 
 Confirmation requires an assessed exact-pair command, never an answer or steering message.
 A recognized withdrawal, material objection or commitment change invalidates earlier confirmation without erasing it.
 Reconciliation does not restore that authority: require fresh confirmation, and a new pair when documents change.
+Invalidation applies through the withdrawing input in durable admission order, not to a subsequent exact confirmation delivered in the same batch; that later input still requires explicit assessment.
 
 Use short round introductions and occasional consolidated checkpoints rather than full drafts before each question round.
 Each checkpoint retains both complete documents in one comment, behind a concise entry point and separate expandable sections.
 Validate the full rendered payload, including signature and marker; reject oversize publication definitely and actionably, never truncate or split the pair.
 Persist the exact payload before posting and reconcile that artifact rather than regenerating prose after restart.
 Reserve acknowledgment publication independently of source deduplication so concurrent deliveries cannot independently post receipts.
+Only proven non-application releases the exact POST attempt for retry with unchanged bytes; uncertain publication remains reconciliation-only.
 
 ## Rationale
 
