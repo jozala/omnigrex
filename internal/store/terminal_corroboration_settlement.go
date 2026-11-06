@@ -443,8 +443,11 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 		if state.Planning == nil {
 			return ErrTerminalCorroborationConflict
 		}
+		// Corroborate the recorded terminal evidence, not authority that may
+		// have changed since the invocation. The settlement fence checks current
+		// authority and turns late human input into safe clarification waiting.
 		for _, v := range state.Planning.Revalidations {
-			if v.SourceInvocationID == sourceID && v.TurnID == job.AgentTurnID && v.ParticipantID == job.AgentParticipantID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.ConfirmationInputID != "" && state.PlanningValidationCurrent(v) {
+			if v.SourceInvocationID == sourceID && v.TurnID == job.AgentTurnID && v.ParticipantID == job.AgentParticipantID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.ConfirmationInputID != "" {
 				return nil
 			}
 		}

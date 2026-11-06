@@ -18,7 +18,7 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	for i, mode := range []string{"confirmation-wait", "complete"} {
+	for i, mode := range []string{"confirmation-wait", "complete", "complete-late-input"} {
 		t.Run(mode, func(t *testing.T) {
 			database := databases[0]
 			fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1100+i, workflow.RolePlanner, "")
@@ -36,7 +36,7 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 			}
 			tool := "request_clarification"
 			result := json.RawMessage(`{"outcome":"CLARIFICATION_WAIT","round_id":""}`)
-			if mode == "complete" {
+			if mode != "confirmation-wait" {
 				receipt := state.Accept("confirmation", collaboration.Command{Kind: "confirm-plan", Target: "P1"}, collaboration.Admission{Active: true, Authorized: true, ParticipantID: fixture.assignmentID, Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "confirm"}, At: time.Now()})
 				if receipt.ResponseID == "" {
 					t.Fatal(receipt)
@@ -45,13 +45,13 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 				result = json.RawMessage(`{"outcome":"PLANNING_READY","revision_id":"P1","repository_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 			}
 			state.Prepare(fixture.assignmentID, lease.ID)
-			if mode == "complete" {
+			if mode != "confirmation-wait" {
 				if err := state.Assess("assess-confirmation", fixture.assignmentID, lease.ID, []collaboration.Assessment{{InputID: "confirmation", EvidenceIDs: []string{"confirmation"}, Disposition: "confirmed", Explanation: "Exact published pair accepted."}}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			request := json.RawMessage(`{"operation_id":"terminal"}`)
-			if mode == "complete" {
+			if mode != "confirmation-wait" {
 				request = json.RawMessage(`{"operation_id":"terminal","revision_id":"P1","repository_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","evidence":"Current code still supports the approach.","material_decisions_resolved":true}`)
 			}
 			mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: "terminal", ToolName: tool, Request: request, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID})
@@ -61,7 +61,7 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 			if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "complete" {
+			if mode != "confirmation-wait" {
 				if err = state.ValidatePlanning(mutation.ID, "P1", fixture.assignmentID, lease.ID, strings.Repeat("a", 40), "Current code still supports the approach.", true); err != nil {
 					t.Fatal(err)
 				}
@@ -92,6 +92,12 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 			if err != nil || recovered.Status != store.AgentTurnCorroborating || recovered.SuccessorAllowed {
 				t.Fatal("terminal intent lost to retry", recovered, err)
 			}
+			if mode == "complete-late-input" {
+				receipt, err := database.AdmitHumanInput(ctx, store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "steer", Body: "Withdraw my confirmation; we need to revise retention."}, Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "late-steering"}, Authorized: true, At: time.Now()})
+				if err != nil || receipt.ResponseID == "" {
+					t.Fatal("late input not admitted", receipt, err)
+				}
+			}
 			workspaces, _ := integrationTerminalWorkspace(t, pool, lease, committedPublicationPaths(t), "head", "installation-token")
 			credentials := &integrationCredentialProvider{credential: "installation-token"}
 			api := &replayOutcomeGitHub{}
@@ -117,17 +123,28 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 				expectedState = "PLAN_READY"
 				expectedOutcome = "PLANNING_READY"
 			}
-			if status != expectedState || outcome != expectedOutcome || waiting != (mode == "confirmation-wait") || failures != 0 || turnStatus != "SUCCEEDED" || successors != 0 || api.calls != 0 {
+			expectedSuccessors := 0
+			if mode == "complete-late-input" {
+				expectedSuccessors = 1
+			}
+			if status != expectedState || outcome != expectedOutcome || waiting != (mode != "complete") || failures != 0 || turnStatus != "SUCCEEDED" || successors != expectedSuccessors || api.calls != 0 {
 				t.Fatalf("unexpected recovery %s/%s wait=%t failures=%d turn=%s successors=%d reads=%d", status, outcome, waiting, failures, turnStatus, successors, api.calls)
 			}
-			if mode == "complete" {
+			if mode != "confirmation-wait" {
 				var raw []byte
 				if err = pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
 					t.Fatal(err)
 				}
 				var final collaboration.State
-				if err = json.Unmarshal(raw, &final); err != nil || final.Planning.ReadyRevision != "P1" {
-					t.Fatal("confirmed pair not preserved", err)
+				expectedReady := "P1"
+				if mode == "complete-late-input" {
+					expectedReady = ""
+				}
+				if err = json.Unmarshal(raw, &final); err != nil || final.Planning.ReadyRevision != expectedReady {
+					t.Fatal("incorrect readiness after recovery", final.Planning, err)
+				}
+				if mode == "complete-late-input" && !final.Pending(fixture.assignmentID) {
+					t.Fatal("late input was lost or marked delivered")
 				}
 			}
 			if processed, err := worker.ProcessOne(ctx); err != nil || processed {
