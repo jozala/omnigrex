@@ -210,3 +210,22 @@ Summary-only entry is pressure, not a failure verdict.
 Use the [step-budget instruments](../observability/application.md#agent-turn-step-budget-metrics) to compare effective ceilings, complete usage distributions, summary pressure, and settled incomplete-work handoffs.
 Keep partial/unknown usage separate and distinguish infrastructure endings from ordinary early completion.
 Delivery is best-effort live telemetry, not a historical usage ledger.
+
+## Prompt, tool, and mounted-storage observations
+
+Use the [extended application contract](../observability/application.md#prompt-tool-and-storage-observations) for prompt-call boundaries, safe provenance, fixed tool layers, units, storage distributions, and the revised 2050-series target.
+`caller_return` prompt samples do not confirm that guest execution stopped; `agent_turn.execute` still includes launch and finalization.
+Search correlated execution/launch completion logs for original Profile source identity, composed-guidance fingerprint, exact Runtime Profile/image, and configured versus effective model fields; do not promote these to stream/metric labels.
+
+Mounted-tree samples run in the existing background cache monitor cadence, including idle retained Participants, using configured orchestrator-visible workspace, runtime-state and mise roots on both supported backends.
+No environment is created and no permission repair or cleanup is performed for collection.
+An inaccessible/unsafe root is unavailable; correct deployment mounts/ownership through the normal operator procedure rather than making the monitor chmod paths.
+Observe `storage.observations` by bounded status and treat absent exports as unknown, not zero usage/free space.
+Allocation and backing-filesystem histograms describe samples, not current totals, quotas, or exact snapshots; never sum shared capacity across Participants or repeated polls.
+There is no per-owner freshness/completeness ledger, and filesystem calls cannot be preempted despite scan deadlines.
+Existing tool-cache warnings retain their narrower threshold and suppression meaning; broader samples do not replace them or trigger eviction.
+Temporary `/tmp` and `/run/pi-agent` observations require the runtime companion; VM-root `/var/tmp`, host captures/native archives, and whole-host monitoring are excluded.
+
+After deployment configuration changes, use authorized backend inspection to confirm expected sample arrival and no-data handling; absence of telemetry warnings does not prove delivery.
+Client/native and server MCP counts have different boundaries and should not be merged as one population.
+Dashboard/live-acceptance and runtime-producer Work Items remain separate; this contract does not activate dashboards, alerts, or notifications.

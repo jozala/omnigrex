@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
+	"github.com/jozala/omnigrex/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (c *connection) configure(ctx context.Context) error {
@@ -99,5 +101,11 @@ func (c *connection) configure(ctx context.Context) error {
 	if json.Unmarshal(result.data, &effective) != nil || effective.Model.Provider != provider || effective.Model.ID != model || selection.Thinking != "" && effective.Thinking != selection.Thinking {
 		return ErrConfiguration
 	}
+	thinking := "unknown"
+	switch effective.Thinking {
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
+		thinking = effective.Thinking
+	}
+	telemetry.AddAttributes(ctx, attribute.String("effective_model", selection.Model), attribute.String("effective_thinking", thinking))
 	return nil
 }

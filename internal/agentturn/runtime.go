@@ -21,9 +21,11 @@ import (
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/turnconfig"
 	"github.com/jozala/omnigrex/internal/workflow"
 	"github.com/jozala/omnigrex/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -423,6 +425,10 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if err != nil {
 		return nil, fmt.Errorf("compile Runtime Process contract: %w", err)
 	}
+	telemetry.AddAttributes(ctx,
+		attribute.String("backend", stateRef.Backend.Family),
+		attribute.Int64("configured_memory_bytes", spec.MemoryBytes),
+		attribute.Int64("configured_pids_limit", spec.PIDsLimit))
 	spec.Workspace = resources.workspaceRef
 	spec.State = stateRef
 	spec.Command = append([]string{environment.Executable, "run"}, runtimeProfile.Contract().Command...)

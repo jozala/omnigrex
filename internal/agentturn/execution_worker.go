@@ -409,8 +409,13 @@ func (worker *ExecutionWorker) execute(workCtx, leaseCtx context.Context, heartb
 			promptCtx := workCtx
 			var budgetConfiguration turnconfig.Configuration
 			_ = json.Unmarshal(execution.Turn.TurnConfiguration, &budgetConfiguration)
+			if budgetConfiguration.StepBudget != nil {
+				telemetry.AddAttributes(promptCtx, attribute.String("configured_step_budget", budgetConfiguration.StepBudget.String()))
+			}
 			observer := telemetry.NewAgentTurnObserver(string(execution.Participant.Role), budgetConfiguration.StepBudget, worker.agentEventSink)
+			promptStarted := time.Now()
 			outcome, promptErr := runtime.AgentConnection().Prompt(promptCtx, *lease, execution.Session, content, observer)
+			telemetry.RecordPromptDuration(context.WithoutCancel(promptCtx), time.Since(promptStarted), promptErr == nil && (outcome.Status == agent.Completed || outcome.Status == agent.Failed || outcome.Status == agent.Aborted))
 			termination := "unknown"
 			switch outcome.Status {
 			case agent.Completed:
