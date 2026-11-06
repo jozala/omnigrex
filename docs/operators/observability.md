@@ -220,6 +220,7 @@ Search correlated execution/launch completion logs for original Profile source i
 Mounted-tree samples run in the existing background cache monitor cadence, including idle retained Participants, using configured orchestrator-visible workspace, runtime-state and mise roots on both supported backends.
 No environment is created and no permission repair or cleanup is performed for collection.
 An inaccessible/unsafe root is unavailable; correct deployment mounts/ownership through the normal operator procedure rather than making the monitor chmod paths.
+Discovery continues across other healthy backing roots, and incomplete discovery does not prune undiscovered Participants' retained scan or warning state.
 Observe `storage.observations` by bounded status and treat absent exports as unknown, not zero usage/free space.
 Allocation and backing-filesystem histograms describe samples, not current totals, quotas, or exact snapshots; never sum shared capacity across Participants or repeated polls.
 There is no per-owner freshness/completeness ledger, and filesystem calls cannot be preempted despite scan deadlines.

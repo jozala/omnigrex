@@ -211,24 +211,21 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 	if monitor == nil || monitor.lifecycle == nil {
 		return 0, 0, fmt.Errorf("%w: nil tool cache monitor", ErrInvalidOptions)
 	}
-	all, err := monitor.listMountedParticipantIDs(ctx)
-	discoveryComplete := err == nil
-	if err != nil {
-		// Broader storage discovery must not suppress the existing mise cache
-		// warnings if a different backing root becomes inaccessible.
-		all, err = listParticipantDirectories(ctx, monitor.lifecycle.miseRoot)
-		if err != nil {
-			return 0, 0, err
-		}
+	all, discoveryErr := monitor.listMountedParticipantIDs(ctx)
+	discoveryComplete := discoveryErr == nil
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
 	}
+	// Healthy roots remain observable after another root fails. Absence from
+	// this partial union cannot establish that retained monitoring state is stale.
 	monitor.mu.Lock()
 	for id := range monitor.scans {
-		if index := sort.SearchStrings(all, id); index == len(all) || all[index] != id {
+		if index := sort.SearchStrings(all, id); discoveryComplete && (index == len(all) || all[index] != id) {
 			monitor.dropScan(id)
 		}
 	}
 	for id := range monitor.lastWarned {
-		if index := sort.SearchStrings(all, id); index == len(all) || all[index] != id {
+		if index := sort.SearchStrings(all, id); discoveryComplete && (index == len(all) || all[index] != id) {
 			delete(monitor.lastWarned, id)
 		}
 	}
@@ -284,8 +281,11 @@ func (monitor *ToolCacheMonitor) Run(ctx context.Context) error {
 	}
 }
 
+// Return the successful roots' union even when another root is unavailable.
+// The bounded error indicates incomplete discovery, not failure of every root.
 func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) ([]string, error) {
 	seen := make(map[string]bool)
+	var discoveryErr error
 	for _, root := range []string{monitor.lifecycle.miseRoot, monitor.lifecycle.workspaceRoot, monitor.stateRoot} {
 		if root == "" {
 			continue
@@ -297,7 +297,8 @@ func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) 
 					telemetry.RecordStorage(ctx, mounted.resource, "unavailable", nil)
 				}
 			}
-			return nil, errors.New("mounted storage discovery unavailable")
+			discoveryErr = errors.New("mounted storage discovery unavailable")
+			continue
 		}
 		for _, id := range ids {
 			seen[id] = true
@@ -308,7 +309,7 @@ func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) 
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return ids, nil
+	return ids, discoveryErr
 }
 
 func listParticipantDirectories(ctx context.Context, directory string) ([]string, error) {

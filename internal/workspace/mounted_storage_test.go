@@ -179,3 +179,123 @@ func TestMountedDiscoveryFailureDoesNotSuppressCacheWarning(t *testing.T) {
 		t.Fatalf("cache warning suppression regressed: warned=%d err=%v", warned, err)
 	}
 }
+
+func TestMountedDiscoveryKeepsHealthyRootsAfterFailure(t *testing.T) {
+	const id = "10000000-0000-4000-8000-000000000001"
+	for _, failed := range []string{"state", "mise", "workspace"} {
+		for _, failure := range []string{"not-directory", "inaccessible", "symlink"} {
+			t.Run(failed+"/"+failure, func(t *testing.T) {
+				roots := map[string]string{"workspace": t.TempDir(), "mise": t.TempDir(), "state": t.TempDir()}
+				healthy, leaf := "workspace", "workspace"
+				if failed == "workspace" {
+					healthy, leaf = "state", "runtime-state"
+				}
+				tree := filepath.Join(roots[healthy], "assignment-"+id, leaf)
+				if err := os.MkdirAll(tree, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tree, "data"), []byte("data"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				switch failure {
+				case "not-directory":
+					path := filepath.Join(t.TempDir(), "root")
+					if err := os.WriteFile(path, nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+					roots[failed] = path
+				case "inaccessible":
+					if err := os.Chmod(roots[failed], 0); err != nil {
+						t.Fatal(err)
+					}
+					defer os.Chmod(roots[failed], 0700)
+				case "symlink":
+					path := filepath.Join(t.TempDir(), "root")
+					if err := os.Symlink(roots[failed], path); err != nil {
+						t.Fatal(err)
+					}
+					roots[failed] = path
+				}
+				monitor, err := NewToolCacheMonitor(&Lifecycle{workspaceRoot: roots["workspace"], miseRoot: roots["mise"]}, ToolCacheMonitorConfig{StateRoot: roots["state"], ThresholdBytes: 1, PollInterval: time.Minute})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer monitor.Close()
+				monitor.entryBudget = 0
+				ids, err := monitor.listMountedParticipantIDs(context.Background())
+				if err == nil || len(ids) != 1 || ids[0] != id {
+					t.Fatalf("partial discovery=%v, %v; want healthy Participant and incomplete status", ids, err)
+				}
+				checked, _, err := monitor.Check(context.Background())
+				if err != nil || checked != 1 {
+					t.Fatalf("healthy-root check=%d, %v", checked, err)
+				}
+				if scan := monitor.mountedScans[id+"/"+healthy]; scan == nil || len(scan.frames) == 0 {
+					t.Fatal("healthy idle tree was not measured")
+				}
+			})
+		}
+	}
+}
+
+func TestIncompleteMountedDiscoveryPreservesRetainedMonitoringState(t *testing.T) {
+	const retained = "10000000-0000-4000-8000-000000000001"
+	const healthy = "10000000-0000-4000-8000-000000000002"
+	mise, workspace := t.TempDir(), t.TempDir()
+	cache := filepath.Join(mise, "assignment-"+retained, "tool-data", "assignment")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "data"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(workspace, "assignment-"+healthy, "workspace")
+	if err := os.MkdirAll(tree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := NewToolCacheMonitor(&Lifecycle{workspaceRoot: workspace, miseRoot: mise}, ToolCacheMonitorConfig{ThresholdBytes: 1, PollInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer monitor.Close()
+	monitor.entryBudget = 0
+	_, warned, err := monitor.Observe(context.Background(), retained)
+	if err != nil || !warned {
+		t.Fatalf("warning fixture=%v %v", warned, err)
+	}
+	monitor.observeMounted(context.Background(), retained, make(map[uint64]bool))
+	scan, mounted, watermark := monitor.scans[retained], monitor.mountedScans[retained+"/tool-data"], monitor.lastWarned[retained]
+	if scan == nil || mounted == nil {
+		t.Fatal("fixture did not retain scans")
+	}
+	if err := os.Rename(mise, mise+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(mise + "-old")
+	if err := os.WriteFile(mise, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	checked, _, err := monitor.Check(context.Background())
+	if err != nil || checked != 1 {
+		t.Fatalf("healthy observation=%d %v", checked, err)
+	}
+	if monitor.scans[retained] != scan || monitor.mountedScans[retained+"/tool-data"] != mounted || monitor.lastWarned[retained] != watermark || len(scan.frames) == 0 || len(mounted.frames) == 0 {
+		t.Fatal("incomplete discovery pruned retained scan/warning state")
+	}
+	// Complete discovery can subsequently establish that the old owner is gone.
+	if err := os.Remove(mise); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mise, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := monitor.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if monitor.scans[retained] != nil || monitor.mountedScans[retained+"/tool-data"] != nil || len(scan.frames) != 0 || len(mounted.frames) != 0 {
+		t.Fatal("complete discovery did not release stale scans")
+	}
+	if _, present := monitor.lastWarned[retained]; present {
+		t.Fatal("complete discovery retained stale warning")
+	}
+}
