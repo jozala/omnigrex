@@ -51,6 +51,11 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 				records = append(records, raw)
 			}
 		}
+	case "assessment_history":
+		for _, a := range s.Assessments {
+			raw, _ := json.Marshal(a)
+			records = append(records, raw)
+		}
 	case "clarification_history":
 		for _, round := range s.Rounds {
 			raw, _ := json.Marshal(round)
@@ -65,7 +70,7 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 	object := map[string]json.RawMessage{}
 	projection := Projection{Counts: map[string]int{}}
-	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history"} {
+	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history", "assessment_history"} {
 		records := s.Records(participant, turn, name)
 		projection.Counts[name] = len(records)
 		if records == nil {

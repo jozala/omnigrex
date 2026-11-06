@@ -15,7 +15,7 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
-var ErrUnresolvedClarification = errors.New("clarification questions remain unresolved; record explicit interpretation with resolve_clarification or publish a revised round")
+var ErrUnresolvedClarification = errors.New("human input or decisions remain unassessed or unresolved; assess every delivered input with assess_human_input and explicitly resolve clarification or historical material uncertainty")
 
 var ErrPendingHumanInput = errors.New("pending human input must be delivered before Stage handoff; retrieve all frozen human_input chunks, or call request_clarification with empty questions for input accepted after preparation")
 
@@ -50,7 +50,8 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 			return ErrMutationAdmissionClosed
 		}
 		var mutationID, head string
-		if err := tx.QueryRow(ctx, `SELECT id::text,COALESCE(expected_sha,'') FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='request_clarification' AND id=$3 AND state='IN_FLIGHT'`, turn.ID, turn.ExecutionEpoch, operation).Scan(&mutationID, &head); err != nil {
+		var request []byte
+		if err := tx.QueryRow(ctx, `SELECT id::text,COALESCE(expected_sha,''),request FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='request_clarification' AND id=$3 AND state='IN_FLIGHT'`, turn.ID, turn.ExecutionEpoch, operation).Scan(&mutationID, &head, &request); err != nil {
 			return err
 		}
 		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
@@ -83,9 +84,21 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 				}
 			}
 		}
+		var args struct {
+			Introduction string `json:"introduction"`
+		}
+		if err = json.Unmarshal(request, &args); err != nil {
+			return err
+		}
 		round, err = state.Request(id, turn.AgentParticipantID, turn.ID, head, questions)
 		if err != nil {
 			return err
+		}
+		for i := range state.Rounds {
+			if state.Rounds[i].ID == round.ID {
+				state.Rounds[i].Introduction = args.Introduction
+				round = state.Rounds[i]
+			}
 		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
 	})
@@ -307,19 +320,20 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		return err
 	}
 	event.HumanInputPending = state.Pending(participant)
-	if event.HumanInputPending && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
+	blocked := state.AssessmentBlocked(participant) || state.Unresolved(participant)
+	if (event.HumanInputPending || blocked) && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
 		event.Outcome = workflow.TurnOutcomeClarificationWait
 		event.Review = nil
 		event.ExistingReview = nil
 		event.AuthorizedReviewerActorID = 0
 	}
 	if event.Outcome == workflow.TurnOutcomePlanningReady {
-		if state.Planning == nil || state.Pending(participant) || state.Unresolved(participant) {
+		if state.Planning == nil || state.Pending(participant) || state.Unresolved(participant) || state.AssessmentBlocked(participant) {
 			return collaboration.ErrInvalid
 		}
 		found := false
 		for _, v := range state.Planning.Revalidations {
-			if v.TurnID == event.Turn.TurnID && v.RevisionID == state.Planning.CurrentRevision {
+			if v.TurnID == event.Turn.TurnID && v.RevisionID == state.Planning.CurrentRevision && state.PlanningValidationCurrent(v) {
 				state.Planning.ReadyRevision = v.RevisionID
 				found = true
 			}
@@ -407,6 +421,8 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
 		err = tx.QueryRow(ctx, `SELECT state->'planning'->'original_request' FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw)
 	case "planning_history":
 		err = tx.QueryRow(ctx, `SELECT state->'planning'->'revisions'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
+	case "assessment_history":
+		err = tx.QueryRow(ctx, `SELECT state->'assessments'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	case "clarification_history":
 		err = tx.QueryRow(ctx, `SELECT state->'rounds'->$2::int FROM work_item_collaboration WHERE workflow_id=$1`, workflowID, index).Scan(&raw)
 	default:

@@ -1207,7 +1207,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			if state.Pending(turn.AgentParticipantID) {
 				return ErrPendingHumanInput
 			}
-			if state.Unresolved(turn.AgentParticipantID) {
+			if state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
 				return ErrUnresolvedClarification
 			}
 		}

@@ -26,7 +26,18 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	if json.Unmarshal(in.Arguments, &args) != nil {
 		return nil, ErrInvalidInvocation
 	}
-	op := collaboration.Publication{WorkflowID: in.Scope.WorkflowID, Publisher: backend.clarificationDelivery(in), Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
+	op := collaboration.Publication{WorkflowID: in.Scope.WorkflowID, Publisher: backend.clarificationDelivery(in), SaveArtifact: backend.artifactSaver(in), RejectCheckpoint: func(ctx context.Context, id, reason string) error {
+		ledger, ok := backend.clarifications.(interface {
+			RejectPlanningPublication(context.Context, store.AgentTurnLease, string, string) error
+		})
+		if !ok {
+			return ErrToolDependency
+		}
+		if err := ledger.RejectPlanningPublication(ctx, in.lease, id, reason); err != nil {
+			return OutcomeUnknown(err)
+		}
+		return nil
+	}, Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
 		if err := ledger.ConfirmPlanningPublication(ctx, in.Scope.WorkflowID, id, source); err != nil {
 			return OutcomeUnknown(err)
 		}
@@ -53,7 +64,7 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	return planningCheckpointResult(r)
 }
 func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.RawMessage, error) {
-	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation") {
+	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation" && r.Reason != "payload_too_large" && r.Reason != "interrupted_before_publication") {
 		return nil, ErrInvalidInvocation
 	}
 	action, instruction := "request_clarification_empty_questions", "Call request_clarification with empty questions and a fresh operation ID, then end this Turn without report_blocked. The orchestrator will deliver pending input in the retained Session's next Turn; interpret it and reconsider affected decisions before publishing revised content with a new operation ID."
@@ -61,13 +72,16 @@ func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.R
 	if r.Reason == "unread_input" {
 		action, instruction = "retrieve_human_input", "Complete every scoped human_input record and chunk required by the frozen projection before dependent action. This operation remains not applied; a new publication attempt needs a new operation ID."
 	}
-	if r.Reason == "interrupted_before_reservation" {
-		status, action, instruction = "not_applied", "publish_checkpoint_new_operation", "Recovery proved publication never reached reservation after fencing and stopping the old Runtime Process. Reconsider current input and use a new operation ID for a fresh attempt."
+	if r.Reason == "interrupted_before_reservation" || r.Reason == "interrupted_before_publication" {
+		status, action, instruction = "not_applied", "publish_checkpoint_new_operation", "Recovery proved publication never reached the external effect after fencing and stopping the old Runtime Process. Reconsider current input and use a new operation ID for a fresh attempt."
+	}
+	if r.Reason == "payload_too_large" {
+		status, action, instruction = "not_applied", "rewrite_complete_pair", "The complete rendered pair, including signature and marker, exceeds the single-comment limit. Rewrite both complete documents more concisely without dropping requirements or material commitments, then publish with a new operation ID. No comment was posted; this rejected operation will not publish on replay."
 	}
 	return json.Marshal(map[string]any{"status": status, "publication": "not_applied", "reason": r.Reason, "next_action": action, "instructions": instruction})
 }
 func planningCheckpointResult(r collaboration.PlanningRevision) (json.RawMessage, error) {
-	return json.Marshal(map[string]any{"revision_id": r.ID, "source": r.Source, "status": r.Content.Status})
+	return json.Marshal(map[string]any{"revision_id": r.ID, "reference": r.Reference, "source": r.Source, "status": r.Content.Status})
 }
 func (reconciler *ProductionReconciler) reconcilePlanningCheckpoint(ctx context.Context, scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
 	if scope.Role != "PLANNER" || mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != scope.WorkflowID {

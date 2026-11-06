@@ -2,9 +2,10 @@
 
 [User guide](README.md) · [Human Handoffs](human-handoffs.md)
 
-Developer and Reviewer can publish a clarification round on the Work Item Issue.
+Planner, Developer and Reviewer can publish a clarification round on the Work Item Issue.
 A round identifies individual questions and shows the exact round identifier to answer, for example `R7`.
-Actual identifiers may be longer; copy them from the question comment rather than using a GitHub comment number.
+These short references are permanent within the Work Item; they are not shortened UUIDs or GitHub comment numbers.
+A required answer target is never inferred from the round current when the comment is processed.
 Only one published round is current for a Work Item.
 
 ## Submit a complete or partial answer
@@ -19,7 +20,9 @@ Create a new Issue comment with one command on its first nonblank line, then you
 
 Repository write, maintain, or admin permission is required.
 Opening the Issue alone does not grant decision authority.
-Answers may include numbered partial answers, disagreement, inability to decide, or “yes to all.”
+Answers may include natural agreement, numbered partial answers, qualifications, disagreement, or uncertainty.
+The Planner phrases each recommendation so a simple "yes" can accept it and may invite "yes to both" for a clear set of recommendations.
+The agent interprets the actual context; admission does not keyword-match yes or treat it as blanket approval.
 Unanswered or ambiguous questions remain unresolved; acceptance of the command is not agreement with its interpretation.
 Conflicting responses retain each author's provenance rather than applying last-answer-wins.
 The agent must ask which decision governs before dependent action.
@@ -27,13 +30,15 @@ The agent must ask which decision governs before dependent action.
 Omnigrex acknowledges acceptance and queueing with a response identifier, for example `A12`.
 The acknowledgment is separate from the agent's interpretation and does not authorize implementation.
 A rejected command receives feedback explaining missing permission, invalid syntax, an unknown target, a superseded round, or a lifecycle that cannot accept input.
-If a round was superseded, use the current round identifier from the rejection or the new question comment.
+If a round was superseded, use the short reference in the new question comment.
 A delayed answer to an old round cannot accept a revised recommendation.
 
 ## Amend accepted content
 
 Editing or deleting an accepted comment does not change its accepted record.
-Create an explicit amendment instead:
+Explain a correction naturally in a new admitted answer or `/omnigrex steer` message; you do not need to find the earlier input reference.
+The agent records exactly which earlier decisions it changes and asks if that is ambiguous.
+For a precise optional amendment, use:
 
 ```text
 /omnigrex amend A12
@@ -68,7 +73,7 @@ No `omnigrex:run` is needed and no timeout or inactivity period decides an unans
 An accepted partial answer is enough to continue discussion.
 All input pending at next-Turn preparation is delivered together, preserving its content, identity, author, and order, without an artificial collection delay.
 Later input waits for another Turn; an active Turn is not automatically interrupted.
-Pending input fences successful Stage handoff until delivery, but does not undo already-published commits or native reviews.
+Pending input fences successful Stage handoff until delivery and explicit agent assessment, but does not undo already-published commits or native reviews.
 If a Stage transition committed first, the resulting current Stage determines routing, not an obsolete question's original Stage.
 
 The agent must reconsider old questions and answers against relevant default-branch and Change Proposal changes.
@@ -94,3 +99,14 @@ The agent receives a bounded projection and frozen collection counts, with `get_
 All input pending at preparation remains available in that Turn without a batching delay; later input still belongs to the next Turn.
 When pending contents are omitted from the envelope, successful handoff remains fenced until every record and chunk has been retrieved through the scoped capability.
 Skipped, partial, or failed retrieval cannot acknowledge delivery; unread input survives an interrupted Turn and is included in the retained Session's continuation.
+
+
+### Explicit consideration and historical conflicts
+
+Every delivered input receives a durable explicit agent assessment: changed understanding, an explanation of no change, or unresolved uncertainty.
+A short receipt is not that assessment.
+A correction can affect several earlier decisions; unaffected decisions and exact accepted source contents remain intact.
+Material conflicts remain blocking even when their decisions are absent from the current question round.
+When authorized humans disagree, the agent preserves both accounts and asks them to reconcile instead of choosing by recency or preference.
+Clear self-revision or explicit acceptance of someone else's proposal can resolve the conflict.
+GitHub source links can change or disappear; exact contents, authors and provenance remain in immutable collaboration history rather than depending on those links.

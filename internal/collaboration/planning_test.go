@@ -19,7 +19,7 @@ func planningFixture(t *testing.T) *collaboration.State {
 	return s
 }
 func planningContent() collaboration.PlanningContent {
-	return collaboration.PlanningContent{Title: "Onboarding", Status: "proposed", Changes: "Ephemeral local checklist.", RequirementsBrief: "Small teams, no retained personal data or external accounts. Reset discards status. Non-goals: implementation.", TechnicalPlan: "README.md describes a minimal repository. Separate transient status and UI; no migration. Test reset. If persistence becomes necessary, clarify again. Names are suggestions.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+	return collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "Onboarding", Status: "proposed", Changes: "Ephemeral local checklist.", RequirementsBrief: "Small teams, no retained personal data or external accounts. Reset discards status. Non-goals: implementation.", TechnicalPlan: "README.md describes a minimal repository. Separate transient status and UI; no migration. Test reset. If persistence becomes necessary, clarify again. Names are suggestions.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
 }
 func publishCheckpoint(t *testing.T, s *collaboration.State, id, turn string, c collaboration.PlanningContent) collaboration.PlanningRevision {
 	t.Helper()
@@ -106,6 +106,9 @@ func TestPlanningConfirmationAndFinalInputFences(t *testing.T) {
 	if validate("unprepared") == nil {
 		t.Fatal("unprepared completion")
 	}
+	if err := s.Assess("assess", "planner", "turn-3", []collaboration.Assessment{{InputID: "confirmation", EvidenceIDs: []string{"confirmation"}, Disposition: "confirmed", Explanation: "Exact pair accepted without changes."}, {InputID: "answer", EvidenceIDs: []string{"answer"}, Disposition: "unchanged", Explanation: "Confirms existing no-retention scope."}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := validate("turn-3"); err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +124,9 @@ func TestMaterialRevisionNeedsRenewedConfirmation(t *testing.T) {
 	publishCheckpoint(t, s, "P1", "turn-1", planningContent())
 	admitPlanning(s, "confirm", collaboration.Command{Kind: "confirm-plan", Target: "P1"})
 	s.Prepare("planner", "turn-2")
+	if err := s.Assess("assess", "planner", "turn-2", []collaboration.Assessment{{InputID: "confirm", EvidenceIDs: []string{"confirm"}, Disposition: "confirmed", Explanation: "Exact pair accepted."}}); err != nil {
+		t.Fatal(err)
+	}
 	publishCheckpoint(t, s, "P2", "turn-2", planningContent())
 	if err := s.ValidatePlanning("complete", "P2", "planner", "turn-2", strings.Repeat("b", 40), "Changed architecture investigated", true); err == nil {
 		t.Fatal("old confirmation accepted changed pair")
@@ -139,7 +145,7 @@ func TestCheckpointNonPublicationIsImmutableAndRetrievalPrecedesYield(t *testing
 	if r := admitPlanning(s, "steer", collaboration.Command{Kind: "steer", Body: "Use a standalone CLI."}); r.ResponseID == "" {
 		t.Fatal(r)
 	}
-	if r := admitPlanning(s, "amend", collaboration.Command{Kind: "amend", Target: "steer", Body: "Users have no repository access."}); r.ResponseID == "" {
+	if r := admitPlanning(s, "amend", collaboration.Command{Kind: "amend", Target: "A1", Body: "Users have no repository access."}); r.ResponseID == "" {
 		t.Fatal(r)
 	}
 	_, err := s.ReserveCheckpoint("P2", "planner", "turn-1", c)
@@ -175,6 +181,9 @@ func TestCheckpointNonPublicationIsImmutableAndRetrievalPrecedesYield(t *testing
 		t.Fatal(err)
 	}
 	restored.Inputs[0].DeliveryPending = false
+	if err = restored.Assess("assess", "planner", "turn-2", []collaboration.Assessment{{InputID: "steer", EvidenceIDs: []string{"steer"}, Disposition: "changed", Explanation: "Standalone CLI."}, {InputID: "amend", EvidenceIDs: []string{"amend"}, Disposition: "changed", Explanation: "No repository access."}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = restored.ReserveCheckpoint("P4", "planner", "turn-2", c); err != nil {
 		t.Fatal(err)
 	}

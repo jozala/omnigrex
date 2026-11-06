@@ -27,7 +27,7 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			state.Prepare(fixture.assignmentID, "prior-turn")
-			content := collaboration.PlanningContent{Title: "Onboarding", Status: "proposed", Changes: "No persistence", RequirementsBrief: "Ephemeral local checklist.", TechnicalPlan: "Use local transient state. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+			content := collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "Onboarding", Status: "proposed", Changes: "No persistence", RequirementsBrief: "Ephemeral local checklist.", TechnicalPlan: "Use local transient state. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
 			if _, err := state.ReserveCheckpoint("P1", fixture.assignmentID, "prior-turn", content); err != nil {
 				t.Fatal(err)
 			}
@@ -45,6 +45,11 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 				result = json.RawMessage(`{"outcome":"PLANNING_READY","revision_id":"P1","repository_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 			}
 			state.Prepare(fixture.assignmentID, lease.ID)
+			if mode == "complete" {
+				if err := state.Assess("assess-confirmation", fixture.assignmentID, lease.ID, []collaboration.Assessment{{InputID: "confirmation", EvidenceIDs: []string{"confirmation"}, Disposition: "confirmed", Explanation: "Exact published pair accepted."}}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			request := json.RawMessage(`{"operation_id":"terminal"}`)
 			if mode == "complete" {
 				request = json.RawMessage(`{"operation_id":"terminal","revision_id":"P1","repository_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","evidence":"Current code still supports the approach.","material_decisions_resolved":true}`)
@@ -228,7 +233,7 @@ func TestInitialPlanningPreparationSupportsOriginalReadAndCheckpoint(t *testing.
 	if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 		t.Fatal(err)
 	}
-	revision, err := database.ReservePlanningCheckpoint(ctx, lease, mutation.ID, collaboration.PlanningContent{Title: "Checklist", Status: "draft", Changes: "Initial investigation", RequirementsBrief: "Scope proposed, not agreed", TechnicalPlan: "Inspect local checklist approach", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}})
+	revision, err := database.ReservePlanningCheckpoint(ctx, lease, mutation.ID, collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "Checklist", Status: "draft", Changes: "Initial investigation", RequirementsBrief: "Scope proposed, not agreed", TechnicalPlan: "Inspect local checklist approach", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}})
 	if err != nil || revision.ID == "" {
 		t.Fatal("initial checkpoint rejected", revision, err)
 	}

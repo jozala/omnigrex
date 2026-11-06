@@ -1,0 +1,275 @@
+package collaboration_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jozala/omnigrex/internal/collaboration"
+)
+
+func TestPermanentReferencesSurviveFailureReplacementAndRestart(t *testing.T) {
+	var s collaboration.State
+	questions := []collaboration.Question{{ID: "internal-question", Body: "Keep updates structured? I recommend facts and links."}}
+	first, err := s.Request("internal-round-one", "developer", "turn-one", "", questions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Reference != "R1" {
+		t.Fatal(first)
+	}
+	if err = s.FailPublication(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Request("internal-round-two", "developer", "turn-two", "", questions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Reference != "R2" {
+		t.Fatal("failed reservation reused reference", second)
+	}
+	if err = s.Publish(second.ID, collaboration.Source{Channel: "fixture", ID: "questions"}); err != nil {
+		t.Fatal(err)
+	}
+	a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: "developer", Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "answer"}, At: time.Now()}
+	for _, target := range []string{"", first.Reference, second.ID, "R02", "R999"} {
+		if receipt := s.Accept("rejected-"+target, collaboration.Command{Kind: "answer", Target: target, Body: "yes"}, a); receipt.ResponseID != "" {
+			t.Fatal("bad target accepted", target)
+		}
+		a.Source.ID += "-next"
+	}
+	receipt := s.Accept("internal-input", collaboration.Command{Kind: "answer", Target: "R2", Body: "yes to both, except retain diagnostics locally"}, a)
+	if receipt.ResponseID != "internal-input" || s.Inputs[0].Reference != "A1" || s.Inputs[0].RoundID != second.ID || strings.Contains(receipt.Feedback, "internal") {
+		t.Fatal(receipt, s.Inputs)
+	}
+	raw, _ := json.Marshal(s)
+	var restarted collaboration.State
+	if err = json.Unmarshal(raw, &restarted); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := restarted.Accept("different-id", collaboration.Command{Kind: "steer", Body: "different"}, a)
+	if duplicate != receipt || len(restarted.Inputs) != 1 {
+		t.Fatal("source dedup rebound input", duplicate)
+	}
+	// A rejection never applies to the current round implicitly, including after restart.
+	a.Source.ID = "missing-target-after-restart"
+	if r := restarted.Accept("later", collaboration.Command{Kind: "answer", Body: "yes"}, a); r.ResponseID != "" {
+		t.Fatal(r)
+	}
+	if restarted.Inputs[0].Body != "yes to both, except retain diagnostics locally" {
+		t.Fatal("accepted contents changed")
+	}
+}
+
+func TestNaturalCorrectionsAndHistoricalConflictFenceEveryRole(t *testing.T) {
+	for _, participant := range []string{"planner", "developer", "reviewer"} {
+		t.Run(participant, func(t *testing.T) {
+			var s collaboration.State
+			round, err := s.Request("internal-round", participant, "turn-one", "", []collaboration.Question{{ID: "Q1", Body: "Keep API?"}, {ID: "Q2", Body: "Keep source links?"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Publish(round.ID, collaboration.Source{Channel: "fixture", ID: "questions"}); err != nil {
+				t.Fatal(err)
+			}
+			a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: participant, Actor: collaboration.Actor{ID: "one", Name: "One"}, Source: collaboration.Source{Channel: "fixture", ID: "original"}, At: time.Now()}
+			s.Accept("original", collaboration.Command{Kind: "answer", Target: "R1", Body: "yes to both"}, a)
+			s.Prepare(participant, "turn-two")
+			if !s.AssessmentBlocked(participant) {
+				t.Fatal("delivery counted as consideration")
+			}
+			if err = s.Assess("assess-original", participant, "turn-two", []collaboration.Assessment{{InputID: "original", EvidenceIDs: []string{"original"}, Disposition: "changed", Explanation: "Both recommendations explicitly accepted."}}); err != nil {
+				t.Fatal(err)
+			}
+			resolutions := []collaboration.Resolution{{QuestionID: "Q1", ResponseIDs: []string{"original"}, Explanation: "Keep API."}, {QuestionID: "Q2", ResponseIDs: []string{"original"}, Explanation: "Keep links."}}
+			if err = s.Resolve(round.ID, "turn-two", resolutions); err != nil {
+				t.Fatal(err)
+			}
+			// New frontier omits the settled historical decisions, without a checkpoint.
+			next, err := s.Request("next-round", participant, "turn-two", "", []collaboration.Question{{ID: "Q3", Body: "Start locally?"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Publish(next.ID, collaboration.Source{Channel: "fixture", ID: "next"}); err != nil {
+				t.Fatal(err)
+			}
+			a.Source.ID = "correction"
+			s.Accept("correction", collaboration.Command{Kind: "steer", Body: "Actually change both earlier choices: remove API and links."}, a)
+			s.Prepare(participant, "turn-three")
+			correction := collaboration.Assessment{InputID: "correction", EvidenceIDs: []string{"correction"}, Corrects: []string{"original"}, Disposition: "changed", Explanation: "The same maintainer explicitly revises both earlier choices."}
+			if err = s.Assess("assess-correction", participant, "turn-three", []collaboration.Assessment{correction}); err != nil {
+				t.Fatal(err)
+			}
+			if !s.Unresolved(participant) {
+				t.Fatal("historical correction disappeared outside current frontier")
+			}
+			for i := range resolutions {
+				resolutions[i].ResponseIDs = []string{"correction"}
+				resolutions[i].Explanation = "Explicit self-correction replaces this decision."
+			}
+			if err = s.Resolve(round.ID, "turn-three", resolutions); err != nil {
+				t.Fatal("natural correction required fabricated amend", err)
+			}
+			// Another authorized human disagrees; the agent records, rather than the
+			// application guesses, semantic conflict and its historical materiality.
+			a.Actor = collaboration.Actor{ID: "two", Name: "Two"}
+			a.Source.ID = "objection"
+			s.Accept("objection", collaboration.Command{Kind: "steer", Body: "Keep the original API."}, a)
+			s.Prepare(participant, "turn-four")
+			conflict := collaboration.Assessment{InputID: "objection", EvidenceIDs: []string{"original", "correction", "objection"}, Disposition: "uncertain", Explanation: "Two authorized humans disagree about the historical API commitment; ask them to reconcile."}
+			if err = s.Assess("assess-conflict", participant, "turn-four", []collaboration.Assessment{conflict}); err != nil {
+				t.Fatal(err)
+			}
+			if !s.AssessmentBlocked(participant) {
+				t.Fatal("historical conflict hidden by current frontier")
+			}
+			a.Source.ID = "answer-current"
+			s.Accept("answer-current", collaboration.Command{Kind: "answer", Target: "R2", Body: "yes"}, a)
+			s.Prepare(participant, "turn-five")
+			if err = s.Assess("assess-current", participant, "turn-five", []collaboration.Assessment{{InputID: "answer-current", EvidenceIDs: []string{"answer-current"}, Disposition: "unchanged", Explanation: "Local first."}}); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Resolve(next.ID, "turn-five", []collaboration.Resolution{{QuestionID: "Q3", ResponseIDs: []string{"answer-current"}, Explanation: "Local first."}}); err != nil {
+				t.Fatal(err)
+			}
+			if s.Unresolved(participant) || !s.AssessmentBlocked(participant) {
+				t.Fatal("current question resolution erased independent conflict")
+			}
+			a.Source.ID = "reconcile"
+			s.Accept("reconcile", collaboration.Command{Kind: "steer", Body: "I accept One's revised proposal."}, a)
+			s.Prepare(participant, "turn-six")
+			conflict.Disposition = "unchanged"
+			conflict.EvidenceIDs = append(conflict.EvidenceIDs, "reconcile")
+			conflict.Explanation = "Two explicitly accepts One's self-revision; no competing direction remains."
+			if err = s.Assess("assess-reconciliation", participant, "turn-six", []collaboration.Assessment{conflict, {InputID: "reconcile", EvidenceIDs: []string{"reconcile"}, Disposition: "unchanged", Explanation: "Explicit acceptance reconciles the conflict."}}); err != nil {
+				t.Fatal(err)
+			}
+			if s.AssessmentBlocked(participant) || s.Unresolved(participant) {
+				t.Fatal("reconciled evidence remained blocked")
+			}
+			if len(s.Inputs) != 5 || s.Inputs[0].Body != "yes to both" || !s.HasAssessmentEffect("assess-correction", []collaboration.Assessment{correction}) || s.HasAssessmentEffect("other-operation", []collaboration.Assessment{correction}) {
+				t.Fatal("lost immutable evidence or operation provenance")
+			}
+		})
+	}
+}
+
+func TestQualifiedWithdrawalAndRenewedExactConfirmation(t *testing.T) {
+	for _, disposition := range []string{"changed", "uncertain"} {
+		t.Run(disposition, func(t *testing.T) {
+			s := planningFixture(t)
+			publishCheckpoint(t, s, "internal-pair", "turn-1", planningContent())
+			if r := admitPlanning(s, "initial-confirmation", collaboration.Command{Kind: "confirm-plan", Target: "P1", Body: "Yes, looks right."}); r.ResponseID == "" {
+				t.Fatal(r)
+			}
+			s.Prepare("planner", "turn-2")
+			assessment := collaboration.Assessment{InputID: "initial-confirmation", EvidenceIDs: []string{"initial-confirmation"}, Disposition: "confirmed", Explanation: "Harmless accompanying text accepts the exact published pair."}
+			if err := s.Assess("assess-confirmation", "planner", "turn-2", []collaboration.Assessment{assessment}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ValidatePlanning("ready-before-objection", "internal-pair", "planner", "turn-2", strings.Repeat("b", 40), "Repository unchanged.", true); err != nil {
+				t.Fatal(err)
+			}
+			admitPlanning(s, "objection", collaboration.Command{Kind: "steer", Body: "Withdraw my confirmation; reconsider retention."})
+			s.Prepare("planner", "turn-3")
+			objection := collaboration.Assessment{InputID: "objection", EvidenceIDs: []string{"objection"}, Disposition: disposition, Explanation: "Material withdrawal/objection to accepted commitments.", InvalidateConfirmation: true}
+			if err := s.Assess("withdraw", "planner", "turn-3", []collaboration.Assessment{objection}); err != nil {
+				t.Fatal(err)
+			}
+			if s.PlanningValidationCurrent(s.Planning.Revalidations[0]) {
+				t.Fatal("old ready validation survived withdrawal")
+			}
+			objection.Disposition = "unchanged"
+			objection.Explanation = "Investigation resolves the objection without changing the documents."
+			objection.InvalidateConfirmation = false
+			if err := s.Assess("resolve-objection", "planner", "turn-3", []collaboration.Assessment{objection}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ValidatePlanning("ready-again", "internal-pair", "planner", "turn-3", strings.Repeat("b", 40), "Unchanged pair remains relevant.", true); err == nil {
+				t.Fatal("resolution resurrected old confirmation")
+			}
+			admitPlanning(s, "renewed", collaboration.Command{Kind: "confirm-plan", Target: "P1"})
+			s.Prepare("planner", "turn-4")
+			assessment.InputID = "renewed"
+			assessment.EvidenceIDs = []string{"renewed"}
+			if err := s.Assess("assess-renewed", "planner", "turn-4", []collaboration.Assessment{assessment}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ValidatePlanning("ready-renewed", "internal-pair", "planner", "turn-4", strings.Repeat("b", 40), "Fresh exact confirmation and unchanged documents.", true); err != nil {
+				t.Fatal(err)
+			}
+			if !s.PlanningValidationCurrent(s.Planning.Revalidations[1]) || s.Inputs[0].Body != "Yes, looks right." || s.Planning.ReadyRevision != "" {
+				t.Fatal("renewal lost history or granted premature readiness")
+			}
+		})
+	}
+	// A qualified confirmation requesting changes cannot confirm an unpublished
+	// modified version, even when the application admits its natural-language body.
+	s := planningFixture(t)
+	publishCheckpoint(t, s, "pair", "turn-1", planningContent())
+	admitPlanning(s, "qualified", collaboration.Command{Kind: "confirm-plan", Target: "P1", Body: "Yes, but change retention to seven days."})
+	s.Prepare("planner", "turn-2")
+	if err := s.Assess("qualified", "planner", "turn-2", []collaboration.Assessment{{InputID: "qualified", EvidenceIDs: []string{"qualified"}, Disposition: "changed", Explanation: "This requests a material change, not confirmation of an unpublished version."}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ValidatePlanning("ready", "pair", "planner", "turn-2", strings.Repeat("b", 40), "Changed commitments.", true); err == nil {
+		t.Fatal("qualified input was automatic confirmation")
+	}
+}
+
+func TestAssessmentBatchIsAtomicAndEvidenceBound(t *testing.T) {
+	var s collaboration.State
+	a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: "developer", Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "one"}, At: time.Now()}
+	s.Accept("one", collaboration.Command{Kind: "steer", Body: "Keep scope small."}, a)
+	s.Prepare("developer", "turn")
+	good := collaboration.Assessment{InputID: "one", EvidenceIDs: []string{"one"}, Disposition: "unchanged", Explanation: "No change."}
+	for i, bad := range []collaboration.Assessment{{InputID: "one", EvidenceIDs: []string{"not-delivered"}, Disposition: "unchanged", Explanation: "No evidence."}, {InputID: "one", EvidenceIDs: []string{"one"}, Disposition: "confirmed", Explanation: "An ordinary answer is not plan confirmation."}, {InputID: "one", EvidenceIDs: []string{"one"}, Disposition: "guessed", Explanation: "Invalid disposition."}} {
+		if err := s.Assess(fmt.Sprint(i), "developer", "turn", []collaboration.Assessment{good, bad}); err == nil || len(s.Assessments) != 0 {
+			t.Fatal("partial or invalid assessment applied", err)
+		}
+	}
+	if err := s.Assess("good", "reviewer", "turn", []collaboration.Assessment{good}); err == nil {
+		t.Fatal("cross-Role evidence admitted")
+	}
+}
+
+func TestUnassessedInputAndHistoricalUncertaintyPermitOnlyIncompleteDraft(t *testing.T) {
+	s := planningFixture(t)
+	admitPlanning(s, "input", collaboration.Command{Kind: "steer", Body: "I am unsure about retention."})
+	s.Prepare("planner", "turn-2")
+	c := planningContent()
+	if _, err := s.ReserveCheckpoint("blocked-unassessed", "planner", "turn-2", c); err == nil {
+		t.Fatal("unassessed input allowed proposal")
+	}
+	if err := s.Assess("uncertain", "planner", "turn-2", []collaboration.Assessment{{InputID: "input", EvidenceIDs: []string{"input"}, Disposition: "uncertain", Explanation: "Retention is a material unresolved decision."}}); err != nil {
+		t.Fatal(err)
+	}
+	c.Status = "draft"
+	c.UnresolvedDecisions = []string{"Retention remains undecided."}
+	draft, err := s.ReserveCheckpoint("draft", "planner", "turn-2", c)
+	if err != nil {
+		t.Fatal("explicitly incomplete draft rejected", err)
+	}
+	if err = s.ConfirmCheckpoint(draft.ID, collaboration.Source{Channel: "fixture", ID: "draft"}); err != nil {
+		t.Fatal(err)
+	}
+	c.Status = "proposed"
+	c.UnresolvedDecisions = nil
+	if _, err = s.ReserveCheckpoint("blocked-historical", "planner", "turn-2", c); err == nil {
+		t.Fatal("omitting uncertainty from the pair cleared the blocker")
+	}
+}
+
+func TestMissingTargetsGiveUsableExamplesEvenWithoutAnswerContent(t *testing.T) {
+	var s collaboration.State
+	a := collaboration.Admission{Active: true, Authorized: true, ParticipantID: "developer", Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: "source"}, At: time.Now()}
+	for _, kind := range []string{"answer", "amend", "confirm-plan", "invalid"} {
+		a.Source.ID = kind
+		r := s.Accept(kind, collaboration.Command{Kind: kind}, a)
+		if r.ResponseID != "" || !strings.Contains(r.Feedback, "/omnigrex") || strings.Contains(r.Feedback, "internal-") {
+			t.Fatal("missing target became opaque or inferred", r)
+		}
+	}
+}

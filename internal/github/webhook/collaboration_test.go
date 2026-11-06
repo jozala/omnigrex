@@ -18,6 +18,7 @@ type collaborationFixture struct {
 	authorized, active, loseResponse bool
 	comments                         []githubapi.IssueComment
 	calls                            int
+	listFailures                     int
 }
 
 func (f *collaborationFixture) FindCollaborationWorkItem(context.Context, int64, int64, int64) (string, error) {
@@ -35,6 +36,10 @@ func (f *collaborationFixture) CanDecideWorkItem(context.Context, string, string
 	return f.authorized, nil
 }
 func (f *collaborationFixture) ListIssueComments(context.Context, string, string, string, int) ([]githubapi.IssueComment, error) {
+	if f.listFailures > 0 {
+		f.listFailures--
+		return nil, errors.New("temporary read failure")
+	}
 	return f.comments, nil
 }
 func (f *collaborationFixture) CreateIssueComment(_ context.Context, _ string, _, _ string, _ int, in githubapi.CommentRequest) (githubapi.IssueComment, error) {
@@ -86,5 +91,37 @@ func TestIssueCommandsRejectUnauthorizedAndLifecycleWithoutPrompting(t *testing.
 		if len(f.state.Inputs) != 0 || len(f.comments) != 1 || f.state.Receipts[0].ResponseID != "" {
 			t.Fatal("rejection did not preserve lifecycle")
 		}
+	}
+}
+
+func (f *collaborationFixture) ReserveCollaborationReceipt(_ context.Context, _, id string, a collaboration.RenderedPublication) (collaboration.RenderedPublication, bool, error) {
+	for i := range f.state.Receipts {
+		r := &f.state.Receipts[i]
+		if r.ID == id {
+			if r.Artifact != nil {
+				return *r.Artifact, false, nil
+			}
+			r.Artifact = &a
+			return a, true, nil
+		}
+	}
+	return a, false, collaboration.ErrInvalid
+}
+
+func TestAcknowledgmentReadFailureDoesNotConsumePublicationOwnership(t *testing.T) {
+	f := &collaborationFixture{authorized: true, active: true, listFailures: 1}
+	adapter := &IssueCollaboration{Store: f, API: f, Credentials: f}
+	claim := collaborationClaim("created", "/omnigrex steer\nKeep the bounded scope.")
+	if _, err := adapter.HandleCollaboration(t.Context(), claim); err == nil {
+		t.Fatal("expected read failure")
+	}
+	if len(f.state.Inputs) != 1 || len(f.comments) != 0 || f.state.Receipts[0].Artifact != nil {
+		t.Fatal("read failure consumed POST ownership")
+	}
+	if _, err := adapter.HandleCollaboration(t.Context(), claim); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.state.Inputs) != 1 || len(f.comments) != 1 || f.state.Inputs[0].Reference != "A1" {
+		t.Fatal("retry duplicated admission or lost receipt")
 	}
 }

@@ -444,7 +444,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			return ErrTerminalCorroborationConflict
 		}
 		for _, v := range state.Planning.Revalidations {
-			if v.SourceInvocationID == sourceID && v.TurnID == job.AgentTurnID && v.ParticipantID == job.AgentParticipantID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.ConfirmationInputID != "" {
+			if v.SourceInvocationID == sourceID && v.TurnID == job.AgentTurnID && v.ParticipantID == job.AgentParticipantID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.ConfirmationInputID != "" && state.PlanningValidationCurrent(v) {
 				return nil
 			}
 		}
@@ -459,13 +459,15 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			return err
 		}
 		var args struct {
-			OperationID string                   `json:"operation_id"`
-			Questions   []collaboration.Question `json:"questions"`
-			Signature   string                   `json:"signature"`
+			Introduction string                   `json:"introduction"`
+			OperationID  string                   `json:"operation_id"`
+			Questions    []collaboration.Question `json:"questions"`
+			Signature    string                   `json:"signature"`
 		}
 		var evidence struct {
-			Outcome string `json:"outcome"`
-			RoundID string `json:"round_id"`
+			Reference string `json:"reference,omitempty"`
+			Outcome   string `json:"outcome"`
+			RoundID   string `json:"round_id"`
 		}
 		if !(service == "omnigrex" && resource == job.WorkflowID || service == "github" && resource == fmt.Sprintf("%d:%d", repositoryID, issueID)) || !decodeCorroborationObject(request, &args) || args.OperationID != operation || !decodeCorroborationObject(result, &evidence) || evidence.Outcome != "CLARIFICATION_WAIT" {
 			return ErrTerminalCorroborationConflict
@@ -483,7 +485,7 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 		for _, round := range state.Rounds {
 			questions, _ := json.Marshal(round.Questions)
 			requested, _ := json.Marshal(args.Questions)
-			if round.ID == "R"+sourceID && evidence.RoundID == round.ID && state.CurrentRound == round.ID && round.Published && !round.PublicationFailed && round.Source != nil && round.Source.ID != "" && round.ParticipantID == job.AgentParticipantID && bytes.Equal(questions, requested) {
+			if round.ID == "R"+sourceID && evidence.RoundID == round.ID && (evidence.Reference == "" || evidence.Reference == round.Reference) && round.Introduction == args.Introduction && state.CurrentRound == round.ID && round.Published && !round.PublicationFailed && round.Source != nil && round.Source.ID != "" && round.ParticipantID == job.AgentParticipantID && bytes.Equal(questions, requested) {
 				return nil
 			}
 		}

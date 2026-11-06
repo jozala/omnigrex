@@ -23,7 +23,7 @@ func TestPlannerDiscoveryComesFromCurrentDeploymentWithoutRepositorySkill(t *tes
 	// Composition is invoked on every launch, including retained Session continuation.
 	for _, purpose := range []workflow.TurnPurpose{"INITIAL_PLANNING", workflow.TurnPurposeReactivation, workflow.TurnPurposeRetry} {
 		current := operator.Compose(policy, stage, purpose, "Repository preferences only.")
-		for _, want := range []string{"Omnigrex discovery procedure v1", "at most five", "prerequisites", "Investigate repository facts", "unresolved", "confirmed human decisions", "requirements brief", "technical plan", "confirm-plan", "not implementation authorization", "no sub-agents"} {
+		for _, want := range []string{"Omnigrex discovery procedure v2", "at most five", `Word each question so "yes" accepts your recommended answer.`, "Consecutive answer/question rounds need no intervening full checkpoint", "Do not impose a fixed question count", "fresh exact-revision confirmation", "prerequisites", "Investigate repository facts", "unresolved", "confirmed human decisions", "requirements brief", "technical plan", "confirm-plan", "not implementation authorization", "no sub-agents"} {
 			if !strings.Contains(current, want) {
 				t.Errorf("%s instructions missing %q", purpose, want)
 			}
@@ -34,7 +34,7 @@ func TestPlannerDiscoveryComesFromCurrentDeploymentWithoutRepositorySkill(t *tes
 	}
 	developer, _ := role.BuiltinPolicyCatalog().Lookup(role.Developer)
 	current := operator.Compose(developer, workflow.StageDefinition{ID: "implementation"}, workflow.TurnPurposeInitialDevelopment, "")
-	if strings.Contains(current, "Omnigrex discovery procedure v1") {
+	if strings.Contains(current, "Omnigrex discovery procedure v2") {
 		t.Fatal("Planner discovery leaked into Developer instructions")
 	}
 }

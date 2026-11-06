@@ -88,7 +88,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 	builtin := map[ID]Policy{
 		Planner: {
 			Role:                          Planner,
-			MCPTools:                      []string{"publish_plan_checkpoint", "complete_planning", "get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs", "refresh_default_branch", "comment_on_issue", "request_clarification", "resolve_clarification", "get_collaboration_record", "report_blocked"},
+			MCPTools:                      []string{"publish_plan_checkpoint", "complete_planning", "get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs", "refresh_default_branch", "comment_on_issue", "request_clarification", "resolve_clarification", "assess_human_input", "get_collaboration_record", "report_blocked"},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
 			AllowFileEdits:                true, DiscardWorkspace: true, AllowHumanSessionControl: true,
 		},
@@ -97,7 +97,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 				"get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs",
-				"refresh_default_branch", "publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "get_collaboration_record",
+				"refresh_default_branch", "publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "assess_human_input", "get_collaboration_record",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
 			AllowFileEdits:                true,
@@ -108,7 +108,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 				"get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs",
-				"refresh_default_branch", "submit_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "get_collaboration_record",
+				"refresh_default_branch", "submit_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "assess_human_input", "get_collaboration_record",
 			},
 			RequiresChangeProposal: true, RepositoryCredentialAuthority: OrchestratorAuthority,
 			ToolCredentialAuthorities: map[string]CredentialAuthority{"submit_review": ReviewerAuthority, "confirm_prior_terminal_intent": ReviewerAuthority},

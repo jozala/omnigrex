@@ -36,7 +36,8 @@ try {
       return;
     }
     const results = data.messages.slice(userIndex + 1).filter(m => m.role === 'tool');
-    const step = results.length;
+    const toolStep = results.length;
+    const step = toolStep;
     const names = (data.tools ?? []).map(t => t.function.name);
     if (role === 'REVIEWER' && (names.includes('write') || names.includes('edit') || names.includes('omnigrex_publish_changes'))) throw new Error('Reviewer authority expanded');
     const result = index => JSON.parse(text(results[index].content));
@@ -56,15 +57,19 @@ try {
     } else if (fault === 'planning') {
       if(role!=='PLANNER'||names.some(n=>['omnigrex_publish_changes','omnigrex_open_pr','omnigrex_submit_review','omnigrex_request_review'].includes(n)))throw new Error('planning authority escaped');
       const system=data.messages.filter(m=>m.role==='system').map(m=>text(m.content)).join('\n');
-      if(!system.includes('omnigrex-discovery/v1'))throw new Error('discovery missing on continuation');
+      if(!system.includes('omnigrex-discovery/v2'))throw new Error('discovery missing on continuation');
       const rounds=(envelope.clarification_history??[]).filter(r=>r.participant_id===envelope.agent_participant_id);
       const input=envelope.human_input??[];
       const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>i.kind!=='confirm-plan');
       const confirmation=input.find(i=>i.kind==='confirm-plan');
+      const step=toolStep-(input.length?1:0);
+      const result=index=>JSON.parse(text(results[index+(input.length?1:0)].content));
       const amended=input.some(i=>i.kind==='amend');
       const stale=rounds.length===2&&!amended&&!confirmation;
       const offset=rounds.length?1:0;
-      if(confirmation){
+      if(toolStep===0&&input.length){
+        name='omnigrex_assess_human_input';args={operation_id:`assess-planning-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:[i.id],disposition:i.kind==='confirm-plan'?'confirmed':'changed',explanation:i.kind==='confirm-plan'?'Exact published pair accepted without changes.':'Explicit fixture direction considered; update the affected audience/retention choices.'}))};
+      }else if(confirmation){
         if(step===0){name='omnigrex_refresh_default_branch';args={operation_id:'planning-final-base'};}
         if(step===1){name='bash';args={command:`git cat-file -e ${result(0).sha}^{commit} && git show ${result(0).sha}:README.md`};}
         if(step===2){name='omnigrex_complete_planning';args={operation_id:'planning-ready',revision_id:confirmation.target,repository_commit:result(0).sha,evidence:'README.md remains a minimal repository. Ephemeral local checklist requires no retention schema or external integration. All delivered human choices remain applicable.',material_decisions_resolved:true};}
@@ -76,14 +81,15 @@ try {
       }else if(rounds.length===0){
         if(step===0){name='omnigrex_request_clarification';args={operation_id:'planning-ask-1',questions:[{id:'Q1',body:'README.md establishes a minimal repository, not an existing onboarding service. Should we target small teams without external accounts? I recommend this bounded scope.'}]};}
       }else{
-        if(step===offset){name='omnigrex_refresh_default_branch';args={operation_id:`planning-base-${rounds.length}-${amended?"amended":"initial"}`};}
-        if(step===offset+1 || stale && step===offset+2){name='omnigrex_publish_plan_checkpoint';args={operation_id:`planning-pair-${rounds.length}-${amended?'amended':'initial'}`,content:{title:'Small-team onboarding',status:rounds.length===1?'draft':'proposed',changes:rounds.length===1?'Scope selected; retention remains an unresolved proposal.':'Replace retention assumption with the human choice: ephemeral local status.',requirements_brief:amended?'Users without repository access need a standalone ephemeral checklist. No retained personal data, repository permissions or external accounts. Reset discards status. Non-goals: deployment and implementation. Material unresolved questions: none.':rounds.length===1?'Users: small teams. Scope: checklist without external accounts. Non-goals: deployment and implementation. Retention is only proposed, not accepted; ask next.':'Problem: small teams need onboarding guidance. Required: ephemeral local checklist, no retained personal data, no external accounts. Accept when a team completes and resets its checklist. Non-goals: deployment and implementation. Human choices are backed by accepted input. Material unresolved questions: none.',technical_plan:(amended?'Use a standalone operator CLI, not a repository plugin. ':'')+'README.md is the current repository baseline. Prefer a local component over hosted integration to avoid external accounts. Separate UI, transient status and tests; no database migration. Deliver tests then a local checklist. Verify reset discards status. If persistence becomes necessary, clarify again; local implementation names are suggestions.',investigated_commit:result(offset).sha,evidence:['README.md at the acquired default commit'],decision_response_ids:decisions.map(i=>i.id)}};}
+        if(rounds.length===1 && step===offset){name='omnigrex_request_clarification';args={operation_id:'planning-ask-2',introduction:'Small teams without accounts is settled. Let us decide retention before consolidating the plan.',questions:[{id:'Q2',body:'Use ephemeral local status? I recommend avoiding a new retention obligation.'}]};}
+        if(rounds.length>1 && step===offset){name='omnigrex_refresh_default_branch';args={operation_id:`planning-base-${rounds.length}-${amended?"amended":"initial"}`};}
+        if(rounds.length>1 && (step===offset+1 || stale && step===offset+2)){name='omnigrex_publish_plan_checkpoint';args={operation_id:`planning-pair-${rounds.length}-${amended?'amended':'initial'}`,content:{title:'Small-team onboarding',summary:'An ephemeral local checklist without accounts or personal-data retention.',unresolved_decisions:[],status:rounds.length===1?'draft':'proposed',changes:rounds.length===1?'Scope selected; retention remains an unresolved proposal.':'Replace retention assumption with the human choice: ephemeral local status.',requirements_brief:amended?'Users without repository access need a standalone ephemeral checklist. No retained personal data, repository permissions or external accounts. Reset discards status. Non-goals: deployment and implementation. Material unresolved questions: none.':rounds.length===1?'Users: small teams. Scope: checklist without external accounts. Non-goals: deployment and implementation. Retention is only proposed, not accepted; ask next.':'Problem: small teams need onboarding guidance. Required: ephemeral local checklist, no retained personal data, no external accounts. Accept when a team completes and resets its checklist. Non-goals: deployment and implementation. Human choices are backed by accepted input. Material unresolved questions: none.',technical_plan:(amended?'Use a standalone operator CLI, not a repository plugin. ':'')+'README.md is the current repository baseline. Prefer a local component over hosted integration to avoid external accounts. Separate UI, transient status and tests; no database migration. Deliver tests then a local checklist. Verify reset discards status. If persistence becomes necessary, clarify again; local implementation names are suggestions.',investigated_commit:result(offset).sha,evidence:['README.md at the acquired default commit'],decision_response_ids:decisions.map(i=>i.id)}};}
         if(stale && step===offset+3){
           const rejected=result(offset+1), replay=result(offset+2);
           if(rejected.status!=='input_pending'||rejected.publication!=='not_applied'||rejected.reason!=='late_input'||rejected.next_action!=='request_clarification_empty_questions'||rejected.revision_id||rejected.source||Object.keys(rejected).length!==Object.keys(replay).length||Object.keys(rejected).some(key=>rejected[key]!==replay[key]))throw new Error('non-publication lost through Pi or replay');
           name='omnigrex_request_clarification';args={operation_id:'drain-late-input',questions:[]};
         }
-        if(!stale && step===offset+2){
+        if(rounds.length>1 && !stale && step===offset+2){
           if(!result(offset+1).revision_id||result(offset+1).publication==='not_applied')throw new Error('expected published checkpoint');
           name='omnigrex_request_clarification';args={operation_id:rounds.length===1?'planning-ask-2':'await-confirmation',questions:rounds.length===1?[{id:'Q2',body:'Should onboarding status be retained? I recommend ephemeral local status rather than the earlier persistence proposal, avoiding a new retention obligation.'}]:[]};}
       }
@@ -115,9 +121,10 @@ try {
       }
       const rounds = (collections.clarification_history ?? envelope.clarification_history ?? []).filter(r => r.participant_id === envelope.agent_participant_id);
       const input = collections.human_input ?? envelope.human_input ?? [];
-      const actionStep = step - fetched;
+      const actionStep = step - fetched - (input.length?1:0);
       const prefix = rounds.length > 0 ? 1 : 0;
       if (fetchRequest) { name = 'omnigrex_get_collaboration_record'; args = fetchRequest; }
+      else if(step===fetched && input.length){name='omnigrex_assess_human_input';args={operation_id:`assess-clarification-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:[i.id],disposition:'changed',explanation:'Explicit fixture answer considered for this round.'}))};}
       else if (actionStep === 0 && prefix) {
         if (!input.length || input.some(i => !i.id || !i.actor?.id || !i.source?.id)) throw new Error('missing correlated human input');
         const round = rounds.at(-1);

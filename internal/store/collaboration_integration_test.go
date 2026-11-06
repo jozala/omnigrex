@@ -37,7 +37,7 @@ func TestClarificationDurableWaitAndInputFences(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			input := store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "answer", Target: round.ID, Body: "1. Preserve compatibility. Cannot decide 2."}, Actor: collaboration.Actor{ID: "maintainer", Name: "M"}, Source: collaboration.Source{Channel: "fixture", ID: "reply-during-publication"}, Authorized: true, At: time.Now()}
+			input := store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "answer", Target: round.Reference, Body: "1. Preserve compatibility. Cannot decide 2."}, Actor: collaboration.Actor{ID: "maintainer", Name: "M"}, Source: collaboration.Source{Channel: "fixture", ID: "reply-during-publication"}, Authorized: true, At: time.Now()}
 			receipt, err := database.AdmitHumanInput(ctx, input)
 			if err != nil || receipt.ResponseID == "" {
 				t.Fatalf("admit = %+v %v", receipt, err)
@@ -432,8 +432,9 @@ func TestRetrievalOnlyInputFencesHandoffUntilEveryChunkIsRecorded(t *testing.T) 
 			if role == workflow.RoleReviewer {
 				tool = "submit_review"
 			}
+			assessDeliveredFixtureInputs(t, database, ctx, lease, "assess-read-input", []string{"A1", "A2"})
 			if _, err = database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: tool, OperationID: "complete", Request: json.RawMessage(`{"operation_id":"complete"}`), ExternalService: "fixture", ExternalResourceID: "resource"}); err != nil {
-				t.Fatalf("fully delivered input blocked handoff: %v", err)
+				t.Fatalf("fully delivered and assessed input blocked handoff: %v", err)
 			}
 		})
 	}
@@ -585,6 +586,7 @@ func TestObsoleteQuestionRenewalPersistsAfterRequiredEvidenceDelivery(t *testing
 			if role == workflow.RoleReviewer {
 				tool = "submit_review"
 			}
+			assessDeliveredFixtureInputs(t, database, ctx, lease, "assess-renewal", []string{"A1", "A2"})
 			if _, err = database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: tool, OperationID: "renewed-handoff", Request: json.RawMessage(`{"operation_id":"renewed-handoff"}`), ExternalService: "fixture", ExternalResourceID: "resource"}); err != nil {
 				t.Fatalf("delivered renewed interpretation failed handoff: %v", err)
 			}

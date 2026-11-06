@@ -374,6 +374,8 @@ func TestObsoleteQuestionCanReceiveRenewedInterpretation(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
+					original.Sequence = 1
+					obsolete.Sequence = 2
 					originalInput := s.Inputs[0]
 					target, current := "R1", "R1"
 					if route != "same round" {

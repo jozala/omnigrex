@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 )
 
-const DiscoveryProcedureVersion = "omnigrex-discovery/v1"
+const DiscoveryProcedureVersion = "omnigrex-discovery/v2"
 
 type OriginalRequest struct {
 	Title  string `json:"title"`
@@ -17,6 +17,8 @@ type OriginalRequest struct {
 	Source Source `json:"source"`
 }
 type PlanningContent struct {
+	Summary             string   `json:"summary"`
+	UnresolvedDecisions []string `json:"unresolved_decisions"`
 	Title               string   `json:"title"`
 	Status              string   `json:"status"`
 	Changes             string   `json:"changes"`
@@ -27,17 +29,20 @@ type PlanningContent struct {
 	DecisionResponseIDs []string `json:"decision_response_ids,omitempty"`
 }
 type PlanningRevision struct {
-	ID                string          `json:"id"`
-	Supersedes        string          `json:"supersedes,omitempty"`
-	ParticipantID     string          `json:"participant_id"`
-	TurnID            string          `json:"turn_id"`
-	ProcedureVersion  string          `json:"procedure_version"`
-	Content           PlanningContent `json:"content"`
-	OriginalRequest   OriginalRequest `json:"original_request"`
-	Decisions         []Input         `json:"decisions,omitempty"`
-	PublicationFailed bool            `json:"publication_failed,omitempty"`
-	Published         bool            `json:"published"`
-	Source            *Source         `json:"source,omitempty"`
+	Artifact            *RenderedPublication `json:"artifact,omitempty"`
+	Reference           string               `json:"reference"`
+	SupersedesReference string               `json:"supersedes_reference,omitempty"`
+	ID                  string               `json:"id"`
+	Supersedes          string               `json:"supersedes,omitempty"`
+	ParticipantID       string               `json:"participant_id"`
+	TurnID              string               `json:"turn_id"`
+	ProcedureVersion    string               `json:"procedure_version"`
+	Content             PlanningContent      `json:"content"`
+	OriginalRequest     OriginalRequest      `json:"original_request"`
+	Decisions           []Input              `json:"decisions,omitempty"`
+	PublicationFailed   bool                 `json:"publication_failed,omitempty"`
+	Published           bool                 `json:"published"`
+	Source              *Source              `json:"source,omitempty"`
 }
 type PlanRevalidation struct {
 	SourceInvocationID  string   `json:"source_invocation_id"`
@@ -76,12 +81,13 @@ func (s *State) CheckpointInputReason(participant string) string {
 }
 
 type PlanningState struct {
-	NonPublications []CheckpointNotApplied `json:"non_publications,omitempty"`
-	OriginalRequest OriginalRequest        `json:"original_request"`
-	Revisions       []PlanningRevision     `json:"revisions"`
-	CurrentRevision string                 `json:"current_revision,omitempty"`
-	ReadyRevision   string                 `json:"ready_revision,omitempty"`
-	Revalidations   []PlanRevalidation     `json:"revalidations,omitempty"`
+	InvalidatedConfirmations []string               `json:"invalidated_confirmations,omitempty"`
+	NonPublications          []CheckpointNotApplied `json:"non_publications,omitempty"`
+	OriginalRequest          OriginalRequest        `json:"original_request"`
+	Revisions                []PlanningRevision     `json:"revisions"`
+	CurrentRevision          string                 `json:"current_revision,omitempty"`
+	ReadyRevision            string                 `json:"ready_revision,omitempty"`
+	Revalidations            []PlanRevalidation     `json:"revalidations,omitempty"`
 }
 
 var planningCommit = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -101,8 +107,13 @@ func (s *State) StartPlanning(original OriginalRequest) error {
 }
 func cloneRevision(r PlanningRevision) PlanningRevision {
 	r.Content.Evidence = slices.Clone(r.Content.Evidence)
+	r.Content.UnresolvedDecisions = slices.Clone(r.Content.UnresolvedDecisions)
 	r.Content.DecisionResponseIDs = slices.Clone(r.Content.DecisionResponseIDs)
 	r.Decisions = slices.Clone(r.Decisions)
+	if r.Artifact != nil {
+		a := *r.Artifact
+		r.Artifact = &a
+	}
 	if r.Source != nil {
 		source := *r.Source
 		r.Source = &source
@@ -147,7 +158,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 			return PlanningRevision{}, ErrInvalid
 		}
 	}
-	for _, v := range []string{c.Title, c.Changes, c.RequirementsBrief, c.TechnicalPlan} {
+	for _, v := range []string{c.Title, c.Summary, c.Changes, c.RequirementsBrief, c.TechnicalPlan} {
 		if strings.TrimSpace(v) == "" || !utf8.ValidString(v) || strings.ContainsRune(v, '\x00') {
 			return PlanningRevision{}, ErrInvalid
 		}
@@ -155,7 +166,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 	if c.Status != "draft" && c.Status != "proposed" || !planningCommit.MatchString(c.InvestigatedCommit) || len(c.Evidence) == 0 {
 		return PlanningRevision{}, ErrInvalid
 	}
-	for _, v := range c.Evidence {
+	for _, v := range append(slices.Clone(c.Evidence), c.UnresolvedDecisions...) {
 		if strings.TrimSpace(v) == "" || !utf8.ValidString(v) {
 			return PlanningRevision{}, ErrInvalid
 		}
@@ -163,7 +174,11 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 	if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.ParticipantID == participant && p.TurnID == turn }) {
 		return PlanningRevision{}, ErrInvalid
 	}
-	r := PlanningRevision{ID: id, ParticipantID: participant, TurnID: turn, ProcedureVersion: DiscoveryProcedureVersion, Content: c, OriginalRequest: s.Planning.OriginalRequest, Supersedes: s.Planning.CurrentRevision}
+	supersedesReference := ""
+	if current := s.CurrentCheckpoint(); current != nil {
+		supersedesReference = current.Reference
+	}
+	r := PlanningRevision{SupersedesReference: supersedesReference, ID: id, ParticipantID: participant, TurnID: turn, ProcedureVersion: DiscoveryProcedureVersion, Content: c, OriginalRequest: s.Planning.OriginalRequest, Supersedes: s.Planning.CurrentRevision}
 	seen := map[string]bool{}
 	for _, response := range c.DecisionResponseIDs {
 		if seen[response] {
@@ -179,6 +194,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		r.Decisions = append(r.Decisions, s.Inputs[i])
 	}
 	if reason := s.CheckpointInputReason(participant); reason != "" {
+		s.reference("P", id)
 		rejection := CheckpointNotApplied{OperationID: id, ParticipantID: participant, TurnID: turn, Content: c, Reason: reason}
 		// Deep-copy slices just as for immutable revisions.
 		rejection.Content = cloneRevision(r).Content
@@ -186,6 +202,10 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		rejection.Content = cloneRevision(r).Content
 		return PlanningRevision{}, &rejection
 	}
+	if c.Status == "proposed" && (len(c.UnresolvedDecisions) > 0 || s.AssessmentBlocked(participant) || s.Unresolved(participant)) {
+		return PlanningRevision{}, ErrInvalid
+	}
+	r.Reference = s.reference("P", id)
 	s.Planning.Revisions = append(s.Planning.Revisions, cloneRevision(r))
 	return cloneRevision(r), nil
 }
@@ -228,16 +248,16 @@ func (s *State) FailCheckpoint(id string) error {
 }
 func (s *State) AwaitingPlanConfirmation(participant string) bool {
 	r := s.CurrentCheckpoint()
-	return r != nil && r.Published && r.Content.Status == "proposed" && r.ParticipantID == participant && !s.Unresolved(participant) && s.Planning.ReadyRevision == ""
+	return r != nil && r.Published && r.Content.Status == "proposed" && r.ParticipantID == participant && !s.Unresolved(participant) && !s.AssessmentBlocked(participant) && s.Planning.ReadyRevision == ""
 }
 func (s *State) planningConfirmationTarget(target, participant string) string {
 	r := s.CurrentCheckpoint()
 	if r == nil || !r.Published || r.Content.Status != "proposed" || r.ID != target || r.ParticipantID != participant || s.Planning.ReadyRevision != "" {
 		id := "none"
 		if r != nil {
-			id = r.ID
+			id = r.Reference
 		}
-		return fmt.Sprintf("Rejected: confirm the current published proposed planning revision (%s), not an unknown, draft, stale or completed revision.", id)
+		return fmt.Sprintf("Please review the current proposed pair (%s) and use its short reference, for example `/omnigrex confirm-plan P2`. Draft, replaced and completed pairs cannot be confirmed.", id)
 	}
 	return ""
 }
@@ -245,7 +265,7 @@ func (s *State) planningConfirmationTarget(target, participant string) string {
 // ValidatePlanning records final assessment; readiness is committed separately
 // at fenced settlement so input arriving after this operation cannot be lost.
 func (s *State) ValidatePlanning(operation, revision, participant, turn, commit, evidence string, resolved bool) error {
-	if operation == "" || !resolved || !planningCommit.MatchString(commit) || strings.TrimSpace(evidence) == "" || !utf8.ValidString(evidence) || s.Pending(participant) || s.Unresolved(participant) {
+	if operation == "" || !resolved || !planningCommit.MatchString(commit) || strings.TrimSpace(evidence) == "" || !utf8.ValidString(evidence) || s.Pending(participant) || s.Unresolved(participant) || s.AssessmentBlocked(participant) {
 		return ErrInvalid
 	}
 	r := s.CurrentCheckpoint()
@@ -261,7 +281,7 @@ func (s *State) ValidatePlanning(operation, revision, participant, turn, commit,
 			continue
 		}
 		v.ConsideredInputIDs = append(v.ConsideredInputIDs, in.ID)
-		if in.Kind == "confirm-plan" && in.Target == revision {
+		if in.Kind == "confirm-plan" && in.Target == revision && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) && s.latestAssessment(in.ID) != nil && s.latestAssessment(in.ID).Disposition == "confirmed" {
 			v.ConfirmationInputID = in.ID
 		}
 	}
@@ -281,4 +301,22 @@ func (s *State) ValidatePlanning(operation, revision, participant, turn, commit,
 	}
 	s.Planning.Revalidations = append(s.Planning.Revalidations, v)
 	return nil
+}
+
+// PlanningValidationCurrent rechecks authority at settlement, not merely when
+// the completion tool ran. An immutable old validation is not a current grant.
+func (s *State) PlanningValidationCurrent(v PlanRevalidation) bool {
+	if s.Planning == nil || s.Planning.CurrentRevision != v.RevisionID || s.Pending(v.ParticipantID) || s.AssessmentBlocked(v.ParticipantID) || s.Unresolved(v.ParticipantID) || slices.Contains(s.Planning.InvalidatedConfirmations, v.ConfirmationInputID) {
+		return false
+	}
+	a := s.latestAssessment(v.ConfirmationInputID)
+	if a == nil || a.Disposition != "confirmed" {
+		return false
+	}
+	for _, in := range s.Inputs {
+		if in.ParticipantID == v.ParticipantID && !slices.Contains(v.ConsideredInputIDs, in.ID) {
+			return false
+		}
+	}
+	return true
 }

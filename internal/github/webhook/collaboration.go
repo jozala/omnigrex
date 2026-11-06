@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ type CollaborationHandler interface {
 type CollaborationStore interface {
 	FindCollaborationWorkItem(context.Context, int64, int64, int64) (string, error)
 	AdmitHumanInput(context.Context, store.HumanInputSubmission) (collaboration.Receipt, error)
+	ReserveCollaborationReceipt(context.Context, string, string, collaboration.RenderedPublication) (collaboration.RenderedPublication, bool, error)
 }
 type CollaborationAPI interface {
 	CanDecideWorkItem(context.Context, string, string, string, string, int64) (bool, error)
@@ -113,17 +115,25 @@ func (adapter *IssueCollaboration) HandleCollaboration(ctx context.Context, clai
 	if err != nil {
 		return true, err
 	}
-	// Acknowledgments are an independently reconciled visible receipt, not the
-	// agent's interpretation. A retry after an uncertain POST first checks it.
+
+	// Read-only failures must not consume POST ownership. Once reserved, a
+	// contender may only reconcile uncertainty, never grant itself another POST.
 	comments, err := adapter.API.ListIssueComments(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber))
 	if err != nil {
 		return true, err
 	}
+	artifact, owned, err := adapter.Store.ReserveCollaborationReceipt(ctx, workflowID, receipt.ID, collaboration.RenderedPublication{Body: githubapi.JoinPostedBody(receipt.Feedback, marker), Marker: marker})
+	if err != nil {
+		return true, err
+	}
 	for _, comment := range comments {
-		if comment.Body == githubapi.JoinBodyParts(receipt.Feedback, marker) {
+		if comment.Body == artifact.Body {
 			return true, nil
 		}
 	}
-	_, err = adapter.API.CreateIssueComment(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber), githubapi.CommentRequest{Body: receipt.Feedback, Marker: marker})
+	if !owned {
+		return true, errors.New("acknowledgment publication is uncertain; the reserved exact artifact has not been observed")
+	}
+	_, err = adapter.API.CreateIssueComment(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber), githubapi.CommentRequest{Body: artifact.Body})
 	return true, err
 }

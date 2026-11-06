@@ -189,14 +189,14 @@ func (s *Store) ReconcilePlanningNonPublication(ctx context.Context, workflowID,
 	if state.Planning == nil {
 		return nil, collaboration.ErrInvalid
 	}
-	for _, r := range state.Planning.Revisions {
-		if r.ID == "P"+operation {
-			return nil, nil
-		}
-	}
 	for _, r := range state.Planning.NonPublications {
 		if r.OperationID == "P"+operation {
 			return &r, nil
+		}
+	}
+	for _, r := range state.Planning.Revisions {
+		if r.ID == "P"+operation && (r.Published || r.Artifact != nil) {
+			return nil, nil
 		}
 	}
 	var stopped bool
@@ -228,6 +228,18 @@ FOR UPDATE OF t,i`, workflowID, turnID, operation).Scan(&stopped, &participant, 
 	if reason == "" {
 		reason = "interrupted_before_reservation"
 	}
+	for i := range state.Planning.Revisions {
+		r := &state.Planning.Revisions[i]
+		if r.ID == "P"+operation {
+			if r.ParticipantID != participant || r.TurnID != turnID {
+				return nil, collaboration.ErrInvalid
+			}
+			r.PublicationFailed = true
+			if reason == "interrupted_before_reservation" {
+				reason = "interrupted_before_publication"
+			}
+		}
+	}
 	r := collaboration.CheckpointNotApplied{OperationID: "P" + operation, ParticipantID: participant, TurnID: turnID, Content: args.Content, Reason: reason}
 	state.Planning.NonPublications = append(state.Planning.NonPublications, r)
 	if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
@@ -237,4 +249,37 @@ FOR UPDATE OF t,i`, workflowID, turnID, operation).Scan(&stopped, &participant, 
 		return nil, err
 	}
 	return &r, nil
+}
+
+func (s *Store) RejectPlanningPublication(ctx context.Context, lease AgentTurnLease, id, reason string) error {
+	return s.withLockedAgentTurnLease(ctx, lease, "reject planning publication", func(tx pgx.Tx, turn lockedTurn) error {
+		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
+			return ErrMutationAdmissionClosed
+		}
+		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
+		if err != nil {
+			return err
+		}
+		if state.Planning == nil || reason != "payload_too_large" {
+			return collaboration.ErrInvalid
+		}
+		for _, r := range state.Planning.NonPublications {
+			if r.OperationID == id && r.Reason == reason {
+				return nil
+			}
+		}
+		for i := range state.Planning.Revisions {
+			r := &state.Planning.Revisions[i]
+			if r.ID != id || r.TurnID != turn.ID || r.ParticipantID != turn.AgentParticipantID {
+				continue
+			}
+			if r.Published || r.Artifact != nil {
+				return collaboration.ErrInvalid
+			}
+			r.PublicationFailed = true
+			state.Planning.NonPublications = append(state.Planning.NonPublications, collaboration.CheckpointNotApplied{OperationID: id, ParticipantID: r.ParticipantID, TurnID: r.TurnID, Content: r.Content, Reason: reason})
+			return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
+		}
+		return collaboration.ErrInvalid
+	})
 }

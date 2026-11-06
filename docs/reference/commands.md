@@ -82,15 +82,17 @@ See [testing](../contributors/testing.md) and [mise.toml](../../mise.toml) for e
 
 ## Work Item collaboration commands
 
-On the first nonblank line of a new Work Item Issue comment, use `/omnigrex answer <round-id>`, `/omnigrex amend <response-id>`, or `/omnigrex steer`, followed by natural-language content.
+On the first nonblank line of a new Work Item Issue comment, use `/omnigrex answer R3`, `/omnigrex amend A7`, or `/omnigrex steer`, followed by natural-language content.
+Use the actual permanent short reference from the conversation; missing targets are never inferred from the current round.
+For exact proposed-pair confirmation use `/omnigrex confirm-plan P2` with the published reference, after reviewing both complete documents.
 Repository write-or-higher permission and an active Workflow or normal clarification wait are required.
 These commands do not authorize implementation or recover Human Handoff.
 See [clarification and steering](../users/clarification.md) for partial answers, immutable history, acknowledgment identifiers, rejections, and waiting behavior.
 
 ## Agent collaboration history
 
-Both Developer and Reviewer can call the scoped read capability `get_collaboration_record`.
-Its `collection` is `human_input`, `human_input_history`, or `clarification_history`; `index` is zero-based and `offset` defaults to zero.
+Planner, Developer and Reviewer can call the scoped read capability `get_collaboration_record`.
+Its `collection` is `human_input`, `human_input_history`, `clarification_history`, `assessment_history`, `planning_request`, or `planning_history`; `index` is zero-based and `offset` defaults to zero.
 Preparation supplies frozen collection counts in `collaboration_projection`.
 When `retrieval_required` is true, every pending `human_input` record must be retrieved before interpretation or handoff; older history is available as needed.
 Each result contains JSON-text `content`, `record_sha256`, `index`, and `total`, with `next_offset` for another chunk of the same record or `next_index` for the next record.
@@ -109,3 +111,9 @@ The orchestrator records this origin atomically with the interpretation; agents 
 Recovery requires matching origin, Work Item, Participant, round, and the complete requested interpretation batch.
 An identical historical interpretation from another operation is not proof that a cancelled or uncertain operation applied its effect.
 Earlier unattributed interpretations remain history but cannot establish operation-specific recovery proof.
+
+
+`assess_human_input` records each delivered input's explanation and `changed`, `unchanged`, `uncertain`, or exact-confirmation `confirmed` disposition, with immutable evidence IDs and optional natural-correction links.
+Every delivered input must be assessed before a pair is proposed or a Role completes work, and unresolved material uncertainty remains blocking outside the current question frontier.
+Assessment effects, including confirmation invalidation, are bound to their exact reservation; identical historical content from another operation is not recovery proof.
+Human-facing references do not replace internal reconciliation identities.
