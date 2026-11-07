@@ -76,6 +76,24 @@ func TestMountedDiscoveryExportsHealthyUsageAndFailedCategories(t *testing.T) {
 	if checked, _, err := monitor.Check(context.Background()); err != nil || checked != 1 {
 		t.Fatalf("check=%d %v", checked, err)
 	}
+	// Enumeration succeeds but child lookup fails. With no other discovered
+	// Participants, only discovery itself can report this root as unavailable.
+	lookupDenied := t.TempDir()
+	if err := os.Mkdir(filepath.Join(lookupDenied, "assignment-10000000-0000-4000-8000-000000000002"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lookupDenied, 0400); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(lookupDenied, 0700)
+	incomplete, err := NewToolCacheMonitor(&Lifecycle{workspaceRoot: lookupDenied, miseRoot: t.TempDir()}, ToolCacheMonitorConfig{ThresholdBytes: 1, PollInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer incomplete.Close()
+	if checked, _, err := incomplete.Check(context.Background()); err != nil || checked != 0 {
+		t.Fatalf("child-lookup check=%d %v", checked, err)
+	}
 	// ForceFlush uses the existing provider, and export happens only in this test.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -117,7 +135,7 @@ func TestMountedDiscoveryExportsHealthyUsageAndFailedCategories(t *testing.T) {
 				}
 			}
 		}
-		if !healthyUsage || !unavailable["state"] || !unavailable["mise"] || !unavailable["tool-data"] {
+		if !healthyUsage || !unavailable["workspace"] || !unavailable["state"] || !unavailable["mise"] || !unavailable["tool-data"] {
 			t.Fatalf("healthy usage=%v unavailable categories=%v", healthyUsage, unavailable)
 		}
 	case <-ctx.Done():

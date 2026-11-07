@@ -252,6 +252,7 @@ Filesystem capacity is shared, not exclusive Participant capacity or a quota; ne
 The background cache monitor initially retains its five-minute configured cadence.
 Discovery unions configured workspace, runtime-state and mise backing roots, including idle retained Participant directories without starting an environment or invoking cleanup/inventory APIs.
 Each backing root is discovered independently: a failed root records its resource categories as `unavailable` without discarding IDs from healthy roots or preventing later roots from being discovered.
+Enumeration errors and non-`ENOENT` child-lookup failures also make discovery incomplete, while retaining IDs already discovered successfully; a readable but non-searchable root must not appear empty.
 Absence-based pruning of retained scans and cache-warning state requires complete discovery; incomplete discovery does not establish that an undiscovered Participant was removed.
 For both supplied Docker and Microsandbox mappings, exact `assignment-<Participant UUID>` directories map to `workspace`, `runtime-state`, `mise`, and `tool-data` under those roots.
 The four persistent categories are `workspace`, `state`, `mise`, and `tool-data`; the latter includes assignment caches **and** Turn scratch, while mise covers the whole mounted installation tree.

@@ -291,6 +291,10 @@ func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) 
 			continue
 		}
 		ids, err := listParticipantDirectories(ctx, root)
+		// A root may yield usable IDs before a child lookup or enumeration fails.
+		for _, id := range ids {
+			seen[id] = true
+		}
 		if err != nil {
 			for _, mounted := range monitor.mountedRoots() {
 				if mounted.parent == root {
@@ -298,10 +302,6 @@ func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) 
 				}
 			}
 			discoveryErr = errors.New("mounted storage discovery unavailable")
-			continue
-		}
-		for _, id := range ids {
-			seen[id] = true
 		}
 	}
 	ids := make([]string, 0, len(seen))
@@ -322,9 +322,11 @@ func listParticipantDirectories(ctx context.Context, directory string) ([]string
 	}
 	defer root.Close()
 	var ids []string
+	var discoveryErr error
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err // Incomplete discovery must not prune active scans.
+			discoveryErr = err
+			break // Keep partial results, but never treat absence as complete.
 		}
 		names, err := root.Readdirnames(toolCacheDirBatchSize)
 		for _, name := range names {
@@ -333,7 +335,13 @@ func listParticipantDirectories(ctx context.Context, directory string) ([]string
 				continue
 			}
 			var stat unix.Stat_t
-			if unix.Fstatat(int(root.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+			if err := unix.Fstatat(int(root.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				if !os.IsNotExist(err) {
+					discoveryErr = err
+				}
+				continue
+			}
+			if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
 				ids = append(ids, id)
 			}
 		}
@@ -341,9 +349,10 @@ func listParticipantDirectories(ctx context.Context, directory string) ([]string
 			break
 		}
 		if err != nil {
-			return nil, err
+			discoveryErr = err
+			break
 		}
 	}
 	sort.Strings(ids)
-	return ids, nil
+	return ids, discoveryErr
 }

@@ -239,63 +239,91 @@ func TestMountedDiscoveryKeepsHealthyRootsAfterFailure(t *testing.T) {
 }
 
 func TestIncompleteMountedDiscoveryPreservesRetainedMonitoringState(t *testing.T) {
-	const retained = "10000000-0000-4000-8000-000000000001"
-	const healthy = "10000000-0000-4000-8000-000000000002"
-	mise, workspace := t.TempDir(), t.TempDir()
-	cache := filepath.Join(mise, "assignment-"+retained, "tool-data", "assignment")
-	if err := os.MkdirAll(cache, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cache, "data"), []byte("data"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	tree := filepath.Join(workspace, "assignment-"+healthy, "workspace")
-	if err := os.MkdirAll(tree, 0700); err != nil {
-		t.Fatal(err)
-	}
-	monitor, err := NewToolCacheMonitor(&Lifecycle{workspaceRoot: workspace, miseRoot: mise}, ToolCacheMonitorConfig{ThresholdBytes: 1, PollInterval: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer monitor.Close()
-	monitor.entryBudget = 0
-	_, warned, err := monitor.Observe(context.Background(), retained)
-	if err != nil || !warned {
-		t.Fatalf("warning fixture=%v %v", warned, err)
-	}
-	monitor.observeMounted(context.Background(), retained, make(map[uint64]bool))
-	scan, mounted, watermark := monitor.scans[retained], monitor.mountedScans[retained+"/tool-data"], monitor.lastWarned[retained]
-	if scan == nil || mounted == nil {
-		t.Fatal("fixture did not retain scans")
-	}
-	if err := os.Rename(mise, mise+"-old"); err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(mise + "-old")
-	if err := os.WriteFile(mise, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	checked, _, err := monitor.Check(context.Background())
-	if err != nil || checked != 1 {
-		t.Fatalf("healthy observation=%d %v", checked, err)
-	}
-	if monitor.scans[retained] != scan || monitor.mountedScans[retained+"/tool-data"] != mounted || monitor.lastWarned[retained] != watermark || len(scan.frames) == 0 || len(mounted.frames) == 0 {
-		t.Fatal("incomplete discovery pruned retained scan/warning state")
-	}
-	// Complete discovery can subsequently establish that the old owner is gone.
-	if err := os.Remove(mise); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(mise, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := monitor.Check(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if monitor.scans[retained] != nil || monitor.mountedScans[retained+"/tool-data"] != nil || len(scan.frames) != 0 || len(mounted.frames) != 0 {
-		t.Fatal("complete discovery did not release stale scans")
-	}
-	if _, present := monitor.lastWarned[retained]; present {
-		t.Fatal("complete discovery retained stale warning")
+	for _, failure := range []string{"not-directory", "child-lookup-denied"} {
+		t.Run(failure, func(t *testing.T) {
+			const retained = "10000000-0000-4000-8000-000000000001"
+			const healthy = "10000000-0000-4000-8000-000000000002"
+			mise, workspace := t.TempDir(), t.TempDir()
+			cache := filepath.Join(mise, "assignment-"+retained, "tool-data", "assignment")
+			if err := os.MkdirAll(cache, 0700); err != nil {
+				t.Fatal(err)
+			}
+			// Either first entry is an allocated file. Visit one, leaving the other
+			// unread so the warning does not depend on directory st_blocks (e.g. APFS).
+			for _, name := range []string{"data-a", "data-b"} {
+				if err := os.WriteFile(filepath.Join(cache, name), make([]byte, 8192), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tree := filepath.Join(workspace, "assignment-"+healthy, "workspace")
+			if err := os.MkdirAll(tree, 0700); err != nil {
+				t.Fatal(err)
+			}
+			monitor, err := NewToolCacheMonitor(&Lifecycle{workspaceRoot: workspace, miseRoot: mise}, ToolCacheMonitorConfig{ThresholdBytes: 1, PollInterval: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer monitor.Close()
+			monitor.entryBudget = 1
+			usage, warned, err := monitor.Observe(context.Background(), retained)
+			if err != nil || !warned || usage.Files != 1 || !usage.Truncated || usage.Bytes < 8192 {
+				t.Fatalf("warning fixture=%+v warned=%v err=%v", usage, warned, err)
+			}
+			monitor.observeMounted(context.Background(), retained, make(map[uint64]bool))
+			scan, mounted, watermark := monitor.scans[retained], monitor.mountedScans[retained+"/tool-data"], monitor.lastWarned[retained]
+			if scan == nil || mounted == nil {
+				t.Fatal("fixture did not retain scans")
+			}
+			if failure == "not-directory" {
+				if err := os.Rename(mise, mise+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				defer os.RemoveAll(mise + "-old")
+				if err := os.WriteFile(mise, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Chmod(mise, 0400); err != nil {
+					t.Fatal(err)
+				}
+				defer os.Chmod(mise, 0700)
+				ids, err := listParticipantDirectories(context.Background(), mise)
+				if err == nil || len(ids) != 0 {
+					t.Fatalf("non-searchable directory discovery=%v err=%v; want incomplete", ids, err)
+				}
+			}
+			checked, _, err := monitor.Check(context.Background())
+			if err != nil || checked != 1 {
+				t.Fatalf("healthy observation=%d %v", checked, err)
+			}
+			if monitor.scans[retained] != scan || monitor.mountedScans[retained+"/tool-data"] != mounted || monitor.lastWarned[retained] != watermark || len(scan.frames) == 0 || len(mounted.frames) == 0 {
+				t.Fatal("incomplete discovery pruned retained scan/warning state")
+			}
+			// Complete discovery can subsequently establish that the old owner is gone.
+			if failure == "not-directory" {
+				if err := os.Remove(mise); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(mise, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Chmod(mise, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.RemoveAll(filepath.Join(mise, "assignment-"+retained)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := monitor.Check(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if monitor.scans[retained] != nil || monitor.mountedScans[retained+"/tool-data"] != nil || len(scan.frames) != 0 || len(mounted.frames) != 0 {
+				t.Fatal("complete discovery did not release stale scans")
+			}
+			if _, present := monitor.lastWarned[retained]; present {
+				t.Fatal("complete discovery retained stale warning")
+			}
+		})
 	}
 }
