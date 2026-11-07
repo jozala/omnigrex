@@ -393,3 +393,105 @@ func TestRenewalSurvivesEarlierWithdrawalInSharedBatch(t *testing.T) {
 		})
 	}
 }
+
+func TestAmendmentOfLaterRoundAnswerCanReviseHistoricalCorrection(t *testing.T) {
+	for _, role := range []string{"planner", "developer", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			var s collaboration.State
+			request := func(id, turn, question string) collaboration.Round {
+				t.Helper()
+				r, err := s.Request(id, role, turn, "", []collaboration.Question{{ID: question, Body: "Keep this recommendation?"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = s.Publish(id, collaboration.Source{Channel: "fixture", ID: id}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			accept := func(id, participant string, command collaboration.Command) {
+				t.Helper()
+				receipt := s.Accept(id, command, collaboration.Admission{Active: true, Authorized: true, ParticipantID: participant, Actor: collaboration.Actor{ID: "human"}, Source: collaboration.Source{Channel: "fixture", ID: id}, At: time.Now()})
+				if receipt.ResponseID != id {
+					t.Fatal(receipt)
+				}
+			}
+			assess := func(id string, corrects ...string) {
+				t.Helper()
+				s.Prepare(role, id)
+				if err := s.Assess("assess-"+id, role, id, []collaboration.Assessment{{InputID: id, EvidenceIDs: []string{id}, Corrects: corrects, Disposition: "changed", Explanation: "Explicit interpretation of the admitted input."}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolution := func(question string, evidence ...string) []collaboration.Resolution {
+				return []collaboration.Resolution{{QuestionID: question, ResponseIDs: evidence, Explanation: "The explicit amendment governs; earlier interpretations remain history."}}
+			}
+			resolve := func(round, turn, question, evidence string) {
+				t.Helper()
+				if err := s.Resolve(round, turn, resolution(question, evidence)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := request("first", "initial", "Q1")
+			accept("original", role, collaboration.Command{Kind: "answer", Target: first.Reference, Body: "yes"})
+			assess("original")
+			resolve(first.ID, "original", "Q1", "original")
+			second := request("second", "original", "Q2")
+			accept("correction", role, collaboration.Command{Kind: "answer", Target: second.Reference, Body: "Yes to Q2, but revise the earlier Q1 decision."})
+			assess("correction", "original")
+			resolve(first.ID, "correction", "Q1", "correction")
+			resolve(second.ID, "correction", "Q2", "correction")
+			if s.Unresolved(role) || s.AssessmentBlocked(role) {
+				t.Fatal("governing correction was not current")
+			}
+
+			accept("amendment", role, collaboration.Command{Kind: "amend", Target: "A2", Body: "Revise that answer, including its earlier correction."})
+			if s.Inputs[2].RoundID != second.ID {
+				t.Fatal("amendment lost its actual addressed round")
+			}
+			if err := s.Resolve(first.ID, "correction", resolution("Q1", "amendment")); err == nil {
+				t.Fatal("undelivered evidence bypassed the scope check")
+			}
+			assess("amendment")
+			if !s.Unresolved(role) {
+				t.Fatal("amendment failed to fence governing interpretations")
+			}
+			s.Inputs[2].DeliveryPending = true
+			if err := s.Resolve(first.ID, "amendment", resolution("Q1", "amendment")); err == nil {
+				t.Fatal("unread evidence bypassed the scope check")
+			}
+			s.Inputs[2].DeliveryPending = false
+
+			// A valid amendment cannot launder unrelated or another Participant's evidence.
+			accept("unrelated", role, collaboration.Command{Kind: "answer", Target: second.Reference, Body: "Another Q2 answer only."})
+			assess("unrelated")
+			accept("foreign", "another-participant", collaboration.Command{Kind: "steer", Body: "Other Stage input."})
+			s.Prepare("another-participant", "foreign")
+			for _, invalid := range []string{"unrelated", "foreign"} {
+				if err := s.Resolve(first.ID, "unrelated", resolution("Q1", "amendment", invalid)); err == nil {
+					t.Fatalf("accepted out-of-scope %s evidence", invalid)
+				}
+			}
+			resolve(second.ID, "unrelated", "Q2", "amendment")
+			if !s.Unresolved(role) {
+				t.Fatal("current round resolution silently cleared the historical decision")
+			}
+			// Persistence must preserve lineage without inventing Corrects on the amendment.
+			raw, err := json.Marshal(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s = collaboration.State{}
+			if err = json.Unmarshal(raw, &s); err != nil {
+				t.Fatal(err)
+			}
+			resolve(first.ID, "unrelated", "Q1", "amendment")
+			if s.Unresolved(role) || s.AssessmentBlocked(role) {
+				t.Fatal("valid recorded amendment remained fenced")
+			}
+			if s.Inputs[1].Body != "Yes to Q2, but revise the earlier Q1 decision." || s.Inputs[2].Amends != "correction" || len(s.Assessments[2].Corrects) != 0 {
+				t.Fatal("source or correction relationships rewritten")
+			}
+		})
+	}
+}

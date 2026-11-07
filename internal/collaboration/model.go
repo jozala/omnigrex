@@ -431,10 +431,15 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 					}
 				}
 			}
+			// A later-round answer can govern a historical question through a
+			// recorded correction. Its amendments retain that evidence scope;
+			// unrelated answers do not acquire it merely by sharing a round.
 			for _, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
 					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID) || slices.ContainsFunc(r.Resolutions, func(old Resolution) bool {
-						return old.QuestionID == resolution.QuestionID && slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.explicitlyCorrects(in.ID, prior) })
+						return old.QuestionID == resolution.QuestionID && slices.ContainsFunc(old.ResponseIDs, func(prior string) bool {
+							return s.isAmendmentOfEvidence(in.ID, prior) || s.explicitlyCorrects(in.ID, prior)
+						})
 					}))
 				}) {
 					return ErrInvalid
