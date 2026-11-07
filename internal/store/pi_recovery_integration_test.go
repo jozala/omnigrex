@@ -801,7 +801,10 @@ func (f *piWorkflowFixture) testClarificationRestart(t *testing.T, role workflow
 	if err = json.Unmarshal(raw, &state); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Use option one."}, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+	if len(state.Rounds) != 1 || state.Rounds[0].ID != state.CurrentRound || state.Rounds[0].Reference != "R1" {
+		t.Fatal("restart lost the permanent published target", state.Rounds)
+	}
+	receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.Rounds[0].Reference, Body: "Use option one."}, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
 	if err != nil || receipt.ResponseID == "" {
 		t.Fatal(receipt, err)
 	}

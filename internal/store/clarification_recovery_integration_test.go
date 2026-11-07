@@ -187,7 +187,7 @@ func TestClarificationRevalidationAfterExplicitHumanHandoffRecovery(t *testing.T
 				t.Fatal(err)
 			}
 			// Clarification itself cannot bypass this real Human Handoff.
-			input := store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "answer", Target: round.ID, Body: "Keep compatibility."}, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "before-recovery"}, Authorized: true, At: time.Now()}
+			input := store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "answer", Target: round.Reference, Body: "Keep compatibility."}, Actor: collaboration.Actor{ID: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "before-recovery"}, Authorized: true, At: time.Now()}
 			receipt, err := database.AdmitHumanInput(ctx, input)
 			if err != nil || receipt.ResponseID != "" {
 				t.Fatal(receipt, err)

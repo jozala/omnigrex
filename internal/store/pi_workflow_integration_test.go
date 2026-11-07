@@ -125,6 +125,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 						// Seed durable, already-delivered historical fixture records. The actual next
 						// prompt must traverse Pi RPC and retrieve the new answer despite >1 MiB history.
 						for i := 0; i < 20; i++ {
+							state.Assessments = append(state.Assessments, collaboration.Assessment{OriginOperationID: "historical-fixture", InputID: fmt.Sprintf("archive-%s-%d", role, i), EvidenceIDs: []string{fmt.Sprintf("archive-%s-%d", role, i)}, Disposition: "unchanged", Explanation: "Already interpreted historical fixture context."})
 							state.Inputs = append(state.Inputs, collaboration.Input{ID: fmt.Sprintf("archive-%s-%d", role, i), Kind: "steer", Body: strings.Repeat("old context ", 5500), Actor: collaboration.Actor{ID: "fixture-maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: fmt.Sprintf("archive-%s-%d", role, i)}, ParticipantID: participant, DeliveredTo: prepared.Commit.Turn.ID, AcceptedAt: time.Now()})
 						}
 						historical, _ := json.Marshal(state)
@@ -132,7 +133,7 @@ func TestPiControlledWorkflow(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Use option one."}, Actor: collaboration.Actor{ID: "fixture-maintainer", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+					receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "answer", Target: state.Rounds[len(state.Rounds)-1].Reference, Body: "Use option one."}, Actor: collaboration.Actor{ID: "fixture-maintainer", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
 					if err != nil || receipt.ResponseID == "" {
 						t.Fatal(receipt, err)
 					}

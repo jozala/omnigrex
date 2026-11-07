@@ -155,8 +155,9 @@ It verifies corroboration enters clarification waiting without spending an infra
 The PostgreSQL clarification recovery matrix additionally covers empty-question yields, input on both sides of the corroboration boundary, unpublished-question rejection, and revalidation after explicit Human Handoff recovery.
 
 `TestPiControlledWorkflow/planning` also admits an amendment and steering after preparation, verifies actionable checkpoint non-publication and identical-operation replay through the existing Pi bridge, yields with empty questions, and delivers both inputs in the same Participant, Session and Workflow Attempt.
-It asserts explicit audience reinterpretation, a revised standalone CLI plan, immutable paired history, exactly two external checkpoint comments, unchanged budgets and no implementation allocation.
-`TestPlanningNonPublicationRecovery` distinguishes a committed rejection whose acknowledgment was lost from interruption before reservation, and retains a successful-publication control with the same frozen history bounds.
+It asserts explicit assessments, audience reinterpretation, a revised standalone CLI plan, immutable history, exactly one complete final checkpoint, unchanged budgets and no implementation allocation.
+The first two answer/question rounds have no intervening checkpoint; the final pair remains complete and requires exact confirmation.
+`TestPlanningNonPublicationRecovery` distinguishes committed late-input/oversize rejections whose acknowledgments were lost from interruption before reservation or before frozen-payload publication, and retains a successful-publication control with the same frozen history bounds.
 Recovery may prove absence only after durable Runtime Process stop and closed admission under the Workflow lock; committed reservations still require exact-artifact reconciliation.
 `TestPlanningUnreadInputRequiresDurableCoverage` keeps publication fenced until every frozen input chunk is durably recorded, not merely read.
 These deterministic tests establish the continuation mechanism, not real-model reasoning quality.
@@ -167,3 +168,14 @@ See [release publication](releases.md) for candidate evidence, finite artifact r
 Run `mise exec -- go test -race ./.github/workflows` explicitly: the hidden-directory suite validates workflow boundaries; ordinary Go release behavior tests live in `scripts/release/` and are included in the normal unit gate.
 Product post-publication smoke now verifies and extracts the CI deployment archive before testing its Compose files with captured exact digests.
 Dedicated release App setup and live historical-tag authorization, first publication, anonymous GHCR access, and first promotion remain separately authorized post-merge acceptance.
+
+
+## Conversation contract regressions
+
+`TestPermanentReferencesSurviveFailureReplacementAndRestart` and `TestConcurrentInputReferencesAndReceiptPublicationReservation` cover durable non-rebinding names, exact targets, source deduplication, concurrent admissions and independently reserved acknowledgment publication.
+`TestNaturalCorrectionsAndHistoricalConflictFenceEveryRole` covers explicit correction links, several historical decisions, incompatible authorized-human evidence and reconciliation without application semantic matching.
+`TestConversationAssessmentFencesAllRoleTerminalAdmissionAndRecoversExactly` checks real locked-store terminal fences and operation-bound assessment replay for Planner, Developer and Reviewer.
+`TestQualifiedWithdrawalAndRenewedExactConfirmation` checks change requests, invalidation, unchanged-pair renewal and settlement-time authority rather than treating admission as confirmation.
+`TestFrozenPayloadReconcilesWithoutRendererOrSignatureRegeneration`, `TestCompletePayloadLimitIncludesUnicodeSignatureAndMarker` and `TestOversizeCompletePairReturnsActionableDefiniteNonPublication` distinguish exact new-format recovery from rendering, including complete payload boundaries and definite rejection without truncation or half-pair publication.
+Controlled-provider qualification establishes these mechanisms, not real-model semantics, tone or reading burden.
+After a separately authorized deployment, record fresh unassisted real-provider results and actual human feedback under Work Item 176 or a linked follow-up; closed evaluation 172 is not an unqualified pass or a substitute for that assessment.

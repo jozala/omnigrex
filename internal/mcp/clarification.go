@@ -23,14 +23,15 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		return nil, ErrToolDependency
 	}
 	var request struct {
-		Questions []collaboration.Question `json:"questions"`
-		Signature string                   `json:"signature"`
+		Introduction string                   `json:"introduction"`
+		Questions    []collaboration.Question `json:"questions"`
+		Signature    string                   `json:"signature"`
 	}
 	if json.Unmarshal(invocation.Arguments, &request) != nil || invocation.Scope.Role == role.Planner && len(request.Questions) > 5 {
 		return nil, ErrInvalidInvocation
 	}
 	publisher := backend.clarificationDelivery(invocation)
-	operation := collaboration.Publication{WorkflowID: invocation.Scope.WorkflowID, Publisher: publisher, Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
+	operation := collaboration.Publication{WorkflowID: invocation.Scope.WorkflowID, Publisher: publisher, SaveArtifact: backend.artifactSaver(invocation), Confirm: func(ctx context.Context, id string, source collaboration.Source) error {
 		if err := backend.clarifications.ConfirmClarificationPublication(ctx, invocation.Scope.WorkflowID, id, source); err != nil {
 			return OutcomeUnknown(err)
 		}
@@ -42,14 +43,14 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 			err = OutcomeUnknown(err)
 		}
 		return round, err
-	}, collaboration.Round{ID: "R" + invocation.OperationID, Supersedes: "R00000000-0000-4000-8000-000000000000", Questions: request.Questions}, request.Signature)
+	}, collaboration.Round{ID: "R" + invocation.OperationID, Supersedes: "R00000000-0000-4000-8000-000000000000", Questions: request.Questions, Introduction: request.Introduction}, request.Signature)
 	if err != nil {
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}
 		return nil, classifyGitHubMutationError(err)
 	}
-	return json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID})
+	return json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID, "reference": round.Reference})
 }
 func (backend *ProductionBackend) resolveClarification(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
 	if backend.clarifications == nil {
@@ -69,4 +70,19 @@ func (backend *ProductionBackend) resolveClarification(ctx context.Context, invo
 		return nil, OutcomeUnknown(err)
 	}
 	return json.Marshal(map[string]any{"round_id": request.RoundID, "recorded": true})
+}
+
+func (backend *ProductionBackend) artifactSaver(in Invocation) func(context.Context, string, collaboration.RenderedPublication) error {
+	return func(ctx context.Context, id string, artifact collaboration.RenderedPublication) error {
+		ledger, ok := backend.clarifications.(interface {
+			SaveCollaborationArtifact(context.Context, store.AgentTurnLease, string, collaboration.RenderedPublication) error
+		})
+		if !ok {
+			return ErrToolDependency
+		}
+		if err := ledger.SaveCollaborationArtifact(ctx, in.lease, id, artifact); err != nil {
+			return OutcomeUnknown(err)
+		}
+		return nil
+	}
 }

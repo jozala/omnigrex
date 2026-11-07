@@ -20,7 +20,7 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	for n, mode := range []string{"rejection-commit-ack-lost", "crash-before-reservation", "crash-without-input", "published-control"} {
+	for n, mode := range []string{"rejection-commit-ack-lost", "crash-before-reservation", "crash-without-input", "published-control", "oversize-commit-ack-lost", "crash-after-reservation"} {
 		t.Run(mode, func(t *testing.T) {
 			database := databases[0]
 			fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1130+n, workflow.RolePlanner, "")
@@ -28,7 +28,7 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 			if err := state.StartPlanning(collaboration.OriginalRequest{Title: "CLI", Body: "Rough idea", Source: collaboration.Source{Channel: "fixture", ID: "original"}}); err != nil {
 				t.Fatal(err)
 			}
-			c := collaboration.PlanningContent{Title: "CLI", Status: "draft", Changes: "Audience proposal", RequirementsBrief: "Repository collaborators", TechnicalPlan: "Local CLI. Verify access.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+			c := collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "CLI", Status: "draft", Changes: "Audience proposal", RequirementsBrief: "Repository collaborators", TechnicalPlan: "Local CLI. Verify access.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
 			state.Prepare(lease.AgentParticipantID, "prior-turn")
 			if _, err := state.ReserveCheckpoint("Pprior", lease.AgentParticipantID, "prior-turn", c); err != nil {
 				t.Fatal(err)
@@ -45,6 +45,10 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 			if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
 				t.Fatal(err)
 			}
+			if mode == "oversize-commit-ack-lost" {
+				c.RequirementsBrief = strings.Repeat("界", 10666)
+				c.TechnicalPlan = strings.Repeat("p", 32768)
+			}
 			request, _ := json.Marshal(map[string]any{"operation_id": "checkpoint", "content": c, "signature": "fixture-signature"})
 			spec := store.MutationSpec{OperationID: "checkpoint", ToolName: "publish_plan_checkpoint", Request: request, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID}
 			mutation, err := database.ReserveMutation(ctx, lease, spec)
@@ -55,10 +59,10 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode != "published-control" && mode != "crash-without-input" {
+			if mode == "rejection-commit-ack-lost" || mode == "crash-before-reservation" {
 				// Sequential barriers: preparation completed, then both real admissions
 				// commit, then reservation runs. No scheduler timing or sleeps involved.
-				for i, command := range []collaboration.Command{{Kind: "amend", Target: "Afirst", Body: "Users have no repository access."}, {Kind: "steer", Body: "Use a standalone operator CLI."}} {
+				for i, command := range []collaboration.Command{{Kind: "amend", Target: "A1", Body: "Users have no repository access."}, {Kind: "steer", Body: "Use a standalone operator CLI."}} {
 					r, err := database.AdmitHumanInput(ctx, store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: command, Actor: a.Actor, Source: collaboration.Source{Channel: "fixture", ID: []string{"amend", "steer"}[i]}, Authorized: true, At: a.At.Add(time.Duration(i) * time.Second)})
 					if err != nil || r.ResponseID == "" {
 						t.Fatal(r, err)
@@ -75,6 +79,17 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 				// the committed pre-publication evidence, independent of result recording.
 				if _, err = databases[1].GetPlanningCheckpoint(ctx, fixture.workflowID, "P"+mutation.ID); !errors.Is(err, collaboration.ErrInvalid) {
 					t.Fatal("rejection reserved a revision", err)
+				}
+			}
+			if mode == "oversize-commit-ack-lost" || mode == "crash-after-reservation" {
+				r, err := database.ReservePlanningCheckpoint(ctx, lease, mutation.ID, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "oversize-commit-ack-lost" {
+					if err = database.RejectPlanningPublication(ctx, lease, r.ID, "payload_too_large"); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			if mode == "published-control" {
@@ -94,7 +109,7 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 			if err = database.MarkMutationUnknown(ctx, lease, mutation.ID, errors.New("acknowledgment lost")); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "crash-before-reservation" || mode == "crash-without-input" {
+			if mode == "crash-before-reservation" || mode == "crash-without-input" || mode == "crash-after-reservation" {
 				if _, err = database.ReconcilePlanningNonPublication(ctx, fixture.workflowID, lease.ID, mutation.ID); !errors.Is(err, store.ErrAgentTurnRecoveryUnsettled) {
 					t.Fatal("absence was treated as proof while runtime live", err)
 				}
@@ -139,6 +154,12 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 				if mode == "crash-without-input" {
 					want = "interrupted_before_reservation"
 				}
+				if mode == "oversize-commit-ack-lost" {
+					want = "payload_too_large"
+				}
+				if mode == "crash-after-reservation" {
+					want = "interrupted_before_publication"
+				}
 				if got["publication"] != "not_applied" || got["reason"] != want || got["revision_id"] != nil {
 					t.Fatal(got)
 				}
@@ -162,7 +183,7 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := 1
-			if mode == "published-control" {
+			if mode == "published-control" || mode == "oversize-commit-ack-lost" || mode == "crash-after-reservation" {
 				expected = 2
 			}
 			if len(state.Planning.Revisions) != expected || state.Planning.Revisions[0].Content.RequirementsBrief != "Repository collaborators" {
@@ -202,7 +223,7 @@ func TestPlanningUnreadInputRequiresDurableCoverage(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE agent_turns SET turn_configuration=$2 WHERE id=$1`, lease.ID, config); err != nil {
 		t.Fatal(err)
 	}
-	c := collaboration.PlanningContent{Title: "CLI", Status: "draft", Changes: "Scope", RequirementsBrief: "Standalone", TechnicalPlan: "Local. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}, DecisionResponseIDs: []string{"A1"}}
+	c := collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "CLI", Status: "draft", Changes: "Scope", RequirementsBrief: "Standalone", TechnicalPlan: "Local. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}, DecisionResponseIDs: []string{"A1"}}
 	reserve := func(label string) (collaboration.PlanningRevision, error) {
 		request, _ := json.Marshal(map[string]any{"operation_id": label, "content": c})
 		m, err := database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: "publish_plan_checkpoint", OperationID: label, Request: request, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID})

@@ -16,3 +16,4 @@ Preserve this file and the referenced license files when distributing the affect
 
 The pinned source and root license were supplied in Work Item #164 through the scoped Issue read boundary.
 The discovery procedure was adapted to bound rounds to five questions, replace sub-agent delegation with local investigation, retain routine-detail authority, and end at planning-only confirmation/revalidation.
+The v2 procedure restores the upstream yes-accepts-recommendation requirement, uses ordinary-language examples, and adds Omnigrex short-reference, explicit-assessment and lightweight-checkpoint guidance.

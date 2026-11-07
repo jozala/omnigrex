@@ -15,15 +15,15 @@ Direct `omnigrex:run` development still works with only Developer and Reviewer P
 The built-in, versioned discovery procedure is supplied on every launch, including continuation of the retained Agent Session.
 The Planner investigates code, tests and repository decisions before asking about facts it can discover itself.
 It asks at most five consequential questions per round, recommends answers with evidence, and retains dependent questions for later rounds.
-Use `/omnigrex answer <round-id>`, `/omnigrex amend <response-id>` and `/omnigrex steer` as described in the clarification guide.
+Use `/omnigrex answer R3`, `/omnigrex amend A7` and `/omnigrex steer` as described in the clarification guide.
 Partial answers can resume discussion; silence and unanswered questions are not agreement.
 Ordinary comments, reactions, quoted commands, and edits/deletions of accepted comments do not control planning.
 Routine reversible details remain within the Planner's existing authority.
 
 ## Checkpoints and confirmation
 
-After meaningful changes, the Planner publishes one readable Issue comment containing a **requirements brief** and a **technical plan**.
-Each complete pair has one immutable revision ID; a new revision supersedes the earlier pair even when only one part changes.
+At substantial milestones, revised directions, your request, and final review, the Planner publishes one readable Issue comment containing a **requirements brief** and a **technical plan**.
+Each complete pair has one permanent short reference backed by an immutable internal revision; a new revision supersedes the earlier pair even when only one part changes.
 Drafts distinguish confirmed decisions, assumptions/proposals and unresolved questions.
 The evidence/history section shows repository references, the investigated commit, discovery version and bounded, escaped provenance references to the original request and selected accepted input.
 Complete source text stays unchanged in durable collaboration history rather than being copied verbatim into every comment.
@@ -34,7 +34,7 @@ If an accepted amendment or steering arrives after a Turn was prepared but befor
 The Planner yields so the orchestrator can deliver that input in the retained Session's next Turn, then reconsiders affected decisions before publishing a revised pair.
 This ordinary discussion path does not require a human recovery command or reset retry/review budgets.
 
-When material choices are settled, inspect the proposed pair and submit its actual revision ID on the first nonblank line of a **new** Issue comment:
+When material choices are settled, inspect the proposed pair and submit its actual short reference on the first nonblank line of a **new** Issue comment:
 
 ```text
 /omnigrex confirm-plan P7
@@ -66,3 +66,22 @@ Planning does not allocate Developer/Reviewer implementation work, publish code 
 `omnigrex:run` cannot convert planning into development, including after planning-ready; that transition belongs to follow-up #165.
 The Planner can perform bounded local investigations and experiments in the existing disposable Execution Environment with existing tool permissions.
 This is the Developer/Reviewer trusted-repository baseline, not new shell/network confinement or provider-credential isolation.
+
+
+## Conversation rhythm and confirmation
+
+Answer a round with its permanent short target, for example `/omnigrex answer R3`, followed by natural agreement, qualifications or changes.
+A round may briefly explain consequential implications of your last answer before asking what matters next.
+The Planner can continue through several answer/question rounds without an initial full draft or a replacement plan after each answer.
+Consolidated checkpoints are useful at substantial milestones, revised directions, your request, and final confirmation; there is no fixed number of questions between them.
+
+Each checkpoint leads with a concise summary, material changes, unresolved decisions and next action.
+Open the separate complete requirements brief and complete technical plan sections and review both before confirming with the actual published reference, for example `/omnigrex confirm-plan P2`.
+The summary is not a substitute for the complete documents.
+Evidence and history remain accessible separately, without repeating original requests and verbatim answers throughout the conversation.
+Both complete documents remain one immutable pair in one comment; oversize content is rejected before publication so it can be rewritten concisely without losing commitments, never silently truncated or split.
+
+Confirmation with a requested change is a change request, not approval of an unpublished modified plan.
+A withdrawal or material objection invalidates earlier confirmation during active planning.
+After reconciliation, confirm the exact pair again even if its documents remain unchanged; changed documents require a new pair and its own confirmation.
+Answers and steering never substitute for exact-pair confirmation or implementation authorization, and none of these commands reopens completed planning.

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -25,18 +26,26 @@ type ClarificationPublisher struct {
 
 func clarificationBody(round collaboration.Round) string {
 	var body strings.Builder
-	fmt.Fprintf(&body, "## Clarification %s\n\n", round.ID)
-	if round.Supersedes != "" {
-		fmt.Fprintf(&body, "Supersedes round `%s`; earlier accepted responses remain in history.\n\n", round.Supersedes)
+
+	fmt.Fprintf(&body, "## Questions · %s\n\n", round.Reference)
+	if round.Introduction != "" {
+		fmt.Fprintf(&body, "%s\n\n", round.Introduction)
 	}
-	for _, question := range round.Questions {
-		fmt.Fprintf(&body, "- **%s**: %s\n", question.ID, question.Body)
+	if round.SupersedesReference != "" {
+		fmt.Fprintf(&body, "Replaces %s.\n\n", round.SupersedesReference)
 	}
-	fmt.Fprintf(&body, "\nReply with `/omnigrex answer %s` on the first nonblank line of a new Issue comment, followed by your complete or partial answer. Repository write permission is required. Unanswered questions remain unresolved. This is expected waiting, not a Human Handoff; do not add omnigrex:run. Answers do not authorize implementation.\n", round.ID)
+	for i, question := range round.Questions {
+		fmt.Fprintf(&body, "%d. %s\n\n", i+1, question.Body)
+	}
+	fmt.Fprintf(&body, "Reply with `/omnigrex answer %s`, followed by your answer. You can agree with the recommendations, answer just part, or tell me what you would change.\n", round.Reference)
+
 	return body.String()
 }
 
 func (p ClarificationPublisher) body(message collaboration.PublicationMessage) (string, string, error) {
+	if message.Artifact != nil {
+		return message.Artifact.Body, "", nil
+	}
 	body := clarificationBody(message.Round)
 	if message.Checkpoint != nil {
 		body = planningCheckpointBody(*message.Checkpoint)
@@ -51,6 +60,9 @@ func (p ClarificationPublisher) body(message collaboration.PublicationMessage) (
 	}
 	signed := AppendSignature(body, message.Signature)
 	if err = CheckPostedBodyLength(signed, marker); err != nil {
+		if errors.Is(err, ErrPostedBodyTooLong) {
+			return "", "", fmt.Errorf("%w: %w", collaboration.ErrPublicationTooLarge, err)
+		}
 		return "", "", err
 	}
 	return signed, marker, nil
@@ -61,7 +73,7 @@ func (p ClarificationPublisher) Validate(message collaboration.PublicationMessag
 	}
 	_, _, err := p.body(message)
 	if err != nil {
-		return fmt.Errorf("%w: %v", collaboration.ErrInvalid, err)
+		return fmt.Errorf("%w: %w", collaboration.ErrInvalid, err)
 	}
 	return nil
 }
@@ -96,6 +108,10 @@ func (p ClarificationPublisher) Reconcile(ctx context.Context, message collabora
 	if err != nil {
 		return collaboration.Source{}, false, err
 	}
+	expected := JoinBodyParts(body, marker)
+	if message.Artifact != nil {
+		expected = message.Artifact.Body
+	}
 	var match *IssueComment
 	for _, comment := range comments {
 		inspection := InspectMarkers(comment.Body)
@@ -108,7 +124,7 @@ func (p ClarificationPublisher) Reconcile(ctx context.Context, message collabora
 		if !owns {
 			continue
 		}
-		if inspection.Untrusted || comment.Body != JoinBodyParts(body, marker) || match != nil || comment.ID <= 0 || comment.NodeID == "" || comment.HTMLURL == "" {
+		if inspection.Untrusted || comment.Body != expected || match != nil || comment.ID <= 0 || comment.NodeID == "" || comment.HTMLURL == "" {
 			return collaboration.Source{}, false, nil
 		}
 		c := comment
@@ -118,4 +134,12 @@ func (p ClarificationPublisher) Reconcile(ctx context.Context, message collabora
 		return collaboration.Source{}, false, nil
 	}
 	return collaboration.Source{Channel: "github", ID: fmt.Sprint(match.ID), URL: match.HTMLURL}, true, nil
+}
+
+func (p ClarificationPublisher) Render(message collaboration.PublicationMessage) (collaboration.RenderedPublication, error) {
+	body, marker, err := p.body(message)
+	if message.Artifact != nil {
+		return *message.Artifact, err
+	}
+	return collaboration.RenderedPublication{Body: JoinPostedBody(body, marker), Marker: marker}, err
 }

@@ -30,6 +30,7 @@ type Question struct {
 	Body     string `json:"body"`
 }
 type Resolution struct {
+	Sequence uint64 `json:"sequence,omitempty"`
 	// OriginOperationID is the orchestrator reservation identity that applied this
 	// interpretation, never a caller-supplied operation label or inferred content.
 	OriginOperationID string `json:"origin_operation_id,omitempty"`
@@ -42,18 +43,22 @@ type Resolution struct {
 	Explanation           string   `json:"explanation"`
 }
 type Round struct {
-	PublicationFailed bool         `json:"publication_failed,omitempty"`
-	Supersedes        string       `json:"supersedes,omitempty"`
-	ID                string       `json:"id"`
-	Purpose           Purpose      `json:"purpose"`
-	ParticipantID     string       `json:"participant_id"`
-	TurnID            string       `json:"turn_id"`
-	HeadSHA           string       `json:"head_sha"`
-	Questions         []Question   `json:"questions"`
-	Resolutions       []Resolution `json:"resolutions,omitempty"`
-	SupersededBy      string       `json:"superseded_by,omitempty"`
-	Published         bool         `json:"published"`
-	Source            *Source      `json:"source,omitempty"`
+	SupersedesReference string               `json:"supersedes_reference,omitempty"`
+	Artifact            *RenderedPublication `json:"artifact,omitempty"`
+	Reference           string               `json:"reference"`
+	Introduction        string               `json:"introduction,omitempty"`
+	PublicationFailed   bool                 `json:"publication_failed,omitempty"`
+	Supersedes          string               `json:"supersedes,omitempty"`
+	ID                  string               `json:"id"`
+	Purpose             Purpose              `json:"purpose"`
+	ParticipantID       string               `json:"participant_id"`
+	TurnID              string               `json:"turn_id"`
+	HeadSHA             string               `json:"head_sha"`
+	Questions           []Question           `json:"questions"`
+	Resolutions         []Resolution         `json:"resolutions,omitempty"`
+	SupersededBy        string               `json:"superseded_by,omitempty"`
+	Published           bool                 `json:"published"`
+	Source              *Source              `json:"source,omitempty"`
 }
 
 // HasResolutionEffect proves this operation's complete requested interpretation,
@@ -69,6 +74,8 @@ func (r Round) HasResolutionEffect(operation string, resolutions []Resolution) b
 			if actual.OriginOperationID != operation {
 				continue
 			}
+			actual.Sequence = 0
+			wanted.Sequence = 0
 			actual.OriginOperationID = ""
 			wanted.OriginOperationID = ""
 			actual.ConsideredResponseIDs = nil
@@ -86,6 +93,7 @@ func (r Round) HasResolutionEffect(operation string, resolutions []Resolution) b
 }
 
 type Input struct {
+	Reference     string    `json:"reference"`
 	Target        string    `json:"target,omitempty"`
 	Route         string    `json:"route,omitempty"`
 	ID            string    `json:"id"`
@@ -103,10 +111,15 @@ type Input struct {
 	DeliveryPending bool   `json:"delivery_pending,omitempty"`
 }
 type Receipt struct {
-	ID         string `json:"id"`
-	Source     Source `json:"source"`
-	ResponseID string `json:"response_id,omitempty"`
-	Feedback   string `json:"feedback"`
+	// Attempt ownership is separate from the immutable artifact. Only a proven
+	// rejection releases that attempt; uncertainty never permits another POST.
+	PublicationAttempt  uint64               `json:"publication_attempt,omitempty"`
+	PublicationRejected bool                 `json:"publication_rejected,omitempty"`
+	Artifact            *RenderedPublication `json:"artifact,omitempty"`
+	ID                  string               `json:"id"`
+	Source              Source               `json:"source"`
+	ResponseID          string               `json:"response_id,omitempty"`
+	Feedback            string               `json:"feedback"`
 }
 type Preparation struct {
 	ParticipantID string `json:"participant_id"`
@@ -114,13 +127,16 @@ type Preparation struct {
 }
 
 type State struct {
-	Planning     *PlanningState `json:"planning,omitempty"`
-	Preparations []Preparation  `json:"preparations,omitempty"`
-	Rounds       []Round        `json:"rounds"`
-	Inputs       []Input        `json:"inputs"`
-	Receipts     []Receipt      `json:"receipts"`
-	CurrentRound string         `json:"current_round,omitempty"`
-	Waiting      bool           `json:"waiting"`
+	InterpretationSequence uint64         `json:"interpretation_sequence,omitempty"`
+	Assessments            []Assessment   `json:"assessments,omitempty"`
+	References             []Reference    `json:"references,omitempty"`
+	Planning               *PlanningState `json:"planning,omitempty"`
+	Preparations           []Preparation  `json:"preparations,omitempty"`
+	Rounds                 []Round        `json:"rounds"`
+	Inputs                 []Input        `json:"inputs"`
+	Receipts               []Receipt      `json:"receipts"`
+	CurrentRound           string         `json:"current_round,omitempty"`
+	Waiting                bool           `json:"waiting"`
 }
 type Command struct {
 	Kind   string
@@ -180,7 +196,13 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 			}
 		}
 	}
-	r := Round{ID: id, Supersedes: s.CurrentRound, Purpose: Clarification, ParticipantID: participant, TurnID: turn, HeadSHA: head, Questions: slices.Clone(questions)}
+	supersedesReference := ""
+	for _, prior := range s.Rounds {
+		if prior.ID == s.CurrentRound {
+			supersedesReference = prior.Reference
+		}
+	}
+	r := Round{SupersedesReference: supersedesReference, Reference: s.reference("R", id), ID: id, Supersedes: s.CurrentRound, Purpose: Clarification, ParticipantID: participant, TurnID: turn, HeadSHA: head, Questions: slices.Clone(questions)}
 	// Carry only unchanged decisions owned by this Participant; changed question
 	// identities require new evidence. The source round retains its full history.
 	for _, previous := range s.Rounds {
@@ -252,7 +274,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	if !a.Active || a.ParticipantID == "" && a.Route == "" {
 		return reject("Rejected: this Work Item is not accepting input; resolve Human Handoff or lifecycle state explicitly before retrying.")
 	}
-	if id == "" || (strings.TrimSpace(c.Body) == "" && c.Kind != "confirm-plan") || a.Actor.ID == "" || a.Source.ID == "" || a.Source.Channel == "" || a.At.IsZero() {
+	if id == "" || a.Actor.ID == "" || a.Source.ID == "" || a.Source.Channel == "" || a.At.IsZero() {
 		return reject("Rejected: provide nonempty content after the command.")
 	}
 	for _, input := range s.Inputs {
@@ -261,27 +283,36 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		}
 	}
 	roundID := ""
+	target := ""
+	switch c.Kind {
+	case "answer":
+		target = s.target("R", c.Target)
+	case "amend":
+		target = s.target("A", c.Target)
+	case "confirm-plan":
+		target = s.target("P", c.Target)
+	}
 	switch c.Kind {
 	case "confirm-plan":
-		if feedback := s.planningConfirmationTarget(c.Target, a.ParticipantID); feedback != "" {
+		if feedback := s.planningConfirmationTarget(target, a.ParticipantID); feedback != "" {
 			return reject(feedback)
 		}
 	case "answer":
 		var found *Round
 		for i := range s.Rounds {
-			if s.Rounds[i].ID == c.Target {
+			if s.Rounds[i].ID == target {
 				found = &s.Rounds[i]
 				break
 			}
 		}
 		if found == nil {
-			return reject("Rejected: unknown round in this Work Item; use the round ID from the current question comment.")
+			return reject("Which question round? Use its short reference, for example `/omnigrex answer R3`.")
 		}
 		if found.PublicationFailed {
 			return reject("Rejected: this question publication failed; use the current published round after the agent retries.")
 		}
 		if found.SupersededBy != "" || found.Published && s.CurrentRound != found.ID {
-			return reject(fmt.Sprintf("Rejected: round is superseded; answer current round %s.", s.CurrentRound))
+			return reject("That round has been replaced. Please use the short reference in the latest questions.")
 		}
 		if found.ParticipantID != a.ParticipantID {
 			return reject("Rejected: the addressed round belongs to an obsolete Stage; use /omnigrex steer for current work.")
@@ -290,13 +321,13 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	case "amend":
 		var found *Input
 		for i := range s.Inputs {
-			if s.Inputs[i].ID == c.Target {
+			if s.Inputs[i].ID == target {
 				found = &s.Inputs[i]
 				break
 			}
 		}
 		if found == nil {
-			return reject("Rejected: unknown response in this Work Item; use the response ID from its acknowledgment.")
+			return reject("Which earlier input? Use its short reference, for example `/omnigrex amend A7`, or `/omnigrex steer` to explain the change.")
 		}
 		if found.ParticipantID != a.ParticipantID {
 			return reject("Rejected: response belongs to an obsolete Stage; use /omnigrex steer for current work.")
@@ -307,15 +338,18 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 			return reject("Rejected: /omnigrex steer does not take a target.")
 		}
 	default:
-		return reject("Rejected: use /omnigrex answer <round-id>, /omnigrex amend <response-id>, or /omnigrex steer.")
+		return reject("Please include a short target: `/omnigrex answer R3`, `/omnigrex amend A7`, or `/omnigrex confirm-plan P2`. To change direction, use `/omnigrex steer`.")
 	}
-	input := Input{Target: c.Target, ID: id, Kind: c.Kind, RoundID: roundID, Body: c.Body, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, ParticipantID: a.ParticipantID, Route: a.Route}
+	if strings.TrimSpace(c.Body) == "" && c.Kind != "confirm-plan" {
+		return reject("Please add nonempty content after the command.")
+	}
+	input := Input{Reference: s.reference("A", id), Target: target, ID: id, Kind: c.Kind, RoundID: roundID, Body: c.Body, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, ParticipantID: a.ParticipantID, Route: a.Route}
 	if c.Kind == "amend" {
-		input.Amends = c.Target
+		input.Amends = target
 	}
 	s.Inputs = append(s.Inputs, input)
 	receipt.ResponseID = id
-	receipt.Feedback = fmt.Sprintf("Accepted and queued as %s. This acknowledges receipt, not interpretation or implementation authorization. Amend with /omnigrex amend %s.", id, id)
+	receipt.Feedback = fmt.Sprintf("Thanks, queued as %s for the agent to consider.", input.Reference)
 	s.Receipts = append(s.Receipts, receipt)
 	return receipt
 }
@@ -397,9 +431,16 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 					}
 				}
 			}
+			// A later-round answer can govern a historical question through a
+			// recorded correction. Its amendments retain that evidence scope;
+			// unrelated answers do not acquire it merely by sharing a round.
 			for _, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
-					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID))
+					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID) || slices.ContainsFunc(r.Resolutions, func(old Resolution) bool {
+						return old.QuestionID == resolution.QuestionID && slices.ContainsFunc(old.ResponseIDs, func(prior string) bool {
+							return s.isAmendmentOfEvidence(in.ID, prior) || s.explicitlyCorrects(in.ID, prior)
+						})
+					}))
 				}) {
 					return ErrInvalid
 				}
@@ -411,7 +452,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			// cannot be silently included in an interpretation's coverage.
 			resolution.ConsideredResponseIDs = nil
 			for _, in := range s.Inputs {
-				if in.DeliveredTo != "" && !in.DeliveryPending && slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) }) {
+				if in.DeliveredTo != "" && !in.DeliveryPending && slices.ContainsFunc(resolution.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) || s.explicitlyCorrects(in.ID, id) }) {
 					resolution.ConsideredResponseIDs = append(resolution.ConsideredResponseIDs, in.ID)
 				}
 			}
@@ -420,6 +461,8 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			}
 		}
 		for _, resolution := range resolutions {
+			s.InterpretationSequence++
+			resolution.Sequence = s.InterpretationSequence
 			resolution.ResponseIDs = slices.Clone(resolution.ResponseIDs)
 			resolution.ConsideredResponseIDs = slices.Clone(resolution.ConsideredResponseIDs)
 			r.Resolutions = append(r.Resolutions, resolution)
@@ -439,7 +482,8 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 	return ErrInvalid
 }
 
-// A live decision requires an explicit amendment, not silent last-answer-wins.
+// A live decision requires an explicit amendment or assessed correction link,
+// not silent last-answer-wins.
 // Obsolescence has no governing human evidence to amend; renewal still requires
 // delivered, scoped evidence and an explicit explanation in Resolve.
 func (s *State) canRevise(old *Resolution, next Resolution) bool {
@@ -447,12 +491,33 @@ func (s *State) canRevise(old *Resolution, next Resolution) bool {
 		return true
 	}
 	return slices.ContainsFunc(next.ResponseIDs, func(id string) bool {
-		return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.isAmendmentOfEvidence(id, prior) })
+		return slices.ContainsFunc(old.ResponseIDs, func(prior string) bool { return s.isAmendmentOfEvidence(id, prior) || s.explicitlyCorrects(id, prior) })
 	})
 }
 
 // Unresolved fences completion without interpreting natural-language answers.
 func (s *State) Unresolved(participant string) bool {
+	// Follow explicit interpretation order, not round recency: an agent may
+	// reconcile a historical decision after it has left the current frontier.
+	effective := map[string]Resolution{}
+	for _, round := range s.Rounds {
+		if round.ParticipantID != participant || !round.Published {
+			continue
+		}
+		for _, q := range round.Questions {
+			if r := latestResolution(round, q.ID); r != nil {
+				if old, ok := effective[q.ID]; !ok || r.Sequence >= old.Sequence {
+					effective[q.ID] = *r
+				}
+			}
+		}
+	}
+	for _, r := range effective {
+		if !s.resolutionCurrent(r) {
+			return true
+		}
+	}
+
 	for _, round := range s.Rounds {
 		if round.ID == s.CurrentRound && round.ParticipantID == participant {
 			for _, question := range round.Questions {
@@ -515,24 +580,44 @@ func (s *State) amends(id, prior string) bool {
 	return false
 }
 
-// evidenceRoot follows explicit amendment links, not text similarity or ordering.
-func (s *State) evidenceRoot(id string) string {
-	for {
-		var parent string
+// evidenceLineage follows only recorded amendment and natural-correction edges.
+// A visited set also bounds traversal when assessments refer back to each other.
+func (s *State) evidenceLineage(id string) map[string]bool {
+	seen := map[string]bool{}
+	var visit func(string)
+	visit = func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
 		for _, in := range s.Inputs {
 			if in.ID == id {
-				parent = in.Amends
+				visit(in.Amends)
 				break
 			}
 		}
-		if parent == "" {
-			return id
+		for _, a := range s.Assessments {
+			if a.InputID == id && a.Disposition == "changed" {
+				for _, prior := range a.Corrects {
+					visit(prior)
+				}
+			}
 		}
-		id = parent
 	}
+	visit(id)
+	return seen
 }
 func (s *State) isAmendmentOfEvidence(id, prior string) bool {
-	return slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == id && in.Amends != "" }) && s.evidenceRoot(id) == s.evidenceRoot(prior)
+	if !slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == id && in.Amends != "" }) {
+		return false
+	}
+	lineage := s.evidenceLineage(id)
+	for ancestor := range s.evidenceLineage(prior) {
+		if lineage[ancestor] {
+			return true
+		}
+	}
+	return false
 }
 func (s *State) resolutionCurrent(r Resolution) bool {
 	if r.Obsolete {
@@ -542,7 +627,7 @@ func (s *State) resolutionCurrent(r Resolution) bool {
 		if slices.Contains(r.ResponseIDs, in.ID) || slices.Contains(r.ConsideredResponseIDs, in.ID) || slices.ContainsFunc(r.ResponseIDs, func(cited string) bool { return s.amends(cited, in.ID) }) {
 			continue
 		}
-		if slices.ContainsFunc(r.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) }) {
+		if slices.ContainsFunc(r.ResponseIDs, func(id string) bool { return s.isAmendmentOfEvidence(in.ID, id) || s.explicitlyCorrects(in.ID, id) }) {
 			return false
 		}
 	}

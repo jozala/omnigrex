@@ -28,7 +28,7 @@ type clarificationLedger struct {
 }
 
 func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
-	f.round = collaboration.Round{ID: "R" + id, Questions: questions}
+	f.round = collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
 	return f.round, nil
 }
 func (f *clarificationLedger) ConfirmClarificationPublication(_ context.Context, _, id string, source collaboration.Source) error {
@@ -59,7 +59,7 @@ func TestSignedClarificationPublishesBeforeReturningWaiting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !ledger.published || !strings.Contains(string(result), "CLARIFICATION_WAIT") || !strings.Contains(api.issueCommentRequest.Body, "persisted-signature") || !strings.Contains(api.issueCommentRequest.Body, ledger.round.ID) {
+			if !ledger.published || !strings.Contains(string(result), "CLARIFICATION_WAIT") || !strings.Contains(api.issueCommentRequest.Body, "persisted-signature") || !strings.Contains(api.issueCommentRequest.Body, ledger.round.Reference) {
 				t.Fatalf("publication=%+v result=%s", api.issueCommentRequest, result)
 			}
 		})
@@ -313,4 +313,9 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *clarificationLedger) SaveCollaborationArtifact(_ context.Context, _ store.AgentTurnLease, id string, artifact collaboration.RenderedPublication) error {
+	f.round.Artifact = &artifact
+	return nil
 }

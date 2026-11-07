@@ -118,6 +118,8 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 		return reconciler.reconcilePublication(ctx, reconciliation, mutation)
 	case ToolOpenPR:
 		return reconciler.reconcileOpenPullRequest(ctx, reconciliation, mutation, marker)
+	case ToolAssessHumanInput:
+		return reconciler.reconcileHumanInputAssessment(ctx, reconciliation, mutation)
 	case ToolResolveClarification:
 		return reconciler.reconcileClarificationResolution(ctx, reconciliation, mutation)
 	case ToolCompletePlanning:
@@ -792,7 +794,8 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 		return unresolvedReconciliation(), nil
 	}
 	var args struct {
-		Questions []collaboration.Question `json:"questions"`
+		Introduction string                   `json:"introduction"`
+		Questions    []collaboration.Question `json:"questions"`
 	}
 	if json.Unmarshal(mutation.Request, &args) != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
@@ -815,9 +818,23 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 		raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": ""})
 		return foundReconciliation(raw), nil
 	}
+	if ledger, ok := reconciler.clarifications.(interface {
+		ReconcileClarificationNonPublication(context.Context, string, string, string) (bool, error)
+	}); ok {
+		absent, err := ledger.ReconcileClarificationNonPublication(ctx, scope.WorkflowID, mutation.AgentTurnID, mutation.ID)
+		if err != nil {
+			return unresolvedReconciliation(), err
+		}
+		if absent {
+			return MutationReconciliationResult{Disposition: ReconciliationDefinitelyFailed, Outcome: store.RecoveredMutationOutcome{State: store.MutationFailed, LastError: "Recovery proved clarification was not published before the stopped and fenced Turn; a fresh operation may retry."}}, nil
+		}
+	}
 	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, "R"+mutation.ID)
 	if err != nil {
 		return unresolvedReconciliation(), nil
+	}
+	if round.ParticipantID != scope.Turn.AgentParticipantID || round.TurnID != mutation.AgentTurnID || !reflect.DeepEqual(round.Questions, args.Questions) || round.Introduction != args.Introduction {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	var request struct {
 		Signature string `json:"signature"`
@@ -836,7 +853,7 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 	if err != nil || !found {
 		return unresolvedReconciliation(), err
 	}
-	raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID})
+	raw, _ := json.Marshal(map[string]any{"outcome": "CLARIFICATION_WAIT", "round_id": round.ID, "reference": round.Reference})
 	return foundReconciliation(raw), nil
 }
 

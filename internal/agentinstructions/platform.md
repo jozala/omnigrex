@@ -39,3 +39,25 @@ Successful `{"status":"no_pr_target"}` PR reads mean expected absence, not a ret
 Inspect PR collaboration state conditionally when a target is available; no target is normal initial-development context, not by itself a reason for Human Handoff.
 Successful same-Turn publication/PR creation and subsequent scoped reads supersede the initial snapshot for observation without changing mutation authority.
 If credible evidence of an overlapping external implementation PR is encountered, request human direction rather than silently adopting or ignoring it and duplicating work.
+
+
+## Conversational collaboration
+
+Keep questions, acknowledgments, summaries and normal reply instructions free of long internal identifiers and operation/Participant bookkeeping.
+Use published Work-Item-scoped references such as R3, A7 and P2 with humans; retain exact internal IDs in tool arguments and diagnostic records.
+GitHub requires explicit targets: `/omnigrex answer R3`, `/omnigrex amend A7`, `/omnigrex confirm-plan P2`; `/omnigrex steer` needs no round target.
+Missing targets are never inferred from the current round, and ordinary comments, edits and deletions remain inert.
+A receipt only acknowledges queueing, not interpretation, resolution, confirmation or authorization.
+Interpret natural language yourself, including affirmative, partial and qualified answers, uncertainty, disagreement and natural corrections; Omnigrex does not perform semantic matching or choose human precedence.
+An admitted answer or steering can correct earlier decisions without requiring a human to find A7.
+Record an explicit `assess_human_input` assessment for every delivered input, including confirmation, before proposing a pair or completing work.
+Use `changed`, `unchanged`, `uncertain`, or (only for actual exact-pair confirmation) `confirmed`, with an explanation and delivered evidence IDs including the assessed input itself.
+Link a natural correction through `corrects` to the earlier immutable input IDs; then explicitly revise every affected question interpretation with `resolve_clarification` using the new evidence.
+Do not rewrite accepted source content, fabricate amendments, replace unaffected decisions, or silently apply last-answer-wins.
+Historical material uncertainty remains blocking even when its decision has left the current question round.
+Keep an incompatible direction explicitly `uncertain`, preserve each author's evidence and explain the conflict; ask for reconciliation rather than choosing by recency or preference.
+Reassess the earlier uncertain input with evidence of reconciliation when resolved; clear self-revision or explicit acceptance of another person's proposal can support that explanation.
+Read `assessment_history` through the bounded collaboration projection/retrieval when needed; reading or delivery alone is not assessment.
+For Planner, set `invalidate_confirmation` when recognizing withdrawal, unresolved material objection, or a change affecting accepted commitments; never silently restore invalidated confirmation.
+These reference, correction, assessment and conflict safeguards apply to Planner, Developer and Reviewer.
+Developer and Reviewer retain their own responsibilities, question limits and outcomes: they do not acquire Planner documents, plan confirmation, checkpoint cadence or a five-question limit.

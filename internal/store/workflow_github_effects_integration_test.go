@@ -1164,7 +1164,7 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatal(err)
 	}
 	stateHistory.Prepare(fixture.assignmentID, "planning-turn")
-	content := collaboration.PlanningContent{Title: "Checklist", Status: "proposed", Changes: "Initial plan", RequirementsBrief: "Ephemeral checklist", TechnicalPlan: "Local state and reset tests", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+	content := collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "Checklist", Status: "proposed", Changes: "Initial plan", RequirementsBrief: "Ephemeral checklist", TechnicalPlan: "Local state and reset tests", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
 	if _, err := stateHistory.ReserveCheckpoint("P1", fixture.assignmentID, "planning-turn", content); err != nil {
 		t.Fatal(err)
 	}
@@ -1176,6 +1176,9 @@ WHERE id = $1`, fixture.workflowID); err != nil {
 		t.Fatal(receipt)
 	}
 	stateHistory.Prepare(fixture.assignmentID, "final-turn")
+	if err := stateHistory.Assess("assessed-confirmation", fixture.assignmentID, "final-turn", []collaboration.Assessment{{InputID: "confirmation", EvidenceIDs: []string{"confirmation"}, Disposition: "confirmed", Explanation: "Exact published pair accepted without changes."}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := stateHistory.ValidatePlanning("complete", "P1", fixture.assignmentID, "final-turn", strings.Repeat("a", 40), "Still applicable", true); err != nil {
 		t.Fatal(err)
 	}

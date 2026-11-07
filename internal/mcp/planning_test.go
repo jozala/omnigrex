@@ -18,7 +18,7 @@ type planningLedger struct {
 }
 
 func (f *planningLedger) ReservePlanningCheckpoint(_ context.Context, _ store.AgentTurnLease, id string, c collaboration.PlanningContent) (collaboration.PlanningRevision, error) {
-	f.revision = collaboration.PlanningRevision{ID: "P" + id, ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, Content: c, ProcedureVersion: collaboration.DiscoveryProcedureVersion, OriginalRequest: collaboration.OriginalRequest{Title: "Original idea", Body: "Keep the request unchanged.", Source: collaboration.Source{Channel: "fixture", ID: "issue"}}}
+	f.revision = collaboration.PlanningRevision{Reference: "P1", ID: "P" + id, ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, Content: c, ProcedureVersion: collaboration.DiscoveryProcedureVersion, OriginalRequest: collaboration.OriginalRequest{Title: "Original idea", Body: "Keep the request unchanged.", Source: collaboration.Source{Channel: "fixture", ID: "issue"}}}
 	return f.revision, nil
 }
 func (f *planningLedger) ConfirmPlanningPublication(_ context.Context, _, id string, source collaboration.Source) error {
@@ -48,7 +48,7 @@ func TestPlanningCheckpointLostResponseUsesExactPairWithoutRepost(t *testing.T) 
 	scope.PullRequest = nil
 	scope.AgentProfileName = "planner"
 	scope.RoleDisplayName = "Planner"
-	c := collaboration.PlanningContent{Title: "Rough idea", Status: "proposed", Changes: "No retention.", RequirementsBrief: "Ephemeral local onboarding; no external accounts.", TechnicalPlan: "Separate transient state, UI and tests. Verify reset discards status.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+	c := collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "Rough idea", Status: "proposed", Changes: "No retention.", RequirementsBrief: "Ephemeral local onboarding; no external accounts.", TechnicalPlan: "Separate transient state, UI and tests. Verify reset discards status.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
 	request, _ := json.Marshal(map[string]any{"operation_id": "pair", "content": c, "signature": "persisted-signature"})
 	_, err = backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolPublishPlanCheckpoint, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
 	if !mcp.IsOutcomeUnknown(err) || ledger.revision.Published {
@@ -73,7 +73,7 @@ func TestPlanningCheckpointLostResponseUsesExactPairWithoutRepost(t *testing.T) 
 	if err != nil || result.Disposition != mcp.ReconciliationFound || !ledger.revision.Published || api.posts != 1 {
 		t.Fatal("recovery failed", result, err, api.posts)
 	}
-	for _, want := range []string{"Requirements brief", "Technical plan", "persisted-signature", "Original idea", "confirm-plan"} {
+	for _, want := range []string{"Complete requirements brief", "Complete technical plan", "persisted-signature", "Original idea", "confirm-plan"} {
 		if !strings.Contains(api.posted.Body, want) {
 			t.Fatal("presentation missing", want)
 		}
@@ -155,7 +155,7 @@ func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T
 			}
 			scope := productionToolScope(role.Planner)
 			scope.PullRequest = nil
-			request, _ := json.Marshal(map[string]any{"operation_id": "pending", "content": collaboration.PlanningContent{Title: "CLI", Status: "draft", Changes: "Scope", RequirementsBrief: "Users", TechnicalPlan: "Local. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}})
+			request, _ := json.Marshal(map[string]any{"operation_id": "pending", "content": collaboration.PlanningContent{Summary: "A complete local checklist with no retained personal data.", UnresolvedDecisions: []string{}, Title: "CLI", Status: "draft", Changes: "Scope", RequirementsBrief: "Users", TechnicalPlan: "Local. Test reset.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}})
 			invoke := func() (json.RawMessage, error) {
 				return backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolPublishPlanCheckpoint, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: request})
 			}
@@ -186,5 +186,43 @@ func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T
 				t.Fatal("uncertain store result became definite", err)
 			}
 		})
+	}
+}
+
+func (f *planningLedger) SaveCollaborationArtifact(_ context.Context, _ store.AgentTurnLease, id string, artifact collaboration.RenderedPublication) error {
+	f.revision.Artifact = &artifact
+	return nil
+}
+
+func (f *planningLedger) RejectPlanningPublication(_ context.Context, _ store.AgentTurnLease, id, reason string) error {
+	if id != f.revision.ID || reason != "payload_too_large" {
+		return collaboration.ErrInvalid
+	}
+	f.revision.PublicationFailed = true
+	return nil
+}
+
+func TestOversizeCompletePairReturnsActionableDefiniteNonPublication(t *testing.T) {
+	ledger := &planningLedger{}
+	api := &clarificationLostGitHub{backendGitHub: &backendGitHub{}}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{developer: "fixture"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productionToolScope(role.Planner)
+	scope.AgentProfileName = "planner"
+	scope.PullRequest = nil
+	c := collaboration.PlanningContent{Title: "Complete pair", Summary: "Local checklist.", UnresolvedDecisions: []string{}, Status: "proposed", Changes: "Settled scope.", RequirementsBrief: strings.Repeat("界", 22000), TechnicalPlan: "Complete technical plan.", InvestigatedCommit: strings.Repeat("a", 40), Evidence: []string{"README.md"}}
+	args, _ := json.Marshal(map[string]any{"operation_id": "oversize", "content": c, "signature": "Planner"})
+	raw, err := backend.Execute(t.Context(), mcp.Invocation{Name: mcp.ToolPublishPlanCheckpoint, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
+	if err != nil {
+		t.Fatal("definite size rejection became opaque tool failure", err)
+	}
+	var result map[string]any
+	if err = json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["publication"] != "not_applied" || result["reason"] != "payload_too_large" || result["next_action"] != "rewrite_complete_pair" || result["revision_id"] != nil || result["source"] != nil || api.posts != 0 || !ledger.revision.PublicationFailed || ledger.revision.Content.RequirementsBrief != c.RequirementsBrief {
+		t.Fatal("partial publication, truncation, or ambiguous outcome", string(raw), api.posts)
 	}
 }

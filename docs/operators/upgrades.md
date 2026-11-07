@@ -93,3 +93,17 @@ See [decision 0029](../decisions/0029-preserve-historical-pid-budgets-and-size-n
 Require [readiness and repository preflight](health-and-diagnostics.md), verify ingress if changed, and run controlled work appropriate to the upgrade.
 Check retained image/state availability rather than assuming a healthy new Participant proves old Sessions can continue.
 Record the deployed revision, digests, configured contract, qualification artifact if used, and observed outcome privately.
+
+
+## Conversation contract cutover
+
+The short-reference and explicit-assessment contract in [decision 0062](../decisions/0062-use-short-conversation-references-and-explicit-assessments.md) is a clean compatibility boundary.
+Before upgrading to this contract, finish or explicitly stop all active Workflows using existing lifecycle controls.
+Do not upgrade while an old-format question, checkpoint or acknowledgment publication is interrupted or uncertain: reconcile it under the old deployment first or explicitly stop the affected Workflow.
+Retain historical records, but do not expect UUID commands, reference backfill, old-renderer reconciliation or continuation of old-format publications across the upgrade.
+Do not delete history or automatically reactivate completed Workflows.
+Evaluate the new contract on fresh Work Items, including a separately authorized post-deployment real-provider conversation assessment; deterministic fixtures alone do not establish tone or semantic interpretation quality.
+Within the new contract, publication freezes exact rendered payloads before external effects and retains exact-operation recovery after restart.
+An acknowledgment reservation whose POST outcome is uncertain is reconciled against its frozen artifact; absence is not permission to repost, and admission deduplication does not prove visible receipt delivery.
+A proven client rejection (for example a rate-limit response) durably releases only that POST attempt, allowing a delivery retry to reserve the same frozen receipt again.
+Timeouts, server failures, transport failures and lost responses do not release ownership; stale rejection reports cannot release a later attempt.

@@ -291,6 +291,8 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 		return backend.publishPlanningCheckpoint(ctx, invocation)
 	case ToolRequestClarification:
 		return backend.requestClarification(ctx, invocation)
+	case ToolAssessHumanInput:
+		return backend.assessHumanInput(ctx, invocation)
 	case ToolResolveClarification:
 		return backend.resolveClarification(ctx, invocation)
 	case ToolReportBlocked:
@@ -1334,7 +1336,7 @@ func replayMetadataForScope(tool string, scope ToolScope) MutationMetadata {
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolCompletePlanning, ToolPublishPlanCheckpoint, ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
+	case ToolAssessHumanInput, ToolCompletePlanning, ToolPublishPlanCheckpoint, ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		if tool == ToolRequestClarification {

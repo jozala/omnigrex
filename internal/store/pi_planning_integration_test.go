@@ -38,7 +38,7 @@ func testPiPlanningWorkflow(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, command := range []collaboration.Command{
-				{Kind: "amend", Target: state.Inputs[0].ID, Body: "Change the audience to users without repository access. Keep all status ephemeral."},
+				{Kind: "amend", Target: state.Inputs[0].Reference, Body: "Change the audience to users without repository access. Keep all status ephemeral."},
 				{Kind: "steer", Body: "Use a standalone operator CLI, not a repository plugin."},
 			} {
 				receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: command, Actor: collaboration.Actor{ID: "human-fixture", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
@@ -64,10 +64,13 @@ func testPiPlanningWorkflow(t *testing.T) {
 		if err = json.Unmarshal(raw, &state); err != nil {
 			t.Fatal(err)
 		}
+		if turn == 1 && (state.Planning != nil && len(state.Planning.Revisions) != 0) {
+			t.Fatal("a full checkpoint interrupted the next question round")
+		}
 		if turn == 2 {
 			continue
 		} // late input already queued the sole successor
-		command := collaboration.Command{Kind: "answer", Target: state.CurrentRound, Body: "Target small teams without external accounts."}
+		command := collaboration.Command{Kind: "answer", Target: state.Rounds[len(state.Rounds)-1].Reference, Body: "Target small teams without external accounts."}
 		if turn == 1 {
 			command.Body = "Change the proposed retention assumption: retain no personal onboarding data. Use ephemeral local status."
 		}
@@ -76,7 +79,7 @@ func testPiPlanningWorkflow(t *testing.T) {
 			if r == nil || !r.Published || r.Content.Status != "proposed" || len(r.Decisions) != 4 {
 				t.Fatal("missing paired proposal or decisions", state.Planning)
 			}
-			command = collaboration.Command{Kind: "confirm-plan", Target: r.ID}
+			command = collaboration.Command{Kind: "confirm-plan", Target: r.Reference}
 		}
 		receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: command, Actor: collaboration.Actor{ID: "human-fixture", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
 		if err != nil || receipt.ResponseID == "" {
@@ -94,10 +97,10 @@ func testPiPlanningWorkflow(t *testing.T) {
 	if err = json.Unmarshal(raw, &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Planning.ReadyRevision == "" || len(state.Planning.Revisions) != 2 || len(state.Planning.Revalidations) != 1 || state.Planning.Revisions[1].Supersedes != state.Planning.Revisions[0].ID {
+	if state.Planning.ReadyRevision == "" || len(state.Planning.Revisions) != 1 || len(state.Planning.Revalidations) != 1 {
 		t.Fatal("history missing", state.Planning)
 	}
-	if len(state.Planning.NonPublications) != 1 || state.Planning.NonPublications[0].Reason != "late_input" || !strings.Contains(state.Planning.Revisions[1].Content.RequirementsBrief, "without repository access") || !strings.Contains(state.Planning.Revisions[1].Content.TechnicalPlan, "standalone operator CLI") {
+	if len(state.Planning.NonPublications) != 1 || state.Planning.NonPublications[0].Reason != "late_input" || !strings.Contains(state.Planning.Revisions[0].Content.RequirementsBrief, "without repository access") || !strings.Contains(state.Planning.Revisions[0].Content.TechnicalPlan, "standalone operator CLI") {
 		t.Fatal("amendment did not change the actual plan", state.Planning)
 	}
 	if len(state.Rounds[0].Resolutions) < 2 || !strings.Contains(state.Rounds[0].Resolutions[len(state.Rounds[0].Resolutions)-1].Explanation, "without repository access") {
@@ -110,12 +113,12 @@ func testPiPlanningWorkflow(t *testing.T) {
 	checkpointPosts := 0
 	f.github.mutex.Lock()
 	for _, comment := range f.github.comments {
-		if strings.Contains(comment.Body, "Requirements brief") {
+		if strings.Contains(comment.Body, "Complete requirements brief") {
 			checkpointPosts++
 		}
 	}
 	f.github.mutex.Unlock()
-	if checkpointPosts != 2 {
+	if checkpointPosts != 1 {
 		t.Fatal("duplicate or missing checkpoint publication", checkpointPosts)
 	}
 	t.Log("PASS: controlled retained Planner rounds, changed assumption, paired draft/proposal, exact confirmation and final revalidation; no implementation. This does not assess reasoning quality.")
