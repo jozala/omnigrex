@@ -2,7 +2,9 @@
 package agentinstructions
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -144,4 +146,11 @@ func (operator Operator) Compose(policy role.Policy, stage workflow.StageDefinit
 	}
 	appendSection("Repository Agent Profile", repositoryInstructions)
 	return strings.Join(sections, "\n\n")
+}
+
+// Fingerprint covers only the composed guidance bytes, not Pi's rendered system
+// prompt, AGENTS.md, skill bodies, or later instruction-bearing tool reads.
+func Fingerprint(composed string) string {
+	hash := sha256.Sum256([]byte(composed))
+	return hex.EncodeToString(hash[:])
 }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/uuidtext"
 	"golang.org/x/sys/unix"
 )
@@ -50,6 +51,8 @@ func (lifecycle *Lifecycle) MeasureAssignmentToolCache(ctx context.Context, part
 
 type ToolCacheMonitor struct {
 	lifecycle      *Lifecycle
+	stateRoot      string
+	mountedScans   map[string]*toolCacheScan
 	thresholdBytes int64
 	pollInterval   time.Duration
 	maxAssignments int
@@ -69,6 +72,7 @@ type monitoredCacheScan struct {
 }
 
 type ToolCacheMonitorConfig struct {
+	StateRoot      string
 	ThresholdBytes int64
 	PollInterval   time.Duration
 	MaxAssignments int
@@ -87,6 +91,7 @@ func NewToolCacheMonitor(lifecycle *Lifecycle, config ToolCacheMonitorConfig) (*
 		maxAssignments = maxToolCacheAssignmentsPerPoll
 	}
 	return &ToolCacheMonitor{
+		stateRoot: config.StateRoot, mountedScans: make(map[string]*toolCacheScan),
 		lifecycle: lifecycle, thresholdBytes: config.ThresholdBytes,
 		pollInterval: config.PollInterval, maxAssignments: maxAssignments,
 		entryBudget: maxToolCacheEntries, logger: config.Logger, onError: config.OnError,
@@ -194,6 +199,10 @@ func (monitor *ToolCacheMonitor) Close() error {
 		err = errors.Join(err, scan.Close())
 		delete(monitor.scans, id)
 	}
+	for key, scan := range monitor.mountedScans {
+		err = errors.Join(err, scan.Close())
+		delete(monitor.mountedScans, key)
+	}
 	clear(monitor.lastWarned)
 	return err
 }
@@ -202,19 +211,29 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 	if monitor == nil || monitor.lifecycle == nil {
 		return 0, 0, fmt.Errorf("%w: nil tool cache monitor", ErrInvalidOptions)
 	}
-	all, err := monitor.lifecycle.listAssignmentParticipantIDs(ctx)
-	if err != nil {
+	all, discoveryErr := monitor.listMountedParticipantIDs(ctx)
+	discoveryComplete := discoveryErr == nil
+	if err := ctx.Err(); err != nil {
 		return 0, 0, err
 	}
+	// Healthy roots remain observable after another root fails. Absence from
+	// this partial union cannot establish that retained monitoring state is stale.
 	monitor.mu.Lock()
 	for id := range monitor.scans {
-		if index := sort.SearchStrings(all, id); index == len(all) || all[index] != id {
+		if index := sort.SearchStrings(all, id); discoveryComplete && (index == len(all) || all[index] != id) {
 			monitor.dropScan(id)
 		}
 	}
 	for id := range monitor.lastWarned {
-		if index := sort.SearchStrings(all, id); index == len(all) || all[index] != id {
+		if index := sort.SearchStrings(all, id); discoveryComplete && (index == len(all) || all[index] != id) {
 			delete(monitor.lastWarned, id)
+		}
+	}
+	for key, scan := range monitor.mountedScans {
+		id, _, _ := strings.Cut(key, "/")
+		if index := sort.SearchStrings(all, id); discoveryComplete && (index == len(all) || all[index] != id) {
+			scan.Close()
+			delete(monitor.mountedScans, key)
 		}
 	}
 	start := sort.Search(len(all), func(i int) bool { return all[i] > monitor.scanCursor })
@@ -226,12 +245,14 @@ func (monitor *ToolCacheMonitor) Check(ctx context.Context) (checked int, warned
 		monitor.scanCursor = selected[len(selected)-1]
 	}
 	monitor.mu.Unlock()
+	devices := make(map[uint64]bool)
 	for _, id := range selected {
 		if err := ctx.Err(); err != nil {
 			return checked, warned, err
 		}
 		pollCtx, cancel := context.WithTimeout(ctx, toolCachePerAssignmentTimeout)
 		_, didWarn, _ := monitor.Observe(pollCtx, id)
+		monitor.observeMounted(pollCtx, id, devices)
 		cancel()
 		checked++
 		if didWarn {
@@ -260,8 +281,39 @@ func (monitor *ToolCacheMonitor) Run(ctx context.Context) error {
 	}
 }
 
-func (lifecycle *Lifecycle) listAssignmentParticipantIDs(ctx context.Context) ([]string, error) {
-	root, _, err := openDirectoryNoFollow(lifecycle.miseRoot)
+// Return the successful roots' union even when another root is unavailable.
+// The bounded error indicates incomplete discovery, not failure of every root.
+func (monitor *ToolCacheMonitor) listMountedParticipantIDs(ctx context.Context) ([]string, error) {
+	seen := make(map[string]bool)
+	var discoveryErr error
+	for _, root := range []string{monitor.lifecycle.miseRoot, monitor.lifecycle.workspaceRoot, monitor.stateRoot} {
+		if root == "" {
+			continue
+		}
+		ids, err := listParticipantDirectories(ctx, root)
+		// A root may yield usable IDs before a child lookup or enumeration fails.
+		for _, id := range ids {
+			seen[id] = true
+		}
+		if err != nil {
+			for _, mounted := range monitor.mountedRoots() {
+				if mounted.parent == root {
+					telemetry.RecordStorage(ctx, mounted.resource, "unavailable", nil)
+				}
+			}
+			discoveryErr = errors.New("mounted storage discovery unavailable")
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, discoveryErr
+}
+
+func listParticipantDirectories(ctx context.Context, directory string) ([]string, error) {
+	root, _, err := openDirectoryNoFollow(directory)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -270,9 +322,11 @@ func (lifecycle *Lifecycle) listAssignmentParticipantIDs(ctx context.Context) ([
 	}
 	defer root.Close()
 	var ids []string
+	var discoveryErr error
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err // Incomplete discovery must not prune active scans.
+			discoveryErr = err
+			break // Keep partial results, but never treat absence as complete.
 		}
 		names, err := root.Readdirnames(toolCacheDirBatchSize)
 		for _, name := range names {
@@ -281,7 +335,13 @@ func (lifecycle *Lifecycle) listAssignmentParticipantIDs(ctx context.Context) ([
 				continue
 			}
 			var stat unix.Stat_t
-			if unix.Fstatat(int(root.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+			if err := unix.Fstatat(int(root.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				if !os.IsNotExist(err) {
+					discoveryErr = err
+				}
+				continue
+			}
+			if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
 				ids = append(ids, id)
 			}
 		}
@@ -289,9 +349,10 @@ func (lifecycle *Lifecycle) listAssignmentParticipantIDs(ctx context.Context) ([
 			break
 		}
 		if err != nil {
-			return nil, err
+			discoveryErr = err
+			break
 		}
 	}
 	sort.Strings(ids)
-	return ids, nil
+	return ids, discoveryErr
 }

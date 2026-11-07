@@ -329,6 +329,9 @@ func TestFinalMetricsCollectionAndTraceFlushHaveIndependentBoundedShutdown(t *te
 	budget := NewAgentTurnObserver("DEVELOPER", nil, nil)
 	startRecording := time.Now()
 	budget.Finish(serviceCtx, nil, "transport")
+	RecordTool(serviceCtx, "mcp_client", "get_issue", Cancelled, nil)
+	RecordStorage(serviceCtx, "tmp", "unavailable", nil)
+	RecordPromptDuration(serviceCtx, time.Second, false)
 	if time.Since(startRecording) > time.Second {
 		t.Fatal("budget recording waited for slow exporter")
 	}

@@ -140,6 +140,14 @@ func (op *Operation) Finish(err *error) {
 	}
 	slog.InfoContext(op.ctx, message, attrs...)
 	recordOperation(op.ctx, op.name, op.outcome, time.Since(op.started))
+	if op.name == MCPToolExecute {
+		for _, attr := range op.attrs {
+			if attr.Key == "tool_name" {
+				duration := time.Since(op.started)
+				RecordTool(op.ctx, "mcp_server", attr.Value.AsString(), op.outcome, &duration)
+			}
+		}
+	}
 	op.span.End()
 }
 

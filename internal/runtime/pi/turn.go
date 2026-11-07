@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentinstructions"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
@@ -15,7 +16,9 @@ import (
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/runtime/session"
 	"github.com/jozala/omnigrex/internal/store"
+	"github.com/jozala/omnigrex/internal/telemetry"
 	"github.com/jozala/omnigrex/internal/turnconfig"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type TurnAdapter struct {
@@ -82,6 +85,10 @@ func (adapter TurnAdapter) Prepare(ctx context.Context, request session.TurnPrep
 	if err != nil {
 		return nil, err
 	}
+	telemetry.AddAttributes(ctx,
+		attribute.String("composed_guidance_sha256", agentinstructions.Fingerprint(configuration.Instructions)),
+		attribute.String("configured_model", configuration.Selection.Model),
+		attribute.String("configured_thinking", configuration.Selection.Thinking))
 	coordinator := session.NewRuntimeCoordinator(adapter.Store)
 	result, err := coordinator.Prepare(ctx, session.RuntimePrepareRequest{Lease: request.Lease, Session: request.Session, State: request.State, Connect: func(ctx context.Context, identity agent.SessionIdentity) (agent.Connection, error) {
 		configuration.StepBudget = request.StepBudget

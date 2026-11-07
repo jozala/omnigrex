@@ -2,6 +2,7 @@ package agentturn
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 
 	"github.com/jozala/omnigrex/internal/store"
@@ -27,6 +28,13 @@ func executionAttributes(execution store.AgentTurnExecutionContext) []attribute.
 		attribute.String("agent_turn_id", execution.Turn.ID),
 		attribute.String("role", string(execution.Participant.Role)),
 		attribute.String("stage", string(execution.Turn.Stage)),
+		attribute.String("purpose", string(execution.Turn.Purpose)),
+		attribute.String("agent_profile_source_commit", execution.Turn.AgentProfileCommitSHA),
+		attribute.String("agent_profile_source_sha256", hex.EncodeToString(execution.Turn.AgentProfileContentSHA256)),
+		attribute.String("runtime_profile_name", execution.Participant.RuntimeProfileName),
+		attribute.String("runtime_profile_version", execution.Participant.RuntimeProfileVersion),
+		attribute.String("runtime_profile_sha256", execution.Participant.RuntimeProfileContentSHA256),
+		attribute.String("runtime_image", execution.Participant.RuntimeImageDigest),
 	}
 }
 

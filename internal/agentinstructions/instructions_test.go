@@ -151,3 +151,13 @@ func TestInitialDevelopmentExplainsConditionalPRInspection(t *testing.T) {
 		}
 	}
 }
+
+func TestComposedGuidanceFingerprint(t *testing.T) {
+	// Independent SHA-256 vector: no credential-bearing launch config is hashed.
+	if got := agentinstructions.Fingerprint("abc"); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("fingerprint=%s", got)
+	}
+	if agentinstructions.Fingerprint("abc\n") == agentinstructions.Fingerprint("abc") {
+		t.Fatal("fingerprint does not cover exact bytes")
+	}
+}

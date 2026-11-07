@@ -524,6 +524,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		return fmt.Errorf("configure Assignment retention Worker: %w", err)
 	}
 	toolCacheMonitor, err := workspace.NewToolCacheMonitor(workspaces, workspace.ToolCacheMonitorConfig{
+		StateRoot:      settings.RuntimeStateRoot,
 		ThresholdBytes: settings.AssignmentToolCacheWarningBytes,
 		PollInterval:   settings.AssignmentToolCachePollInterval,
 		Logger:         logger,
