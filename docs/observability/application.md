@@ -284,7 +284,7 @@ VM-root space including `/var/tmp`, host-only Workspace Captures/native log arch
 
 The existing 653 application series remain compatible.
 This extension adds at most **1346** classic series: 61 authorized layer/tool pairs × (5 counters + 13 histogram series) = 1098; two prompt boundaries × 13 = 26; six resources × four statuses = 24; six resources × two usable statuses × 11 allocation histogram series = 132; six filesystem histograms × 11 = 66 (including the live runtime used-byte extension).
-The combined application ceiling is **1999**, with a reviewed **2050 total target** allowing 51 backend metadata series, replacing the preceding 750 target.
+The combined application ceiling is **1999**, with the existing reviewed **2050 total target** allowing 51 backend metadata series, replacing the preceding 750 target.
 Executable tests enumerate all combinations and exercise SDK view/filter retention; arbitrary labels remain disallowed.
 Resource identity churn and backend translation can multiply retained series and must be inspected during deployment.
 

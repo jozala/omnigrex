@@ -2,8 +2,8 @@
 name: reviewer
 role: REVIEWER
 runtime: pi-rpc/v2
-model: opencode-go/deepseek-v4.1-flash
-thinking: max
+model: openai/gpt-6.1-sol
+thinking: high
 permissions:
   read: allow
   edit: deny

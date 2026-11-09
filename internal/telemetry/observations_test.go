@@ -61,6 +61,8 @@ func TestObservationSeriesBudget(t *testing.T) {
 			}
 		}
 	}
+	// The current tool vocabulary contributes 61 layer/tool pairs; temporary
+	// filesystem used bytes add 11 series to main's 1335-series extension.
 	if series != 1346 || series+653 > 2050 {
 		t.Fatalf("extension=%d total=%d target=2050", series, series+653)
 	}
