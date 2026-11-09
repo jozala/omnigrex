@@ -77,6 +77,15 @@ async function prompt(t, root, mode, continued = false) {
     assert.ok(records.some(record => record.type === 'auto_retry_end' && record.success));
   }
   if (mode === 'cancel') assert.ok(records.some(record => record.type === 'response' && record.id === 'cancel-long' && record.command === 'abort' && record.success));
+  if (!continued) {
+    const tools = records.filter(record => record.type === 'tool_execution_end');
+    assert.equal(tools.length, 6);
+    for (const tool of tools) {
+      assert.equal(tool.toolName, 'read'); assert.equal(tool.isError, false);
+      assert.ok(Number.isFinite(tool.durationMs) && tool.durationMs >= 0);
+      assert.equal(tool.result, undefined); assert.equal(tool.args, undefined);
+    }
+  }
   return records;
 }
 

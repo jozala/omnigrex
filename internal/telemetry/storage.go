@@ -53,3 +53,13 @@ func RecordFilesystem(ctx context.Context, capacity, free, available, inodes, fr
 		instrument.Record(ctx, *value)
 	}
 }
+
+// RecordFilesystemUsed records observed block consumption, not directory
+// allocation or configured mount size. Like capacity, this is not additive.
+func RecordFilesystemUsed(ctx context.Context, used *float64) {
+	if !metricsActive.Load() || used == nil || *used < 0 || math.IsNaN(*used) || math.IsInf(*used, 0) {
+		return
+	}
+	instrument, _ := otel.Meter(Scope).Float64Histogram("omnigrex.storage.filesystem.used", metric.WithUnit("By"))
+	instrument.Record(ctx, *used)
+}

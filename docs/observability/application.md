@@ -228,9 +228,9 @@ Layers are `mcp_server` (orchestrator admitted execution including gate waits an
 They are independent populations: server execution may outlive client waiting, and neither counts nor durations should be summed/merged across layers as one population.
 Server recording reuses `mcp.tool.execute` completion without changing admission, authorization, validation, cancellation, detached mutation lifetime, or finalization; pre-admission rejections remain excluded.
 Existing aggregate operation instruments remain intact.
-`KnownMCPToolName(name)` checks the fixed 26-name MCP vocabulary, tested against the authorized catalog; native names are only `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`.
+`KnownMCPToolName(name)` checks the fixed 27-name MCP vocabulary, tested against the authorized catalog; native names are only `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`.
 Unknown external/model-supplied names, layers, or outcomes are discarded, not normalized into new series.
-No runtime producers are implemented here; #184 supplies client/native events through the existing live boundary.
+The [live runtime producers](#live-runtime-producers) supply client/native events through the existing live boundary.
 
 ### Mounted-storage sampling and runtime seam
 
@@ -239,6 +239,7 @@ No runtime producers are implemented here; #184 supplies client/native events th
 | `omnigrex.storage.observations` | Counter / `{observation}` | `resource`, `status` | Observed collection attempts, not a completeness ledger. |
 | `omnigrex.storage.allocated` | Histogram / bytes | `resource`, `status` | Allocated directory blocks observed, including directory metadata; complete/partial samples only. |
 | `omnigrex.storage.filesystem.capacity` | Histogram / bytes | None | Backing filesystem block capacity samples. |
+| `omnigrex.storage.filesystem.used` | Histogram / bytes | None | Observed filesystem block consumption from the live runtime; not directory allocation. |
 | `omnigrex.storage.filesystem.free` | Histogram / bytes | None | Free blocks, including reserved blocks. |
 | `omnigrex.storage.filesystem.available` | Histogram / bytes | None | Blocks available to an unprivileged caller. |
 | `omnigrex.storage.filesystem.inodes` | Histogram / `{inode}` | None | Backing filesystem inode capacity samples. |
@@ -276,17 +277,57 @@ There is no per-owner observation-age gauge: the status counter indicates sample
 The runtime companion may call `RecordStorage(ctx, resource, status, allocated)` for fixed `tmp` and `run-pi-agent` categories only; host scans never measure those temporary mounts.
 Nil allocation is required when unavailable/missing; only observed complete/partial values may be supplied, including actual zero.
 `RecordFilesystem` accepts optional nonnegative finite numeric samples, independently omitting unavailable values; producers must avoid duplicate shared-capacity samples within one collection.
-There is no universal observation abstraction or new Agent Event schema until a producer needs it.
+The live runtime producer uses small typed neutral observations, not a universal telemetry abstraction.
 VM-root space including `/var/tmp`, host-only Workspace Captures/native log archives, and whole-host monitoring are excluded.
 
 ### Revised bounded series budget
 
 The existing 653 application series remain compatible.
-This extension adds at most **1299** classic series: 59 authorized layer/tool pairs × (5 counters + 13 histogram series) = 1062; two prompt boundaries × 13 = 26; six resources × four statuses = 24; six resources × two usable statuses × 11 allocation histogram series = 132; five filesystem histograms × 11 = 55.
-The combined application ceiling is **1952**, with a reviewed **2050 total target** allowing 98 backend metadata series, replacing the preceding 750 target.
+This extension adds at most **1346** classic series: 61 authorized layer/tool pairs × (5 counters + 13 histogram series) = 1098; two prompt boundaries × 13 = 26; six resources × four statuses = 24; six resources × two usable statuses × 11 allocation histogram series = 132; six filesystem histograms × 11 = 66 (including the live runtime used-byte extension).
+The combined application ceiling is **1999**, with a reviewed **2050 total target** allowing 51 backend metadata series, replacing the preceding 750 target.
 Executable tests enumerate all combinations and exercise SDK view/filter retention; arbitrary labels remain disallowed.
 Resource identity churn and backend translation can multiply retained series and must be inspected during deployment.
 
-Deployment dashboards and authorized live verification remain #185, after runtime producers in #184.
+Deployment dashboards and authorized live verification remain #185, after runtime producer qualification in #184.
 Inspect actual units/names/buckets/metadata, distinguish layers and partial/missing storage, and verify stdout log/trace navigation without adding labels or another logging route.
 Local code tests and any existing received signals do not establish live backend acceptance, dashboard correctness, or notification activation.
+
+### Live runtime producers
+
+The owned Pi runner preserves each observed `tool_execution_end` as bounded native/client evidence in the existing activity Agent Event.
+The orchestrator's per-prompt observer calls the shared tool recorder; no start/end pairing, deduplication, new open spans, or trace-header propagation is introduced.
+Native tools are the seven fixed names above; registered `omnigrex_` MCP wrappers map to the same fixed MCP vocabulary with `layer=mcp_client`.
+Unknown names or missing/non-boolean final error flags omit the observation.
+Pi's final `isError` maps only to `success` or `failure`, not an inferred cancellation, validation, or transport cause.
+Bounded call IDs (ASCII alphanumeric, underscore or hyphen, at most 128 bytes) are diagnostic metadata only, never metric attributes.
+Duplicate endings can count twice, unmatched endings count independently, and missing endings count nothing; none require a recovery ledger.
+Each prompt has its own consumer and queues; History Replay does not emit live tool/storage observations.
+
+The inspected pinned Pi 1.4.0 SDK supplies optional monotonic `durationMs` around `tool.execute()`.
+This excludes preflight/validation, waiting before execute, post-hooks, and transport delivery.
+Only finite numeric values from zero through 86,400,000 ms are accepted, independently of the final error flag.
+Missing, null, negative, oversized or malformed timing omits the duration sample, never supplies a zero or uses `AgentEvent.ObservedAt` as execution timing.
+Older 1.0.4 images lack native durations, and older projections may omit them even with a newer package; exact retained resources, not package version alone, determine coverage.
+Native/client measurements and admitted MCP server measurements are separate populations and must not be summed; detached server work can outlive client waiting.
+
+One asynchronous sampler calls Node's `statfs` for `/tmp` and `/run/pi-agent` sequentially, at startup and approximately every 60 seconds while the owned RPC process lives.
+At most one collection is outstanding; a slow or hung syscall skips subsequent collections without blocking JavaScript input/cancellation or launching helper processes.
+It never enumerates paths or reads credential bodies and never runs monitoring through prompt RPC commands or backend exec APIs.
+A small optional frame is skipped under stdout backpressure; a separate one-slot coalescing adapter queue cannot displace critical events or the independent budget queue/snapshot.
+Malformed optional data is dropped, and unavailable fields remain absent.
+No terminal sample, acknowledgement, restart recovery, or measurement-driven settlement is required.
+Ordinary critical protocol framing and downstream sink failure behavior remain unchanged.
+
+Temporary samples record fixed `tmp`/`run-pi-agent` collection statuses through `RecordStorage`, **without** directory allocation values.
+Filesystem histograms receive actual block capacity, used (`blocks - bfree`), free, available, inode capacity and free inode values, where supported.
+`omnigrex.storage.filesystem.used` is an additional byte histogram with the same storage buckets and no dimensions, adding 11 classic series: together with the current catalog's `assess_human_input` tool (36 series for two layers), the extension ceiling is now 1346 and the application ceiling **1999**, still within the **2050** target (51 metadata allowance).
+Like the prerequisite's capacity histograms, these distributions have no mount/Participant labels and cannot be interpreted as current per-mount gauges or added across collections.
+The two temporary mounts are separate filesystems in the owned Docker and Microsandbox contracts; the runtime never samples host backing directories or configured mount sizes as substitutes.
+Open-but-unlinked allocations remain visible in filesystem usage even though directory listings would miss them.
+Unsupported statistics are unavailable, not zero; failed collection contributes no filesystem sample.
+
+`AgentEvent.ObservedAt` is transport arrival time for diagnostics; exported histogram points follow SDK collection timestamps.
+There is no retained last-value gauge to leave looking current after process termination.
+Treat collection/export silence as unavailable coverage after allowing for the sampling/export cadence and ingestion delay, not as zero use/free space.
+No inactive environment is launched to collect temporary statistics, and no Session capability or immutable image/resource binding is changed to obtain coverage.
+Token/provider usage, first-token timing, VM-root `/var/tmp`, per-file measurement, and live deployment acceptance remain excluded.

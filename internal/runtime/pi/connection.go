@@ -81,23 +81,24 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
-	budget            *stepbudget.Observation
-	budgetSummary     string
-	events            chan agentevent.AgentEvent
-	observations      chan agentevent.AgentEvent
-	settled           chan struct{}
-	settledOK         bool
-	lastReason        string
-	lastFailure       string
-	lastGeneration    string
-	lastDiagnostic    *agent.ProviderDiagnostic
-	lastLoggedAttempt string
-	outcome           agent.Outcome
-	retryBackoff      bool
-	cancelRequested   bool
-	retryCancelled    bool
-	compactionFailed  bool
-	compactionAborted bool
+	budget                *stepbudget.Observation
+	budgetSummary         string
+	events                chan agentevent.AgentEvent
+	observations          chan agentevent.AgentEvent
+	temporaryObservations chan agentevent.AgentEvent
+	settled               chan struct{}
+	settledOK             bool
+	lastReason            string
+	lastFailure           string
+	lastGeneration        string
+	lastDiagnostic        *agent.ProviderDiagnostic
+	lastLoggedAttempt     string
+	outcome               agent.Outcome
+	retryBackoff          bool
+	cancelRequested       bool
+	retryCancelled        bool
+	compactionFailed      bool
+	compactionAborted     bool
 }
 
 // Connect starts reading immediately, including events emitted before a waiter.
@@ -345,7 +346,7 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		c.mu.Unlock()
 		return agent.Outcome{Status: agent.Rejected}, err
 	}
-	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), observations: make(chan agentevent.AgentEvent, 1), settled: make(chan struct{})}
+	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), observations: make(chan agentevent.AgentEvent, 1), temporaryObservations: make(chan agentevent.AgentEvent, 1), settled: make(chan struct{})}
 	if c.options.StepBudget != nil {
 		t.budget = &stepbudget.Observation{Limit: *c.options.StepBudget}
 	}
@@ -446,6 +447,7 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 			select {
 			case event = <-t.events:
 			case event = <-t.observations:
+			case event = <-t.temporaryObservations:
 			case <-c.done:
 				// Settlement enqueues the terminal event before closing its signal.
 				// Continue through that event so neither EOF nor a queue-empty race
@@ -710,6 +712,23 @@ func (c *connection) record(content []byte) error {
 	if t == nil {
 		return nil
 	}
+	if record.Type == "omnigrex_temporary_filesystems" {
+		if !t.settledOK {
+			if samples := temporaryFilesystems(record.Data); samples != nil {
+				event := c.eventLocked("temporary_filesystems", "running", "")
+				event.Metadata.TemporaryFilesystems = samples
+				select {
+				case <-t.temporaryObservations:
+				default:
+				}
+				select {
+				case t.temporaryObservations <- event:
+				default:
+				}
+			}
+		}
+		return nil
+	}
 	if t.settledOK {
 		return agent.ErrProtocol
 	}
@@ -913,8 +932,12 @@ func (c *connection) record(content []byte) error {
 	default:
 		return nil
 	}
+	event := c.runtimeEvent("activity", status, "", record.Type, "", t.retryCancelled)
+	if record.Type == "tool_execution_end" {
+		event.Metadata.ToolObservation, event.Metadata.ToolCallID = terminalTool(content)
+	}
 	select {
-	case t.events <- c.runtimeEvent("activity", status, "", record.Type, "", t.retryCancelled):
+	case t.events <- event:
 	default:
 		return agent.ErrBackpressure
 	}

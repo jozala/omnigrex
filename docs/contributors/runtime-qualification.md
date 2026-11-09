@@ -66,9 +66,10 @@ Only the RPC subscriber receives projected events; the real Session, extensions,
 | `message_end` | Type, message role, stop reason, sanitized error marker, provider generation, bounded provider diagnostic |
 | `message_update` | Type, role, delta kind/index; stock Pi conversion retains tool-call start identity without the partial message; no text/thinking/argument deltas |
 | `turn_end`, `entry_appended`, `queue_update`, `bash_execution_update` | Event type only; redundant message/tool/entry/queued-text/output bodies stay in the Session owner |
-| `tool_execution_start/update/end` | Type, tool-call identity/name, parent identity, error flag; no arguments/results |
+| `tool_execution_start/update/end` | Type, bounded diagnostic identity/parent identity, allowlisted name, boolean error flag, and optional valid native terminal `durationMs`; no arguments/results |
 | `omnigrex_provider_request_failed` (owned request observer) | Closed failure class and revalidated diagnostic only; delivered to the RPC subscriber without adding Session messages, including native summary requests |
 | `compaction_start`, `compaction_end` | Type and reason; end includes aborted/retry flags and a fixed failure marker, never a summary or raw provider error |
+| `omnigrex_temporary_filesystems` (owned asynchronous sampler) | At most two fixed resource/statfs records, no filenames, file bodies, or error prose; separate optional coalescing slot, no budget/settlement evidence |
 | Retry, settlement, other lifecycle and unknown events | Unchanged; required fields are not truncated |
 
 The orchestrator still bounds every JSONL record to 1 MiB and fails closed on malformed/oversized required records.
@@ -81,7 +82,7 @@ New Runtime Profiles include the projection module in their owned-resource hash 
 Historical inventories remain valid and retain their original behavior; release images still require both-backend qualification before deployment selection.
 That release gate is distinct from optional qualification of an installation's historical source image against a candidate.
 If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
-Run `node --test agent/pi/diagnostic/control-events.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
+Run `node --test agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/temporary-filesystems.test.mjs` for the synthetic multi-megabyte projection boundary and the ordinary Go Pi tests for the real bounded-reader regression.
 The configuration gate also runs `control-rpc.test.mjs` against the pinned SDK for long normal/retry/error/cancel completion, correlated commands during streaming, stdout backpressure, EOF cleanup, and fresh-process continuation.
 The both-backend Session gate performs a multi-megabyte normal completion followed by fresh-environment continuation and bounded metadata replay.
 Long-Turn fixtures accumulate several individually bounded assistant messages through read-tool calls, so only the redundant aggregate exceeds 1 MiB.

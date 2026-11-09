@@ -58,7 +58,7 @@ func applicationMetricView(instrument sdkmetric.Instrument) (sdkmetric.Stream, b
 	case "omnigrex.storage.allocated":
 		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: storageBuckets, NoMinMax: true}
 		stream.AttributeFilter = attribute.NewAllowKeysFilter("resource", "status")
-	case "omnigrex.storage.filesystem.capacity", "omnigrex.storage.filesystem.free", "omnigrex.storage.filesystem.available", "omnigrex.storage.filesystem.inodes", "omnigrex.storage.filesystem.free_inodes":
+	case "omnigrex.storage.filesystem.used", "omnigrex.storage.filesystem.capacity", "omnigrex.storage.filesystem.free", "omnigrex.storage.filesystem.available", "omnigrex.storage.filesystem.inodes", "omnigrex.storage.filesystem.free_inodes":
 		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: storageBuckets, NoMinMax: true}
 		stream.AttributeFilter = attribute.NewAllowKeysFilter()
 

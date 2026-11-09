@@ -10,14 +10,19 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+var expectedMCPTools = []string{
+	"assess_human_input", "complete_planning", "publish_plan_checkpoint", "get_collaboration_record", "get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff", "get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs", "refresh_default_branch", "publish_changes", "open_pr", "request_review", "submit_review", "comment_on_issue", "comment_on_pull_request", "request_clarification", "resolve_clarification", "report_blocked", "confirm_prior_terminal_intent",
+}
+var expectedNativeTools = []string{"read", "edit", "write", "bash", "grep", "find", "ls"}
+
 func TestObservationSeriesBudget(t *testing.T) {
 	reader := budgetReader(t)
 	ctx := context.Background()
 	duration := time.Second
 	for _, layer := range []string{"mcp_server", "mcp_client", "native"} {
-		names := mcpToolNames
+		names := expectedMCPTools
 		if layer == "native" {
-			names = nativeToolNames
+			names = expectedNativeTools
 		}
 		for _, name := range names {
 			for _, outcome := range []Outcome{Success, DomainOutcome, Failure, Cancelled, Timeout} {
@@ -36,6 +41,7 @@ func TestObservationSeriesBudget(t *testing.T) {
 	}
 	capacity := float64(1 << 30)
 	RecordFilesystem(ctx, &capacity, &capacity, &capacity, &capacity, &capacity)
+	RecordFilesystemUsed(ctx, &capacity)
 	var data metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &data); err != nil {
 		t.Fatal(err)
@@ -55,7 +61,7 @@ func TestObservationSeriesBudget(t *testing.T) {
 			}
 		}
 	}
-	if series != 1299 || series+653 > 2050 {
+	if series != 1346 || series+653 > 2050 {
 		t.Fatalf("extension=%d total=%d target=2050", series, series+653)
 	}
 }

@@ -134,3 +134,23 @@ test('owned request subscriptions are isolated across rebinds and unsubscribe wi
   assert.equal(first.count, 0);
   assert.equal(second.count, 0);
 });
+
+test('terminal tools preserve only bounded evidence and native duration, never payloads', () => {
+  for (const name of ['read', 'edit', 'write', 'bash', 'grep', 'find', 'ls', 'omnigrex_get_issue']) {
+    const source = { type: 'tool_execution_end', toolName: name, toolCallId: 'call_1', isError: true, durationMs: 1.25,
+      args: 'SENTINEL_SECRET', result: 'SENTINEL_SECRET', details: 'SENTINEL_SECRET' };
+    const wire = controlEvent(source, ['get_issue']);
+    assert.equal(wire.toolName, name); assert.equal(wire.durationMs, 1.25); assert.equal(wire.isError, true);
+    assert.ok(!JSON.stringify(wire).includes('SENTINEL_SECRET'));
+  }
+  for (const durationMs of [undefined, null, -1, NaN, Infinity, '1', {}, 86400001]) {
+    const wire = controlEvent({ type: 'tool_execution_end', toolName: 'read', isError: false, durationMs });
+    assert.equal(wire.durationMs, undefined);
+  }
+  const hostile = controlEvent({ type: 'tool_execution_end', toolName: 'SENTINEL_SECRET'.repeat(1000),
+    toolCallId: 'SENTINEL_SECRET'.repeat(1000), parentToolCallId: {}, isError: 'SENTINEL_SECRET', durationMs: 0 });
+  assert.equal(hostile.toolName, undefined); assert.equal(hostile.toolCallId, undefined);
+  assert.equal(hostile.isError, undefined); assert.equal(hostile.durationMs, 0);
+  assert.equal(controlEvent({ type: 'tool_execution_start', durationMs: 10 }).durationMs, undefined);
+  assert.equal(controlEvent({ type: 'tool_execution_end', toolName: 'omnigrex_unregistered' }, ['get_issue']).toolName, undefined);
+});

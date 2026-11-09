@@ -38,6 +38,8 @@ type AgentEvent struct {
 type StepBudgetObservation = stepbudget.Observation
 
 type OperationalMetadata struct {
+	ToolObservation       *ToolObservation
+	TemporaryFilesystems  []TemporaryFilesystem
 	StepBudget            *StepBudgetObservation
 	MessageID             string
 	ToolCallID            string
