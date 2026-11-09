@@ -179,6 +179,114 @@ Abrupt orchestrator death, exporter failure, and uncertain settlement acknowledg
 The 173-series subtotal remains the non-budget baseline.
 This extension adds at most 480 classic series per resource: 140 coverage categories (4 Role categories × 7 mode/completeness combinations × 5 terminations), 208 usage series (16 combinations × 13), 52 finite-ceiling series (4 × 13), 72 ratio series (8 × 9), and 8 summary/handoff counters.
 The seven coverage combinations are finite/unlimited with complete/partial/unknown usage, plus unknown mode and unknown usage.
-The application subtotal is now **653**, replacing the earlier 200-series target with a **750-series target**, allowing 97 backend metadata series.
+The step-budget subtotal is **653**, which replaced the earlier 200-series target with a 750-series target and 97 backend metadata series of allowance.
+The [prompt/tool/storage extension](#revised-bounded-series-budget) defines the current combined target.
 Termination is deliberately excluded from histogram dimensions; compare ending-category counts and correlated logs rather than individually joining aggregate histogram samples.
 Resource identity churn still multiplies retained backend series.
+
+## Prompt, tool, and storage observations
+
+These extend the existing exporter; recording is synchronous SDK aggregation, independent of trace sampling and without network waits in prompt processing, lease handling, settlement, or cleanup.
+No Pi exporter, credentials, public scrape endpoint, OTel log route, or new service identity is added.
+Like budget observations, these are best-effort samples, not durable accounting; process death and failed export lose observations without recovery or replay-derived metrics.
+
+### Prompt boundary and provenance
+
+`omnigrex.agent_turn.prompt_duration` is a histogram in seconds with the operation duration buckets.
+It surrounds only the existing `Prompt` call: submission through the returned terminal outcome includes model work, tools, compaction, and internal waits, but excludes launch and subsequent finalization/cleanup.
+Its only dimension is `boundary`: `runtime_terminal` when a terminal outcome is returned without a transport/caller error, otherwise `caller_return`.
+A cancellation/error return does **not** establish when guest execution stopped.
+This does not change durable `started_at` or `agent_turn.execute`, which still measures the acquired execution attempt including launch, cleanup, and finalization.
+These nested/overlapping durations are not additive.
+
+Execution traces and correlated completion logs include the Turn's original Profile source commit and retained source SHA-256, exact Participant Runtime Profile name/version/content hash/image, Role, Stage, and purpose.
+The original source hash is **not** recalculated from decoded snapshot JSON.
+Pi preparation adds `configured_model`, `configured_thinking`, and `composed_guidance_sha256`; successful existing model validation adds `effective_model` and allowlisted `effective_thinking` without an extra runtime request.
+Prompt processing also records the retained configured step-budget value when available, not as a metric label.
+Runtime launch adds backend family, configured memory bytes and PID limit; these are configuration, not observed usage or proof of enforced effective resources.
+The composed fingerprint covers exactly the bytes produced by `agentinstructions.Operator.Compose`: platform/Stage/purpose/operator/Profile guidance.
+It excludes the full Pi-rendered system prompt, repository AGENTS.md files (read explicitly through tools), skill bodies, and later instruction-bearing reads.
+There is no instruction-read manifest, payload inspection, historical instruction authority, or hash of credential-bearing launch configuration.
+These allowlisted fields and identities belong only in correlated traces/logs, never metric or Loki stream labels.
+The existing typed failure diagnostics from decision 0046 remain unchanged.
+
+### Shared tool producer contract
+
+| Instrument | Kind / unit | Dimensions |
+| --- | --- | --- |
+| `omnigrex.tool.calls` | Counter / `{call}` | `layer`, `tool`, `outcome` |
+| `omnigrex.tool.duration` | Histogram / seconds | `layer`, `tool` |
+
+`telemetry.RecordTool(ctx, layer, name, outcome, duration)` records **one observed ending**, not a start/end pair or exactly-once call ledger.
+`duration` is an optional `*time.Duration`; nil or negative omits the duration sample, never substitutes zero.
+Observed interrupted calls can contribute cancelled/timeout counts with missing duration; do not fabricate success for calls without terminal evidence.
+The producer owns event validation and when it has enough evidence to record; there are no per-call pairing maps or recovery of missed events.
+Outcomes use the existing five bounded operation values.
+Duration uses the existing ten finite operation buckets and omits outcome to avoid the histogram cross-product.
+
+Layers are `mcp_server` (orchestrator admitted execution including gate waits and durable finalization), `mcp_client` (runtime-observed client waiting), and `native` (runtime native tools).
+They are independent populations: server execution may outlive client waiting, and neither counts nor durations should be summed/merged across layers as one population.
+Server recording reuses `mcp.tool.execute` completion without changing admission, authorization, validation, cancellation, detached mutation lifetime, or finalization; pre-admission rejections remain excluded.
+Existing aggregate operation instruments remain intact.
+`KnownMCPToolName(name)` checks the fixed 26-name MCP vocabulary, tested against the authorized catalog; native names are only `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`.
+Unknown external/model-supplied names, layers, or outcomes are discarded, not normalized into new series.
+No runtime producers are implemented here; #184 supplies client/native events through the existing live boundary.
+
+### Mounted-storage sampling and runtime seam
+
+| Instrument | Kind / unit | Dimensions | Meaning |
+| --- | --- | --- | --- |
+| `omnigrex.storage.observations` | Counter / `{observation}` | `resource`, `status` | Observed collection attempts, not a completeness ledger. |
+| `omnigrex.storage.allocated` | Histogram / bytes | `resource`, `status` | Allocated directory blocks observed, including directory metadata; complete/partial samples only. |
+| `omnigrex.storage.filesystem.capacity` | Histogram / bytes | None | Backing filesystem block capacity samples. |
+| `omnigrex.storage.filesystem.free` | Histogram / bytes | None | Free blocks, including reserved blocks. |
+| `omnigrex.storage.filesystem.available` | Histogram / bytes | None | Blocks available to an unprivileged caller. |
+| `omnigrex.storage.filesystem.inodes` | Histogram / `{inode}` | None | Backing filesystem inode capacity samples. |
+| `omnigrex.storage.filesystem.free_inodes` | Histogram / `{inode}` | None | Free inode samples. |
+
+Storage histogram finite boundaries are `0, 1048576, 16777216, 268435456, 1073741824, 17179869184, 274877906944, 1099511627776`.
+These broad shared buckets bound cost, not precise capacity quantiles; sum/count gives the mean sampled value, **not a current fleet total**.
+Directory allocation and filesystem block use differ, especially for open-but-unlinked files.
+Filesystem capacity is shared, not exclusive Participant capacity or a quota; never sum capacity samples across Participants or polls.
+
+The background cache monitor initially retains its five-minute configured cadence.
+Discovery unions configured workspace, runtime-state and mise backing roots, including idle retained Participant directories without starting an environment or invoking cleanup/inventory APIs.
+Each backing root is discovered independently: a failed root records its resource categories as `unavailable` without discarding IDs from healthy roots or preventing later roots from being discovered.
+Enumeration errors and non-`ENOENT` child-lookup failures also make discovery incomplete, while retaining IDs already discovered successfully; a readable but non-searchable root must not appear empty.
+Absence-based pruning of retained scans and cache-warning state requires complete discovery; incomplete discovery does not establish that an undiscovered Participant was removed.
+For both supplied Docker and Microsandbox mappings, exact `assignment-<Participant UUID>` directories map to `workspace`, `runtime-state`, `mise`, and `tool-data` under those roots.
+The four persistent categories are `workspace`, `state`, `mise`, and `tool-data`; the latter includes assignment caches **and** Turn scratch, while mise covers the whole mounted installation tree.
+No default path or Docker-daemon host path is used and no Participant is rebound.
+Backend capacity is sampled from safely opened descriptors, once per device per poll, without Participant/category labels; independent polls and instances can still repeat samples.
+A failed statfs omits capacity samples; it does not become zero free space.
+
+The scanner reuses metadata-only descriptor-relative no-follow traversal, ownership/device checks, bounded depth/hardlink tracking, 500,000-entry steps, 30-second per-Participant budgets, and at most four retained mounted-tree scans in addition to the independent four cache-warning scans.
+Discovery retains the existing 2,000-Participant rotating poll budget.
+It never reads file contents or exports filenames, repairs permissions, pauses agents, captures workspaces, reclaims leases, or performs retention/eviction.
+Filesystem syscalls cannot be preempted by context cancellation; observations remain off the Agent Turn critical path.
+Existing retained tool-cache threshold/suppression semantics and scratch/retention cleanup remain independent and unchanged.
+
+Statuses are `complete`, `partial`, `missing`, or `unavailable` (including inaccessible/unsafe roots and exhausted concurrent-scan capacity).
+A completed empty tree contributes an actual allocation sample (directory metadata may use blocks); missing/unavailable observations contribute **no usage sample**.
+Partial samples are cumulative progress from a resumable traversal and can overlap across polls; do not sum them.
+Completed concurrent traversals are neither atomic snapshots nor necessarily lower bounds at completion; replacement invalidates retained scan state on the next root check.
+There is no exact fleet-total, collection-percentage, per-Turn peak/growth, retained measurement ledger, or measurement recovery protocol.
+There is no per-owner observation-age gauge: the status counter indicates sampled collections but cannot establish freshness of every retained Participant; collection/export absence must remain unknown.
+
+The runtime companion may call `RecordStorage(ctx, resource, status, allocated)` for fixed `tmp` and `run-pi-agent` categories only; host scans never measure those temporary mounts.
+Nil allocation is required when unavailable/missing; only observed complete/partial values may be supplied, including actual zero.
+`RecordFilesystem` accepts optional nonnegative finite numeric samples, independently omitting unavailable values; producers must avoid duplicate shared-capacity samples within one collection.
+There is no universal observation abstraction or new Agent Event schema until a producer needs it.
+VM-root space including `/var/tmp`, host-only Workspace Captures/native log archives, and whole-host monitoring are excluded.
+
+### Revised bounded series budget
+
+The existing 653 application series remain compatible.
+This extension adds at most **1299** classic series: 59 authorized layer/tool pairs × (5 counters + 13 histogram series) = 1062; two prompt boundaries × 13 = 26; six resources × four statuses = 24; six resources × two usable statuses × 11 allocation histogram series = 132; five filesystem histograms × 11 = 55.
+The combined application ceiling is **1952**, with a reviewed **2050 total target** allowing 98 backend metadata series, replacing the preceding 750 target.
+Executable tests enumerate all combinations and exercise SDK view/filter retention; arbitrary labels remain disallowed.
+Resource identity churn and backend translation can multiply retained series and must be inspected during deployment.
+
+Deployment dashboards and authorized live verification remain #185, after runtime producers in #184.
+Inspect actual units/names/buckets/metadata, distinguish layers and partial/missing storage, and verify stdout log/trace navigation without adding labels or another logging route.
+Local code tests and any existing received signals do not establish live backend acceptance, dashboard correctness, or notification activation.

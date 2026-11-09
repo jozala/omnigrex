@@ -43,6 +43,25 @@ func applicationMetricView(instrument sdkmetric.Instrument) (sdkmetric.Stream, b
 		return stream, true
 	}
 	switch instrument.Name {
+	case "omnigrex.tool.calls":
+		stream.Aggregation = sdkmetric.AggregationDefault{}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("layer", "tool", "outcome")
+	case "omnigrex.tool.duration":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: durationBuckets, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("layer", "tool")
+	case "omnigrex.agent_turn.prompt_duration":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: durationBuckets, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("boundary")
+	case "omnigrex.storage.observations":
+		stream.Aggregation = sdkmetric.AggregationDefault{}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("resource", "status")
+	case "omnigrex.storage.allocated":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: storageBuckets, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter("resource", "status")
+	case "omnigrex.storage.filesystem.capacity", "omnigrex.storage.filesystem.free", "omnigrex.storage.filesystem.available", "omnigrex.storage.filesystem.inodes", "omnigrex.storage.filesystem.free_inodes":
+		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: storageBuckets, NoMinMax: true}
+		stream.AttributeFilter = attribute.NewAllowKeysFilter()
+
 	case "omnigrex.agent_turn.step_limit":
 		stream.Aggregation = sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000}, NoMinMax: true}
 		stream.AttributeFilter = attribute.NewAllowKeysFilter("role")

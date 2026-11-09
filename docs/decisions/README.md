@@ -78,6 +78,8 @@ Record 0052 retains the Human Handoff publication decision independently numbere
 
 Record 0053 retains the budget observation decision independently numbered 0046 before the telemetry failure diagnostic decision merged.
 
+- [0062: Sample mounted storage without fleet accounting](0062-sample-mounted-storage-without-fleet-accounting.md) - Accepted, 2026-11-06.
+
 ## Existing architectural decisions
 
 ADR identifiers remain stable; the links below locate their authoritative current or archived records.
