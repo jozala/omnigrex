@@ -98,3 +98,18 @@ func TestProviderDiagnosticResourceKeepsHistoricalInventoriesValid(t *testing.T)
 		t.Fatal("historical runtime was rebound to a new diagnostic module")
 	}
 }
+
+func TestTemporaryFilesystemResourceDoesNotRebindHistoricalInventories(t *testing.T) {
+	const name = "temporary-filesystems.mjs"
+	var current ResourceContract
+	_ = json.Unmarshal(CurrentContract("amd64"), &current)
+	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
+		t.Fatal("current inventory omits sampler")
+	}
+	current.Files = slices.DeleteFunc(current.Files, func(file ResourceFile) bool { return file.Name == name })
+	retained, _ := json.Marshal(current)
+	script, err := QualificationScript("amd64", retained)
+	if err != nil || strings.Contains(script, name) {
+		t.Fatalf("historical binding changed: %v", err)
+	}
+}

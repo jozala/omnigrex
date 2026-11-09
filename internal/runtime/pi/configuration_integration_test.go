@@ -11,6 +11,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
+	"github.com/jozala/omnigrex/internal/runtime/agentevent"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/pi"
 	"github.com/jozala/omnigrex/internal/stepbudget"
@@ -68,7 +69,7 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 			case "compaction-boundary":
 				spec.Environment = append(spec.Environment, "OMNIGREX_PI_COMPACTION_FIXTURE=1")
 			case "control-boundary":
-				spec.Environment = append(spec.Environment, "OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE=1")
+				spec.Environment = append(spec.Environment, "OMNIGREX_PI_CONTROL_BOUNDARY_FIXTURE=1", "OMNIGREX_PI_TEMPORARY_FIXTURE=1")
 			case "model":
 				inputs.Selection.Model = "diagnostic/does-not-exist"
 			case "thinking":
@@ -132,8 +133,34 @@ func TestPiConfigurationAndRoleAuthority(t *testing.T) {
 				return
 			}
 			if tc.prompt == "" {
-				if err := pi.CheckConfigurationDiagnostic(ctx, c); err != nil {
-					t.Fatalf("configuration: %v; safe stderr: %s", err, stderr.String())
+				if _, err := c.Prepare(ctx); err != nil {
+					t.Fatal(err)
+				}
+				seen := map[string]bool{}
+				downstream := eventSinkFunc(func(event agentevent.AgentEvent) {
+					if tool := event.Metadata.ToolObservation; tool != nil {
+						denied := tc.role == role.Reviewer && tool.Layer == "native" && (tool.Name == "edit" || tool.Name == "write")
+						if denied {
+							if !tool.Error || tool.Duration != nil {
+								t.Errorf("rejected tool fabricated execution evidence: %+v", tool)
+							}
+						} else if tool.Error || tool.Duration == nil || *tool.Duration < 0 {
+							t.Errorf("native SDK terminal measurement unavailable: %+v", tool)
+						}
+						seen[tool.Layer+"/"+tool.Name] = true
+					}
+				})
+				observer := telemetry.NewAgentTurnObserver(string(tc.role), nil, downstream)
+				for _, prompt := range []string{"configuration-audit", "configuration-mcp", "configuration-write", "configuration-edit", "configuration-skill", "configuration-grep", "configuration-find", "configuration-ls", "configuration-bash", "configuration-audit"} {
+					got, err := c.Prompt(ctx, prompt, observer)
+					if err != nil || got.Status != agent.Completed {
+						t.Fatalf("configuration: %+v %v; safe stderr: %s", got, err, stderr.String())
+					}
+				}
+				for _, name := range []string{"native/read", "native/edit", "native/write", "native/bash", "native/grep", "native/find", "native/ls", "mcp_client/get_issue"} {
+					if !seen[name] {
+						t.Errorf("missing live tool observation %s", name)
+					}
 				}
 			} else {
 				if _, err := c.Prepare(ctx); err != nil {

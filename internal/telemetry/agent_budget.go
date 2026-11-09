@@ -39,6 +39,30 @@ func budgetRole(role string) string {
 	}
 }
 func (o *AgentTurnObserver) Emit(ctx context.Context, event agentevent.AgentEvent) error {
+	if event.Kind == "activity" && event.Metadata.ToolObservation != nil {
+		tool := event.Metadata.ToolObservation
+		outcome := Success
+		if tool.Error {
+			outcome = Failure
+		}
+		RecordTool(ctx, tool.Layer, tool.Name, outcome, tool.Duration)
+	}
+	if event.Kind == "temporary_filesystems" && ctx.Err() != nil {
+		return nil
+	}
+	if event.Kind == "temporary_filesystems" {
+		for _, s := range event.Metadata.TemporaryFilesystems {
+			if s.Resource != "tmp" && s.Resource != "run-pi-agent" {
+				continue
+			}
+			RecordStorage(ctx, s.Resource, s.Status, nil)
+			if s.Status != "complete" {
+				continue
+			}
+			RecordFilesystem(ctx, s.Capacity, s.Free, s.Available, s.Inodes, s.FreeInodes)
+			RecordFilesystemUsed(ctx, s.Used)
+		}
+	}
 	if event.Kind == "step_budget" && event.Metadata.StepBudget != nil && event.Metadata.StepBudget.Valid() {
 		o.observeSummary(ctx, *event.Metadata.StepBudget)
 	}

@@ -1,9 +1,13 @@
 import { safeDiagnostic } from './provider-diagnostic.mjs';
 
+const nativeNames = new Set(['read', 'edit', 'write', 'bash', 'grep', 'find', 'ls']);
+// Registered wrapper names come from the trusted bootstrap catalog, not model input.
+const safeID = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value) ? value : undefined;
+
 // Pi's public Session subscription is the projection boundary. Only the
 // RPC consumer sees this view; persistence, extensions and the agent keep the
 // original events. Do not intercept stdout or replace Pi's RPC implementation.
-export function controlEvent(event) {
+export function controlEvent(event, mcpTools = []) {
   switch (event.type) {
     case 'omnigrex_provider_request_failed': {
       const { diagnostic, failureClass } = event;
@@ -38,8 +42,11 @@ export function controlEvent(event) {
     case 'tool_execution_start':
     case 'tool_execution_update':
     case 'tool_execution_end':
-      return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName,
-        parentToolCallId: event.parentToolCallId, isError: event.isError };
+      return { type: event.type, toolCallId: safeID(event.toolCallId),
+        toolName: nativeNames.has(event.toolName) || mcpTools.some(name => event.toolName === `omnigrex_${name}`) ? event.toolName : undefined,
+        parentToolCallId: safeID(event.parentToolCallId),
+        isError: typeof event.isError === 'boolean' ? event.isError : undefined,
+        ...(event.type === 'tool_execution_end' && typeof event.durationMs === 'number' && Number.isFinite(event.durationMs) && event.durationMs >= 0 && event.durationMs <= 86400000 ? { durationMs: event.durationMs } : {}) };
     case 'compaction_start':
       return { type: event.type, reason: event.reason };
     case 'compaction_end':
@@ -59,7 +66,7 @@ export function controlEvent(event) {
 // Cache session views so rebinds follow runtime.session without modifying the
 // Session itself. subscribe's unsubscribe handle and synchronous ordering pass
 // through unchanged; the agent's separate backpressure subscription is intact.
-export function controlRuntime(runtime) {
+export function controlRuntime(runtime, mcpTools = []) {
   const sessions = new WeakMap();
   return new Proxy(runtime, {
     get(target, property) {
@@ -72,7 +79,7 @@ export function controlRuntime(runtime) {
           sessions.set(session, new Proxy(session, {
             get(owner, key) {
               if (key === 'subscribe') return listener => {
-                const deliver = event => listener(controlEvent(event));
+                const deliver = event => listener(controlEvent(event, mcpTools));
                 const unsubscribe = owner.subscribe(deliver);
                 const unsubscribeFailures = subscribeFailures?.(deliver);
                 return () => { unsubscribe(); unsubscribeFailures?.(); };

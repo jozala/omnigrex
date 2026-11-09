@@ -80,6 +80,8 @@ Record 0053 retains the budget observation decision independently numbered 0046 
 
 - [0062: Sample mounted storage without fleet accounting](0062-sample-mounted-storage-without-fleet-accounting.md) - Accepted, 2026-11-06.
 
+- [0063: Observe live tools and temporary filesystems without accounting state](0063-observe-live-runtime-tools-and-temporary-filesystems.md) - Accepted, 2026-11-09.
+
 ## Existing architectural decisions
 
 ADR identifiers remain stable; the links below locate their authoritative current or archived records.

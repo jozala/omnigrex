@@ -7,6 +7,7 @@ import { compactionCompatibilityExtension } from './compaction-compat-extension.
 import { openDurableSession } from './session-state.mjs';
 import { historyInput } from './history-rpc.mjs';
 import { stepBudget } from './step-budget.mjs';
+import { sampleTemporaryFilesystems } from './temporary-filesystems.mjs';
 import { controlRuntime } from './control-events.mjs';
 import { subscriptionRuntime } from './subscription-auth.mjs';
 
@@ -124,9 +125,16 @@ export async function run(configuration, sessionManager, models) {
     input.on('error', () => process.exit(1));
     Object.defineProperty(process, 'stdin', { value: input });
   }
-  const rpc = runRpcMode(controlRuntime(runtime));
-  source.resume();
-  await rpc;
+  // Capture the real stdout writer before Pi redirects extension stdout.
+  const output = { write, get destroyed() { return process.stdout.destroyed; },
+    get writableLength() { return process.stdout.writableLength; },
+    get writableNeedDrain() { return process.stdout.writableNeedDrain; } };
+  const stopSampling = sampleTemporaryFilesystems(output);
+  try {
+    const rpc = runRpcMode(controlRuntime(runtime, configuration.mcpTools));
+    source.resume();
+    await rpc;
+  } finally { stopSampling(); }
 }
 
 if (process.argv[1]?.endsWith('/runner.mjs')) {

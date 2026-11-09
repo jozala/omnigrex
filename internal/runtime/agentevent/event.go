@@ -38,6 +38,8 @@ type AgentEvent struct {
 type StepBudgetObservation = stepbudget.Observation
 
 type OperationalMetadata struct {
+	ToolObservation       *ToolObservation
+	TemporaryFilesystems  []TemporaryFilesystem
 	StepBudget            *StepBudgetObservation
 	MessageID             string
 	ToolCallID            string
@@ -54,6 +56,12 @@ type OperationalMetadata struct {
 	Runtime               json.RawMessage
 }
 
+// Sink receives bounded operational metadata. Temporary-filesystem observations
+// may be delivered concurrently with ordinary events and may finish after the
+// originating Prompt returns. Implementations must be concurrency-safe, respect
+// context cancellation where possible, and must not relabel late observations
+// with a later Turn's context. Critical events retain their serial delivery and
+// error semantics; optional filesystem rejection is ignored.
 type Sink interface {
 	Emit(context.Context, AgentEvent) error
 }

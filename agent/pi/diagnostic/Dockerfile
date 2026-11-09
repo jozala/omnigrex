@@ -36,7 +36,8 @@ COPY agent/pi/subscription-auth.mjs agent/pi/provider-diagnostic.mjs ./
 COPY agent/pi/diagnostic/control-events.test.mjs agent/pi/diagnostic/control-rpc.test.mjs agent/pi/diagnostic/control-rpc-fixture.mjs ./diagnostic/
 COPY agent/pi/diagnostic/compaction.test.mjs ./diagnostic/
 COPY agent/pi/diagnostic/compaction-compat.test.mjs ./diagnostic/
-COPY agent/pi/step-budget.mjs ./
+COPY agent/pi/step-budget.mjs agent/pi/temporary-filesystems.mjs ./
+COPY agent/pi/diagnostic/temporary-filesystems.test.mjs ./diagnostic/
 COPY agent/pi/diagnostic/configuration.mjs ./configuration.mjs
 COPY agent/pi/diagnostic/seed-session.mjs ./seed-session.mjs
 COPY agent/pi/diagnostic/mcp-boundary.test.mjs ./mcp-boundary.test.mjs

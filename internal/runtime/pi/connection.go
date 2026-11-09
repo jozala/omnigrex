@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/runtime/agent"
@@ -65,6 +66,9 @@ type connection struct {
 	closeOnce       sync.Once
 	closed          chan struct{}
 	closeErr        error
+	// One optional delivery across the entire connection lifetime, including
+	// later prompts if a sink ignores cancellation. Never reset on prompt exit.
+	temporaryDelivery atomic.Bool
 }
 
 type pendingRequest struct {
@@ -81,23 +85,24 @@ type writeJob struct {
 	done    chan error
 }
 type turn struct {
-	budget            *stepbudget.Observation
-	budgetSummary     string
-	events            chan agentevent.AgentEvent
-	observations      chan agentevent.AgentEvent
-	settled           chan struct{}
-	settledOK         bool
-	lastReason        string
-	lastFailure       string
-	lastGeneration    string
-	lastDiagnostic    *agent.ProviderDiagnostic
-	lastLoggedAttempt string
-	outcome           agent.Outcome
-	retryBackoff      bool
-	cancelRequested   bool
-	retryCancelled    bool
-	compactionFailed  bool
-	compactionAborted bool
+	budget                *stepbudget.Observation
+	budgetSummary         string
+	events                chan agentevent.AgentEvent
+	observations          chan agentevent.AgentEvent
+	temporaryObservations chan agentevent.AgentEvent
+	settled               chan struct{}
+	settledOK             bool
+	lastReason            string
+	lastFailure           string
+	lastGeneration        string
+	lastDiagnostic        *agent.ProviderDiagnostic
+	lastLoggedAttempt     string
+	outcome               agent.Outcome
+	retryBackoff          bool
+	cancelRequested       bool
+	retryCancelled        bool
+	compactionFailed      bool
+	compactionAborted     bool
 }
 
 // Connect starts reading immediately, including events emitted before a waiter.
@@ -345,7 +350,7 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 		c.mu.Unlock()
 		return agent.Outcome{Status: agent.Rejected}, err
 	}
-	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), observations: make(chan agentevent.AgentEvent, 1), settled: make(chan struct{})}
+	t := &turn{events: make(chan agentevent.AgentEvent, queueCapacity), observations: make(chan agentevent.AgentEvent, 1), temporaryObservations: make(chan agentevent.AgentEvent, 1), settled: make(chan struct{})}
 	if c.options.StepBudget != nil {
 		t.budget = &stepbudget.Observation{Limit: *c.options.StepBudget}
 	}
@@ -364,8 +369,9 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 	if sink == nil {
 		sink = agentevent.NoopSink{}
 	}
-	// A sink is serial and receives only bounded operational metadata. It cannot
-	// block the RPC reader, command correlation, cancellation, or detachment.
+	// Critical and budget sink delivery remains serial. Optional filesystem
+	// delivery is independently single-flight and never waits on this emitter.
+	// Neither path blocks the RPC reader or command correlation.
 	emitJobs := make(chan agentevent.AgentEvent)
 	emitResults := make(chan error, 1)
 	emitCtx, stopEmitter := context.WithCancel(ctx)
@@ -446,6 +452,9 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 			select {
 			case event = <-t.events:
 			case event = <-t.observations:
+			case event = <-t.temporaryObservations:
+				c.deliverTemporary(emitCtx, sink, event)
+				continue
 			case <-c.done:
 				// Settlement enqueues the terminal event before closing its signal.
 				// Continue through that event so neither EOF nor a queue-empty race
@@ -470,6 +479,22 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 			return outcome, nil
 		}
 	}
+}
+
+// Optional filesystem delivery has no acknowledgement or settlement authority.
+// A sink may ignore its cancelled context: retain the slot until it really
+// returns, so stalled callbacks cannot accumulate across prompts. Critical
+// delivery may run concurrently and keeps its existing failure semantics.
+func (c *connection) deliverTemporary(ctx context.Context, sink agentevent.Sink, event agentevent.AgentEvent) {
+	if ctx.Err() != nil || !c.temporaryDelivery.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.temporaryDelivery.Store(false)
+		if ctx.Err() == nil {
+			_ = sink.Emit(ctx, event)
+		}
+	}()
 }
 
 func (c *connection) interrupted(ctx context.Context, admitted bool, cause error) (agent.Outcome, error) {
@@ -710,6 +735,23 @@ func (c *connection) record(content []byte) error {
 	if t == nil {
 		return nil
 	}
+	if record.Type == "omnigrex_temporary_filesystems" {
+		if !t.settledOK {
+			if samples := temporaryFilesystems(record.Data); samples != nil {
+				event := c.eventLocked("temporary_filesystems", "running", "")
+				event.Metadata.TemporaryFilesystems = samples
+				select {
+				case <-t.temporaryObservations:
+				default:
+				}
+				select {
+				case t.temporaryObservations <- event:
+				default:
+				}
+			}
+		}
+		return nil
+	}
 	if t.settledOK {
 		return agent.ErrProtocol
 	}
@@ -913,8 +955,12 @@ func (c *connection) record(content []byte) error {
 	default:
 		return nil
 	}
+	event := c.runtimeEvent("activity", status, "", record.Type, "", t.retryCancelled)
+	if record.Type == "tool_execution_end" {
+		event.Metadata.ToolObservation, event.Metadata.ToolCallID = terminalTool(content)
+	}
 	select {
-	case t.events <- c.runtimeEvent("activity", status, "", record.Type, "", t.retryCancelled):
+	case t.events <- event:
 	default:
 		return agent.ErrBackpressure
 	}
