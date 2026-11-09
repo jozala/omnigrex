@@ -316,7 +316,12 @@ It never enumerates paths or reads credential bodies and never runs monitoring t
 A small optional frame is skipped under stdout backpressure; a separate one-slot coalescing adapter queue cannot displace critical events or the independent budget queue/snapshot.
 Malformed optional data is dropped, and unavailable fields remain absent.
 No terminal sample, acknowledgement, restart recovery, or measurement-driven settlement is required.
-Ordinary critical protocol framing and downstream sink failure behavior remain unchanged.
+Filesystem sink delivery is independently single-flight across the connection lifetime, not just its queue or one prompt.
+The adapter never waits for a filesystem sink callback or treats its rejection as backpressure; later optional samples are dropped while that callback is outstanding.
+Prompt exit cancels the delivery context without joining the callback, so a sink ignoring cancellation can retain at most one optional callback per connection, even across later prompts or connection close.
+Sinks must support concurrent optional/critical callbacks and preserve the event's original correlation; a late optional callback must not be relabeled as another Turn.
+The orchestrator skips filesystem recording/forwarding when its delivery context is already cancelled.
+Critical and budget events still use their original serial emitter and rejection/deadline semantics; ordinary critical framing/backpressure remains unchanged.
 
 Temporary samples record fixed `tmp`/`run-pi-agent` collection statuses through `RecordStorage`, **without** directory allocation values.
 Filesystem histograms receive actual block capacity, used (`blocks - bfree`), free, available, inode capacity and free inode values, where supported.

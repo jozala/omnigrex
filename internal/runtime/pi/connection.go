@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/runtime/agent"
@@ -65,6 +66,9 @@ type connection struct {
 	closeOnce       sync.Once
 	closed          chan struct{}
 	closeErr        error
+	// One optional delivery across the entire connection lifetime, including
+	// later prompts if a sink ignores cancellation. Never reset on prompt exit.
+	temporaryDelivery atomic.Bool
 }
 
 type pendingRequest struct {
@@ -365,8 +369,9 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 	if sink == nil {
 		sink = agentevent.NoopSink{}
 	}
-	// A sink is serial and receives only bounded operational metadata. It cannot
-	// block the RPC reader, command correlation, cancellation, or detachment.
+	// Critical and budget sink delivery remains serial. Optional filesystem
+	// delivery is independently single-flight and never waits on this emitter.
+	// Neither path blocks the RPC reader or command correlation.
 	emitJobs := make(chan agentevent.AgentEvent)
 	emitResults := make(chan error, 1)
 	emitCtx, stopEmitter := context.WithCancel(ctx)
@@ -448,6 +453,8 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 			case event = <-t.events:
 			case event = <-t.observations:
 			case event = <-t.temporaryObservations:
+				c.deliverTemporary(emitCtx, sink, event)
+				continue
 			case <-c.done:
 				// Settlement enqueues the terminal event before closing its signal.
 				// Continue through that event so neither EOF nor a queue-empty race
@@ -472,6 +479,22 @@ func (c *connection) Prompt(ctx context.Context, text string, sink agentevent.Si
 			return outcome, nil
 		}
 	}
+}
+
+// Optional filesystem delivery has no acknowledgement or settlement authority.
+// A sink may ignore its cancelled context: retain the slot until it really
+// returns, so stalled callbacks cannot accumulate across prompts. Critical
+// delivery may run concurrently and keeps its existing failure semantics.
+func (c *connection) deliverTemporary(ctx context.Context, sink agentevent.Sink, event agentevent.AgentEvent) {
+	if ctx.Err() != nil || !c.temporaryDelivery.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.temporaryDelivery.Store(false)
+		if ctx.Err() == nil {
+			_ = sink.Emit(ctx, event)
+		}
+	}()
 }
 
 func (c *connection) interrupted(ctx context.Context, admitted bool, cause error) (agent.Outcome, error) {

@@ -237,3 +237,7 @@ Tool failure flags do not identify cancellation or validation causes, and client
 Keep these populations separate from admitted MCP server work, which may outlive client waiting.
 Temporary filesystem samples use metadata only and are distributions, not retained current gauges; do not sum repeated capacity/usage samples or infer current free space after process exit.
 Observe no-data with allowance for the approximately 60-second sampling and export cadences; never launch an inactive Participant or rebind an image just for telemetry.
+
+Optional filesystem delivery is also best-effort at the downstream sink boundary: rejection cannot fail the Turn, and a stalled callback does not delay settlement, cancellation or cleanup.
+At most one filesystem delivery is outstanding per connection; further samples are dropped until it returns, including across later Turns if a sink ignores its cancelled context.
+Critical and budget sink delivery keeps its existing failure semantics.

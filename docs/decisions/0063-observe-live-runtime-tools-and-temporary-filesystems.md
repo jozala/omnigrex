@@ -14,6 +14,8 @@ Historical Participants retain their exact image/resource contracts.
 Preserve bounded terminal tool evidence on existing activity events and consume it through the shared native/client tool recorder.
 Use a single sequential asynchronous `statfs` sampler for the two owned temporary mounts, with best-effort stdout delivery and an independent one-slot coalescing adapter queue.
 Keep the budget queue and critical snapshot independent.
+Deliver optional filesystem events through a separate single-flight sink callback per connection, ignoring its errors and never waiting for it during settlement, cancellation or cleanup.
+Sink implementations support concurrent optional/critical callbacks; critical and budget delivery remains serial and fail-closed.
 Record filesystem consumption, not directory allocation, and extend the shared filesystem histograms with a dimensionless `used` byte distribution.
 The current 27-name MCP catalog also includes `assess_human_input`, previously missing from the recording vocabulary.
 The used-byte instrument adds 11 classic series and the catalog correction adds 36, bringing the application ceiling to 1999 within the existing 2050 target.
@@ -22,6 +24,8 @@ The used-byte instrument adds 11 classic series and the catalog correction adds 
 Pairing starts and endings, retaining exact last values, and synthesizing timing from transport arrivals would add state without establishing accurate accounting.
 Async metadata-only calls avoid commands, directory traversal and credential access; single-flight scheduling bounds hung work without blocking the JavaScript input path.
 A separate observation slot prevents temporary data from displacing budget or critical Turn evidence.
+Isolation must extend through the downstream sink: ignoring only returned errors still allows a stalled callback to hold settlement.
+A connection-wide single-flight guard, retained until the callback returns even if it ignores context cancellation, bounds stuck callbacks across later prompts without spawning timeout waiters or per-sample workers behind them.
 Reusing distributions avoids a retained freshness ledger and leaves stopped processes without misleading current gauges.
 
 ## Consequences

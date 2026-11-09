@@ -85,3 +85,26 @@ func TestLiveToolAndTemporaryFilesystemRecording(t *testing.T) {
 		t.Fatal("filesystem use is not directory allocation")
 	}
 }
+
+func TestCancelledTemporaryDeliveryDoesNotRecordStaleSamples(t *testing.T) {
+	reader := budgetReader(t)
+	observer := NewAgentTurnObserver("DEVELOPER", nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	used := float64(4096)
+	err := observer.Emit(ctx, agentevent.AgentEvent{Kind: "temporary_filesystems", Metadata: agentevent.OperationalMetadata{TemporaryFilesystems: []agentevent.TemporaryFilesystem{
+		{Resource: "tmp", Status: "complete", Used: &used},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range data.ScopeMetrics {
+		if len(scope.Metrics) != 0 {
+			t.Fatalf("cancelled sample exported: %+v", scope.Metrics)
+		}
+	}
+}

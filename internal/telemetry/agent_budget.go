@@ -47,6 +47,9 @@ func (o *AgentTurnObserver) Emit(ctx context.Context, event agentevent.AgentEven
 		}
 		RecordTool(ctx, tool.Layer, tool.Name, outcome, tool.Duration)
 	}
+	if event.Kind == "temporary_filesystems" && ctx.Err() != nil {
+		return nil
+	}
 	if event.Kind == "temporary_filesystems" {
 		for _, s := range event.Metadata.TemporaryFilesystems {
 			if s.Resource != "tmp" && s.Resource != "run-pi-agent" {
