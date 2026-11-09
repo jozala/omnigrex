@@ -55,7 +55,9 @@ func TestObservationSeriesBudget(t *testing.T) {
 			}
 		}
 	}
-	if series != 1299 || series+653 > 2050 {
+	// assess_human_input adds two MCP layer/tool pairs, each with 5 counters
+	// and 13 classic histogram series, within the existing total target.
+	if series != 1335 || series+653 > 2050 {
 		t.Fatalf("extension=%d total=%d target=2050", series, series+653)
 	}
 }
