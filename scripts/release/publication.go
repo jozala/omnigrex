@@ -154,6 +154,23 @@ func bundleQualification(ctx context.Context, api githubAPI, b Build) error {
 	if evidence[names[0]] != p.Qualification.DockerJobID || evidence[names[1]] != p.Qualification.MicrosandboxJobID {
 		return errors.New("selected Pi origin qualification mismatch")
 	}
+	run, err := getJSON[Run](ctx, api, endpoint(fmt.Sprintf("actions/runs/%d/attempts/%d", origin.RunID, origin.Attempt)))
+	if err != nil {
+		return err
+	}
+	workflow, err := getJSON[struct {
+		ID int64 `json:"id"`
+	}](ctx, api, endpoint("actions/workflows/ci.yaml"))
+	if err != nil {
+		return err
+	}
+	event := "workflow_dispatch"
+	if p.Version == 1 {
+		event = "push"
+	}
+	if run.ID != origin.RunID || run.Attempt != origin.Attempt || run.Commit != origin.Commit || run.Repository.FullName != repository || run.HeadRepository.FullName != repository || run.Event != event || run.Branch != "main" || run.Path != ".github/workflows/ci.yaml" || run.Status != "completed" || (p.Version == 2 && run.Conclusion != "success") || workflow.ID <= 0 || run.WorkflowID != workflow.ID {
+		return errors.New("invalid Pi qualification run provenance")
+	}
 	if p.Version == 1 {
 		files, err := downloadEvidence(ctx, api, origin, "deployment-payload", candidateAssets)
 		if err != nil {
@@ -177,19 +194,6 @@ func bundleQualification(ctx context.Context, api githubAPI, b Build) error {
 			return errors.New("origin deployment payload tested a different Pi image/identity")
 		}
 		return nil
-	}
-	run, err := getJSON[Run](ctx, api, endpoint(fmt.Sprintf("actions/runs/%d/attempts/%d", origin.RunID, origin.Attempt)))
-	if err != nil {
-		return err
-	}
-	workflow, err := getJSON[struct {
-		ID int64 `json:"id"`
-	}](ctx, api, endpoint("actions/workflows/ci.yaml"))
-	if err != nil {
-		return err
-	}
-	if run.ID != origin.RunID || run.Attempt != origin.Attempt || run.Commit != origin.Commit || run.Repository.FullName != repository || run.HeadRepository.FullName != repository || run.Event != "workflow_dispatch" || run.Branch != "main" || run.Path != ".github/workflows/ci.yaml" || run.Status != "completed" || run.Conclusion != "success" || workflow.ID <= 0 || run.WorkflowID != workflow.ID {
-		return errors.New("invalid Pi qualification run provenance")
 	}
 	for _, backend := range []string{"docker", "microsandbox"} {
 		files, err := downloadEvidence(ctx, api, origin, "pi-bundle-"+backend, []string{"candidate.json"})

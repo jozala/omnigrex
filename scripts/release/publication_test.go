@@ -581,7 +581,7 @@ func TestSelectedBundlePromotionPreservesBytesWithoutOriginalCI(t *testing.T) {
 	p := f.publication()
 	base := p.api
 	p.api = apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
-		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/", bundle.Qualification.RunID)) || strings.Contains(path, "actions/artifacts/987/") {
+		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/", bundle.Qualification.RunID)) || strings.Contains(path, "actions/artifacts/987/") || strings.Contains(path, "actions/workflows/ci.yaml") {
 			return legacyBundleAPI(t, bundle, []Job{
 				{ID: bundle.Qualification.DockerJobID, Name: "deploy-smoke", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
 				{ID: bundle.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
@@ -628,6 +628,12 @@ func legacyBundleAPI(t *testing.T, bundle piresources.Bundle, jobs []Job) github
 	}
 	archive := zipCandidate(t, dir)
 	return apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
+		if strings.Contains(path, "actions/workflows/ci.yaml") {
+			return []byte(`{"id":12}`), nil
+		}
+		if strings.HasSuffix(path, fmt.Sprintf("actions/runs/%d/attempts/%d", b.RunID, b.Attempt)) {
+			return mustJSON(t, fixtureRun(b)), nil
+		}
 		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/attempts/%d/jobs", b.RunID, b.Attempt)) {
 			return jobsJSON(t, b, jobs), nil
 		}
