@@ -59,7 +59,7 @@ func main() {
 			err = fmt.Errorf("unknown command")
 		}
 	} else if err == nil {
-		err = fmt.Errorf("usage: pi-bundle image|record|qualification|candidate-amd64|candidate-arm64")
+		err = fmt.Errorf("usage: pi-bundle image|record|profile|qualification|candidate-amd64|candidate-arm64|candidate-record|validate-candidate")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

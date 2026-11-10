@@ -15,7 +15,7 @@ import (
 var selectedBundle []byte
 
 // Bundle identifies the sole bundle admitted for fresh production Participants.
-// Qualification records the original exact-pair smokes, not the current build.
+// Qualification identifies the tested source/run independently of image origin.
 type Bundle struct {
 	Version       int                 `json:"version"`
 	Platform      string              `json:"platform"`

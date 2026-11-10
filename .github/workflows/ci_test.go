@@ -75,14 +75,14 @@ func TestCIQualificationDependencies(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing qualification %s", name)
 		}
-		if needs := ciNeeds(t, job); len(needs) != 0 || job.If != "github.event_name != 'workflow_dispatch'" {
+		if needs := ciNeeds(t, job); len(needs) != 0 || job.If != "" {
 			t.Errorf("%s must run independently on every CI event, got needs %v, if %q", name, needs, job.If)
 		}
 	}
 	if got := ciNeeds(t, jobs["check"]); !reflect.DeepEqual(got, qualifications) {
 		t.Errorf("stable required check must gate all qualifications, got %v", got)
 	}
-	if got := jobs["check"].If; got != "always() && github.event_name != 'workflow_dispatch'" {
+	if got := jobs["check"].If; got != "always()" {
 		t.Errorf("aggregate must run even when a qualification fails or is skipped, got %q", got)
 	}
 	if got := ciNeeds(t, jobs["publish"]); !reflect.DeepEqual(got, []string{"check"}) {
