@@ -19,3 +19,12 @@ func TestQualificationComposesWithStorageSetupScript(t *testing.T) {
 		t.Fatalf("invalid combined initializer: %v\n%s", err, output)
 	}
 }
+
+func TestEmptyRetainedInventoryIsNotDefaultSelection(t *testing.T) {
+	if _, err := QualificationScript("amd64", "pi-rpc", nil); err == nil || !strings.Contains(err.Error(), "missing bound Pi resource inventory") {
+		t.Fatalf("retained contract reconstructed: %v", err)
+	}
+	if _, err := QualificationScript("arm64", "pi-rpc"); err == nil || !strings.Contains(err.Error(), "no selected production Pi bundle") {
+		t.Fatalf("default arm64 admitted: %v", err)
+	}
+}

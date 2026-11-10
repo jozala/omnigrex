@@ -105,12 +105,8 @@ func resourceHash(value string) bool {
 
 func QualificationScript(architecture string, content json.RawMessage) (string, error) {
 	if len(content) == 0 {
-		bundle, err := SelectedBundle("linux", architecture)
-		if err != nil {
-			return "", err
-		}
-		content = bundle.Resources
-	} // Preparatory pre-Step14 contracts.
+		return "", errors.New("missing bound Pi resource inventory; restore the Participant's canonical ledger contract rather than reconstructing it from the current selection")
+	}
 	canonical, err := NormalizeContract(content)
 	if err != nil {
 		return "", err

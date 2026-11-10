@@ -16,6 +16,14 @@ func QualificationScript(architecture, runtime string, resourceContracts ...json
 		}
 		if len(resourceContracts) == 1 {
 			content = resourceContracts[0]
+		} else {
+			// Omission requests a default-selection diagnostic. An explicitly
+			// empty retained inventory must never be reconstructed.
+			bundle, err := piresources.SelectedBundle("linux", architecture)
+			if err != nil {
+				return "", err
+			}
+			content = bundle.Resources
 		}
 		script, err := piresources.QualificationScript(architecture, content)
 		if err != nil {

@@ -34,12 +34,12 @@ func TestSelectionIsDefensiveAndStrict(t *testing.T) {
 			t.Fatal("unsupported production platform selected")
 		}
 	}
-	script, err := QualificationScript("amd64", nil)
+	script, err := QualificationScript("amd64", again.Resources)
 	if err != nil || !strings.Contains(script, "runner.mjs") || strings.Contains(script, "temporary-filesystems.mjs") {
 		t.Fatal("implicit qualification uses checkout candidate")
 	}
-	if _, err := QualificationScript("arm64", nil); err == nil {
-		t.Fatal("missing production selection fell back to checkout")
+	if _, err := QualificationScript("amd64", nil); err == nil {
+		t.Fatal("missing retained inventory reconstructed from selection")
 	}
 }
 
