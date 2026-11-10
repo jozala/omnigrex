@@ -67,3 +67,14 @@ esac
 		t.Fatal("derived publication silently adopted candidate")
 	}
 }
+
+func TestIndependentBundleQualificationCannotEmitMigrationEvidence(t *testing.T) {
+	// Reject before invoking Docker or creating fixture resources, rather than
+	// labelling retained/fresh checks as proof of cross-image compatibility.
+	command := exec.Command("/bin/sh", "../test-pi-upgrade.sh")
+	command.Env = append(os.Environ(), "OMNIGREX_PI_UPGRADE_MODE=bundle", "OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE="+filepath.Join(t.TempDir(), "migration.json"))
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "does not emit Session migration compatibility results") {
+		t.Fatalf("migration evidence accepted for independent bundle qualification: %v: %s", err, output)
+	}
+}

@@ -2,6 +2,12 @@
 set -eu
 backend="${OMNIGREX_PI_BACKEND:-docker}"
 case "$backend" in docker|microsandbox) ;; *) exit 2 ;; esac
+mode="${OMNIGREX_PI_UPGRADE_MODE:-compatibility}"
+case "$mode" in bundle|compatibility) ;; *) exit 2 ;; esac
+if [ "$mode" = bundle ] && [ -n "${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:-}" ]; then
+  echo 'Independent bundle qualification does not emit Session migration compatibility results' >&2
+  exit 2
+fi
 namespace="pi-upgrade-$(date +%s)-$$"
 source_volume="$namespace-source"
 candidate_volume="$namespace-candidate"
@@ -89,7 +95,7 @@ if [ "$backend" = microsandbox ]; then
     --mount "type=volume,src=$source_volume,dst=/data/source" --mount "type=volume,src=$candidate_volume,dst=/data/candidate" --mount "type=volume,src=$restore_volume,dst=/data/restore" \
     --env "OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=$selected_source" --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=microsandbox --env OMNIGREX_PI_UPGRADE_ROOT=/data \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
-    --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
+    --env "OMNIGREX_PI_UPGRADE_MODE=$mode" --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
     --env "OMNIGREX_PI_BUNDLE_CANDIDATE_FILE=${OMNIGREX_PI_BUNDLE_CANDIDATE_FILE:+/tmp/pi-bundle-candidate.json}" \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \
@@ -113,7 +119,7 @@ else
     --env "OMNIGREX_PI_UPGRADE_SOURCE_LOCAL=$source_local" --env "OMNIGREX_PI_UPGRADE_TARGET_LOCAL=$target_local" --env "OMNIGREX_PI_UPGRADE_ARCH=$arch" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VOLUME=$source_volume" --env "OMNIGREX_PI_UPGRADE_CANDIDATE_VOLUME=$candidate_volume" --env "OMNIGREX_PI_UPGRADE_RESTORE_VOLUME=$restore_volume" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
-    --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
+    --env "OMNIGREX_PI_UPGRADE_MODE=$mode" --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
     --env "OMNIGREX_PI_BUNDLE_CANDIDATE_FILE=${OMNIGREX_PI_BUNDLE_CANDIDATE_FILE:+/tmp/pi-bundle-candidate.json}" \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \

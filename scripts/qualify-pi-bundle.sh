@@ -33,9 +33,11 @@ OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE="$work/source-profile.json" \
 OMNIGREX_PI_UPGRADE_SOURCE_VERSION="$source_version" \
 OMNIGREX_PI_UPGRADE_TARGET_VERSION="$target_version" \
 OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=1 \
+OMNIGREX_PI_UPGRADE_MODE=bundle \
 OMNIGREX_PI_BUNDLE_CANDIDATE_FILE="$work/candidate.json" \
 sh scripts/test-pi-upgrade.sh
 # Success proves this exact image/inventory passed the resource, protocol,
-# continuation/replay and fresh-Session checks in the integration-only fixture.
+# retained R1 continuation/replay/restore and independent fresh R2 Sessions.
+# Cross-image Session migration is optional evidence, not an adoption gate.
 mkdir "$OMNIGREX_PI_BUNDLE_OUTPUT"
 cp "$work/candidate.json" "$OMNIGREX_PI_BUNDLE_OUTPUT/candidate.json"
