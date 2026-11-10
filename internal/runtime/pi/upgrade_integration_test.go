@@ -326,6 +326,12 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 		if bundleQualification {
 			// Prove that refusal to read R1 state cannot gate fresh R2
 			// qualification. No R1 archive is attached to candidate storage.
+			// The native backend requires an existing mount directory even for
+			// this rejected probe. Keep it empty so rejection reaches the
+			// controlled runtime rather than failing backend state validation.
+			if err := states("candidate").Ensure(ctx, ref); err != nil {
+				t.Fatal(err)
+			}
 			rejected, remove, diagnostics, err := launch("candidate", target, targetVersion, 5, true)
 			if err == nil {
 				_, err = rejected.Prepare(ctx)
