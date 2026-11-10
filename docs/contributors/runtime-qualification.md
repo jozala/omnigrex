@@ -262,7 +262,9 @@ Default deployment smoke builds only the current orchestrator and pulls the sele
 
 ## Qualify an unselected bundle before adoption
 
-Capture a candidate record from the exact image-building source checkout C, after resolving its published immutable Pi digest:
+The normal main-push publication job retains `pi-candidate-build-<run>-<attempt>` with the exact image-building source C, actual published candidate digest and complete inventory, without adopting it.
+Use that captured `pi-candidate.json`; do not regenerate C's hashes from a later checkout D.
+For source-local investigation, the equivalent capture command in the image-building checkout C is:
 
 ```sh
 OMNIGREX_PI_CANDIDATE_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:... \

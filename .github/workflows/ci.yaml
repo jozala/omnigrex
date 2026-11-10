@@ -189,6 +189,18 @@ jobs:
         env:
           OMNIGREX_RELEASE_COMMIT: "${{ github.sha }}"
         run: sh scripts/publish-pi-images.sh
+      - name: Capture the unselected runtime build identity
+        env:
+          OMNIGREX_PI_CANDIDATE_IMAGE: ${{ steps.images.outputs.pi_candidate_image }}
+          OMNIGREX_PI_CANDIDATE_SOURCE_COMMIT: ${{ github.sha }}
+        run: go run ./scripts/pi-bundle candidate-record > pi-candidate.json
+      - name: Retain the captured candidate without adopting it
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: pi-candidate-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pi-candidate.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Package exact deployment payload
         env:
           ORCHESTRATOR_IMAGE: ${{ steps.images.outputs.orchestrator_image }}

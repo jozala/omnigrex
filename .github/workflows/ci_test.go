@@ -291,3 +291,16 @@ func TestPreAdoptionQualificationCannotPublishOrOverrideProduction(t *testing.T)
 		}
 	}
 }
+
+func TestPublicationCapturesCandidateOriginWithoutChangingProductSelection(t *testing.T) {
+	job := readCIJobs(t)["publish"]
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "candidate-record") {
+			if step.Env["OMNIGREX_PI_CANDIDATE_IMAGE"] != "${{ steps.images.outputs.pi_candidate_image }}" || step.Env["OMNIGREX_PI_CANDIDATE_SOURCE_COMMIT"] != "${{ github.sha }}" {
+				t.Fatal("candidate must capture its own actual build origin, not selected-image provenance")
+			}
+			return
+		}
+	}
+	t.Fatal("publication must retain an unqualified exact candidate record")
+}
