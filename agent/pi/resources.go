@@ -37,7 +37,7 @@ type ResourceFile struct {
 // CandidateContract captures checkout resources for explicit source-built qualification.
 // Production admission must use SelectedBundle instead.
 func CandidateContract(architecture string) json.RawMessage {
-	contract := ResourceContract{Version: 1, NodeVersion: "v24.14.1"}
+	contract := ResourceContract{Version: 2, NodeVersion: "v24.14.1", BootstrapContract: "omnigrex-environment/v1", Executables: slices.Clone(requiredExecutables)}
 	switch architecture {
 	case "amd64":
 		contract.MiseSHA256 = "2af841603ad2981529f230add15c601c64e3a81a79f4f41e9860eb38b7672771"

@@ -25,10 +25,12 @@ type Bundle struct {
 	Resources     json.RawMessage     `json:"resources"`
 }
 type BundleQualification struct {
-	RunID             int64 `json:"run_id"`
-	Attempt           int   `json:"attempt"`
-	DockerJobID       int64 `json:"docker_job_id"`
-	MicrosandboxJobID int64 `json:"microsandbox_job_id"`
+	Commit            string `json:"commit,omitempty"`
+	Suite             string `json:"suite,omitempty"`
+	RunID             int64  `json:"run_id"`
+	Attempt           int    `json:"attempt"`
+	DockerJobID       int64  `json:"docker_job_id"`
+	MicrosandboxJobID int64  `json:"microsandbox_job_id"`
 }
 
 // SelectedBundle never consults checkout resources or discovers images. Historical
@@ -53,8 +55,11 @@ func ParseBundle(data []byte) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("invalid selected Pi bundle record")
 	}
 	q := b.Qualification
-	if b.Version != 1 || b.Platform != "linux/amd64" || !regexp.MustCompile(`^ghcr.io/jozala/omnigrex/pi@sha256:[0-9a-f]{64}$`).MatchString(b.Image) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(b.SourceCommit) || q.RunID <= 0 || q.Attempt <= 0 || q.DockerJobID <= 0 || q.MicrosandboxJobID <= 0 || q.DockerJobID == q.MicrosandboxJobID {
+	if (b.Version != 1 && b.Version != 2) || b.Platform != "linux/amd64" || !regexp.MustCompile(`^ghcr.io/jozala/omnigrex/pi@sha256:[0-9a-f]{64}$`).MatchString(b.Image) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(b.SourceCommit) || q.RunID <= 0 || q.Attempt <= 0 || q.DockerJobID <= 0 || q.MicrosandboxJobID <= 0 || q.DockerJobID == q.MicrosandboxJobID {
 		return Bundle{}, fmt.Errorf("incomplete selected Pi bundle identity, provenance or bootstrap requirements")
+	}
+	if b.Version == 1 && (q.Commit != "" || q.Suite != "") || b.Version == 2 && (!regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(q.Commit) || q.Suite != "pi-bundle/v1") {
+		return Bundle{}, fmt.Errorf("invalid bundle qualification identity/suite")
 	}
 	resources, err := NormalizeContract(b.Resources)
 	if err != nil {

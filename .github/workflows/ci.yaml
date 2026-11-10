@@ -1,6 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      pi_candidate:
+        description: 'Captured candidate JSON (image, platform, source_commit, resources); qualification only, no publication/adoption'
+        required: true
+        type: string
   pull_request:
   push:
     branches:
@@ -11,6 +17,7 @@ permissions:
 
 jobs:
   docker-check:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -99,6 +106,7 @@ jobs:
           retention-days: 7
 
   development-qualification:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -114,6 +122,7 @@ jobs:
           sh scripts/test-development-image-unit.sh
 
   microsandbox:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -140,7 +149,7 @@ jobs:
 
   # Keep the existing required check context while all three qualifications run independently.
   check:
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     needs: [docker-check, development-qualification, microsandbox]
     runs-on: ubuntu-latest
     steps:
@@ -346,3 +355,75 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 14
+
+  qualify-pi-bundle-docker:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out qualification source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare KVM when required
+        if: ${{ 'docker' == 'microsandbox' }}
+        run: |
+          test -c /dev/kvm
+          sudo chgrp "$(id -g)" /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+      - name: Qualify exact unselected bundle
+        env:
+          PI_CANDIDATE: ${{ inputs.pi_candidate }}
+          OMNIGREX_PI_CANDIDATE_FILE: ${{ runner.temp }}/proposed-bundle.json
+          OMNIGREX_PI_BUNDLE_OUTPUT: ${{ runner.temp }}/pi-bundle-evidence
+          OMNIGREX_PI_BACKEND: docker
+        run: |
+          printf '%s\n' "$PI_CANDIDATE" > "$OMNIGREX_PI_CANDIDATE_FILE"
+          sh scripts/qualify-pi-bundle.sh
+      - name: Retain exact tested identity
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: pi-bundle-docker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pi-bundle-evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  qualify-pi-bundle-microsandbox:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out qualification source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare KVM when required
+        if: ${{ 'microsandbox' == 'microsandbox' }}
+        run: |
+          test -c /dev/kvm
+          sudo chgrp "$(id -g)" /dev/kvm
+          sudo chmod 0660 /dev/kvm
+          echo "OMNIGREX_MICROSANDBOX_KVM_GID=$(stat -c '%g' /dev/kvm)" >> "$GITHUB_ENV"
+      - name: Qualify exact unselected bundle
+        env:
+          PI_CANDIDATE: ${{ inputs.pi_candidate }}
+          OMNIGREX_PI_CANDIDATE_FILE: ${{ runner.temp }}/proposed-bundle.json
+          OMNIGREX_PI_BUNDLE_OUTPUT: ${{ runner.temp }}/pi-bundle-evidence
+          OMNIGREX_PI_BACKEND: microsandbox
+        run: |
+          printf '%s\n' "$PI_CANDIDATE" > "$OMNIGREX_PI_CANDIDATE_FILE"
+          sh scripts/qualify-pi-bundle.sh
+      - name: Retain exact tested identity
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: pi-bundle-microsandbox-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pi-bundle-evidence/
+          if-no-files-found: error
+          retention-days: 90

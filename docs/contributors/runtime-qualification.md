@@ -259,3 +259,27 @@ Set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` 
 These variables affect qualification scripts only; normal deployment uses `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_IMAGE`.
 CI requires Docker and usable Linux/amd64 KVM, then repeats smoke after publication against current orchestrator and selected Pi digests.
 Default deployment smoke builds only the current orchestrator and pulls the selected immutable Pi image.
+
+## Qualify an unselected bundle before adoption
+
+Capture a candidate record from the exact image-building source checkout C, after resolving its published immutable Pi digest:
+
+```sh
+OMNIGREX_PI_CANDIDATE_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:... \
+OMNIGREX_PI_CANDIDATE_SOURCE_COMMIT=<full-C-commit> \
+go run ./scripts/pi-bundle candidate-record > pi-candidate.json
+```
+
+This is a complete proposed inventory, not a production selection or a claim of prior qualification.
+On the trusted default branch, explicitly dispatch the existing **CI** workflow with the `pi_candidate` input containing that JSON.
+This qualification-only mode publishes no images or releases and changes no production selection or repository pins.
+Both `qualify-pi-bundle-docker` and `qualify-pi-bundle-microsandbox` must succeed; they test the exact supplied digest/inventory through bounded resource checks, protocol, continuation, replay/restore and fresh Sessions using integration-only fixtures.
+The qualification checkout D can differ from C; the captured inventory is used rather than D's checkout hashes.
+For supported local Docker investigation, run `OMNIGREX_PI_CANDIDATE_FILE=/absolute/pi-candidate.json OMNIGREX_PI_BUNDLE_OUTPUT=/absolute/new-output OMNIGREX_PI_BACKEND=docker sh scripts/qualify-pi-bundle.sh`.
+
+Only after successful qualification, propose a version-2 selection record retaining C as `source_commit`, with qualification `commit` D, `suite: pi-bundle/v1`, and the actual run, attempt and both job IDs.
+Retain both `pi-bundle-<backend>-<run>-<attempt>` artifacts containing the tested `candidate.json`.
+Release readiness verifies both successful job identities and both exact digest/platform/source/inventory receipts; successful jobs alone cannot authorize a different candidate.
+Missing, expired, malformed or mismatched evidence fails closed: rerun qualification of the same exact image and review the replacement evidence, without rebuilding or changing its resources or repository pins.
+The version-1 initial baseline is verified against its original deployment-payload artifact and successful product smokes, not against whichever Pi candidate that source commit happened to publish.
+After selection, normal main-push product packaging and both exact-pair deployment smokes remain required before release designation or live adoption.

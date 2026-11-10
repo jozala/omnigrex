@@ -142,3 +142,9 @@ After merge and a new main candidate qualifies, **Mariusz or an explicitly autho
 4. When intentionally approved, promote to `v0.1.0` and compare payload checksums and exact image digests to prove no rebuild.
 
 These are pending live acceptance steps, not actions authorized by implementing the release tooling.
+
+Runtime build source and runtime qualification source are distinct identities.
+For a new bundle, follow [pre-adoption qualification](runtime-qualification.md#qualify-an-unselected-bundle-before-adoption): capture C's complete immutable candidate, qualify it at D without changing production admission, then review selection with the actual tested receipt and job IDs.
+Version-2 bundle records carry D in `qualification.commit` and C in `source_commit`.
+The release verifier binds both backend receipts to the exact Pi digest and inventory; C's product smoke of a different selected runtime is not evidence for C's unselected candidate.
+Evidence artifacts must remain available; renew expired evidence for the same exact bundle rather than changing runtime contents merely to regain qualification.

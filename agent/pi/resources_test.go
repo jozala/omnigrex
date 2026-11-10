@@ -57,7 +57,7 @@ func TestResourceQualificationUsesRetainedInventory(t *testing.T) {
 
 func TestResourceContractsRejectExecutableOrIncompleteInventory(t *testing.T) {
 	for _, mutate := range []func(*ResourceContract){
-		func(c *ResourceContract) { c.Version = 2 }, func(c *ResourceContract) { c.NodeVersion = "v24.14.1'; touch /tmp/poison; #" }, func(c *ResourceContract) { c.MiseSHA256 = "unverified" }, func(c *ResourceContract) { c.Files[0].Name = "../runner.mjs" }, func(c *ResourceContract) { c.Files[0].SHA256 = "unverified" }, func(c *ResourceContract) { c.Files = c.Files[:1] }, func(c *ResourceContract) { c.Files = append(c.Files, c.Files[0]) },
+		func(c *ResourceContract) { c.Version = 99 }, func(c *ResourceContract) { c.NodeVersion = "v24.14.1'; touch /tmp/poison; #" }, func(c *ResourceContract) { c.MiseSHA256 = "unverified" }, func(c *ResourceContract) { c.Files[0].Name = "../runner.mjs" }, func(c *ResourceContract) { c.Files[0].SHA256 = "unverified" }, func(c *ResourceContract) { c.Files = c.Files[:1] }, func(c *ResourceContract) { c.Files = append(c.Files, c.Files[0]) },
 	} {
 		var contract ResourceContract
 		_ = json.Unmarshal(CandidateContract("arm64"), &contract)

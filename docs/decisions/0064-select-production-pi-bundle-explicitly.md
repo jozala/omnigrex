@@ -38,3 +38,7 @@ Delivery and observed qualification remain tracked in the Work Item.
 - [Platform scope answer A1](https://github.com/jozala/omnigrex/issues/190#issuecomment-6763624864)
 - [Operator cutover](../operators/upgrades.md#runtime-profile-image-change)
 - [Manual releases](0054-manual-product-releases.md)
+
+Build origin and qualification identity are independent: the runtime image can originate at C and be qualified at D before production selection changes.
+An explicit qualification-only mode in the existing CI workflow tests captured exact candidates through integration-only fixtures and retains backend-specific receipts; it does not publish or adopt images or add production admission overrides.
+Release verification checks actual tested digest/inventory receipts as well as successful job provenance, failing closed when evidence is unavailable or expired.

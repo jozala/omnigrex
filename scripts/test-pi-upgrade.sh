@@ -22,7 +22,7 @@ target="${OMNIGREX_PI_UPGRADE_TARGET_IMAGE:-}"
 artifact="${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:-}"
 restore_input=""
 source_contract=""
-selected_source=0
+selected_source="${OMNIGREX_PI_UPGRADE_SELECTED_SOURCE:-0}"
 fixture_source_version=1.0.4
 if [ -n "${OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE:-}" ]; then source_contract=/tmp/pi-source-contract.json; fi
 if [ -n "${OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE:-}" ]; then restore_input=/tmp/pi-upgrade-input.tar; fi
@@ -90,6 +90,7 @@ if [ "$backend" = microsandbox ]; then
     --env "OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=$selected_source" --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=microsandbox --env OMNIGREX_PI_UPGRADE_ROOT=/data \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
     --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
+    --env "OMNIGREX_PI_BUNDLE_CANDIDATE_FILE=${OMNIGREX_PI_BUNDLE_CANDIDATE_FILE:+/tmp/pi-bundle-candidate.json}" \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_IMAGE=${OMNIGREX_PI_UPGRADE_SOURCE_IMAGE:-}" --env "OMNIGREX_PI_UPGRADE_TARGET_IMAGE=${OMNIGREX_PI_UPGRADE_TARGET_IMAGE:-}" \
@@ -111,6 +112,7 @@ else
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VOLUME=$source_volume" --env "OMNIGREX_PI_UPGRADE_CANDIDATE_VOLUME=$candidate_volume" --env "OMNIGREX_PI_UPGRADE_RESTORE_VOLUME=$restore_volume" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
     --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
+    --env "OMNIGREX_PI_BUNDLE_CANDIDATE_FILE=${OMNIGREX_PI_BUNDLE_CANDIDATE_FILE:+/tmp/pi-bundle-candidate.json}" \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \
     --entrypoint /usr/local/bin/pi.test omnigrex/pi-upgrade-qualification:docker -test.v -test.run '^TestPiControlledStateUpgrade$' -test.timeout 10m >/dev/null
@@ -125,6 +127,11 @@ if [ -n "$source_contract" ]; then
   cp "$OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE" "$archives/source-contract.json"
   chmod 0644 "$archives/source-contract.json"
   docker cp "$archives/source-contract.json" "$wrapper:$source_contract"
+fi
+if [ -n "${OMNIGREX_PI_BUNDLE_CANDIDATE_FILE:-}" ]; then
+  cp "$OMNIGREX_PI_BUNDLE_CANDIDATE_FILE" "$archives/candidate.json"
+  chmod 0644 "$archives/candidate.json"
+  docker cp "$archives/candidate.json" "$wrapper:/tmp/pi-bundle-candidate.json"
 fi
 docker start --attach "$wrapper"
 test "$(docker inspect "$wrapper" --format '{{.State.ExitCode}}')" = 0

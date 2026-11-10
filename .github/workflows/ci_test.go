@@ -75,14 +75,14 @@ func TestCIQualificationDependencies(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing qualification %s", name)
 		}
-		if needs := ciNeeds(t, job); len(needs) != 0 || job.If != "" {
+		if needs := ciNeeds(t, job); len(needs) != 0 || job.If != "github.event_name != 'workflow_dispatch'" {
 			t.Errorf("%s must run independently on every CI event, got needs %v, if %q", name, needs, job.If)
 		}
 	}
 	if got := ciNeeds(t, jobs["check"]); !reflect.DeepEqual(got, qualifications) {
 		t.Errorf("stable required check must gate all qualifications, got %v", got)
 	}
-	if got := jobs["check"].If; got != "always()" {
+	if got := jobs["check"].If; got != "always() && github.event_name != 'workflow_dispatch'" {
 		t.Errorf("aggregate must run even when a qualification fails or is skipped, got %q", got)
 	}
 	if got := ciNeeds(t, jobs["publish"]); !reflect.DeepEqual(got, []string{"check"}) {
@@ -258,5 +258,36 @@ touch "$stage"
 				t.Fatalf("qualification events = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestPreAdoptionQualificationCannotPublishOrOverrideProduction(t *testing.T) {
+	jobs := readCIJobs(t)
+	for _, backend := range []string{"docker", "microsandbox"} {
+		j := jobs["qualify-pi-bundle-"+backend]
+		if j.If != "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" || len(ciNeeds(t, j)) != 0 {
+			t.Fatal("qualification must be explicit, main-source-only and independent of publication")
+		}
+		tested, receipt := false, false
+		for _, step := range j.Steps {
+			if strings.Contains(step.Run, "${{") || strings.Contains(step.Run, "publish-pi-images") {
+				t.Fatal("qualification executes dispatch shell or publishes images")
+			}
+			if strings.Contains(step.Run, "qualify-pi-bundle.sh") {
+				tested = true
+				if step.Env["OMNIGREX_PI_BACKEND"] != backend || step.Env["PI_CANDIDATE"] != "${{ inputs.pi_candidate }}" {
+					t.Fatal("candidate not passed as data")
+				}
+			}
+			if strings.Contains(step.Uses, "upload-artifact") {
+				receipt = true
+				if step.If != "" || step.With["name"] != "pi-bundle-"+backend+"-${{ github.run_id }}-${{ github.run_attempt }}" {
+					t.Fatal("receipt must follow success and bind exact run/attempt/backend")
+				}
+			}
+		}
+		if !tested || !receipt {
+			t.Fatal("missing qualification/evidence")
+		}
 	}
 }

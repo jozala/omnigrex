@@ -4,6 +4,7 @@ package docker_test
 
 import (
 	"context"
+	"encoding/json"
 	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/conformance"
 	dockerruntime "github.com/jozala/omnigrex/internal/runtime/docker"
@@ -33,4 +34,16 @@ func TestSelectedAndRetainedPiBundleResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	conformance.PiBundleInventories(t, ctx, r1, r2, dockerruntime.CheckRepositoryEnvironment)
+	var inventory piresources.ResourceContract
+	_ = json.Unmarshal(r2.Contract().GoldenResourceContract, &inventory)
+	inventory.Version = 1
+	inventory.BootstrapContract = ""
+	inventory.Executables = nil
+	c := r2.Contract()
+	c.GoldenResourceContract, _ = json.Marshal(inventory)
+	legacy, err := profile.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conformance.PiBundleInventories(t, ctx, r2, legacy, dockerruntime.CheckRepositoryEnvironment)
 }

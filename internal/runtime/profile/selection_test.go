@@ -21,10 +21,6 @@ func TestFreshProductionUsesSelectedNotCheckoutResources(t *testing.T) {
 	if !bytes.Equal(p.Contract().GoldenResourceContract, b.Resources) {
 		t.Fatal("fresh profile adopted candidate resources")
 	}
-	// The checkout has already advanced beyond the selected baseline.
-	if bytes.Equal(b.Resources, piresources.CandidateContract("amd64")) {
-		t.Fatal("fixture no longer exercises an unselected candidate")
-	}
 	selected, err := p.WithEnvironment("registry.example/project@sha256:"+strings.Repeat("b", 64), p.Contract().Platform, nil)
 	if err != nil || !bytes.Equal(selected.Contract().GoldenResourceContract, b.Resources) {
 		t.Fatalf("repository image did not use selection: %v", err)

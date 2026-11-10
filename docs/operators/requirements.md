@@ -22,7 +22,8 @@ A source build or synthetic fixture alone does not establish release qualificati
 
 Git and mise are not required on the no-clone deployment host.
 Runtime Profile qualification uses a separate source checkout.
-Docker-backed development on macOS is supported with locally built arm64 images; published deployment images are initially amd64.
+The ordinary selected-bundle stack currently admits fresh Participants only on Linux/amd64, including when Docker runs on macOS.
+Locally built ARM64 images remain supported for explicit [candidate/protocol development tests](../contributors/runtime-qualification.md#pi-protocol-diagnostic), not fresh production-stack admission; retained ARM64 Participants keep their original contracts.
 See [backend requirements](backends.md) before choosing the installation backend.
 
 ## Trust and credentials

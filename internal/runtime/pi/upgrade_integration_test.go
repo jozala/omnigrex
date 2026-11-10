@@ -72,6 +72,25 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if path := os.Getenv("OMNIGREX_PI_BUNDLE_CANDIDATE_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposed, err := piresources.ParseCandidate(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proposed.Image != targetImage || proposed.Platform != platform.OS+"/"+platform.Arch {
+			t.Fatal("candidate differs from tested image/platform")
+		}
+		c := target.Contract()
+		c.GoldenResourceContract = proposed.Resources
+		target, err = profile.New(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	participant, sessionID := uuid.NewString(), uuid.NewString()
 	ref := execution.StateRef{ID: participant, ParticipantID: participant, Backend: execution.BackendBinding{Family: settings.ExecutionBackend, Version: 1, Namespace: "upgrade-isolated"}, Format: profile.PiStateContractVersion, RuntimeProfileSHA256: source.ContentSHA256(), Image: sourceImage}
 	var imported []byte
