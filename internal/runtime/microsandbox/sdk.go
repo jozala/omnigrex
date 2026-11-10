@@ -230,18 +230,25 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 		return err
 	}
 	call := sdkCall("ExecStream", meta)
-	handle, err := sandbox.ExecStream(ctx, command[0], command[1:], sdk.WithExecUser(user), sdk.WithExecStdinPipe())
+	options := []sdk.ExecOption{sdk.WithExecUser(user)}
+	// A command without input can exit before ExecStream returns. Opening and
+	// then closing an unused pipe races that exit, making successful setup look
+	// ambiguous. Leave stdin disconnected and validate the actual exit event.
+	if input != nil {
+		options = append(options, sdk.WithExecStdinPipe())
+	}
+	handle, err := sandbox.ExecStream(ctx, command[0], command[1:], options...)
 	if err != nil {
 		return errors.Join(sdkError(ctx, call, err), boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Detach", meta, sandbox.Detach)))
 	}
 	defer func() {
 		result = errors.Join(result, boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Exec.Close", meta, func(context.Context) error { return handle.Close() }), sdkRelease("Detach", meta, sandbox.Detach)))
 	}()
-	stdin := handle.TakeStdin()
-	if stdin == nil {
-		return execution.ErrUnknownEffect
-	}
 	if input != nil {
+		stdin := handle.TakeStdin()
+		if stdin == nil {
+			return execution.ErrUnknownEffect
+		}
 		content, err := io.ReadAll(io.LimitReader(input, 1<<20))
 		if err != nil || len(content) >= 1<<20 {
 			return execution.ErrInvalidSpec
@@ -250,9 +257,9 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 		if _, err := stdin.WriteCtx(ctx, content); err != nil {
 			return sdkError(ctx, call, err)
 		}
-	}
-	if err := boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Stdin.Close", meta, func(context.Context) error { return stdin.Close() })); err != nil {
-		return err
+		if err := boundedNativeRelease(ctx, nativeReleaseWait, sdkRelease("Stdin.Close", meta, func(context.Context) error { return stdin.Close() })); err != nil {
+			return err
+		}
 	}
 	return awaitSDKExecution(ctx, meta, handle)
 }
