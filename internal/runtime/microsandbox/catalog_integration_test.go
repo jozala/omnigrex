@@ -67,11 +67,21 @@ func TestNativeCatalogLongevity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Create can fail after the VM exists but before it returns a process.
+		// Register identity-fenced cleanup before dispatch so that failed setup
+		// cannot leave a live writer that contaminates later capture fixtures.
+		t.Cleanup(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := engine.EnsureAbsent(cleanup); err != nil {
+				t.Error(err)
+			}
+		})
 		process, err := engine.Create(ctx, current, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = process.Transport().Close(); _ = engine.EnsureAbsent(context.Background()) })
+		t.Cleanup(func() { _ = process.Transport().Close() })
 		if err := process.Start(ctx); err != nil {
 			t.Fatal(err)
 		}
