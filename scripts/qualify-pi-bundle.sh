@@ -22,14 +22,16 @@ version() {
     return 1
   fi
   docker rm "$id" >/dev/null
-  test -f "$work/package.json" && test ! -L "$work/package.json"
+  if [ ! -f "$work/package.json" ] || [ -L "$work/package.json" ]; then return 1; fi
   jq -er '.dependencies["@earendil-works/pi-coding-agent"]' "$work/package.json"
 }
+source_version="$(version "$source_image")"
+target_version="$(version "$target_image")"
 OMNIGREX_PI_UPGRADE_SOURCE_IMAGE="$source_image" \
 OMNIGREX_PI_UPGRADE_TARGET_IMAGE="$target_image" \
 OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE="$work/source-profile.json" \
-OMNIGREX_PI_UPGRADE_SOURCE_VERSION="$(version "$source_image")" \
-OMNIGREX_PI_UPGRADE_TARGET_VERSION="$(version "$target_image")" \
+OMNIGREX_PI_UPGRADE_SOURCE_VERSION="$source_version" \
+OMNIGREX_PI_UPGRADE_TARGET_VERSION="$target_version" \
 OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=1 \
 OMNIGREX_PI_BUNDLE_CANDIDATE_FILE="$work/candidate.json" \
 sh scripts/test-pi-upgrade.sh
