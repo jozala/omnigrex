@@ -311,6 +311,12 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 		}
 		remove()
 	}
+	if os.Getenv("OMNIGREX_PI_BUNDLE_CANDIDATE_FILE") != "" && source.Binding() == target.Binding() {
+		// Renewing evidence for unchanged contents is not a Session migration and
+		// must not manufacture a source-to-target compatibility result.
+		t.Log("PASS exact unchanged-bundle requalification; no compatibility artifact emitted")
+		return
+	}
 	result := profile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: profile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: profile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success", BackendFamily: settings.ExecutionBackend, BackendContractVersion: 1}
 	file := profile.CompatibilityResultsFile{SchemaVersion: profile.PiCompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
 	if err := file.ValidateDeployment(settings.ExecutionBackend, 1, target); err != nil {
