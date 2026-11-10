@@ -162,6 +162,7 @@ mise run test-pi-microsandbox-integration
 OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' mise run test-pi-microsandbox-workflow
 mise run test-pi-microsandbox-recovery
 mise run test-pi-microsandbox-upgrade
+OMNIGREX_PI_BACKEND=microsandbox sh scripts/test-pi-bundle-requalification.sh
 mise run test-pi-microsandbox-deployment
 '''
 

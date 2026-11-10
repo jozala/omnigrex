@@ -95,12 +95,14 @@ if [ "$backend" = microsandbox ]; then
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_IMAGE=${OMNIGREX_PI_UPGRADE_SOURCE_IMAGE:-}" --env "OMNIGREX_PI_UPGRADE_TARGET_IMAGE=${OMNIGREX_PI_UPGRADE_TARGET_IMAGE:-}" \
     omnigrex/pi-upgrade-qualification:native -test.v -test.run '^TestPiControlledStateUpgrade$' -test.timeout 10m >/dev/null
+  if [ -z "${OMNIGREX_PI_UPGRADE_SOURCE_IMAGE:-}" ]; then
   docker image save --output "$archives/source.tar" "$source"
   chmod 0644 "$archives/source.tar"
   docker cp "$archives/source.tar" "$wrapper:/tmp/pi-upgrade-SOURCE.tar"
   docker image save --output "$archives/target.tar" "$target"
   chmod 0644 "$archives/target.tar"
   docker cp "$archives/target.tar" "$wrapper:/tmp/pi-upgrade-TARGET.tar"
+  fi
 else
   docker build --quiet --platform "linux/$arch" --file Dockerfile.pi-qualification --tag omnigrex/pi-upgrade-qualification:docker .
   gid="$(docker run --rm --user 0:0 --entrypoint /usr/bin/stat --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock "$target" -c %g /var/run/docker.sock)"

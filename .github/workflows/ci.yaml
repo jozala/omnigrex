@@ -86,6 +86,7 @@ jobs:
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh
+          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-bundle-requalification.sh
           OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh
 
       - name: Compile live GitHub App gate
