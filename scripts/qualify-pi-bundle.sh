@@ -13,7 +13,17 @@ go run ./scripts/pi-bundle profile > "$work/source-profile.json"
 docker pull --platform linux/amd64 "$source_image"
 docker pull --platform linux/amd64 "$target_image"
 version() {
-  docker run --rm --network none --entrypoint /usr/local/bin/node "$1" -p "require('/opt/omnigrex/pi/package.json').dependencies['@earendil-works/pi-coding-agent']"
+  # Read the expected version without executing an unqualified image. The
+  # integration gate still verifies the manifest/hash and actual locked SDK.
+  rm -f "$work/package.json"
+  id="$(docker create --network none --entrypoint /bin/true "$1")"
+  if ! docker cp "$id:/opt/omnigrex/pi/package.json" "$work/package.json"; then
+    docker rm "$id" >/dev/null
+    return 1
+  fi
+  docker rm "$id" >/dev/null
+  test -f "$work/package.json" && test ! -L "$work/package.json"
+  jq -er '.dependencies["@earendil-works/pi-coding-agent"]' "$work/package.json"
 }
 OMNIGREX_PI_UPGRADE_SOURCE_IMAGE="$source_image" \
 OMNIGREX_PI_UPGRADE_TARGET_IMAGE="$target_image" \
