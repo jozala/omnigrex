@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
@@ -395,7 +396,7 @@ func TestGoldenSetupUsesProbeBudgetWithoutChangingStorageOnlyHelpers(t *testing.
 		spec := runtimeProcessSpec()
 		spec.Volumes = []VolumeMount{{Name: "state", Subpath: "assignment-" + key.AssignmentID + "/runtime-state", Target: "/state"}}
 		api := &probeBudgetAPI{runtimeAPIFake: newRuntimeAPIFake()}
-		_ = prepareExecutionSubpaths(t.Context(), api, spec, ledger, key, golden, nil)
+		_ = prepareExecutionSubpaths(t.Context(), api, spec, ledger, key, golden, piresources.CandidateContract(spec.Platform.Architecture))
 		if api.options.HostConfig == nil {
 			t.Fatal("probe not dispatched")
 		}
