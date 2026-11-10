@@ -37,7 +37,7 @@ func TestMicrosandboxGoldenEnvironmentWorkingRevisionAndSessionContinuation(t *t
 	if _, err := sdk.Image.Load(ctx, archive, image); err != nil {
 		t.Fatalf("bind exact imported fixture: %v", err)
 	}
-	runtime, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
+	runtime, err := profile.NewCandidatePiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}

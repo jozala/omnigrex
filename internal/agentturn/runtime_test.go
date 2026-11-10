@@ -1644,7 +1644,7 @@ func runtimeLauncher(t *testing.T, config agentturn.LauncherConfig) *agentturn.L
 
 func runtimeLauncherProfile(t *testing.T) profile.Profile {
 	t.Helper()
-	value, err := profile.NewPiV2(runtimeTestImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV2(runtimeTestImage, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatalf("NewPiV2() error = %v", err)
 	}

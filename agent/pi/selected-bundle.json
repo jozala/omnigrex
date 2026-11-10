@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "platform": "linux/amd64",
+  "image": "ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5",
+  "source_commit": "72e5ac1eb99022ccaaeb3a1a31468c06ec308306",
+  "qualification": {
+    "run_id": 42547887513,
+    "attempt": 1,
+    "docker_job_id": 128947968828,
+    "microsandbox_job_id": 128947968823
+  },
+  "resources": {
+    "version": 2,
+    "node_version": "v24.14.1",
+    "mise_sha256": "2af841603ad2981529f230add15c601c64e3a81a79f4f41e9860eb38b7672771",
+    "files": [
+      {
+        "name": "compaction-compat-extension.mjs",
+        "sha256": "881e12790e3838d88f778b79ca7de1d087e77ca7e7ef11b1edd9d9d1b6f8d68a"
+      },
+      {
+        "name": "control-events.mjs",
+        "sha256": "8118f1de3a48af1b7a476280aa6e01ee86fdab1f950c4357e125ed2202e505db"
+      },
+      {
+        "name": "failure-extension.mjs",
+        "sha256": "23ed9e4b0af23d67d1156632e145814e5fd8c42fd3dcfcf34ef85fba1d7d5b81"
+      },
+      {
+        "name": "history-rpc.mjs",
+        "sha256": "46d0fca119722cb4feefa629afd02083353a8266fb40dfdddf276cb32589af6a"
+      },
+      {
+        "name": "mcp-extension.mjs",
+        "sha256": "2c12d21aad389ffbd05d318b43b36d825f3e65ca802b798d02bfbdbb7e9fe8f1"
+      },
+      {
+        "name": "package-integrity.mjs",
+        "sha256": "ff666ea012efc19d087822ecd9eae62195a3146c3a4c508dcac2b9ffbd79391e"
+      },
+      {
+        "name": "package-lock.json",
+        "sha256": "3c0c44f0a87f0aef74d87fafe5770792980c842c779add1f6615075a35a6fa03"
+      },
+      {
+        "name": "package.json",
+        "sha256": "fe334ec133f5ed9a48d36efd4d89f181367b9a2d58f0e0e3bce60e1ee1c91109"
+      },
+      {
+        "name": "provider-diagnostic.mjs",
+        "sha256": "4aaf715995b9f275a2003cec89bec0dfb729b1faf8b34dedac37abb4cb73bd76"
+      },
+      {
+        "name": "qualify-packages.mjs",
+        "sha256": "6a01a5cb46b9381d5baea6ee52a08b92eaa3f7e5ba2ddc8fbffb80729039bf6a"
+      },
+      {
+        "name": "runner.mjs",
+        "sha256": "6ce4fccdf990e4a436e4a42f7443ee6f890f4d8856dc81b5fbc872e0602c5034"
+      },
+      {
+        "name": "session-state.mjs",
+        "sha256": "691f5a233f48d5abf2e86fe039a822423885c644aa55b41a005c821f14fb9126"
+      },
+      {
+        "name": "session-validation.mjs",
+        "sha256": "f448bce7f451268b298c98370bf952900a94eecef0f0bfcc0d8aff4655caf04a"
+      },
+      {
+        "name": "step-budget.mjs",
+        "sha256": "845fe437ae3c75879b2d08b18f59560289c6f0b6a90629cfec9da821b79d63ea"
+      },
+      {
+        "name": "subscription-auth.mjs",
+        "sha256": "588d51ec5715dcae5967d95f9f25810b5c078c5437b2008ae0cb601d992e55f6"
+      }
+    ],
+    "bootstrap_contract": "omnigrex-environment/v1",
+    "executables": [
+      "/usr/local/bin/omnigrex-environment",
+      "/usr/local/bin/node",
+      "/usr/local/bin/mise",
+      "/usr/bin/git",
+      "/bin/sh",
+      "/usr/bin/env",
+      "/usr/bin/sha256sum",
+      "/usr/local/bin/rg",
+      "/usr/local/bin/fd"
+    ]
+  }
+}

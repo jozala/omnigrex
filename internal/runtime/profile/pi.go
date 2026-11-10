@@ -13,16 +13,13 @@ const (
 )
 
 func NewPiV2(image string, platform Platform) (Profile, error) {
-	return New(piContract(image, platform))
-}
-
-func NewBuiltinV2(name, image string, platform Platform) (Profile, error) {
-	switch name {
-	case PiRuntimeName:
-		return NewPiV2(image, platform)
-	default:
-		return Profile{}, ErrNotFound
+	bundle, err := piresources.SelectedBundle(platform.OS, platform.Arch)
+	if err != nil {
+		return Profile{}, err
 	}
+	contract := piContract(image, platform)
+	contract.GoldenResourceContract = bundle.Resources
+	return New(contract)
 }
 
 func piContract(image string, platform Platform) Contract {
@@ -30,7 +27,7 @@ func piContract(image string, platform Platform) Contract {
 		Environment:  []EnvironmentVariable{{Name: "HOME", Value: "/tmp"}, {Name: "PATH", Value: "/usr/local/bin:/usr/bin:/bin"}, {Name: "PI_CODING_AGENT_DIR", Value: "/run/pi-agent"}, {Name: "PI_OFFLINE", Value: "1"}, {Name: "PI_TELEMETRY", Value: "0"}, {Name: "PI_SKIP_VERSION_CHECK", Value: "1"}, {Name: "TMPDIR", Value: "/tmp"}},
 		Mounts:       []Mount{{Name: "workspace", Path: "/workspace"}, {Name: "state", Path: "/state"}, {Name: "mise", Path: "/home/omnigrex/.local/share/mise"}, {Name: "tool-data", Path: "/home/omnigrex/.local/share/omnigrex-tool-data"}},
 		Tmpfs:        []Tmpfs{{Path: "/tmp", SizeBytes: 64 << 20, Executable: true}, {Path: "/run/pi-agent", SizeBytes: 16 << 20}},
-		Capabilities: []string{"exact-session", "history-replay", "checked-configuration", "authenticated-mcp"}, RepositoryEnvironment: &RepositoryEnvironment{Version: 1}, GoldenResourceContract: piresources.CurrentContract(platform.Arch)}
+		Capabilities: []string{"exact-session", "history-replay", "checked-configuration", "authenticated-mcp"}, RepositoryEnvironment: &RepositoryEnvironment{Version: 1}}
 }
 
 func validatePi(contract Contract) error {

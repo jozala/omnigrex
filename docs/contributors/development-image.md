@@ -24,14 +24,16 @@ mise run test-development-image-unit
 ```
 
 The build first creates the current checkout's Linux/amd64 `omnigrex/development-golden:dev`, so bootstrap/storage paths match even before publication.
-Release CI instead uses the same release's exact published golden digest.
+Release CI and production-derived image qualification use the exact digest in `agent/pi/selected-bundle.json`, which can originate from an older source commit.
+The local source-built path above is explicitly candidate testing, not production adoption.
+Publishing candidates never edits that selection or a repository pin.
 For an externally qualified base, build with `--platform linux/amd64 --target development --file agent/environments/omnigrex/Dockerfile --build-arg OMNIGREX_GOLDEN_IMAGE=<exact-golden-reference>`.
 The base must provide supported `pi-rpc/v2` storage under `/home/omnigrex/.local/share/mise` and `/home/omnigrex/.local/share/omnigrex-tool-data`.
 Pre-baseline golden images are unsupported.
 
 Only the `development` target is published.
 Cache/repository qualification targets add disposable fixtures excluded from the production image.
-Before publication, the independent CI `development-qualification` job must pass the module-source check and unit suite with the source-built image's actual system tools, including jq-based deployment fixtures.
+Before publication, the independent CI `development-qualification` job must pass the module-source check and unit suite with the selected-bundle-derived image's actual system tools, including jq-based deployment fixtures.
 The required `check` job waits for this qualification, Docker checks, and Microsandbox qualification before publication.
 
 ## Module source and scratch behavior
@@ -44,6 +46,8 @@ Go fills writable Participant module caches on demand, without a bootstrap-copy 
 Keep `GOPATH` and `GOCACHE` approved in [operator policy](../operators/agent-policy.md#approve-tool-path-variables) and retain `.omnigrex/turn-configuration.yaml`.
 
 New versions fall back upstream and cache for later Turns; working-revision module files remain authoritative.
+The offline cache-coverage test qualifies newly built cache-image publication, not whether an existing image may run a later working revision.
+Adding a dependency does not mandate environment adoption; normal fallback and checksum verification must remain enabled.
 Checksum verification remains enabled and can require network access for missing records.
 The image-local source does not persist the Go distribution, startup installation data, compiled artifacts, or modules downloaded in separate Docker builds.
 See [decision 0026](../decisions/0026-use-an-image-local-go-module-source.md).

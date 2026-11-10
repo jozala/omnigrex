@@ -21,7 +21,7 @@ import (
 func TestPiImageRunsGoRaceTests(t *testing.T) {
 	image := environmentOrDefault("OMNIGREX_PI_IMAGE", "omnigrex/pi:1.4.0")
 	arch := dockerCommand(t, "image", "inspect", "--format", "{{.Architecture}}", image)
-	profile, err := runtimeprofile.NewPiV2(
+	profile, err := runtimeprofile.NewCandidatePiV2(
 		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: arch},
 	)

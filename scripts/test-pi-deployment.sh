@@ -55,23 +55,22 @@ trap 'exit 143' HUP TERM
 orchestrator="${OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE:-}"
 pi="${OMNIGREX_PI_DEPLOY_IMAGE:-}"
 if [ -z "$orchestrator" ] && [ -z "$pi" ]; then
-  docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
+  pi="$(go run ./scripts/pi-bundle image)"
+  docker pull --platform linux/amd64 "$pi"
   if [ "$backend" = docker ]; then
     docker build --quiet --tag omnigrex/orchestrator:dev .
     sh scripts/check-orchestrator-image.sh omnigrex/orchestrator:dev
     ensure_fixture_registry
-    for image in pi:1.4.0 orchestrator:dev; do
+    for image in orchestrator:dev; do
       name="${image%%:*}"
       docker tag "omnigrex/$image" "127.0.0.1:$registry_port/omnigrex/$name:fixture"
       docker push "127.0.0.1:$registry_port/omnigrex/$name:fixture" >/dev/null
     done
     orchestrator="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/orchestrator:fixture" --format '{{index .RepoDigests 0}}')"
-    pi="$(docker image inspect "127.0.0.1:$registry_port/omnigrex/pi:fixture" --format '{{index .RepoDigests 0}}')"
   else
     : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the host KVM group}"
     docker build --quiet --file Dockerfile.microsandbox --target runtime --tag omnigrex/orchestrator-microsandbox:dev .
     orchestrator=omnigrex/orchestrator-microsandbox:dev
-    pi=omnigrex/pi:1.4.0
   fi
 elif [ -z "$orchestrator" ] || [ -z "$pi" ]; then
   printf '%s\n' 'Supply both published image digests or neither.' >&2

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/environment"
 )
 
@@ -24,7 +25,7 @@ func TestPiRepositoryEnvironmentRejectsUnqualifiedResolution(t *testing.T) {
 	if len(fields) != 2 {
 		t.Fatal("incomplete Pi fixture identity")
 	}
-	script, err := environment.QualificationScript(fields[1], "pi-rpc")
+	script, err := environment.QualificationScript(fields[1], "pi-rpc", piresources.CandidateContract(fields[1]))
 	if err != nil {
 		t.Fatal(err)
 	}

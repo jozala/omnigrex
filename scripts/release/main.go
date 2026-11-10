@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"os"
 	"strconv"
 	"strings"
@@ -20,10 +21,15 @@ func identityFromEnv() (Build, error) {
 	if e != nil {
 		return Build{}, errors.New("GITHUB_RUN_ATTEMPT is required")
 	}
-	b := Build{SchemaVersion: 1, Repository: os.Getenv("GITHUB_REPOSITORY"), Commit: os.Getenv("GITHUB_SHA"), RunID: run, Attempt: attempt, Platform: "linux/amd64", Images: map[string]string{}}
+	bundle, e := piresources.SelectedBundle("linux", "amd64")
+	if e != nil {
+		return Build{}, e
+	}
+	b := Build{SchemaVersion: 2, PiBundle: &bundle, Repository: os.Getenv("GITHUB_REPOSITORY"), Commit: os.Getenv("GITHUB_SHA"), RunID: run, Attempt: attempt, Platform: "linux/amd64", Images: map[string]string{}}
 	for _, n := range products {
 		b.Images[n] = os.Getenv(strings.ToUpper(strings.ReplaceAll(n, "-", "_")) + "_IMAGE")
 	}
+	b.Images["pi"] = bundle.Image
 	return b, nil
 }
 func execute(ctx context.Context, args []string) error {

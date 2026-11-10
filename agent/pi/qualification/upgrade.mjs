@@ -10,6 +10,9 @@ try {
   const pkg = JSON.parse(await readFile('/opt/omnigrex/pi/node_modules/@earendil-works/pi-coding-agent/package.json', 'utf8'));
   if (pkg.version !== process.env.OMNIGREX_PI_EXPECTED_VERSION || process.version !== 'v24.14.1') throw new Error('unexpected runtime identity');
   const configuration = await readBootstrap();
+  if (configuration.session.runtimeSessionId === process.env.OMNIGREX_PI_REJECT_SESSION) {
+    throw new Error('fixture refuses previous-image Session');
+  }
   let count = 0;
   const server = http.createServer(async (request, response) => {
     if (request.url === '/mcp') {

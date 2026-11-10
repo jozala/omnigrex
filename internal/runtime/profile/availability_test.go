@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/server"
 )
@@ -130,8 +131,15 @@ func availabilityProfile(t *testing.T, digit, arch string) profile.Profile {
 	t.Helper()
 	value, err := profile.NewPiV2(
 		"registry.example/omnigrex/pi@sha256:"+strings.Repeat(digit, 64),
-		profile.Platform{OS: "linux", Arch: arch},
+		profile.Platform{OS: "linux", Arch: "amd64"},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := value.Contract()
+	c.Platform.Arch = arch
+	c.GoldenResourceContract = piresources.CandidateContract(arch)
+	value, err = profile.New(c)
 	if err != nil {
 		t.Fatal(err)
 	}

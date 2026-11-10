@@ -1,3 +1,4 @@
+ARG OMNIGREX_SELECTED_PI=scratch
 FROM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS bootstrap
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -45,3 +46,7 @@ COPY agent/pi/upgrade-source/package.json agent/pi/upgrade-source/package-lock.j
 RUN npm ci --ignore-scripts --no-audit --no-fund && node retain-packages.mjs && npm cache clean --force
 USER 10001:10001
 WORKDIR /workspace
+
+# Product Workflow qualification uses the selected bundle, not checkout resources.
+FROM ${OMNIGREX_SELECTED_PI} AS selected-workflow-fixture
+COPY agent/pi/qualification/turn.mjs /opt/omnigrex/pi/qualification/turn.mjs

@@ -17,7 +17,7 @@ import (
 )
 
 func TestToolPathMountIsDiskBackedAndAssignmentIsolated(t *testing.T) {
-	profile, err := runtimeprofile.NewPiV2(
+	profile, err := runtimeprofile.NewCandidatePiV2(
 		"registry.example/omnigrex/pi@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		runtimeprofile.Platform{OS: "linux", Arch: "amd64"},
 	)

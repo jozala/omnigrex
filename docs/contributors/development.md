@@ -70,8 +70,10 @@ It source-builds the orchestrator and uses an exact registry-pinned Pi image.
 Complete the authoritative [App](../operators/github-apps.md), [secret](../operators/secrets.md), [ingress](../operators/installation.md#https-ingress), and [repository setup](../repository-owners/connect-a-repository.md) procedures first.
 
 Copy `.env.example` to a private `.env`, configure required values, and set a real `OMNIGREX_PI_IMAGE` digest with matching `OMNIGREX_PI_PLATFORM`.
-For a locally built Pi image, publish it to a development registry and resolve its digest using the [image procedure](../operators/installation.md#3-resolve-and-provision-images).
-Provision the exact image before startup; Docker-backed arm64 development is supported with a matching local image/platform.
+The ordinary stack uses the selected production bundle and currently requires `linux/amd64`, even on Apple Silicon.
+Provision its exact image before startup; a locally built ARM64 image cannot bypass fresh production admission.
+For native ARM64 development, use the explicit source-built [candidate/protocol qualification paths](runtime-qualification.md#pi-protocol-diagnostic), not this full-stack procedure.
+Retained ARM64 Participants keep their original contracts independently of the production selection.
 
 From the checkout, select only the root development Compose file, keeping any explicit overrides in the same selection:
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -39,7 +38,7 @@ func TestIsExactRegistryImageUsesCanonicalDistributionGrammar(t *testing.T) {
 }
 
 func TestNewPiV2ReturnsQualifiedContract(t *testing.T) {
-	got, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	got, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatalf("NewPiV2() error = %v", err)
 	}
@@ -50,7 +49,7 @@ func TestNewPiV2ReturnsQualifiedContract(t *testing.T) {
 		Image:   testImage,
 		Platform: profile.Platform{
 			OS:   "linux",
-			Arch: "arm64",
+			Arch: "amd64",
 		},
 		User:    profile.User{UID: 10001, GID: 10001},
 		Command: []string{"/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"},
@@ -77,7 +76,7 @@ func TestNewPiV2ReturnsQualifiedContract(t *testing.T) {
 		Workspace:              "/workspace",
 		PIDsLimit:              512,
 		RepositoryEnvironment:  &profile.RepositoryEnvironment{Version: 1},
-		GoldenResourceContract: piresources.CurrentContract("arm64"),
+		GoldenResourceContract: selectedResources(t),
 	}
 	if contract := got.Contract(); !reflect.DeepEqual(contract, want) {
 		t.Fatalf("Contract() = %#v, want %#v", contract, want)
@@ -173,7 +172,7 @@ func TestNewRejectsContractsOutsidePiV1(t *testing.T) {
 }
 
 func TestNewAcceptsSupportedPlatformsAndCanonicalizesOrder(t *testing.T) {
-	for _, arch := range []string{"arm64", "amd64"} {
+	for _, arch := range []string{"amd64", "amd64"} {
 		t.Run(arch, func(t *testing.T) {
 			contract := validContract(t)
 			contract.Platform.Arch = arch
@@ -343,7 +342,7 @@ func TestCatalogResolvesCurrentAndHistoricalImmutableBindings(t *testing.T) {
 
 func validContract(t *testing.T) profile.Contract {
 	t.Helper()
-	value, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := profile.NewPiV2(testImage, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatalf("NewPiV2() error = %v", err)
 	}

@@ -4,6 +4,7 @@ package pi_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,6 +31,19 @@ func upgradeImages(t *testing.T) (string, string, profile.Platform, config.Confi
 	}
 	load := func(name string) string {
 		image := os.Getenv("OMNIGREX_PI_UPGRADE_" + name + "_IMAGE")
+		if image != "" {
+			// Registry digests may identify an OCI index. Provision the real
+			// reference instead of relabelling a Docker-exported child manifest.
+			command := exec.CommandContext(t.Context(), settings.MicrosandboxExecutable, "image", "pull", image)
+			command.Env = append(os.Environ(), "MSB_HOME="+settings.MicrosandboxHome)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("provision exact candidate: %v\n%s", err, output)
+			}
+			if err := b.Available(t.Context(), image, profile.Platform{OS: "linux", Arch: "amd64"}); err != nil {
+				t.Fatal(err)
+			}
+			return image
+		}
 		archive := "/tmp/pi-upgrade-" + name + ".tar"
 		images, err := sdk.Image.Load(t.Context(), archive, "registry.example/omnigrex/pi-upgrade:fixture")
 		if err != nil || len(images) == 0 {

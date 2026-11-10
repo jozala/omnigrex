@@ -251,7 +251,7 @@ func compatibilityPreparationSpec(commitSHA string, profile runtimeprofile.Profi
 
 func compatibilityProfile(t *testing.T, digit, architecture string) runtimeprofile.Profile {
 	t.Helper()
-	profile, err := runtimeprofile.NewPiV2(compatibilityImage(digit), runtimeprofile.Platform{OS: "linux", Arch: architecture})
+	profile, err := runtimeprofile.NewCandidatePiV2(compatibilityImage(digit), runtimeprofile.Platform{OS: "linux", Arch: architecture})
 	if err != nil {
 		t.Fatal(err)
 	}

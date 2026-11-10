@@ -15,7 +15,9 @@ cleanup() {
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT HUP INT TERM
-docker build --quiet --file agent/pi/Dockerfile --target workflow-fixture --tag omnigrex/pi-workflow:step12 .
+selected="$(go run ./scripts/pi-bundle image)"
+docker pull --platform linux/amd64 "$selected"
+docker build --quiet --platform linux/amd64 --file agent/pi/Dockerfile --build-arg "OMNIGREX_SELECTED_PI=$selected" --target selected-workflow-fixture --tag omnigrex/pi-workflow:step12 .
 if [ "$backend" = microsandbox ]; then
   : "${OMNIGREX_MICROSANDBOX_KVM_GID:?set the approved Docker host KVM group}"
   docker build --quiet --file Dockerfile.microsandbox --target pi-workflow-qualification --tag omnigrex/pi-workflow-qualification:step12 .

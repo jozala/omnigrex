@@ -21,10 +21,12 @@ var resources embed.FS
 // ResourceContract is the approved inventory captured when a Pi Runtime
 // Profile is created. Historical profiles keep it across deployment upgrades.
 type ResourceContract struct {
-	Version     int            `json:"version"`
-	NodeVersion string         `json:"node_version"`
-	MiseSHA256  string         `json:"mise_sha256"`
-	Files       []ResourceFile `json:"files"`
+	Version           int            `json:"version"`
+	NodeVersion       string         `json:"node_version"`
+	MiseSHA256        string         `json:"mise_sha256"`
+	Files             []ResourceFile `json:"files"`
+	BootstrapContract string         `json:"bootstrap_contract,omitempty"`
+	Executables       []string       `json:"executables,omitempty"`
 }
 
 type ResourceFile struct {
@@ -32,8 +34,10 @@ type ResourceFile struct {
 	SHA256 string `json:"sha256"`
 }
 
-func CurrentContract(architecture string) json.RawMessage {
-	contract := ResourceContract{Version: 1, NodeVersion: "v24.14.1"}
+// CandidateContract captures checkout resources for explicit source-built qualification.
+// Production admission must use SelectedBundle instead.
+func CandidateContract(architecture string) json.RawMessage {
+	contract := ResourceContract{Version: 2, NodeVersion: "v24.14.1", BootstrapContract: "omnigrex-environment/v1", Executables: slices.Clone(requiredExecutables)}
 	switch architecture {
 	case "amd64":
 		contract.MiseSHA256 = "2af841603ad2981529f230add15c601c64e3a81a79f4f41e9860eb38b7672771"
@@ -50,6 +54,10 @@ func CurrentContract(architecture string) json.RawMessage {
 	return content
 }
 
+// requiredExecutables is the fixed minimum for inventory version 2, not a
+// current-checkout tool list. Preserve it when adding a future contract version.
+var requiredExecutables = []string{"/usr/local/bin/omnigrex-environment", "/usr/local/bin/node", "/usr/local/bin/mise", "/usr/bin/git", "/bin/sh", "/usr/bin/env", "/usr/bin/sha256sum", "/usr/local/bin/rg", "/usr/local/bin/fd"}
+
 var resourceName = regexp.MustCompile(`^[a-z][a-z0-9-]*\.(mjs|json)$`)
 var nodeVersion = regexp.MustCompile(`^v[1-9][0-9]*\.[0-9]+\.[0-9]+$`)
 
@@ -62,8 +70,14 @@ func NormalizeContract(content json.RawMessage) (json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	var contract ResourceContract
-	if decoder.Decode(&contract) != nil || decoder.Decode(new(any)) != io.EOF || contract.Version != 1 || !nodeVersion.MatchString(contract.NodeVersion) || !resourceHash(contract.MiseSHA256) || len(contract.Files) > 128 {
+	if decoder.Decode(&contract) != nil || decoder.Decode(new(any)) != io.EOF || (contract.Version != 1 && contract.Version != 2) || !nodeVersion.MatchString(contract.NodeVersion) || !resourceHash(contract.MiseSHA256) || len(contract.Files) > 128 {
 		return nil, errors.New("invalid Pi resource contract")
+	}
+	if contract.Version == 1 && (contract.BootstrapContract != "" || len(contract.Executables) > 0) {
+		return nil, errors.New("invalid legacy Pi executable contract")
+	}
+	if contract.Version == 2 && (contract.BootstrapContract != "omnigrex-environment/v1" || !slices.Equal(contract.Executables, requiredExecutables)) {
+		return nil, errors.New("incomplete Pi bootstrap/executable contract")
 	}
 	seen := map[string]bool{}
 	for _, file := range contract.Files {
@@ -91,8 +105,8 @@ func resourceHash(value string) bool {
 
 func QualificationScript(architecture string, content json.RawMessage) (string, error) {
 	if len(content) == 0 {
-		content = CurrentContract(architecture)
-	} // Preparatory pre-Step14 contracts.
+		return "", errors.New("missing bound Pi resource inventory; restore the Participant's canonical ledger contract rather than reconstructing it from the current selection")
+	}
 	canonical, err := NormalizeContract(content)
 	if err != nil {
 		return "", err
@@ -102,6 +116,13 @@ func QualificationScript(architecture string, content json.RawMessage) (string, 
 		return "", err
 	}
 	var script strings.Builder
+	if contract.Version == 2 {
+		for _, executable := range contract.Executables {
+			fmt.Fprintf(&script, "test -x '%s'\n", executable)
+		}
+		fmt.Fprintf(&script, "test \"$(/usr/local/bin/omnigrex-environment contract-version)\" = '%s'\n", contract.BootstrapContract)
+	}
+
 	script.WriteString(`
 for directory in /opt /opt/omnigrex /opt/omnigrex/pi; do
   test -d "$directory" && test ! -L "$directory"

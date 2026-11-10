@@ -34,10 +34,15 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if os.Getenv("OMNIGREX_PI_UPGRADE_INTEGRATION") != "1" {
 		t.Skip("explicit isolated Pi upgrade gate required")
 	}
+	mode := os.Getenv("OMNIGREX_PI_UPGRADE_MODE")
+	if mode != "" && mode != "compatibility" && mode != "bundle" {
+		t.Fatal("unknown isolated qualification mode")
+	}
+	bundleQualification := mode == "bundle"
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	sourceImage, targetImage, platform, settings := upgradeImages(t)
-	source, err := profile.NewPiV2(sourceImage, platform)
+	source, err := profile.NewCandidatePiV2(sourceImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +50,14 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	// contract. Candidate defaults cannot replace that inventory on reopening.
 	sourceContract := source.Contract()
 	sourceContract.GoldenResourceContract = piresources.UpgradeSourceContract(platform.Arch)
+	if os.Getenv("OMNIGREX_PI_UPGRADE_SELECTED_SOURCE") == "1" {
+		bundle, err := piresources.SelectedBundle(platform.OS, platform.Arch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceContract.GoldenResourceContract = bundle.Resources
+	}
+
 	if path := os.Getenv("OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE"); path != "" {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -60,9 +73,28 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV2(targetImage, platform)
+	target, err := profile.NewCandidatePiV2(targetImage, platform)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if path := os.Getenv("OMNIGREX_PI_BUNDLE_CANDIDATE_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposed, err := piresources.ParseCandidate(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proposed.Image != targetImage || proposed.Platform != platform.OS+"/"+platform.Arch {
+			t.Fatal("candidate differs from tested image/platform")
+		}
+		c := target.Contract()
+		c.GoldenResourceContract = proposed.Resources
+		target, err = profile.New(c)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	participant, sessionID := uuid.NewString(), uuid.NewString()
 	ref := execution.StateRef{ID: participant, ParticipantID: participant, Backend: execution.BackendBinding{Family: settings.ExecutionBackend, Version: 1, Namespace: "upgrade-isolated"}, Format: profile.PiStateContractVersion, RuntimeProfileSHA256: source.ContentSHA256(), Image: sourceImage}
@@ -98,7 +130,8 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	start := func(storage string, p profile.Profile, version string, epoch int64, mustExist bool) (agent.Connection, func()) {
+	retainedSessionID := sessionID
+	launch := func(storage string, p profile.Profile, version string, epoch int64, mustExist bool) (agent.Connection, func(), *diagnosticOutput, error) {
 		t.Helper()
 		key := execution.Key{AssignmentID: participant, AgentSessionID: sessionID, AgentTurnID: uuid.NewString(), ExecutionEpoch: epoch, RuntimeProfileName: "pi-rpc", RuntimeProfileVersion: "v2"}
 		request, err := (pi.TurnAdapter{}).BuildProcess(p, key, "", 512<<20, nil)
@@ -107,6 +140,11 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 		}
 		request.Command = []string{"/usr/local/bin/node", "--input-type=module", "--eval", qualification.UpgradeScript}
 		request.Environment = append(request.Environment, "OMNIGREX_PI_EXPECTED_VERSION="+version)
+		if bundleQualification && storage == "candidate" {
+			// Regression fixture: this R2 accepts independent Sessions but
+			// deliberately refuses the original R1 Session, even on reopening.
+			request.Environment = append(request.Environment, "OMNIGREX_PI_REJECT_SESSION="+retainedSessionID)
+		}
 		// Full production golden-resource qualification uses the bound inventory.
 		// Tool/cache and workspace attachments are isolated copies as well.
 		request.GoldenResources = true
@@ -164,10 +202,19 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 		}
 		c, err := pi.Start(ctx, process.Transport(), pi.Configuration{Selection: agent.ModelSelection{Model: "upgrade/controlled"}, Tools: []string{}, Instructions: "Verify retained upgrade context.", MCP: agent.MCPEndpoint{Name: "omnigrex", URL: "http://127.0.0.1:8845/mcp", Headers: []agent.Header{{Name: "Authorization", Value: "Bearer upgrade-only-mcp"}}}, MCPTools: []string{"get_issue"}, Auth: json.RawMessage(`{"upgrade":{"type":"api_key","key":"upgrade-only-provider"}}`), Session: &agent.SessionIdentity{AgentSessionID: sessionID, RuntimeSessionID: sessionID, MustExist: mustExist}}, pi.Options{RequestTimeout: 20 * time.Second, EventContext: agentevent.Context{AssignmentID: participant, AgentSessionID: sessionID, TurnID: key.AgentTurnID, ExecutionEpoch: uint64(epoch)}})
 		if err != nil {
-			t.Fatal(err)
+			return nil, cleanup, stderr, err
 		}
 		t.Cleanup(func() { _ = c.Close() })
-		return c, func() { _ = c.Close(); cleanup() }
+		return c, func() { _ = c.Close(); cleanup() }, stderr, nil
+	}
+	start := func(storage string, p profile.Profile, version string, epoch int64, mustExist bool) (agent.Connection, func()) {
+		t.Helper()
+		c, remove, _, err := launch(storage, p, version, epoch, mustExist)
+		if err != nil {
+			remove()
+			t.Fatal(err)
+		}
+		return c, remove
 	}
 	sourceVersion, targetVersion := os.Getenv("OMNIGREX_PI_UPGRADE_SOURCE_VERSION"), os.Getenv("OMNIGREX_PI_UPGRADE_TARGET_VERSION")
 	first, removeFirst := start("source", source, sourceVersion, 1, imported != nil)
@@ -194,7 +241,11 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err := os.WriteFile("/tmp/pi-upgrade-source-state.tar", archive.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"candidate", "restore"} {
+	restoreNames := []string{"restore"}
+	if !bundleQualification {
+		restoreNames = append(restoreNames, "candidate")
+	}
+	for _, name := range restoreNames {
 		copied := states(name)
 		for range 2 {
 			if err := copied.Restore(ctx, ref, bytes.NewReader(archive.Bytes())); err != nil {
@@ -209,11 +260,16 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 			}
 		}
 	}
-	for index, tc := range []struct {
+	type continuationCase struct {
 		name    string
 		p       profile.Profile
 		version string
-	}{{"candidate", target, targetVersion}, {"restore", source, sourceVersion}} {
+	}
+	continuations := []continuationCase{{"restore", source, sourceVersion}}
+	if !bundleQualification {
+		continuations = append(continuations, continuationCase{"candidate", target, targetVersion})
+	}
+	for index, tc := range continuations {
 		c, remove := start(tc.name, tc.p, tc.version, int64(index+2), true)
 		if ready, err := c.Prepare(ctx); err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
 			t.Fatalf("%s continuation: %+v %v", tc.name, ready, err)
@@ -247,6 +303,82 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	var unchanged bytes.Buffer
 	if err := original.Export(ctx, ref, &unchanged); err != nil || !bytes.Equal(archive.Bytes(), unchanged.Bytes()) {
 		t.Fatalf("qualification modified source state: %v", err)
+	}
+	if bundleQualification || os.Getenv("OMNIGREX_PI_UPGRADE_SELECTED_SOURCE") == "1" {
+		// An orchestrator upgrade reopens the original image/inventory and Session,
+		// not the candidate used by the optional copied-state compatibility probe.
+		encoded, _ := json.Marshal(source.Contract())
+		restored, err := profile.DecodeContract(encoded, source.Binding())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, remove := start("source", restored, sourceVersion, 4, true)
+		if ready, err := c.Prepare(ctx); err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
+			t.Fatalf("retained R1 continuation: %+v %v", ready, err)
+		}
+		if out, err := c.Prompt(ctx, "upgrade-continue", nil); err != nil || out.Status != agent.Completed {
+			t.Fatalf("retained R1 Turn: %+v %v", out, err)
+		}
+		remove()
+		if restored.Binding() != source.Binding() {
+			t.Fatal("retained binding changed")
+		}
+		if bundleQualification {
+			// Prove that refusal to read R1 state cannot gate fresh R2
+			// qualification. No R1 archive is attached to candidate storage.
+			// The native backend requires an existing mount directory even for
+			// this rejected probe. Keep it empty so rejection reaches the
+			// controlled runtime rather than failing backend state validation.
+			if err := states("candidate").Ensure(ctx, ref); err != nil {
+				t.Fatal(err)
+			}
+			rejected, remove, diagnostics, err := launch("candidate", target, targetVersion, 5, true)
+			if err == nil {
+				_, err = rejected.Prepare(ctx)
+			}
+			remove()
+			if err == nil || !strings.Contains(diagnostics.String(), "fixture refuses previous-image Session") {
+				t.Fatalf("incompatible R2 probe did not reject the R1 Session: %v: %s", err, diagnostics.String())
+			}
+		}
+		// A newly created Reviewer may use R2 independently of the old Developer.
+		// This is isolated candidate qualification, not production admission of R2.
+		participant, sessionID = uuid.NewString(), uuid.NewString()
+		ref = execution.StateRef{ID: participant, ParticipantID: participant, Backend: ref.Backend, Format: profile.PiStateContractVersion, RuntimeProfileSHA256: target.ContentSHA256(), Image: targetImage}
+		metadata = qualificationStateSource{ref: ref}
+		if err := states("candidate").Ensure(ctx, ref); err != nil {
+			t.Fatal(err)
+		}
+		fresh, remove := start("candidate", target, targetVersion, 5, false)
+		if ready, err := fresh.Prepare(ctx); err != nil || ready.Disposition != "created" || ready.RuntimeSessionID != sessionID {
+			t.Fatalf("fresh R2 Session: %+v %v", ready, err)
+		}
+		if out, err := fresh.Prompt(ctx, "upgrade-source-context", nil); err != nil || out.Status != agent.Completed {
+			t.Fatalf("fresh R2 Turn: %+v %v", out, err)
+		}
+		remove()
+		if bundleQualification {
+			// Inability to consume the old image's Session does not imply
+			// inability to replay and continue R2's own independent Session.
+			continued, remove := start("candidate", target, targetVersion, 6, true)
+			if ready, err := continued.Prepare(ctx); err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
+				t.Fatalf("independent R2 continuation: %+v %v", ready, err)
+			}
+			sink := &historySink{}
+			if cursor, err := continued.Replay(ctx, agent.HistoryCursor{}, sink); err != nil || cursor.RuntimeSessionID != sessionID || len(sink.events) == 0 {
+				t.Fatalf("independent R2 replay: %+v %v", cursor, err)
+			}
+			if out, err := continued.Prompt(ctx, "upgrade-continue", nil); err != nil || out.Status != agent.Completed {
+				t.Fatalf("independent R2 further Turn: %+v %v", out, err)
+			}
+			remove()
+		}
+	}
+	if bundleQualification {
+		// Independent retained/fresh qualification is not Session migration.
+		// Never manufacture a source-to-target compatibility result.
+		t.Log("PASS retained R1 and independent fresh R2 qualification despite incompatible prior Session; no migration artifact emitted")
+		return
 	}
 	result := profile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: profile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: profile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success", BackendFamily: settings.ExecutionBackend, BackendContractVersion: 1}
 	file := profile.CompatibilityResultsFile{SchemaVersion: profile.PiCompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
@@ -284,7 +416,7 @@ func TestSameImagePIDUpgradeArchiveKeepsForeignImageProbeNegative(t *testing.T) 
 		"registry.example/pi@sha256:" + strings.Repeat("a", 64),
 		"registry.example/foreign-upgrade@sha256:" + strings.Repeat("a", 64),
 	} {
-		current, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
+		current, err := profile.NewCandidatePiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
 		if err != nil {
 			t.Fatal(err)
 		}

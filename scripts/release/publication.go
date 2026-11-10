@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"io"
 	"os"
 	"path/filepath"
@@ -131,6 +132,85 @@ func qualification(ctx context.Context, api githubAPI, b Build, names []string) 
 	}
 	return evidence, nil
 }
+
+// Verify the reused runtime against its original exact source/run/attempt and
+// captured successful smoke IDs, separately from qualification of this build.
+func bundleQualification(ctx context.Context, api githubAPI, b Build) error {
+	if b.PiBundle == nil {
+		return nil
+	} // Legacy qualified assets retain schema-1 verification.
+	p := b.PiBundle
+	commit := p.Qualification.Commit
+	names := []string{"qualify-pi-bundle-docker", "qualify-pi-bundle-microsandbox"}
+	if p.Version == 1 {
+		commit = p.SourceCommit
+		names = []string{"deploy-smoke", "deploy-smoke-microsandbox"}
+	}
+	origin := Build{Commit: commit, RunID: p.Qualification.RunID, Attempt: p.Qualification.Attempt}
+	evidence, err := qualification(ctx, api, origin, names)
+	if err != nil {
+		return err
+	}
+	if evidence[names[0]] != p.Qualification.DockerJobID || evidence[names[1]] != p.Qualification.MicrosandboxJobID {
+		return errors.New("selected Pi origin qualification mismatch")
+	}
+	run, err := getJSON[Run](ctx, api, endpoint(fmt.Sprintf("actions/runs/%d/attempts/%d", origin.RunID, origin.Attempt)))
+	if err != nil {
+		return err
+	}
+	workflow, err := getJSON[struct {
+		ID int64 `json:"id"`
+	}](ctx, api, endpoint("actions/workflows/ci.yaml"))
+	if err != nil {
+		return err
+	}
+	event := "workflow_dispatch"
+	if p.Version == 1 {
+		event = "push"
+	}
+	if run.ID != origin.RunID || run.Attempt != origin.Attempt || run.Commit != origin.Commit || run.Repository.FullName != repository || run.HeadRepository.FullName != repository || run.Event != event || run.Branch != "main" || run.Path != ".github/workflows/ci.yaml" || run.Status != "completed" || (p.Version == 2 && run.Conclusion != "success") || workflow.ID <= 0 || run.WorkflowID != workflow.ID {
+		return errors.New("invalid Pi qualification run provenance")
+	}
+	if p.Version == 1 {
+		files, err := downloadEvidence(ctx, api, origin, "deployment-payload", candidateAssets)
+		if err != nil {
+			return err
+		}
+		dir, err := os.MkdirTemp("", "pi-origin-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		for name, data := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+				return err
+			}
+		}
+		manifest, _, err := verify(dir)
+		if err != nil {
+			return err
+		}
+		if manifest.Commit != origin.Commit || manifest.RunID != origin.RunID || manifest.Attempt != origin.Attempt || manifest.Images["pi"] != p.Image || manifest.Platform != p.Platform {
+			return errors.New("origin deployment payload tested a different Pi image/identity")
+		}
+		return nil
+	}
+	for _, backend := range []string{"docker", "microsandbox"} {
+		files, err := downloadEvidence(ctx, api, origin, "pi-bundle-"+backend, []string{"candidate.json"})
+		if err != nil {
+			return err
+		}
+		tested, err := piresources.ParseCandidate(files["candidate.json"])
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(tested, p.Candidate()) {
+			return errors.New("qualification tested a different Pi image, source or inventory")
+		}
+	}
+	return nil
+}
+
 func ready(ctx context.Context, api githubAPI, dir string, identity Build) error {
 	m, _, e := verify(dir)
 	if e != nil {
@@ -139,6 +219,9 @@ func ready(ctx context.Context, api githubAPI, dir string, identity Build) error
 	identity.Images = m.Images
 	if !reflect.DeepEqual(m.Build, identity) {
 		return errors.New("candidate identity mismatch")
+	}
+	if e := bundleQualification(ctx, api, m.Build); e != nil {
+		return e
 	}
 	m.Qualification, e = qualification(ctx, api, m.Build, requiredJobs)
 	if e != nil {
@@ -180,6 +263,9 @@ func validateSource(ctx context.Context, api githubAPI, run Run, m Manifest) err
 	if compare.Status != "ahead" && compare.Status != "identical" {
 		return errors.New("source is not an ancestor of main")
 	}
+	if e := bundleQualification(ctx, api, m.Build); e != nil {
+		return e
+	}
 	evidence, e := qualification(ctx, api, m.Build, requiredJobs)
 	if e != nil {
 		return e
@@ -191,11 +277,23 @@ func validateSource(ctx context.Context, api githubAPI, run Run, m Manifest) err
 	return e
 }
 func downloadCandidate(ctx context.Context, api githubAPI, run Run, dir string) error {
-	artifacts, e := pages[Artifact](ctx, api, endpoint(fmt.Sprintf("actions/runs/%d/artifacts", run.ID)), "artifacts")
-	if e != nil {
-		return e
+	files, err := downloadEvidence(ctx, api, Build{RunID: run.ID, Attempt: run.Attempt}, "release-candidate", candidateAssets)
+	if err != nil {
+		return err
 	}
-	name := fmt.Sprintf("release-candidate-%d-%d", run.ID, run.Attempt)
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func downloadEvidence(ctx context.Context, api githubAPI, run Build, prefix string, allowedFiles []string) (map[string][]byte, error) {
+	artifacts, e := pages[Artifact](ctx, api, endpoint(fmt.Sprintf("actions/runs/%d/artifacts", run.RunID)), "artifacts")
+	if e != nil {
+		return nil, e
+	}
+	name := fmt.Sprintf("%s-%d-%d", prefix, run.RunID, run.Attempt)
 	var found []Artifact
 	for _, a := range artifacts {
 		if a.Name == name && !a.Expired {
@@ -203,51 +301,50 @@ func downloadCandidate(ctx context.Context, api githubAPI, run Run, dir string) 
 		}
 	}
 	if len(found) != 1 || found[0].ID <= 0 {
-		return errors.New("candidate artifact missing, expired, or ambiguous")
+		return nil, errors.New("candidate artifact missing, expired, or ambiguous")
 	}
 	b, e := api.call(ctx, "GET", endpoint(fmt.Sprintf("actions/artifacts/%d/zip", found[0].ID)), nil)
 	if e != nil {
-		return fmt.Errorf("candidate artifact unavailable: %w", e)
+		return nil, fmt.Errorf("candidate artifact unavailable: %w", e)
 	}
 	z, e := zip.NewReader(bytes.NewReader(b), int64(len(b)))
 	if e != nil {
-		return fmt.Errorf("malformed candidate artifact: %w", e)
+		return nil, fmt.Errorf("malformed candidate artifact: %w", e)
 	}
-	if len(z.File) != len(candidateAssets) {
-		return errors.New("invalid candidate artifact files")
+	if len(z.File) != len(allowedFiles) {
+		return nil, errors.New("invalid candidate artifact files")
 	}
 	seen := map[string]bool{}
+	files := map[string][]byte{}
 	for _, f := range z.File {
 		allowed := false
-		for _, n := range candidateAssets {
+		for _, n := range allowedFiles {
 			if f.Name == n {
 				allowed = true
 			}
 		}
 		if !allowed || seen[f.Name] || !f.Mode().IsRegular() || f.UncompressedSize64 > 8<<20 {
-			return errors.New("invalid candidate artifact paths or size")
+			return nil, errors.New("invalid candidate artifact paths or size")
 		}
 		seen[f.Name] = true
 		reader, e := f.Open()
 		if e != nil {
-			return e
+			return nil, e
 		}
 		data, e := io.ReadAll(io.LimitReader(reader, 8<<20+1))
 		closeErr := reader.Close()
 		if e != nil {
-			return e
+			return nil, e
 		}
 		if closeErr != nil {
-			return closeErr
+			return nil, closeErr
 		}
 		if len(data) > 8<<20 {
-			return errors.New("candidate artifact file too large")
+			return nil, errors.New("candidate artifact file too large")
 		}
-		if e := os.WriteFile(filepath.Join(dir, f.Name), data, 0644); e != nil {
-			return e
-		}
+		files[f.Name] = data
 	}
-	return nil
+	return files, nil
 }
 func downloadRelease(ctx context.Context, api githubAPI, r Release, dir string) error {
 	if r.Draft || !r.Prerelease {

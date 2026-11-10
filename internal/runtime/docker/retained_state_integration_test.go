@@ -85,7 +85,7 @@ func TestRetainedStateMountedVolumeConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.initialized[ref.ID] = true
-	runtimeProfile, err := profile.NewPiV2("registry.example/omnigrex/pi@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
+	runtimeProfile, err := profile.NewCandidatePiV2("registry.example/omnigrex/pi@"+ref.Image, profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_STATE_AGENT_ARCH")})
 	if err != nil {
 		t.Fatal(err)
 	}

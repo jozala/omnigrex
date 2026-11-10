@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -420,6 +421,13 @@ func TestCommandPackAndVerifyUseActualCIEnvironment(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	bundle, err := piresources.SelectedBundle("linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SchemaVersion = 2
+	b.PiBundle = &bundle
+	b.Images["pi"] = bundle.Image
 	if !reflect.DeepEqual(m.Build, b) {
 		t.Fatal("CI environment identity lost")
 	}
@@ -441,5 +449,36 @@ func TestGzipFooterCorruptionIsRejectedWithSelfConsistentOuterChecksums(t *testi
 	}
 	if _, _, e := verify(dir); e == nil {
 		t.Fatal("malformed gzip accepted")
+	}
+}
+
+func TestSelectedRuntimePackagingPreservesDistinctOrigin(t *testing.T) {
+	b := fixtureBuild()
+	bundle, err := piresources.SelectedBundle("linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SchemaVersion = 2
+	b.PiBundle = &bundle
+	b.Images["pi"] = bundle.Image
+	if b.Commit == bundle.SourceCommit {
+		t.Fatal("fixture must exercise reused runtime")
+	}
+	dir := filepath.Join(t.TempDir(), "candidate")
+	if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := verify(dir)
+	if err != nil || !reflect.DeepEqual(m.Build, b) {
+		t.Fatalf("selected provenance lost: %v", err)
+	}
+	b.Images["pi"] = "ghcr.io/jozala/omnigrex/pi@sha256:" + strings.Repeat("f", 64)
+	if err := validateBuild(b); err == nil {
+		t.Fatal("candidate substituted for selected digest")
+	}
+	b.Images["pi"] = bundle.Image
+	b.PiBundle = nil
+	if err := validateBuild(b); err == nil {
+		t.Fatal("new schema lost runtime provenance")
 	}
 }

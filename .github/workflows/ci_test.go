@@ -178,7 +178,7 @@ func TestCITimingCaptureAndPublicationStayOnTheDockerRunner(t *testing.T) {
 	}
 }
 
-func TestCIDevelopmentQualificationBuildsItsOwnGoldenAndPropagatesFailures(t *testing.T) {
+func TestCIDevelopmentQualificationUsesSelectedGoldenAndPropagatesFailures(t *testing.T) {
 	job := readCIJobs(t)["development-qualification"]
 	var commands []string
 	for _, step := range job.Steps {
@@ -192,14 +192,23 @@ func TestCIDevelopmentQualificationBuildsItsOwnGoldenAndPropagatesFailures(t *te
 	for _, fail := range []string{"", "golden", "development", "module-source", "unit-suite"} {
 		t.Run("fail="+fail, func(t *testing.T) {
 			dir := t.TempDir()
-			// An empty runner has no images from the Docker job. This fake Docker
-			// rejects a derived build before its matching same-source golden build.
+			selection, err := os.ReadFile("../../agent/pi/selected-bundle.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "agent/pi"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "agent/pi/selected-bundle.json"), selection, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// An empty runner must pull the selected immutable baseline, not build checkout Pi.
 			stub := `#!/bin/sh
 set -eu
 case "$*" in
-  'build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .')
+  'pull ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5')
     stage=golden ;;
-  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.4.0 --tag omnigrex/development:dev .')
+  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5 --tag omnigrex/development:dev .')
     test -f golden
     stage=development ;;
   *) echo "unexpected Docker command: $*" >&2; exit 2 ;;
@@ -220,7 +229,7 @@ touch "$stage"
 					t.Fatal(err)
 				}
 			}
-			var err error
+			err = nil
 			for _, run := range commands {
 				cmd := exec.Command("sh", "-ec", run)
 				cmd.Dir = dir
@@ -249,5 +258,75 @@ touch "$stage"
 				t.Fatalf("qualification events = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestPreAdoptionQualificationCannotPublishOrOverrideProduction(t *testing.T) {
+	jobs := readCIJobs(t)
+	for _, backend := range []string{"docker", "microsandbox"} {
+		j := jobs["qualify-pi-bundle-"+backend]
+		if j.If != "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" || len(ciNeeds(t, j)) != 0 {
+			t.Fatal("qualification must be explicit, main-source-only and independent of publication")
+		}
+		tested, receipt := false, false
+		for _, step := range j.Steps {
+			if strings.Contains(step.Run, "${{") || strings.Contains(step.Run, "publish-pi-images") {
+				t.Fatal("qualification executes dispatch shell or publishes images")
+			}
+			if strings.Contains(step.Run, "qualify-pi-bundle.sh") {
+				tested = true
+				if step.Env["OMNIGREX_PI_BACKEND"] != backend || step.Env["PI_CANDIDATE"] != "${{ inputs.pi_candidate }}" {
+					t.Fatal("candidate not passed as data")
+				}
+			}
+			if strings.Contains(step.Uses, "upload-artifact") {
+				receipt = true
+				if step.If != "" || step.With["name"] != "pi-bundle-"+backend+"-${{ github.run_id }}-${{ github.run_attempt }}" {
+					t.Fatal("receipt must follow success and bind exact run/attempt/backend")
+				}
+			}
+		}
+		if !tested || !receipt {
+			t.Fatal("missing qualification/evidence")
+		}
+	}
+}
+
+func TestPublicationCapturesCandidateOriginWithoutChangingProductSelection(t *testing.T) {
+	job := readCIJobs(t)["publish"]
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "candidate-record") {
+			if step.Env["OMNIGREX_PI_CANDIDATE_IMAGE"] != "${{ steps.images.outputs.pi_candidate_image }}" || step.Env["OMNIGREX_PI_CANDIDATE_SOURCE_COMMIT"] != "${{ github.sha }}" {
+				t.Fatal("candidate must capture its own actual build origin, not selected-image provenance")
+			}
+			return
+		}
+	}
+	t.Fatal("publication must retain an unqualified exact candidate record")
+}
+
+func TestRequiredGatesDoNotRequireCrossImageSessionMigration(t *testing.T) {
+	found := false
+	for _, step := range readCIJobs(t)["docker-check"].Steps {
+		for _, line := range strings.Split(step.Run, "\n") {
+			if strings.Contains(line, "sh scripts/test-pi-upgrade.sh") {
+				found = true
+				if !strings.Contains(line, "OMNIGREX_PI_UPGRADE_MODE=bundle") {
+					t.Fatal("required Docker gate must not default to optional Session migration")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing retained/fresh Docker qualification")
+	}
+	mise, err := os.ReadFile("../../mise.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []string{"test-pi-upgrade", "test-pi-microsandbox-upgrade"} {
+		if !strings.Contains(string(mise), "OMNIGREX_PI_UPGRADE_MODE=bundle mise run "+task+"\n") {
+			t.Fatalf("required aggregate must qualify independent Sessions: %s", task)
+		}
 	}
 }

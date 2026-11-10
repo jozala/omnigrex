@@ -447,7 +447,7 @@ func dockerProviderSmokeEnvironment(t *testing.T) liveEnvironment {
 	if os.Getenv("OMNIGREX_PI_BACKEND") != "docker" {
 		t.Fatal("Docker smoke requires the Docker backend")
 	}
-	p, err := profile.NewPiV2(os.Getenv("OMNIGREX_PI_LIVE_IMAGE"), profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_PI_LIVE_ARCH")})
+	p, err := profile.NewCandidatePiV2(os.Getenv("OMNIGREX_PI_LIVE_IMAGE"), profile.Platform{OS: "linux", Arch: os.Getenv("OMNIGREX_PI_LIVE_ARCH")})
 	if err != nil {
 		t.Fatal(err)
 	}
