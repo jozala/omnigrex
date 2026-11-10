@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -499,6 +500,120 @@ func TestExplicitDeclarationsRequired(t *testing.T) {
 		}
 		if f.appMinted != 0 {
 			t.Fatal("credential minted before input validation")
+		}
+	}
+}
+
+func TestReusedBundleQualificationRequiresOriginalProvenance(t *testing.T) {
+	bundle, err := piresources.SelectedBundle("linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := fixtureBuild()
+	b.SchemaVersion = 2
+	b.PiBundle = &bundle
+	b.Images["pi"] = bundle.Image
+	origin := Build{Commit: bundle.SourceCommit, RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt}
+	jobs := []Job{
+		{ID: bundle.Qualification.DockerJobID, Name: "deploy-smoke", RunID: origin.RunID, Attempt: origin.Attempt, Commit: origin.Commit, Status: "completed", Conclusion: "success"},
+		{ID: bundle.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: origin.RunID, Attempt: origin.Attempt, Commit: origin.Commit, Status: "completed", Conclusion: "success"},
+	}
+	for _, mutation := range []string{"none", "current-build", "failure", "missing", "job-id", "attempt", "unavailable"} {
+		t.Run(mutation, func(t *testing.T) {
+			changed := append([]Job{}, jobs...)
+			switch mutation {
+			case "current-build":
+				for i := range changed {
+					changed[i].RunID = b.RunID
+					changed[i].Commit = b.Commit
+					changed[i].Attempt = b.Attempt
+				}
+			case "failure":
+				changed[1].Conclusion = "failure"
+			case "missing":
+				changed = changed[:1]
+			case "job-id":
+				changed[0].ID++
+			case "attempt":
+				changed[0].Attempt++
+			}
+			api := apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
+				if mutation == "unavailable" {
+					return nil, errors.New("unavailable")
+				}
+				if !strings.Contains(path, fmt.Sprintf("actions/runs/%d/attempts/%d/jobs", origin.RunID, origin.Attempt)) {
+					t.Fatalf("runtime attributed to current build: %s", path)
+				}
+				return jobsJSON(t, origin, changed), nil
+			})
+			err := bundleQualification(t.Context(), api, b)
+			if (err == nil) != (mutation == "none") {
+				t.Fatalf("origin evidence: %v", err)
+			}
+		})
+	}
+}
+
+func TestSelectedBundlePromotionPreservesBytesWithoutOriginalCI(t *testing.T) {
+	f := newGitHubFixture(t)
+	bundle, err := piresources.SelectedBundle("linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := f.build
+	b.SchemaVersion = 2
+	b.PiBundle = &bundle
+	b.Images["pi"] = bundle.Image
+	dir := filepath.Join(t.TempDir(), "candidate")
+	if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Qualification = evidence()
+	if err := writeJSON(dir, "candidate.json", m); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeChecksums(dir); err != nil {
+		t.Fatal(err)
+	}
+	f.build = b
+	f.candidateZip = zipCandidate(t, dir)
+	p := f.publication()
+	base := p.api
+	p.api = apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
+		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/", bundle.Qualification.RunID)) {
+			return jobsJSON(t, b, []Job{
+				{ID: bundle.Qualification.DockerJobID, Name: "deploy-smoke", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
+				{ID: bundle.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
+			}), nil
+		}
+		return base.call(ctx, method, path, body)
+	})
+	alpha := filepath.Join(t.TempDir(), "alpha")
+	if err := p.publish(t.Context(), alphaInput(), alpha); err != nil {
+		t.Fatal(err)
+	}
+	f.ciExpired = true
+	f.requests = nil
+	// Drop all special original-runtime API support as well as current CI.
+	p.api = base
+	stable := filepath.Join(t.TempDir(), "stable")
+	if err := p.publish(t.Context(), publishInput{Channel: "stable", Version: "0.1.0", Alpha: "0.1.0-alpha.1", Notes: "Stable"}, stable); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range candidateAssets {
+		a, _ := readAsset(alpha, name)
+		b, _ := readAsset(stable, name)
+		if !bytes.Equal(a, b) {
+			t.Fatalf("promotion changed %s", name)
+		}
+	}
+	for _, request := range f.requests {
+		if strings.Contains(request, "actions/") {
+			t.Fatal("promotion required historical CI")
 		}
 	}
 }

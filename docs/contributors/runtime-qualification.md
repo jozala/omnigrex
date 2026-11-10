@@ -6,6 +6,24 @@ Run qualification in disposable environments with fixture authority, not against
 Use the selected backend's [host and storage prerequisites](../operators/backends.md).
 For remote native gates, use an existing authorized `DOCKER_HOST` connection and the daemon host's KVM group.
 
+## Production selection versus candidates
+
+`agent/pi/selected-bundle.json` is the sole fresh-production bundle authority, not a generated checkout manifest.
+`go run ./scripts/pi-bundle image`, `record`, or `qualification` reads and validates that selection for build scripts.
+The record captures the exact owned-resource inventory, Node/mise checks, locked package-integrity resources, bootstrap contract, required executables, immutable golden digest and original source/run/attempt/smoke job IDs.
+Production profiles, repository preflight and launches use that inventory; retained launches use the ledger inventory instead.
+Initial fresh production selection is Linux/amd64 only, with an actionable error for arm64 and no checkout fallback.
+Arm64 source-built candidate/protocol tests on Apple Silicon remain explicit and do not claim production qualification.
+Explicit `candidate-amd64` / `candidate-arm64` CLI commands emit checkout inventories for isolated candidate tooling only.
+Integration-only `NewCandidatePiV2` constructs source-built fixture contracts; it is absent from production binaries and is not a runtime configuration override.
+
+Workflow/deployment qualification uses the selected golden image with the current orchestrator, not a rebuilt checkout substitute.
+The controlled Workflow fixture adds only its test provider module to the selected image; its owned runtime files remain unchanged.
+The Workflow/recovery suites cover fresh Developer/Reviewer preparation and subsequent Turns with unchanged pins under the current orchestrator.
+The explicit candidate image/resource tests continue qualifying future runner edits separately.
+To advance production, qualify the new exact bundle, review the complete record change, and follow the [coordinated cutover](../operators/upgrades.md#runtime-profile-image-change).
+Never synthesize a qualified digest or publish an image just to populate a compatibility matrix.
+
 ## Pi protocol diagnostic
 
 The disposable Pi 1.4.0 diagnostic exercises the adapter with a controlled HTTP provider, no real credentials, no GitHub/business MCP authority, no Workflow, and temporary tmpfs Session storage.
@@ -78,7 +96,7 @@ Native transcript queries and unknown future events remain subject to the same o
 Diagnostics use closed-vocabulary runtime observations, never transcript bodies or new raw-event logging.
 An infrastructure protocol failure is not repaired by accepting a terminal intent without valid outcome evidence.
 
-New Runtime Profiles include the projection module in their owned-resource hash inventory.
+New Runtime Profiles include the selected bundle's projection module in their owned-resource hash inventory.
 Historical inventories remain valid and retain their original behavior; release images still require both-backend qualification before deployment selection.
 That release gate is distinct from optional qualification of an installation's historical source image against a candidate.
 If long Turns fail on an old retained profile, inspect its selected runner/resources and qualify the replacement rather than increasing frame limits or changing settlement policy.
@@ -184,7 +202,9 @@ OMNIGREX_MICROSANDBOX_KVM_GID=<host-kvm-group> mise run test-pi-microsandbox-upg
 ```
 
 Fixture gates use controlled provider/MCP servers, private volumes, and independently built source/candidate inventories.
-The default fixtures test the frozen Pi 1.0.4 dependency bundle against Pi 1.4.0 with the current owned runner; they do not substitute for qualification of historical release images and their retained contracts.
+The default upgrade gate uses the actual selected immutable baseline inventory against the explicit current-source candidate, with separate retained-R1 continuation and fresh-R2 Session probes.
+These candidate probes are isolated evidence, not authorization to admit R2 in production before a reviewed selection change.
+Set `OMNIGREX_PI_UPGRADE_FIXTURE_SOURCE=candidate` explicitly to exercise the older Pi 1.0.4 package fixture (including arm64 local builds); this does not represent a supported historical production release.
 Synthetic aliases are test evidence and cannot emit deployment artifacts.
 
 To produce compatibility evidence for actual source/candidate release images, provision both exact registry images and choose an absent private absolute output path:
@@ -237,4 +257,5 @@ Synthetic archive markers prove ownership/round-trip, while Workflow/upgrade gat
 
 Set both `OMNIGREX_PI_DEPLOY_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_DEPLOY_IMAGE` to actual registry digests to qualify published images without builds.
 These variables affect qualification scripts only; normal deployment uses `OMNIGREX_ORCHESTRATOR_IMAGE` and `OMNIGREX_PI_IMAGE`.
-CI requires Docker and usable Linux/amd64 KVM, then repeats smoke after publication against resolved digests.
+CI requires Docker and usable Linux/amd64 KVM, then repeats smoke after publication against current orchestrator and selected Pi digests.
+Default deployment smoke builds only the current orchestrator and pulls the selected immutable Pi image.

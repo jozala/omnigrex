@@ -10,10 +10,16 @@ Only Linux/amd64 is supported.
 
 Choose an explicit **CI** run ID from a successful `push` to `main`, not a PR run, unrelated green check, workflow summary, mutable `sha-*` image tag, or current main tip.
 All existing jobs must pass, including `check`, development qualification, both exact-digest deployment smoke jobs, and development Microsandbox smoke.
-`publish` records the actual pushed digests and builds `deployment-payload-RUN-ATTEMPT`.
+`publish` records actual pushed candidate digests separately from the deliberately selected Pi digest and builds `deployment-payload-RUN-ATTEMPT`.
 Both product smoke jobs verify and extract that payload and use its packaged Compose files with those captured digests.
 Only afterward does `release-candidate` record job IDs and upload `release-candidate-RUN-ATTEMPT` with a machine-readable `candidate.json`, deployment payload, and checksums.
 Main CI creates no version tag or GitHub Release.
+
+Schema-2 payloads capture the complete selected `pi_bundle` with its original source commit and qualification run/attempt/job IDs, separately from orchestrator build identity.
+Packaging resolves Pi from the checked-in selection, not a mutable tag or the newly published Pi candidate.
+Both exact-digest product smokes qualify the current orchestrator with that selected Pi.
+Original Pi qualification provenance is also checked independently when marking a candidate ready and designating an alpha.
+Schema-1 assets remain verifiable and promotable without changing their bytes or inventing missing provenance.
 
 New deployment payloads include `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the explicitly allowlisted third-party license files from `scripts/release/artifacts.go`.
 Both orchestrator images carry the same notices and license tree under `/usr/share/licenses/omnigrex/`.
@@ -48,6 +54,12 @@ The orchestrator version remains its source commit.
 `release.json` carries the designation, channel, breaking-change/upgrade declarations, commit, and payload checksum separately.
 No release operation builds images, alters image labels, creates `latest`, changes `.omnigrex/environment.yaml`, or rebinds retained Agent Participants.
 The Omnigrex-specific `development` image remains independently qualified and adopted by a separate repository change; other repositories supply their own environments, optionally derived from Pi.
+
+A Pi/development-image update alone is not a breaking change.
+Declare coordinated selection/repository-image migration in upgrade prerequisites, and assess actual Session, protocol, API, configuration and other incompatibilities independently.
+Ordinary runtime updates retain existing Participants and do not inherently require them to finish first.
+An ordinary orchestrator-only upgrade keeps the selection, installation Pi digest and repository pins unchanged.
+See the [operator cutover](../operators/upgrades.md#runtime-profile-image-change).
 
 Alpha sequence numbers must increase within a stable target.
 Judge compatibility against the previous **stable**, not the previous alpha.

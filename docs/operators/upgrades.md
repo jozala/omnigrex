@@ -22,7 +22,10 @@ Historical repair requires separate authorization; never reset the database or d
 
 ## Orchestrator-only upgrade
 
-Keep the configured agent digest/platform and protected historical images, but account for possible changes to the default contract selected for new Participants.
+An ordinary orchestrator-only upgrade leaves the checked-in Pi bundle selection, installation Pi digest/platform, and repository development-image pins unchanged.
+The authoritative selection is `agent/pi/selected-bundle.json`, also captured in schema-2 release `build.json` as `pi_bundle`; it is independent of the orchestrator commit and unselected checkout runtime candidates.
+Compare the selected bundle and all other immutable process-contract changes before treating an upgrade as orchestrator-only.
+Retained Participants resolve their exact original canonical contracts from the ledger; do not reconstruct them from the selection.
 Record the current commit and images, download and checksum the target Release assets, then stage its common bundle, selected overlay, and environment example, then update the orchestrator digest.
 Reconcile configuration changes against [deployment settings](../reference/deployment-configuration.md).
 
@@ -49,24 +52,33 @@ Do not reuse the physical data volume across major versions.
 
 ### Normal rollout without Session migration
 
+Establishing the initial explicit baseline is itself a coordinated cutover if existing repository images contain a different formerly checkout-selected runner.
+Do not assume the latest published development image or this repository's existing pin satisfies the initial selection.
+Qualify and explicitly adopt selected-bundle-derived images before resuming fresh admission; no deployment reset or Session disposal is involved.
+
 New Participants select the newly configured image and start independent Agent Sessions; existing Participants retain their exact original image, platform, and versioned contract.
 A normal supported Pi image rollout does not require source-to-candidate Session qualification or generating/importing a Pi compatibility artifact.
 This does not waive release qualification, exact image/resource validation, or repository preflight.
 See [decisions 0009](../decisions/0009-pin-participant-images-and-use-working-revision-tools.md) and [0012](../decisions/0012-qualify-repository-environments-without-rebinding-sessions.md).
 
-1. Create the coordinated pre-upgrade [backup](backup.md) and record the deployed revision, configuration, exact images, and canonical contracts.
-2. Select a supported qualified release and reconcile its deployment configuration using [installation](installation.md#1-select-a-qualified-commit).
-3. Set `OMNIGREX_PI_IMAGE` and `OMNIGREX_PI_PLATFORM` to the new exact digest/platform and [provision it in the selected backend](installation.md#6-start-the-selected-bundle).
-   Keep canonical historical Runtime Profile records in PostgreSQL and every protected historical image available until its Participants are collected.
-4. If `OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE` is already configured, replace it with separately qualified evidence matching the new exact target contract and backend family/version, or clear the optional import setting before deployment.
-   Preserve the old private artifact as historical recovery evidence; clearing import does not delete ledger results or change retained bindings.
-   Never edit an artifact's target hash to force a match.
-5. Validate Compose with `docker compose config --quiet`, deploy with `docker compose up --wait`, then require readiness and a passing [doctor for every repository](health-and-diagnostics.md#repository-preflight).
-   Exact configured/protected image, owned-resource, and retained-state checks remain mandatory.
+1. Build and qualify the deliberate R2 bundle and all required derived repository images on the selected backends before changing selection.
+   Initial fresh production admission is Linux/amd64 only; local arm64 candidates are not qualified production selections.
+2. Create the coordinated pre-upgrade [backup](backup.md) and record exact images, contracts, configuration and revision.
+   Provision R2 images in the backend before the switch and retain every protected R1 image and its ledger contract.
+3. Pause admission of new work using existing operational controls while deploying the reviewed bundle selection and updating installation `OMNIGREX_PI_IMAGE`/`OMNIGREX_PI_PLATFORM` and trusted-default-branch repository image pins.
+   Coordinate [repository-owner promotion](../repository-owners/development-environments.md#qualify-and-promote); changing the installation golden image does not update repository pins.
+   There is no overlap admitting R1 and R2 for new Participants, no automatic pin repair, and no runtime installation into an old image.
+4. Preserve optional compatibility artifacts as historical evidence; clear an obsolete import setting or replace it with separately qualified evidence targeting the new exact contract/backend.
+   Clearing import does not delete ledger evidence or rebind Participants; never edit target hashes to force a match.
+5. Validate Compose, deploy, require readiness, and run [repository preflight](health-and-diagnostics.md#repository-preflight) for every managed repository before resuming new work.
+   A resource mismatch means provision/qualify the correct self-contained image and explicitly promote its pin, not bypass the bounded checks.
 
-Repositories explicitly pinning a development image in `.omnigrex/environment.yaml` require [separate image qualification and promotion](../repository-owners/development-environments.md#qualify-and-promote) on their trusted default branch.
-Changing the installation golden image alone does not update those pins, even for new Participants.
-Retained Participants keep their original binding in either case.
+Existing R1 Participants continue Sessions and receive new Agent Turns in their original images with unchanged binding hashes, platform, inventory and Agent Session identity.
+This includes retained arm64 Participants without a current arm64 production selection.
+A Reviewer first created after the cutover requires R2 even when its existing Developer remains on R1.
+Do not wait for all R1 Participants to finish merely because an image changed; protect their images until collection.
+Actual protocol, Session, API or configuration incompatibilities can impose separate release prerequisites and must be assessed explicitly.
+A runtime/repository-image migration belongs in upgrade prerequisites and does not automatically make a release breaking or authorize deleting state.
 
 ### Optional copied-state compatibility qualification
 

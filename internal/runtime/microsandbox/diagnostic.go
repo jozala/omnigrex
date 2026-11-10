@@ -26,7 +26,11 @@ type diagnosticProcess struct {
 }
 
 func (backend *Backend) diagnostic(ctx context.Context, runtime profile.Profile, image string, memory int64, network bool) (process *diagnosticProcess, err error) {
-	if err := backend.Available(ctx, image, runtime.Contract().Platform); err != nil {
+	return backend.diagnosticContract(ctx, runtime.Contract(), image, memory, network)
+}
+
+func (backend *Backend) diagnosticContract(ctx context.Context, contract profile.Contract, image string, memory int64, network bool) (process *diagnosticProcess, err error) {
+	if err := backend.Available(ctx, image, contract.Platform); err != nil {
 		return nil, err
 	}
 	name := "omnigrex-diagnostic-" + strings.ToLower(rand.Text())
@@ -40,7 +44,6 @@ func (backend *Backend) diagnostic(ctx context.Context, runtime profile.Profile,
 	}()
 	request := execution.Request{Image: image, User: "10001:10001", WorkingDir: "/workspace", MemoryBytes: memory, TemporaryDirectories: []execution.TemporaryDirectory{{Target: "/workspace", SizeBytes: 16 << 20}}}
 	setup := "set -eu\nchown 10001:10001 /workspace /run/omnigrex\n"
-	contract := runtime.Contract()
 	for _, mount := range contract.Mounts {
 		if mount.Path != "/workspace" {
 			request.TemporaryDirectories = append(request.TemporaryDirectories, execution.TemporaryDirectory{Target: mount.Path, SizeBytes: 64 << 20})

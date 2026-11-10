@@ -10,7 +10,7 @@ import (
 func TestCompactionCompatibilityResourceKeepsHistoricalInventoriesValid(t *testing.T) {
 	const name = "compaction-compat-extension.mjs"
 	var current ResourceContract
-	if err := json.Unmarshal(CurrentContract("amd64"), &current); err != nil {
+	if err := json.Unmarshal(CandidateContract("amd64"), &current); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
@@ -32,7 +32,7 @@ func TestCompactionCompatibilityResourceKeepsHistoricalInventoriesValid(t *testi
 
 func TestResourceQualificationUsesRetainedInventory(t *testing.T) {
 	var old ResourceContract
-	if err := json.Unmarshal(CurrentContract("amd64"), &old); err != nil {
+	if err := json.Unmarshal(CandidateContract("amd64"), &old); err != nil {
 		t.Fatal(err)
 	}
 	old.NodeVersion = "v24.13.0"
@@ -46,7 +46,7 @@ func TestResourceQualificationUsesRetainedInventory(t *testing.T) {
 	if !strings.Contains(script, "v24.13.0") || !strings.Contains(script, old.MiseSHA256) || !strings.Contains(script, old.Files[0].SHA256) {
 		t.Fatal("current deployment replaced retained resource inventory")
 	}
-	current, err := QualificationScript("amd64", CurrentContract("amd64"))
+	current, err := QualificationScript("amd64", CandidateContract("amd64"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestResourceContractsRejectExecutableOrIncompleteInventory(t *testing.T) {
 		func(c *ResourceContract) { c.Version = 2 }, func(c *ResourceContract) { c.NodeVersion = "v24.14.1'; touch /tmp/poison; #" }, func(c *ResourceContract) { c.MiseSHA256 = "unverified" }, func(c *ResourceContract) { c.Files[0].Name = "../runner.mjs" }, func(c *ResourceContract) { c.Files[0].SHA256 = "unverified" }, func(c *ResourceContract) { c.Files = c.Files[:1] }, func(c *ResourceContract) { c.Files = append(c.Files, c.Files[0]) },
 	} {
 		var contract ResourceContract
-		_ = json.Unmarshal(CurrentContract("arm64"), &contract)
+		_ = json.Unmarshal(CandidateContract("arm64"), &contract)
 		mutate(&contract)
 		content, _ := json.Marshal(contract)
 		if _, err := QualificationScript("arm64", content); err == nil {
@@ -75,13 +75,13 @@ func TestResourceContractsRejectExecutableOrIncompleteInventory(t *testing.T) {
 func TestProviderDiagnosticResourceKeepsHistoricalInventoriesValid(t *testing.T) {
 	const name = "provider-diagnostic.mjs"
 	var current ResourceContract
-	if err := json.Unmarshal(CurrentContract("amd64"), &current); err != nil {
+	if err := json.Unmarshal(CandidateContract("amd64"), &current); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
 		t.Fatal("current runtime does not qualify the provider diagnostic module")
 	}
-	script, err := QualificationScript("amd64", CurrentContract("amd64"))
+	script, err := QualificationScript("amd64", CandidateContract("amd64"))
 	if err != nil || !strings.Contains(script, name) {
 		t.Fatalf("current qualification omits diagnostics: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestProviderDiagnosticResourceKeepsHistoricalInventoriesValid(t *testing.T)
 func TestTemporaryFilesystemResourceDoesNotRebindHistoricalInventories(t *testing.T) {
 	const name = "temporary-filesystems.mjs"
 	var current ResourceContract
-	_ = json.Unmarshal(CurrentContract("amd64"), &current)
+	_ = json.Unmarshal(CandidateContract("amd64"), &current)
 	if !slices.ContainsFunc(current.Files, func(file ResourceFile) bool { return file.Name == name }) {
 		t.Fatal("current inventory omits sampler")
 	}

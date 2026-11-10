@@ -22,6 +22,8 @@ target="${OMNIGREX_PI_UPGRADE_TARGET_IMAGE:-}"
 artifact="${OMNIGREX_RUNTIME_PROFILE_COMPATIBILITY_RESULTS_FILE:-}"
 restore_input=""
 source_contract=""
+selected_source=0
+fixture_source_version=1.0.4
 if [ -n "${OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE:-}" ]; then source_contract=/tmp/pi-source-contract.json; fi
 if [ -n "${OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE:-}" ]; then restore_input=/tmp/pi-upgrade-input.tar; fi
 if [ -n "$artifact" ]; then
@@ -32,11 +34,21 @@ if [ -n "$artifact" ]; then
   test ! -e "$artifact"
 fi
 if [ -z "$source" ] && [ -z "$target" ]; then
+  if [ "${OMNIGREX_PI_UPGRADE_FIXTURE_SOURCE:-selected}" = selected ]; then
+    selected_source=1
+    fixture_source_version=1.4.0
+    source="$(go run ./scripts/pi-bundle image)"
+    docker pull --platform linux/amd64 "$source"
+  else
+    test "$OMNIGREX_PI_UPGRADE_FIXTURE_SOURCE" = candidate
+    if [ "${OMNIGREX_PI_UPGRADE_USE_CACHED_FIXTURES:-0}" != 1 ]; then
+      docker build --quiet --file agent/pi/Dockerfile --target upgrade-source --tag omnigrex/pi-upgrade-source:1.0.4 .
+    fi
+    source=omnigrex/pi-upgrade-source:1.0.4
+  fi
   if [ "${OMNIGREX_PI_UPGRADE_USE_CACHED_FIXTURES:-0}" != 1 ]; then
-    docker build --quiet --file agent/pi/Dockerfile --target upgrade-source --tag omnigrex/pi-upgrade-source:1.0.4 .
     docker build --quiet --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
   fi
-  source=omnigrex/pi-upgrade-source:1.0.4
   target=omnigrex/pi:1.4.0
 else
   test -n "$source" && test -n "$target"
@@ -75,8 +87,8 @@ if [ "$backend" = microsandbox ]; then
   docker create --name "$wrapper" --device /dev/kvm --group-add "$OMNIGREX_MICROSANDBOX_KVM_GID" \
     --memory 4g --memory-swap 4g --cpus 2 --pids-limit 1024 \
     --mount "type=volume,src=$source_volume,dst=/data/source" --mount "type=volume,src=$candidate_volume,dst=/data/candidate" --mount "type=volume,src=$restore_volume,dst=/data/restore" \
-    --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=microsandbox --env OMNIGREX_PI_UPGRADE_ROOT=/data \
-    --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-1.0.4}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
+    --env "OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=$selected_source" --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=microsandbox --env OMNIGREX_PI_UPGRADE_ROOT=/data \
+    --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
     --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \
@@ -93,11 +105,11 @@ else
   gid="$(docker run --rm --user 0:0 --entrypoint /usr/bin/stat --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock "$target" -c %g /var/run/docker.sock)"
   docker create --name "$wrapper" --group-add "$gid" --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     --mount "type=volume,src=$source_volume,dst=/data/source" --mount "type=volume,src=$candidate_volume,dst=/data/candidate" --mount "type=volume,src=$restore_volume,dst=/data/restore" \
-    --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=docker --env OMNIGREX_PI_UPGRADE_ROOT=/data \
+    --env "OMNIGREX_PI_UPGRADE_SELECTED_SOURCE=$selected_source" --env OMNIGREX_PI_UPGRADE_INTEGRATION=1 --env OMNIGREX_PI_BACKEND=docker --env OMNIGREX_PI_UPGRADE_ROOT=/data \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_IMAGE=$source_binding" --env "OMNIGREX_PI_UPGRADE_TARGET_IMAGE=$target_binding" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_LOCAL=$source_local" --env "OMNIGREX_PI_UPGRADE_TARGET_LOCAL=$target_local" --env "OMNIGREX_PI_UPGRADE_ARCH=$arch" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_VOLUME=$source_volume" --env "OMNIGREX_PI_UPGRADE_CANDIDATE_VOLUME=$candidate_volume" --env "OMNIGREX_PI_UPGRADE_RESTORE_VOLUME=$restore_volume" \
-    --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-1.0.4}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
+    --env "OMNIGREX_PI_UPGRADE_SOURCE_VERSION=${OMNIGREX_PI_UPGRADE_SOURCE_VERSION:-$fixture_source_version}" --env "OMNIGREX_PI_UPGRADE_TARGET_VERSION=${OMNIGREX_PI_UPGRADE_TARGET_VERSION:-1.4.0}" \
     --env OMNIGREX_PI_UPGRADE_ARTIFACT=/tmp/pi-upgrade-result.json \
     --env "OMNIGREX_PI_UPGRADE_RESTORE_ARCHIVE=$restore_input" \
     --env "OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE=$source_contract" \

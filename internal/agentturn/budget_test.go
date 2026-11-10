@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -114,15 +115,7 @@ func TestStepBudgetPreservesCorroboratedReviewerSuccess(t *testing.T) {
 func TestHistoricalRuntimeDoesNotSilentlyAcceptFiniteBudget(t *testing.T) {
 	p := runtimeProfile(t, testImage)
 	contract := p.Contract()
-	var inventory struct {
-		Version int    `json:"version"`
-		Node    string `json:"node_version"`
-		Mise    string `json:"mise_sha256"`
-		Files   []struct {
-			Name string `json:"name"`
-			SHA  string `json:"sha256"`
-		} `json:"files"`
-	}
+	var inventory piresources.ResourceContract
 	if err := json.Unmarshal(contract.GoldenResourceContract, &inventory); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +134,8 @@ func TestHistoricalRuntimeDoesNotSilentlyAcceptFiniteBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := &preparationStore{selected: workflow.RoleDeveloper}
+	binding := store.ParticipantRuntimeBinding{AgentProfileName: "developer", RuntimeProfileName: historical.Binding().Name, RuntimeProfileVersion: historical.Binding().Version, RuntimeProfileContentSHA256: historical.Binding().ContentSHA256, RuntimeImageDigest: historical.Binding().Image}
+	database := &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &binding}}
 	preparer := agentturn.NewPreparer(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database)
 	limit, _ := stepbudget.Parse("1")
 	preparer.SetDefaultMaxSteps(limit)

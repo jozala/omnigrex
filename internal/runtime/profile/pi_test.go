@@ -10,7 +10,7 @@ import (
 )
 
 func TestPiRuntimeProfilePinsSeparateStateAndDisposableInputs(t *testing.T) {
-	p, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "arm64"})
+	p, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,27 +74,5 @@ func TestPiHistoricalResourceContractSurvivesCanonicalStoreResolution(t *testing
 	contract.GoldenResourceContract[0] = 'x'
 	if _, err := profile.New(contract); err == nil {
 		t.Fatal("malformed golden resource inventory accepted")
-	}
-}
-
-func TestPiNewEnvironmentCapturesSelectedPlatformResources(t *testing.T) {
-	for _, pair := range [][2]string{{"amd64", "arm64"}, {"arm64", "amd64"}} {
-		t.Run(pair[0]+"-to-"+pair[1], func(t *testing.T) {
-			base, err := profile.NewPiV2("registry.example/pi@sha256:"+strings.Repeat("a", 64), profile.Platform{OS: "linux", Arch: pair[0]})
-			if err != nil {
-				t.Fatal(err)
-			}
-			original := base.Binding()
-			selected, err := base.WithEnvironment("registry.example/repository@sha256:"+strings.Repeat("b", 64), profile.Platform{OS: "linux", Arch: pair[1]}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(selected.Contract().GoldenResourceContract) != string(piresources.CurrentContract(pair[1])) {
-				t.Fatal("selected environment retains another platform's resource inventory")
-			}
-			if base.Binding() != original || string(base.Contract().GoldenResourceContract) != string(piresources.CurrentContract(pair[0])) {
-				t.Fatal("selecting a new environment rewrote the source binding")
-			}
-		})
 	}
 }

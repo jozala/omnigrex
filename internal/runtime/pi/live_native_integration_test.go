@@ -43,7 +43,7 @@ func providerSmokeEnvironment(t *testing.T, root, endpoint string) liveEnvironme
 	if _, err := sdk.Image.Load(t.Context(), "/tmp/pi-live-image.tar", image); err != nil {
 		t.Fatal("cannot bind exact live golden image")
 	}
-	p, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
+	p, err := profile.NewCandidatePiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}

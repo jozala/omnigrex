@@ -3,7 +3,8 @@ set -eu
 : "${OMNIGREX_RELEASE_COMMIT:?set the full release commit}"
 : "${GITHUB_STEP_SUMMARY:?publication runs in release CI}"
 printf '## Published Omnigrex images\n\nCommit: %s\n\n| Image | Tag | Digest |\n| --- | --- | --- |\n' "$OMNIGREX_RELEASE_COMMIT" >> "$GITHUB_STEP_SUMMARY"
-golden_image=
+golden_image="$(go run ./scripts/pi-bundle image)"
+docker pull --platform linux/amd64 "$golden_image"
 for name in pi orchestrator orchestrator-microsandbox development; do
   set --
   case "$name" in
@@ -31,7 +32,11 @@ for name in pi orchestrator orchestrator-microsandbox development; do
   docker pull "$digest"
   # shellcheck disable=SC2016 # Backticks delimit Markdown, not shell commands.
   printf '| %s | `%s` | `%s` |\n' "$name" "$tag" "$digest" >> "$GITHUB_STEP_SUMMARY"
-  if [ "$name" = pi ]; then golden_image="$digest"; fi
+  # Publication does not adopt the newly built Pi candidate.
+  if [ "$name" = pi ]; then
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then printf 'pi_candidate_image=%s\n' "$digest" >> "$GITHUB_OUTPUT"; fi
+    digest="$golden_image"
+  fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     key="$(printf '%s' "$name" | tr '-' '_')"
     printf '%s_image=%s\n' "$key" "$digest" >> "$GITHUB_OUTPUT"

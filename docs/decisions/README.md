@@ -82,6 +82,8 @@ Record 0053 retains the budget observation decision independently numbered 0046 
 
 - [0063: Observe live tools and temporary filesystems without accounting state](0063-observe-live-runtime-tools-and-temporary-filesystems.md) - Accepted, 2026-11-09.
 
+- [0064: Select the production Pi bundle explicitly](0064-select-production-pi-bundle-explicitly.md) - Accepted, 2026-11-10.
+
 ## Existing architectural decisions
 
 ADR identifiers remain stable; the links below locate their authoritative current or archived records.

@@ -78,10 +78,12 @@ type RepositoryEnvironment struct {
 
 func (profile Profile) WithEnvironment(image string, platform Platform, requirements []string) (Profile, error) {
 	contract := profile.Contract()
-	if contract.Name == "pi-rpc" && platform != contract.Platform {
-		// This selects a fresh Participant, not a retained binding. Capture the
-		// deployment's approved bundle for the newly selected guest platform.
-		contract.GoldenResourceContract = piresources.CurrentContract(platform.Arch)
+	if contract.Name == PiRuntimeName {
+		bundle, err := piresources.SelectedBundle(platform.OS, platform.Arch)
+		if err != nil {
+			return Profile{}, err
+		}
+		contract.GoldenResourceContract = bundle.Resources
 	}
 	contract.Image, contract.Platform = image, platform
 	contract.RepositoryEnvironment = &RepositoryEnvironment{Version: 1, Requirements: slices.Clone(requirements)}

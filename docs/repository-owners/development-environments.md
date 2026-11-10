@@ -9,7 +9,9 @@ If the repository needs additional system tools or backend capabilities, publish
 
 ## Build and publish an image
 
-Derive from the qualified golden digest using the [Debian-based example](../../agent/environments/pi-example/Dockerfile):
+Derive from the installation's explicitly selected qualified golden digest (`agent/pi/selected-bundle.json` in its source, or `pi_bundle` in a schema-2 release `build.json`), not the latest published candidate.
+Ordinary orchestrator-only upgrades keep this bundle and your environment pin unchanged.
+Use that digest using the [Debian-based example](../../agent/environments/pi-example/Dockerfile):
 
 ```sh
 docker build --platform linux/amd64 --file agent/environments/pi-example/Dockerfile \
@@ -47,6 +49,13 @@ No backend mounts the host Docker socket into a guest as fallback.
 Unknown requirements/fields, mutable tags, and unsupported platforms fail configuration.
 
 ## Qualify and promote
+
+When the required runtime bundle advances, coordinate with the [operator cutover](../operators/upgrades.md#runtime-profile-image-change): build/qualify and provision replacements first, pause new work through selection and pin updates, then require preflight before resuming.
+Multiple self-contained images with different project tools can satisfy the same selected inventory.
+A mismatched image fails before repository setup; Omnigrex never installs a new runner or silently changes your pin.
+The environment schema remains version 1 with no runtime-version field.
+Fresh production arm64 admission currently fails explicitly; retained arm64 Participants keep their original contracts and images.
+Local arm64 candidate testing is separate from production qualification.
 
 1. Ask the operator to provision the exact digest/platform in the selected backend before accepting work.
 2. For pre-promotion testing, configure the candidate on the default branch of a separate qualification repository containing the project's build/test workload and required Profiles/skills.

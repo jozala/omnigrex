@@ -377,7 +377,7 @@ func TestLoadAcceptsLargestAgentTurnMemoryWithoutOverflow(t *testing.T) {
 func TestAgentTurnMemoryDoesNotChangeRuntimeProfileBinding(t *testing.T) {
 	var binding profile.Binding
 	for _, value := range []string{"512", "1024"} {
-		settings, err := config.Load(environment(map[string]string{"OMNIGREX_AGENT_TURN_MEMORY_MIB": value}))
+		settings, err := config.Load(environment(map[string]string{"OMNIGREX_AGENT_TURN_MEMORY_MIB": value, "OMNIGREX_PI_PLATFORM": "linux/amd64"}))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -106,9 +106,10 @@ jobs:
 
       - name: Build the development environment and qualify its module source
         run: |
-          docker build --platform linux/amd64 --file agent/pi/Dockerfile --target golden --tag omnigrex/pi:1.4.0 .
+          golden="$(jq -er .image agent/pi/selected-bundle.json)"
+          docker pull "$golden"
           docker build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development \
-            --build-arg OMNIGREX_GOLDEN_IMAGE=omnigrex/pi:1.4.0 --tag omnigrex/development:dev .
+            --build-arg "OMNIGREX_GOLDEN_IMAGE=$golden" --tag omnigrex/development:dev .
           sh scripts/test-development-image-cache.sh
           sh scripts/test-development-image-unit.sh
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 )
 
@@ -24,7 +25,12 @@ func TestPersistedRepositoryContractSurvivesCurrentImageAndRequirementChanges(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := current.WithEnvironment("registry.example/repository@sha256:"+strings.Repeat("b", 64), profile.Platform{OS: "linux", Arch: "arm64"}, []string{"nested-containers", "tool-installation"})
+	c := current.Contract()
+	c.Image = "registry.example/repository@sha256:" + strings.Repeat("b", 64)
+	c.Platform.Arch = "arm64"
+	c.GoldenResourceContract = piresources.CandidateContract("arm64")
+	c.RepositoryEnvironment.Requirements = []string{"nested-containers", "tool-installation"}
+	bound, err := profile.New(c)
 	if err != nil {
 		t.Fatal(err)
 	}

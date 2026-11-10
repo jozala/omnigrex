@@ -13,6 +13,8 @@ The existing `check` context must remain compatible with required-check configur
 
 ## Decision
 
+The same-release/current-checkout golden assumption below is superseded for production selection by [decision 0064](0064-select-production-pi-bundle-explicitly.md); the cache and required-check policies remain in force.
+
 Run Docker checks, development-image qualification, and Microsandbox qualification as independent jobs.
 Retain `check` as an aggregate required job that runs after all three and succeeds only if each result is `success`.
 Make publication depend on that aggregate; keep exact published-digest deployment and development-environment smoke after publication.

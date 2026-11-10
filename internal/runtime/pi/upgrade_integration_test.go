@@ -37,7 +37,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	sourceImage, targetImage, platform, settings := upgradeImages(t)
-	source, err := profile.NewPiV2(sourceImage, platform)
+	source, err := profile.NewCandidatePiV2(sourceImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +45,14 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	// contract. Candidate defaults cannot replace that inventory on reopening.
 	sourceContract := source.Contract()
 	sourceContract.GoldenResourceContract = piresources.UpgradeSourceContract(platform.Arch)
+	if os.Getenv("OMNIGREX_PI_UPGRADE_SELECTED_SOURCE") == "1" {
+		bundle, err := piresources.SelectedBundle(platform.OS, platform.Arch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceContract.GoldenResourceContract = bundle.Resources
+	}
+
 	if path := os.Getenv("OMNIGREX_PI_UPGRADE_SOURCE_CONTRACT_FILE"); path != "" {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -60,7 +68,7 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := profile.NewPiV2(targetImage, platform)
+	target, err := profile.NewCandidatePiV2(targetImage, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +256,42 @@ func TestPiControlledStateUpgrade(t *testing.T) {
 	if err := original.Export(ctx, ref, &unchanged); err != nil || !bytes.Equal(archive.Bytes(), unchanged.Bytes()) {
 		t.Fatalf("qualification modified source state: %v", err)
 	}
+	if os.Getenv("OMNIGREX_PI_UPGRADE_SELECTED_SOURCE") == "1" {
+		// An orchestrator upgrade reopens the original image/inventory and Session,
+		// not the candidate used by the optional copied-state compatibility probe.
+		encoded, _ := json.Marshal(source.Contract())
+		restored, err := profile.DecodeContract(encoded, source.Binding())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, remove := start("source", restored, sourceVersion, 4, true)
+		if ready, err := c.Prepare(ctx); err != nil || ready.Disposition != "continued" || ready.RuntimeSessionID != sessionID {
+			t.Fatalf("retained R1 continuation: %+v %v", ready, err)
+		}
+		if out, err := c.Prompt(ctx, "upgrade-continue", nil); err != nil || out.Status != agent.Completed {
+			t.Fatalf("retained R1 Turn: %+v %v", out, err)
+		}
+		remove()
+		if restored.Binding() != source.Binding() {
+			t.Fatal("retained binding changed")
+		}
+		// A newly created Reviewer may use R2 independently of the old Developer.
+		// This is isolated candidate qualification, not production admission of R2.
+		participant, sessionID = uuid.NewString(), uuid.NewString()
+		ref = execution.StateRef{ID: participant, ParticipantID: participant, Backend: ref.Backend, Format: profile.PiStateContractVersion, RuntimeProfileSHA256: target.ContentSHA256(), Image: targetImage}
+		metadata = qualificationStateSource{ref: ref}
+		if err := states("candidate").Ensure(ctx, ref); err != nil {
+			t.Fatal(err)
+		}
+		fresh, remove := start("candidate", target, targetVersion, 5, false)
+		if ready, err := fresh.Prepare(ctx); err != nil || ready.Disposition != "created" || ready.RuntimeSessionID != sessionID {
+			t.Fatalf("fresh R2 Session: %+v %v", ready, err)
+		}
+		if out, err := fresh.Prompt(ctx, "upgrade-source-context", nil); err != nil || out.Status != agent.Completed {
+			t.Fatalf("fresh R2 Turn: %+v %v", out, err)
+		}
+		remove()
+	}
 	result := profile.CompatibilityResult{Source: source.Binding(), Target: target.Binding(), Platform: platform, StateContractVersion: profile.PiStateContractVersion, WorkspacePath: "/workspace", QualificationSuite: profile.PiCompatibilityQualificationSuite, QualificationVersion: "1", QualifiedAt: time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), Outcome: "success", BackendFamily: settings.ExecutionBackend, BackendContractVersion: 1}
 	file := profile.CompatibilityResultsFile{SchemaVersion: profile.PiCompatibilityResultsSchemaVersion, Results: []profile.CompatibilityResult{result}}
 	if err := file.ValidateDeployment(settings.ExecutionBackend, 1, target); err != nil {
@@ -284,7 +328,7 @@ func TestSameImagePIDUpgradeArchiveKeepsForeignImageProbeNegative(t *testing.T) 
 		"registry.example/pi@sha256:" + strings.Repeat("a", 64),
 		"registry.example/foreign-upgrade@sha256:" + strings.Repeat("a", 64),
 	} {
-		current, err := profile.NewPiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
+		current, err := profile.NewCandidatePiV2(image, profile.Platform{OS: "linux", Arch: "amd64"})
 		if err != nil {
 			t.Fatal(err)
 		}

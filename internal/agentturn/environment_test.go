@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/role"
@@ -39,7 +40,7 @@ func TestRepositoryImageSelectionIsPerParticipantAndDefaultBranchProvenanceIsSep
 			t.Fatal("image or Profile was read from a different revision")
 		}
 	}
-	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + imageB + "\nplatform: linux/arm64\n")
+	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + imageB + "\nplatform: linux/amd64\n")
 	catalog, _ := profile.NewCatalog([]profile.Profile{base}, []profile.Profile{first.RuntimeProfile})
 	database = &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &first.Commit.Participant.ParticipantRuntimeBinding}}
 	preparer = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, database)
@@ -50,7 +51,7 @@ func TestRepositoryImageSelectionIsPerParticipantAndDefaultBranchProvenanceIsSep
 	database = &preparationStore{selected: workflow.RoleReviewer}
 	preparer = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, database)
 	reviewer, err := preparer.Prepare(context.Background(), validRequest())
-	if err != nil || reviewer.RuntimeProfile.Contract().Image != imageB || reviewer.RuntimeProfile.Contract().Platform.Arch != "arm64" {
+	if err != nil || reviewer.RuntimeProfile.Contract().Image != imageB || reviewer.RuntimeProfile.Contract().Platform.Arch != "amd64" {
 		t.Fatalf("later Reviewer did not select current environment: %+v %v", reviewer.RuntimeProfile.Contract(), err)
 	}
 }
@@ -132,5 +133,37 @@ func TestRetainedPiParticipantProvisionsToolsWithoutRebinding(t *testing.T) {
 	}
 	if err := handle.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRetainedArm64ParticipantContinuesWithoutProductionSelection(t *testing.T) {
+	source := validProfileSource()
+	base := runtimeProfile(t, testImage)
+	c := base.Contract()
+	c.Platform.Arch = "arm64"
+	c.GoldenResourceContract = piresources.CandidateContract("arm64")
+	retained, err := profile.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := store.ParticipantRuntimeBinding{AgentProfileName: "developer", RuntimeProfileName: retained.Binding().Name, RuntimeProfileVersion: retained.Binding().Version, RuntimeProfileContentSHA256: retained.Binding().ContentSHA256, RuntimeImageDigest: retained.Binding().Image}
+	catalog, err := profile.NewCatalog([]profile.Profile{base}, []profile.Profile{retained})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Current repository configuration is not authority to rebind an old Participant.
+	source.contents[".omnigrex/environment.yaml"] = []byte("version: 1\nimage: " + testImage + "\nplatform: linux/arm64\n")
+	database := &preparationStore{selected: workflow.RoleDeveloper, bindings: store.AgentTurnPreparationRuntimeBindings{Participant: &binding}}
+	preparer := agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, database)
+	for range 2 {
+		got, err := preparer.Prepare(context.Background(), validRequest())
+		if err != nil || got.RuntimeProfile.Binding() != retained.Binding() || got.RuntimeProfile.Contract().Platform.Arch != "arm64" {
+			t.Fatalf("retained arm64 Turn: %v", err)
+		}
+	}
+	fresh := &preparationStore{selected: workflow.RoleReviewer}
+	preparer = agentturn.NewPreparer(agentprofile.NewLoader(source, role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, catalog, fresh)
+	if _, err := preparer.Prepare(context.Background(), validRequest()); err == nil || !strings.Contains(err.Error(), "no selected production Pi bundle") || len(fresh.calls) != 0 {
+		t.Fatalf("fresh arm64 admission reached persistence: %v", err)
 	}
 }

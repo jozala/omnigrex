@@ -13,6 +13,8 @@ The requested image optimization should work through the existing repository env
 
 ## Decision
 
+The same-release/current-checkout golden assumption below is superseded for production selection by [decision 0064](0064-select-production-pi-bundle-explicitly.md); the cache and required-check policies remain in force.
+
 Package downloaded project modules and the pinned Go development tool's dependencies as a read-only file-based Go module proxy inside the development image.
 Use repository mise environment configuration to prepend that local source when the directory exists, retaining the configured upstream proxy as fallback.
 Let Go populate each Participant's existing writable module cache on demand, without adding cache-copy behavior to the Omnigrex runtime or changing the golden bootstrap.

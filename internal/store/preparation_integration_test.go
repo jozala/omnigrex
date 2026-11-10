@@ -2072,7 +2072,7 @@ func TestRuntimeProfilePlatformDriftCreatesConfigurationConflictAndHumanHandoff(
 	if err != nil {
 		t.Fatal(err)
 	}
-	arm64Profile, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	arm64Profile, err := runtimeprofile.NewCandidatePiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
 	if err != nil {
 		t.Fatal(err)
 	}

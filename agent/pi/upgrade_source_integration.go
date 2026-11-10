@@ -16,7 +16,7 @@ var upgradeSource embed.FS
 // retaining the same owned runner contract in this preparatory fixture.
 func UpgradeSourceContract(architecture string) json.RawMessage {
 	var contract ResourceContract
-	_ = json.Unmarshal(CurrentContract(architecture), &contract)
+	_ = json.Unmarshal(CandidateContract(architecture), &contract)
 	for i, file := range contract.Files {
 		if file.Name == "package.json" || file.Name == "package-lock.json" {
 			data, _ := upgradeSource.ReadFile("upgrade-source/" + file.Name)

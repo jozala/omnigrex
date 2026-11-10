@@ -131,6 +131,25 @@ func qualification(ctx context.Context, api githubAPI, b Build, names []string) 
 	}
 	return evidence, nil
 }
+
+// Verify the reused runtime against its original exact source/run/attempt and
+// captured successful smoke IDs, separately from qualification of this build.
+func bundleQualification(ctx context.Context, api githubAPI, b Build) error {
+	if b.PiBundle == nil {
+		return nil
+	} // Legacy qualified assets retain schema-1 verification.
+	p := b.PiBundle
+	origin := Build{Commit: p.SourceCommit, RunID: p.Qualification.RunID, Attempt: p.Qualification.Attempt}
+	evidence, err := qualification(ctx, api, origin, []string{"deploy-smoke", "deploy-smoke-microsandbox"})
+	if err != nil {
+		return err
+	}
+	if evidence["deploy-smoke"] != p.Qualification.DockerJobID || evidence["deploy-smoke-microsandbox"] != p.Qualification.MicrosandboxJobID {
+		return errors.New("selected Pi origin qualification mismatch")
+	}
+	return nil
+}
+
 func ready(ctx context.Context, api githubAPI, dir string, identity Build) error {
 	m, _, e := verify(dir)
 	if e != nil {
@@ -139,6 +158,9 @@ func ready(ctx context.Context, api githubAPI, dir string, identity Build) error
 	identity.Images = m.Images
 	if !reflect.DeepEqual(m.Build, identity) {
 		return errors.New("candidate identity mismatch")
+	}
+	if e := bundleQualification(ctx, api, m.Build); e != nil {
+		return e
 	}
 	m.Qualification, e = qualification(ctx, api, m.Build, requiredJobs)
 	if e != nil {
@@ -179,6 +201,9 @@ func validateSource(ctx context.Context, api githubAPI, run Run, m Manifest) err
 	}
 	if compare.Status != "ahead" && compare.Status != "identical" {
 		return errors.New("source is not an ancestor of main")
+	}
+	if e := bundleQualification(ctx, api, m.Build); e != nil {
+		return e
 	}
 	evidence, e := qualification(ctx, api, m.Build, requiredJobs)
 	if e != nil {

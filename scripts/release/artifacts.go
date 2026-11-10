@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,13 +28,14 @@ var releaseAssets = []string{"payload.tar.gz", "candidate.json", "SHA256SUMS", "
 
 // Build identity is channel-independent and embedded unchanged in the payload.
 type Build struct {
-	SchemaVersion int               `json:"schema_version"`
-	Repository    string            `json:"repository"`
-	Commit        string            `json:"commit"`
-	RunID         int64             `json:"run_id"`
-	Attempt       int               `json:"attempt"`
-	Platform      string            `json:"platform"`
-	Images        map[string]string `json:"images"`
+	SchemaVersion int                 `json:"schema_version"`
+	Repository    string              `json:"repository"`
+	Commit        string              `json:"commit"`
+	RunID         int64               `json:"run_id"`
+	Attempt       int                 `json:"attempt"`
+	Platform      string              `json:"platform"`
+	Images        map[string]string   `json:"images"`
+	PiBundle      *piresources.Bundle `json:"pi_bundle,omitempty"`
 }
 type Manifest struct {
 	Build
@@ -87,8 +89,27 @@ func readAsset(dir, name string) ([]byte, error) {
 	return b, e
 }
 func validateBuild(b Build) error {
-	if b.SchemaVersion != 1 || b.Repository != repository || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(b.Commit) || b.RunID <= 0 || b.Attempt <= 0 || b.Platform != "linux/amd64" {
+	if (b.SchemaVersion != 1 && b.SchemaVersion != 2) || b.Repository != repository || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(b.Commit) || b.RunID <= 0 || b.Attempt <= 0 || b.Platform != "linux/amd64" {
 		return errors.New("invalid candidate schema, repository, commit, run/attempt or platform")
+	}
+	if b.SchemaVersion == 1 && b.PiBundle != nil {
+		return errors.New("legacy build cannot carry bundle selection")
+	}
+	if b.SchemaVersion == 2 {
+		if b.PiBundle == nil {
+			return errors.New("selected Pi bundle missing")
+		}
+		data, err := json.Marshal(b.PiBundle)
+		if err != nil {
+			return err
+		}
+		bundle, err := piresources.ParseBundle(data)
+		if err != nil {
+			return err
+		}
+		if bundle.Image != b.Images["pi"] || bundle.Platform != b.Platform {
+			return errors.New("selected Pi image/platform mismatch")
+		}
 	}
 	if len(b.Images) != len(products) {
 		return errors.New("product images must exclude development and include both orchestrators and Pi")

@@ -580,7 +580,7 @@ func assertRolePreparation(t *testing.T, got store.ParticipantPreparation, wantB
 
 func runtimeProfile(t *testing.T, image string) runtimeprofile.Profile {
 	t.Helper()
-	value, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "arm64"})
+	value, err := runtimeprofile.NewPiV2(image, runtimeprofile.Platform{OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatalf("NewPiV2() error = %v", err)
 	}

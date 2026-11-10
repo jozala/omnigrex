@@ -367,19 +367,19 @@ func (engine *engine) Create(ctx context.Context, request execution.Request, std
 		}
 		if !record.Created {
 			if request.GoldenResources {
-				qualified, err := profile.NewBuiltinV2(request.Key.RuntimeProfileName, request.Image, profile.Platform{OS: request.Platform.OS, Arch: request.Platform.Architecture})
+				// This request carries the already resolved immutable inventory.
+				// Never route retained launches through fresh admission selection.
+				c := profile.Contract{Name: request.Key.RuntimeProfileName, Image: request.Image,
+					Platform:               profile.Platform{OS: request.Platform.OS, Arch: request.Platform.Architecture},
+					GoldenResourceContract: request.GoldenResourceContract}
+				probe, err := engine.backend.diagnosticContract(ctx, c, request.Image, 256<<20, false)
 				if err != nil {
 					return err
 				}
-				if len(request.GoldenResourceContract) > 0 {
-					contract := qualified.Contract()
-					contract.GoldenResourceContract = request.GoldenResourceContract
-					qualified, err = profile.New(contract)
-					if err != nil {
-						return err
-					}
-				}
-				if err := engine.backend.CheckRepositoryEnvironment(ctx, qualified); err != nil {
+				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				err = probe.Remove(cleanup)
+				cancel()
+				if err != nil {
 					return err
 				}
 			}
