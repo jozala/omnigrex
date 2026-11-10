@@ -304,3 +304,29 @@ func TestPublicationCapturesCandidateOriginWithoutChangingProductSelection(t *te
 	}
 	t.Fatal("publication must retain an unqualified exact candidate record")
 }
+
+func TestRequiredGatesDoNotRequireCrossImageSessionMigration(t *testing.T) {
+	found := false
+	for _, step := range readCIJobs(t)["docker-check"].Steps {
+		for _, line := range strings.Split(step.Run, "\n") {
+			if strings.Contains(line, "sh scripts/test-pi-upgrade.sh") {
+				found = true
+				if !strings.Contains(line, "OMNIGREX_PI_UPGRADE_MODE=bundle") {
+					t.Fatal("required Docker gate must not default to optional Session migration")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing retained/fresh Docker qualification")
+	}
+	mise, err := os.ReadFile("../../mise.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []string{"test-pi-upgrade", "test-pi-microsandbox-upgrade"} {
+		if !strings.Contains(string(mise), "OMNIGREX_PI_UPGRADE_MODE=bundle mise run "+task+"\n") {
+			t.Fatalf("required aggregate must qualify independent Sessions: %s", task)
+		}
+	}
+}

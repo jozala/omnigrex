@@ -278,6 +278,7 @@ This qualification-only mode publishes no images or releases and changes no prod
 Both `qualify-pi-bundle-docker` and `qualify-pi-bundle-microsandbox` must succeed; they test the exact supplied digest/inventory through bounded resource checks and protocol using integration-only fixtures.
 Mandatory bundle qualification (`OMNIGREX_PI_UPGRADE_MODE=bundle`) restores, replays and continues retained R1 Sessions only under their original R1 image/inventory, while R2 starts independent fresh Sessions with separate identities and storage.
 It neither requires R2 to read R1 Session files nor emits Session-migration compatibility results.
+The regular required Docker/Microsandbox gates use this independent mode too, so a failing optional cross-image probe cannot indirectly block adoption through the aggregate `check` or qualification run conclusion.
 The existing `scripts/test-pi-upgrade.sh` defaults to the separate optional `compatibility` mode: use it explicitly for cross-image copied-state evidence when that capability is desired, not as a prerequisite for normal bundle adoption (see [decision 0012](../decisions/0012-qualify-repository-environments-without-rebinding-sessions.md)).
 The qualification checkout D can differ from C; the captured inventory is used rather than D's checkout hashes.
 For supported local Docker investigation, run `OMNIGREX_PI_CANDIDATE_FILE=/absolute/pi-candidate.json OMNIGREX_PI_BUNDLE_OUTPUT=/absolute/new-output OMNIGREX_PI_BACKEND=docker sh scripts/qualify-pi-bundle.sh`.

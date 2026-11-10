@@ -85,7 +85,7 @@ jobs:
           OMNIGREX_PI_PROTOCOL_INTEGRATION=1 OMNIGREX_PI_BACKEND=docker "$RUNNER_TEMP/omnigrex-test-timings" run "$RUNNER_TEMP/test-timings" pi-protocol -- go test -race -tags=integration -timeout 15m -count=1 -json ./internal/runtime/pi
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^(TestPiControlledWorkflow|TestPiProtectedStateRecovery|TestPiSlowRepositoryBootstrap)$' sh scripts/test-pi-workflow.sh
           OMNIGREX_PI_BACKEND=docker OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiFailureRecovery$' sh scripts/test-pi-workflow.sh
-          OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh
+          OMNIGREX_PI_UPGRADE_MODE=bundle OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-upgrade.sh
           OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-bundle-requalification.sh
           OMNIGREX_PI_BACKEND=docker sh scripts/test-pi-deployment.sh
 
