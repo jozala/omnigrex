@@ -84,6 +84,8 @@ Record 0053 retains the budget observation decision independently numbered 0046 
 
 - [0064: Select the production Pi bundle explicitly](0064-select-production-pi-bundle-explicitly.md) - Accepted, 2026-11-10.
 
+- [0065: Distinguish mutation admission from recovery evidence](0065-distinguish-mutation-admission-from-recovery-evidence.md) - Accepted, 2026-11-11.
+
 ## Existing architectural decisions
 
 ADR identifiers remain stable; the links below locate their authoritative current or archived records.

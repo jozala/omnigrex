@@ -208,7 +208,7 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	if err != nil {
 		t.Fatalf("first AcknowledgeAgentTurnMutationReconciliationFailure() error = %v", err)
 	}
-	if !acknowledgement.RetryScheduled || acknowledgement.Escalated || acknowledgement.Attempt != 1 || acknowledgement.UnresolvedMutationCount != 2 {
+	if !acknowledgement.RetryScheduled || acknowledgement.Escalated || acknowledgement.Attempt != 1 || acknowledgement.UnresolvedMutationCount != 2 || acknowledgement.SuccessfulVerificationCount != 0 || acknowledgement.VerificationCandidateCount != 2 {
 		t.Errorf("first acknowledgement = %#v, want delayed retry", acknowledgement)
 	}
 	retriedJob := readStoredJob(t, pool, ctx, recovery.ReconcileMutationsJobID)
@@ -241,7 +241,7 @@ VALUES ('40000000-0000-4000-8000-000000000217', $1, 21, 'owner', 'repo',
 	}
 	if acknowledgement.RetryScheduled || !acknowledgement.Escalated || acknowledgement.Attempt != 3 ||
 		acknowledgement.WorkflowRevision != 8 || acknowledgement.UnresolvedMutationCount != 2 ||
-		!strings.Contains(acknowledgement.Diagnostic, "outcome unknowable; escalated") ||
+		!strings.Contains(acknowledgement.Diagnostic, "mutation verification inconclusive") ||
 		!strings.Contains(acknowledgement.Diagnostic, finalCause.Error()) {
 		t.Errorf("final acknowledgement = %#v, want terminal escalation", acknowledgement)
 	}
@@ -317,7 +317,7 @@ FROM workflow_attempts AS attempt WHERE attempt.id = $3`, fixture.workflowID, tu
 	if err := pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE workflow_id = $1 AND kind = 'RECONCILE_GITHUB_LABELS'`, fixture.workflowID).Scan(&labelsPayload); err != nil {
 		t.Fatalf("read RECONCILE_GITHUB_LABELS: %v", err)
 	}
-	if !strings.Contains(string(handoffPayload), wantReason) || !strings.Contains(string(handoffPayload), "outcome unknowable; escalated") ||
+	if !strings.Contains(string(handoffPayload), wantReason) || !strings.Contains(string(handoffPayload), "mutation verification inconclusive") ||
 		!strings.Contains(string(labelsPayload), string(workflow.StateNeedsHuman)) {
 		t.Errorf("handoff actions = handoff %s, labels %s", handoffPayload, labelsPayload)
 	}

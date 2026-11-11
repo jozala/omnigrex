@@ -47,16 +47,18 @@ type AgentTurnRuntimeStopFailureAcknowledgement struct {
 // AgentTurnMutationReconciliationAcknowledgement is the durable retry or
 // Human Handoff outcome of one inconclusive reconciliation attempt.
 type AgentTurnMutationReconciliationAcknowledgement struct {
-	JobID                   string
-	WorkflowID              string
-	WorkflowAttemptID       string
-	AgentTurnID             string
-	Attempt                 int
-	RetryScheduled          bool
-	Escalated               bool
-	UnresolvedMutationCount int
-	Diagnostic              string
-	WorkflowRevision        uint64
+	JobID                       string
+	WorkflowID                  string
+	WorkflowAttemptID           string
+	AgentTurnID                 string
+	Attempt                     int
+	RetryScheduled              bool
+	Escalated                   bool
+	UnresolvedMutationCount     int
+	SuccessfulVerificationCount int
+	VerificationCandidateCount  int
+	Diagnostic                  string
+	WorkflowRevision            uint64
 }
 
 // GetAgentTurnRuntimeCleanupContext returns the source Assignment under the live stale-runtime stop-job fence.
@@ -227,6 +229,40 @@ WHERE id = $1 AND workflow_id = $2 AND repository_id = $3
 	return reconciliation, nil
 }
 
+// recoverySkipsCorroboratedEffectsTx is shared by selection and diagnostics.
+func recoverySkipsCorroboratedEffectsTx(ctx context.Context, tx pgx.Tx, job Job) (bool, error) {
+	skipSucceeded := false
+	var stopReason, errorClass string
+	var recorded bool
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
+       prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, job.AgentTurnID).Scan(
+		&stopReason, &errorClass, &recorded); err != nil {
+		return false, err
+	}
+	if recorded && (stopReason == "completed" || eligibleCorroborationError(errorClass)) {
+		var participantRole workflow.Role
+		if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1`, job.AgentParticipantID).Scan(&participantRole); err != nil {
+			return false, err
+		}
+		if _, eligible, err := findTerminalCorroborationSourceTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch, participantRole, ""); err != nil {
+			return false, err
+		} else if eligible {
+			// The later verifier corroborates publication and review readiness.
+			// Unrelated successful effects, including comments, still need the
+			// existing mutation-reconciliation barrier.
+			skipSucceeded = true
+		}
+	}
+	return skipSucceeded, nil
+}
+
+const recoveryCandidatePredicate = `WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+  AND (state IN ('UNKNOWN', 'RECONCILING')
+       OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
+           ('publish_changes', 'open_pr', 'publish_plan_checkpoint', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
+`
+
 // ListAgentTurnMutationsForReconciliation returns mutations that require fresh
 // reconciliation in invocation order under the live recovery-job fence after stale Runtime Process stop is durable.
 func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context, lease JobLease) ([]MutationReservation, error) {
@@ -242,34 +278,12 @@ func (store *Store) ListAgentTurnMutationsForReconciliation(ctx context.Context,
 	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return nil, err
 	}
-	skipSucceeded := false
-	var stopReason, errorClass string
-	var recorded bool
-	if err := tx.QueryRow(ctx, `
-SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
-       prompt_recorded_at IS NOT NULL FROM agent_turns WHERE id = $1`, job.AgentTurnID).Scan(
-		&stopReason, &errorClass, &recorded); err != nil {
+	skipSucceeded, err := recoverySkipsCorroboratedEffectsTx(ctx, tx, job)
+	if err != nil {
 		return nil, err
 	}
-	if recorded && (stopReason == "completed" || eligibleCorroborationError(errorClass)) {
-		var participantRole workflow.Role
-		if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id = $1`, job.AgentParticipantID).Scan(&participantRole); err != nil {
-			return nil, err
-		}
-		if _, eligible, err := findTerminalCorroborationSourceTx(ctx, tx, job.AgentTurnID, job.ExecutionEpoch, participantRole, ""); err != nil {
-			return nil, err
-		} else if eligible {
-			// The later verifier corroborates publication and review readiness.
-			// Unrelated successful effects, including comments, still need the
-			// existing mutation-reconciliation barrier.
-			skipSucceeded = true
-		}
-	}
 	rows, err := tx.Query(ctx, mutationSelect+`
-WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
-  AND (state IN ('UNKNOWN', 'RECONCILING')
-       OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
-           ('publish_changes', 'open_pr', 'publish_plan_checkpoint', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
+`+recoveryCandidatePredicate+`
 ORDER BY invocation_number`, job.AgentTurnID, job.ExecutionEpoch, skipSucceeded)
 	if err != nil {
 		return nil, fmt.Errorf("list Agent Turn mutations for reconciliation: %w", err)
@@ -316,14 +330,17 @@ func (store *Store) AcknowledgeAgentTurnMutationReconciliationFailure(ctx contex
 	if err := requireRecoveredRuntimeStopped(ctx, tx, job); err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err
 	}
-	var candidates, unresolved int
+	skipSucceeded, err := recoverySkipsCorroboratedEffectsTx(ctx, tx, job)
+	if err != nil {
+		return AgentTurnMutationReconciliationAcknowledgement{}, err
+	}
+	var candidates, unresolved, succeeded int
 	if err := tx.QueryRow(ctx, `
-SELECT count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING', 'SUCCEEDED')),
-       count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING'))
+SELECT count(*), count(*) FILTER (WHERE state IN ('UNKNOWN', 'RECONCILING')),
+       count(*) FILTER (WHERE state = 'SUCCEEDED')
 FROM tool_invocations
-WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
-	`, job.AgentTurnID, job.ExecutionEpoch).Scan(&candidates, &unresolved); err != nil {
-		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("count unresolved recovered mutations: %w", err)
+`+recoveryCandidatePredicate, job.AgentTurnID, job.ExecutionEpoch, skipSucceeded).Scan(&candidates, &unresolved, &succeeded); err != nil {
+		return AgentTurnMutationReconciliationAcknowledgement{}, fmt.Errorf("count recovered mutation candidates: %w", err)
 	}
 	if candidates == 0 {
 		return AgentTurnMutationReconciliationAcknowledgement{}, ErrAgentTurnRecoveryUnsettled
@@ -332,8 +349,10 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 	acknowledgement := AgentTurnMutationReconciliationAcknowledgement{
 		JobID: job.ID, WorkflowID: job.WorkflowID, WorkflowAttemptID: job.WorkflowAttemptID,
 		AgentTurnID: job.AgentTurnID, Attempt: job.AttemptCount,
-		RetryScheduled:          job.AttemptCount < job.MaxAttempts,
-		UnresolvedMutationCount: candidates,
+		RetryScheduled:              job.AttemptCount < job.MaxAttempts,
+		UnresolvedMutationCount:     unresolved,
+		SuccessfulVerificationCount: succeeded,
+		VerificationCandidateCount:  candidates,
 	}
 	if acknowledgement.RetryScheduled {
 		if err := failAgentTurnMutationReconciliationAttemptTx(ctx, tx, job, cause.Error(), retryDelay); err != nil {
@@ -345,7 +364,7 @@ WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
 		return acknowledgement, nil
 	}
 
-	diagnostic := fmt.Sprintf("outcome unknowable; escalated after %d reconciliation attempts: %s", job.AttemptCount, cause.Error())
+	diagnostic := fmt.Sprintf("mutation verification inconclusive after %d attempts: %d unknown/reconciling mutations, %d successful effects awaiting verification (%d selected candidates): %s", job.AttemptCount, unresolved, succeeded, candidates, cause.Error())
 	result, err := tx.Exec(ctx, `
 UPDATE tool_invocations
 SET state = 'FAILED', result = NULL, last_error = $3,
@@ -390,8 +409,7 @@ WHERE assignment.id = $1 AND assignment.workflow_id = $2`, job.AgentParticipantI
 		if definitionCompatible {
 			handoffDiagnostic := diagnostic
 			if runtimeOOMKilled {
-				handoffDiagnostic = fmt.Sprintf("outcome unknowable; escalated after %d reconciliation attempts. %s Reconciliation detail: %s",
-					job.AttemptCount, RuntimeOOMDiagnostic, cause.Error())
+				handoffDiagnostic = fmt.Sprintf("%s %s", diagnostic, RuntimeOOMDiagnostic)
 			}
 			decision = store.reducer.Reduce(snapshot, workflow.AgentTurnMutationReconciliationExhaustedEvent{
 				EventMetadata: workflow.EventMetadata{
@@ -430,7 +448,8 @@ WHERE id = $1 AND execution_epoch = $2
 	}
 	jobResult, err := json.Marshal(map[string]any{
 		"escalated": true, "diagnostic": diagnostic,
-		"unresolved_mutation_count": candidates, "workflow_revision": workflowRevision,
+		"unresolved_mutation_count":     unresolved,
+		"successful_verification_count": succeeded, "verification_candidate_count": candidates, "workflow_revision": workflowRevision,
 	})
 	if err != nil {
 		return AgentTurnMutationReconciliationAcknowledgement{}, err

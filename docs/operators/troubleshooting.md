@@ -90,6 +90,18 @@ An absent archive is not a readiness failure, and log contents do not establish 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 Definite failures place safe details in `tool_invocations.last_error`; unknown outcomes remain under reconciliation.
 
+A definite pre-reservation handoff rejection, including pending human input, has no mutation row or backend effect and does not itself require recovery.
+The agent can yield with empty questions so the Orchestrator delivers that input at the next safe Turn boundary without resetting the Workflow Attempt.
+Unclassified reservation/database failures still require controlled recovery; a later successful tool does not clear earlier ambiguity.
+
+Mutation-recovery diagnostics distinguish `unresolved_mutation_count` (actual UNKNOWN/RECONCILING rows), `successful_verification_count` (selected SUCCEEDED effects requiring verification), and `verification_candidate_count` (their sum).
+These counts appear in recovery operation attributes and the exhausted reconciliation job result; Human Handoff diagnostics describe the same categories.
+Terminal corroboration may delegate publication and terminal-effect verification to its later verifier, so selected candidates can be fewer than all successful ledger rows.
+An all-success ledger can still require Human Handoff when fresh external-effect verification is unavailable, but does not imply unknown writes.
+A successful, correctly scoped local default-branch refresh can complete its historical barrier from its recorded receipt, without refetching or claiming new freshness.
+An interrupted refresh remains conservative even if partial refs or packs exist; do not mark it successful or repair its files manually.
+This behavior does not automatically reactivate a previously blocked Workflow or authorize production ledger repair.
+
 For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's orchestrator-owned `origin_operation_id`, not just its text or response IDs.
 Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.
 Historical entries without an origin remain preserved but cannot prove an uncertain operation's effect; normal reconciliation retries or explicit Human Handoff handle missing proof.
