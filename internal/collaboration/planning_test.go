@@ -191,3 +191,77 @@ func TestCheckpointNonPublicationIsImmutableAndRetrievalPrecedesYield(t *testing
 		t.Fatal("lost immutable history")
 	}
 }
+
+func TestProposalRejectsEveryStaleHistoricalInterpretation(t *testing.T) {
+	s := planningFixture(t)
+	round, err := s.Request("R-old", "planner", "turn-1", "", []collaboration.Question{{ID: "success", Body: "Literal success?"}, {ID: "selection", Body: "Select required checks?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Publish(round.ID, collaboration.Source{Channel: "fixture", ID: "round"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := admitPlanning(s, "original", collaboration.Command{Kind: "answer", Target: round.Reference, Body: "yes; private original body"}); r.ResponseID == "" {
+		t.Fatal(r)
+	}
+	s.Prepare("planner", "turn-2")
+	if err = s.Assess("first", "planner", "turn-2", []collaboration.Assessment{{InputID: "original", EvidenceIDs: []string{"original"}, Disposition: "changed", Explanation: "Accept both"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Resolve(round.ID, "turn-2", []collaboration.Resolution{{QuestionID: "success", ResponseIDs: []string{"original"}, Explanation: "Literal success"}, {QuestionID: "selection", ResponseIDs: []string{"original"}, Explanation: "Required checks"}}); err != nil {
+		t.Fatal(err)
+	}
+	if r := admitPlanning(s, "correction", collaboration.Command{Kind: "steer", Body: "Change success resets, retain required-check selection; private correction"}); r.ResponseID == "" {
+		t.Fatal(r)
+	}
+	s.Prepare("planner", "turn-3")
+	if err = s.Assess("correct", "planner", "turn-3", []collaboration.Assessment{{InputID: "correction", EvidenceIDs: []string{"original", "correction"}, Corrects: []string{"original"}, Disposition: "changed", Explanation: "Explicit correction; selection unchanged"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.StaleDecisions("planner")) != 2 || len(s.StaleDecisions("other-participant")) != 0 {
+		t.Fatal("correction did not fence all scoped interpretations")
+	}
+	if err = s.Resolve(round.ID, "turn-3", []collaboration.Resolution{{QuestionID: "success", ResponseIDs: []string{"original", "correction"}, Explanation: "Reaffirm literal success with changed resets"}}); err != nil {
+		t.Fatal(err)
+	}
+	beforeInputs, _ := json.Marshal(s.Inputs)
+	beforeAssessments, _ := json.Marshal(s.Assessments)
+	beforeRounds, _ := json.Marshal(s.Rounds)
+	_, err = s.ReserveCheckpoint("rejected", "planner", "turn-3", planningContent())
+	var rejection *collaboration.CheckpointNotApplied
+	if !errors.As(err, &rejection) || rejection.Reason != "historical_decisions_unresolved" || len(rejection.Decisions) != 1 || rejection.Decisions[0].QuestionID != "selection" || rejection.Decisions[0].RoundReference != round.Reference || len(s.Planning.Revisions) != 0 {
+		t.Fatal(rejection, err)
+	}
+	raw, _ := json.Marshal(rejection.Decisions)
+	if strings.Contains(string(raw), "private") || !strings.Contains(string(raw), `"A1"`) || !strings.Contains(string(raw), `"A2"`) {
+		t.Fatal(string(raw))
+	}
+	assertPreserved := func() {
+		t.Helper()
+		a, _ := json.Marshal(s.Inputs)
+		b, _ := json.Marshal(s.Assessments)
+		c, _ := json.Marshal(s.Rounds)
+		if string(a) != string(beforeInputs) || string(b) != string(beforeAssessments) || string(c) != string(beforeRounds) {
+			t.Fatal("rejection rewrote collaboration history")
+		}
+	}
+	assertPreserved()
+	// A caller cannot mutate the durable rejection through returned slices.
+	rejection.Decisions[0].EvidenceReferences[0] = "tampered"
+	rejection.Decisions[0].QuestionID = "tampered"
+	if err = s.Resolve(round.ID, "turn-3", []collaboration.Resolution{{QuestionID: "selection", ResponseIDs: []string{"original", "correction"}, Explanation: "Correction leaves required-check selection unchanged; explicitly reaffirm"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ReserveCheckpoint("rejected", "planner", "turn-3", planningContent())
+	var replay *collaboration.CheckpointNotApplied
+	if !errors.As(err, &replay) || len(s.Planning.Revisions) != 0 || replay.Decisions[0].QuestionID != "selection" || replay.Decisions[0].EvidenceReferences[0] != "A1" {
+		t.Fatal("replay retried publication", err)
+	}
+	if s.Unresolved("planner") {
+		t.Fatal("reaffirmation did not clear historical fence")
+	}
+	publishCheckpoint(t, s, "fresh", "turn-3", planningContent())
+	if len(s.Rounds[0].Resolutions) != 4 || len(s.Inputs) != 2 || len(s.Assessments) != 2 || len(s.Planning.NonPublications) != 1 {
+		t.Fatal("history missing", s)
+	}
+}

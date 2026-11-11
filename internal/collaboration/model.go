@@ -500,19 +500,7 @@ func (s *State) canRevise(old *Resolution, next Resolution) bool {
 func (s *State) Unresolved(participant string) bool {
 	// Follow explicit interpretation order, not round recency: an agent may
 	// reconcile a historical decision after it has left the current frontier.
-	effective := map[string]Resolution{}
-	for _, round := range s.Rounds {
-		if round.ParticipantID != participant || !round.Published {
-			continue
-		}
-		for _, q := range round.Questions {
-			if r := latestResolution(round, q.ID); r != nil {
-				if old, ok := effective[q.ID]; !ok || r.Sequence >= old.Sequence {
-					effective[q.ID] = *r
-				}
-			}
-		}
-	}
+	effective := s.effectiveResolutions(participant)
 	for _, r := range effective {
 		if !s.resolutionCurrent(r) {
 			return true

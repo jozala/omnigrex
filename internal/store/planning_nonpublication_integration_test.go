@@ -20,7 +20,7 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 	databases, pool := openPhaseFiveStores(t, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	for n, mode := range []string{"rejection-commit-ack-lost", "crash-before-reservation", "crash-without-input", "published-control", "oversize-commit-ack-lost", "crash-after-reservation"} {
+	for n, mode := range []string{"rejection-commit-ack-lost", "crash-before-reservation", "crash-without-input", "published-control", "oversize-commit-ack-lost", "crash-after-reservation", "historical-rejection-commit-ack-lost"} {
 		t.Run(mode, func(t *testing.T) {
 			database := databases[0]
 			fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1130+n, workflow.RolePlanner, "")
@@ -40,7 +40,36 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 			if r := state.Accept("Afirst", collaboration.Command{Kind: "steer", Body: "Use a collaborator CLI."}, a); r.ResponseID == "" {
 				t.Fatal(r)
 			}
+			if mode == "historical-rejection-commit-ack-lost" {
+				round, err := state.Request("historical", lease.AgentParticipantID, "prior-turn", "", []collaboration.Question{{ID: "success", Body: "Success?"}, {ID: "selection", Body: "Selected checks?"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = state.Publish(round.ID, collaboration.Source{Channel: "fixture", ID: "historical"}); err != nil {
+					t.Fatal(err)
+				}
+				state.Prepare(lease.AgentParticipantID, "interpret-original")
+				if err = state.Assess("original", lease.AgentParticipantID, "interpret-original", []collaboration.Assessment{{InputID: "Afirst", EvidenceIDs: []string{"Afirst"}, Disposition: "changed", Explanation: "Accept both"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err = state.Resolve(round.ID, "interpret-original", []collaboration.Resolution{{QuestionID: "success", ResponseIDs: []string{"Afirst"}, Explanation: "Success"}, {QuestionID: "selection", ResponseIDs: []string{"Afirst"}, Explanation: "Selection"}}); err != nil {
+					t.Fatal(err)
+				}
+				a.Source.ID = "correction"
+				if receipt := state.Accept("Acorrection", collaboration.Command{Kind: "steer", Body: "Change success, keep selection"}, a); receipt.ResponseID == "" {
+					t.Fatal(receipt)
+				}
+			}
 			state.Prepare(lease.AgentParticipantID, lease.ID)
+			if mode == "historical-rejection-commit-ack-lost" {
+				if err := state.Assess("correct", lease.AgentParticipantID, lease.ID, []collaboration.Assessment{{InputID: "Acorrection", EvidenceIDs: []string{"Afirst", "Acorrection"}, Corrects: []string{"Afirst"}, Disposition: "changed", Explanation: "Explicit correction"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := state.Resolve("historical", lease.ID, []collaboration.Resolution{{QuestionID: "success", ResponseIDs: []string{"Afirst", "Acorrection"}, Explanation: "Reaffirm success"}}); err != nil {
+					t.Fatal(err)
+				}
+				c.Status = "proposed"
+			}
 			raw, _ := json.Marshal(state)
 			if _, err := pool.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2)`, fixture.workflowID, raw); err != nil {
 				t.Fatal(err)
@@ -69,10 +98,14 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 					}
 				}
 			}
-			if mode == "rejection-commit-ack-lost" {
+			if mode == "rejection-commit-ack-lost" || mode == "historical-rejection-commit-ack-lost" {
 				_, err = database.ReservePlanningCheckpoint(ctx, lease, mutation.ID, c)
 				var rejection *collaboration.CheckpointNotApplied
-				if !errors.As(err, &rejection) || rejection.Reason != "late_input" {
+				wantReason := "late_input"
+				if mode == "historical-rejection-commit-ack-lost" {
+					wantReason = "historical_decisions_unresolved"
+				}
+				if !errors.As(err, &rejection) || rejection.Reason != wantReason {
 					t.Fatal(err)
 				}
 				// The gateway has not yet durably completed the operation; restart reads
@@ -151,6 +184,12 @@ func TestPlanningNonPublicationRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := "late_input"
+				if mode == "historical-rejection-commit-ack-lost" {
+					want = "historical_decisions_unresolved"
+					if got["next_action"] != "reconcile_historical_decisions" || !strings.Contains(string(result.Outcome.Result), `"question_id":"selection"`) {
+						t.Fatal(got)
+					}
+				}
 				if mode == "crash-without-input" {
 					want = "interrupted_before_reservation"
 				}

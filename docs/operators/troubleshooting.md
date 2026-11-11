@@ -110,6 +110,13 @@ A successful, correctly scoped local default-branch refresh can complete its his
 An interrupted refresh remains conservative even if partial refs or packs exist; do not mark it successful or repair its files manually.
 This behavior does not automatically reactivate a previously blocked Workflow or authorize production ledger repair.
 
+For `publish_plan_checkpoint`, `historical_decisions_unresolved` with `publication: not_applied` is durable definite pre-publication rejection, not a created pair.
+The result identifies outstanding historical question/round references and original/correction input references without human bodies.
+A correction can stale several interpretations, even unchanged decisions absent from the current round.
+The agent must explicitly reconcile each affected interpretation using existing evidence before a new complete-pair attempt; assessments and current-round resolutions alone do not suffice.
+Do not remove correction links, rewrite history, ask humans to repeat settled answers, or treat an empty frozen history index as proof of non-publication.
+Identical-operation replay remains rejected after reconciliation; a fresh attempt needs a new identity, while unknown outcomes stay on exact-operation recovery.
+
 For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's orchestrator-owned `origin_operation_id`, not just its text or response IDs.
 Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.
 Historical entries without an origin remain preserved but cannot prove an uncertain operation's effect; normal reconciliation retries or explicit Human Handoff handle missing proof.

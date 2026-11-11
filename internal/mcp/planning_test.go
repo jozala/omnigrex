@@ -145,7 +145,7 @@ func (f *rejectingPlanningLedger) ReservePlanningCheckpoint(context.Context, sto
 	return collaboration.PlanningRevision{}, f.err
 }
 func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T) {
-	for _, reason := range []string{"late_input", "unread_input"} {
+	for _, reason := range []string{"late_input", "unread_input", "historical_decisions_unresolved"} {
 		t.Run(reason, func(t *testing.T) {
 			ledger := &rejectingPlanningLedger{err: &collaboration.CheckpointNotApplied{Reason: reason}}
 			api := &clarificationLostGitHub{backendGitHub: &backendGitHub{}}
@@ -166,13 +166,20 @@ func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T
 			}
 			request = validRequest
 			raw, err := invoke()
+			wantStatus := "input_pending"
+			if reason == "historical_decisions_unresolved" {
+				wantStatus = "not_applied"
+			}
 			var result map[string]any
-			if err != nil || json.Unmarshal(raw, &result) != nil || result["status"] != "input_pending" || result["publication"] != "not_applied" || result["reason"] != reason || result["revision_id"] != nil || result["source"] != nil || api.posts != 0 {
+			if err != nil || json.Unmarshal(raw, &result) != nil || result["status"] != wantStatus || result["publication"] != "not_applied" || result["reason"] != reason || result["revision_id"] != nil || result["source"] != nil || api.posts != 0 {
 				t.Fatal(string(raw), err, api.posts)
 			}
 			want := "request_clarification_empty_questions"
 			if reason == "unread_input" {
 				want = "retrieve_human_input"
+			}
+			if reason == "historical_decisions_unresolved" {
+				want = "reconcile_historical_decisions"
 			}
 			if result["next_action"] != want {
 				t.Fatal(result)
@@ -180,6 +187,10 @@ func TestPlanningExpectedNonPublicationIsNormalResultNotPublication(t *testing.T
 			ledger.err = collaboration.ErrInvalid
 			if _, err = invoke(); !errors.Is(err, mcp.ErrInvalidInvocation) {
 				t.Fatal("unrelated validation became successful", err)
+			}
+			ledger.err = mcp.OutcomeUnknown(&collaboration.CheckpointNotApplied{Reason: reason})
+			if raw, err = invoke(); !mcp.IsOutcomeUnknown(err) || strings.Contains(string(raw), "not_applied") {
+				t.Fatal("typed rejection overrode unknown outcome", string(raw), err)
 			}
 			ledger.err = errors.New("commit acknowledgment lost")
 			if _, err = invoke(); !mcp.IsOutcomeUnknown(err) {

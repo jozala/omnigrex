@@ -26,6 +26,16 @@ An expanded error allowlist would not fix retained bridges without rebinding the
 Ordinary results preserve compatibility while requiring consumers to inspect resolution semantics rather than transport success.
 A durable rejection receipt closes the lost-acknowledgment window without manufacturing resolution origin evidence or weakening historical correction fences.
 
+## Historical proposal prerequisites
+
+Extend the existing [checkpoint non-publication contract](0059-return-durable-checkpoint-nonpublication.md) to stale effective historical interpretations.
+Persist structural round/question/evidence/correction references in the exact-operation rejection receipt under the reservation transaction; expose no source bodies or interpretation text.
+A correction to an input may stale several interpretations, including substantively unchanged decisions outside the current round.
+The agent must explicitly reconcile all affected interpretations against existing evidence; application code must not infer unchanged meaning or remove the historical fence.
+Current-round resolution and complete input assessments are not substitutes for those interpretations.
+Exact replay stays rejected after reconciliation; a fresh complete pair uses a new identity only after definite rejection.
+Ambiguous commits remain unknown and require exact-operation recovery.
+
 ## Consequences
 
 Developer, Reviewer and Planner share the same nonterminal result contract.

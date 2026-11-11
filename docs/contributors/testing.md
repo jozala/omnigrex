@@ -186,3 +186,8 @@ After a separately authorized deployment, record fresh unassisted real-provider 
 `TestPiControlledWorkflow/planning` deliberately submits invalid older-question evidence, replays the rejection through the selected pinned Pi bridge, corrects the request without another human answer, and reaches the consolidated planning pair and confirmation without implementation allocation.
 A successful MCP transport or a `SUCCEEDED` invocation is not itself a recorded resolution: consumers must inspect `recorded` and `application`; the resolution aggregate and operation-origin proof remain authoritative.
 No terminal-outcome consumer treats `resolve_clarification` as Stage completion; reconciliation distinguishes durable rejection receipts from actual resolution origins and leaves absent evidence unresolved.
+
+`TestProposalRejectsEveryStaleHistoricalInterpretation` preserves the multi-decision correction fence and immutable history while permitting explicit reaffirmation of an unchanged decision.
+`TestPiControlledWorkflow/planning` now traverses three question rounds: A2 corrects A1, only one R1 interpretation is reaffirmed, and A3 accepts the revised R3 question.
+It recovers both invalid mixed-round resolution and stale historical proposal rejection through the selected pinned Pi bridge, with exact replay, explicit unchanged-decision reaffirmation and one complete published pair without another human answer or implementation allocation.
+`TestPlanningNonPublicationRecovery/historical-rejection-commit-ack-lost` restarts through the durable exact-operation rejection receipt rather than inferring outcome from frozen history.

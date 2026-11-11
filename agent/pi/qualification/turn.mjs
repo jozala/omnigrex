@@ -1,6 +1,7 @@
 // Qualification only: replace the HTTP model catalog, retaining production
 // bootstrap, durable preparation, resources, RPC, permissions and MCP bridge.
 import http from 'node:http';
+import { isDeepStrictEqual } from 'node:util';
 import { stat, writeFile } from 'node:fs/promises';
 import { readBootstrap, run } from '../runner.mjs';
 import { openDurableSession } from '../session-state.mjs';
@@ -62,43 +63,64 @@ try {
       const input=envelope.human_input??[];
       const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>i.kind!=='confirm-plan');
       const confirmation=input.find(i=>i.kind==='confirm-plan');
-      const recovery = rounds.length===2 && !input.some(i=>i.kind==='amend'||i.kind==='confirm-plan');
-      const rawStep=toolStep-(input.length?1:0);
-      const step=rawStep-(recovery?2:0);
-      const result=index=>JSON.parse(text(results[index+(input.length?1:0)+(recovery?2:0)].content));
       const amended=input.some(i=>i.kind==='amend');
-      const stale=rounds.length===2&&!amended&&!confirmation;
-      const offset=rounds.length?1:0;
-      if(toolStep===0&&input.length){
-        name='omnigrex_assess_human_input';args={operation_id:`assess-planning-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:[i.id],disposition:i.kind==='confirm-plan'?'confirmed':'changed',explanation:i.kind==='confirm-plan'?'Exact published pair accepted without changes.':'Explicit fixture direction considered; update the affected audience/retention choices.'}))};
-      }else if(confirmation){
-        if(step===0){name='omnigrex_refresh_default_branch';args={operation_id:'planning-final-base'};}
-        if(step===1){name='bash';args={command:`git cat-file -e ${result(0).sha}^{commit} && git show ${result(0).sha}:README.md`};}
-        if(step===2){name='omnigrex_complete_planning';args={operation_id:'planning-ready',revision_id:confirmation.target,repository_commit:result(0).sha,evidence:'README.md remains a minimal repository. Ephemeral local checklist requires no retention schema or external integration. All delivered human choices remain applicable.',material_decisions_resolved:true};}
-      }else if(amended && step===0){
-        const amendment=input.find(i=>i.kind==='amend');
-        name='omnigrex_resolve_clarification';args={operation_id:'reinterpret-audience',round_id:rounds[0].id,resolutions:[{question_id:'Q1',response_ids:[amendment.id,...input.filter(i=>i.kind==='steer').map(i=>i.id)],explanation:'The explicit amendment replaces the prior audience: users without repository access. Use the steering choice of a standalone operator CLI; no repository plugin or accounts.'}]};
-      }else if(recovery && rawStep<2){
-        if(rawStep===1){const rejected=JSON.parse(text(results.at(-1).content));if(rejected.recorded!==false||rejected.application!=='not_applied'||rejected.reason!=='response_not_valid_for_question')throw new Error('resolution rejection masked by Pi');}
-        const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:'invalid-resolution-evidence',round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:[decisions[0].id,...input.map(i=>i.id)],explanation:'Deliberately invalid older-question evidence for recovery qualification.'}]};
-      }else if(rounds.length&&step===0){
-        if(recovery){const first=JSON.parse(text(results.at(-2).content)), replay=JSON.parse(text(results.at(-1).content));if(Object.keys(first).length!==Object.keys(replay).length||Object.keys(first).some(key=>first[key]!==replay[key]))throw new Error('rejection replay changed');}
-        const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:`resolve-${round.id}`,round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:input.map(i=>i.id),explanation:'Use the explicit human choice; replace proposed retention with ephemeral local status after the second answer.'}]};
+      const calls=[];
+      const add=(name,args)=>calls.push(()=>({name,args:typeof args==='function'?args():args}));
+      const get=i=>JSON.parse(text(results[i].content));
+      const expectRejection=(first,second,reason)=>{
+        const a=get(first),b=get(second);
+        if(a.publication!=='not_applied'||a.reason!==reason||a.revision_id||a.source||!isDeepStrictEqual(a,b))throw new Error('non-publication lost through Pi or replay');
+        return a;
+      };
+      if(input.length)add('omnigrex_assess_human_input',{operation_id:`assess-planning-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:i.kind==='answer'&&rounds.length===2?[decisions[0].id,i.id]:[i.id],...(i.kind==='answer'&&rounds.length===2?{corrects:[decisions[0].id]}:{}),disposition:i.kind==='confirm-plan'?'confirmed':'changed',explanation:i.kind==='confirm-plan'?'Exact published pair accepted without changes.':'Explicit fixture direction considered; retention changes, audience and selection remain unchanged unless amended.'}))});
+      const resolve=(operation,round,resolutions)=>add('omnigrex_resolve_clarification',{operation_id:operation,round_id:round.id,resolutions});
+      const resolution=(question,ids,explanation)=>({question_id:question,response_ids:ids,explanation});
+      if(confirmation){
+        const base=calls.length;
+        add('omnigrex_refresh_default_branch',{operation_id:'planning-final-base'});
+        add('bash',()=>({command:`git cat-file -e ${get(base).sha}^{commit} && git show ${get(base).sha}:README.md`}));
+        add('omnigrex_complete_planning',()=>({operation_id:'planning-ready',revision_id:confirmation.target,repository_commit:get(base).sha,evidence:'README.md remains a minimal repository. Ephemeral local checklist requires no retention schema or external integration. All delivered human choices remain applicable.',material_decisions_resolved:true}));
       }else if(rounds.length===0){
-        if(step===0){name='omnigrex_request_clarification';args={operation_id:'planning-ask-1',questions:[{id:'Q1',body:'README.md establishes a minimal repository, not an existing onboarding service. Should we target small teams without external accounts? I recommend this bounded scope.'}]};}
+        add('omnigrex_request_clarification',{operation_id:'planning-ask-1',questions:[{id:'Q1',body:'Target small teams without external accounts?'},{id:'Q1-selection',body:'Keep selected checklist steps explicit?'}]});
+      }else if(rounds.length===1){
+        resolve('resolve-first',rounds[0],[resolution('Q1',input.map(i=>i.id),'Small teams without accounts.'),resolution('Q1-selection',input.map(i=>i.id),'Explicit selected steps accepted.')]);
+        add('omnigrex_request_clarification',{operation_id:'planning-ask-2',questions:[{id:'Q2',body:'Retain onboarding status? I recommend persistence.'}]});
+      }else if(rounds.length===2){
+        resolve('reaffirm-audience',rounds[0],[resolution('Q1',decisions.map(i=>i.id),'Audience remains small teams without accounts after the correction. Selection still needs explicit reconciliation.')]);
+        add('omnigrex_request_clarification',{operation_id:'planning-ask-3',questions:[{id:'Q2-v2',replaces:'Q2',body:'Use ephemeral local status with no retained personal data instead?'}]});
       }else{
-        if(rounds.length===1 && step===offset){name='omnigrex_request_clarification';args={operation_id:'planning-ask-2',introduction:'Small teams without accounts is settled. Let us decide retention before consolidating the plan.',questions:[{id:'Q2',body:'Use ephemeral local status? I recommend avoiding a new retention obligation.'}]};}
-        if(rounds.length>1 && step===offset){name='omnigrex_refresh_default_branch';args={operation_id:`planning-base-${rounds.length}-${amended?"amended":"initial"}`};}
-        if(rounds.length>1 && (step===offset+1 || stale && step===offset+2)){name='omnigrex_publish_plan_checkpoint';args={operation_id:`planning-pair-${rounds.length}-${amended?'amended':'initial'}`,content:{title:'Small-team onboarding',summary:'An ephemeral local checklist without accounts or personal-data retention.',unresolved_decisions:[],status:rounds.length===1?'draft':'proposed',changes:rounds.length===1?'Scope selected; retention remains an unresolved proposal.':'Replace retention assumption with the human choice: ephemeral local status.',requirements_brief:amended?'Users without repository access need a standalone ephemeral checklist. No retained personal data, repository permissions or external accounts. Reset discards status. Non-goals: deployment and implementation. Material unresolved questions: none.':rounds.length===1?'Users: small teams. Scope: checklist without external accounts. Non-goals: deployment and implementation. Retention is only proposed, not accepted; ask next.':'Problem: small teams need onboarding guidance. Required: ephemeral local checklist, no retained personal data, no external accounts. Accept when a team completes and resets its checklist. Non-goals: deployment and implementation. Human choices are backed by accepted input. Material unresolved questions: none.',technical_plan:(amended?'Use a standalone operator CLI, not a repository plugin. ':'')+'README.md is the current repository baseline. Prefer a local component over hosted integration to avoid external accounts. Separate UI, transient status and tests; no database migration. Deliver tests then a local checklist. Verify reset discards status. If persistence becomes necessary, clarify again; local implementation names are suggestions.',investigated_commit:result(offset).sha,evidence:['README.md at the acquired default commit'],decision_response_ids:decisions.map(i=>i.id)}};}
-        if(stale && step===offset+3){
-          const rejected=result(offset+1), replay=result(offset+2);
-          if(rejected.status!=='input_pending'||rejected.publication!=='not_applied'||rejected.reason!=='late_input'||rejected.next_action!=='request_clarification_empty_questions'||rejected.revision_id||rejected.source||Object.keys(rejected).length!==Object.keys(replay).length||Object.keys(rejected).some(key=>rejected[key]!==replay[key]))throw new Error('non-publication lost through Pi or replay');
-          name='omnigrex_request_clarification';args={operation_id:'drain-late-input',questions:[]};
+        if(amended){
+          resolve('reinterpret-audience',rounds[0],[resolution('Q1',input.map(i=>i.id),'The amendment replaces the audience: users without repository access. Use the standalone operator CLI from steering.')]);
+        }else{
+          const invalid=calls.length;
+          const bad={operation_id:'invalid-resolution-evidence',round_id:rounds.at(-1).id,resolutions:[resolution('Q2-v2',[decisions[1].id,...input.map(i=>i.id)],'Deliberately invalid older-question evidence.')]};
+          add('omnigrex_resolve_clarification',bad);add('omnigrex_resolve_clarification',bad);
+          calls.push(()=>{
+            const a=get(invalid),b=get(invalid+1);
+            if(a.recorded!==false||a.application!=='not_applied'||a.reason!=='response_not_valid_for_question'||!isDeepStrictEqual(a,b))throw new Error('resolution rejection masked by Pi');
+            return {name:'omnigrex_resolve_clarification',args:{operation_id:'resolve-revised',round_id:rounds.at(-1).id,resolutions:[resolution('Q2-v2',input.map(i=>i.id),'Accept ephemeral local status without retention.')]}};
+          });
         }
-        if(rounds.length>1 && !stale && step===offset+2){
-          if(!result(offset+1).revision_id||result(offset+1).publication==='not_applied')throw new Error('expected published checkpoint');
-          name='omnigrex_request_clarification';args={operation_id:rounds.length===1?'planning-ask-2':'await-confirmation',questions:rounds.length===1?[{id:'Q2',body:'Should onboarding status be retained? I recommend ephemeral local status rather than the earlier persistence proposal, avoiding a new retention obligation.'}]:[]};}
+        const base=calls.length;
+        add('omnigrex_refresh_default_branch',{operation_id:`planning-base-${amended?'amended':'initial'}`});
+        const content=()=>({title:'Small-team onboarding',summary:'An ephemeral local checklist without accounts or personal-data retention.',unresolved_decisions:[],status:'proposed',changes:'Replace retention with the human choice: ephemeral local status.',requirements_brief:amended?'Users without repository access need a standalone ephemeral checklist. No retained personal data, repository permissions or external accounts. Reset discards status. Non-goals: deployment and implementation. Material unresolved questions: none.':'Small teams need ephemeral onboarding guidance. Required: selected checklist steps, no retained personal data or external accounts. Verify completion and reset. Non-goals: deployment and implementation. Material unresolved questions: none.',technical_plan:(amended?'Use a standalone operator CLI, not a repository plugin. ':'')+'README.md is the repository baseline. Separate transient status, explicit selected steps and tests; no database migration. Verify reset discards status. If persistence becomes necessary, clarify again. Names are suggestions.',investigated_commit:get(base).sha,evidence:['README.md at the acquired default commit'],decision_response_ids:decisions.map(i=>i.id)});
+        const attempt=calls.length;
+        const pair=()=>({operation_id:`planning-pair-${amended?'amended':'initial'}`,content:content()});
+        add('omnigrex_publish_plan_checkpoint',pair);add('omnigrex_publish_plan_checkpoint',pair);
+        if(!amended){
+          calls.push(()=>{expectRejection(attempt,attempt+1,'late_input');return {name:'omnigrex_request_clarification',args:{operation_id:'drain-late-input',questions:[]}};});
+        }else{
+          calls.push(()=>{
+            const rejected=expectRejection(attempt,attempt+1,'historical_decisions_unresolved');
+            if(rejected.next_action!=='reconcile_historical_decisions'||rejected.decisions.length!==1||rejected.decisions[0].question_id!=='Q1-selection'||rejected.decisions[0].round_reference!==rounds[0].reference||!rejected.decisions[0].correction_references.includes(decisions[1].reference))throw new Error('historical prerequisite missing');
+            return {name:'omnigrex_resolve_clarification',args:{operation_id:'reaffirm-selection',round_id:rounds[0].id,resolutions:[resolution('Q1-selection',decisions.filter(i=>i.id===decisions[0].id||i.id===decisions[1].id||i.kind==='amend').map(i=>i.id),'Original and correction evidence leave selected checklist steps unchanged. Explicitly reaffirm this historical interpretation without another human answer.')]}};
+          });
+          const published=calls.length;
+          add('omnigrex_publish_plan_checkpoint',()=>({operation_id:'planning-pair-reconciled',content:content()}));
+          calls.push(()=>{if(!get(published).revision_id||get(published).publication==='not_applied')throw new Error('expected complete published pair');return {name:'omnigrex_request_clarification',args:{operation_id:'await-confirmation',questions:[]}};});
+        }
       }
+      if(toolStep<calls.length)({name,args}=calls[toolStep]());
     } else if ((fault === 'clarification' || fault === 'clarification-restart')) {
       // Fetch bounded projected records through the real production MCP bridge.
       // Historical fixture bodies need not be re-read to interpret this new answer.

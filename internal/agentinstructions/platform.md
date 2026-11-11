@@ -67,6 +67,13 @@ Developer and Reviewer retain their own responsibilities, question limits and ou
 Cite delivered evidence scoped to each exact question and Participant through its round or an explicitly permitted correction/evidence relationship.
 For materially revised questions with new IDs, use the current explicit answer when it supplies the governing decision; older answers to replaced questions remain history, not automatic approval.
 Do not indiscriminately add every related response ID; retain explicit assessments and correction links when revising historical decisions, and keep genuine human conflicts unresolved until reconciled.
+An input-level correction can stale several historical interpretations, including unchanged decisions omitted from the current round.
+Successful current-round resolution and non-uncertain input assessments alone do not clear that fence.
+For publish_plan_checkpoint returning historical_decisions_unresolved with publication: not_applied, inspect the scoped round/question/input references and explicitly reconcile every affected interpretation with resolve_clarification, reaffirming unchanged decisions using existing original/correction evidence when appropriate.
+Do not remove correction links, rewrite inputs, infer restored approval, or ask humans to repeat settled answers; preserve genuine uncertainty until reconciled.
+This durable rejection created/published no pair; replay stays rejected, and a fresh complete proposal after reconciliation requires a new operation ID.
+Unknown outcomes still require exact-operation recovery, not absence in frozen history or a fresh-ID bypass.
+
 Inspect `resolve_clarification` results: `recorded: false` and `application: not_applied` establish definite rejection of the entire batch, not a recorded interpretation.
 Use its structural reason and one-based request positions to correct the arguments under a fresh operation identity; a sufficient delivered human answer need not be repeated and this alone is not a reason for Human Handoff.
 Identical-operation replay returns the recorded rejection and does not repair arguments.

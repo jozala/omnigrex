@@ -51,6 +51,9 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 		}
 		return r, err
 	}, args.Signature)
+	if IsOutcomeUnknown(err) {
+		return nil, err
+	}
 	var rejection *collaboration.CheckpointNotApplied
 	if errors.As(err, &rejection) {
 		return planningNonPublicationResult(rejection)
@@ -64,7 +67,7 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	return planningCheckpointResult(r)
 }
 func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.RawMessage, error) {
-	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation" && r.Reason != "payload_too_large" && r.Reason != "interrupted_before_publication") {
+	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation" && r.Reason != "payload_too_large" && r.Reason != "interrupted_before_publication" && r.Reason != "historical_decisions_unresolved") {
 		return nil, ErrInvalidInvocation
 	}
 	action, instruction := "request_clarification_empty_questions", "Call request_clarification with empty questions and a fresh operation ID, then end this Turn without report_blocked. The orchestrator will deliver pending input in the retained Session's next Turn; interpret it and reconsider affected decisions before publishing revised content with a new operation ID."
@@ -78,7 +81,14 @@ func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.R
 	if r.Reason == "payload_too_large" {
 		status, action, instruction = "not_applied", "rewrite_complete_pair", "The complete rendered pair, including signature and marker, exceeds the single-comment limit. Rewrite both complete documents more concisely without dropping requirements or material commitments, then publish with a new operation ID. No comment was posted; this rejected operation will not publish on replay."
 	}
-	return json.Marshal(map[string]any{"status": status, "publication": "not_applied", "reason": r.Reason, "next_action": action, "instructions": instruction})
+	result := map[string]any{"status": status, "publication": "not_applied", "reason": r.Reason, "next_action": action, "instructions": instruction}
+	if r.Reason == "historical_decisions_unresolved" {
+		result["status"] = "not_applied"
+		result["next_action"] = "reconcile_historical_decisions"
+		result["decisions"] = r.Decisions
+		result["instructions"] = "No pair was created or published. Read the scoped historical rounds and input evidence. Explicitly reconcile every affected interpretation using resolve_clarification, including reaffirming unchanged decisions against original/correction evidence. Current-round resolutions and input assessments alone do not clear historical decisions. Preserve correction links and history; do not ask humans to repeat settled answers. If evidence conflicts, keep uncertainty and ask for reconciliation. Replay returns this rejection unchanged; after reconciliation publish the complete pair with a new operation ID. Unknown outcomes still require exact-operation recovery."
+	}
+	return json.Marshal(result)
 }
 func planningCheckpointResult(r collaboration.PlanningRevision) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"revision_id": r.ID, "reference": r.Reference, "source": r.Source, "status": r.Content.Status})
