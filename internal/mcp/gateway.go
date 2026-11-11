@@ -971,7 +971,8 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	reservation, err := gateway.store.ReserveMutation(operationContext, registration.scope.Lease, spec)
 	if err != nil {
 		observeToolError(operationContext, err)
-		finishCall(false)
+		var rejection *store.MutationReservationRejection
+		finishCall(errors.As(err, &rejection))
 		switch {
 		case errors.Is(err, store.ErrMutationOperationConflict):
 			writeToolError(response, id, "mutation operation identity conflict")

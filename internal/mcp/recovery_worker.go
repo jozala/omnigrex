@@ -129,6 +129,10 @@ func (worker *RecoveryWorker) ProcessNext(ctx context.Context) (processed bool, 
 		}
 		return true, errors.Join(operationErr, fmt.Errorf("acknowledge mutation reconciliation failure: %w", acknowledgeErr))
 	}
+	telemetry.AddAttributes(ctx,
+		attribute.Int("unresolved_mutation_count", acknowledgement.UnresolvedMutationCount),
+		attribute.Int("successful_verification_count", acknowledgement.SuccessfulVerificationCount),
+		attribute.Int("verification_candidate_count", acknowledgement.VerificationCandidateCount))
 	if acknowledgement.Escalated {
 		if _, completeErr := worker.store.CompleteAgentTurnRecovery(ctx, lease.AgentTurnID, lease.ExecutionEpoch); completeErr != nil &&
 			!errors.Is(completeErr, store.ErrAgentTurnRecoveryUnsettled) {

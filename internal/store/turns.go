@@ -1160,11 +1160,19 @@ WHERE id = $1 AND workflow_id = $2 AND repository_id = $3 AND active`,
 	return execution, nil
 }
 
+// MutationReservationRejection proves admission stopped before allocating or
+// committing a reservation. Database/commit failures must never use this type.
+// It does not settle any earlier operation whose durability is ambiguous.
+type MutationReservationRejection struct{ Cause error }
+
+func (err *MutationReservationRejection) Error() string { return err.Cause.Error() }
+func (err *MutationReservationRejection) Unwrap() error { return err.Cause }
+
 // ReserveMutation allocates a stable operation and monotonic invocation before a side effect.
 func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, spec MutationSpec) (MutationReservation, error) {
 	request, err := validateMutationSpec(spec)
 	if err != nil {
-		return MutationReservation{}, err
+		return MutationReservation{}, &MutationReservationRejection{Cause: err}
 	}
 	spec.Request = request
 	invocationID, err := randomUUID()
@@ -1180,7 +1188,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		if err == nil {
 			if existing.AgentTurnID == turn.ID && !sameMutationDefinition(existing, spec) ||
 				existing.AgentTurnID != turn.ID && !sameAgentMutationDefinition(existing, spec) {
-				return ErrMutationOperationConflict
+				return &MutationReservationRejection{Cause: ErrMutationOperationConflict}
 			}
 			if existing.AgentTurnID != turn.ID {
 				if err := validateMutationReplayAncestor(ctx, tx, turn.ID, existing.AgentTurnID); err != nil {
@@ -1197,7 +1205,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			return err
 		}
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
-			return ErrMutationAdmissionClosed
+			return &MutationReservationRejection{Cause: ErrMutationAdmissionClosed}
 		}
 		if spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
 			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
@@ -1205,10 +1213,10 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 				return err
 			}
 			if state.Pending(turn.AgentParticipantID) {
-				return ErrPendingHumanInput
+				return &MutationReservationRejection{Cause: ErrPendingHumanInput}
 			}
 			if state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
-				return ErrUnresolvedClarification
+				return &MutationReservationRejection{Cause: ErrUnresolvedClarification}
 			}
 		}
 		var number int64

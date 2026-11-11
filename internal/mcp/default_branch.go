@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -130,4 +131,42 @@ func (backend *ProductionBackend) refreshDefaultBranch(ctx context.Context, invo
 
 func snapshotExecutionKey(scope ToolScope) execution.Key {
 	return execution.Key{AssignmentID: scope.AgentParticipantID, AgentSessionID: scope.AgentSessionID, AgentTurnID: scope.AgentTurnID, ExecutionEpoch: scope.ExecutionEpoch, RuntimeProfileName: scope.RuntimeProfileName, RuntimeProfileVersion: scope.RuntimeProfileVersion}
+}
+
+// A completed local observation has no external artifact to rediscover. Validate
+// its durable, exact-epoch receipt without touching the stopped workspace or
+// creating a new observation. This proves historical completion, not freshness.
+func reconcileSucceededDefaultBranch(scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
+	resource := fmt.Sprintf("%d:%s:%s:%s:%d", scope.Repository.ID, scope.Turn.AgentParticipantID, scope.Turn.AgentSessionID, scope.Turn.ID, scope.Turn.ExecutionEpoch)
+	var result defaultBranchResult
+	if scope.Turn.AgentSessionID == "" || mutation.ExternalService != "workspace" || mutation.ExternalResourceID != resource ||
+		!decodePersistedRequest(mutation.Result, &result) || result.Repository.ID != scope.Repository.ID ||
+		!strings.EqualFold(result.Repository.Owner, scope.Repository.Owner) || !strings.EqualFold(result.Repository.Name, scope.Repository.Name) ||
+		!validBranchResourceName(result.Branch) || result.ObservedAt.IsZero() ||
+		result.ReobservedAt != nil && result.ReobservedAt.Before(result.ObservedAt) {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	identity := sha256.Sum256([]byte(resource + ":" + mutation.ID))
+	installed := result.SHA != "" || result.Ref != ""
+	if installed && (!validRevision(result.SHA) || result.Ref != "refs/omnigrex/default/"+hex.EncodeToString(identity[:])) {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	switch result.Status {
+	case "current", "stale":
+		if !installed || result.ReobservedAt == nil || result.ObservedBranch != result.Branch || !validRevision(result.ObservedSHA) ||
+			(result.Status == "current") != (result.ObservedSHA == result.SHA) || result.Reason != "" {
+			return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+		}
+	case "default_branch_changed":
+		if !validBranchResourceName(result.ObservedBranch) || result.ObservedBranch == result.Branch || !validRevision(result.ObservedSHA) || installed && result.ReobservedAt == nil {
+			return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+		}
+	case "unavailable":
+		if result.Reason == "" {
+			return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+		}
+	default:
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	return foundReconciliation(mutation.Result), nil
 }

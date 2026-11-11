@@ -110,6 +110,9 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 
 	switch mutation.ToolName {
 	case ToolRefreshDefaultBranch:
+		if mutation.State == store.MutationSucceeded {
+			return reconcileSucceededDefaultBranch(reconciliation, mutation)
+		}
 		// Local installation has no externally discoverable receipt. A partial
 		// ref or pack is not fresh observation evidence; never refetch or bind
 		// an interrupted operation to a newer base during recovery.
