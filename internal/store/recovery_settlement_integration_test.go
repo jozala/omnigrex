@@ -172,7 +172,7 @@ WHERE workflow_id = $1 AND kind = 'PUBLISH_HUMAN_HANDOFF'`, lease.JobLease.Workf
 		t.Fatal(err)
 	}
 	if reason != string(workflow.ReasonAgentTurnMutationReconciliationExhausted) ||
-		!strings.Contains(diagnostic, "outcome unknowable") || !strings.Contains(diagnostic, store.RuntimeOOMDiagnostic) ||
+		!strings.Contains(diagnostic, "1 unknown/reconciling mutations") || !strings.Contains(diagnostic, store.RuntimeOOMDiagnostic) ||
 		strings.Contains(mutationError, store.RuntimeOOMDiagnostic) {
 		t.Fatalf("handoff = %s / %q, mutation error = %q", reason, diagnostic, mutationError)
 	}
