@@ -179,3 +179,10 @@ Dedicated release App setup and live historical-tag authorization, first publica
 `TestFrozenPayloadReconcilesWithoutRendererOrSignatureRegeneration`, `TestCompletePayloadLimitIncludesUnicodeSignatureAndMarker` and `TestOversizeCompletePairReturnsActionableDefiniteNonPublication` distinguish exact new-format recovery from rendering, including complete payload boundaries and definite rejection without truncation or half-pair publication.
 Controlled-provider qualification establishes these mechanisms, not real-model semantics, tone or reading burden.
 After a separately authorized deployment, record fresh unassisted real-provider results and actual human feedback under Work Item 176 or a linked follow-up; closed evaluation 172 is not an unqualified pass or a substitute for that assessment.
+
+`TestRevisedQuestionsRejectMixedEvidenceAtomically` covers the old-plus-current versus current-only evidence contrast for replaced questions.
+`TestResolutionGatewayRejectionReplayAndCorrectedRequest` exercises production backend/gateway result semantics, identical-operation replay, corrected fresh requests, and unexpected-error masking.
+`TestResolutionRejectionDurableReceiptAndFreshCorrection` covers operation-bound pre-effect rejection, atomic batches, receipt replay, fresh correction, and stopped-Turn recovery of a lost rejection acknowledgment for Developer and Reviewer.
+`TestPiControlledWorkflow/planning` deliberately submits invalid older-question evidence, replays the rejection through the selected pinned Pi bridge, corrects the request without another human answer, and reaches the consolidated planning pair and confirmation without implementation allocation.
+A successful MCP transport or a `SUCCEEDED` invocation is not itself a recorded resolution: consumers must inspect `recorded` and `application`; the resolution aggregate and operation-origin proof remain authoritative.
+No terminal-outcome consumer treats `resolve_clarification` as Stage completion; reconciliation distinguishes durable rejection receipts from actual resolution origins and leaves absent evidence unresolved.

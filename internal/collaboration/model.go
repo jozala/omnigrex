@@ -127,16 +127,17 @@ type Preparation struct {
 }
 
 type State struct {
-	InterpretationSequence uint64         `json:"interpretation_sequence,omitempty"`
-	Assessments            []Assessment   `json:"assessments,omitempty"`
-	References             []Reference    `json:"references,omitempty"`
-	Planning               *PlanningState `json:"planning,omitempty"`
-	Preparations           []Preparation  `json:"preparations,omitempty"`
-	Rounds                 []Round        `json:"rounds"`
-	Inputs                 []Input        `json:"inputs"`
-	Receipts               []Receipt      `json:"receipts"`
-	CurrentRound           string         `json:"current_round,omitempty"`
-	Waiting                bool           `json:"waiting"`
+	ResolutionRejections   []ResolutionRejection `json:"resolution_rejections,omitempty"`
+	InterpretationSequence uint64                `json:"interpretation_sequence,omitempty"`
+	Assessments            []Assessment          `json:"assessments,omitempty"`
+	References             []Reference           `json:"references,omitempty"`
+	Planning               *PlanningState        `json:"planning,omitempty"`
+	Preparations           []Preparation         `json:"preparations,omitempty"`
+	Rounds                 []Round               `json:"rounds"`
+	Inputs                 []Input               `json:"inputs"`
+	Receipts               []Receipt             `json:"receipts"`
+	CurrentRound           string                `json:"current_round,omitempty"`
+	Waiting                bool                  `json:"waiting"`
 }
 type Command struct {
 	Kind   string
@@ -398,28 +399,28 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			continue
 		}
 		if !r.Published {
-			return ErrInvalid
+			return &ResolutionValidationError{Code: "round_not_published"}
 		}
 		if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.TurnID == turn && p.ParticipantID == r.ParticipantID }) {
-			return ErrInvalid
+			return &ResolutionValidationError{Code: "round_not_prepared"}
 		}
 		seen := map[string]bool{}
-		for _, resolution := range resolutions {
+		for resolutionIndex, resolution := range resolutions {
 			if seen[resolution.QuestionID] {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "duplicate_question", ResolutionIndex: resolutionIndex + 1}
 			}
 			seen[resolution.QuestionID] = true
 			if strings.TrimSpace(resolution.Explanation) == "" || len(resolution.ResponseIDs) == 0 && !resolution.Obsolete {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "missing_explanation_or_evidence", ResolutionIndex: resolutionIndex + 1}
 			}
 			if !slices.ContainsFunc(r.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "question_not_in_round", ResolutionIndex: resolutionIndex + 1}
 			}
 			if r.SupersededBy != "" && latestResolution(*r, resolution.QuestionID) == nil {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "superseded_question_without_interpretation", ResolutionIndex: resolutionIndex + 1}
 			}
 			if !s.canRevise(latestResolution(*r, resolution.QuestionID), resolution) {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "historical_change_requires_correction", ResolutionIndex: resolutionIndex + 1}
 			}
 			// A historical interpretation may propagate to the current unchanged
 			// question. Validate its governing decision too, so archived obsolescence
@@ -427,14 +428,14 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			if r.SupersededBy != "" {
 				for _, current := range s.Rounds {
 					if current.ID == s.CurrentRound && current.ParticipantID == r.ParticipantID && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) && !s.canRevise(latestResolution(current, resolution.QuestionID), resolution) {
-						return ErrInvalid
+						return &ResolutionValidationError{Code: "current_change_requires_correction", ResolutionIndex: resolutionIndex + 1}
 					}
 				}
 			}
 			// A later-round answer can govern a historical question through a
 			// recorded correction. Its amendments retain that evidence scope;
 			// unrelated answers do not acquire it merely by sharing a round.
-			for _, id := range resolution.ResponseIDs {
+			for responseIndex, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
 					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID) || slices.ContainsFunc(r.Resolutions, func(old Resolution) bool {
 						return old.QuestionID == resolution.QuestionID && slices.ContainsFunc(old.ResponseIDs, func(prior string) bool {
@@ -442,7 +443,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 						})
 					}))
 				}) {
-					return ErrInvalid
+					return &ResolutionValidationError{Code: "response_not_valid_for_question", ResolutionIndex: resolutionIndex + 1, ResponseIndex: responseIndex + 1}
 				}
 			}
 		}
@@ -457,7 +458,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 				}
 			}
 			if !s.resolutionCurrent(*resolution) {
-				return ErrInvalid
+				return &ResolutionValidationError{Code: "unresolved_competing_evidence", ResolutionIndex: index + 1}
 			}
 		}
 		for _, resolution := range resolutions {
@@ -479,7 +480,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 		}
 		return nil
 	}
-	return ErrInvalid
+	return &ResolutionValidationError{Code: "round_not_found"}
 }
 
 // A live decision requires an explicit amendment or assessed correction link,

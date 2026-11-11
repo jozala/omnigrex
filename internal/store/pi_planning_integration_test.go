@@ -97,6 +97,16 @@ func testPiPlanningWorkflow(t *testing.T) {
 	if err = json.Unmarshal(raw, &state); err != nil {
 		t.Fatal(err)
 	}
+	if len(state.ResolutionRejections) != 1 || state.ResolutionRejections[0].Validation.Code != "response_not_valid_for_question" {
+		t.Fatal("missing durable resolution rejection", state.ResolutionRejections)
+	}
+	for _, round := range state.Rounds {
+		for _, resolution := range round.Resolutions {
+			if resolution.OriginOperationID == state.ResolutionRejections[0].OperationID {
+				t.Fatal("rejection fabricated interpretation origin")
+			}
+		}
+	}
 	if state.Planning.ReadyRevision == "" || len(state.Planning.Revisions) != 1 || len(state.Planning.Revalidations) != 1 {
 		t.Fatal("history missing", state.Planning)
 	}

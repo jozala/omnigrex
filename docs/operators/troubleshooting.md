@@ -90,6 +90,13 @@ An absent archive is not a readiness failure, and log contents do not establish 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 Definite failures place safe details in `tool_invocations.last_error`; unknown outcomes remain under reconciliation.
 
+For `resolve_clarification`, an ordinary tool result with `recorded: false` and `application: not_applied` is a definite validation rejection of the entire batch, not a recorded interpretation.
+The canonical reason and one-based resolution/response positions identify the internal request mistake without exposing human text.
+The agent should correct its evidence selection under a fresh operation identity, using the current explicit answer for revised questions rather than indiscriminately citing older answers to replaced questions.
+It need not ask the human to repeat a sufficient answer or request Human Handoff solely for this rejection.
+Identical-operation replay returns the same rejection; changed arguments do not repair the old invocation.
+A committed operation-specific rejection receipt also permits recovery after a lost acknowledgment; absent receipts or frozen history do not prove non-application.
+Unknown outcomes still require exact-operation reconciliation, not a new-ID retry.
 For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's orchestrator-owned `origin_operation_id`, not just its text or response IDs.
 Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.
 Historical entries without an origin remain preserved but cannot prove an uncertain operation's effect; normal reconciliation retries or explicit Human Handoff handle missing proof.

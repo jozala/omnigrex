@@ -62,8 +62,10 @@ try {
       const input=envelope.human_input??[];
       const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>i.kind!=='confirm-plan');
       const confirmation=input.find(i=>i.kind==='confirm-plan');
-      const step=toolStep-(input.length?1:0);
-      const result=index=>JSON.parse(text(results[index+(input.length?1:0)].content));
+      const recovery = rounds.length===2 && !input.some(i=>i.kind==='amend'||i.kind==='confirm-plan');
+      const rawStep=toolStep-(input.length?1:0);
+      const step=rawStep-(recovery?2:0);
+      const result=index=>JSON.parse(text(results[index+(input.length?1:0)+(recovery?2:0)].content));
       const amended=input.some(i=>i.kind==='amend');
       const stale=rounds.length===2&&!amended&&!confirmation;
       const offset=rounds.length?1:0;
@@ -76,7 +78,11 @@ try {
       }else if(amended && step===0){
         const amendment=input.find(i=>i.kind==='amend');
         name='omnigrex_resolve_clarification';args={operation_id:'reinterpret-audience',round_id:rounds[0].id,resolutions:[{question_id:'Q1',response_ids:[amendment.id,...input.filter(i=>i.kind==='steer').map(i=>i.id)],explanation:'The explicit amendment replaces the prior audience: users without repository access. Use the steering choice of a standalone operator CLI; no repository plugin or accounts.'}]};
+      }else if(recovery && rawStep<2){
+        if(rawStep===1){const rejected=JSON.parse(text(results.at(-1).content));if(rejected.recorded!==false||rejected.application!=='not_applied'||rejected.reason!=='response_not_valid_for_question')throw new Error('resolution rejection masked by Pi');}
+        const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:'invalid-resolution-evidence',round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:[decisions[0].id,...input.map(i=>i.id)],explanation:'Deliberately invalid older-question evidence for recovery qualification.'}]};
       }else if(rounds.length&&step===0){
+        if(recovery){const first=JSON.parse(text(results.at(-2).content)), replay=JSON.parse(text(results.at(-1).content));if(Object.keys(first).length!==Object.keys(replay).length||Object.keys(first).some(key=>first[key]!==replay[key]))throw new Error('rejection replay changed');}
         const round=rounds.at(-1);name='omnigrex_resolve_clarification';args={operation_id:`resolve-${round.id}`,round_id:round.id,resolutions:[{question_id:round.questions[0].id,response_ids:input.map(i=>i.id),explanation:'Use the explicit human choice; replace proposed retention with ephemeral local status after the second answer.'}]};
       }else if(rounds.length===0){
         if(step===0){name='omnigrex_request_clarification';args={operation_id:'planning-ask-1',questions:[{id:'Q1',body:'README.md establishes a minimal repository, not an existing onboarding service. Should we target small teams without external accounts? I recommend this bounded scope.'}]};}
