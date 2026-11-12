@@ -118,23 +118,24 @@ func QualificationScript(architecture string, content json.RawMessage) (string, 
 	var script strings.Builder
 	if contract.Version == 2 {
 		for _, executable := range contract.Executables {
-			fmt.Fprintf(&script, "test -x '%s'\n", executable)
+			fmt.Fprintf(&script, "omnigrex_check='executable %s'\ntest -x '%s'\n", executable, executable)
 		}
-		fmt.Fprintf(&script, "test \"$(/usr/local/bin/omnigrex-environment contract-version)\" = '%s'\n", contract.BootstrapContract)
+		fmt.Fprintf(&script, "omnigrex_check='bootstrap identity'\ntest \"$(/usr/local/bin/omnigrex-environment contract-version)\" = '%s'\n", contract.BootstrapContract)
 	}
 
 	script.WriteString(`
+omnigrex_check='owned directories'
 for directory in /opt /opt/omnigrex /opt/omnigrex/pi; do
   test -d "$directory" && test ! -L "$directory"
 done
 `)
-	fmt.Fprintf(&script, "test \"$(/usr/local/bin/node --version)\" = '%s'\n", contract.NodeVersion)
-	fmt.Fprintf(&script, "printf '%%s  %%s\\n' '%s' /usr/local/bin/mise | sha256sum -c -\n", contract.MiseSHA256)
+	fmt.Fprintf(&script, "omnigrex_check='Node version'\ntest \"$(/usr/local/bin/node --version)\" = '%s'\n", contract.NodeVersion)
+	fmt.Fprintf(&script, "omnigrex_check='mise checksum'\nprintf '%%s  %%s\\n' '%s' /usr/local/bin/mise | sha256sum -c -\n", contract.MiseSHA256)
 	for _, file := range contract.Files {
-		fmt.Fprintf(&script, "test -f '/opt/omnigrex/pi/%s' && test ! -L '/opt/omnigrex/pi/%s'\n", file.Name, file.Name)
-		fmt.Fprintf(&script, "printf '%%s  %%s\\n' '%s' '/opt/omnigrex/pi/%s' | sha256sum -c -\n", file.SHA256, file.Name)
+		fmt.Fprintf(&script, "omnigrex_check='owned file %s'\ntest -f '/opt/omnigrex/pi/%s' && test ! -L '/opt/omnigrex/pi/%s'\n", file.Name, file.Name, file.Name)
+		fmt.Fprintf(&script, "omnigrex_check='owned checksum %s'\nprintf '%%s  %%s\\n' '%s' '/opt/omnigrex/pi/%s' | sha256sum -c -\n", file.Name, file.SHA256, file.Name)
 	}
-	script.WriteString("/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/omnigrex/pi/qualify-packages.mjs\n")
+	script.WriteString("omnigrex_check='locked package integrity'\n/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/omnigrex/pi/qualify-packages.mjs\n")
 	return script.String(), nil
 }
 

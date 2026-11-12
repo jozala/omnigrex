@@ -195,3 +195,23 @@ If an agent reports unavailable current-base verification, consult the [snapshot
 Do not inject credentials into an active checkout or replace a live Session to bypass acquisition failures.
 A stale result needs a new operation identity and local verification of the newly returned pair; ambiguous local installation is not evidence that acquisition succeeded.
 Use the existing execution/storage recovery procedures on this page for infrastructure failures, preserving affected workspace evidence before replacement.
+
+## Runtime resource qualification failures
+
+`qualify configured Runtime Profile` now includes the inspected/bound image, platform, and SHA-256 of the expected **canonical resource inventory**, not a hash of guest output or an image digest comparison.
+Fresh/default admission also identifies the selected production Pi bundle image and source.
+Setting `OMNIGREX_PI_IMAGE` chooses an image to inspect; it does not adopt a published candidate or change `agent/pi/selected-bundle.json`.
+A derived image with a different digest is compatible if its actual approved resources match exactly.
+
+A `guest-reported failed check` identifies an allowlisted check reached before an observed nonzero exit: required executable, bootstrap identity, Node version, mise checksum, owned directory/file/checksum, or locked package integrity.
+An `owned checksum runner.mjs` failure, for example, means the bound runner check failed; it is not permission to install a replacement at startup.
+Package integrity failures identify the locked-package check, not an unverified package name or digest copied from arbitrary output.
+`unknown stage (diagnostic unavailable or untrusted)` means no trustworthy complete bounded label was captured, or execution did not establish a nonzero exit; it must not be interpreted as a specific hash mismatch.
+Native/cleanup failures, image availability errors, cancellation, deadlines, and unknown execution effects remain separate underlying errors; a diagnostic label does not prove cleanup succeeded or an uncertain command stopped.
+Qualification does not forward arbitrary stdout/stderr; excessive, malformed, conflicting, or truncated diagnostic capture loses check detail rather than exposing raw output.
+For native SDK failures use the existing restricted [SDK diagnostics](observability.md#microsandbox-sdk-failures); review sensitive logs privately before sharing.
+
+For fresh Participants, build and qualify a self-contained image against the selected bundle, then provision the exact qualified digest in the configured backend and coordinate repository image pins using [Runtime Profile upgrades](upgrades.md#runtime-profile-image-change).
+No network installation or automatic Pi defaults repair an incompatible image.
+For a retained Participant, the error's bound image and inventory are its original expectation, even if production selection has changed.
+Restore availability of that exact historical image and canonical ledger contract using the [restore procedure](restore.md); do not delete state, reconstruct a missing inventory from current defaults, or rebind/replace a protected Participant to silence qualification.

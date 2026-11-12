@@ -206,12 +206,17 @@ func (engine *executionEngine) Create(ctx context.Context, request execution.Req
 	return wrapped, err
 }
 
-func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, resources json.RawMessage) error {
+func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, ledger execution.Ledger, key execution.Key, golden bool, resources json.RawMessage) (err error) {
 	options, err := buildSubpathCreateOptions(spec)
 	if err != nil || options.Config == nil {
 		return err
 	}
+	var output *environment.QualificationOutput
 	if golden {
+		output = environment.NewQualificationOutput(spec.Platform.Architecture, key.RuntimeProfileName, resources)
+		defer func() {
+			err = environment.QualificationFailure(spec.Image, spec.Platform.OS, spec.Platform.Architecture, resources, output, err)
+		}()
 		script, err := environment.QualificationScript(spec.Platform.Architecture, key.RuntimeProfileName, resources)
 		if err != nil {
 			return noExecutionEffectsError{cause: err}
@@ -230,7 +235,7 @@ func prepareExecutionSubpaths(ctx context.Context, api dockerAPI, spec Spec, led
 	}
 	return runManagedOneShotContainer(ctx, api, options, operation,
 		func(ctx context.Context, id string) error { return ledger.BindSetupResource(ctx, key, id) },
-		func(ctx context.Context, id string) error { return ledger.RecordSetupStopped(ctx, key, id) })
+		func(ctx context.Context, id string) error { return ledger.RecordSetupStopped(ctx, key, id) }, output)
 }
 
 func (engine *executionEngine) recordCreationFailure(ctx context.Context, failure error) error {

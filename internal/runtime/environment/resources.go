@@ -31,9 +31,13 @@ func QualificationScript(architecture, runtime string, resourceContracts ...json
 		}
 		return `
 set -eu
-trap 'status=$?; if [ "$status" -ne 0 ]; then printf "%s\n" "Pi resource qualification failed: image must contain the exact bound runtime inventory before repository setup; for new Participants build and qualify a self-contained image against agent/pi/selected-bundle.json, then explicitly provision and promote its digest; retained Participants require their original image. No runtime is installed automatically." >&2; fi' 0
+omnigrex_check='unknown stage'
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "Pi resource check failed: %s\n" "$omnigrex_check" >&2; fi' 0
+omnigrex_check='executable /usr/local/bin/omnigrex-environment'
 test -x /usr/local/bin/omnigrex-environment
+omnigrex_check='bootstrap identity'
 test "$(/usr/local/bin/omnigrex-environment contract-version)" = omnigrex-environment/v1
+omnigrex_check='executable /usr/bin/git'
 test -x /usr/bin/git
 ` + script + "\ntrap - 0\n", nil
 	}
