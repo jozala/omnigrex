@@ -64,6 +64,10 @@ func (output *QualificationOutput) Write(data []byte) (int, error) {
 				} else {
 					output.check = label
 				}
+			} else if strings.HasPrefix(line, "Pi resource check failed:") {
+				// An unexpected diagnostic-looking line makes the capture
+				// ambiguous, even if another complete label looked valid.
+				output.Invalidate()
 			}
 			output.line = output.line[:0]
 		} else if len(output.line) < 256 {

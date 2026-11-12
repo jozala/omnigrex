@@ -31,6 +31,8 @@ func TestQualificationOutputBoundary(t *testing.T) {
 		{"binary", "Pi resource check failed: Node version\x00\n", true, false},
 		{"oversized line", strings.Repeat("x", 257) + "\nPi resource check failed: Node version\n", true, false},
 		{"oversized stream", strings.Repeat("x\n", 8193) + "Pi resource check failed: Node version\n", true, false},
+		{"unexpected after valid", "Pi resource check failed: Node version\nPi resource check failed: token=fake\n", true, false},
+		{"malformed after valid", "Pi resource check failed: Node version\nPi resource check failed:Node version\n", true, false},
 		{"conflicting", "Pi resource check failed: Node version\nPi resource check failed: mise checksum\n", true, false},
 		{"trailing partial", "Pi resource check failed: Node version\npartial", true, false},
 	} {
