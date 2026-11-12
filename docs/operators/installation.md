@@ -50,8 +50,14 @@ Parallel installations must override every storage/network name and matching vol
 
 ## 3. Resolve and provision images
 
-Read the exact product digest references from `../build.json` (`images.orchestrator`, `images.orchestrator-microsandbox`, and `images.pi`).
-Set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend orchestrator, `OMNIGREX_PI_IMAGE` to generic Pi, and `OMNIGREX_PI_PLATFORM=linux/amd64` in the private `.env`.
+For runs that provide it, open the exact source run/attempt recorded in `candidate.json` from the selected Release in [Actions CI](https://github.com/jozala/omnigrex/actions/workflows/ci.yaml).
+The `release-candidate` job's **Qualified main CI candidate — deployment configuration** summary provides copyable Docker and Microsandbox snippets; the same Markdown is downloadable as `deployment-guidance-RUN-ATTEMPT` while its 14-day artifact retention lasts.
+No clone, Go, or mise is needed to read it.
+Choose one backend and copy only its three image/platform settings into your private `.env`; do not replace your installation configuration or credentials.
+This is qualification of a main CI candidate, not manual alpha/stable designation or deployment approval: use the source run/attempt of your chosen Release, never the latest green run.
+Do not use the early publication table or its unselected Pi candidate as an installation recommendation.
+If guidance is absent or expired, the retained Release assets remain authoritative; read the exact product digest references from `../build.json` (`images.orchestrator`, `images.orchestrator-microsandbox`, and `images.pi`).
+Set `OMNIGREX_ORCHESTRATOR_IMAGE` to the selected backend orchestrator, `OMNIGREX_PI_IMAGE` to the packaged selected Pi, and `OMNIGREX_PI_PLATFORM` to the packaged `platform` (`linux/amd64`) in the private `.env`.
 Pull those **exact digest references**, not the mutable commit tags:
 
 ```sh

@@ -358,6 +358,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: go run ./scripts/release ready candidate
+      - name: Download qualified repository environment
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: development-environment
+          path: qualified-development
+      - name: Render qualified deployment guidance
+        run: |
+          go run ./scripts/release guidance candidate qualified-development/development-environment.yaml > deployment-guidance.md
+          cat deployment-guidance.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload derived deployment guidance
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: deployment-guidance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-guidance.md
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload ready candidate (not a public release)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
         with:

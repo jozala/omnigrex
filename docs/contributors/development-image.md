@@ -64,6 +64,8 @@ CI publishes `ghcr.io/jozala/omnigrex/development:sha-<commit>` and records the 
 The `development-smoke-microsandbox` job runs actual checkout and Docker integration checks across two fresh environments sharing Participant caches and Pi Session.
 It tests nested Compose networking/volumes/cleanup, concurrent orphan/sentinel containers, historical/current PID persistence, nested background termination, and real Pi diagnostic MCP initialization.
 Only a successful job emits the digest-pinned `development-environment` artifact for repository promotion.
+After product release readiness also succeeds, the `release-candidate` job reuses this artifact in its qualified deployment guidance summary and `deployment-guidance-RUN-ATTEMPT` Markdown artifact.
+The development YAML is specific to the Omnigrex repository and independently adopted, not an automatic update for every managed repository or part of the product release payload.
 
 To repeat qualification on a Linux/amd64 Docker host with KVM:
 

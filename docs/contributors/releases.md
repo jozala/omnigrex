@@ -15,6 +15,16 @@ Both product smoke jobs verify and extract that payload and use its packaged Com
 Only afterward does `release-candidate` record job IDs and upload `release-candidate-RUN-ATTEMPT` with a machine-readable `candidate.json`, deployment payload, and checksums.
 Main CI creates no version tag or GitHub Release.
 
+The early **Build/publication output — not deployment approval** summary separates selected production Pi from any newly published, unselected Pi candidate.
+Changing `.env` alone does not adopt a candidate or change the approved runtime resource inventory.
+After `ready` verifies the payload and all required successful job identities, `release-candidate` renders **Qualified main CI candidate — deployment configuration** in its job summary and the separate `deployment-guidance-RUN-ATTEMPT` artifact (14-day retention).
+It contains backend-specific non-secret `.env` snippets and the existing qualified `development-environment` YAML, independently adopted for this repository only.
+The renderer consumes verified packaged `build.json`/candidate metadata, not current main or the last built Pi candidate; it does not require a newly published Pi candidate.
+Failed, cancelled, skipped, incomplete, or missing required qualification produces no ready guidance.
+This derived presentation is not another selection record or a new release asset; archives, checksums, designation, and byte-preserving promotion remain unchanged.
+For local fixture inspection, `go run ./scripts/release guidance CANDIDATE_DIRECTORY QUALIFIED_DEVELOPMENT_YAML` prints the same Markdown and rejects missing readiness evidence or invalid inputs.
+Operators do not need a checkout or this command: use the source run's summary/artifact and packaged release metadata as described in [installation](../operators/installation.md#3-resolve-and-provision-images).
+
 Schema-2 payloads capture the complete selected `pi_bundle` with its original source commit and qualification run/attempt/job IDs, separately from orchestrator build identity.
 Packaging resolves Pi from the checked-in selection, not a mutable tag or the newly published Pi candidate.
 Both exact-digest product smokes qualify the current orchestrator with that selected Pi.

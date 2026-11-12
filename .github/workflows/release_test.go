@@ -97,3 +97,37 @@ func TestAppCreatedTagsCannotTriggerReleaseOrCIBuildLoops(t *testing.T) {
 	}
 	// The manual-only event check above covers both release entry points.
 }
+
+func TestDeploymentGuidanceFollowsReadiness(t *testing.T) {
+	job := readCIJobs(t)["release-candidate"]
+	if job.If != "github.event_name == 'push' && github.ref == 'refs/heads/main'" {
+		t.Fatal("guidance must remain main-push only")
+	}
+	ready, download, render, upload := -1, -1, -1, -1
+	for i, step := range job.Steps {
+		if step.Run == "go run ./scripts/release ready candidate" {
+			ready = i
+		}
+		if step.With["name"] == "development-environment" {
+			download = i
+			if step.With["path"] != "qualified-development" {
+				t.Fatal("wrong development source")
+			}
+		}
+		if strings.Contains(step.Run, "go run ./scripts/release guidance") {
+			render = i
+			if step.If != "" || !strings.Contains(step.Run, "guidance candidate qualified-development/development-environment.yaml > deployment-guidance.md") || !strings.Contains(step.Run, `cat deployment-guidance.md >> "$GITHUB_STEP_SUMMARY"`) {
+				t.Fatal("guidance must fail closed and reuse verified inputs")
+			}
+		}
+		if step.With["name"] == "deployment-guidance-${{ github.run_id }}-${{ github.run_attempt }}" {
+			upload = i
+			if step.With["path"] != "deployment-guidance.md" || step.With["retention-days"] != "14" || step.If != "" {
+				t.Fatal("derived guidance must use existing retention and success gating")
+			}
+		}
+	}
+	if ready < 0 || download <= ready || render <= download || upload <= render {
+		t.Fatal("guidance must follow readiness and qualified artifact download")
+	}
+}

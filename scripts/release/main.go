@@ -33,8 +33,16 @@ func identityFromEnv() (Build, error) {
 	return b, nil
 }
 func execute(ctx context.Context, args []string) error {
+	if len(args) == 3 && args[0] == "guidance" {
+		data, err := guidance(args[1], args[2])
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(data)
+		return err
+	}
 	if len(args) != 2 {
-		return errors.New("usage: release pack|verify|ready|alpha|stable OUTPUT_DIRECTORY")
+		return errors.New("usage: release pack|verify|ready|alpha|stable OUTPUT_DIRECTORY, or release guidance OUTPUT_DIRECTORY QUALIFIED_DEVELOPMENT_YAML")
 	}
 	command, dir := args[0], args[1]
 	if command == "pack" {
