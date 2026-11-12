@@ -283,3 +283,30 @@ func (s *Store) RejectPlanningPublication(ctx context.Context, lease AgentTurnLe
 		return collaboration.ErrInvalid
 	})
 }
+
+// GetPlanningRejectionRecord reads only the immutable structural prerequisites
+// of one committed rejection. Unlike frozen history indices, its exact receipt
+// identity is available in the rejecting Turn and remains readable on continuation.
+// Workflow, Participant and read-Turn ownership are checked independently.
+func (s *Store) GetPlanningRejectionRecord(ctx context.Context, workflowID, participant, turn, rejection string, index, offset int) (collaboration.RecordPage, error) {
+	if rejection == "" || index < 0 || offset < 0 {
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	var raw []byte
+	var total int
+	err := s.pool.QueryRow(ctx, `SELECT receipt->'decisions'->$5::int, jsonb_array_length(receipt->'decisions')
+ FROM work_item_collaboration c,
+ LATERAL jsonb_array_elements(c.state->'planning'->'non_publications') receipt
+ WHERE c.workflow_id=$1 AND receipt->>'participant_id'=$2 AND receipt->>'operation_id'=$4
+ AND receipt->>'reason'='historical_decisions_unresolved'
+ AND EXISTS (SELECT 1 FROM agent_turns t JOIN agent_sessions session ON session.id=t.agent_session_id
+ WHERE t.id=$3 AND t.workflow_id=$1 AND session.agent_participant_id::text=$2)
+ AND $5 < jsonb_array_length(receipt->'decisions')`, workflowID, participant, turn, rejection, index).Scan(&raw, &total)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return collaboration.RecordPage{}, collaboration.ErrInvalid
+	}
+	if err != nil {
+		return collaboration.RecordPage{}, err
+	}
+	return collaboration.PageRecord(raw, total, index, offset)
+}

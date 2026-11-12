@@ -36,6 +36,13 @@ Current-round resolution and complete input assessments are not substitutes for 
 Exact replay stays rejected after reconciliation; a fresh complete pair uses a new identity only after definite rejection.
 Ambiguous commits remain unknown and require exact-operation recovery.
 
+Following [0056](0056-bound-collaboration-prompt-projections.md) and [0058](0058-retain-paired-planning-checkpoints-in-collaboration.md), keep the full immutable rejection in durable state but limit its complete compact-JSON agent-facing result to 16 KiB, reserving room for JSONB replay whitespace and outer MCP/Session escaping.
+Return a deterministic prefix, total decision count and exact receipt identity with continuation for every remaining prerequisite; even one oversized decision must fall back to lossless chunked retrieval.
+Extend `get_collaboration_record` with the `planning_rejection` collection and required `rejection_id` for this operation-bound read, scoped to the Workflow and Participant and available immediately in the rejecting Turn.
+Reuse 4096-character JSON-text chunks, fingerprints and index/offset continuation; unlike frozen history indices this is a read of a named immutable receipt, not a live history listing or proof inferred from absence.
+Reading the receipt neither reconciles interpretations nor weakens publication fences.
+Increasing Pi's entry limit, truncating the stored receipt, or returning the entire list would break retained-Session compatibility or omit prerequisites.
+
 ## Consequences
 
 Developer, Reviewer and Planner share the same nonterminal result contract.

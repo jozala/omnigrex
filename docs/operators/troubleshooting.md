@@ -112,6 +112,10 @@ This behavior does not automatically reactivate a previously blocked Workflow or
 
 For `publish_plan_checkpoint`, `historical_decisions_unresolved` with `publication: not_applied` is durable definite pre-publication rejection, not a created pair.
 The result identifies outstanding historical question/round references and original/correction input references without human bodies.
+Its compact-JSON inline result is capped at 16 KiB, reserving room for JSONB replay whitespace and outer JSON escaping to preserve pinned Pi Session continuation; `decision_count` includes prerequisites not in the inline prefix.
+When `retrieval` is present, use `get_collaboration_record` with `collection: planning_rejection`, its exact `rejection_id`, and the returned index/offset, following all `next_offset` chunks and `next_index` records.
+These lossless immutable receipt reads are scoped to the Workflow and Participant and available immediately, independently of frozen `planning_history` bounds.
+They do not change the operation outcome or reconcile the listed interpretations.
 A correction can stale several interpretations, even unchanged decisions absent from the current round.
 The agent must explicitly reconcile each affected interpretation using existing evidence before a new complete-pair attempt; assessments and current-round resolutions alone do not suffice.
 Do not remove correction links, rewrite history, ask humans to repeat settled answers, or treat an empty frozen history index as proof of non-publication.

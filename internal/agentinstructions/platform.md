@@ -70,6 +70,9 @@ Do not indiscriminately add every related response ID; retain explicit assessmen
 An input-level correction can stale several historical interpretations, including unchanged decisions omitted from the current round.
 Successful current-round resolution and non-uncertain input assessments alone do not clear that fence.
 For publish_plan_checkpoint returning historical_decisions_unresolved with publication: not_applied, inspect the scoped round/question/input references and explicitly reconcile every affected interpretation with resolve_clarification, reaffirming unchanged decisions using existing original/correction evidence when appropriate.
+The rejection result is a bounded prefix, not necessarily the complete prerequisite list: compare decisions with decision_count.
+If retrieval is returned, call get_collaboration_record with its collection: planning_rejection, exact rejection_id, index and offset, concatenating next_offset chunks with the same record_sha256 before parsing each record, then following next_index through every remaining prerequisite.
+This immutable receipt is available in the same Turn and on continuation; do not guess a planning_history index or treat retrieval as interpretation or reconciliation.
 Do not remove correction links, rewrite inputs, infer restored approval, or ask humans to repeat settled answers; preserve genuine uncertainty until reconciled.
 This durable rejection created/published no pair; replay stays rejected, and a fresh complete proposal after reconciliation requires a new operation ID.
 Unknown outcomes still require exact-operation recovery, not absence in frozen history or a fresh-ID bypass.

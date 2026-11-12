@@ -66,6 +66,9 @@ func (backend *ProductionBackend) publishPlanningCheckpoint(ctx context.Context,
 	}
 	return planningCheckpointResult(r)
 }
+
+const maxPlanningRejectionResultBytes = 16 * 1024
+
 func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.RawMessage, error) {
 	if r == nil || (r.Reason != "late_input" && r.Reason != "unread_input" && r.Reason != "interrupted_before_reservation" && r.Reason != "payload_too_large" && r.Reason != "interrupted_before_publication" && r.Reason != "historical_decisions_unresolved") {
 		return nil, ErrInvalidInvocation
@@ -85,8 +88,34 @@ func planningNonPublicationResult(r *collaboration.CheckpointNotApplied) (json.R
 	if r.Reason == "historical_decisions_unresolved" {
 		result["status"] = "not_applied"
 		result["next_action"] = "reconcile_historical_decisions"
-		result["decisions"] = r.Decisions
-		result["instructions"] = "No pair was created or published. Read the scoped historical rounds and input evidence. Explicitly reconcile every affected interpretation using resolve_clarification, including reaffirming unchanged decisions against original/correction evidence. Current-round resolutions and input assessments alone do not clear historical decisions. Preserve correction links and history; do not ask humans to repeat settled answers. If evidence conflicts, keep uncertainty and ask for reconciliation. Replay returns this rejection unchanged; after reconciliation publish the complete pair with a new operation ID. Unknown outcomes still require exact-operation recovery."
+		result["rejection_id"] = r.OperationID
+		result["decision_count"] = len(r.Decisions)
+		result["decisions"] = []collaboration.StaleDecision{}
+		result["instructions"] = "No pair was created or published. Read the scoped historical rounds and input evidence. Explicitly reconcile every affected interpretation using resolve_clarification, including reaffirming unchanged decisions against original/correction evidence. Current-round resolutions and input assessments alone do not clear historical decisions. Preserve correction links and history; do not ask humans to repeat settled answers. If evidence conflicts, keep uncertainty and ask for reconciliation. Replay returns this rejection unchanged; after reconciliation publish the complete pair with a new operation ID. Unknown outcomes still require exact-operation recovery. If retrieval is present, read every remaining decision with get_collaboration_record using that exact rejection_id and collection; concatenate next_offset chunks, then follow next_index. This immutable receipt is available immediately and is not a guessed frozen planning_history index."
+		var previous json.RawMessage
+		// Budget the complete encoded result, not decision count or source text.
+		// 16 KiB compact JSON leaves ample room for JSONB replay whitespace
+		// (less than twofold for this schema) and outer MCP/Session escaping
+		// (at most sixfold), below the pinned 1 MiB entry ceiling.
+		for count := 0; ; count++ {
+			if count < len(r.Decisions) {
+				result["retrieval"] = map[string]any{"collection": "planning_rejection", "rejection_id": r.OperationID, "index": count, "offset": 0}
+			} else {
+				delete(result, "retrieval")
+			}
+			raw, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			if len(raw) > maxPlanningRejectionResultBytes {
+				return previous, nil
+			}
+			previous = raw
+			if count == len(r.Decisions) {
+				return raw, nil
+			}
+			result["decisions"] = r.Decisions[:count+1]
+		}
 	}
 	return json.Marshal(result)
 }
