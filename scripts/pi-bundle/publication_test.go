@@ -27,6 +27,14 @@ func TestPublicationDoesNotAdoptTheRebuiltPiCandidate(t *testing.T) {
 		}
 	}
 	write("publish.sh", string(script))
+	summaryScript, err := os.ReadFile("../write-publication-summary.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write("scripts/write-publication-summary.sh", string(summaryScript))
 	write("go", "#!/bin/sh\nset -eu\ntest \"$*\" = 'run ./scripts/pi-bundle image'\nprintf '%s\\n' \"$SELECTED\"\n")
 	const candidateDigest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	write("docker", `#!/bin/sh
@@ -58,6 +66,15 @@ esac
 	}
 	if !strings.Contains(string(outputs), "pi_image="+bundle.Image+"\n") || !strings.Contains(string(outputs), "pi_candidate_image=ghcr.io/jozala/omnigrex/pi@sha256:"+candidateDigest+"\n") {
 		t.Fatalf("candidate conflated with selected Pi: %s", outputs)
+	}
+	summary, err := os.ReadFile(filepath.Join(dir, "summary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"not deployment approval", "Selected production Pi: `" + bundle.Image + "`", "Pi candidate — **Not selected for production**: `ghcr.io/jozala/omnigrex/pi@sha256:" + candidateDigest + "`", "Changing `.env` alone does not adopt"} {
+		if !strings.Contains(string(summary), want) {
+			t.Errorf("publication summary missing %q", want)
+		}
 	}
 	events, err := os.ReadFile(filepath.Join(dir, "events"))
 	if err != nil {

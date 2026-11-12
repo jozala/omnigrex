@@ -23,6 +23,9 @@ Historical repair requires separate authorization; never reset the database or d
 ## Orchestrator-only upgrade
 
 An ordinary orchestrator-only upgrade leaves the checked-in Pi bundle selection, installation Pi digest/platform, and repository development-image pins unchanged.
+For copyable image/platform settings, use the [qualified source-run guidance](installation.md#3-resolve-and-provision-images) for your selected Release, not the early publication table or the latest built Pi candidate.
+These snippets do not replace installation credentials or authorize repository environment adoption.
+
 The authoritative selection is `agent/pi/selected-bundle.json`, also captured in schema-2 release `build.json` as `pi_bundle`; it is independent of the orchestrator commit and unselected checkout runtime candidates.
 Compare the selected bundle and all other immutable process-contract changes before treating an upgrade as orchestrator-only.
 Retained Participants resolve their exact original canonical contracts from the ledger; do not reconstruct them from the selection.
