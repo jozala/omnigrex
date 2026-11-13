@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jozala/omnigrex/internal/role"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
@@ -318,4 +320,99 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 func (f *clarificationLedger) SaveCollaborationArtifact(_ context.Context, _ store.AgentTurnLease, id string, artifact collaboration.RenderedPublication) error {
 	f.round.Artifact = &artifact
 	return nil
+}
+
+type rejectingResolutionLedger struct {
+	clarificationLedger
+	calls int
+	err   error
+}
+
+func (f *rejectingResolutionLedger) ResolveClarification(_ context.Context, _ store.AgentTurnLease, _, _ string, resolutions []collaboration.Resolution) error {
+	f.calls++
+	if f.err != nil {
+		return f.err
+	}
+	if len(resolutions[0].ResponseIDs) > 1 {
+		return &collaboration.ResolutionValidationError{Code: "response_not_valid_for_question", ResolutionIndex: 1, ResponseIndex: 1}
+	}
+	return nil
+}
+func TestResolutionGatewayRejectionReplayAndCorrectedRequest(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	ledger := &rejectingResolutionLedger{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fakeStore{}
+	gateway := newTestGateway(t, now, durable, backend)
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	call := func(operation, evidence string) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"resolve_clarification","arguments":{"operation_id":"`+operation+`","round_id":"R1","resolutions":[{"question_id":"Q2","response_ids":`+evidence+`,"explanation":"human-secret-body"}]}}}`))
+		return response.Body.String()
+	}
+	first := call("bad", `["old","current"]`)
+	replay := call("bad", `["old","current"]`)
+	if first != replay || strings.Contains(first, `"isError":true`) || !strings.Contains(first, `\"recorded\":false`) || !strings.Contains(first, "response_not_valid_for_question") || strings.Contains(first, "human-secret-body") || ledger.calls != 1 {
+		t.Fatalf("rejection/replay = %s / %s calls=%d", first, replay, ledger.calls)
+	}
+	corrected := call("corrected", `["current"]`)
+	if !strings.Contains(corrected, `\"recorded\":true`) || ledger.calls != 2 {
+		t.Fatal(corrected, ledger.calls)
+	}
+	ledger.err = errors.New("dependency credential-secret")
+	unknown := call("uncertain", `["current"]`)
+	if !strings.Contains(unknown, `"isError":true`) || strings.Contains(unknown, "credential-secret") || strings.Contains(unknown, "not_applied") {
+		t.Fatal(unknown)
+	}
+	ledger.err = mcp.OutcomeUnknown(&collaboration.ResolutionValidationError{Code: "response_not_valid_for_question"})
+	wrappedUnknown := call("uncertain-validation", `["current"]`)
+	if !strings.Contains(wrappedUnknown, `"isError":true`) || strings.Contains(wrappedUnknown, "not_applied") {
+		t.Fatal("uncertainty lost to validation classification", wrappedUnknown)
+	}
+	_, _, completed, failed, uncertain := durable.mutationCounts()
+	if completed != 2 || failed != 0 || uncertain != 2 {
+		t.Fatal(completed, failed, uncertain)
+	}
+}
+
+type durableRejectionLedger struct {
+	clarificationLedger
+	rejection *collaboration.ResolutionValidationError
+}
+
+func (f *durableRejectionLedger) GetResolutionRejection(_ context.Context, _, participant, operation string) (*collaboration.ResolutionValidationError, error) {
+	if participant != reconciliationContext().Turn.AgentParticipantID || operation != reconciliationMutationID {
+		return nil, nil
+	}
+	return f.rejection, nil
+}
+func TestResolutionRecoveryUsesExactDurableRejectionNotHistoryAbsence(t *testing.T) {
+	ledger := &durableRejectionLedger{rejection: &collaboration.ResolutionValidationError{Code: "response_not_valid_for_question", ResolutionIndex: 2, ResponseIndex: 1}}
+	reconciler, err := mcp.NewProductionReconciler(mcp.ProductionReconcilerConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publications: &reconciliationPublications{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation := reconciliationMutation(mcp.ToolResolveClarification, `{"operation_id":"resolve-rejection","round_id":"R1","resolutions":[{"question_id":"Q1","response_ids":["A1"],"explanation":"Explicit"}]}`)
+	scope := reconciliationContext()
+	mutation.ExternalService = "omnigrex"
+	mutation.ExternalResourceID = scope.WorkflowID
+	result, err := reconciler.Reconcile(context.Background(), scope, mutation)
+	if err != nil || result.Disposition != mcp.ReconciliationFound || !strings.Contains(string(result.Outcome.Result), `"recorded":false`) || strings.Contains(string(result.Outcome.Result), "origin_operation_id") {
+		t.Fatal(result, err)
+	}
+	ledger.rejection = nil
+	result, err = reconciler.Reconcile(context.Background(), scope, mutation)
+	if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
+		t.Fatal("absence converted to rejection", result, err)
+	}
 }

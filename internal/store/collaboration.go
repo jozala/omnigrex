@@ -253,7 +253,8 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 }
 
 func (s *Store) ResolveClarification(ctx context.Context, lease AgentTurnLease, operation, round string, resolutions []collaboration.Resolution) error {
-	return s.withLockedAgentTurnLease(ctx, lease, "resolve clarification", func(tx pgx.Tx, turn lockedTurn) error {
+	var rejection *collaboration.ResolutionValidationError
+	err := s.withLockedAgentTurnLease(ctx, lease, "resolve clarification", func(tx pgx.Tx, turn lockedTurn) error {
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return ErrMutationAdmissionClosed
 		}
@@ -296,11 +297,53 @@ func (s *Store) ResolveClarification(ctx context.Context, lease AgentTurnLease, 
 				return nil
 			}
 		}
+		for _, prior := range state.ResolutionRejections {
+			if prior.OperationID == operation && prior.ParticipantID == turn.AgentParticipantID {
+				copy := prior.Validation
+				rejection = &copy
+				return nil
+			}
+		}
 		if err = state.Resolve(round, turn.ID, bound); err != nil {
-			return err
+			if !errors.Is(err, collaboration.ErrInvalid) {
+				return err
+			}
+			rejection = &collaboration.ResolutionValidationError{Code: "invalid_resolution"}
+			var detail *collaboration.ResolutionValidationError
+			if errors.As(err, &detail) {
+				rejection = detail
+			}
+			state.ResolutionRejections = append(state.ResolutionRejections, collaboration.ResolutionRejection{OperationID: operation, ParticipantID: turn.AgentParticipantID, Validation: *rejection})
 		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
 	})
+	// An uncertain commit must never become a definite rejection.
+	if err != nil {
+		return err
+	}
+	if rejection != nil {
+		return rejection
+	}
+	return nil
+}
+
+// GetResolutionRejection reads durable operation-specific non-application evidence.
+func (s *Store) GetResolutionRejection(ctx context.Context, workflowID, participant, operation string) (*collaboration.ResolutionValidationError, error) {
+	var raw []byte
+	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	var state collaboration.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, err
+	}
+	for _, rejection := range state.ResolutionRejections {
+		if rejection.OperationID == operation && rejection.ParticipantID == participant {
+			copy := rejection.Validation
+			return &copy, nil
+		}
+	}
+	return nil, nil
 }
 
 // FindCollaborationWorkItem resolves an exact Issue, never a Pull Request,

@@ -240,21 +240,39 @@ func (backend *ProductionBackend) Execute(ctx context.Context, invocation Invoca
 	case ToolRefreshDefaultBranch:
 		return backend.refreshDefaultBranch(ctx, invocation)
 	case ToolGetCollaborationRecord:
-		reader, ok := backend.clarifications.(interface {
-			GetCollaborationRecord(context.Context, string, string, string, string, int, int) (collaboration.RecordPage, error)
-		})
-		if !ok {
-			return nil, ErrToolDependency
-		}
 		var args struct {
-			Collection string `json:"collection"`
-			Index      int    `json:"index"`
-			Offset     int    `json:"offset"`
+			Collection  string `json:"collection"`
+			RejectionID string `json:"rejection_id"`
+			Index       int    `json:"index"`
+			Offset      int    `json:"offset"`
 		}
 		if json.Unmarshal(invocation.Arguments, &args) != nil {
 			return nil, ErrInvalidInvocation
 		}
-		page, err := reader.GetCollaborationRecord(ctx, invocation.Scope.WorkflowID, invocation.Scope.AgentParticipantID, invocation.Scope.AgentTurnID, args.Collection, args.Index, args.Offset)
+		var page collaboration.RecordPage
+		if args.Collection == "planning_rejection" {
+			reader, ok := backend.clarifications.(interface {
+				GetPlanningRejectionRecord(context.Context, string, string, string, string, int, int) (collaboration.RecordPage, error)
+			})
+			if !ok {
+				return nil, ErrToolDependency
+			}
+			if args.RejectionID == "" {
+				return nil, ErrInvalidInvocation
+			}
+			page, err = reader.GetPlanningRejectionRecord(ctx, invocation.Scope.WorkflowID, invocation.Scope.AgentParticipantID, invocation.Scope.AgentTurnID, args.RejectionID, args.Index, args.Offset)
+		} else {
+			reader, ok := backend.clarifications.(interface {
+				GetCollaborationRecord(context.Context, string, string, string, string, int, int) (collaboration.RecordPage, error)
+			})
+			if !ok {
+				return nil, ErrToolDependency
+			}
+			if args.RejectionID != "" {
+				return nil, ErrInvalidInvocation
+			}
+			page, err = reader.GetCollaborationRecord(ctx, invocation.Scope.WorkflowID, invocation.Scope.AgentParticipantID, invocation.Scope.AgentTurnID, args.Collection, args.Index, args.Offset)
+		}
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}

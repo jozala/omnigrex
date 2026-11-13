@@ -64,6 +64,13 @@ func (backend *ProductionBackend) resolveClarification(ctx context.Context, invo
 		return nil, ErrInvalidInvocation
 	}
 	if err := backend.clarifications.ResolveClarification(ctx, invocation.lease, invocation.OperationID, request.RoundID, request.Resolutions); err != nil {
+		if IsOutcomeUnknown(err) {
+			return nil, err
+		}
+		var rejection *collaboration.ResolutionValidationError
+		if errors.As(err, &rejection) {
+			return resolutionRejectedResult(rejection)
+		}
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}
@@ -85,4 +92,23 @@ func (backend *ProductionBackend) artifactSaver(in Invocation) func(context.Cont
 		}
 		return nil
 	}
+}
+
+// Successful MCP transport is not successful resolution: retained Pi bridges
+// pass ordinary result content unchanged but mask tool errors.
+func resolutionRejectedResult(rejection *collaboration.ResolutionValidationError) (json.RawMessage, error) {
+	// The transport allowlist stays server-side, including for retained bridges.
+	reason := "invalid_resolution"
+	switch rejection.Code {
+	case "round_not_found", "round_not_published", "round_not_prepared", "duplicate_question", "missing_explanation_or_evidence", "question_not_in_round", "superseded_question_without_interpretation", "historical_change_requires_correction", "current_change_requires_correction", "response_not_valid_for_question", "unresolved_competing_evidence":
+		reason = rejection.Code
+	}
+	resolutionIndex, responseIndex := rejection.ResolutionIndex, rejection.ResponseIndex
+	if resolutionIndex < 0 || resolutionIndex > 50 {
+		resolutionIndex = 0
+	}
+	if responseIndex < 0 || responseIndex > 100 {
+		responseIndex = 0
+	}
+	return json.Marshal(map[string]any{"status": "rejected", "recorded": false, "application": "not_applied", "reason": reason, "resolution_index": resolutionIndex, "response_index": responseIndex, "next_action": "correct_arguments_new_operation", "message": "The entire resolution batch was not applied. Cite delivered evidence scoped to each question; an older answer to replaced questions is history, not automatic approval of revised questions. Use the governing current answer, retaining explicit correction relationships for historical changes. Correct the request under a fresh operation identity; no new human answer is needed if the delivered answer suffices."})
 }

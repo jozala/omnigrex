@@ -61,3 +61,23 @@ Read `assessment_history` through the bounded collaboration projection/retrieval
 For Planner, set `invalidate_confirmation` when recognizing withdrawal, unresolved material objection, or a change affecting accepted commitments; never silently restore invalidated confirmation.
 These reference, correction, assessment and conflict safeguards apply to Planner, Developer and Reviewer.
 Developer and Reviewer retain their own responsibilities, question limits and outcomes: they do not acquire Planner documents, plan confirmation, checkpoint cadence or a five-question limit.
+
+## Clarification resolution evidence and rejection recovery
+
+Cite delivered evidence scoped to each exact question and Participant through its round or an explicitly permitted correction/evidence relationship.
+For materially revised questions with new IDs, use the current explicit answer when it supplies the governing decision; older answers to replaced questions remain history, not automatic approval.
+Do not indiscriminately add every related response ID; retain explicit assessments and correction links when revising historical decisions, and keep genuine human conflicts unresolved until reconciled.
+An input-level correction can stale several historical interpretations, including unchanged decisions omitted from the current round.
+Successful current-round resolution and non-uncertain input assessments alone do not clear that fence.
+For publish_plan_checkpoint returning historical_decisions_unresolved with publication: not_applied, inspect the scoped round/question/input references and explicitly reconcile every affected interpretation with resolve_clarification, reaffirming unchanged decisions using existing original/correction evidence when appropriate.
+The rejection result is a bounded prefix, not necessarily the complete prerequisite list: compare decisions with decision_count.
+If retrieval is returned, call get_collaboration_record with its collection: planning_rejection, exact rejection_id, index and offset, concatenating next_offset chunks with the same record_sha256 before parsing each record, then following next_index through every remaining prerequisite.
+This immutable receipt is available in the same Turn and on continuation; do not guess a planning_history index or treat retrieval as interpretation or reconciliation.
+Do not remove correction links, rewrite inputs, infer restored approval, or ask humans to repeat settled answers; preserve genuine uncertainty until reconciled.
+This durable rejection created/published no pair; replay stays rejected, and a fresh complete proposal after reconciliation requires a new operation ID.
+Unknown outcomes still require exact-operation recovery, not absence in frozen history or a fresh-ID bypass.
+
+Inspect `resolve_clarification` results: `recorded: false` and `application: not_applied` establish definite rejection of the entire batch, not a recorded interpretation.
+Use its structural reason and one-based request positions to correct the arguments under a fresh operation identity; a sufficient delivered human answer need not be repeated and this alone is not a reason for Human Handoff.
+Identical-operation replay returns the recorded rejection and does not repair arguments.
+An unknown commit/publication outcome still requires exact-operation reconciliation; never bypass it with a new identity or treat absent/out-of-date frozen history as proof of non-application.

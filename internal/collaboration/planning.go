@@ -62,6 +62,7 @@ type CheckpointNotApplied struct {
 	TurnID        string          `json:"turn_id"`
 	Content       PlanningContent `json:"content"`
 	Reason        string          `json:"reason"`
+	Decisions     []StaleDecision `json:"decisions,omitempty"`
 }
 
 func (e *CheckpointNotApplied) Error() string { return "checkpoint not applied: " + e.Reason }
@@ -143,7 +144,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 			if rejection.ParticipantID != participant || rejection.TurnID != turn || !reflect.DeepEqual(rejection.Content, c) {
 				return PlanningRevision{}, ErrInvalid
 			}
-			rejection.Content = cloneRevision(PlanningRevision{Content: rejection.Content}).Content
+			rejection = cloneCheckpointRejection(rejection)
 			return PlanningRevision{}, &rejection
 		}
 	}
@@ -201,6 +202,14 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		s.Planning.NonPublications = append(s.Planning.NonPublications, rejection)
 		rejection.Content = cloneRevision(r).Content
 		return PlanningRevision{}, &rejection
+	}
+	if c.Status == "proposed" {
+		if decisions := s.StaleDecisions(participant); len(decisions) > 0 {
+			s.reference("P", id)
+			rejection := CheckpointNotApplied{OperationID: id, ParticipantID: participant, TurnID: turn, Content: cloneRevision(r).Content, Reason: "historical_decisions_unresolved", Decisions: decisions}
+			s.Planning.NonPublications = append(s.Planning.NonPublications, cloneCheckpointRejection(rejection))
+			return PlanningRevision{}, &rejection
+		}
 	}
 	if c.Status == "proposed" && (len(c.UnresolvedDecisions) > 0 || s.AssessmentBlocked(participant) || s.Unresolved(participant)) {
 		return PlanningRevision{}, ErrInvalid
@@ -319,4 +328,14 @@ func (s *State) PlanningValidationCurrent(v PlanRevalidation) bool {
 		}
 	}
 	return true
+}
+
+func cloneCheckpointRejection(r CheckpointNotApplied) CheckpointNotApplied {
+	r.Content = cloneRevision(PlanningRevision{Content: r.Content}).Content
+	r.Decisions = slices.Clone(r.Decisions)
+	for i := range r.Decisions {
+		r.Decisions[i].EvidenceReferences = slices.Clone(r.Decisions[i].EvidenceReferences)
+		r.Decisions[i].CorrectionReferences = slices.Clone(r.Decisions[i].CorrectionReferences)
+	}
+	return r
 }

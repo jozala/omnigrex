@@ -86,6 +86,8 @@ Record 0053 retains the budget observation decision independently numbered 0046 
 
 - [0065: Distinguish mutation admission from recovery evidence](0065-distinguish-mutation-admission-from-recovery-evidence.md) - Accepted, 2026-11-11.
 
+- [0066: Return definite resolution rejection as an expected result](0066-return-definite-resolution-rejections.md) - Accepted, 2026-11-10.
+
 ## Existing architectural decisions
 
 ADR identifiers remain stable; the links below locate their authoritative current or archived records.

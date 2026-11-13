@@ -871,6 +871,21 @@ func (reconciler *ProductionReconciler) reconcileClarificationResolution(ctx con
 	if json.Unmarshal(mutation.Request, &request) != nil || len(request.Resolutions) == 0 {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
+	if ledger, ok := reconciler.clarifications.(interface {
+		GetResolutionRejection(context.Context, string, string, string) (*collaboration.ResolutionValidationError, error)
+	}); ok {
+		rejection, err := ledger.GetResolutionRejection(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID, mutation.ID)
+		if err != nil {
+			return unresolvedReconciliation(), err
+		}
+		if rejection != nil {
+			raw, err := resolutionRejectedResult(rejection)
+			if err != nil {
+				return unresolvedReconciliation(), err
+			}
+			return foundReconciliation(raw), nil
+		}
+	}
 	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, request.RoundID)
 	if err != nil || round.ID != request.RoundID || round.ParticipantID != scope.Turn.AgentParticipantID {
 		return unresolvedReconciliation(), nil

@@ -90,6 +90,14 @@ An absent archive is not a readiness failure, and log contents do not establish 
 `MCP mutation failed` supplies a safe `failure_code`, operation/mutation identifiers, and allowlisted GitHub status/request ID or expected/observed commit IDs.
 Definite failures place safe details in `tool_invocations.last_error`; unknown outcomes remain under reconciliation.
 
+For `resolve_clarification`, an ordinary tool result with `recorded: false` and `application: not_applied` is a definite validation rejection of the entire batch, not a recorded interpretation.
+The canonical reason and one-based resolution/response positions identify the internal request mistake without exposing human text.
+The agent should correct its evidence selection under a fresh operation identity, using the current explicit answer for revised questions rather than indiscriminately citing older answers to replaced questions.
+It need not ask the human to repeat a sufficient answer or request Human Handoff solely for this rejection.
+Identical-operation replay returns the same rejection; changed arguments do not repair the old invocation.
+A committed operation-specific rejection receipt also permits recovery after a lost acknowledgment; absent receipts or frozen history do not prove non-application.
+Unknown outcomes still require exact-operation reconciliation, not a new-ID retry.
+
 A definite pre-reservation handoff rejection, including pending human input, has no mutation row or backend effect and does not itself require recovery.
 The agent can yield with empty questions so the Orchestrator delivers that input at the next safe Turn boundary without resetting the Workflow Attempt.
 Unclassified reservation/database failures still require controlled recovery; a later successful tool does not clear earlier ambiguity.
@@ -101,6 +109,17 @@ An all-success ledger can still require Human Handoff when fresh external-effect
 A successful, correctly scoped local default-branch refresh can complete its historical barrier from its recorded receipt, without refetching or claiming new freshness.
 An interrupted refresh remains conservative even if partial refs or packs exist; do not mark it successful or repair its files manually.
 This behavior does not automatically reactivate a previously blocked Workflow or authorize production ledger repair.
+
+For `publish_plan_checkpoint`, `historical_decisions_unresolved` with `publication: not_applied` is durable definite pre-publication rejection, not a created pair.
+The result identifies outstanding historical question/round references and original/correction input references without human bodies.
+Its compact-JSON inline result is capped at 16 KiB, reserving room for JSONB replay whitespace and outer JSON escaping to preserve pinned Pi Session continuation; `decision_count` includes prerequisites not in the inline prefix.
+When `retrieval` is present, use `get_collaboration_record` with `collection: planning_rejection`, its exact `rejection_id`, and the returned index/offset, following all `next_offset` chunks and `next_index` records.
+These lossless immutable receipt reads are scoped to the Workflow and Participant and available immediately, independently of frozen `planning_history` bounds.
+They do not change the operation outcome or reconcile the listed interpretations.
+A correction can stale several interpretations, even unchanged decisions absent from the current round.
+The agent must explicitly reconcile each affected interpretation using existing evidence before a new complete-pair attempt; assessments and current-round resolutions alone do not suffice.
+Do not remove correction links, rewrite history, ask humans to repeat settled answers, or treat an empty frozen history index as proof of non-publication.
+Identical-operation replay remains rejected after reconciliation; a fresh attempt needs a new identity, while unknown outcomes stay on exact-operation recovery.
 
 For `resolve_clarification`, recovery matches the reservation's mutation ID to each interpretation's orchestrator-owned `origin_operation_id`, not just its text or response IDs.
 Cancellation before the interpretation commits must leave that operation unresolved even if an identical older interpretation exists.

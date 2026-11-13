@@ -181,3 +181,18 @@ Dedicated release App setup and live historical-tag authorization, first publica
 `TestFrozenPayloadReconcilesWithoutRendererOrSignatureRegeneration`, `TestCompletePayloadLimitIncludesUnicodeSignatureAndMarker` and `TestOversizeCompletePairReturnsActionableDefiniteNonPublication` distinguish exact new-format recovery from rendering, including complete payload boundaries and definite rejection without truncation or half-pair publication.
 Controlled-provider qualification establishes these mechanisms, not real-model semantics, tone or reading burden.
 After a separately authorized deployment, record fresh unassisted real-provider results and actual human feedback under Work Item 176 or a linked follow-up; closed evaluation 172 is not an unqualified pass or a substitute for that assessment.
+
+`TestRevisedQuestionsRejectMixedEvidenceAtomically` covers the old-plus-current versus current-only evidence contrast for replaced questions.
+`TestResolutionGatewayRejectionReplayAndCorrectedRequest` exercises production backend/gateway result semantics, identical-operation replay, corrected fresh requests, and unexpected-error masking.
+`TestResolutionRejectionDurableReceiptAndFreshCorrection` covers operation-bound pre-effect rejection, atomic batches, receipt replay, fresh correction, and stopped-Turn recovery of a lost rejection acknowledgment for Developer and Reviewer.
+`TestPiControlledWorkflow/planning` deliberately submits invalid older-question evidence, replays the rejection through the selected pinned Pi bridge, corrects the request without another human answer, and reaches the consolidated planning pair and confirmation without implementation allocation.
+A successful MCP transport or a `SUCCEEDED` invocation is not itself a recorded resolution: consumers must inspect `recorded` and `application`; the resolution aggregate and operation-origin proof remain authoritative.
+No terminal-outcome consumer treats `resolve_clarification` as Stage completion; reconciliation distinguishes durable rejection receipts from actual resolution origins and leaves absent evidence unresolved.
+
+`TestProposalRejectsEveryStaleHistoricalInterpretation` preserves the multi-decision correction fence and immutable history while permitting explicit reaffirmation of an unchanged decision.
+`TestPiControlledWorkflow/planning` now traverses three question rounds: A2 corrects A1, only one R1 interpretation is reaffirmed, and A3 accepts the revised R3 question.
+It recovers both invalid mixed-round resolution and stale historical proposal rejection through the selected pinned Pi bridge, with exact replay, explicit unchanged-decision reaffirmation and one complete published pair without another human answer or implementation allocation.
+`TestPlanningNonPublicationRecovery/historical-rejection-commit-ack-lost` restarts through the durable exact-operation rejection receipt rather than inferring outcome from frozen history.
+`TestPlanningRejectionProjectionBudgetsEncodedBytes` covers small inline results, long escaped histories, and a single oversized decision which must use bounded retrieval rather than truncation.
+Docker-backed `TestHistoricalPlanningRejectionBoundedThroughPinnedSession` generates 900 published five-question rounds and a delivered/assessed correction, rejects through the production gateway, and checks exact replay plus complete retrieval of all 4500 durable prerequisites from a separate Store.
+It passes the generated result and every remaining page through the selected pinned MCP extension and Session validator/loader, with the former unbounded result as a failing control and successful retained-Session reopening for bounded feedback.
