@@ -83,6 +83,15 @@ func TestQualificationFailureUsesOriginalBindingAndPreservesSemantics(t *testing
 }
 
 func TestQualificationScriptReportsActualFailedCheck(t *testing.T) {
+	checksumPath, err := exec.LookPath("sha256sum")
+	checksumCommand := "sha256sum -c -"
+	if err != nil {
+		checksumPath, err = exec.LookPath("shasum")
+		checksumCommand = "shasum -a 256 -c -"
+	}
+	if err != nil {
+		t.Fatal("fixture requires sha256sum or shasum:", err)
+	}
 	for _, test := range []struct {
 		name, check string
 		mutate      func(string)
@@ -147,7 +156,8 @@ func TestQualificationScriptReportsActualFailedCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Relocate fixture execution only; preserve host-generated diagnostic labels.
-			replace := strings.NewReplacer("/usr/local/bin", filepath.Join(root, "bin"), "/opt/omnigrex/pi", filepath.Join(root, "owned/pi"), "/opt/omnigrex", filepath.Join(root, "owned"), "/opt", root)
+			// macOS supplies shasum rather than the guest's /usr/bin/sha256sum.
+			replace := strings.NewReplacer("/usr/bin/sha256sum", strings.ReplaceAll(checksumPath, "'", "'\"'\"'"), "sha256sum -c -", checksumCommand, "/usr/local/bin", filepath.Join(root, "bin"), "/opt/omnigrex/pi", filepath.Join(root, "owned/pi"), "/opt/omnigrex", filepath.Join(root, "owned"), "/opt", root)
 			lines := strings.Split(script, "\n")
 			for i, line := range lines {
 				if !strings.HasPrefix(line, "omnigrex_check=") {
