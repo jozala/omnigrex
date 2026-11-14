@@ -409,3 +409,53 @@ func TestCandidatePublicationAuthorityAndCapture(t *testing.T) {
 		t.Fatal("candidate artifact must follow successful publication and capture with exact run/attempt identity")
 	}
 }
+
+func TestDispatchRequiresIntentAfterWorkflowDefaultResolution(t *testing.T) {
+	data, err := os.ReadFile("ci.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		On struct {
+			Dispatch struct {
+				Inputs map[string]struct {
+					Default string `yaml:"default"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		inputs      map[string]string
+		wantSuccess bool
+	}{
+		{name: "omitted mode and candidate", inputs: map[string]string{}},
+		{name: "omitted mode with captured candidate", inputs: map[string]string{"pi_candidate": `{"image":"captured"}`}},
+		{name: "explicit empty mode", inputs: map[string]string{"pi_mode": "", "pi_candidate": `{"image":"captured"}`}},
+		{name: "explicit build", inputs: map[string]string{"pi_mode": "build-candidate"}, wantSuccess: true},
+		{name: "explicit qualification", inputs: map[string]string{"pi_mode": "qualify-candidate", "pi_candidate": `{"image":"captured"}`}, wantSuccess: true},
+		{name: "qualification missing candidate", inputs: map[string]string{"pi_mode": "qualify-candidate"}},
+		{name: "build with candidate", inputs: map[string]string{"pi_mode": "build-candidate", "pi_candidate": `{"image":"captured"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// GitHub substitutes workflow defaults for omitted dispatch inputs.
+			// Read those defaults from the real workflow, not a hard-coded sentinel.
+			resolved := map[string]string{}
+			for name, input := range workflow.On.Dispatch.Inputs {
+				resolved[name] = input.Default
+			}
+			for name, value := range tc.inputs {
+				resolved[name] = value
+			}
+			cmd := exec.Command("sh", "../../scripts/validate-pi-dispatch.sh")
+			cmd.Env = []string{"GITHUB_EVENT_NAME=workflow_dispatch", "GITHUB_REF=refs/heads/main", "PI_MODE=" + resolved["pi_mode"], "PI_CANDIDATE=" + resolved["pi_candidate"]}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tc.wantSuccess {
+				t.Fatalf("resolved mode %q: success=%t, want %t: %s", resolved["pi_mode"], err == nil, tc.wantSuccess, output)
+			}
+		})
+	}
+}

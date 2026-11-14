@@ -279,7 +279,8 @@ go run ./scripts/pi-bundle candidate-record > pi-candidate.json
 
 This is a complete proposed inventory, not a production selection or a claim of prior qualification.
 On the trusted default branch, explicitly dispatch the existing **CI** workflow with `pi_mode: qualify-candidate` and the `pi_candidate` input containing that JSON.
-Missing or unknown modes, a candidate supplied to build mode, missing candidate JSON in qualification mode, and non-main dispatches fail validation before publication.
+The default `choose-intent` is non-operational: explicitly select `build-candidate` or `qualify-candidate`; omitting the mode does not authorize either action.
+Missing or unknown modes, the `choose-intent` placeholder, a candidate supplied to build mode, missing candidate JSON in qualification mode, and non-main dispatches fail validation before publication.
 This qualification-only mode publishes no images or releases and changes no production selection or repository pins.
 Both `qualify-pi-bundle-docker` and `qualify-pi-bundle-microsandbox` must succeed; they test the exact supplied digest/inventory through bounded resource checks and protocol using integration-only fixtures.
 Mandatory bundle qualification (`OMNIGREX_PI_UPGRADE_MODE=bundle`) restores, replays and continues retained R1 Sessions only under their original R1 image/inventory, while R2 starts independent fresh Sessions with separate identities and storage.
