@@ -630,6 +630,15 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 		if event.HumanInputPending {
 			return clarificationWaitDecision(next, event.Turn, true)
 		}
+		if event.ImplementationAuthorized {
+			next.PlanningOnly = false
+			next.State = StateDeveloping
+			next.CurrentAttempt.CurrentStage = StageImplementation
+			next.ContinuationStage = ""
+			next.ClarificationWaiting = false
+			next.Revision++
+			return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("implementation_queued"), Actions: []Action{EnqueueTurnAction{Stage: StageImplementation, Role: RoleDeveloper, Purpose: TurnPurposeInitialDevelopment}, ReconcileLabelsAction{State: StateDeveloping}}}
+		}
 		next.State = StatePlanReady
 		next.Revision++
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonApproved, Actions: []Action{ReconcileLabelsAction{State: StatePlanReady}}}

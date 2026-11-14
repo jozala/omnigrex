@@ -552,6 +552,9 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	github.branch = fmt.Sprintf("omnigrex/issue-%d", workflowLocator().IssueNumber)
 	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies, allowedPaths...)
 	preparer := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database)
+	if mode == "planning" {
+		preparer = agentturn.NewPreparerWithChangeProposalVerifier(loader, agentprofile.SingletonSelector{}, registry, database, github)
+	}
 	preparer.SetReviewGate(&agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: head}, Observer: github})
 	f := &piWorkflowFixture{ctx: ctx, database: database, databaseURL: url, password: secret, settings: settings, runtime: p, backend: backend, fault: fault, launcher: launcher, preparer: preparer, worker: worker, workspaces: workspaces, github: github, authority: authority, workflowID: application.WorkflowID, head: head, git: git}
 	t.Cleanup(func() {
@@ -792,6 +795,13 @@ func (g *workflowQualificationGitHub) GetPullRequest(context.Context, string, st
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	return g.pull(), nil
+}
+
+func (*workflowQualificationGitHub) CanDecideWorkItem(_ context.Context, credential, _, _, login string, actorID int64) (bool, error) {
+	if credential != "developer-token" {
+		return false, errors.New("wrong permission-read authority")
+	}
+	return login == "Maintainer" && actorID == 42, nil
 }
 
 func (*workflowQualificationGitHub) GetIssue(_ context.Context, credential, _, _ string, number int) (githubapi.Issue, error) {

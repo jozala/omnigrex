@@ -143,5 +143,39 @@ func testPiPlanningWorkflow(t *testing.T) {
 	if checkpointPosts != 1 {
 		t.Fatal("duplicate or missing checkpoint publication", checkpointPosts)
 	}
-	t.Log("PASS: controlled retained Planner rounds, changed assumption, paired draft/proposal, exact confirmation and final revalidation; no implementation. This does not assess reasoning quality.")
+	// A ready pair from the planning-only path now accepts explicit authorization
+	// without discussion replay or republishing the unchanged documents.
+	receipt, err := f.database.AdmitHumanInput(f.ctx, store.HumanInputSubmission{WorkflowID: f.workflowID, Command: collaboration.Command{Kind: "implement", Target: state.CurrentCheckpoint().Reference}, Actor: collaboration.Actor{ID: "42", Name: "Maintainer"}, Source: collaboration.Source{Channel: "qualification", ID: uuid.NewString()}, Authorized: true, At: time.Now()})
+	if err != nil || receipt.ResponseID == "" {
+		t.Fatal(receipt, err)
+	}
+	revalidated := f.prepare(t)
+	if revalidated.Commit.Participant.ID != participant || revalidated.Commit.Session.ID != sessionID {
+		t.Fatal("ready-plan validation lost Planner continuity")
+	}
+	if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+		t.Fatal(processed, err)
+	}
+	f.assertState(t, workflow.StateDeveloping)
+	for _, want := range []workflow.State{workflow.StateReviewing, workflow.StatePRReady} {
+		admitted := f.prepare(t)
+		if admitted.Commit.Turn.WorkflowAttemptID != attempt {
+			t.Fatal("handoff replaced Work Item or Attempt")
+		}
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatal(processed, err)
+		}
+		f.assertState(t, want)
+	}
+	if err = f.pool(t).QueryRow(f.ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, f.workflowID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Planning.Implementation.FirstDeveloperTurnID == "" || state.Planning.Implementation.AcceptedRevisionID != state.Planning.CurrentRevision || len(state.Planning.Revisions) != 1 {
+		t.Fatal("accepted handoff lost exact revision", state.Planning)
+	}
+	t.Log("PASS: already-ready exact pair authorization through retained Planner validation, first Developer admission, normal CI admission and native Reviewer approval; direct development remains independently exercised. Controlled qualification does not assess reasoning quality.")
+
 }

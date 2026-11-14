@@ -108,11 +108,14 @@ type ParticipantPreparation struct {
 // A nonempty value repairs a stale stored head transactionally before Turn
 // creation and scopes the new Turn to the verified head.
 type AgentTurnPreparationSpec struct {
-	ReviewAdmission  *ReviewAdmission
-	Stages           map[workflow.StageID]ParticipantPreparation
-	VerifiedHeadSHA  string
-	VerifiedPRNumber int64
-	VerifiedPRID     int64
+	// VerifiedImplementationAuthorization binds fresh open-Issue and actor-permission
+	// observations to the exact unused grant before first Developer admission.
+	VerifiedImplementationAuthorization string
+	ReviewAdmission                     *ReviewAdmission
+	Stages                              map[workflow.StageID]ParticipantPreparation
+	VerifiedHeadSHA                     string
+	VerifiedPRNumber                    int64
+	VerifiedPRID                        int64
 }
 
 // ActiveChangeProposal is the durable current Change Proposal association used
@@ -299,6 +302,16 @@ func (store *Store) PrepareAgentTurn(ctx context.Context, lease JobLease, spec A
 	if verifiedHead != "" {
 		payload.ExpectedHeadSHA = verifiedHead
 	}
+	redirected, err := store.fenceImplementationPreparationTx(ctx, tx, job, payload, profile.CommitSHA, spec.VerifiedImplementationAuthorization)
+	if err != nil {
+		return AgentTurnPreparationCommit{}, err
+	}
+	if redirected {
+		if err = tx.Commit(ctx); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
+		return AgentTurnPreparationCommit{}, ErrAgentTurnPreparationFenceLost
+	}
 	participant, stageAssignment, err := ensurePreparationParticipant(ctx, tx, job.ID, job.WorkflowID, payload, participantPreparation)
 	if err != nil {
 		return AgentTurnPreparationCommit{}, err
@@ -405,6 +418,9 @@ SELECT EXISTS (
 		}
 		configuration["review_start"] = reviewStart
 		turnConfiguration, _ = json.Marshal(configuration)
+	}
+	if err = consumeImplementationTx(ctx, tx, job.WorkflowID, turnID, payload.Stage); err != nil {
+		return AgentTurnPreparationCommit{}, err
 	}
 	turnConfiguration, err = prepareCollaborationTx(ctx, tx, job.WorkflowID, participant.ID, turnID, job.WorkflowAttemptID+":"+string(payload.Stage), turnConfiguration)
 	if err != nil {

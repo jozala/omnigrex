@@ -26,7 +26,7 @@ var ErrLabelReconciliation = errors.New("GitHub labels did not converge")
 var managedLabels = [...]Label{
 	{Name: string(StatePlan), Color: "1f6feb", Description: "Start planning without implementation"},
 	{Name: string(StatePlanning), Color: "d4a72c", Description: "Planning or awaiting human discussion/confirmation"},
-	{Name: string(StatePlanReady), Color: "2da44e", Description: "Confirmed plan ready; implementation not authorized"},
+	{Name: string(StatePlanReady), Color: "2da44e", Description: "Confirmed plan ready; explicit implementation action required"},
 	{Name: string(StateRun), Color: "1f6feb", Description: "Start or resume Omnigrex work"},
 	{Name: string(StateDeveloping), Color: "d4a72c", Description: "Omnigrex Developer is working"},
 	{Name: string(StateReviewing), Color: "8250df", Description: "Omnigrex Reviewer is reviewing"},

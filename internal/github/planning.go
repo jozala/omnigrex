@@ -26,7 +26,7 @@ func planningCheckpointBody(r collaboration.PlanningRevision) string {
 	}
 	fmt.Fprint(&b, "### Next action\n\n")
 	if c.Status == "proposed" {
-		fmt.Fprintf(&b, "Review both complete documents below, then confirm shared understanding with `/omnigrex confirm-plan %s` on the first nonblank line of a new Issue comment. Repository write-or-higher permission is required. This queues final Planner validation, not implementation. Use `/omnigrex steer` to change direction.\n\n", r.Reference)
+		fmt.Fprintf(&b, "Review both complete documents below, then confirm shared understanding with `/omnigrex confirm-plan %s` on the first nonblank line of a new Issue comment. Repository write-or-higher permission is required. This confirms understanding only and never authorizes implementation. Alternatively, submit `/omnigrex implement %s` alone (no accompanying prose) to accept this exact pair and authorize development after Planner validation. No separate confirmation is required. Receipt is not implementation start. Use `/omnigrex steer` to change direction.\n\n", r.Reference, r.Reference)
 	} else {
 		fmt.Fprint(&b, "This is an incomplete draft, not a confirmation request. Continue through the current questions or `/omnigrex steer`.\n\n")
 	}

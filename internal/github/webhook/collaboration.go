@@ -109,41 +109,45 @@ func (adapter *IssueCollaboration) HandleCollaboration(ctx context.Context, clai
 	if err != nil {
 		return true, err
 	}
-	receipt, err := adapter.Store.AdmitHumanInput(ctx, store.HumanInputSubmission{WorkflowID: workflowID, Command: command, Actor: collaboration.Actor{ID: fmt.Sprint(payload.Comment.User.ID), Name: payload.Comment.User.Login}, Source: collaboration.Source{Channel: "github", ID: fmt.Sprint(payload.Comment.ID), URL: payload.Comment.HTMLURL}, Authorized: authorized, At: claim.ReceivedAt})
+	receipt, err := adapter.Store.AdmitHumanInput(ctx, store.HumanInputSubmission{SourceSequence: uint64(payload.Comment.ID), WorkflowID: workflowID, Command: command, Actor: collaboration.Actor{ID: fmt.Sprint(payload.Comment.User.ID), Name: payload.Comment.User.Login}, Source: collaboration.Source{Channel: "github", ID: fmt.Sprint(payload.Comment.ID), URL: payload.Comment.HTMLURL}, Authorized: authorized, At: claim.ReceivedAt})
 	if err != nil {
 		return true, err
 	}
+	return true, adapter.publishReceipt(ctx, workflowID, receipt, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber))
+}
+
+func (adapter *IssueCollaboration) publishReceipt(ctx context.Context, workflowID string, receipt collaboration.Receipt, credential, owner, repository string, issue int) error {
 	marker, err := githubapi.RenderMarker(githubapi.Marker{WorkflowID: workflowID, OperationID: strings.TrimPrefix(receipt.ID, "A")})
 	if err != nil {
-		return true, err
+		return err
 	}
 
 	// Read-only failures must not consume POST ownership. Once reserved, a
 	// contender may only reconcile uncertainty. A proven rejection can release
 	// that exact attempt under the same serialized receipt boundary.
-	comments, err := adapter.API.ListIssueComments(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber))
+	comments, err := adapter.API.ListIssueComments(ctx, credential, owner, repository, issue)
 	if err != nil {
-		return true, err
+		return err
 	}
 	artifact, attempt, err := adapter.Store.ReserveCollaborationReceipt(ctx, workflowID, receipt.ID, collaboration.RenderedPublication{Body: githubapi.JoinPostedBody(receipt.Feedback, marker), Marker: marker})
 	if err != nil {
-		return true, err
+		return err
 	}
 	for _, comment := range comments {
 		if comment.Body == artifact.Body {
-			return true, nil
+			return nil
 		}
 	}
 	if attempt == 0 {
-		return true, errors.New("acknowledgment publication is uncertain; the reserved exact artifact has not been observed")
+		return errors.New("acknowledgment publication is uncertain; the reserved exact artifact has not been observed")
 	}
-	_, err = adapter.API.CreateIssueComment(ctx, credential, claim.RepositoryOwner, claim.RepositoryName, int(claim.IssueNumber), githubapi.CommentRequest{Body: artifact.Body})
+	_, err = adapter.API.CreateIssueComment(ctx, credential, owner, repository, issue, githubapi.CommentRequest{Body: artifact.Body})
 	if err != nil && receiptPostDefinitelyRejected(err) {
 		if releaseErr := adapter.Store.RejectCollaborationReceipt(ctx, workflowID, receipt.ID, attempt); releaseErr != nil {
-			return true, errors.Join(err, releaseErr)
+			return errors.Join(err, releaseErr)
 		}
 	}
-	return true, err
+	return err
 }
 
 // Only explicit client rejections establish non-application. Timeouts, server

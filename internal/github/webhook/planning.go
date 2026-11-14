@@ -35,7 +35,7 @@ func (a *IssueCollaboration) AuthorizePlanningActivation(ctx context.Context, cl
 	}
 	feedback := ""
 	if event.Label == "omnigrex:run" {
-		feedback = "Planning does not authorize implementation. omnigrex:run cannot convert this planning Work Item, including after planning-ready; planning-to-development is follow-up #165."
+		feedback = "Planning does not authorize implementation. omnigrex:run cannot convert this planning Work Item, including after planning-ready. Use `/omnigrex implement P2` with the current proposed pair reference to request exact-pair authorization."
 	} else if state.Exists {
 		feedback = "Planning requires an open, unstarted Work Item. Existing development or completed planning cannot be switched or restarted with omnigrex:plan."
 	} else {

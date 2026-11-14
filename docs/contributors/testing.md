@@ -196,3 +196,16 @@ It recovers both invalid mixed-round resolution and stale historical proposal re
 `TestPlanningRejectionProjectionBudgetsEncodedBytes` covers small inline results, long escaped histories, and a single oversized decision which must use bounded retrieval rather than truncation.
 Docker-backed `TestHistoricalPlanningRejectionBoundedThroughPinnedSession` generates 900 published five-question rounds and a delivered/assessed correction, rejects through the production gateway, and checks exact replay plus complete retrieval of all 4500 durable prerequisites from a separate Store.
 It passes the generated result and every remaining page through the selected pinned MCP extension and Session validator/loader, with the former unbounded result as a failing control and successful retained-Session reopening for bounded feedback.
+
+## Exact planning implementation admission
+
+`TestExactImplementationConsentWithdrawalRestartAndAdmission`, `TestKnownInputAndMaterialRevisionFenceImplementation` and `TestDelayedEarlierAuthorizationCannotUndoWithdrawal` distinguish confirmation, exact-pair consent, immaterial revalidation, material supersession, withdrawal and delayed source replay without time expiry.
+`TestImplementationPreparationRechecksActorAndOpenWorkItem` checks fresh external authority and Work Item identity before preparation can commit.
+PostgreSQL `TestImplementationAdmissionSerializesWithdrawalSteeringAndRestart` and `TestImplementationClosureAndFirstAdmissionHaveOneStartBoundary` race the real locked first-admission transaction against human input/closure and replay the stale preparation through another Store.
+`TestImplementationRepositoryMovementReopensValidationWithoutRevokingGrant` preserves an unused grant while queuing Planner relevance assessment, without allocating a Developer Participant.
+`TestImplementationAcceptedPairRequiresCompleteLosslessDelivery` fences terminal handoff until every omitted accepted-pair chunk is durably read.
+`TestImplementationMilestoneOutboxReconcilesLostReceiptWithoutRetryNoise` restarts publication after a lost response and observes exactly one queued and one started milestone independently of label effects.
+`TestPiControlledWorkflow/planning` extends the unchanged planning-only confirmation path with fresh authorization of the already-ready pair, retained Planner validation, first Developer admission, ordinary CI admission and native Reviewer approval.
+The direct-development controlled path remains independently exercised.
+Run the normal local, Docker integration, controlled Workflow/recovery and exact-head Linux/KVM gates before claiming backend qualification.
+These fixtures do not deploy the feature, exercise a historical production plan or establish real-model semantic reasoning quality.

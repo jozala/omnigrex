@@ -87,12 +87,16 @@ Use the actual permanent short reference from the conversation; missing targets 
 For exact proposed-pair confirmation use `/omnigrex confirm-plan P2` with the published reference, after reviewing both complete documents.
 Repository write-or-higher permission and an active Workflow or normal clarification wait are required.
 These commands do not authorize implementation or recover Human Handoff.
+To accept a current proposed pair and authorize implementation, submit `/omnigrex implement P2` alone, with no additional non-whitespace prose.
+To withdraw unused authority, submit `/omnigrex withdraw-implementation P2` alone.
+Both use the actual pair reference, require write-or-higher authority and are distinct from `confirm-plan`; receipt is not validation or admission.
+See [planning authorization and withdrawal](../users/planning.md#authorize-an-exact-pair) for ready-plan compatibility, relevance validation, lifetime and the first Developer admission boundary.
 See [clarification and steering](../users/clarification.md) for partial answers, immutable history, acknowledgment identifiers, rejections, and waiting behavior.
 
 ## Agent collaboration history
 
 Planner, Developer and Reviewer can call the scoped read capability `get_collaboration_record`.
-Its `collection` is `human_input`, `human_input_history`, `clarification_history`, `assessment_history`, `planning_request`, or `planning_history`; `index` is zero-based and `offset` defaults to zero.
+Its `collection` is `human_input`, `human_input_history`, `clarification_history`, `assessment_history`, `planning_request`, `planning_history`, or `accepted_plan`; `index` is zero-based and `offset` defaults to zero.
 Preparation supplies frozen collection counts in `collaboration_projection`.
 When `retrieval_required` is true, every pending `human_input` record must be retrieved before interpretation or handoff; older history is available as needed.
 Each result contains JSON-text `content`, `record_sha256`, `index`, and `total`, with `next_offset` for another chunk of the same record or `next_index` for the next record.
@@ -100,6 +104,8 @@ Concatenate content chunks verbatim before parsing the record; offsets count Uni
 Follow `next_offset` from offset zero and keep one `record_sha256` across the chunks of a record; a changed fingerprint requires restarting that record.
 For retrieval-only pending input, frozen assignment is not delivery: every canonical chunk of every batch record must be successfully recorded by the scoped read ledger before handoff is admitted.
 Failed reads, duplicate chunks, and retrieval of only the final chunk do not clear that fence.
+For planning-derived implementation/review, `accepted_plan` contains the exact complete accepted revision, original request and selected original decisions.
+If omitted from the inline projection, every canonical chunk must be successfully read before terminal handoff; `implementation_handoff` is orientation, not a substitute for the documents.
 Unread input is carried to the retained Session's next Turn if execution ends early; successful reads do not reset budgets or interpret the contents.
 Neither retrieval nor command acceptance resolves questions or grants implementation authorization.
 

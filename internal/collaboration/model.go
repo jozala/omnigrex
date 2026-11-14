@@ -1,5 +1,5 @@
 // Package collaboration defines Work Item human interaction independently of its transport.
-// It does not grant Session control or implementation authorization.
+// It records human implementation intent but never grants Session control or admits Agent Turns.
 package collaboration
 
 import (
@@ -145,13 +145,15 @@ type Command struct {
 	Body   string
 }
 type Admission struct {
-	Route         string
-	Active        bool
-	Authorized    bool
-	ParticipantID string
-	Actor         Actor
-	Source        Source
-	At            time.Time
+	// SourceSequence is a transport-provided immutable creation order within its Work Item channel.
+	SourceSequence uint64
+	Route          string
+	Active         bool
+	Authorized     bool
+	ParticipantID  string
+	Actor          Actor
+	Source         Source
+	At             time.Time
 }
 
 var ErrInvalid = errors.New("invalid collaboration operation")
@@ -272,6 +274,9 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	if !a.Authorized {
 		return reject("Rejected: repository write, maintain or admin permission is required.")
 	}
+	if c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+		return reject("Implementation has already started. Withdrawal cannot stop it; close the original Work Item Issue to use the existing stopping mechanism.")
+	}
 	if !a.Active || a.ParticipantID == "" && a.Route == "" {
 		return reject("Rejected: this Work Item is not accepting input; resolve Human Handoff or lifecycle state explicitly before retrying.")
 	}
@@ -290,10 +295,27 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		target = s.target("R", c.Target)
 	case "amend":
 		target = s.target("A", c.Target)
-	case "confirm-plan":
+	case "confirm-plan", "implement", "withdraw-implementation":
 		target = s.target("P", c.Target)
 	}
 	switch c.Kind {
+	case "implement", "withdraw-implementation":
+		if strings.TrimSpace(c.Body) != "" {
+			return reject("Authorization commands must stand alone with no additional prose. Submit changes using `/omnigrex steer` or `/omnigrex amend A7`, then authorize the resulting exact pair with `/omnigrex implement P2`.")
+		}
+		if feedback := s.implementationTarget(target, a.ParticipantID); feedback != "" {
+			return reject(feedback)
+		}
+		if c.Kind == "implement" && s.implementationBeforeWithdrawal(a) {
+			return reject("This implementation request predates withdrawal and cannot restore authority. Submit a fresh stand-alone `/omnigrex implement " + c.Target + "` for the still-current valid pair.")
+		}
+		s.Planning.Implementation.Actions = append(s.Planning.Implementation.Actions, ImplementationAction{ID: id, RevisionID: target, Kind: c.Kind, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, SourceSequence: a.SourceSequence})
+		if c.Kind == "withdraw-implementation" {
+			receipt.ResponseID = id
+			receipt.Feedback = fmt.Sprintf("Unused implementation authorization for %s withdrawn. Pair confirmation and the open Work Item are unchanged. A fresh `/omnigrex implement %s` can authorize this still-valid pair again.", c.Target, c.Target)
+			s.Receipts = append(s.Receipts, receipt)
+			return receipt
+		}
 	case "confirm-plan":
 		if feedback := s.planningConfirmationTarget(target, a.ParticipantID); feedback != "" {
 			return reject(feedback)
@@ -341,7 +363,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	default:
 		return reject("Please include a short target: `/omnigrex answer R3`, `/omnigrex amend A7`, or `/omnigrex confirm-plan P2`. To change direction, use `/omnigrex steer`.")
 	}
-	if strings.TrimSpace(c.Body) == "" && c.Kind != "confirm-plan" {
+	if strings.TrimSpace(c.Body) == "" && !exactConfirmation(c.Kind) {
 		return reject("Please add nonempty content after the command.")
 	}
 	input := Input{Reference: s.reference("A", id), Target: target, ID: id, Kind: c.Kind, RoundID: roundID, Body: c.Body, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, ParticipantID: a.ParticipantID, Route: a.Route}
@@ -351,6 +373,9 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	s.Inputs = append(s.Inputs, input)
 	receipt.ResponseID = id
 	receipt.Feedback = fmt.Sprintf("Thanks, queued as %s for the agent to consider.", input.Reference)
+	if c.Kind == "implement" {
+		receipt.Feedback = fmt.Sprintf("Implementation request received for %s (%s). Queued for Planner validity and repository-relevance checks; receipt does not mean development started. No second approval is required if validation succeeds.", c.Target, input.Reference)
+	}
 	s.Receipts = append(s.Receipts, receipt)
 	return receipt
 }

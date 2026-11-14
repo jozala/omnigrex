@@ -106,3 +106,5 @@ Do not copy an existing ADR into a second record.
 - [ADR 0010: Use one provider credential bundle before proxy mediation](../plans/runtime-history/adr-0010.md) - Superseded by [decision 0007](0007-supply-provider-api-keys-through-disposable-files.md).
 - [ADR 0011: Discover repository Agent Profiles and select separately](../adr/0011-discover-repository-agent-profiles-and-select-separately.md)
 - [ADR 0012: Load repository skills from the current checkout](../adr/0012-load-repository-skills-from-the-current-checkout.md)
+
+- [0067: Admit exact-plan implementation at the first Developer Turn](0067-admit-exact-plan-implementation-at-the-first-developer-turn.md) - Accepted, 2026-11-14.

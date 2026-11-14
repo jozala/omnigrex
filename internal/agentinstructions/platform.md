@@ -81,3 +81,11 @@ Inspect `resolve_clarification` results: `recorded: false` and `application: not
 Use its structural reason and one-based request positions to correct the arguments under a fresh operation identity; a sufficient delivered human answer need not be repeated and this alone is not a reason for Human Handoff.
 Identical-operation replay returns the recorded rejection and does not repair arguments.
 An unknown commit/publication outcome still requires exact-operation reconciliation; never bypass it with a new identity or treat absent/out-of-date frozen history as proof of non-application.
+
+## Accepted planning handoff
+
+When implementation_handoff is present, read the exact complete accepted_plan and original request before implementation or review, not just a handoff summary.
+If the projection omits them, retrieve every accepted_plan chunk using get_collaboration_record before dependent work; terminal handoff remains fenced until complete delivery.
+Use the accepted revision identity, original sources, relevant decisions and evidence links; supporting history is available losslessly through planning_request, planning_history, human_input_history and assessment_history.
+Accepted behavior and material design commitments govern; reversible local implementation suggestions may be adjusted.
+Until automatic replanning is implemented, material contradictions preventing safe implementation require report_blocked/Human Handoff, not silent changes to accepted intent.

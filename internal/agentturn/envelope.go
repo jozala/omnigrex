@@ -47,6 +47,11 @@ type pullRequestContext struct {
 }
 
 type eventEnvelope struct {
+	ImplementationHandoff    json.RawMessage                `json:"implementation_handoff,omitempty"`
+	AcceptedPlan             json.RawMessage                `json:"accepted_plan,omitempty"`
+	PlanningRequest          json.RawMessage                `json:"planning_request,omitempty"`
+	PlanningHistory          json.RawMessage                `json:"planning_history,omitempty"`
+	AssessmentHistory        json.RawMessage                `json:"assessment_history,omitempty"`
 	PullRequestContext       pullRequestContext             `json:"pull_request_context"`
 	CollaborationProjection  json.RawMessage                `json:"collaboration_projection,omitempty"`
 	HumanInputHistory        json.RawMessage                `json:"human_input_history,omitempty"`
@@ -97,14 +102,24 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	}
 	if len(execution.Turn.TurnConfiguration) > 0 {
 		var configuration struct {
-			Projection        json.RawMessage `json:"collaboration_projection"`
-			HumanInput        json.RawMessage `json:"human_input"`
-			HumanInputHistory json.RawMessage `json:"human_input_history"`
-			History           json.RawMessage `json:"clarification_history"`
+			Projection            json.RawMessage `json:"collaboration_projection"`
+			ImplementationHandoff json.RawMessage `json:"implementation_handoff"`
+			AcceptedPlan          json.RawMessage `json:"accepted_plan"`
+			PlanningRequest       json.RawMessage `json:"planning_request"`
+			PlanningHistory       json.RawMessage `json:"planning_history"`
+			AssessmentHistory     json.RawMessage `json:"assessment_history"`
+			HumanInput            json.RawMessage `json:"human_input"`
+			HumanInputHistory     json.RawMessage `json:"human_input_history"`
+			History               json.RawMessage `json:"clarification_history"`
 		}
 		if json.Unmarshal(execution.Turn.TurnConfiguration, &configuration) != nil {
 			return "", ErrInvalidEventEnvelope
 		}
+		envelope.ImplementationHandoff = configuration.ImplementationHandoff
+		envelope.AcceptedPlan = configuration.AcceptedPlan
+		envelope.PlanningRequest = configuration.PlanningRequest
+		envelope.PlanningHistory = configuration.PlanningHistory
+		envelope.AssessmentHistory = configuration.AssessmentHistory
 		envelope.CollaborationProjection = configuration.Projection
 		envelope.HumanInput = configuration.HumanInput
 		envelope.HumanInputHistory = configuration.HumanInputHistory

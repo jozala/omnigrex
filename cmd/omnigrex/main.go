@@ -464,6 +464,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure GitHub label Worker: %w", err)
 	}
+	collaborationStatusWorker := &webhook.CollaborationStatusWorker{Store: database, Adapter: &webhook.IssueCollaboration{Store: database, API: githubServices.api, Credentials: developerRepositoryCredentials}, Owner: githubServices.claimOwner + ":collaboration-status", OnError: func(err error) { logger.Error("publish collaboration milestone", "error", err) }}
 	humanHandoffWorker, err := githubapi.NewHumanHandoffWorker(database, developerRepositoryCredentials, githubServices.api, githubapi.VisibleEffectWorkerConfig{
 		ClaimOwner: githubServices.claimOwner + ":publish-human-handoff", LeaseDuration: settings.WorkflowEffectLeaseDuration,
 		HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval, IdlePollInterval: settings.WorkflowEffectPollInterval,
@@ -597,6 +598,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 		mutationRecoveryWorker.Run,
 		expiredTurnMonitor.Run,
 		labelWorker.Run,
+		collaborationStatusWorker.Run,
 		humanHandoffWorker.Run,
 		provisioningWorker.Run,
 		failureWorker.Run,
