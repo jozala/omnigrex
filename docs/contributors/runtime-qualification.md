@@ -262,7 +262,12 @@ Default deployment smoke builds only the current orchestrator and pulls the sele
 
 ## Qualify an unselected bundle before adoption
 
-The normal main-push publication job retains `pi-candidate-build-<run>-<attempt>` with the exact image-building source C, actual published candidate digest and complete inventory, without adopting it.
+Ordinary main-push publication builds both orchestrators and the development image against the selected Pi bundle; it does not build, push, or capture a new Pi candidate.
+To publish an unselected candidate, dispatch **CI** on `main` with `pi_mode: build-candidate` and leave `pi_candidate` empty.
+After the required `check` succeeds, the main-only `build-pi-candidate` job publishes only Pi and retains `pi-candidate-build-<run>-<attempt>` (90 days) with the exact image-building source C, actual published candidate digest and complete inventory, without adopting it.
+The package-write token is scoped to that job; no arbitrary source-ref input is accepted.
+A successful build is not qualification, release readiness, or deployment guidance.
+If publication or capture fails, do not substitute a tag or invented record; correct the failure and explicitly rerun the build.
 Use that captured `pi-candidate.json`; do not regenerate C's hashes from a later checkout D.
 For source-local investigation, the equivalent capture command in the image-building checkout C is:
 
@@ -273,7 +278,8 @@ go run ./scripts/pi-bundle candidate-record > pi-candidate.json
 ```
 
 This is a complete proposed inventory, not a production selection or a claim of prior qualification.
-On the trusted default branch, explicitly dispatch the existing **CI** workflow with the `pi_candidate` input containing that JSON.
+On the trusted default branch, explicitly dispatch the existing **CI** workflow with `pi_mode: qualify-candidate` and the `pi_candidate` input containing that JSON.
+Missing or unknown modes, a candidate supplied to build mode, missing candidate JSON in qualification mode, and non-main dispatches fail validation before publication.
 This qualification-only mode publishes no images or releases and changes no production selection or repository pins.
 Both `qualify-pi-bundle-docker` and `qualify-pi-bundle-microsandbox` must succeed; they test the exact supplied digest/inventory through bounded resource checks and protocol using integration-only fixtures.
 Mandatory bundle qualification (`OMNIGREX_PI_UPGRADE_MODE=bundle`) restores, replays and continues retained R1 Sessions only under their original R1 image/inventory, while R2 starts independent fresh Sessions with separate identities and storage.
