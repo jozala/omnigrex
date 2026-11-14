@@ -265,7 +265,7 @@ func TestPreAdoptionQualificationCannotPublishOrOverrideProduction(t *testing.T)
 	jobs := readCIJobs(t)
 	for _, backend := range []string{"docker", "microsandbox"} {
 		j := jobs["qualify-pi-bundle-"+backend]
-		if j.If != "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" || len(ciNeeds(t, j)) != 0 {
+		if j.If != "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pi_mode == 'qualify-candidate'" || !reflect.DeepEqual(ciNeeds(t, j), []string{"validate-pi-dispatch"}) {
 			t.Fatal("qualification must be explicit, main-source-only and independent of publication")
 		}
 		tested, receipt := false, false
@@ -293,7 +293,16 @@ func TestPreAdoptionQualificationCannotPublishOrOverrideProduction(t *testing.T)
 }
 
 func TestPublicationCapturesCandidateOriginWithoutChangingProductSelection(t *testing.T) {
-	job := readCIJobs(t)["publish"]
+	jobs := readCIJobs(t)
+	for _, step := range jobs["publish"].Steps {
+		if strings.Contains(step.Run, "candidate-record") || strings.HasPrefix(step.With["name"], "pi-candidate-build-") {
+			t.Fatal("ordinary publication must not capture or upload candidate")
+		}
+	}
+	job := jobs["build-pi-candidate"]
+	if !reflect.DeepEqual(ciNeeds(t, job), []string{"validate-pi-dispatch", "check"}) || job.If != "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pi_mode == 'build-candidate'" {
+		t.Fatal("candidate publication must be explicit, validated and qualified on trusted main")
+	}
 	for _, step := range job.Steps {
 		if strings.Contains(step.Run, "candidate-record") {
 			if step.Env["OMNIGREX_PI_CANDIDATE_IMAGE"] != "${{ steps.images.outputs.pi_candidate_image }}" || step.Env["OMNIGREX_PI_CANDIDATE_SOURCE_COMMIT"] != "${{ github.sha }}" {
@@ -328,5 +337,75 @@ func TestRequiredGatesDoNotRequireCrossImageSessionMigration(t *testing.T) {
 		if !strings.Contains(string(mise), "OMNIGREX_PI_UPGRADE_MODE=bundle mise run "+task+"\n") {
 			t.Fatalf("required aggregate must qualify independent Sessions: %s", task)
 		}
+	}
+}
+
+func TestDispatchRejectsContradictoryOrUntrustedIntent(t *testing.T) {
+	for _, event := range []string{"workflow_dispatch", "push", "pull_request", ""} {
+		for _, ref := range []string{"refs/heads/main", "refs/heads/topic", "refs/tags/v1", ""} {
+			for _, mode := range []string{"build-candidate", "qualify-candidate", "", "product", "unknown"} {
+				for _, candidate := range []string{"", `{"image":"captured"}`} {
+					cmd := exec.Command("sh", "../../scripts/validate-pi-dispatch.sh")
+					cmd.Env = []string{"GITHUB_EVENT_NAME=" + event, "GITHUB_REF=" + ref, "PI_MODE=" + mode, "PI_CANDIDATE=" + candidate}
+					output, err := cmd.CombinedOutput()
+					want := event == "workflow_dispatch" && ref == "refs/heads/main" && ((mode == "build-candidate" && candidate == "") || (mode == "qualify-candidate" && candidate != ""))
+					if (err == nil) != want {
+						t.Fatalf("event=%q ref=%q mode=%q candidate=%q: %v %s", event, ref, mode, candidate, err, output)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestCandidatePublicationAuthorityAndCapture(t *testing.T) {
+	data, err := os.ReadFile("ci.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Permissions map[string]string `yaml:"permissions"`
+		Jobs        map[string]struct {
+			Permissions map[string]string `yaml:"permissions"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Permissions["packages"] != "" {
+		t.Fatal("package write must be job scoped")
+	}
+	for name, job := range workflow.Jobs {
+		if job.Permissions["packages"] == "write" && name != "publish" && name != "build-pi-candidate" {
+			t.Fatalf("unexpected publisher: %s", name)
+		}
+	}
+	if workflow.Jobs["build-pi-candidate"].Permissions["packages"] != "write" {
+		t.Fatal("candidate job cannot publish")
+	}
+	job := readCIJobs(t)["build-pi-candidate"]
+	validated, published, captured, uploaded := false, false, false, false
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "validate-pi-dispatch.sh") {
+			validated = true
+		}
+		if strings.Contains(step.Run, "docker login") && !validated {
+			t.Fatal("registry login before validation")
+		}
+		if step.Run == "sh scripts/publish-pi-images.sh candidate" {
+			published = true
+			if !validated || step.Env["OMNIGREX_RELEASE_COMMIT"] != "${{ github.sha }}" || step.Env["PI_MODE"] != "${{ inputs.pi_mode }}" || step.Env["PI_CANDIDATE"] != "${{ inputs.pi_candidate }}" {
+				t.Fatal("publication must validate actual inputs and use checkout commit")
+			}
+		}
+		if strings.Contains(step.Run, "candidate-record > pi-candidate.json") {
+			captured = published && step.If == ""
+		}
+		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			uploaded = captured && step.If == "" && step.With["name"] == "pi-candidate-build-${{ github.run_id }}-${{ github.run_attempt }}" && step.With["path"] == "pi-candidate.json" && step.With["if-no-files-found"] == "error"
+		}
+	}
+	if !uploaded {
+		t.Fatal("candidate artifact must follow successful publication and capture with exact run/attempt identity")
 	}
 }
