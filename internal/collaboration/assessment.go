@@ -96,14 +96,12 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 			}
 		}
 		if invalidate && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID == "" {
-			for _, grant := range s.Planning.Implementation.Actions {
-				if grant.Kind == "implement" && !slices.Contains(s.Planning.Implementation.Invalidated, grant.ID) {
-					s.Planning.Implementation.Invalidated = append(s.Planning.Implementation.Invalidated, grant.ID)
-				}
-			}
 			for _, in := range s.Inputs {
 				// Admission order bounds affected authority, not semantic precedence.
 				// A later exact confirmation still needs its own explicit assessment.
+				if in.Kind == "implement" && !slices.Contains(s.Planning.Implementation.Invalidated, in.ID) {
+					s.Planning.Implementation.Invalidated = append(s.Planning.Implementation.Invalidated, in.ID)
+				}
 				if exactConfirmation(in.Kind) && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) {
 					s.Planning.InvalidatedConfirmations = append(s.Planning.InvalidatedConfirmations, in.ID)
 				}

@@ -174,6 +174,7 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 	}
 	beforeStart := preImplementation(state)
 	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing || beforeStart && snapshot.State == workflow.StatePlanReady)
+	limitedWithdrawal := beforeStart && snapshot.CurrentAttempt != nil && snapshot.State == workflow.StateNeedsHuman && snapshot.ActiveTurn == nil && snapshot.ChangeProposal == nil && snapshot.Closure == nil && input.Command.Kind == "withdraw-implementation"
 	stage := workflow.StageID("")
 	if snapshot.CurrentAttempt != nil {
 		stage = snapshot.CurrentAttempt.CurrentStage
@@ -182,7 +183,13 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 		stage = workflow.StagePlanning
 	}
 	participant := ""
-	if active {
+	if limitedWithdrawal {
+		// Revocation belongs to the published pair, not an active Session. A
+		// preparation failure may already have fenced its Planner Participant.
+		if pair := state.CurrentCheckpoint(); pair != nil {
+			participant = pair.ParticipantID
+		}
+	} else if active {
 		err = tx.QueryRow(ctx, `SELECT assignment.agent_participant_id::text FROM stage_assignments assignment JOIN agent_participants participant ON participant.id=assignment.agent_participant_id WHERE assignment.workflow_id=$1 AND assignment.stage_id=$2 AND participant.status='ACTIVE' ORDER BY assignment.assignment_generation DESC LIMIT 1`, input.WorkflowID, stage).Scan(&participant)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return collaboration.Receipt{}, err
@@ -197,7 +204,7 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 	if state.Planning != nil {
 		actionCount = len(state.Planning.Implementation.Actions)
 	}
-	receipt := state.Accept("A"+id, input.Command, collaboration.Admission{SourceSequence: input.SourceSequence, Active: active, Authorized: input.Authorized, ParticipantID: participant, Route: collaborationRoute(snapshot), Actor: input.Actor, Source: input.Source, At: input.At})
+	receipt := state.Accept("A"+id, input.Command, collaboration.Admission{AllowUnusedWithdrawal: limitedWithdrawal, SourceSequence: input.SourceSequence, Active: active, Authorized: input.Authorized, ParticipantID: participant, Route: collaborationRoute(snapshot), Actor: input.Actor, Source: input.Source, At: input.At})
 	if beforeStart && len(state.Inputs) > prior {
 		snapshot, err = s.reopenPlanningTx(ctx, tx, input.WorkflowID, snapshot, &state, receipt.ResponseID)
 		if err != nil {

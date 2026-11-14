@@ -145,6 +145,9 @@ type Command struct {
 	Body   string
 }
 type Admission struct {
+	// AllowUnusedWithdrawal permits only revocation during an eligible pre-start
+	// Human Handoff. It never admits requirements input or resumes automation.
+	AllowUnusedWithdrawal bool
 	// SourceSequence is a transport-provided immutable creation order within its Work Item channel.
 	SourceSequence uint64
 	Route          string
@@ -277,7 +280,8 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	if c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
 		return reject("Implementation has already started. Withdrawal cannot stop it; close the original Work Item Issue to use the existing stopping mechanism.")
 	}
-	if !a.Active || a.ParticipantID == "" && a.Route == "" {
+	limitedWithdrawal := a.AllowUnusedWithdrawal && c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID == ""
+	if (!a.Active && !limitedWithdrawal) || a.ParticipantID == "" && a.Route == "" {
 		return reject("Rejected: this Work Item is not accepting input; resolve Human Handoff or lifecycle state explicitly before retrying.")
 	}
 	if id == "" || a.Actor.ID == "" || a.Source.ID == "" || a.Source.Channel == "" || a.At.IsZero() {
@@ -306,8 +310,11 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		if feedback := s.implementationTarget(target, a.ParticipantID); feedback != "" {
 			return reject(feedback)
 		}
-		if c.Kind == "implement" && s.implementationBeforeWithdrawal(a) {
-			return reject("This implementation request predates withdrawal and cannot restore authority. Submit a fresh stand-alone `/omnigrex implement " + c.Target + "` for the still-current valid pair.")
+		if s.implementationBeforeLatestAction(a) {
+			if c.Kind == "withdraw-implementation" {
+				return reject("This withdrawal predates a newer implementation decision and cannot revoke newer consent. Submit a fresh exact withdrawal if you intend to revoke the current unused authority.")
+			}
+			return reject("This implementation request predates withdrawal or a newer implementation decision and cannot restore authority. Submit a fresh stand-alone `/omnigrex implement " + c.Target + "` for the still-current valid pair.")
 		}
 		s.Planning.Implementation.Actions = append(s.Planning.Implementation.Actions, ImplementationAction{ID: id, RevisionID: target, Kind: c.Kind, Actor: a.Actor, Source: a.Source, AcceptedAt: a.At, SourceSequence: a.SourceSequence})
 		if c.Kind == "withdraw-implementation" {

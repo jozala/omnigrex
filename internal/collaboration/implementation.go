@@ -88,17 +88,18 @@ func (s *State) implementationTarget(target, participant string) string {
 	return ""
 }
 
-// Processing order is not consent order: a delayed earlier command must not
-// resurrect withdrawn authority even when it was never admitted previously.
-func (s *State) implementationBeforeWithdrawal(a Admission) bool {
+// Source sequence, when comparable, is human creation order. Webhook receipt
+// timestamps cannot override it (including retries admitted out of arrival order).
+// Channels without a comparable sequence conservatively use receipt order.
+func (s *State) implementationBeforeLatestAction(a Admission) bool {
 	for _, event := range s.Planning.Implementation.Actions {
-		if event.Kind != "withdraw-implementation" {
+		if a.Source.Channel == event.Source.Channel && a.SourceSequence > 0 && event.SourceSequence > 0 {
+			if a.SourceSequence <= event.SourceSequence {
+				return true
+			}
 			continue
 		}
 		if !a.At.After(event.AcceptedAt) {
-			return true
-		}
-		if a.Source.Channel == event.Source.Channel && a.SourceSequence > 0 && event.SourceSequence > 0 && a.SourceSequence <= event.SourceSequence {
 			return true
 		}
 	}

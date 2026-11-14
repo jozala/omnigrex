@@ -128,7 +128,9 @@ Before the first Developer admission, submit a new comment containing only:
 ```
 
 This prevents unused authorization from starting development, without closing the Work Item or withdrawing pair confirmation.
+This limited revocation also works during a preparation-failure Human Handoff before the first Developer admission; it leaves that Human Handoff and its budgets unchanged and schedules no work.
 An earlier event or replay cannot restore it.
+For commands with comparable immutable source order, a delayed older withdrawal likewise cannot revoke newer consent; webhook receipt time is not the human decision order.
 A fresh explicit `implement` command may authorize the still-current valid pair again.
 Steering/amendments accepted before admission also block development and return discussion to the Planner; assessment cannot silently resurrect withdrawn or invalidated authority.
 Concurrent withdrawal, steering, closure and admission are serialized: feedback reflects which operation crossed the durable start boundary first.

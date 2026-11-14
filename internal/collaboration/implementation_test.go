@@ -177,3 +177,91 @@ func TestAcceptedHandoffIsFocusedWithoutLosingSupportingHistory(t *testing.T) {
 		t.Fatal("focused orientation removed lossless original sources")
 	}
 }
+
+func TestImplementationRenewalSurvivesEarlierInputAssessment(t *testing.T) {
+	for _, historical := range []bool{false, true} {
+		t.Run(map[bool]string{false: "shared-batch", true: "historical-reassessment"}[historical], func(t *testing.T) {
+			s := planningFixture(t)
+			publishCheckpoint(t, s, "pair", "turn-1", planningContent())
+			admitPlanning(s, "initial", collaboration.Command{Kind: "implement", Target: "P1"})
+			validateImplementation(t, s, "initial-validation")
+			s.Planning.ReadyRevision = ""
+			admitPlanning(s, "steering", collaboration.Command{Kind: "steer", Body: "Withdraw earlier acceptance."})
+			s.Prepare("planner", "steering-turn")
+			assess := func(operation, turn string) {
+				t.Helper()
+				if err := s.Assess(operation, "planner", turn, []collaboration.Assessment{{InputID: "steering", EvidenceIDs: []string{"steering"}, Disposition: "unchanged", Explanation: "Earlier acceptance withdrawn; documents remain unchanged.", InvalidateConfirmation: true}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if historical {
+				assess("first-assessment", "steering-turn")
+			}
+			admitPlanning(s, "fresh-consent", collaboration.Command{Kind: "implement", Target: "P1"})
+			s.Prepare("planner", "renewal-turn")
+			assess("assessment-with-renewal", "renewal-turn")
+			if err := s.Assess("confirm-renewal", "planner", "renewal-turn", []collaboration.Assessment{{InputID: "fresh-consent", EvidenceIDs: []string{"fresh-consent"}, Disposition: "confirmed", Explanation: "Fresh consent accepts the unchanged pair."}}); err != nil {
+				t.Fatal(err)
+			}
+			validateImplementation(t, s, "renewal-validation")
+			if !s.ImplementationValidated() || s.ImplementationGrant() == nil || s.ImplementationGrant().ID != "fresh-consent" {
+				t.Fatal("earlier assessment invalidated later consent", s.Planning.Implementation)
+			}
+			s.Planning.ReadyRevision = ""
+			s.Prepare("planner", "historical-turn")
+			assess("reassessment", "historical-turn")
+			validateImplementation(t, s, "historical-validation")
+			if !s.ImplementationValidated() {
+				t.Fatal("historical reassessment revoked newer consent")
+			}
+			if len(s.Planning.Implementation.Invalidated) != 1 || s.Planning.Implementation.Invalidated[0] != "initial" {
+				t.Fatal("earlier authority not permanently invalidated", s.Planning.Implementation)
+			}
+		})
+	}
+}
+
+func TestImplementationSourceOrderDominatesReceiptTimeAndLateWithdrawal(t *testing.T) {
+	for _, lateWithdrawal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "retry-newer-consent", true: "late-older-withdrawal"}[lateWithdrawal], func(t *testing.T) {
+			s := planningFixture(t)
+			publishCheckpoint(t, s, "pair", "turn-1", planningContent())
+			a := admission("withdraw")
+			a.ParticipantID = "planner"
+			a.SourceSequence = 20
+			withdrawal := a
+			withdrawal.At = withdrawal.At.Add(time.Minute)
+			a.Source.ID = "newer"
+			a.SourceSequence = 21
+			if !lateWithdrawal {
+				if r := s.Accept("withdraw", collaboration.Command{Kind: "withdraw-implementation", Target: "P1"}, withdrawal); r.ResponseID == "" {
+					t.Fatal(r)
+				}
+			}
+			if r := s.Accept("newer", collaboration.Command{Kind: "implement", Target: "P1"}, a); r.ResponseID == "" {
+				t.Fatal("newer source consent rejected", r)
+			}
+			validateImplementation(t, s, "validation")
+			if lateWithdrawal {
+				if r := s.Accept("withdraw", collaboration.Command{Kind: "withdraw-implementation", Target: "P1"}, withdrawal); r.ResponseID != "" {
+					t.Fatal("older withdrawal accepted", r)
+				}
+			}
+			raw, _ := json.Marshal(s)
+			var restored collaboration.State
+			if err := json.Unmarshal(raw, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if !restored.ImplementationValidated() || restored.ImplementationGrant().ID != "newer" {
+				t.Fatal("delivery order displaced newer consent", restored.Planning.Implementation)
+			}
+			// Older consent also cannot displace a newer grant or restore withdrawn authority.
+			a.Source.ID = "old"
+			a.SourceSequence = 19
+			a.At = a.At.Add(time.Hour)
+			if r := restored.Accept("old", collaboration.Command{Kind: "implement", Target: "P1"}, a); r.ResponseID != "" {
+				t.Fatal("older consent accepted", r)
+			}
+		})
+	}
+}

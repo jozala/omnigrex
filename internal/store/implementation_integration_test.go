@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-func seedAuthorizedHandoff(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, n int) (agentFixture, store.AgentTurnSettlement) {
+func seedAuthorizedHandoff(t *testing.T, database *store.Store, pool *pgxpool.Pool, ctx context.Context, n int, beforeAssessment ...func(*collaboration.State, string, string)) (agentFixture, store.AgentTurnSettlement) {
 	t.Helper()
 	fixture, lease, _ := prepareSettlementTurn(t, database, pool, ctx, n, workflow.RolePlanner, "")
 	state := collaboration.State{}
@@ -37,6 +37,9 @@ func seedAuthorizedHandoff(t *testing.T, database *store.Store, pool *pgxpool.Po
 	r := state.Accept("authorize", collaboration.Command{Kind: "implement", Target: "P1"}, collaboration.Admission{Authorized: true, Active: true, ParticipantID: fixture.assignmentID, Actor: collaboration.Actor{ID: "42", Name: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "authorize"}, At: time.Now()})
 	if r.ResponseID == "" {
 		t.Fatal(r)
+	}
+	for _, hook := range beforeAssessment {
+		hook(&state, fixture.assignmentID, lease.ID)
 	}
 	state.Prepare(fixture.assignmentID, lease.ID)
 	if err := state.Assess("assessment", fixture.assignmentID, lease.ID, []collaboration.Assessment{{InputID: "authorize", EvidenceIDs: []string{"authorize"}, Disposition: "confirmed", Explanation: "Exact complete pair accepted."}}); err != nil {
@@ -442,5 +445,158 @@ func TestImplementationUpgradeExposesReadyPairWithoutGrantOrDiscussionReplay(t *
 	}
 	if prompts != 1 || turns != 1 || c.ImplementationGrant() != nil || len(c.Planning.Revisions) != 1 || !strings.Contains(c.Receipts[0].Feedback, "/omnigrex implement P1") {
 		t.Fatal("upgrade authorized work, repeated discussion, or hid actual action", prompts, turns, c)
+	}
+}
+
+func TestImplementationFreshConsentQueuesDespiteEarlierAssessment(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, settled := seedAuthorizedHandoff(t, databases[0], pool, ctx, 2400, func(s *collaboration.State, participant, turn string) {
+		for _, in := range []struct {
+			id      string
+			command collaboration.Command
+		}{{"earlier-steering", collaboration.Command{Kind: "steer", Body: "Withdraw prior acceptance, not the unchanged documents."}}, {"fresh-consent", collaboration.Command{Kind: "implement", Target: "P1"}}} {
+			r := s.Accept(in.id, in.command, collaboration.Admission{Active: true, Authorized: true, ParticipantID: participant, Actor: collaboration.Actor{ID: "42", Name: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: in.id}, At: time.Now()})
+			if r.ResponseID == "" {
+				t.Fatal(r)
+			}
+		}
+		s.Prepare(participant, turn)
+		for _, op := range []string{"assessment", "historical-reassessment"} {
+			if err := s.Assess(op, participant, turn, []collaboration.Assessment{{InputID: "earlier-steering", EvidenceIDs: []string{"earlier-steering"}, Disposition: "unchanged", Explanation: "Earlier acceptance withdrawn.", InvalidateConfirmation: true}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Assess("renewal", participant, turn, []collaboration.Assessment{{InputID: "fresh-consent", EvidenceIDs: []string{"fresh-consent"}, Disposition: "confirmed", Explanation: "New exact consent accepts unchanged commitments."}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var state collaboration.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != workflow.StateDeveloping || settled.SuccessorJobID == "" || !state.ImplementationValidated() || state.ImplementationGrant().ID != "fresh-consent" {
+		t.Fatal("settlement lost fresh consent", settled, state)
+	}
+}
+
+func TestImplementationUnusedWithdrawalDuringPreparationHumanHandoff(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, settled := seedAuthorizedHandoff(t, databases[0], pool, ctx, 2410)
+	job := claimSettlementSuccessorJob(t, databases[0], pool, ctx, settled.SuccessorJobID, "preparation-failure")
+	if _, err := databases[0].AcknowledgeAgentTurnPreparationFailure(ctx, *job, errors.New("Developer profile unavailable"), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	var before, after []byte
+	inspect := func() []byte {
+		t.Helper()
+		var raw []byte
+		if err := pool.QueryRow(ctx, `SELECT jsonb_build_array(w.status,w.state_revision,w.planning_only,w.human_handoff_reason,a.current_stage,a.infrastructure_failures,a.review_usage,(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND status IN ('AVAILABLE','LEASED'))) FROM workflows w JOIN workflow_attempts a ON a.workflow_id=w.id AND a.active WHERE w.id=$1`, fixture.workflowID).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before = inspect()
+	submission := store.HumanInputSubmission{WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: "withdraw-implementation", Target: "P1"}, Actor: collaboration.Actor{ID: "42", Name: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "withdraw-during-handoff"}, Authorized: true, At: time.Now()}
+	for _, bad := range []struct {
+		name         string
+		authorized   bool
+		target, body string
+	}{{"unauthorized", false, "P1", ""}, {"unrelated", true, "P2", ""}, {"qualified", true, "P1", "but change storage"}} {
+		rejected := submission
+		rejected.Source.ID = bad.name
+		rejected.Authorized = bad.authorized
+		rejected.Command.Target = bad.target
+		rejected.Command.Body = bad.body
+		r, err := databases[0].AdmitHumanInput(ctx, rejected)
+		if err != nil || r.ResponseID != "" {
+			t.Fatal("ineligible withdrawal accepted", r, err)
+		}
+	}
+	r, err := databases[1].AdmitHumanInput(ctx, submission)
+	if err != nil || r.ResponseID == "" {
+		t.Fatal("unused withdrawal rejected", r, err)
+	}
+	// A replay on another Store is idempotent; no continuation or budget mutation.
+	replay, err := databases[0].AdmitHumanInput(ctx, submission)
+	if err != nil || replay.ResponseID != r.ResponseID {
+		t.Fatal(replay, err)
+	}
+	after = inspect()
+	if string(before) != string(after) || !strings.Contains(string(after), "NEEDS_HUMAN") {
+		t.Fatal("withdrawal changed handoff/budgets/work", string(before), string(after))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var s collaboration.State
+	if err = json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.ImplementationGrant() != nil || s.Planning.ReadyRevision != "pair" || s.Planning.Implementation.FirstDeveloperTurnID != "" || len(s.Planning.Implementation.Actions) != 2 {
+		t.Fatal("withdrawal lost confirmation/history or retained authority", s)
+	}
+	for _, kind := range []string{"implement", "steer"} {
+		submission.Command = collaboration.Command{Kind: kind, Target: "P1", Body: map[string]string{"steer": "Change requirements."}[kind]}
+		submission.Source.ID = kind + "-blocked"
+		r, err = databases[0].AdmitHumanInput(ctx, submission)
+		if err != nil || r.ResponseID != "" {
+			t.Fatal("Human Handoff allowed continuation", r, err)
+		}
+	}
+	delivery := workflowDelivery("24100000-0000-4000-8000-000000000001")
+	delivery.RepositoryID, delivery.IssueID, delivery.IssueNumber = 2410, 2410, 2410
+	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
+	claim := claimWorkflowDelivery(t, databases[0], ctx, delivery)
+	if _, err = databases[0].CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "closed"), store.WorkflowLocator{RepositoryID: 2410, IssueID: 2410, IssueNumber: 2410}, func(c store.WorkflowEventContext) (workflow.Event, error) {
+		return workflow.IssueClosedEvent{EventMetadata: c.Metadata, ClosureID: "24100000-0000-4000-8000-000000000002", RetentionToken: "24100000-0000-4000-8000-000000000003", RetainUntil: c.Metadata.ObservedAt.Add(time.Hour)}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	submission.Command = collaboration.Command{Kind: "withdraw-implementation", Target: "P1"}
+	submission.Source.ID = "closed-withdrawal"
+	if r, err = databases[1].AdmitHumanInput(ctx, submission); err != nil || r.ResponseID != "" {
+		t.Fatal("closed lifecycle allowed withdrawal", r, err)
+	}
+}
+
+func TestImplementationLateWithdrawalDoesNotCancelNewerQueuedConsent(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	fixture, settled := seedAuthorizedHandoff(t, databases[0], pool, ctx, 2420, func(s *collaboration.State, _, _ string) {
+		s.Planning.Implementation.Actions[0].SourceSequence = 21
+	})
+	job := claimSettlementSuccessorJob(t, databases[0], pool, ctx, settled.SuccessorJobID, "newer-consent-preparer")
+	for _, command := range []string{"withdraw-implementation", "implement"} {
+		r, err := databases[1].AdmitHumanInput(ctx, store.HumanInputSubmission{SourceSequence: 20, WorkflowID: fixture.workflowID, Command: collaboration.Command{Kind: command, Target: "P1"}, Actor: collaboration.Actor{ID: "42", Name: "maintainer"}, Source: collaboration.Source{Channel: "fixture", ID: "older-" + command}, Authorized: true, At: time.Now().Add(time.Minute)})
+		if err != nil || r.ResponseID != "" {
+			t.Fatal("older action displaced newer queued consent", r, err)
+		}
+	}
+	var status string
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT j.status,c.state FROM jobs j JOIN work_item_collaboration c ON c.workflow_id=j.workflow_id WHERE j.id=$1`, job.ID).Scan(&status, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var state collaboration.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if status != "LEASED" || !state.ImplementationValidated() || len(state.Planning.Implementation.Actions) != 1 {
+		t.Fatal("late action cancelled preparation or changed authority", status, state)
+	}
+	spec := preparationSpec(strings.Repeat("a", 40), "openai/test")
+	spec.VerifiedImplementationAuthorization = "authorize"
+	if _, err := databases[1].PrepareAgentTurn(ctx, *job, spec); err != nil {
+		t.Fatal("newer consent cannot admit development", err)
 	}
 }

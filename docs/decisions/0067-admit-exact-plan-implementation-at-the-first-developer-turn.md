@@ -21,7 +21,9 @@ Record that Turn, authorization and accepted revision permanently.
 
 Before that transaction, new human input reopens the existing Planner discussion and fences queued or leased preparation.
 Repository movement likewise returns to relevance validation while preserving unused authorization; it is not automatically a material change.
-Explicit material assessment invalidates authority permanently; withdrawal does not invalidate pair confirmation.
+Explicit material assessment invalidates earlier authority permanently, bounded by the assessed input's admission position as in [decision 0062](0062-use-short-conversation-references-and-explicit-assessments.md); it does not revoke later fresh consent.
+Comparable immutable source order governs implementation requests and withdrawals, rather than webhook receipt or processing order.
+Withdrawal does not invalidate pair confirmation, and unused authority can be revoked during pre-start Human Handoff without resuming work or changing budgets.
 Fresh external actor-permission and open-Issue observations are bound to the exact grant and checked again under the admission lock.
 
 Deliver the exact accepted pair, original request and selected source decisions through the bounded collaboration projection, with lossless supporting history available.
