@@ -2,9 +2,21 @@
 set -eu
 : "${OMNIGREX_RELEASE_COMMIT:?set the full release commit}"
 : "${GITHUB_STEP_SUMMARY:?publication runs in release CI}"
-golden_image="$(go run ./scripts/pi-bundle image)"
-docker pull --platform linux/amd64 "$golden_image"
-for name in pi orchestrator orchestrator-microsandbox development; do
+case "${1:-product}" in
+  product)
+    names='orchestrator orchestrator-microsandbox development'
+    golden_image="$(go run ./scripts/pi-bundle image)"
+    docker pull --platform linux/amd64 "$golden_image"
+    ;;
+  candidate)
+    # Also guard direct invocation, before any Docker operation.
+    sh scripts/validate-pi-dispatch.sh
+    test "$PI_MODE" = build-candidate
+    names=pi
+    ;;
+  *) echo 'Expected product or candidate publication mode' >&2; exit 1 ;;
+esac
+for name in $names; do
   set --
   case "$name" in
     pi) file=agent/pi/Dockerfile; target=golden ;;
@@ -35,15 +47,19 @@ for name in pi orchestrator orchestrator-microsandbox development; do
     orchestrator-microsandbox) microsandbox_image="$digest" ;;
     development) development_image="$digest" ;;
   esac
-  # Publication does not adopt the newly built Pi candidate.
-  if [ "$name" = pi ]; then
-    if [ -n "${GITHUB_OUTPUT:-}" ]; then printf 'pi_candidate_image=%s\n' "$digest" >> "$GITHUB_OUTPUT"; fi
-    digest="$golden_image"
-  fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    key="$(printf '%s' "$name" | tr '-' '_')"
+    case "$name" in
+      pi) key=pi_candidate ;;
+      *) key="$(printf '%s' "$name" | tr '-' '_')" ;;
+    esac
     printf '%s_image=%s\n' "$key" "$digest" >> "$GITHUB_OUTPUT"
   fi
 done
-sh scripts/write-publication-summary.sh "$golden_image" "${candidate_image:-}" \
-  "$orchestrator_image" "$microsandbox_image" "$development_image" >> "$GITHUB_STEP_SUMMARY"
+if [ "$names" = pi ]; then
+  # shellcheck disable=SC2016 # Markdown backticks.
+  printf '## Unselected Pi candidate — not qualification or adoption\n\nPublished: `%s`\n\nUse the captured candidate record in a separate qualification dispatch. Selection and repository pins are unchanged.\n' "$candidate_image" >> "$GITHUB_STEP_SUMMARY"
+else
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then printf 'pi_image=%s\n' "$golden_image" >> "$GITHUB_OUTPUT"; fi
+  sh scripts/write-publication-summary.sh "$golden_image" "" \
+    "$orchestrator_image" "$microsandbox_image" "$development_image" >> "$GITHUB_STEP_SUMMARY"
+fi

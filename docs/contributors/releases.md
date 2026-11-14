@@ -10,7 +10,9 @@ Only Linux/amd64 is supported.
 
 Choose an explicit **CI** run ID from a successful `push` to `main`, not a PR run, unrelated green check, workflow summary, mutable `sha-*` image tag, or current main tip.
 All existing jobs must pass, including `check`, development qualification, both exact-digest deployment smoke jobs, and development Microsandbox smoke.
-`publish` records actual pushed candidate digests separately from the deliberately selected Pi digest and builds `deployment-payload-RUN-ATTEMPT`.
+`publish` records both actual pushed orchestrator digests and the deliberately selected exact Pi digest and builds `deployment-payload-RUN-ATTEMPT`.
+It also publishes the development image against that selected Pi base, but does not publish a new Pi candidate.
+Use the separate [explicit candidate build and qualification dispatches](runtime-qualification.md#qualify-an-unselected-bundle-before-adoption) when preparing a new runtime; neither dispatch adopts it.
 Both product smoke jobs verify and extract that payload and use its packaged Compose files with those captured digests.
 Only afterward does `release-candidate` record job IDs and upload `release-candidate-RUN-ATTEMPT` with a machine-readable `candidate.json`, deployment payload, and checksums.
 Main CI creates no version tag or GitHub Release.
