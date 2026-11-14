@@ -3,10 +3,13 @@ package composition
 
 import (
 	"context"
+	"fmt"
 	"io"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/runtime/docker"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/microsandbox"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
@@ -42,11 +45,28 @@ func NewImageAvailability(settings ...config.Config) (ImageAvailability, error) 
 	}
 	return docker.NewExactImageAvailability()
 }
+
+// CheckConfiguredRepositoryEnvironment is fresh/default admission only. Retained
+// launch paths use their resolved contract and must not consult this selection.
+func CheckConfiguredRepositoryEnvironment(ctx context.Context, runtime profile.Profile, settings ...config.Config) error {
+	err := CheckRepositoryEnvironment(ctx, runtime, settings...)
+	if err == nil {
+		return nil
+	}
+	contract := runtime.Contract()
+	bundle, selectionErr := piresources.SelectedBundle(contract.Platform.OS, contract.Platform.Arch)
+	if selectionErr != nil {
+		return err
+	}
+	return fmt.Errorf("selected production Pi bundle image=%q source=%s; for fresh Participants qualify a self-contained compatible image against agent/pi/selected-bundle.json, then explicitly provision its exact digest (OMNIGREX_PI_IMAGE chooses the inspected image, not the selection; different image digests may contain identical approved resources): %w", bundle.Image, bundle.SourceCommit, err)
+}
+
 func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile, settings ...config.Config) error {
 	if len(settings) > 0 && settings[0].ExecutionBackend == "microsandbox" {
 		backend, err := microsandbox.New(MicrosandboxOptions(settings[0]), nil)
 		if err != nil {
-			return err
+			contract := profile.Contract()
+			return environment.QualificationFailure(contract.Image, contract.Platform.OS, contract.Platform.Arch, contract.GoldenResourceContract, nil, err)
 		}
 		return backend.CheckRepositoryEnvironment(ctx, profile)
 	}

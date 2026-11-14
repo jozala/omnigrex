@@ -2,11 +2,14 @@ package docker
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -26,14 +29,14 @@ type oneShotAPI interface {
 	ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error)
 }
 
-func runOneShotContainer(ctx context.Context, api oneShotAPI, options mobyclient.ContainerCreateOptions, operation string) (runErr error) {
-	return runManagedOneShotContainer(ctx, api, options, operation, nil, nil)
+func runOneShotContainer(ctx context.Context, api oneShotAPI, options mobyclient.ContainerCreateOptions, operation string, diagnostics ...*environment.QualificationOutput) (runErr error) {
+	return runManagedOneShotContainer(ctx, api, options, operation, nil, nil, diagnostics...)
 }
 
 // Persist the setup ID before starting or deleting it, so an interrupted or lost
 // removal response can be reconciled by immutable ID after orchestrator restart.
 func runManagedOneShotContainer(ctx context.Context, api oneShotAPI, options mobyclient.ContainerCreateOptions, operation string,
-	bind func(context.Context, string) error, stopped func(context.Context, string) error) (runErr error) {
+	bind func(context.Context, string) error, stopped func(context.Context, string) error, diagnostics ...*environment.QualificationOutput) (runErr error) {
 	created, err := api.ContainerCreate(ctx, options)
 	if err != nil {
 		failure := fmt.Errorf("create %s container: %w", operation, err)
@@ -80,6 +83,10 @@ func runManagedOneShotContainer(ctx context.Context, api oneShotAPI, options mob
 			return fmt.Errorf("wait for %s container: %s", operation, result.Error.Message)
 		}
 		if result.StatusCode != 0 {
+			if len(diagnostics) == 1 && diagnostics[0] != nil {
+				diagnostics[0].ObserveNonzeroExit()
+				collectQualificationLogs(ctx, api, created.ID, diagnostics[0])
+			}
 			return fmt.Errorf("%s container exited with status %d", operation, result.StatusCode)
 		}
 		return nil
@@ -87,5 +94,52 @@ func runManagedOneShotContainer(ctx context.Context, api oneShotAPI, options mob
 		return fmt.Errorf("wait for %s container: %w", operation, err)
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// This optional interface is used only by golden-resource callers after an
+// observed nonzero exit, before exact-ID cleanup. Other one-shot commands never
+// read or forward logs.
+type qualificationLogAPI interface {
+	ContainerLogs(context.Context, string, mobyclient.ContainerLogsOptions) (mobyclient.ContainerLogsResult, error)
+}
+
+func collectQualificationLogs(ctx context.Context, api oneShotAPI, id string, output *environment.QualificationOutput) {
+	logs, ok := api.(qualificationLogAPI)
+	if !ok {
+		return
+	}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	reader, err := logs.ContainerLogs(bounded, id, mobyclient.ContainerLogsOptions{ShowStderr: true})
+	if err != nil {
+		return
+	}
+	defer reader.Close()
+	// Do not use a demultiplexer that allocates from untrusted frame lengths.
+	// Cap both wire bytes and individual frames, with a fixed-size header.
+	wire := &io.LimitedReader{R: reader, N: 32 << 10}
+	for {
+		var header [8]byte
+		_, err := io.ReadFull(wire, header[:])
+		if err == io.EOF {
+			if wire.N == 0 {
+				output.Invalidate()
+			}
+			return
+		}
+		if err != nil || header[0] != 2 || header[1] != 0 || header[2] != 0 || header[3] != 0 {
+			output.Invalidate()
+			return
+		}
+		size := int64(binary.BigEndian.Uint32(header[4:]))
+		if size > 16<<10 {
+			output.Invalidate()
+			return
+		}
+		if _, err := io.CopyN(output, wire, size); err != nil {
+			output.Invalidate()
+			return
+		}
 	}
 }

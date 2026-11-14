@@ -5,7 +5,9 @@ package microsandbox
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	piresources "github.com/jozala/omnigrex/agent/pi"
 	"net"
 	"os"
 	"os/exec"
@@ -112,6 +114,25 @@ setInterval(() => {}, 1000);
 	// Qualification uses disposable storage and leaves no diagnostic VM.
 	if err := backend.CheckRepositoryEnvironment(ctx, runtime); err != nil {
 		t.Fatal(err)
+	}
+
+	// The native execution bridge must preserve allowlisted check detail, not
+	// merely reject a corrupt inventory with the generic setup failure.
+	contract := runtime.Contract()
+	var inventory piresources.ResourceContract
+	_ = json.Unmarshal(contract.GoldenResourceContract, &inventory)
+	for i := range inventory.Files {
+		if inventory.Files[i].Name == "runner.mjs" {
+			inventory.Files[i].SHA256 = strings.Repeat("a", 64)
+		}
+	}
+	contract.GoldenResourceContract, _ = json.Marshal(inventory)
+	corrupted, err := profile.New(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.CheckRepositoryEnvironment(ctx, corrupted); err == nil || !strings.Contains(err.Error(), "owned checksum runner.mjs (guest-reported failed check)") || !strings.Contains(err.Error(), image) {
+		t.Fatalf("native qualification lost bound failure detail: %v", err)
 	}
 	resources, _, err := backend.platform.List(ctx, "")
 	if err != nil {

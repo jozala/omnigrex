@@ -20,8 +20,12 @@ const goldenResourceProbeMemoryBytes = 256 << 20
 
 // CheckRepositoryEnvironment exercises exact runtime resources in a disposable
 // diagnostic helper. It attaches no workspace, credentials, or retained state.
-func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) error {
+func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) (err error) {
 	contract := profile.Contract()
+	output := environment.NewQualificationOutput(contract.Platform.Arch, contract.Name, contract.GoldenResourceContract)
+	defer func() {
+		err = environment.QualificationFailure(contract.Image, contract.Platform.OS, contract.Platform.Arch, contract.GoldenResourceContract, output, err)
+	}()
 	var requirements []execution.Requirement
 	if contract.RepositoryEnvironment != nil {
 		for _, requirement := range contract.RepositoryEnvironment.Requirements {
@@ -50,7 +54,7 @@ func CheckRepositoryEnvironment(ctx context.Context, profile profile.Profile) er
 		Config:     &container.Config{Image: contract.Image, User: "10001:10001", Entrypoint: []string{"/bin/sh", "-ec"}, Cmd: []string{script}, Labels: map[string]string{diagnosticMarkerLabel: "true", diagnosticExpiryLabel: time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)}},
 		HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}, Resources: container.Resources{Memory: goldenResourceProbeMemoryBytes, MemorySwap: goldenResourceProbeMemoryBytes, PidsLimit: &pids}},
 	}
-	if err := runOneShotContainer(ctx, api, options, "repository golden-resource qualification"); err != nil {
+	if err := runOneShotContainer(ctx, api, options, "repository golden-resource qualification", output); err != nil {
 		return fmt.Errorf("repository image does not satisfy golden resources: %w", err)
 	}
 	return nil

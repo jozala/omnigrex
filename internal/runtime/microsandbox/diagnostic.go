@@ -17,6 +17,12 @@ import (
 const diagnosticLabel = "io.omnigrex.diagnostic"
 const expiryLabel = "io.omnigrex.diagnostic.expiry"
 
+// Only the resource qualification call may collect allowlisted output. Generic
+// Execute callers continue discarding guest stdout/stderr.
+type qualificationExecutor interface {
+	ExecuteQualification(context.Context, metadata, []string, *environment.QualificationOutput) error
+}
+
 func (backend *Backend) Inspect(ctx context.Context) error { return backend.Check(ctx) }
 
 type diagnosticProcess struct {
@@ -30,6 +36,10 @@ func (backend *Backend) diagnostic(ctx context.Context, runtime profile.Profile,
 }
 
 func (backend *Backend) diagnosticContract(ctx context.Context, contract profile.Contract, image string, memory int64, network bool) (process *diagnosticProcess, err error) {
+	output := environment.NewQualificationOutput(contract.Platform.Arch, contract.Name, contract.GoldenResourceContract)
+	defer func() {
+		err = environment.QualificationFailure(image, contract.Platform.OS, contract.Platform.Arch, contract.GoldenResourceContract, output, err)
+	}()
 	if err := backend.Available(ctx, image, contract.Platform); err != nil {
 		return nil, err
 	}
@@ -64,7 +74,14 @@ func (backend *Backend) diagnosticContract(ctx context.Context, contract profile
 	if err != nil {
 		return process, err
 	}
-	if err := backend.platform.Execute(ctx, meta, []string{"/bin/sh", "-ec", setup + qualification}, "0:0", nil); err != nil {
+	command := []string{"/bin/sh", "-ec", setup + qualification}
+	var executeErr error
+	if diagnostic, ok := backend.platform.(qualificationExecutor); ok {
+		executeErr = diagnostic.ExecuteQualification(ctx, meta, command, output)
+	} else {
+		executeErr = backend.platform.Execute(ctx, meta, command, "0:0", nil)
+	}
+	if err := executeErr; err != nil {
 		return process, err
 	}
 	return process, nil

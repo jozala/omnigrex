@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	sdk "github.com/superradcompany/microsandbox/sdk/go"
@@ -225,6 +226,17 @@ func (driver sdkPlatform) Image(ctx context.Context, reference string) (string, 
 }
 
 func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []string, user string, input io.Reader) (result error) {
+	return driver.execute(ctx, meta, command, user, input, nil)
+}
+
+// ExecuteQualification is used only by diagnosticContract (startup/default
+// checks and retained prelaunch checks). Keep output opt-in here rather than
+// changing generic setup execution or the guest/runtime compatibility contract.
+func (driver sdkPlatform) ExecuteQualification(ctx context.Context, meta metadata, command []string, output *environment.QualificationOutput) error {
+	return driver.execute(ctx, meta, command, "0:0", nil, output)
+}
+
+func (driver sdkPlatform) execute(ctx context.Context, meta metadata, command []string, user string, input io.Reader, output *environment.QualificationOutput) (result error) {
 	sandbox, err := driver.live(ctx, meta)
 	if err != nil {
 		return err
@@ -261,7 +273,10 @@ func (driver sdkPlatform) Execute(ctx context.Context, meta metadata, command []
 			return err
 		}
 	}
-	return awaitSDKExecution(ctx, meta, handle)
+	if output == nil {
+		return awaitSDKExecution(ctx, meta, handle)
+	}
+	return awaitSDKQualification(ctx, meta, handle, output)
 }
 
 type sdkEventReceiver interface {
@@ -269,16 +284,27 @@ type sdkEventReceiver interface {
 }
 
 func awaitSDKExecution(ctx context.Context, meta metadata, handle sdkEventReceiver) error {
+	return awaitSDKQualification(ctx, meta, handle, nil)
+}
+
+func awaitSDKQualification(ctx context.Context, meta metadata, handle sdkEventReceiver, output *environment.QualificationOutput) error {
 	for {
 		event, err := receiveSDKEvent(ctx, meta, handle)
 		if err != nil {
 			return err
+		}
+		if output != nil && event.Kind == sdk.ExecEventStderr {
+			_, _ = output.Write(event.Data)
 		}
 		if event.Kind == sdk.ExecEventFailed || event.Kind == sdk.ExecEventStdinError {
 			return execution.ErrUnknownEffect
 		}
 		if event.Kind == sdk.ExecEventExited {
 			if event.ExitCode != 0 {
+				if output != nil {
+					output.ObserveNonzeroExit()
+					return fmt.Errorf("Microsandbox guest setup failed (observed exit %d)", event.ExitCode)
+				}
 				return errors.New("Microsandbox guest setup failed")
 			}
 			return nil

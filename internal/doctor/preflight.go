@@ -233,7 +233,7 @@ func (state *productionState) checkRuntimeImage(ctx context.Context) error {
 		if err := availability.Available(ctx, contract.Image, contract.Platform); err != nil {
 			return err
 		}
-		if err := composition.CheckRepositoryEnvironment(ctx, profile, state.settings); err != nil {
+		if err := composition.CheckConfiguredRepositoryEnvironment(ctx, profile, state.settings); err != nil {
 			return err
 		}
 	}
@@ -487,7 +487,7 @@ func (state *productionState) checkAgentProfiles(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := composition.CheckRepositoryEnvironment(ctx, selected, state.settings); err != nil {
+		if err := composition.CheckConfiguredRepositoryEnvironment(ctx, selected, state.settings); err != nil {
 			return err
 		}
 	}

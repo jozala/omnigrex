@@ -536,7 +536,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 
 	qualificationCtx, qualificationCancel := context.WithTimeout(ctx, settings.ReadinessTimeout)
 	for _, profile := range profiles {
-		if err := composition.CheckRepositoryEnvironment(qualificationCtx, profile, settings); err != nil {
+		if err := composition.CheckConfiguredRepositoryEnvironment(qualificationCtx, profile, settings); err != nil {
 			qualificationCancel()
 			return fmt.Errorf("qualify configured Runtime Profile: %w", err)
 		}

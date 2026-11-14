@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	piresources "github.com/jozala/omnigrex/agent/pi"
+	"github.com/jozala/omnigrex/internal/runtime/environment"
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 	sdk "github.com/superradcompany/microsandbox/sdk/go"
 	"go.opentelemetry.io/otel/trace"
@@ -139,5 +141,59 @@ func TestSDKExpectedAbsenceDoesNotLogFailure(t *testing.T) {
 	source := &sdk.Error{Kind: sdk.ErrSandboxNotFound}
 	if !errors.Is(sdkLookupError(context.Background(), sdkCall("GetSandbox", metadata{}), source), execution.ErrNotFound) || output.Len() != 0 {
 		t.Fatal(output.String())
+	}
+}
+
+type qualificationEvents struct {
+	events []*sdk.ExecEvent
+	err    error
+}
+
+func (handle *qualificationEvents) Recv(context.Context) (*sdk.ExecEvent, error) {
+	if len(handle.events) == 0 {
+		return nil, handle.err
+	}
+	event := handle.events[0]
+	handle.events = handle.events[1:]
+	return event, nil
+}
+func TestSDKQualificationCaptureRequiresObservedFailure(t *testing.T) {
+	for _, terminal := range []sdk.ExecEventKind{sdk.ExecEventExited, sdk.ExecEventDone, sdk.ExecEventFailed} {
+		output := environment.NewQualificationOutput("amd64", "pi-rpc", piresources.CandidateContract("amd64"))
+		handle := &qualificationEvents{events: []*sdk.ExecEvent{
+			{Kind: sdk.ExecEventStdout, Data: []byte("stdout-secret")},
+			{Kind: sdk.ExecEventStderr, Data: []byte("stderr-secret\nPi resource check failed: owned check")},
+			{Kind: sdk.ExecEventStderr, Data: []byte("sum runner.mjs\n")},
+			{Kind: terminal, ExitCode: 7},
+		}}
+		err := awaitSDKQualification(context.Background(), metadata{}, handle, output)
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatal(err)
+		}
+		if strings.Contains(output.Check(), "owned checksum runner.mjs") != (terminal == sdk.ExecEventExited) {
+			t.Fatal(output.Check(), err)
+		}
+		if terminal != sdk.ExecEventExited && !errors.Is(err, execution.ErrUnknownEffect) {
+			t.Fatal(err)
+		}
+	}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if cause == context.DeadlineExceeded {
+			var stop context.CancelFunc
+			ctx, stop = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer stop()
+		}
+		output := environment.NewQualificationOutput("amd64", "pi-rpc", piresources.CandidateContract("amd64"))
+		handle := &qualificationEvents{events: []*sdk.ExecEvent{{Kind: sdk.ExecEventStderr, Data: []byte("Pi resource check failed: Node version\n")}}, err: cause}
+		err := awaitSDKQualification(ctx, metadata{}, handle, output)
+		if !errors.Is(err, cause) || !strings.Contains(output.Check(), "unknown stage") {
+			t.Fatal(err, output.Check())
+		}
+	}
+	handle := &qualificationEvents{events: []*sdk.ExecEvent{{Kind: sdk.ExecEventStderr, Data: []byte("private guest output")}, {Kind: sdk.ExecEventExited, ExitCode: 1}}}
+	if err := awaitSDKExecution(context.Background(), metadata{}, handle); err == nil || err.Error() != "Microsandbox guest setup failed" {
+		t.Fatal(err)
 	}
 }
