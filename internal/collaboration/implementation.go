@@ -29,7 +29,7 @@ func exactConfirmation(kind string) bool { return kind == "confirm-plan" || kind
 
 // ImplementationGrant is unused, current human authority, not an admission.
 func (s *State) ImplementationGrant() *ImplementationAction {
-	if s.Planning == nil || s.Planning.Implementation.FirstDeveloperTurnID != "" {
+	if s.Planning == nil || s.Planning.Implementation.FirstDeveloperTurnID != "" && s.ActiveReplanning() == nil {
 		return nil
 	}
 	p := s.Planning
@@ -79,7 +79,7 @@ func (s *State) ImplementationCommit() string {
 
 func (s *State) implementationTarget(target, participant string) string {
 	r := s.CurrentCheckpoint()
-	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" && s.ActiveReplanning() == nil {
 		return "Implementation has already started. Withdrawal cannot stop it; close the original Work Item Issue to use the existing stopping mechanism."
 	}
 	if r == nil || !r.Published || r.Source == nil || r.Content.Status != "proposed" || r.ID != target || r.ParticipantID != participant {

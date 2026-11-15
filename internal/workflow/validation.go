@@ -59,6 +59,10 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 			return false
 		}
 		switch event.Outcome {
+		case TurnOutcomeReplanningRequested:
+			return event.ReplanningCycleID != "" && event.CorroborationHandoffReason == "" && event.Turn.Role == RoleDeveloper && event.Review == nil && event.ExistingReview == nil && (event.ChangeProposal == nil || validChangeProposal(event.ChangeProposal))
+		case TurnOutcomeReplanningResolved:
+			return event.ReplanningCycleID != "" && event.ResolvedPlanRevisionID != "" && event.ImplementationAuthorized && event.CorroborationHandoffReason == "" && event.Turn.Role == RolePlanner && event.Review == nil && event.ExistingReview == nil && (event.ChangeProposal == nil || validChangeProposal(event.ChangeProposal))
 		case TurnOutcomePlanningReady:
 			return event.CorroborationHandoffReason == "" && event.Turn.Role == RolePlanner && event.ChangeProposal == nil && event.Review == nil && event.ExistingReview == nil
 		case TurnOutcomeChangeProposalReady:
@@ -135,7 +139,7 @@ func validSnapshot(definition Definition, infrastructureRetryLimit uint8, snapsh
 	if snapshot.PlanningOnly && (snapshot.ChangeProposal != nil || snapshot.CurrentAttempt != nil && snapshot.CurrentAttempt.CurrentStage != StagePlanning) {
 		return false
 	}
-	if !snapshot.PlanningOnly && snapshot.CurrentAttempt != nil && snapshot.CurrentAttempt.CurrentStage == StagePlanning {
+	if !snapshot.PlanningOnly && snapshot.CurrentAttempt != nil && snapshot.CurrentAttempt.CurrentStage == StagePlanning && snapshot.ReplanningCycleID == "" {
 		return false
 	}
 	if snapshot.ResumeRole != "" && !definition.ContainsRole(snapshot.ResumeRole) {
@@ -187,7 +191,7 @@ func validAttempt(definition Definition, infrastructureRetryLimit uint8, snapsho
 	attempt := snapshot.CurrentAttempt
 	stage, stageExists := definition.Stage(attempt.CurrentStage)
 	if attempt.ID == "" || attempt.Number == 0 || attempt.StartedAt.IsZero() || attempt.Lifecycle != AttemptActive || !stageExists ||
-		attempt.InfrastructureRetryBudget.Limit != infrastructureRetryLimit || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
+		attempt.AutonomousReplanningReturns > 3 || attempt.InfrastructureRetryBudget.Limit != infrastructureRetryLimit || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
 		return false
 	}
 	for stageID, used := range attempt.ReviewUsage {

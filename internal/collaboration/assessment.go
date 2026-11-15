@@ -56,7 +56,7 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 	}
 	delivered := func(id string) bool {
 		return slices.ContainsFunc(s.Inputs, func(in Input) bool {
-			return in.ID == id && in.ParticipantID == participant && in.DeliveredTo != "" && !in.DeliveryPending
+			return in.ID == id && s.InputInScope(in, participant) && in.DeliveredTo != "" && !in.DeliveryPending
 		})
 	}
 	seen := map[string]bool{}
@@ -95,7 +95,7 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 				invalidate = true
 			}
 		}
-		if invalidate && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID == "" {
+		if invalidate && s.Planning != nil && (s.Planning.Implementation.FirstDeveloperTurnID == "" || s.ActiveReplanning() != nil) {
 			for _, in := range s.Inputs {
 				// Admission order bounds affected authority, not semantic precedence.
 				// A later exact confirmation still needs its own explicit assessment.
@@ -116,7 +116,7 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 
 func (s *State) AssessmentBlocked(participant string) bool {
 	for _, in := range s.Inputs {
-		if in.ParticipantID != participant {
+		if !s.InputInScope(in, participant) {
 			continue
 		}
 		a := s.latestAssessment(in.ID)

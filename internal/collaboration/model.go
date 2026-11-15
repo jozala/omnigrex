@@ -127,6 +127,7 @@ type Preparation struct {
 }
 
 type State struct {
+	Replanning             *ReplanningState      `json:"replanning,omitempty"`
 	ResolutionRejections   []ResolutionRejection `json:"resolution_rejections,omitempty"`
 	InterpretationSequence uint64                `json:"interpretation_sequence,omitempty"`
 	Assessments            []Assessment          `json:"assessments,omitempty"`
@@ -277,10 +278,10 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 	if !a.Authorized {
 		return reject("Rejected: repository write, maintain or admin permission is required.")
 	}
-	if c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+	if c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" && s.ActiveReplanning() == nil {
 		return reject("Implementation has already started. Withdrawal cannot stop it; close the original Work Item Issue to use the existing stopping mechanism.")
 	}
-	limitedWithdrawal := a.AllowUnusedWithdrawal && c.Kind == "withdraw-implementation" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID == ""
+	limitedWithdrawal := a.AllowUnusedWithdrawal && c.Kind == "withdraw-implementation" && s.Planning != nil && (s.Planning.Implementation.FirstDeveloperTurnID == "" || s.ActiveReplanning() != nil)
 	if (!a.Active && !limitedWithdrawal) || a.ParticipantID == "" && a.Route == "" {
 		return reject("Rejected: this Work Item is not accepting input; resolve Human Handoff or lifecycle state explicitly before retrying.")
 	}

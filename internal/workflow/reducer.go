@@ -623,6 +623,10 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 			next.ChangeProposal = &proposal
 		}
 		return clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
+	case TurnOutcomeReplanningRequested:
+		return reducer.reduceReplanningRequested(snapshot, next, event)
+	case TurnOutcomeReplanningResolved:
+		return reducer.reduceReplanningResolved(snapshot, next, event)
 	case TurnOutcomePlanningReady:
 		if !snapshot.PlanningOnly || snapshot.ChangeProposal != nil || event.PublicationAssociation != nil {
 			return illegalInState(snapshot)

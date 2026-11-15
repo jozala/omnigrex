@@ -12,7 +12,7 @@ const (
 // NewBuiltinDefinition constructs the deployment-wide initial Workflow Definition.
 func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 	return NewDefinition(catalog, StageEntry{Stage: StageImplementation, Purpose: TurnPurposeInitialDevelopment}, []StageDefinition{
-		{ID: StagePlanning, Role: role.Planner, State: StatePlanning, Instructions: "Investigate and discuss; publish paired checkpoints, await exact-revision human confirmation, revalidate and finish planning only. Never allocate implementation or create a Change Proposal.", AcceptedPurposes: []TurnPurpose{TurnPurposeInitialPlanning, TurnPurposeReactivation, TurnPurposeRetry}, Transitions: []OutcomeTransition{{Outcome: TurnOutcomePlanningReady, TerminalState: StatePlanReady, ContinuationStage: StagePlanning}}},
+		{ID: StagePlanning, Role: role.Planner, State: StatePlanning, Instructions: "Investigate and discuss; publish paired checkpoints, await exact-revision human confirmation, revalidate and finish planning only. Never allocate implementation or create a Change Proposal.", AcceptedPurposes: []TurnPurpose{TurnPurposeReplanning, TurnPurposeInitialPlanning, TurnPurposeReactivation, TurnPurposeRetry}, Transitions: []OutcomeTransition{{Outcome: TurnOutcomeReplanningResolved, NextStage: StageImplementation, NextPurpose: TurnPurposeResumedDevelopment}, {Outcome: TurnOutcomePlanningReady, TerminalState: StatePlanReady, ContinuationStage: StagePlanning}}},
 		{
 			ID: StageImplementation, Role: role.Developer, State: StateDeveloping,
 			Instructions: implementationInstructions,
@@ -21,9 +21,9 @@ func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 				TurnPurposeRequestedChanges:   "Inspect all substantive review findings before revising the existing Change Proposal; explain the changes since the previous review in the new handoff summary.",
 			},
 			AcceptedPurposes: []TurnPurpose{
-				TurnPurposeInitialDevelopment, TurnPurposeRequestedChanges, TurnPurposeRetry, TurnPurposeReactivation,
+				TurnPurposeResumedDevelopment, TurnPurposeInitialDevelopment, TurnPurposeRequestedChanges, TurnPurposeRetry, TurnPurposeReactivation,
 			},
-			Transitions: []OutcomeTransition{{
+			Transitions: []OutcomeTransition{{Outcome: TurnOutcomeReplanningRequested, NextStage: StagePlanning, NextPurpose: TurnPurposeReplanning}, {
 				Outcome: TurnOutcomeChangeProposalReady, NextStage: StageReview, NextPurpose: TurnPurposeReview,
 			}},
 		},

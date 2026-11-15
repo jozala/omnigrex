@@ -125,6 +125,8 @@ func (reconciler *ProductionReconciler) Reconcile(ctx context.Context, reconcili
 		return reconciler.reconcileHumanInputAssessment(ctx, reconciliation, mutation)
 	case ToolResolveClarification:
 		return reconciler.reconcileClarificationResolution(ctx, reconciliation, mutation)
+	case ToolRequestReplanning:
+		return reconciler.reconcileReplanningRequest(ctx, reconciliation, mutation)
 	case ToolCompletePlanning:
 		return reconciler.reconcilePlanningCompletion(ctx, reconciliation, mutation)
 	case ToolPublishPlanCheckpoint:

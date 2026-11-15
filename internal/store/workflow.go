@@ -744,10 +744,10 @@ FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 	var reviewUsageJSON []byte
 	err = tx.QueryRow(ctx, `
 	SELECT id::text, attempt_number, started_at, infrastructure_failures,
-	       infrastructure_failure_limit, current_stage, review_usage
+	       infrastructure_failure_limit, current_stage, review_usage, autonomous_replanning_returns
 FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.InfrastructureRetryBudget.Used,
-		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON)
+		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON, &attempt.AutonomousReplanningReturns)
 	if err == nil {
 		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
 			return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt Stage usage: %w", err)
@@ -759,6 +759,16 @@ FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 		snapshot.CurrentAttempt = &attempt
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return workflow.Snapshot{}, fmt.Errorf("rehydrate active attempt: %w", err)
+	}
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return workflow.Snapshot{}, err
+	}
+	if state.Planning != nil {
+		snapshot.AcceptedPlanRevisionID = state.Planning.Implementation.AcceptedRevisionID
+	}
+	if cycle := state.ActiveReplanning(); cycle != nil && cycle.Phase != collaboration.ReplanningRequested {
+		snapshot.ReplanningCycleID = cycle.Scope.OperationID
 	}
 	var proposal workflow.ChangeProposal
 	err = tx.QueryRow(ctx, `
@@ -904,10 +914,10 @@ VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
 		}
 		if _, err := tx.Exec(ctx, `
 		UPDATE workflow_attempts SET infrastructure_failures = $3, infrastructure_failure_limit = $4,
-		    current_stage = $5, review_usage = $6, updated_at = clock_timestamp()
+		    current_stage = $5, review_usage = $6, autonomous_replanning_returns=$7, updated_at = clock_timestamp()
 WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
-			attempt.CurrentStage, reviewUsage); err != nil {
+			attempt.CurrentStage, reviewUsage, attempt.AutonomousReplanningReturns); err != nil {
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
