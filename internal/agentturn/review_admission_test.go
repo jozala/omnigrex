@@ -187,3 +187,9 @@ func TestReviewSchedulingEstablishedFailureWithPartialDiscovery(t *testing.T) {
 		t.Fatal("unknown discovery invented selected failure", e)
 	}
 }
+
+func TestReviewAdmissionRoutingSurvivesCredentialSanitization(t *testing.T) {
+	if err := sanitizePreparationError(store.ErrReviewAdmissionRouted, "credential"); err != store.ErrReviewAdmissionRouted {
+		t.Fatal("routing sentinel lost; worker would retry an already retired job", err)
+	}
+}

@@ -389,6 +389,9 @@ func (err credentialSafeError) SafeErrorMetadata() githubapi.SafeErrorMetadata {
 }
 
 func sanitizePreparationError(err error, credential string) error {
+	if errors.Is(err, store.ErrReviewAdmissionRouted) {
+		return store.ErrReviewAdmissionRouted
+	}
 	if errors.Is(err, store.ErrReviewAdmissionPending) {
 		return store.ErrReviewAdmissionPending
 	}
