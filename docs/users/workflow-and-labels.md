@@ -79,8 +79,12 @@ It is a scheduling observation, not a command or an approval state.
 No Reviewer Agent Turn or Runtime Process is running for this wait.
 
 One editable progress comment per location shows the reviewed head, CI state, deadline, and release reason.
-Failed, cancelled, skipped, neutral, and timed-out checks can finish the wait: release does not mean passing CI.
-When no CI is observed after successful discovery and registration grace, or when the absolute deadline expires with incomplete evidence, review can still begin with that limitation explicitly identified.
+Selected successful checks admit review; neutral and skipped checks also admit without being called successful.
+Current selected failures return directly to the Developer without spending a Review Cycle.
+Three automatic repairs are allowed between fully successful selected-CI admissions; the fourth needed repair produces Human Handoff.
+Neutral/skipped, no CI, immediate bypass, and head changes do not reset this separate repair budget.
+When no CI is observed after confirmed-empty discovery and registration grace, review can begin as no CI.
+Incomplete evidence at the absolute deadline (two hours by default) instead produces Human Handoff.
 Missing required checks do not become optional just because registration grace expires.
 
 Repository owners can select [immediate concurrent review or an explicit expected-check set](../reference/repository-configuration.md#review-scheduling).

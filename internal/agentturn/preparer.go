@@ -164,6 +164,9 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		if err != nil {
 			return Result{}, err
 		}
+		if admission.Status == "ROUTED" {
+			return Result{}, store.ErrReviewAdmissionRouted
+		}
 		if admission.Status != "RELEASED" {
 			return Result{}, store.ErrReviewAdmissionPending
 		}
@@ -256,6 +259,9 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 		admission, err = preparer.reviewGate.Check(ctx, request, admission)
 		if err != nil {
 			return Result{}, err
+		}
+		if admission.Status == "ROUTED" {
+			return Result{}, store.ErrReviewAdmissionRouted
 		}
 		if admission.Status != "RELEASED" {
 			return Result{}, store.ErrReviewAdmissionPending

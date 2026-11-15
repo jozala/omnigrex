@@ -138,13 +138,15 @@ See [runtime qualification](runtime-qualification.md) and [release selection](..
 
 ## Reviewer CI-admission regressions
 
-Use `TestReviewScheduling*` for deterministic completion/grace/deadline evaluation and `internal/reviewpolicy` tests for strict policy validation.
+Use `TestReviewScheduling*` for deterministic result/grace/deadline evaluation and `internal/reviewpolicy` tests for strict policy validation.
 `TestReviewerAllocationRequiresOrchestratorAdmission` exercises the real PostgreSQL allocation boundary without an admission fence.
 `TestReviewGateSharedObserverPersistsAndFencesTargets` uses the production shared CI observer with a deterministic HTTP provider, durable healthy delayed claims, frozen policy/inventory, and verified test-merge replacement.
 Scheduling fixtures must not sleep for registration grace or CI deadlines.
 
 `TestPiControlledWorkflow` includes pending-CI admission after the actual Developer handoff, asserting no Reviewer Participant, active Turn, successor execution job, or second Runtime Process is allocated until CI becomes terminal.
-It then exercises completed-with-failure admission through the real Reviewer launch and native review path.
+It then exercises successful admission through the real Reviewer launch and native review path.
+The `ci-repair` subtest returns a selected failure directly to the retained Developer Participant/Session, verifies no Reviewer allocation, publishes the repair, then exercises success reset and native review.
+`TestCIRepairRoutingCommitsOneSuccessorAndCharge` and `TestCIAdmissionResetOnlyOnLiteralSuccessAtAllocation` exercise atomic repair routing, the third/fourth boundary, unchanged Review Cycles, allocation-time resets, and stale-reset rejection.
 The existing default Docker and Microsandbox Workflow script selectors both include that scenario.
 Run `mise run check`, `mise run test-integration`, and `mise run test-pi-workflow`, and inspect the same-head Linux/KVM CI result for `mise run test-pi-microsandbox-workflow` before claiming backend qualification.
 Never attempt nested Microsandbox qualification inside a Microsandbox Execution Environment.

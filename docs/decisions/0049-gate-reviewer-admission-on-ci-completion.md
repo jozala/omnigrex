@@ -1,9 +1,11 @@
 ---
-status: accepted
+status: superseded
 date: 2026-10-27
 decision-makers: [Mariusz]
 ---
 # Gate Reviewer admission on CI completion, not success
+
+Superseded by [decision 0068](0068-qualify-review-admission-and-bound-ci-repair.md).
 
 ## Context
 

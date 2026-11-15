@@ -151,8 +151,8 @@ func TestReviewGateSharedObserverPersistsAndFencesTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Status != "RELEASED" || !strings.Contains(string(request.ReleaseEvidence), "terminal_non_success") {
-		t.Fatalf("completed failure did not release: %+v", request)
+	if request.Status != "RELEASED" || !strings.Contains(string(request.ReleaseEvidence), "terminal_success") {
+		t.Fatalf("completed success did not release: %+v", request)
 	}
 	spec := preparationSpec("profile", "provider/model")
 	spec.ReviewAdmission = &request
@@ -204,7 +204,7 @@ func (p *admissionProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case root + "/commits/" + p.head + "/statuses":
 		fmt.Fprint(w, `[]`)
 	case root + "/commits/" + p.merge + "/statuses":
-		state := "failure"
+		state := "success"
 		if p.pending {
 			state = "pending"
 		}
@@ -287,7 +287,7 @@ func TestReviewGateTimeoutAndImmediateUseActualPromptContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := request.CreatedAt.Add(31 * time.Minute)
+			now := request.CreatedAt.Add(2*time.Hour + time.Minute)
 			if immediate {
 				now = request.CreatedAt
 			}
@@ -295,6 +295,16 @@ func TestReviewGateTimeoutAndImmediateUseActualPromptContext(t *testing.T) {
 			request, err = gate.Check(ctx, agentturn.Request{Lease: lease, InstallationCredential: "fixture", RepositoryOwner: "owner", RepositoryName: "repo"}, request)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !immediate {
+				if request.Status != "ROUTED" {
+					t.Fatalf("deadline did not hand off: %+v", request)
+				}
+				var status string
+				if err := pool.QueryRow(ctx, `SELECT status FROM workflows WHERE id=$1`, lease.WorkflowID).Scan(&status); err != nil || status != "NEEDS_HUMAN" {
+					t.Fatalf("handoff: %s %v", status, err)
+				}
+				return
 			}
 			if request.Status != "RELEASED" {
 				t.Fatalf("release path waited: %+v", request)
@@ -380,16 +390,16 @@ func TestReviewAdmissionRetryReusesSnapshotAndDeadline(t *testing.T) {
 	if _, err = database.PrepareAgentTurn(ctx, retryLease, preparationSpec("profile", "provider/model")); !errors.Is(err, store.ErrReviewAdmissionPending) {
 		t.Fatalf("retry bypassed fresh admission: %v", err)
 	}
-	// An expired original request can release with incomplete evidence; it cannot
+	// An expired original request hands off with incomplete evidence; it cannot
 	// create a second waiting interval anchored at retry time.
-	request, err = database.RecordReviewAdmission(ctx, retryLease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: json.RawMessage(`{"release_reason":"timeout_incomplete"}`), Release: true})
+	request, err = database.RecordReviewAdmission(ctx, retryLease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: json.RawMessage(`{"release_reason":"timeout_incomplete","semantic_version":2,"disposition":"handoff"}`), Disposition: store.ReviewEscalate})
 	if err != nil {
 		t.Fatal(err)
 	}
 	spec := preparationSpec("profile", "provider/model")
 	spec.ReviewAdmission = &request
-	if _, err = database.PrepareAgentTurn(ctx, retryLease, spec); err != nil {
-		t.Fatal(err)
+	if _, err = database.PrepareAgentTurn(ctx, retryLease, spec); err == nil {
+		t.Fatal("deadline allocated Reviewer")
 	}
 }
 
@@ -471,5 +481,161 @@ func TestReviewGateRetriesUnavailableDiscoveryThenFreezesInventory(t *testing.T)
 	check()
 	if request.Status != "RELEASED" || provider.discoveryCount() != 2 {
 		t.Fatalf("complete snapshot was not frozen: %+v discoveries=%d", request, provider.discoveryCount())
+	}
+}
+
+func TestCIRepairRoutingCommitsOneSuccessorAndCharge(t *testing.T) {
+	for _, used := range []int{0, 2, 3} {
+		t.Run(fmt.Sprint(used), func(t *testing.T) {
+			database, pool, ctx, lease := reviewAdmissionFixture(t)
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=$2,review_usage='{"review":2}' WHERE id=$1`, lease.WorkflowAttemptID, used); err != nil {
+				t.Fatal(err)
+			}
+			request, err := database.BeginReviewAdmission(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := json.RawMessage(`{"semantic_version":2,"disposition":"repair","release_reason":"failed_ci","targets":[{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","results":[{"requirement":{"context":"build"},"source":"check","result_id":99,"conclusion":"failure","state":"terminal_non_success"}]}]}`)
+			request, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: evidence, Disposition: store.ReviewRepair})
+			if err != nil || request.Status != "ROUTED" {
+				t.Fatalf("route: %+v %v", request, err)
+			}
+			// Repeat after a lost response cannot charge twice.
+			if _, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: evidence, Disposition: store.ReviewRepair}); err == nil {
+				t.Fatal("retired job accepted")
+			}
+			var usage, cycles, decisions, reviewers, active, successors int
+			var status string
+			if err := pool.QueryRow(ctx, `SELECT a.ci_repair_usage,(a.review_usage->>'review')::int,w.status,(SELECT count(*) FROM review_ci_decisions WHERE workflow_attempt_id=a.id),(SELECT count(*) FROM agent_participants WHERE workflow_id=w.id AND role='REVIEWER'),(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind='PREPARE_AGENT_TURN' AND status='AVAILABLE' AND payload->>'purpose'='CI_REPAIR') FROM workflows w JOIN workflow_attempts a ON a.workflow_id=w.id AND a.active WHERE w.id=$1`, lease.WorkflowID).Scan(&usage, &cycles, &status, &decisions, &reviewers, &active, &successors); err != nil {
+				t.Fatal(err)
+			}
+			wantUsage, wantSuccessors, wantState := used+1, 1, "DEVELOPING"
+			if used == 3 {
+				wantUsage, wantSuccessors, wantState = 3, 0, "NEEDS_HUMAN"
+			}
+			if usage != wantUsage || successors != wantSuccessors || status != wantState || decisions != 1 || reviewers != 0 || active != 0 || cycles != 2 {
+				t.Fatalf("usage=%d successors=%d state=%s decisions=%d reviewers=%d active=%d cycles=%d", usage, successors, status, decisions, reviewers, active, cycles)
+			}
+		})
+	}
+}
+
+func TestCIAdmissionResetOnlyOnLiteralSuccessAtAllocation(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		t.Run(fmt.Sprint(success), func(t *testing.T) {
+			database, pool, ctx, lease := reviewAdmissionFixture(t)
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=3 WHERE id=$1`, lease.WorkflowAttemptID); err != nil {
+				t.Fatal(err)
+			}
+			request, err := database.BeginReviewAdmission(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := json.RawMessage(fmt.Sprintf(`{"semantic_version":2,"disposition":"admit","release_reason":"completed_ci","all_successful":%t}`, success))
+			request, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: raw, Release: true, Disposition: store.ReviewAdmit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var usage int
+			if err := pool.QueryRow(ctx, `SELECT ci_repair_usage FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage); err != nil || usage != 3 {
+				t.Fatal("reset before allocation", usage, err)
+			}
+			spec := preparationSpec("profile", "provider/model")
+			spec.ReviewAdmission = &request
+			if _, err := database.PrepareAgentTurn(ctx, lease, spec); err != nil {
+				t.Fatal(err)
+			}
+			want := 3
+			if success {
+				want = 0
+			}
+			if err := pool.QueryRow(ctx, `SELECT ci_repair_usage FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage); err != nil || usage != want {
+				t.Fatal("reset", usage, err)
+			}
+			// A later charge must not be erased by replay of this admitted request.
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=1 WHERE id=$1`, lease.WorkflowAttemptID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.PrepareAgentTurn(ctx, lease, spec); err == nil {
+				t.Fatal("old job replayed")
+			}
+			if err := pool.QueryRow(ctx, `SELECT ci_repair_usage FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage); err != nil || usage != 1 {
+				t.Fatal("stale reset", usage, err)
+			}
+		})
+	}
+}
+
+func TestCIAdmissionRejectsOlderObservationAndLegacyRelease(t *testing.T) {
+	database, _, ctx, lease := reviewAdmissionFixture(t)
+	r, err := database.BeginReviewAdmission(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = database.RecordReviewAdmission(ctx, lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, Evidence: json.RawMessage(`{"observed_at":"2026-11-15T12:00:00Z","release_reason":"waiting"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.RecordReviewAdmission(ctx, lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, Evidence: json.RawMessage(`{"observed_at":"2026-11-15T11:59:00Z","release_reason":"completed_ci","semantic_version":2,"disposition":"admit","all_successful":true}`), Release: true}); !errors.Is(err, store.ErrReviewAdmissionPending) {
+		t.Fatal("older success accepted", err)
+	}
+	r, err = database.RecordReviewAdmission(ctx, lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, Evidence: json.RawMessage(`{"release_reason":"completed_ci"}`), Release: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := preparationSpec("profile", "provider/model")
+	spec.ReviewAdmission = &r
+	if _, err = database.PrepareAgentTurn(ctx, lease, spec); !errors.Is(err, store.ErrReviewAdmissionPending) {
+		t.Fatal("legacy completion release allocated Reviewer", err)
+	}
+}
+
+func TestCIRepairConcurrentObserversCommitOnce(t *testing.T) {
+	database, pool, ctx, lease := reviewAdmissionFixture(t)
+	r, err := database.BeginReviewAdmission(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, Evidence: json.RawMessage(`{"semantic_version":2,"disposition":"repair","release_reason":"failed_ci"}`), Disposition: store.ReviewRepair}
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	for j := 0; j < 2; j++ {
+		go func() { <-start; _, err := database.RecordReviewAdmission(ctx, lease, r.ID, observation); done <- err }()
+	}
+	close(start)
+	successes := 0
+	for j := 0; j < 2; j++ {
+		if err := <-done; err == nil {
+			successes++
+		}
+	}
+	var usage, decisions int
+	if err := pool.QueryRow(ctx, `SELECT ci_repair_usage,(SELECT count(*) FROM review_ci_decisions WHERE workflow_attempt_id=workflow_attempts.id) FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage, &decisions); err != nil {
+		t.Fatal(err)
+	}
+	if successes != 1 || usage != 1 || decisions != 1 {
+		t.Fatal(successes, usage, decisions)
+	}
+}
+
+func TestCIRepairCannotReactivateStoppedWork(t *testing.T) {
+	for _, state := range []string{"NEEDS_HUMAN", "CLOSING", "CLOSED"} {
+		t.Run(state, func(t *testing.T) {
+			database, pool, ctx, lease := reviewAdmissionFixture(t)
+			r, err := database.BeginReviewAdmission(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE workflows SET status=$2,state_revision=state_revision+1 WHERE id=$1`, lease.WorkflowID, state); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.RecordReviewAdmission(ctx, lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, Evidence: json.RawMessage(`{"release_reason":"failed_ci"}`), Disposition: store.ReviewRepair}); err == nil {
+				t.Fatal("late failure resumed stopped work")
+			}
+			var usage, decisions int
+			if err := pool.QueryRow(ctx, `SELECT ci_repair_usage,(SELECT count(*) FROM review_ci_decisions WHERE workflow_attempt_id=workflow_attempts.id) FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage, &decisions); err != nil || usage != 0 || decisions != 0 {
+				t.Fatal(usage, decisions, err)
+			}
+		})
 	}
 }

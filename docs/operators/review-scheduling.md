@@ -10,7 +10,7 @@ The shared CI reader's permissions and strict App preflight requirements are aut
 No Checks write permission or CI-completion webhook subscription is added.
 
 Repository owners control scheduling within orchestrator limits: timeout 1 second..2 hours and registration grace 0..5 minutes, with grace no longer than timeout and whole-second precision.
-The defaults are 30 minutes and 60 seconds.
+The defaults are two hours and 60 seconds.
 Policy is structured configuration, not Agent Profile prose, and does not grant execution capabilities or alter the Workflow graph.
 
 ## Recognize healthy waiting
@@ -29,12 +29,16 @@ Orchestrator restart reclaims leases and resumes durable delayed observations ra
 
 Check the deadline and progress comment before treating review-stage inactivity as a stuck Runtime Process.
 A missing expected check remains missing after registration grace; a provider error or unsupported required workflow remains explicit rather than proving empty requirements.
-Incomplete discovery is retried until a complete inventory is selected or the original deadline releases with incomplete evidence.
+Incomplete discovery is retried until a complete inventory is selected or the original deadline produces incomplete-evidence Human Handoff.
 The selected inventory is frozen, so newly added required checks affect new requests rather than an existing wait.
 A PR-head or verified merge-target replacement invalidates old evidence and restarts grace without extending the original deadline.
 
-Completion includes failed or cancelled results.
-Timeout admits review with incomplete-evidence context; it is not an infrastructure-failure exhaustion or a passing qualification.
+Selected success, neutral, and skipped checks admit review with their actual conclusions; only legacy success admits.
+Definitive selected failure, cancellation, job timeout, action-required, stale, startup-failure, or legacy failure/error returns directly to the Developer, even with unrelated checks pending.
+Three automatic repairs are allowed since the last complete nonempty literal-success admission, separately from Review Cycles and infrastructure retries.
+The fourth needed repair produces Human Handoff.
+Neutral/skipped, no CI, bypass, and head changes cannot reset usage.
+The absolute waiting deadline produces Human Handoff for incomplete evidence, never Reviewer admission or an invented CI failure.
 The comment distinguishes review queued from actual Reviewer Turn allocation and never certifies approval or mergeability.
 Detailed logs and diagnostics remain behind the existing scoped CI tools.
 
@@ -50,6 +54,14 @@ Do not merge or rebase a published branch to manufacture CI as part of schedulin
 ## Instruction defaults
 
 Developers may hand off with remote CI pending after appropriate local verification and truthful reporting.
-Reviewers normally perform useful review after immediate, no-CI, or timeout admission instead of rebuilding an orchestrator wait in their Turn.
+Reviewers normally perform useful review after immediate or no-CI admission instead of rebuilding an orchestrator wait in their Turn.
 This polling preference is expressly repository-overridable unless explicit operator guidance forbids it.
 The [instruction hierarchy](agent-policy.md) and essential-evidence obligations remain unchanged.
+
+## Upgrade boundary
+
+Stop all old orchestrator workers before deploying the CI-qualified admission migration; do not run mixed-version workers against the new schema.
+New requests default to two hours; existing frozen policy and deadlines, including thirty-minute deadlines, stay unchanged.
+Released-but-unallocated legacy requests are returned to waiting and reevaluated under the qualified-result policy before allocation.
+Already admitted or running Turns are not revoked, and stopped Workflows are not reactivated.
+Inspect the progress comment and normal Human Handoff publication for expired incomplete legacy requests; do not extend deadlines by editing the ledger.

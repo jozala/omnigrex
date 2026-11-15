@@ -20,7 +20,7 @@ GitHub Issue -> Developer -> Pull Request -> Reviewer -> Human review
 - Durable human clarification and explicitly addressed answers, amendments, and steering on the Work Item Issue.
 - Optional planning with immutable brief/design pairs and explicit exact-revision implementation authorization.
 - Bounded retries and Review Cycles, with explicit Human Handoff when automation cannot continue.
-- Durable orchestrator-side CI completion waits before review, with repository-owned immediate-review and expected-check policy.
+- Durable orchestrator-side CI-qualified review admission and bounded Developer repair, with repository-owned immediate-review and expected-check policy.
 - Docker or Linux/KVM Microsandbox execution, with a Docker Compose control plane and PostgreSQL ledger.
 
 Omnigrex is in active early development toward its first dogfooding iteration.
@@ -54,7 +54,7 @@ After your repository owner and operator have completed setup:
 
 For example, start with a narrowly scoped documentation correction or bug fix whose expected result you can verify.
 See [Workflow and labels](docs/users/workflow-and-labels.md) for activation, review, closing, and reopening behavior.
-Omnigrex does not enforce required CI checks before marking a Change Proposal ready; configure GitHub branch protection for mandatory checks.
+CI admission is a point-in-time observation, not a merge guarantee; configure GitHub branch protection for mandatory checks.
 
 ## Documentation
 

@@ -109,11 +109,24 @@ func (worker *LabelWorker) reconcileReviewProgress(ctx context.Context, token st
 
 func reviewProgressBody(effect store.WorkflowGitHubEffectContext, waiting bool) string {
 	r := effect.ReviewAdmission
+	var outcome struct {
+		Reason string `json:"release_reason"`
+	}
+	_ = json.Unmarshal(r.Observation, &outcome)
 	heading := "Review CI wait released; review queued"
 	if waiting {
 		heading = "Review queued: waiting for CI"
 	} else if r.Status == "CANCELLED" || effect.State != workflow.StateReviewing {
 		heading = "Review CI wait no longer pending"
+		if effect.State == workflow.StateDeveloping && outcome.Reason == "failed_ci" {
+			heading = "CI repair queued for Developer"
+			if r.RepairTurnAllocated {
+				heading = "CI repair: Developer Turn allocated"
+			}
+		}
+		if effect.State == workflow.StateNeedsHuman && (outcome.Reason == "failed_ci" || outcome.Reason == "timeout_incomplete") {
+			heading = "CI admission stopped: Human Handoff"
+		}
 	} else if r.Status == "ADMITTED" {
 		heading = "Review CI wait released; Reviewer Turn allocated"
 	}
@@ -133,6 +146,7 @@ func reviewProgressBody(effect store.WorkflowGitHubEffectContext, waiting bool) 
 		Failures  []CIEvidenceFailure `json:"failures"`
 	}
 	_ = json.Unmarshal(r.Observation, &observation)
+	fmt.Fprintf(&text, "\nAutomatic CI repairs since success reset: %d/3.\n", r.RepairUsage)
 	if observation.Reason != "" {
 		fmt.Fprintf(&text, "\nScheduling observation: `%s`.\n", observation.Reason)
 	}

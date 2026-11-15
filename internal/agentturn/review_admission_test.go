@@ -9,16 +9,23 @@ import (
 	"github.com/jozala/omnigrex/internal/store"
 )
 
-func TestReviewSchedulingCompletionNotSuccess(t *testing.T) {
+func TestReviewSchedulingQualifiedResults(t *testing.T) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	request := store.ReviewAdmission{ID: "request", Generation: 1, HeadSHA: "head", CreatedAt: now, GraceAnchor: now, Deadline: now.Add(30 * time.Minute)}
 	mapping := githubapi.CITargetMapping{ReviewedHead: "head", State: "verified"}
 	inventory := githubapi.CIInventory{Availability: githubapi.CIAvailable, Requirements: []githubapi.CIRequirement{{Context: "build", AppID: 7, Source: "classic"}}}
-	for _, conclusion := range []string{"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required", "stale"} {
+	for _, conclusion := range []string{"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required", "stale", "startup_failure", "unknown"} {
 		t.Run(conclusion, func(t *testing.T) {
 			observed := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "head", Checks: []githubapi.CheckRun{{ID: 1, Name: "build", App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: conclusion}}}
 			evidence := evaluateReviewCI(reviewpolicy.Default(), inventory, mapping, []githubapi.CIObservation{observed}, request, now, request.Deadline)
-			if evidence.Reason != "completed_ci" {
+			want := "failed_ci"
+			if conclusion == "success" || conclusion == "neutral" || conclusion == "skipped" {
+				want = "completed_ci"
+			}
+			if conclusion == "unknown" {
+				want = "waiting"
+			}
+			if evidence.Reason != want {
 				t.Fatalf("terminal %s did not release: %+v", conclusion, evidence)
 			}
 			if conclusion != "success" && evidence.Targets[0].Results[0].State != githubapi.CITerminalNonSuccess {
@@ -101,11 +108,82 @@ func TestReviewSchedulingExplicitSourcesAndTestMerge(t *testing.T) {
 	head := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "head", Statuses: []githubapi.CommitStatus{{ID: 2, Context: "build", State: "pending"}}}
 	merge := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "merge", Checks: []githubapi.CheckRun{{ID: 3, Name: "build", App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "failure"}}}
 	e := evaluateReviewCI(p, i, m, []githubapi.CIObservation{head, merge}, r, now, r.Deadline)
-	if e.Reason != "completed_ci" || e.Targets[1].Commit != "merge" {
+	if e.Reason != "failed_ci" || e.Targets[1].Commit != "merge" {
 		t.Fatalf("test merge evidence = %+v", e)
 	}
 	head.Checks = []githubapi.CheckRun{{ID: 4, Name: "build", App: &githubapi.CheckApp{ID: 7}, Status: "in_progress"}}
 	if e = evaluateReviewCI(p, i, m, []githubapi.CIObservation{head, merge}, r, now, r.Deadline); e.Reason != "waiting" {
 		t.Fatal("pending authorized target ignored")
+	}
+}
+
+func TestReviewSchedulingFailurePrecedesUnrelatedIncompleteEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	r := store.ReviewAdmission{Generation: 1, GraceAnchor: now, Deadline: now.Add(2 * time.Hour)}
+	i := githubapi.CIInventory{Availability: githubapi.CIAvailable, Requirements: []githubapi.CIRequirement{{Context: "build"}, {Context: "tests"}}}
+	m := githubapi.CITargetMapping{State: "head_only", ReviewedHead: "head"}
+	for _, state := range []string{"failure", "error", "unknown", "pending", "success"} {
+		t.Run(state, func(t *testing.T) {
+			o := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "head", Statuses: []githubapi.CommitStatus{{ID: 1, Context: "build", State: state}, {ID: 2, Context: "tests", State: "pending"}}}
+			e := evaluateReviewCI(reviewpolicy.Default(), i, m, []githubapi.CIObservation{o}, r, now, r.Deadline)
+			want := store.ReviewWait
+			if state == "failure" || state == "error" {
+				want = store.ReviewRepair
+			}
+			if e.Disposition != want || e.AllSuccessful {
+				t.Fatalf("%s: %+v", state, e)
+			}
+		})
+	}
+}
+
+func TestReviewSchedulingSuccessResetExclusionsAndCollisions(t *testing.T) {
+	now := time.Now().UTC()
+	p := reviewpolicy.Default()
+	r := store.ReviewAdmission{Generation: 1, GraceAnchor: now.Add(-time.Minute), Deadline: now.Add(2 * time.Hour)}
+	i := githubapi.CIInventory{Availability: githubapi.CIAvailable, Requirements: []githubapi.CIRequirement{{Context: "build"}}}
+	m := githubapi.CITargetMapping{State: "verified", ReviewedHead: "head", TestMergeSHA: "merge"}
+	for _, conclusion := range []string{"success", "neutral", "skipped"} {
+		t.Run(conclusion, func(t *testing.T) {
+			o := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "head", Checks: []githubapi.CheckRun{{ID: 1, Name: "build", App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: conclusion}}}
+			e := evaluateReviewCI(p, i, m, []githubapi.CIObservation{o}, r, now, r.Deadline)
+			if e.Disposition != store.ReviewAdmit || e.AllSuccessful != (conclusion == "success") {
+				t.Fatalf("eligibility/reset: %+v", e)
+			}
+			// Success from another producer or authorized target cannot hide a failure.
+			other := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "merge", Checks: []githubapi.CheckRun{{ID: 2, Name: "build", App: &githubapi.CheckApp{ID: 8}, Status: "completed", Conclusion: "failure"}}}
+			if e := evaluateReviewCI(p, i, m, []githubapi.CIObservation{o, other}, r, now, r.Deadline); e.Disposition != store.ReviewRepair {
+				t.Fatal("collision failure hidden", e)
+			}
+			other.Checks = append(other.Checks, githubapi.CheckRun{ID: 3, Name: "build", App: &githubapi.CheckApp{ID: 8}, Status: "queued"})
+			if e := evaluateReviewCI(p, i, m, []githubapi.CIObservation{o, other}, r, now, r.Deadline); e.Disposition != store.ReviewWait {
+				t.Fatal("superseded failure routed", e)
+			}
+		})
+	}
+	for _, immediate := range []bool{false, true} {
+		empty := githubapi.CIInventory{Availability: githubapi.CIAvailable}
+		if immediate {
+			p.Start = "immediate"
+		}
+		e := evaluateReviewCI(p, empty, m, []githubapi.CIObservation{{Availability: githubapi.CIAvailable}}, r, now, r.Deadline)
+		if e.Disposition != store.ReviewAdmit || e.AllSuccessful {
+			t.Fatal("no-CI/bypass reset", e)
+		}
+	}
+}
+
+func TestReviewSchedulingEstablishedFailureWithPartialDiscovery(t *testing.T) {
+	now := time.Now()
+	r := store.ReviewAdmission{Deadline: now.Add(time.Hour)}
+	i := githubapi.CIInventory{Availability: githubapi.CIPartial, Requirements: []githubapi.CIRequirement{{Context: "build", Source: "classic"}}, Failures: []githubapi.CIEvidenceFailure{{Operation: "effective_rules", Code: "unavailable"}}}
+	m := githubapi.CITargetMapping{State: "head_only", ReviewedHead: "head"}
+	o := githubapi.CIObservation{Availability: githubapi.CIAvailable, HeadSHA: "head", Statuses: []githubapi.CommitStatus{{ID: 1, Context: "build", State: "failure"}}}
+	if e := evaluateReviewCI(reviewpolicy.Default(), i, m, []githubapi.CIObservation{o}, r, now, r.Deadline); e.Disposition != store.ReviewRepair {
+		t.Fatal("known required failure lost to unrelated unavailable discovery", e)
+	}
+	i.Requirements = nil
+	if e := evaluateReviewCI(reviewpolicy.Default(), i, m, []githubapi.CIObservation{o}, r, now, r.Deadline); e.Disposition != store.ReviewWait {
+		t.Fatal("unknown discovery invented selected failure", e)
 	}
 }

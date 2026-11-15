@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -744,10 +745,10 @@ FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 	var reviewUsageJSON []byte
 	err = tx.QueryRow(ctx, `
 	SELECT id::text, attempt_number, started_at, infrastructure_failures,
-	       infrastructure_failure_limit, current_stage, review_usage
+	       infrastructure_failure_limit, current_stage, review_usage, ci_repair_usage
 FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.InfrastructureRetryBudget.Used,
-		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON)
+		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON, &attempt.CIRepairUsage)
 	if err == nil {
 		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
 			return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt Stage usage: %w", err)
@@ -904,10 +905,10 @@ VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
 		}
 		if _, err := tx.Exec(ctx, `
 		UPDATE workflow_attempts SET infrastructure_failures = $3, infrastructure_failure_limit = $4,
-		    current_stage = $5, review_usage = $6, updated_at = clock_timestamp()
+		    current_stage = $5, review_usage = $6, ci_repair_usage=$7, updated_at = clock_timestamp()
 WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
-			attempt.CurrentStage, reviewUsage); err != nil {
+			attempt.CurrentStage, reviewUsage, attempt.CIRepairUsage); err != nil {
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
@@ -1236,7 +1237,11 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 		}
 	}
 	if intent.set {
-		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), "prepare-agent-turn", PrepareAgentTurnJobKind, map[string]any{
+		prepareKey := "prepare-agent-turn"
+		if strings.HasPrefix(actionNamespace, "ci-admission:") {
+			prepareKey = namespacedWorkflowActionKey(actionNamespace, prepareKey)
+		}
+		if _, err := enqueueWorkflowJobWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, currentAttemptID(decision.Snapshot), prepareKey, PrepareAgentTurnJobKind, map[string]any{
 			"mode": intent.mode, "stage": intent.turn.Stage, "role": intent.turn.Role, "purpose": intent.turn.Purpose,
 			"expected_head_sha": intent.turn.ExpectedHeadSHA, "retry_of_turn_id": intent.turn.RetryOfTurnID,
 			"revision": decision.Snapshot.Revision,

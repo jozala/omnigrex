@@ -7,7 +7,7 @@ import (
 
 func TestPolicyDefaultsAndExplicitSelection(t *testing.T) {
 	p, err := Parse([]byte("version: 1\n"))
-	if err != nil || p.Start != "after_ci" || p.Timeout != 30*time.Minute || p.RegistrationGrace != time.Minute {
+	if err != nil || p.Start != "after_ci" || p.Timeout != 2*time.Hour || p.RegistrationGrace != time.Minute {
 		t.Fatalf("default = %+v, %v", p, err)
 	}
 	p, err = Parse([]byte("version: 1\nreview:\n  start: immediate\n  ci:\n    selection: explicit\n    timeout: 2h\n    registration-grace: 0s\n    checks:\n      - context: build\n        source: check\n        app-id: 99\n"))

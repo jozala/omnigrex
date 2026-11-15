@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,16 @@ import (
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
+type ReviewDisposition string
+
+const (
+	ReviewWait     ReviewDisposition = "wait"
+	ReviewAdmit    ReviewDisposition = "admit"
+	ReviewRepair   ReviewDisposition = "repair"
+	ReviewEscalate ReviewDisposition = "handoff"
+)
+
+var ErrReviewAdmissionRouted = errors.New("review admission routed without a Reviewer")
 var ErrReviewAdmissionPending = errors.New("Reviewer CI admission pending or target replaced")
 
 type ReviewAdmission struct {
@@ -22,6 +33,8 @@ type ReviewAdmission struct {
 	HeadSHA, BaseSHA, TestMergeSHA, PolicySourceSHA string
 	CreatedAt, Deadline, GraceAnchor                time.Time
 	Policy, Inventory, Observation, ReleaseEvidence json.RawMessage
+	RepairUsage                                     int
+	RepairTurnAllocated                             bool
 	Status                                          string
 }
 type ReviewAdmissionObservation struct {
@@ -30,6 +43,7 @@ type ReviewAdmissionObservation struct {
 	PolicySourceSHA                string
 	Policy, Inventory, Evidence    json.RawMessage
 	Release                        bool
+	Disposition                    ReviewDisposition
 }
 
 const admissionSelect = `SELECT id::text, pull_request_id, pull_request_number, repository_id, generation, head_sha, base_sha, test_merge_sha, policy_source_sha,
@@ -68,7 +82,7 @@ func (s *Store) BeginReviewAdmission(ctx context.Context, lease JobLease) (Revie
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		r, err = scanAdmission(tx.QueryRow(ctx, `INSERT INTO review_admission_requests(workflow_id,workflow_attempt_id,stage_id,source_job_id,created_at,deadline,grace_anchor,head_sha,pull_request_id,pull_request_number,repository_id)
-  SELECT $1,$2,$3,$4,$5,$5::timestamptz + interval '30 minutes',$5,$6,pull_request_id,pull_request_number,repository_id FROM change_proposals WHERE workflow_id=$1 AND active
+  SELECT $1,$2,$3,$4,$5,$5::timestamptz + interval '2 hours',$5,$6,pull_request_id,pull_request_number,repository_id FROM change_proposals WHERE workflow_id=$1 AND active
   RETURNING id::text,pull_request_id,pull_request_number,repository_id,generation,head_sha,base_sha,test_merge_sha,policy_source_sha,created_at,deadline,grace_anchor,policy,inventory,last_observation,release_evidence,status`, job.WorkflowID, job.WorkflowAttemptID, payload.Stage, job.ID, job.CreatedAt, payload.ExpectedHeadSHA))
 	}
 	if err != nil {
@@ -154,6 +168,16 @@ func (s *Store) RecordReviewAdmission(ctx context.Context, lease JobLease, id st
 	previousStatus := r.Status
 	restartGrace := r.HeadSHA != o.HeadSHA || len(r.Observation) > 0
 	targetChanged := r.HeadSHA != o.HeadSHA || r.BaseSHA != o.BaseSHA || r.TestMergeSHA != o.TestMergeSHA
+	if !targetChanged {
+		var previous, observed struct {
+			At time.Time `json:"observed_at"`
+		}
+		_ = json.Unmarshal(r.Observation, &previous)
+		_ = json.Unmarshal(o.Evidence, &observed)
+		if !previous.At.IsZero() && !observed.At.IsZero() && observed.At.Before(previous.At) {
+			return r, ErrReviewAdmissionPending
+		}
+	}
 	if targetChanged {
 		r.Generation++
 		r.HeadSHA = o.HeadSHA
@@ -194,7 +218,9 @@ func (s *Store) RecordReviewAdmission(ctx context.Context, lease JobLease, id st
 		}
 		r.Policy = o.Policy
 		r.PolicySourceSHA = o.PolicySourceSHA
-		r.Deadline = r.CreatedAt.Add(policy.Timeout)
+		if proposed := r.CreatedAt.Add(policy.Timeout); proposed.Before(r.Deadline) {
+			r.Deadline = proposed
+		}
 	}
 	if len(r.Inventory) == 0 && len(o.Inventory) > 0 {
 		r.Inventory = o.Inventory
@@ -218,6 +244,12 @@ func (s *Store) RecordReviewAdmission(ctx context.Context, lease JobLease, id st
 	r.Status = status
 	r.Observation = o.Evidence
 	r.ReleaseEvidence = release
+	if o.Disposition == ReviewRepair || o.Disposition == ReviewEscalate {
+		if err := s.routeReviewCITx(ctx, tx, job, r, o); err != nil {
+			return r, err
+		}
+		r.Status = "ROUTED"
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return r, err
 	}
@@ -275,6 +307,28 @@ func consumeReviewAdmissionTx(ctx context.Context, tx pgx.Tx, job Job, p agentTu
 	var sameProposal bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM change_proposals WHERE workflow_id=$1 AND active AND pull_request_id=$2 AND pull_request_number=$3 AND repository_id=$4)`, job.WorkflowID, r.PullRequestID, r.PullRequestNumber, r.RepositoryID).Scan(&sameProposal); err != nil || !sameProposal {
 		return nil, ErrReviewAdmissionPending
+	}
+	var evidence struct {
+		SemanticVersion int               `json:"semantic_version"`
+		Disposition     ReviewDisposition `json:"disposition"`
+		AllSuccessful   bool              `json:"all_successful"`
+	}
+	if json.Unmarshal(r.ReleaseEvidence, &evidence) != nil || evidence.SemanticVersion != 2 || evidence.Disposition != ReviewAdmit {
+		return nil, ErrReviewAdmissionPending
+	}
+	if evidence.AllSuccessful {
+		// Allocation and the reset intent share this transaction. A retry or
+		// lost acknowledgement cannot replay this reset after a later repair.
+		inserted, err := tx.Exec(ctx, `INSERT INTO review_ci_decisions(request_id,generation,workflow_attempt_id,decision,workflow_revision,evidence)
+ SELECT $1,$2,$3,'reset',state_revision,$4 FROM workflows WHERE id=$5 ON CONFLICT(request_id,decision) DO NOTHING`, r.ID, r.Generation, job.WorkflowAttemptID, r.ReleaseEvidence, job.WorkflowID)
+		if err != nil {
+			return nil, err
+		}
+		if inserted.RowsAffected() == 1 {
+			if _, err := tx.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=0 WHERE id=$1 AND active`, job.WorkflowAttemptID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// The Turn FK is assigned after allocation in the same transaction.
 	return r.ReleaseEvidence, nil
@@ -356,4 +410,88 @@ func lockPreparationJobTx(ctx context.Context, tx pgx.Tx, lease JobLease) (Job, 
 		lease.Payload = current
 	}
 	return lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
+}
+
+// routeReviewCITx retires preparation and dispatches at most one successor under
+// the same Workflow, request-generation and live-lease locks as admission.
+func (s *Store) routeReviewCITx(ctx context.Context, tx pgx.Tx, job Job, r ReviewAdmission, o ReviewAdmissionObservation) error {
+	snapshot, err := rehydrateWorkflow(ctx, tx, job.WorkflowID)
+	if err != nil {
+		return err
+	}
+	diagnostic := fmt.Sprintf("CI admission %s for PR #%d head %s; repair usage %d/3; deadline %s. Inspect scoped CI tools for selected results and diagnostics.", o.Disposition, r.PullRequestNumber, r.HeadSHA, snapshot.CurrentAttempt.CIRepairUsage, r.Deadline.UTC().Format(time.RFC3339))
+	diagnostic += admissionFailureSummary(o.Evidence)
+	decision := s.reducer.Reduce(snapshot, workflow.CIAdmissionEvent{
+		EventMetadata: workflow.EventMetadata{ID: r.ID, ObservedAt: time.Now().UTC(), WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision},
+		AttemptID:     job.WorkflowAttemptID, ChangeProposalID: snapshot.ChangeProposal.ID, HeadSHA: r.HeadSHA, Repair: o.Disposition == ReviewRepair, Diagnostic: diagnostic,
+	})
+	if err := validateWorkflowDecision(snapshot, decision); err != nil {
+		return err
+	}
+	if decision.Disposition != workflow.DispositionApplied {
+		return ErrAgentTurnPreparationFenceLost
+	}
+	kind := o.Disposition
+	if decision.Snapshot.State == workflow.StateNeedsHuman {
+		kind = ReviewEscalate
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO review_ci_decisions(request_id,generation,workflow_attempt_id,decision,workflow_revision,evidence) VALUES($1,$2,$3,$4,$5,$6)`, r.ID, r.Generation, job.WorkflowAttemptID, kind, decision.Snapshot.Revision, o.Evidence); err != nil {
+		return err
+	}
+	delivery, settlement, err := workflowJobActionProvenance(ctx, tx, job.ID)
+	if err != nil {
+		return err
+	}
+	if err := completeAcknowledgementJobTx(ctx, tx, job, o.Evidence, ErrAgentTurnPreparationFenceLost); err != nil {
+		return err
+	}
+	if err := persistAppliedDecisionWithProvenance(ctx, tx, delivery, settlement, job.WorkflowID, snapshot, decision, "ci-admission:"+r.ID); err != nil {
+		return err
+	}
+	// persistWorkflowSnapshot cancels the retired request as the Stage changes.
+	return nil
+}
+
+func admissionFailureSummary(raw json.RawMessage) string {
+	var observation struct {
+		Targets []struct {
+			Results []struct {
+				Requirement struct {
+					Context string `json:"context"`
+				} `json:"requirement"`
+				Source     string `json:"source"`
+				ID         int64  `json:"result_id"`
+				Conclusion string `json:"conclusion"`
+				State      string `json:"state"`
+			} `json:"results"`
+		} `json:"targets"`
+	}
+	if json.Unmarshal(raw, &observation) != nil {
+		return ""
+	}
+	var out strings.Builder
+	count := 0
+	for _, target := range observation.Targets {
+		for _, r := range target.Results {
+			if r.State != "terminal_non_success" || r.Conclusion == "neutral" || r.Conclusion == "skipped" || count >= 8 {
+				continue
+			}
+			clean := func(value string) string {
+				value = strings.Map(func(r rune) rune {
+					if r < ' ' || strings.ContainsRune("`<>@[]", r) {
+						return ' '
+					}
+					return r
+				}, value)
+				runes := []rune(value)
+				if len(runes) > 120 {
+					runes = runes[:120]
+				}
+				return string(runes)
+			}
+			fmt.Fprintf(&out, " Selected %s %s #%d: %s.", clean(r.Requirement.Context), clean(r.Source), r.ID, clean(r.Conclusion))
+			count++
+		}
+	}
+	return out.String()
 }
