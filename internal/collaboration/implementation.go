@@ -17,12 +17,19 @@ type ImplementationAction struct {
 	Source         Source    `json:"source"`
 }
 
+type ImplementationBinding struct {
+	CycleID         string `json:"cycle_id,omitempty"`
+	TurnID          string `json:"turn_id"`
+	RevisionID      string `json:"revision_id"`
+	AuthorizationID string `json:"authorization_id"`
+}
 type ImplementationState struct {
-	Actions              []ImplementationAction `json:"actions"`
-	Invalidated          []string               `json:"invalidated,omitempty"`
-	FirstDeveloperTurnID string                 `json:"first_developer_turn_id,omitempty"`
-	AcceptedRevisionID   string                 `json:"accepted_revision_id,omitempty"`
-	AuthorizationID      string                 `json:"authorization_id,omitempty"`
+	Bindings             []ImplementationBinding `json:"bindings,omitempty"`
+	Actions              []ImplementationAction  `json:"actions"`
+	Invalidated          []string                `json:"invalidated,omitempty"`
+	FirstDeveloperTurnID string                  `json:"first_developer_turn_id,omitempty"`
+	AcceptedRevisionID   string                  `json:"accepted_revision_id,omitempty"`
+	AuthorizationID      string                  `json:"authorization_id,omitempty"`
 }
 
 func exactConfirmation(kind string) bool { return kind == "confirm-plan" || kind == "implement" }

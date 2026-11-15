@@ -110,3 +110,7 @@ Material conflicts remain blocking even when their decisions are absent from the
 When authorized humans disagree, the agent preserves both accounts and asks them to reconcile instead of choosing by recency or preference.
 Clear self-revision or explicit acceptance of someone else's proposal can resolve the conflict.
 GitHub source links can change or disappear; exact contents, authors and provenance remain in immutable collaboration history rather than depending on those links.
+
+Material steering during already-authorized implementation may return responsibility to the retained Planner at a safe Turn boundary.
+A clarification answer still does not authorize changed commitments: use the exact revised-pair commands in [planning and replanning](planning.md#replanning-after-implementation-starts).
+Normal discussion rounds do not consume or refund autonomous replanning returns.

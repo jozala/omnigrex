@@ -51,3 +51,8 @@ Preserve competing corrections and explicitly explain which evidence governs; do
 If current repository or Change Proposal evidence removes a question's premise, record an explained `obsolete: true` interpretation without requesting a human amendment of the formerly valid answer.
 
 If current evidence restores an obsolete question's unchanged premise, explicitly renew its interpretation using delivered, read response evidence and an explanation; no amendment of the obsolete entry is required. Keep the question identity and earlier interpretations, including when the obsolete entry was inherited into a replacement round.
+
+For planned implementation, evaluate the exact complete governing pair and focused replanning resolution/original evidence, retrieving omitted records before review.
+A materially revised accepted pair requires a fresh native review even at the same code SHA; earlier reviews remain historical findings, not approval of changed commitments.
+Use remaining existing Review Cycles, not a new allowance.
+CI facts may remain applicable under the normal target/provenance/freshness rules, but old green results cannot waive new verification obligations in the revised pair.

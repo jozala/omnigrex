@@ -31,28 +31,47 @@ Use the existing controlled Pi fixture for a realistic contradiction through hum
 Record human effort, rework, decision fidelity and loop behavior without adding accounting machinery.
 Local lack of KVM is not a passing backend result; use exact-source CI for that qualification.
 
-## Incomplete implementation checkpoint
+## Implemented boundaries
 
-The current prototype is not a delivered replanning capability and is not ready for review or deployment.
-It introduces collaboration request/cycle types and initial eligibility/replay/origin tests, plus reducer contracts for dispatch/resolution and the independent return cap.
-The initial domain and reducer tests have passed locally.
-Production capability, Store and migration changes are incomplete scaffolding, not verified routing or authority.
+The implementation uses operation-bound request and resolution receipts in the locked collaboration aggregate.
+Normal settlement dispatches the retained Planner only after the existing admitted-mutation, execution-stop and capture barriers.
+The dispatch transaction records the Attempt and once-only autonomous charge; a fourth pending return retains evidence for explicit Human Handoff recovery.
+Independent human-origin classification requires delivered, assessed steering/amendment evidence that has not already been considered in another cycle.
 
-The remaining safety-critical work includes atomic dispatch/activation and counter persistence, complete terminal receipts and recovery, immutable cross-Participant delivery and correction fences, exact resumed authorization/admission, revision-bound review/admission/readiness, and controlled retained-role qualification.
-In particular, input arriving after a Developer request cannot simply be reparented to the Planner or omitted, and resumption must not reuse initial admission's budget reset.
-Do not enable or deploy the prototype as if these boundaries were implemented.
-The original Work Item remains the governing completion contract; this checkpoint does not narrow its acceptance criteria.
+Planner access to Developer-owned evidence is explicit cycle scope, not reparenting.
+Frozen bounded records provide complete governing documents and concern/resolution evidence; the accepted pair embeds the original request and does not require duplicate delivery of that body.
+Historical correction fences remain in force across transfer.
+Initial first-Developer admission remains immutable, with append-only binding history for resumption and no budget initialization on resumed work.
+Material revisions require fresh exact consent and revision-bound native review, including at an unchanged code SHA.
+Unchanged commitments use still-valid authority; actual withdrawal requires fresh validated consent to the same pair, not invented replacement documents or restoration of the old grant.
 
-### Observed verification of the unfinished checkpoint
+## Behavior evidence
 
-- `go test -race ./internal/collaboration ./internal/workflow ./internal/role -count=1`: passed after the final prototype edits.
-- `mise run docs-check`: passed.
-- Compile-only `go test ./internal/mcp ./internal/agentturn -run '^$'`: passed before the last collaboration and Workflow hydration edits; this is not behavioral qualification.
-- `mise run check`: failed when the concurrent dead-code task was killed; a serialized retry subsequently exposed existing envelope/tool-inventory/telemetry contract failures caused by the additive prototype, and did not establish a passing gate.
-- Docker-backed initial implementation tests were attempted on an intermediate source snapshot and failed Role-policy construction while the prototype was being edited.
-- Controlled Docker Pi Workflow was attempted on an intermediate source snapshot and failed production backend construction before meaningful retained-role execution.
-- None of these integration attempts qualify the final checkpoint or demonstrate the required material-contradiction scenario.
-- No exact-checkpoint CI, Linux/KVM qualification, revised-consent scenario or final native review has been observed.
+- Domain/reducer tests cover scoped eligibility and provenance, independent human origin, duplicate requests, three dispatches/fourth Human Handoff, immutable transferred input and historical correction fences.
+- Resumption tests cover material revision, confirmation-only waiting, withdrawal, fresh same-pair consent, source ordering and historical reassessment without revoking newer consent or restoring old authority.
+- PostgreSQL tests cover unchanged settlement/admission with retained Participants/Sessions and existing budgets, fourth-return explicit recovery, pre-admission Human Handoff withdrawal, operation-content mismatch and contradictory post-request mutations.
+- Lost-response recovery covers both request and resolution effects committed without acknowledgments: mutation reconciliation alone cannot transfer responsibility, and stopped-Turn corroboration settles each original effect once.
+- Revision-aware review tests reject historical same-head approvals for a new pair and preserve the remaining Review Cycle limit.
+- The forward migration backfills only established initial bindings, preserves direct-development null bindings, history, readiness, stopped state and existing usage, and creates no cycles or grants.
 
-The failed checks are not acceptance evidence and must not be waived by the focused domain passes.
-Complete the integration and repair its contract regressions before requesting review.
+### Controlled evaluation
+
+The deterministic Pi fixtures model a discovered restart-persistence contradiction in an isolated local decision-record design.
+The material scenario uses five human commands, including the product decision, confirmation-only waiting and exact revised-pair implementation consent.
+The unchanged scenario uses the original two planning/authorization commands and needs no additional approval or duplicate pair.
+Each scenario dispatches one autonomous return, retains the same Change Proposal and published partial history, continues compatible retained Role Sessions, and reaches fresh native review.
+Avoidable rework is confined to the disposable restart model rather than a production implementation.
+The assertions verify explicit decision fidelity, exact governing revision, authority, preserved history/budgets and final review.
+They do not measure real-model reasoning quality or establish deployment qualification.
+
+## Verification status
+
+Focused race-enabled domain, reducer, Store lost-response/unchanged/admission and forward-migration tests have passed during implementation.
+Both controlled replanning Pi scenarios passed before the final additional safety regressions.
+An intermediate serialized `mise run check` passed.
+Completion requires the final relevant-source check, complete Docker integration, full controlled Workflow, recovery, upgrade and protocol qualification; the Change Proposal handoff records their final results and any remaining limits.
+Exact-head CI, including Linux/KVM qualification, must be inspected separately and is not inferred from local Docker success.
+No deployment or live historical Session evaluation is authorized or claimed.
+
+The earlier unfinished prototype was preserved in commit `185719a` and accurately reported as unqualified.
+That checkpoint's failed/incomplete checks are not acceptance evidence for this continuation.

@@ -109,4 +109,4 @@ Do not copy an existing ADR into a second record.
 
 - [0067: Admit exact-plan implementation at the first Developer Turn](0067-admit-exact-plan-implementation-at-the-first-developer-turn.md) - Accepted, 2026-11-14.
 
-- [0068: Return implementation evidence to the retained Planner](0068-return-evidence-to-retained-planner.md) - Proposed, 2026-11-15.
+- [0068: Return implementation evidence to the retained Planner](0068-return-evidence-to-retained-planner.md) - Accepted, 2026-11-15.

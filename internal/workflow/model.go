@@ -150,19 +150,21 @@ type TurnGuard struct {
 }
 
 type ChangeProposal struct {
-	ID          int64
-	Number      int64
-	HeadSHA     string
-	Open        bool
-	ReadyForSHA string
+	ReadyForPlanRevisionID string
+	ID                     int64
+	Number                 int64
+	HeadSHA                string
+	Open                   bool
+	ReadyForSHA            string
 }
 
 type ReviewIdentity struct {
-	ID               int64
-	NodeID           string
-	ChangeProposalID int64
-	ActorID          int64
-	HeadSHA          string
+	AcceptedPlanRevisionID string
+	ID                     int64
+	NodeID                 string
+	ChangeProposalID       int64
+	ActorID                int64
+	HeadSHA                string
 }
 
 type AssignmentStatus string

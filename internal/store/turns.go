@@ -1057,7 +1057,7 @@ FROM ancestors
 JOIN agent_turns AS source ON source.id = ancestors.id
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
-  AND source.operation_lineage_id = $4 AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
+  AND source.operation_lineage_id = $4 AND source.accepted_plan_revision_id IS NOT DISTINCT FROM (SELECT accepted_plan_revision_id FROM agent_turns WHERE id=$1) AND source.status IN ('FAILED', 'INTERRUPTED', 'TIMED_OUT')
    AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
          OR source.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
@@ -1072,7 +1072,7 @@ WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
 	                  ELSE terminal.id::text END) FROM ancestors AS prior_turn
        JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
        WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
-         AND terminal.tool_name IN ('complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
+         AND terminal.tool_name IN ('request_replanning', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
   AND EXISTS (SELECT 1 FROM agent_turn_settlements AS settlement
               WHERE settlement.agent_turn_id = source.id
                 AND settlement.workflow_outcome = 'INFRASTRUCTURE_FAILED')
@@ -1102,7 +1102,7 @@ JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
   AND source.operation_lineage_id = $4 AND mutation.kind = 'MUTATION'
   AND mutation.state = 'SUCCEEDED' AND mutation.tool_name = 'submit_review'
-  AND mutation.expected_sha = $5
+  AND mutation.expected_sha = $5 AND source.accepted_plan_revision_id IS NOT DISTINCT FROM (SELECT accepted_plan_revision_id FROM agent_turns WHERE id=$1)
 ORDER BY source.turn_number DESC, mutation.invocation_number DESC LIMIT 1`,
 					turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID, turn.operationLineageID,
 					turn.ExpectedHeadSHA).Scan(&unconfirmable.SourceInvocationID, &unconfirmable.SourceTurnID,
@@ -1207,7 +1207,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return &MutationReservationRejection{Cause: ErrMutationAdmissionClosed}
 		}
-		if spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
+		if spec.ToolName == "request_replanning" || spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
 			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
 			if err != nil {
 				return err
@@ -1222,6 +1222,13 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			if !read || state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
 				return &MutationReservationRejection{Cause: ErrUnresolvedClarification}
 			}
+		}
+		var terminalReplan bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='request_replanning' AND state IN ('IN_FLIGHT','SUCCEEDED','UNKNOWN','RECONCILING'))`, turn.ID, turn.ExecutionEpoch).Scan(&terminalReplan); err != nil {
+			return err
+		}
+		if terminalReplan {
+			return &MutationReservationRejection{Cause: ErrMutationOperationConflict}
 		}
 		var number int64
 		if err := tx.QueryRow(ctx, `UPDATE agent_turns SET next_invocation_number = next_invocation_number + 1 WHERE id = $1 RETURNING next_invocation_number - 1`, lease.ID).Scan(&number); err != nil {
@@ -2210,7 +2217,7 @@ func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source Mutat
 		return nil
 	}
 	switch source.ToolName {
-	case "complete_planning", "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
+	case "request_replanning", "complete_planning", "request_clarification", "request_review", "submit_review", "report_blocked", "confirm_prior_terminal_intent":
 	default:
 		return nil
 	}

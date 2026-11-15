@@ -246,3 +246,15 @@ Do not edit ledger state, manufacture another event, or manually retry an uncert
 Missing status comments or a label failure do not grant, revoke, reopen or repeat implementation.
 Use the existing Human Handoff recovery procedure for actual Workflow failures; recovering a completed plan's projection does not itself reopen discussion or allocate development.
 A separately requested human revision uses explicit steering/amendment and exact-pair authorization as described in the [planning guide](../users/planning.md).
+
+### Implementation-time replanning
+
+A recorded replanning request is not a completed transfer: the Developer's admitted operations, execution stop and evidence capture must settle before the retained Planner is dispatched.
+Normal question/revised-authorization waiting has no deadline and does not itself require Human Handoff.
+For an actual handoff, inspect bounded cycle/operation evidence and the current accepted revision rather than inferring success from matching comment text or a historical green check.
+Use the existing explicit recovery procedure; do not reset first-admission markers, review usage or the independent three-return counter to force continuation.
+Retained evidence does not restore arbitrary unpublished edits.
+
+Deploy the forward migration and new replanning purposes/outcomes with coordinated workers: old workers must not concurrently consume the new semantic records.
+Do not downgrade workers or repair live collaboration JSON/authorization/readiness records to bypass a failed provenance check.
+Direct-development records retain a no-plan binding; legacy planned admission/readiness is associated only with its established initial accepted pair, not fabricated new consent.

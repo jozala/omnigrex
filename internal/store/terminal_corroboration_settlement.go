@@ -44,7 +44,7 @@ func (store *Store) settleTerminalCorroboration(ctx context.Context, lease JobLe
 	if err != nil {
 		return AgentTurnSettlement{}, err
 	}
-	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomePlanningReady && canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
+	if handoffReason == "" && canonical.Outcome != workflow.TurnOutcomeReplanningRequested && canonical.Outcome != workflow.TurnOutcomeReplanningResolved && canonical.Outcome != workflow.TurnOutcomePlanningReady && canonical.Outcome != workflow.TurnOutcomeClarificationWait && canonical.Outcome != workflow.TurnOutcomeChangeProposalReady &&
 		canonical.Outcome != workflow.TurnOutcomeChangesRequested && canonical.Outcome != workflow.TurnOutcomeApproved {
 		return AgentTurnSettlement{}, ErrAgentTurnSettlementInvalid
 	}
@@ -420,6 +420,29 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 		}
 		return err
 	}
+	if tool == "submit_review" || tool == "confirm_prior_terminal_intent" {
+		var sourcePlan string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(t.accepted_plan_revision_id,'') FROM agent_turns t JOIN tool_invocations i ON i.agent_turn_id=t.id WHERE i.id=$1`, sourceID).Scan(&sourcePlan); err != nil {
+			return err
+		}
+		state, err := readCollaborationTx(ctx, tx, job.WorkflowID)
+		if err != nil {
+			return err
+		}
+		currentPlan := ""
+		if state.Planning != nil {
+			currentPlan = state.Planning.Implementation.AcceptedRevisionID
+		}
+		if sourcePlan != currentPlan {
+			return ErrTerminalCorroborationConflict
+		}
+	}
+	if tool == "request_replanning" {
+		if role != workflow.RoleDeveloper || observation.Outcome != workflow.TurnOutcomeReplanningRequested || service != "omnigrex" || resource != job.WorkflowID {
+			return ErrTerminalCorroborationConflict
+		}
+		return validateReplanningReceiptTx(ctx, tx, job.WorkflowID, sourceID, request, result)
+	}
 	if tool == "complete_planning" {
 		var args struct {
 			OperationID string `json:"operation_id"`
@@ -427,11 +450,34 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 			Commit      string `json:"repository_commit"`
 			Evidence    string `json:"evidence"`
 			Resolved    bool   `json:"material_decisions_resolved"`
+			Disposition string `json:"disposition"`
 		}
 		var evidence struct {
 			Outcome    string `json:"outcome"`
 			RevisionID string `json:"revision_id"`
 			Commit     string `json:"repository_commit"`
+		}
+		if decodeCorroborationObject(request, &args) && args.Disposition != "" {
+			if role != workflow.RolePlanner || observation.Outcome != workflow.TurnOutcomeReplanningResolved || service != "omnigrex" || resource != job.WorkflowID || args.OperationID != operation || !args.Resolved || !decodeCorroborationObject(result, &evidence) || evidence.Outcome != "REPLANNING_RESOLVED" || evidence.RevisionID != args.RevisionID || evidence.Commit != args.Commit {
+				return ErrTerminalCorroborationConflict
+			}
+			state, err := readCollaborationTx(ctx, tx, job.WorkflowID)
+			if err != nil {
+				return err
+			}
+			if state.Replanning != nil {
+				for _, c := range state.Replanning.Cycles {
+					if c.Scope.PlannerParticipantID != job.AgentParticipantID {
+						continue
+					}
+					for _, v := range c.Resolutions {
+						if v.OperationID == sourceID && v.TurnID == job.AgentTurnID && v.RevisionID == args.RevisionID && v.RepositoryCommit == args.Commit && v.Evidence == args.Evidence && v.Disposition == args.Disposition {
+							return nil
+						}
+					}
+				}
+			}
+			return ErrTerminalCorroborationConflict
 		}
 		if role != workflow.RolePlanner || observation.Outcome != workflow.TurnOutcomePlanningReady || service != "omnigrex" || resource != job.WorkflowID || !decodeCorroborationObject(request, &args) || !decodeCorroborationObject(result, &evidence) || args.OperationID != operation || !args.Resolved || evidence.Outcome != "PLANNING_READY" || args.RevisionID != evidence.RevisionID || args.Commit != evidence.Commit {
 			return ErrTerminalCorroborationConflict

@@ -3,11 +3,11 @@ package workflow
 // ReopenPlanning is used only by the locked collaboration boundary before the
 // first Developer admission. Operational projection recovery never calls it.
 func (r Reducer) ReopenPlanning(snapshot Snapshot) Decision {
-	if snapshot.ActiveTurn != nil || snapshot.CurrentAttempt == nil || snapshot.ChangeProposal != nil || (snapshot.State != StatePlanReady && snapshot.State != StateDeveloping && snapshot.State != StatePlanning) {
+	if snapshot.ActiveTurn != nil || snapshot.CurrentAttempt == nil || snapshot.ChangeProposal != nil && snapshot.ReplanningCycleID == "" || (snapshot.State != StatePlanReady && snapshot.State != StateDeveloping && snapshot.State != StatePlanning) {
 		return illegalInState(snapshot)
 	}
 	next := snapshot.Clone()
-	next.PlanningOnly = true
+	next.PlanningOnly = snapshot.ReplanningCycleID == ""
 	next.State = StatePlanning
 	next.CurrentAttempt.CurrentStage = StagePlanning
 	next.ContinuationStage = StagePlanning

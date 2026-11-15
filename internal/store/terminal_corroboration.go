@@ -516,13 +516,14 @@ FROM agent_turns AS source
 JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
 WHERE mutation.id = $1 AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
   AND source.workflow_id = $2
+ AND source.accepted_plan_revision_id IS NOT DISTINCT FROM (SELECT accepted_plan_revision_id FROM agent_turns WHERE id=$3)
    AND (source.prompt_recorded_at IS NULL OR source.prompt_stop_reason = 'completed'
          OR source.prompt_error_class IN ('FAILURE', 'DEADLINE', 'SUBSCRIPTION_QUOTA', 'SUBSCRIPTION_AUTH', 'SUBSCRIPTION_CONFIGURATION'))
    AND (source.outcome IS NULL OR (source.outcome->'admitted' = 'true'::jsonb
         AND source.outcome->>'status' = 'completed'
         AND COALESCE(source.outcome->'limit_reached', 'false'::jsonb) = 'false'::jsonb))
    AND (source.last_error IS NULL OR (source.last_error NOT LIKE 'Agent prompt was cancelled%'
-        AND source.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))`, sourceID, lease.JobLease.WorkflowID).Scan(
+        AND source.last_error NOT LIKE 'Agent prompt returned an invalid outcome%'))`, sourceID, lease.JobLease.WorkflowID, turn.ID).Scan(
 			&sourceTurnID, &sourceLineage, &sourceSessionID, &sourceAttemptID,
 			&sourceStatus, &sourceCompleted, &sourceSettled); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -549,7 +550,7 @@ SELECT count(DISTINCT CASE WHEN terminal.tool_name = 'confirm_prior_terminal_int
 JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
 WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
   AND terminal.tool_name IN
-    ('complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')`,
+    ('request_replanning', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')`,
 			turn.ID).Scan(&successfulTerminals); err != nil {
 			return err
 		}
@@ -601,6 +602,7 @@ SELECT EXISTS (
     JOIN tool_invocations AS mutation ON mutation.agent_turn_id = source.id
     WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
       AND source.operation_lineage_id = $4
+ AND source.accepted_plan_revision_id IS NOT DISTINCT FROM (SELECT accepted_plan_revision_id FROM agent_turns WHERE id=$1)
       AND mutation.kind = 'MUTATION' AND mutation.state = 'SUCCEEDED'
       AND mutation.tool_name = 'submit_review' AND mutation.expected_sha = $5
 )`, turn.ID, turn.WorkflowAttemptID, turn.AgentSessionID,

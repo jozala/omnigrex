@@ -20,7 +20,7 @@ func (s *State) StaleDecisions(participant string) []StaleDecision {
 	var result []StaleDecision
 	seen := map[string]bool{}
 	for _, round := range s.Rounds {
-		if round.ParticipantID != participant || !round.Published {
+		if !s.RoundInScope(round, participant) || !round.Published {
 			continue
 		}
 		for _, q := range round.Questions {
@@ -37,7 +37,7 @@ func (s *State) StaleDecisions(participant string) []StaleDecision {
 			seen[q.ID] = true
 			d := StaleDecision{RoundReference: round.Reference, QuestionID: q.ID}
 			for _, in := range s.Inputs {
-				if in.ParticipantID != participant {
+				if !s.InputInScope(in, participant) {
 					continue
 				}
 				if slices.Contains(r.ResponseIDs, in.ID) {
@@ -60,7 +60,7 @@ func (s *State) StaleDecisions(participant string) []StaleDecision {
 func (s *State) effectiveResolutions(participant string) map[string]Resolution {
 	effective := map[string]Resolution{}
 	for _, round := range s.Rounds {
-		if round.ParticipantID != participant || !round.Published {
+		if !s.RoundInScope(round, participant) || !round.Published {
 			continue
 		}
 		for _, q := range round.Questions {

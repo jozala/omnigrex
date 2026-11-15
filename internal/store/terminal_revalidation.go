@@ -222,6 +222,15 @@ SELECT accepted FROM change_proposal_reviews WHERE repository_id = $1 AND review
 		if err := validateTerminalCorroborationSource(ctx, tx, job, sourceID, role, canonical); err != nil {
 			return err
 		}
+		if canonical.Review != nil {
+			var plan string
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(accepted_plan_revision_id,'') FROM agent_turns WHERE id=$1`, turn.ID).Scan(&plan); err != nil {
+				return err
+			}
+			review := *canonical.Review
+			review.AcceptedPlanRevisionID = plan
+			canonical.Review = &review
+		}
 		pending, err := derivePendingEventsObservation(ctx, tx, job.WorkflowID, turn.ID)
 		if err != nil || pending.Count != 0 {
 			return ErrAgentTurnMutationsUnsettled

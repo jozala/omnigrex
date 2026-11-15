@@ -360,7 +360,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		if found == nil {
 			return reject("Which earlier input? Use its short reference, for example `/omnigrex amend A7`, or `/omnigrex steer` to explain the change.")
 		}
-		if found.ParticipantID != a.ParticipantID {
+		if !s.InputInScope(*found, a.ParticipantID) {
 			return reject("Rejected: response belongs to an obsolete Stage; use /omnigrex steer for current work.")
 		}
 		roundID = found.RoundID
@@ -389,6 +389,9 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 }
 
 func (s *State) Pending(participant string) bool {
+	if c := s.ActiveReplanning(); c != nil && c.Phase != ReplanningRequested && c.Scope.PlannerParticipantID == participant && !c.EvidenceDelivered && len(c.EvidenceInputIDs) > 0 {
+		return true
+	}
 	for _, input := range s.Inputs {
 		if input.ParticipantID == participant && (input.DeliveredTo == "" || input.DeliveryPending) {
 			return true
@@ -434,7 +437,14 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 		if !r.Published {
 			return &ResolutionValidationError{Code: "round_not_published"}
 		}
-		if !slices.ContainsFunc(s.Preparations, func(p Preparation) bool { return p.TurnID == turn && p.ParticipantID == r.ParticipantID }) {
+		participant := ""
+		for _, p := range s.Preparations {
+			if p.TurnID == turn && s.RoundInScope(*r, p.ParticipantID) {
+				participant = p.ParticipantID
+				break
+			}
+		}
+		if participant == "" {
 			return &ResolutionValidationError{Code: "round_not_prepared"}
 		}
 		seen := map[string]bool{}
@@ -470,7 +480,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			// unrelated answers do not acquire it merely by sharing a round.
 			for responseIndex, id := range resolution.ResponseIDs {
 				if !slices.ContainsFunc(s.Inputs, func(in Input) bool {
-					return in.ID == id && in.DeliveredTo != "" && !in.DeliveryPending && in.ParticipantID == r.ParticipantID && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, r.ParticipantID) || slices.ContainsFunc(r.Resolutions, func(old Resolution) bool {
+					return in.ID == id && s.InputDeliveredInScope(in, participant) && (in.RoundID == "" || s.questionInRound(in.RoundID, resolution.QuestionID, participant) || slices.ContainsFunc(r.Resolutions, func(old Resolution) bool {
 						return old.QuestionID == resolution.QuestionID && slices.ContainsFunc(old.ResponseIDs, func(prior string) bool {
 							return s.isAmendmentOfEvidence(in.ID, prior) || s.explicitlyCorrects(in.ID, prior)
 						})
@@ -541,7 +551,7 @@ func (s *State) Unresolved(participant string) bool {
 	}
 
 	for _, round := range s.Rounds {
-		if round.ID == s.CurrentRound && round.ParticipantID == participant {
+		if round.ID == s.CurrentRound && s.RoundInScope(round, participant) {
 			for _, question := range round.Questions {
 				if resolution := latestResolution(round, question.ID); resolution == nil || !s.resolutionCurrent(*resolution) {
 					return true
@@ -578,7 +588,7 @@ func latestResolution(round Round, question string) *Resolution {
 }
 func (s *State) questionInRound(round, question, participant string) bool {
 	return slices.ContainsFunc(s.Rounds, func(r Round) bool {
-		return r.ID == round && r.ParticipantID == participant && slices.ContainsFunc(r.Questions, func(q Question) bool { return q.ID == question })
+		return r.ID == round && s.RoundInScope(r, participant) && slices.ContainsFunc(r.Questions, func(q Question) bool { return q.ID == question })
 	})
 }
 func (s *State) amends(id, prior string) bool {

@@ -17,10 +17,11 @@ func (r Reducer) reduceReplanningRequested(snapshot, next Snapshot, event TurnSe
 	}
 	if !event.HumanOriginReplanning && next.CurrentAttempt.AutonomousReplanningReturns >= 3 {
 		next.State = StateNeedsHuman
-		next.ResumeRole = RoleDeveloper
+		next.CurrentAttempt.CurrentStage = StagePlanning
+		next.ResumeRole = RolePlanner
 		next.Assignments.Status = AssignmentWaitingForHuman
 		next.Revision++
-		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("replanning_budget_exhausted"), Actions: []Action{MarkHumanHandoffAction{Reason: Reason("replanning_budget_exhausted"), Diagnostic: "Three autonomous replanning returns have already been dispatched in this Workflow Attempt. The new concern requires human recovery."}, ReconcileLabelsAction{State: StateNeedsHuman}}}
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("replanning_budget_exhausted"), Actions: []Action{MarkHumanHandoffAction{Reason: Reason("replanning_budget_exhausted"), Diagnostic: "Three autonomous replanning returns have already been dispatched in this Workflow Attempt. The new concern requires human recovery. " + event.Diagnostic}, ReconcileLabelsAction{State: StateNeedsHuman}}}
 	}
 	if !event.HumanOriginReplanning {
 		next.CurrentAttempt.AutonomousReplanningReturns++

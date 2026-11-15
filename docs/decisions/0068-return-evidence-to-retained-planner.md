@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-15
 decision-makers: [Omnigrex Developer]
 ---
@@ -22,6 +22,7 @@ An independently requested human material revision can be exempt only through de
 Preserve the original first-admission marker and add revision-specific resumed bindings rather than recycling initial admission.
 Install the new governing binding only when the resumed Developer Turn is durably admitted.
 An unchanged resolution retains existing valid authority; a material revision requires a complete linked pair and renewed exact-revision authorization.
+Actual withdrawal requires fresh consent even when the documents remain unchanged, without fabricating a material revision.
 Scope review readiness and terminal review evidence to accepted revision as well as head.
 
 ## Rationale
@@ -35,7 +36,7 @@ Treating an old same-head approval as current would omit review of changed commi
 
 The change must extend persistence, admission, terminal recovery and bounded evidence delivery together before becoming available.
 Checkpoint preservation remains instruction-only through existing publication tools, with no guarantee to restore unpublished edits.
-This proposed record and the working plan are not claims of qualification or delivery.
+This decision establishes the implementation approach, not a claim of qualification or deployment; see the working plan for observed verification.
 
 ## Links
 

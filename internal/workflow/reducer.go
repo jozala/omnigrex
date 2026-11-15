@@ -386,6 +386,9 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 			entry.Stage = snapshot.ContinuationStage
 		}
 	}
+	if snapshot.State == StateNeedsHuman && snapshot.ReplanningCycleID != "" && snapshot.AcceptedPlanRevisionID != "" && !snapshot.PlanningOnly {
+		entry.Stage = StagePlanning
+	}
 	stage, ok := reducer.definition.Stage(entry.Stage)
 	if !ok || !reducer.definition.AcceptsPurpose(entry.Stage, purpose) {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
@@ -445,7 +448,7 @@ func (reducer Reducer) reduceTrigger(snapshot Snapshot, event TriggerEvent) Deci
 			ReconcileLabelsAction{State: next.State},
 		)
 	}
-	if event.PriorTerminalTurnID != "" && snapshot.State == StateNeedsHuman &&
+	if event.PriorTerminalTurnID != "" && snapshot.State == StateNeedsHuman && snapshot.ReplanningCycleID == "" &&
 		event.PriorTerminalStage == stage.ID && event.PriorTerminalRole == stage.Role &&
 		snapshot.ResumeRole == stage.Role && assignmentMode != AssignmentGenerationNew &&
 		event.PriorTerminalExpectedHeadSHA == head {
@@ -525,7 +528,7 @@ func (reducer Reducer) reducePreviouslyAcceptedTerminalReview(snapshot Snapshot,
 	next.ChangeProposal = &proposal
 	next.CurrentAttempt.InfrastructureRetryBudget.Used = 0
 	next.Revision++
-	if event.Review.HeadSHA != event.SourceTurn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
+	if event.Review.AcceptedPlanRevisionID != snapshot.AcceptedPlanRevisionID || event.Review.HeadSHA != event.SourceTurn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
 		snapshot.ChangeProposal.HeadSHA != event.SourceTurn.ExpectedHeadSHA {
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced,
 			Actions: []Action{
@@ -537,6 +540,7 @@ func (reducer Reducer) reducePreviouslyAcceptedTerminalReview(snapshot Snapshot,
 	if event.Outcome == TurnOutcomeApproved {
 		next.State = transition.TerminalState
 		next.CurrentAttempt.CurrentStage = transition.ContinuationStage
+		next.ChangeProposal.ReadyForPlanRevisionID = snapshot.AcceptedPlanRevisionID
 		next.ChangeProposal.ReadyForSHA = event.Review.HeadSHA
 		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonApproved,
 			Actions: []Action{ReconcileLabelsAction{State: StatePRReady, ReadyForSHA: event.Review.HeadSHA}}}
@@ -622,6 +626,15 @@ func (reducer Reducer) reduceTurnSettled(snapshot Snapshot, event TurnSettledEve
 			proposal.ReadyForSHA = ""
 			next.ChangeProposal = &proposal
 		}
+		if snapshot.ReplanningCycleID != "" && pendingRequiresReconciliation(event.PendingEvents) {
+			decision := clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
+			head := ""
+			if next.ChangeProposal != nil {
+				head = next.ChangeProposal.HeadSHA
+			}
+			decision.Actions = []Action{reconcilePendingAction(event.Turn, event.PendingEvents, EnqueueTurnAction{Stage: event.Turn.Stage, Role: event.Turn.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head})}
+			return decision
+		}
 		return clarificationWaitDecision(next, event.Turn, event.HumanInputPending)
 	case TurnOutcomeReplanningRequested:
 		return reducer.reduceReplanningRequested(snapshot, next, event)
@@ -700,7 +713,7 @@ func (reducer Reducer) reduceReviewSettled(snapshot, next Snapshot, event TurnSe
 	next.CurrentAttempt.InfrastructureRetryBudget.Used = 0
 	pendingHead := event.PendingEvents.LatestObservedHeadSHA
 	pendingHeadReplaced := pendingHead != "" && (pendingHead != event.Review.HeadSHA || pendingHead != event.Turn.ExpectedHeadSHA)
-	staleHead := event.Review.HeadSHA != event.Turn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
+	staleHead := event.Review.AcceptedPlanRevisionID != snapshot.AcceptedPlanRevisionID || event.Review.HeadSHA != event.Turn.ExpectedHeadSHA || event.Review.HeadSHA != proposal.HeadSHA ||
 		snapshot.ChangeProposal.HeadSHA != event.Turn.ExpectedHeadSHA || pendingHeadReplaced
 	if staleHead {
 		stage, _ := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
@@ -725,6 +738,7 @@ func (reducer Reducer) reduceReviewSettled(snapshot, next Snapshot, event TurnSe
 	if event.Outcome == TurnOutcomeApproved {
 		next.State = transition.TerminalState
 		next.CurrentAttempt.CurrentStage = transition.ContinuationStage
+		next.ChangeProposal.ReadyForPlanRevisionID = snapshot.AcceptedPlanRevisionID
 		next.ChangeProposal.ReadyForSHA = event.Review.HeadSHA
 		next.Revision++
 		actions := []Action{RecordReviewAction{Review: *event.Review, Accepted: true}, ReconcileLabelsAction{State: StatePRReady, ReadyForSHA: event.Review.HeadSHA}}
@@ -868,6 +882,11 @@ func (reducer Reducer) reduceSynchronization(snapshot Snapshot, event Synchroniz
 	stage, stageExists := reducer.definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 	if !stageExists {
 		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionIllegal, Reason: ReasonInvariantViolation}
+	}
+	if snapshot.State == StatePlanning && snapshot.ReplanningCycleID != "" {
+		next.ClarificationWaiting = false
+		next.Revision++
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: ReasonReviewHeadReplaced, Actions: []Action{EnqueueTurnAction{Stage: stage.ID, Role: stage.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: event.HeadSHA}, ReconcileLabelsAction{State: StatePlanning}}}
 	}
 	if stage.State == StateDeveloping || snapshot.ClarificationWaiting {
 		next.Revision++

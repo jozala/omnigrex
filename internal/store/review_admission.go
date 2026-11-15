@@ -16,6 +16,7 @@ import (
 var ErrReviewAdmissionPending = errors.New("Reviewer CI admission pending or target replaced")
 
 type ReviewAdmission struct {
+	AcceptedPlanRevisionID                          string
 	PullRequestID, PullRequestNumber, RepositoryID  int64
 	ID                                              string
 	Generation                                      int64
@@ -33,11 +34,11 @@ type ReviewAdmissionObservation struct {
 }
 
 const admissionSelect = `SELECT id::text, pull_request_id, pull_request_number, repository_id, generation, head_sha, base_sha, test_merge_sha, policy_source_sha,
- created_at, deadline, grace_anchor, policy, inventory, last_observation, release_evidence, status
+ created_at, deadline, grace_anchor, policy, inventory, last_observation, release_evidence, status, COALESCE(accepted_plan_revision_id,'')
  FROM review_admission_requests `
 
 func scanAdmission(row pgx.Row) (r ReviewAdmission, err error) {
-	err = row.Scan(&r.ID, &r.PullRequestID, &r.PullRequestNumber, &r.RepositoryID, &r.Generation, &r.HeadSHA, &r.BaseSHA, &r.TestMergeSHA, &r.PolicySourceSHA, &r.CreatedAt, &r.Deadline, &r.GraceAnchor, &r.Policy, &r.Inventory, &r.Observation, &r.ReleaseEvidence, &r.Status)
+	err = row.Scan(&r.ID, &r.PullRequestID, &r.PullRequestNumber, &r.RepositoryID, &r.Generation, &r.HeadSHA, &r.BaseSHA, &r.TestMergeSHA, &r.PolicySourceSHA, &r.CreatedAt, &r.Deadline, &r.GraceAnchor, &r.Policy, &r.Inventory, &r.Observation, &r.ReleaseEvidence, &r.Status, &r.AcceptedPlanRevisionID)
 	return
 }
 
@@ -67,12 +68,15 @@ func (s *Store) BeginReviewAdmission(ctx context.Context, lease JobLease) (Revie
 		}
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		r, err = scanAdmission(tx.QueryRow(ctx, `INSERT INTO review_admission_requests(workflow_id,workflow_attempt_id,stage_id,source_job_id,created_at,deadline,grace_anchor,head_sha,pull_request_id,pull_request_number,repository_id)
-  SELECT $1,$2,$3,$4,$5,$5::timestamptz + interval '30 minutes',$5,$6,pull_request_id,pull_request_number,repository_id FROM change_proposals WHERE workflow_id=$1 AND active
-  RETURNING id::text,pull_request_id,pull_request_number,repository_id,generation,head_sha,base_sha,test_merge_sha,policy_source_sha,created_at,deadline,grace_anchor,policy,inventory,last_observation,release_evidence,status`, job.WorkflowID, job.WorkflowAttemptID, payload.Stage, job.ID, job.CreatedAt, payload.ExpectedHeadSHA))
+		r, err = scanAdmission(tx.QueryRow(ctx, `INSERT INTO review_admission_requests(workflow_id,workflow_attempt_id,stage_id,source_job_id,created_at,deadline,grace_anchor,head_sha,pull_request_id,pull_request_number,repository_id,accepted_plan_revision_id)
+  SELECT $1,$2,$3,$4,$5,$5::timestamptz + interval '30 minutes',$5,$6,pull_request_id,pull_request_number,repository_id,(SELECT state->'planning'->'implementation'->>'accepted_revision_id' FROM work_item_collaboration WHERE workflow_id=$1) FROM change_proposals WHERE workflow_id=$1 AND active
+  RETURNING id::text,pull_request_id,pull_request_number,repository_id,generation,head_sha,base_sha,test_merge_sha,policy_source_sha,created_at,deadline,grace_anchor,policy,inventory,last_observation,release_evidence,status,COALESCE(accepted_plan_revision_id,'')`, job.WorkflowID, job.WorkflowAttemptID, payload.Stage, job.ID, job.CreatedAt, payload.ExpectedHeadSHA))
 	}
 	if err != nil {
 		return ReviewAdmission{}, fmt.Errorf("anchor review admission: %w", err)
+	}
+	if err := validateReviewPlanTx(ctx, tx, job.WorkflowID, r.AcceptedPlanRevisionID); err != nil {
+		return r, err
 	}
 	if r.Status != "WAITING" && r.Status != "RELEASED" {
 		return ReviewAdmission{}, ErrAgentTurnPreparationFenceLost
@@ -124,6 +128,9 @@ func (s *Store) RecordReviewAdmission(ctx context.Context, lease JobLease, id st
 	}
 	r, err := scanAdmission(tx.QueryRow(ctx, admissionSelect+` WHERE id=$1 AND id=(SELECT request_id FROM review_admission_jobs WHERE job_id=$2) FOR UPDATE`, id, job.ID))
 	if err != nil {
+		return r, err
+	}
+	if err := validateReviewPlanTx(ctx, tx, job.WorkflowID, r.AcceptedPlanRevisionID); err != nil {
 		return r, err
 	}
 	if r.Generation != o.Generation || r.Status != "WAITING" && r.Status != "RELEASED" {
@@ -269,6 +276,9 @@ func consumeReviewAdmissionTx(ctx context.Context, tx pgx.Tx, job Job, p agentTu
 	if err != nil {
 		return nil, fmt.Errorf("read admission fence: %w", err)
 	}
+	if err := validateReviewPlanTx(ctx, tx, job.WorkflowID, r.AcceptedPlanRevisionID); err != nil {
+		return nil, err
+	}
 	if r.Status != "RELEASED" || r.Generation != fence.Generation || r.HeadSHA != head || len(r.ReleaseEvidence) == 0 {
 		return nil, ErrReviewAdmissionPending
 	}
@@ -356,4 +366,22 @@ func lockPreparationJobTx(ctx context.Context, tx pgx.Tx, lease JobLease) (Job, 
 		lease.Payload = current
 	}
 	return lockFencedWorkflowJob(ctx, tx, lease, PrepareAgentTurnJobKind, ErrAgentTurnPreparationFenceLost)
+}
+
+func validateReviewPlanTx(ctx context.Context, tx pgx.Tx, workflowID, plan string) error {
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return err
+	}
+	if state.ActiveReplanning() != nil {
+		return ErrReviewAdmissionPending
+	}
+	current := ""
+	if state.Planning != nil {
+		current = state.Planning.Implementation.AcceptedRevisionID
+	}
+	if current != plan {
+		return ErrReviewAdmissionPending
+	}
+	return nil
 }

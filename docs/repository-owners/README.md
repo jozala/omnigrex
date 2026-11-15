@@ -31,3 +31,7 @@ For planning Work Items, repository write-or-higher permission and an explicit `
 Repository instructions may distinguish material design commitments from reversible implementation suggestions, but cannot bypass explicit consent, publication confirmation, pending-input fences or current repository-relevance validation.
 Unrelated default-branch changes do not automatically invalidate acceptance; the Planner records relevance evidence and material changes require a revised pair and renewed consent.
 Configure normal Developer/Reviewer Profiles and CI policy for the downstream handoff; label projection does not grant implementation authority.
+
+Planned implementation can return a material concern to its retained Planner without replacing the Change Proposal.
+Keep the Planner Profile available for that continuation; this does not add initial planning to direct-development Work Items.
+See [implementation-time replanning](../users/planning.md#replanning-after-implementation-starts) for unchanged-plan resumption, renewed exact-pair consent and loop limits.

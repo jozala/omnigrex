@@ -451,9 +451,9 @@ INSERT INTO agent_turns (
 	    id, workflow_id, preparation_job_id, agent_session_id, workflow_attempt_id,
 	    turn_number, execution_epoch, retry_of_turn_id, operation_lineage_id, status, active, control_revision,
 	    agent_profile_commit_sha, agent_profile_content_sha256, agent_profile_config, turn_configuration,
-	    stage_id, purpose, change_proposal_id, expected_head_sha
+	    stage_id, purpose, change_proposal_id, expected_head_sha,accepted_plan_revision_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'QUEUED', TRUE, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'QUEUED', TRUE, $10, $11, $12, $13, $14, $15, $16, $17, $18,$14::jsonb->'implementation_handoff'->>'revision_id')
 RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		preparation.WorkflowAttemptID, turn.TurnNumber, turn.ExecutionEpoch,
 		nullableString(turn.RetryOfTurnID), turn.operationLineageID, turn.ControlRevision, turn.AgentProfileCommitSHA,
@@ -1148,7 +1148,7 @@ func (store *Store) validAgentTurnPreparationPayload(payload agentTurnPreparatio
 		return false
 	}
 	switch payload.Purpose {
-	case workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
+	case workflow.TurnPurposeReplanning, workflow.TurnPurposeResumedDevelopment, workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
 		workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry,
 		workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
 	default:

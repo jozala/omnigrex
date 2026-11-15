@@ -136,3 +136,32 @@ Steering/amendments accepted before admission also block development and return 
 Concurrent withdrawal, steering, closure and admission are serialized: feedback reflects which operation crossed the durable start boundary first.
 After admission, limited withdrawal is rejected and does not claim to stop work.
 Close the original Work Item Issue to use the existing stopping mechanism; removing state labels is not cancellation.
+
+## Replanning after implementation starts
+
+A Developer may return concrete evidence that an accepted material commitment is doubtful to the retained Planner.
+Routine reversible implementation choices stay with the Developer.
+Accepted human steering/amendments can also supply a material concern; ordinary comments do not.
+Implementation and new Reviewer dispatch pause at a safe Turn boundary, after admitted operations and execution-stop/capture barriers settle.
+Existing external CI need not be cancelled.
+The Issue explains the concern, paused responsibility and governing revision; the same Work Item, Change Proposal and published history remain in use.
+Safe useful unfinished work may be committed/published through existing tools without declaring review readiness; passing tests are not a prerequisite merely to preserve it.
+Unpublished edits are not guaranteed to survive a fresh Execution Environment.
+
+If the same pair and commitments remain valid, the Planner records a false-alarm rationale and resumes under still-valid authority, without another approval or duplicate documents.
+A material change requires a linked **complete revised pair** explaining changed commitments.
+For that current pair, `/omnigrex confirm-plan P8` confirms understanding only; `/omnigrex implement P8` accepts and authorizes validated resumption.
+Limited `/omnigrex withdraw-implementation P8` can revoke unused resumption authority until the next Developer Turn is durably admitted, not stop already-admitted work.
+Withdrawn or invalidated authority is never silently restored.
+New input or repository/head movement before admission returns the same cycle to reassessment.
+
+If authority was actually withdrawn, unchanged documents do not restore it: give fresh explicit authorization to the same still-valid pair before resumption.
+No replacement pair is needed merely to express fresh consent.
+
+Three actually dispatched autonomous returns are allowed per Workflow Attempt; a fourth requires Human Handoff.
+False alarms count; duplicate requests, infrastructure retries and human discussion rounds do not.
+An independently requested, authorized human direction change can be exempt, but replies inside an autonomous cycle never refund it or reset usage.
+Resumption preserves retry/review/replanning usage and the original initial-admission history.
+A material revised pair requires fresh native Reviewer evaluation even at the same code SHA, using remaining Review Cycles.
+Relevant CI facts may be reused under their ordinary scope/provenance/freshness rules, but cannot waive new verification obligations.
+Direct-development Work Items without an authorized plan and retained Planner keep their existing clarification/Human Handoff path.

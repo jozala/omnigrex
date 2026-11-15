@@ -47,6 +47,7 @@ type pullRequestContext struct {
 }
 
 type eventEnvelope struct {
+	Replanning               json.RawMessage                `json:"replanning,omitempty"`
 	ImplementationHandoff    json.RawMessage                `json:"implementation_handoff,omitempty"`
 	AcceptedPlan             json.RawMessage                `json:"accepted_plan,omitempty"`
 	PlanningRequest          json.RawMessage                `json:"planning_request,omitempty"`
@@ -102,6 +103,7 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 	}
 	if len(execution.Turn.TurnConfiguration) > 0 {
 		var configuration struct {
+			Replanning            json.RawMessage `json:"replanning"`
 			Projection            json.RawMessage `json:"collaboration_projection"`
 			ImplementationHandoff json.RawMessage `json:"implementation_handoff"`
 			AcceptedPlan          json.RawMessage `json:"accepted_plan"`
@@ -115,6 +117,7 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		if json.Unmarshal(execution.Turn.TurnConfiguration, &configuration) != nil {
 			return "", ErrInvalidEventEnvelope
 		}
+		envelope.Replanning = configuration.Replanning
 		envelope.ImplementationHandoff = configuration.ImplementationHandoff
 		envelope.AcceptedPlan = configuration.AcceptedPlan
 		envelope.PlanningRequest = configuration.PlanningRequest

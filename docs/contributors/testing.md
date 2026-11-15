@@ -209,3 +209,13 @@ PostgreSQL `TestImplementationAdmissionSerializesWithdrawalSteeringAndRestart` a
 The direct-development controlled path remains independently exercised.
 Run the normal local, Docker integration, controlled Workflow/recovery and exact-head Linux/KVM gates before claiming backend qualification.
 These fixtures do not deploy the feature, exercise a historical production plan or establish real-model semantic reasoning quality.
+
+### Implementation-time replanning qualification
+
+`TestPiControlledWorkflow/replanning-revised` and `/replanning-unchanged` use isolated repositories and retained Role Sessions through the production pinned Pi MCP bridge.
+They preserve unfinished published commits and one Change Proposal, exercise safe Planner transfer, and return through native Reviewer evaluation.
+The revised scenario includes a human decision, complete superseding pair, confirmation-only waiting and exact resumption authorization; the false alarm adds neither consent nor documents.
+These deterministic controlled-provider scenarios measure command effort, bounded loop behavior, decision fidelity and isolated rework, not real-model reasoning quality.
+Run them with `OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiControlledWorkflow/replanning' mise run test-pi-workflow`; use the normal Linux/KVM gate for Microsandbox qualification.
+The schema/reducer tests separately cover same-head old-plan review invalidation and per-Attempt budget preservation.
+Do not substitute production Sessions or live-provider costs for these fixtures.

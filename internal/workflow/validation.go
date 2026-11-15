@@ -216,7 +216,7 @@ func validStateShape(definition Definition, snapshot Snapshot) bool {
 		return snapshot.PlanningOnly && snapshot.CurrentAttempt.CurrentStage == StagePlanning && snapshot.Closure == nil && snapshot.ActiveTurn == nil && snapshot.ChangeProposal == nil
 	case StatePRReady:
 		_, stageExists := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
-		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil && validChangeProposal(snapshot.ChangeProposal) && snapshot.ChangeProposal.ReadyForSHA == snapshot.ChangeProposal.HeadSHA
+		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil && validChangeProposal(snapshot.ChangeProposal) && snapshot.ChangeProposal.ReadyForSHA == snapshot.ChangeProposal.HeadSHA && snapshot.ChangeProposal.ReadyForPlanRevisionID == snapshot.AcceptedPlanRevisionID
 	case StateNeedsHuman:
 		_, stageExists := definition.Stage(snapshot.CurrentAttempt.CurrentStage)
 		return stageExists && snapshot.Closure == nil && snapshot.ActiveTurn == nil

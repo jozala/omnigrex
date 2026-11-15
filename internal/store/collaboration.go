@@ -173,13 +173,14 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 		return collaboration.Receipt{}, err
 	}
 	beforeStart := preImplementation(state)
+	resuming := state.ActiveReplanning() != nil && state.ActiveReplanning().Phase != collaboration.ReplanningRequested
 	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing || beforeStart && snapshot.State == workflow.StatePlanReady)
-	limitedWithdrawal := beforeStart && snapshot.CurrentAttempt != nil && snapshot.State == workflow.StateNeedsHuman && snapshot.ActiveTurn == nil && snapshot.ChangeProposal == nil && snapshot.Closure == nil && input.Command.Kind == "withdraw-implementation"
+	limitedWithdrawal := (beforeStart || resuming) && snapshot.CurrentAttempt != nil && snapshot.State == workflow.StateNeedsHuman && snapshot.ActiveTurn == nil && (snapshot.ChangeProposal == nil || resuming) && snapshot.Closure == nil && input.Command.Kind == "withdraw-implementation"
 	stage := workflow.StageID("")
 	if snapshot.CurrentAttempt != nil {
 		stage = snapshot.CurrentAttempt.CurrentStage
 	}
-	if beforeStart {
+	if beforeStart || resuming {
 		stage = workflow.StagePlanning
 	}
 	participant := ""
@@ -205,7 +206,13 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 		actionCount = len(state.Planning.Implementation.Actions)
 	}
 	receipt := state.Accept("A"+id, input.Command, collaboration.Admission{AllowUnusedWithdrawal: limitedWithdrawal, SourceSequence: input.SourceSequence, Active: active, Authorized: input.Authorized, ParticipantID: participant, Route: collaborationRoute(snapshot), Actor: input.Actor, Source: input.Source, At: input.At})
-	if beforeStart && len(state.Inputs) > prior {
+	if (beforeStart || resuming) && len(state.Inputs) > prior {
+		snapshot, err = s.reopenPlanningTx(ctx, tx, input.WorkflowID, snapshot, &state, receipt.ResponseID)
+		if err != nil {
+			return collaboration.Receipt{}, err
+		}
+	}
+	if resuming && len(state.Planning.Implementation.Actions) > actionCount && input.Command.Kind == "withdraw-implementation" && snapshot.State == workflow.StateDeveloping && snapshot.ActiveTurn == nil {
 		snapshot, err = s.reopenPlanningTx(ctx, tx, input.WorkflowID, snapshot, &state, receipt.ResponseID)
 		if err != nil {
 			return collaboration.Receipt{}, err
@@ -285,6 +292,10 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 	if orientation := acceptedPlanOrientation(state); len(orientation) > 0 {
 		object["implementation_handoff"] = orientation
 	}
+	// Freeze exact governing documents and cycle evidence separately from the
+	// bounded launch projection. This hidden configuration is never sent inline.
+	frozen := map[string][]json.RawMessage{"accepted_plan": state.Records(participant, turn, "accepted_plan"), "planning_request": state.Records(participant, turn, "planning_request"), "replanning": state.Records(participant, turn, "replanning")}
+	object["frozen_collaboration_records"], _ = json.Marshal(frozen)
 	for name, raw := range state.Project(participant, turn) {
 		object[name] = raw
 	}
@@ -404,17 +415,66 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 	if err != nil {
 		return err
 	}
+	if event.Outcome == workflow.TurnOutcomeReplanningRequested {
+		source, valid, err := findTerminalCorroborationSourceTx(ctx, tx, event.Turn.TurnID, int64(event.Turn.Epoch), workflow.RoleDeveloper, "")
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return ErrTerminalCorroborationConflict
+		}
+		c := state.ActiveReplanning()
+		if c == nil || c.Scope.OperationID != source || c.Scope.DeveloperParticipantID != participant || c.Scope.AttemptID != event.Turn.AttemptID || c.Phase != collaboration.ReplanningRequested {
+			return collaboration.ErrInvalid
+		}
+		var args, result []byte
+		if err = tx.QueryRow(ctx, `SELECT request,result FROM tool_invocations WHERE id=$1 AND state='SUCCEEDED'`, source).Scan(&args, &result); err != nil {
+			return err
+		}
+		if err = validateReplanningReceiptTx(ctx, tx, workflowID, source, args, result); err != nil {
+			return err
+		}
+		event.ReplanningCycleID = source
+		event.Diagnostic = c.Concern.Commitment + ": " + c.Concern.Consequences
+		event.HumanOriginReplanning = c.Origin == collaboration.ReplanningHuman
+		return nil
+	}
+	if event.Review != nil {
+		var plan string
+		if err = tx.QueryRow(ctx, `SELECT COALESCE(accepted_plan_revision_id,'') FROM agent_turns WHERE id=$1`, event.Turn.TurnID).Scan(&plan); err != nil {
+			return err
+		}
+		review := *event.Review
+		review.AcceptedPlanRevisionID = plan
+		event.Review = &review
+	}
 	event.HumanInputPending = state.Pending(participant)
 	read, err := acceptedPlanDeliveredTx(ctx, tx, event.Turn.TurnID)
 	if err != nil {
 		return err
 	}
 	blocked := state.AssessmentBlocked(participant) || state.Unresolved(participant) || !read
-	if (event.HumanInputPending || blocked) && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
+	if (event.HumanInputPending || blocked) && (event.Outcome == workflow.TurnOutcomeReplanningResolved || event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
 		event.Outcome = workflow.TurnOutcomeClarificationWait
 		event.Review = nil
 		event.ExistingReview = nil
 		event.AuthorizedReviewerActorID = 0
+	}
+	if event.Outcome == workflow.TurnOutcomeReplanningResolved {
+		c := state.ActiveReplanning()
+		if c == nil || c.Resolution == nil || c.Resolution.TurnID != event.Turn.TurnID || c.Scope.PlannerParticipantID != participant {
+			return collaboration.ErrInvalid
+		}
+		if !state.ResumptionReady() {
+			event.Outcome = workflow.TurnOutcomeClarificationWait
+			state.Waiting = true
+			return saveCollaborationTx(ctx, tx, workflowID, state)
+		}
+		event.ReplanningCycleID = c.Scope.OperationID
+		event.ImplementationAuthorized = true
+		event.ResolvedPlanRevisionID = c.Resolution.RevisionID
+		r := state.CurrentCheckpoint()
+		return enqueueCollaborationStatusTx(ctx, tx, workflowID, "resumption:"+c.Resolution.OperationID, "Planner resolution: "+c.Resolution.Disposition+" commitments under "+r.Reference+". "+c.Resolution.Evidence+" Developer resumption is queued under validated authority; new input or unused-authority withdrawal before admission still fences it.", &state)
 	}
 	if event.Outcome == workflow.TurnOutcomePlanningReady {
 		if state.Planning == nil || state.Pending(participant) || state.Unresolved(participant) || state.AssessmentBlocked(participant) {
@@ -495,7 +555,8 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
 		return nil, 0, err
 	}
 	var object struct {
-		Projection collaboration.Projection `json:"collaboration_projection"`
+		Projection collaboration.Projection     `json:"collaboration_projection"`
+		Frozen     map[string][]json.RawMessage `json:"frozen_collaboration_records"`
 	}
 	if err = json.Unmarshal(configuration, &object); err != nil {
 		return nil, 0, err
@@ -506,6 +567,12 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
 	}
 	if index < 0 || index >= limit {
 		return nil, 0, collaboration.ErrInvalid
+	}
+	if records, present := object.Frozen[collection]; present {
+		if index >= len(records) {
+			return nil, 0, collaboration.ErrInvalid
+		}
+		return records[index], limit, nil
 	}
 	// Select just this record: repeatedly decoding and serializing the entire
 	// aggregate for each chunk makes large discussions unnecessarily expensive.
@@ -549,7 +616,7 @@ func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTu
 	if err := json.Unmarshal(request, &args); err != nil {
 		return err
 	}
-	if args.Collection != "human_input" && args.Collection != "accepted_plan" {
+	if args.Collection != "human_input" && args.Collection != "accepted_plan" && args.Collection != "replanning" {
 		return nil
 	}
 	raw, total, err := getCollaborationRecordTx(ctx, tx, workflowID, turn.AgentParticipantID, turn.ID, args.Collection, args.Index)
@@ -580,10 +647,10 @@ func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTu
 	length := utf8.RuneCount(raw)
 	err = tx.QueryRow(ctx, `SELECT count(DISTINCT COALESCE((request->>'offset')::bigint,0))
  FROM tool_invocations WHERE agent_turn_id=$1 AND kind='READ' AND state='SUCCEEDED'
- AND tool_name='get_collaboration_record' AND request->>'collection'='human_input'
+ AND tool_name='get_collaboration_record' AND request->>'collection'=$6
  AND COALESCE((request->>'index')::bigint,0)=$2 AND result->>'record_sha256'=$3
  AND COALESCE((request->>'offset')::bigint,0)>=0 AND COALESCE((request->>'offset')::bigint,0)<$4
- AND COALESCE((request->>'offset')::bigint,0)%$5=0`, turn.ID, args.Index, expected.RecordSHA256, length, collaboration.RecordChunkRunes).Scan(&chunks)
+ AND COALESCE((request->>'offset')::bigint,0)%$5=0`, turn.ID, args.Index, expected.RecordSHA256, length, collaboration.RecordChunkRunes, args.Collection).Scan(&chunks)
 	if err != nil {
 		return err
 	}
@@ -593,6 +660,15 @@ func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTu
 	state, err := readCollaborationTx(ctx, tx, workflowID)
 	if err != nil {
 		return err
+	}
+	if args.Collection == "replanning" {
+		if state.ActiveReplanning() == nil {
+			return nil
+		}
+		if err = state.ReplanningEvidenceDelivered(turn.AgentParticipantID, turn.ID); err != nil {
+			return err
+		}
+		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}
 	for _, in := range state.Inputs {
 		if in.ID == input.ID && !in.DeliveryPending {

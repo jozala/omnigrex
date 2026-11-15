@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/collaboration"
+	"github.com/jozala/omnigrex/internal/publication"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -30,6 +32,18 @@ func (s *Store) RequestReplanning(ctx context.Context, lease AgentTurnLease, ope
 			return err
 		}
 		if !valid {
+			return collaboration.ErrInvalid
+		}
+		var reserved []byte
+		var caller string
+		if err = tx.QueryRow(ctx, `SELECT request,operation_id FROM tool_invocations WHERE id=$1`, operation).Scan(&reserved, &caller); err != nil {
+			return err
+		}
+		var bound collaboration.ReplanningConcern
+		var identity struct {
+			OperationID string `json:"operation_id"`
+		}
+		if json.Unmarshal(reserved, &bound) != nil || json.Unmarshal(reserved, &identity) != nil || identity.OperationID != caller || !reflect.DeepEqual(bound, concern) {
 			return collaboration.ErrInvalid
 		}
 		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
@@ -58,6 +72,20 @@ func (s *Store) RequestReplanning(ctx context.Context, lease AgentTurnLease, ope
 		scope := collaboration.ReplanningRequestScope{OperationID: operation, TurnID: turn.ID, ExecutionEpoch: uint64(turn.ExecutionEpoch), AttemptID: turn.WorkflowAttemptID, DeveloperParticipantID: turn.AgentParticipantID, PlannerParticipantID: planner, HeadSHA: head}
 		if snapshot.ChangeProposal != nil {
 			scope.ChangeProposalID = snapshot.ChangeProposal.ID
+		} else {
+			// Preserve a PR opened as unfinished work in this very Turn. Settlement's
+			// existing publication-association proof still validates the complete chain.
+			var opened []byte
+			err = tx.QueryRow(ctx, `SELECT result FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='open_pr' AND state='SUCCEEDED' ORDER BY invocation_number DESC LIMIT 1`, turn.ID, turn.ExecutionEpoch).Scan(&opened)
+			if err == nil {
+				v, e := publication.DecodeOpenResult(opened)
+				if e != nil {
+					return e
+				}
+				scope.ChangeProposalID = v.PullRequestID
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
 		}
 		cycle, err = state.RequestReplanning(scope, concern)
 		if err != nil {
@@ -85,4 +113,105 @@ func (s *Store) GetReplanningRequest(ctx context.Context, workflowID, operation 
 		}
 	}
 	return collaboration.ReplanningCycle{}, collaboration.ErrInvalid
+}
+
+func validateReplanningReceiptTx(ctx context.Context, tx pgx.Tx, workflowID, operation string, args, result []byte) error {
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return err
+	}
+	var concern collaboration.ReplanningConcern
+	var receipt struct {
+		Outcome string `json:"outcome"`
+		CycleID string `json:"cycle_id"`
+		Status  string `json:"status"`
+	}
+	if json.Unmarshal(args, &concern) != nil || json.Unmarshal(result, &receipt) != nil || receipt.Outcome != "REPLANNING_REQUESTED" || receipt.CycleID != operation || receipt.Status != "recorded" {
+		return ErrTerminalCorroborationConflict
+	}
+	if state.Replanning != nil {
+		for _, c := range state.Replanning.Cycles {
+			if c.Scope.OperationID == operation && reflect.DeepEqual(c.Concern, concern) {
+				return nil
+			}
+		}
+	}
+	return ErrTerminalCorroborationConflict
+}
+
+// CompleteReplanning extends the existing complete_planning capability. It
+// records resolution evidence; settlement and admission still recheck authority.
+func (s *Store) CompleteReplanning(ctx context.Context, lease AgentTurnLease, operation, revision, commit, evidence, disposition string, resolved bool) error {
+	return s.withLockedAgentTurnLease(ctx, lease, "complete replanning", func(tx pgx.Tx, turn lockedTurn) error {
+		if err := planningInvocation(ctx, tx, turn, operation, "complete_planning"); err != nil {
+			return err
+		}
+		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
+		if err != nil {
+			return err
+		}
+		delivered, err := acceptedPlanDeliveredTx(ctx, tx, turn.ID)
+		if err != nil {
+			return err
+		}
+		if !delivered {
+			return collaboration.ErrInvalid
+		}
+		cycle := state.ActiveReplanning()
+		if cycle == nil || !resolved || cycle.Scope.PlannerParticipantID != turn.AgentParticipantID {
+			return collaboration.ErrInvalid
+		}
+		var raw []byte
+		if err = tx.QueryRow(ctx, `SELECT result FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='refresh_default_branch' AND state='SUCCEEDED' ORDER BY invocation_number DESC LIMIT 1`, turn.ID, turn.ExecutionEpoch).Scan(&raw); err != nil {
+			return err
+		}
+		var base struct {
+			Status string `json:"status"`
+			SHA    string `json:"sha"`
+		}
+		if json.Unmarshal(raw, &base) != nil || base.Status != "current" || base.SHA != commit {
+			return collaboration.ErrInvalid
+		}
+		workHead := ""
+		var proposalID int64
+		err = tx.QueryRow(ctx, `SELECT pull_request_id,head_sha FROM change_proposals WHERE workflow_id=$1 AND active`, lease.JobLease.WorkflowID).Scan(&proposalID, &workHead)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if proposalID > 0 {
+			if err = tx.QueryRow(ctx, `SELECT result FROM tool_invocations WHERE agent_turn_id=$1 AND execution_epoch=$2 AND tool_name='get_pull_request' AND state='SUCCEEDED' ORDER BY invocation_number DESC LIMIT 1`, turn.ID, turn.ExecutionEpoch).Scan(&raw); err != nil {
+				return err
+			}
+			var pr struct {
+				ID    int64  `json:"id"`
+				State string `json:"state"`
+				Head  struct {
+					SHA string `json:"sha"`
+				} `json:"head"`
+			}
+			if json.Unmarshal(raw, &pr) != nil || pr.ID != proposalID || pr.State != "open" || pr.Head.SHA != workHead {
+				return collaboration.ErrInvalid
+			}
+		}
+		grant := state.ImplementationGrant()
+		if disposition == "revised" || disposition == "unchanged" && grant != nil && grant.ID != state.Planning.Implementation.AuthorizationID {
+			if err = state.ValidatePlanning(operation, revision, turn.AgentParticipantID, turn.ID, commit, evidence, true); err != nil {
+				return err
+			}
+			state.Planning.ReadyRevision = revision
+		}
+		if err = state.ResolveReplanning(turn.AgentParticipantID, collaboration.ReplanningResolution{OperationID: operation, TurnID: turn.ID, RevisionID: revision, RepositoryCommit: commit, WorkHeadSHA: workHead, Evidence: evidence, Disposition: disposition}); err != nil {
+			return err
+		}
+		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
+	})
+}
+func (s *Store) GetReplanningResolution(ctx context.Context, workflowID, operation string) (collaboration.ReplanningResolution, error) {
+	var raw []byte
+	if err := s.pool.QueryRow(ctx, `SELECT r FROM work_item_collaboration c,LATERAL jsonb_array_elements(c.state->'replanning'->'cycles') cycle,LATERAL jsonb_array_elements(cycle->'resolutions') r WHERE c.workflow_id=$1 AND r->>'operation_id'=$2`, workflowID, operation).Scan(&raw); err != nil {
+		return collaboration.ReplanningResolution{}, err
+	}
+	var v collaboration.ReplanningResolution
+	err := json.Unmarshal(raw, &v)
+	return v, err
 }

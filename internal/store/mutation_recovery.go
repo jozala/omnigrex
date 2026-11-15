@@ -260,7 +260,7 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 const recoveryCandidatePredicate = `WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
   AND (state IN ('UNKNOWN', 'RECONCILING')
        OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
-           ('publish_changes', 'open_pr', 'publish_plan_checkpoint', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
+           ('publish_changes', 'open_pr', 'publish_plan_checkpoint', 'request_replanning', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
 `
 
 // ListAgentTurnMutationsForReconciliation returns mutations that require fresh

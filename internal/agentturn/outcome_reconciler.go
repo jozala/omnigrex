@@ -332,15 +332,25 @@ func (reconciler *OutcomeReconciler) ReconcileRecorded(ctx context.Context, requ
 		result = blockedObservation(observedAt, promptOutcome, intent, request.Execution.WorkflowID)
 	} else {
 		switch intent.ToolName {
+		case mcp.ToolRequestReplanning:
+			var evidence struct {
+				Outcome string `json:"outcome"`
+				CycleID string `json:"cycle_id"`
+				Status  string `json:"status"`
+			}
+			if request.Execution.Participant.Role != role.Developer || json.Unmarshal(intent.Result, &evidence) != nil || evidence.Outcome != "REPLANNING_REQUESTED" || evidence.CycleID != intent.ID || evidence.Status != "recorded" {
+				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "invalid replanning request evidence"), nil
+			}
+			result = store.AgentTurnSettlementObservation{ObservedAt: observedAt, Outcome: workflow.TurnOutcomeReplanningRequested, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome}}
 		case mcp.ToolCompletePlanning:
 			var evidence struct {
 				Outcome    string `json:"outcome"`
 				RevisionID string `json:"revision_id"`
 			}
-			if request.Execution.Participant.Role != role.Planner || json.Unmarshal(intent.Result, &evidence) != nil || evidence.Outcome != "PLANNING_READY" || evidence.RevisionID == "" {
+			if request.Execution.Participant.Role != role.Planner || json.Unmarshal(intent.Result, &evidence) != nil || (evidence.Outcome != "PLANNING_READY" && evidence.Outcome != "REPLANNING_RESOLVED") || evidence.RevisionID == "" {
 				return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "invalid planning completion evidence"), nil
 			}
-			result = store.AgentTurnSettlementObservation{ObservedAt: observedAt, Outcome: workflow.TurnOutcomePlanningReady, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome}}
+			result = store.AgentTurnSettlementObservation{ObservedAt: observedAt, Outcome: workflow.TurnOutcome(evidence.Outcome), Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome}}
 		case mcp.ToolRequestClarification:
 			var evidence struct {
 				Outcome string `json:"outcome"`
@@ -1078,7 +1088,7 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 			continue
 		}
 		switch mutation.ToolName {
-		case mcp.ToolCompletePlanning, mcp.ToolRequestClarification, mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview, mcp.ToolConfirmPriorTerminalIntent:
+		case mcp.ToolRequestReplanning, mcp.ToolCompletePlanning, mcp.ToolRequestClarification, mcp.ToolReportBlocked, mcp.ToolRequestReview, mcp.ToolSubmitReview, mcp.ToolConfirmPriorTerminalIntent:
 			intents = append(intents, mutation)
 		}
 	}
