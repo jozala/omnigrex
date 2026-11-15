@@ -64,9 +64,9 @@ func reviewReplanningAssessment(t *testing.T, db *store.Store, ctx context.Conte
 		return map[string]any{"recorded": true}
 	})
 }
-func reviewReplanningConcern(t *testing.T, db *store.Store, pool *pgxpool.Pool, ctx context.Context, fixture agentFixture, lease store.AgentTurnLease, spec store.AgentTurnPreparationSpec) (store.AgentTurnLease, store.AgentTurnPreparationSpec) {
+func reviewReplanningConcern(t *testing.T, db *store.Store, pool *pgxpool.Pool, ctx context.Context, fixture agentFixture, lease store.AgentTurnLease, spec store.AgentTurnPreparationSpec, humanInputIDs ...string) (store.AgentTurnLease, store.AgentTurnPreparationSpec) {
 	t.Helper()
-	concern := collaboration.ReplanningConcern{AcceptedRevisionID: "pair", Commitment: "No retained personal data", Evidence: []string{"The restart experiment makes the accepted retention commitment doubtful."}, Consequences: "A product decision may be needed."}
+	concern := collaboration.ReplanningConcern{AcceptedRevisionID: "pair", Commitment: "No retained personal data", Evidence: []string{"The restart experiment makes the accepted retention commitment doubtful."}, Consequences: "A product decision may be needed.", HumanInputIDs: humanInputIDs}
 	recordReplanningMutation(t, db, ctx, lease, "concern", "request_replanning", concern, func(op string) any {
 		c, err := db.RequestReplanning(ctx, lease, op, concern)
 		if err != nil {
@@ -100,7 +100,7 @@ func reviewReplanningQuestion(t *testing.T, db *store.Store, ctx context.Context
 }
 
 func TestReplanningReviewUnresolvedEvidenceCanTransferButNotResume(t *testing.T) {
-	for i, kind := range []string{"uncertain-steering", "unresolved-question"} {
+	for i, kind := range []string{"uncertain-steering", "unresolved-question", "uncertain-steering-referenced"} {
 		t.Run(kind, func(t *testing.T) {
 			dbs, pool := openPhaseFiveStores(t, 2)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -134,7 +134,11 @@ func TestReplanningReviewUnresolvedEvidenceCanTransferButNotResume(t *testing.T)
 				t.Fatal("uncertainty authorized implementation", err)
 			}
 			developer := lease.AgentParticipantID
-			planner, _ := reviewReplanningConcern(t, db, pool, ctx, fixture, lease, spec)
+			var references []string
+			if kind == "uncertain-steering-referenced" {
+				references = []string{id}
+			}
+			planner, _ := reviewReplanningConcern(t, db, pool, ctx, fixture, lease, spec, references...)
 			state := replanningState(t, pool, ctx, fixture.workflowID)
 			if state.ResumptionReady() || !state.AssessmentBlocked(planner.AgentParticipantID) && !state.Unresolved(planner.AgentParticipantID) {
 				t.Fatal("transfer cleared material uncertainty")

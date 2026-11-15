@@ -42,6 +42,7 @@ Planner access to Developer-owned evidence is explicit cycle scope, not reparent
 Frozen bounded records provide complete governing documents and concern/resolution evidence; the accepted pair embeds the original request and does not require duplicate delivery of that body.
 Historical correction fences remain in force across transfer.
 Transfer requires complete delivery and explicit assessment, but can carry recorded uncertainty and unresolved questions to the Planner without authorizing continued implementation.
+Citing uncertain human input does not establish an independently human-requested direction change or exempt the autonomous charge.
 Late input or unused-authority withdrawal between resolution and settlement reopens the same cycle and clears provisional readiness, retaining resolution receipts and the dispatch charge.
 Initial first-Developer admission remains immutable, with append-only binding history for resumption and no budget initialization on resumed work.
 Material revisions require fresh exact consent and revision-bound native review, including at an unchanged code SHA.

@@ -149,7 +149,10 @@ func (s *State) RequestReplanning(scope ReplanningRequestScope, concern Replanni
 			return invalid()
 		}
 		a := s.latestAssessment(id)
-		if a == nil || a.Disposition == "uncertain" {
+		// Referenced uncertainty is valid transfer evidence, not proof of an
+		// independently human-requested direction change. It stays autonomous
+		// unless the stricter changed/invalidation evidence below establishes origin.
+		if a == nil {
 			return invalid()
 		}
 		in := s.Inputs[index]
