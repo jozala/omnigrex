@@ -152,6 +152,8 @@ func (snapshot Snapshot) Clone() Snapshot {
 
 func (reducer Reducer) dispatch(snapshot Snapshot, event Event) Decision {
 	switch event := event.(type) {
+	case CIAdmissionEvent:
+		return reducer.reduceCIAdmission(snapshot, event)
 	case TriggerEvent:
 		return reducer.reduceTrigger(snapshot, event)
 	case TurnSettledEvent:
@@ -1116,4 +1118,34 @@ func clarificationWaitDecision(next Snapshot, turn TurnGuard, pending bool) Deci
 		actions = append(actions, EnqueueTurnAction{Stage: turn.Stage, Role: turn.Role, Purpose: TurnPurposeReactivation, ExpectedHeadSHA: head})
 	}
 	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("clarification_wait"), Actions: actions}
+}
+
+func (reducer Reducer) reduceCIAdmission(snapshot Snapshot, event CIAdmissionEvent) Decision {
+	if decision, stale := expectedRevisionDecision(snapshot, event.EventMetadata); stale {
+		return decision
+	}
+	if snapshot.State != StateReviewing || snapshot.ActiveTurn != nil || snapshot.CurrentAttempt == nil || snapshot.CurrentAttempt.ID != event.AttemptID || snapshot.CurrentAttempt.CurrentStage != StageReview || snapshot.ChangeProposal == nil || snapshot.ChangeProposal.ID != event.ChangeProposalID || snapshot.ChangeProposal.HeadSHA != event.HeadSHA {
+		return Decision{Snapshot: cloneSnapshot(snapshot), Disposition: DispositionStale, Reason: ReasonTurnGuardStale}
+	}
+	next := cloneSnapshot(snapshot)
+	next.Revision++
+	reason := Reason("ci_evidence_incomplete")
+	if event.Repair && next.CurrentAttempt.CIRepairUsage < 3 {
+		next.CurrentAttempt.CIRepairUsage++
+		next.CurrentAttempt.CurrentStage = StageImplementation
+		next.State = StateDeveloping
+		return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: Reason("ci_repair_queued"), Actions: []Action{
+			EnqueueTurnAction{Stage: StageImplementation, Role: RoleDeveloper, Purpose: TurnPurposeCIRepair, ExpectedHeadSHA: event.HeadSHA}, ReconcileLabelsAction{State: StateDeveloping},
+		}}
+	}
+	if event.Repair {
+		reason = Reason("ci_repair_budget_exhausted")
+		next.CurrentAttempt.CurrentStage = StageImplementation
+		next.ResumeRole = RoleDeveloper
+	} else {
+		next.ResumeRole = RoleReviewer
+	}
+	next.State = StateNeedsHuman
+	next.Assignments.Status = AssignmentWaitingForHuman
+	return Decision{Snapshot: next, Disposition: DispositionApplied, Reason: reason, Actions: []Action{MarkHumanHandoffAction{Reason: reason, Diagnostic: event.Diagnostic}, ReconcileLabelsAction{State: StateNeedsHuman}}}
 }

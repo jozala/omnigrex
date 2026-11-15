@@ -18,10 +18,11 @@ func NewBuiltinDefinition(catalog role.Catalog) (Definition, error) {
 			Instructions: implementationInstructions,
 			PurposeInstructions: map[TurnPurpose]string{
 				TurnPurposeInitialDevelopment: "Implement the Work Item and create its initial Change Proposal.",
+				TurnPurposeCIRepair:           "Inspect the structured ci_repair evidence and current scoped CI diagnostics, repair the existing Change Proposal, and request review again. Preserve earlier substantive review findings; this return is not a Reviewer verdict.",
 				TurnPurposeRequestedChanges:   "Inspect all substantive review findings before revising the existing Change Proposal; explain the changes since the previous review in the new handoff summary.",
 			},
 			AcceptedPurposes: []TurnPurpose{
-				TurnPurposeInitialDevelopment, TurnPurposeRequestedChanges, TurnPurposeRetry, TurnPurposeReactivation,
+				TurnPurposeCIRepair, TurnPurposeInitialDevelopment, TurnPurposeRequestedChanges, TurnPurposeRetry, TurnPurposeReactivation,
 			},
 			Transitions: []OutcomeTransition{{
 				Outcome: TurnOutcomeChangeProposalReady, NextStage: StageReview, NextPurpose: TurnPurposeReview,

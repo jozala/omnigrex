@@ -11,7 +11,7 @@ Start with the `omnigrex:needs-human` explanation on the Issue rather than repea
 | Reported condition | Who can usually resolve it |
 | --- | --- |
 | Ambiguous acceptance criteria or an unresolved product choice | Work Item author or project maintainer |
-| Review budget exhausted or a Change Proposal requiring human judgment | Project maintainer |
+| Review or CI-repair budget exhausted, incomplete CI evidence at deadline, or a Change Proposal requiring human judgment | Project maintainer |
 | Invalid Agent Profile, missing skill, or unsupported repository environment | [Repository owner](../repository-owners/troubleshooting.md) |
 | Provider access, GitHub App permissions, missing images, storage, or runtime failure | [Operator](../operators/troubleshooting.md) |
 
@@ -23,7 +23,7 @@ Start with the `omnigrex:needs-human` explanation on the Issue rather than repea
 4. Confirm that the Issue is open.
 5. Add `omnigrex:run` again to the Issue or current Change Proposal.
 
-This creates a fresh Workflow Attempt and resets retry and review budgets without erasing history.
+This creates a fresh Workflow Attempt and resets retry, review, and CI-repair budgets without erasing history.
 Comments and pushes alone do not reactivate a handed-off Workflow.
 Do not edit state labels to simulate progress.
 
@@ -45,3 +45,11 @@ An operator can correlate safe identifiers with deployment logs.
 Keep provider keys, private keys, raw prompts, and private repository content out of public reports.
 
 Next: [Repository troubleshooting](../repository-owners/troubleshooting.md) or [operator troubleshooting](../operators/troubleshooting.md).
+
+## CI admission handoffs
+
+A waiting deadline means required evidence is missing, pending, or unavailable, not that the code failed.
+Check the selected contexts, head, deadline, and permission diagnostics in the progress comment; repair CI registration or access before reactivation.
+A repair-budget handoff means three automatic returns to the Developer have occurred since the last fully successful selected-CI admission.
+Inspect the reported failures and scoped diagnostics before deciding whether to repair manually or explicitly start another Attempt.
+Late CI completion alone cannot resume either handoff.

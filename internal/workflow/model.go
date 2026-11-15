@@ -112,6 +112,7 @@ type WorkflowAttempt struct {
 	StartedAt                 time.Time
 	Lifecycle                 AttemptLifecycle
 	CurrentStage              StageID
+	CIRepairUsage             uint8
 	ReviewUsage               map[StageID]uint8
 	InfrastructureRetryBudget AttemptBudget
 }
@@ -420,6 +421,7 @@ func (WorkflowActionExhaustedEvent) isWorkflowEvent() {}
 type EventKind string
 
 const (
+	EventKindCIAdmission                              EventKind = "CI_ADMISSION"
 	EventKindTrigger                                  EventKind = "TRIGGER"
 	EventKindTurnSettled                              EventKind = "TURN_SETTLED"
 	EventKindTerminalIntentRevalidated                EventKind = "TERMINAL_INTENT_REVALIDATED"
@@ -440,6 +442,7 @@ const (
 type TurnPurpose string
 
 const (
+	TurnPurposeCIRepair           TurnPurpose = "CI_REPAIR"
 	TurnPurposeInitialPlanning    TurnPurpose = "INITIAL_PLANNING"
 	TurnPurposeInitialDevelopment TurnPurpose = "INITIAL_DEVELOPMENT"
 	TurnPurposeReview             TurnPurpose = "REVIEW"
@@ -608,3 +611,15 @@ type ReconcilePendingEventsAction struct {
 }
 
 func (ReconcilePendingEventsAction) isWorkflowAction() {}
+
+// CIAdmissionEvent is an Orchestrator decision before Reviewer allocation, not an Agent verdict.
+type CIAdmissionEvent struct {
+	EventMetadata
+	AttemptID        string
+	ChangeProposalID int64
+	HeadSHA          string
+	Repair           bool
+	Diagnostic       string
+}
+
+func (CIAdmissionEvent) isWorkflowEvent() {}

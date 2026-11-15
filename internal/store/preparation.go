@@ -411,6 +411,23 @@ SELECT EXISTS (
 	if len(turnConfiguration) == 0 {
 		turnConfiguration = json.RawMessage(`{}`)
 	}
+	if payload.Role == workflow.RoleDeveloper {
+		var repair json.RawMessage
+		err := tx.QueryRow(ctx, `SELECT jsonb_build_object('evidence',evidence,'repair_usage',attempt.ci_repair_usage,'limit',3)
+ FROM review_ci_decisions d JOIN workflow_attempts attempt ON attempt.id=d.workflow_attempt_id
+ WHERE d.workflow_attempt_id=$1 AND d.decision='repair' ORDER BY d.workflow_revision DESC LIMIT 1`, job.WorkflowAttemptID).Scan(&repair)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return AgentTurnPreparationCommit{}, err
+		}
+		if len(repair) > 0 {
+			var configuration map[string]json.RawMessage
+			if json.Unmarshal(turnConfiguration, &configuration) != nil || configuration == nil {
+				return AgentTurnPreparationCommit{}, errors.New("invalid turn configuration")
+			}
+			configuration["ci_repair"] = repair
+			turnConfiguration, _ = json.Marshal(configuration)
+		}
+	}
 	if len(reviewStart) > 0 {
 		var configuration map[string]json.RawMessage
 		if json.Unmarshal(turnConfiguration, &configuration) != nil || configuration == nil {
@@ -460,6 +477,11 @@ RETURNING created_at`, turn.ID, preparation.WorkflowID, job.ID, session.ID,
 		turn.AgentProfileContentSHA256, turn.AgentProfileConfig, turn.TurnConfiguration, turn.Stage, turn.Purpose,
 		nullableString(turn.ChangeProposalID), nullableString(turn.ExpectedHeadSHA)).Scan(&turn.CreatedAt); err != nil {
 		return AgentTurnPreparationCommit{}, fmt.Errorf("insert prepared Agent Turn: %w", err)
+	}
+	if payload.Role == workflow.RoleDeveloper && bytes.Contains(turnConfiguration, []byte(`"ci_repair"`)) {
+		if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
+			return AgentTurnPreparationCommit{}, err
+		}
 	}
 	if payload.Role == workflow.RoleReviewer {
 		if _, err := tx.Exec(ctx, `UPDATE review_admission_requests SET status='ADMITTED',admitted_turn_id=$2,updated_at=clock_timestamp() WHERE id=$1`, spec.ReviewAdmission.ID, turn.ID); err != nil {
@@ -1148,7 +1170,7 @@ func (store *Store) validAgentTurnPreparationPayload(payload agentTurnPreparatio
 		return false
 	}
 	switch payload.Purpose {
-	case workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
+	case workflow.TurnPurposeCIRepair, workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
 		workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry,
 		workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
 	default:

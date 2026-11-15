@@ -33,7 +33,7 @@ type Policy struct {
 }
 
 func Default() Policy {
-	return Policy{Start: "after_ci", Selection: "github_required", Timeout: 30 * time.Minute, RegistrationGrace: time.Minute}
+	return Policy{Start: "after_ci", Selection: "github_required", Timeout: MaximumTimeout, RegistrationGrace: time.Minute}
 }
 
 func Parse(content []byte) (Policy, error) {

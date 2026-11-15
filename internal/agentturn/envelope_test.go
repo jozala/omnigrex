@@ -264,3 +264,24 @@ func TestEnvelopePRContextAcrossPRLessTriggersAndRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestCIRepairEnvelopeRetainsScopedDeveloperContext(t *testing.T) {
+	proposal := &store.AgentTurnChangeProposal{ID: "60000000-0000-4000-8000-000000000001", PullRequestNumber: 23, HeadSHA: strings.Repeat("2", 40)}
+	execution := envelopeExecutionContext(workflow.RoleDeveloper, workflow.TurnPurposeCIRepair, proposal)
+	execution.Turn.TurnConfiguration = json.RawMessage(`{"ci_repair":{"evidence":{"release_reason":"failed_ci","reviewed_head":"head","targets":[{"results":[{"result_id":12,"conclusion":"cancelled"}]}]},"repair_usage":2,"limit":3}}`)
+	content, err := agentturn.BuildEventEnvelope(execution, proposal.HeadSHA, builtinDefinition(t), role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		CIRepair struct {
+			Usage    int `json:"repair_usage"`
+			Evidence struct {
+				Reason string `json:"release_reason"`
+			} `json:"evidence"`
+		} `json:"ci_repair"`
+	}
+	if json.Unmarshal([]byte(content), &envelope) != nil || envelope.CIRepair.Usage != 2 || envelope.CIRepair.Evidence.Reason != "failed_ci" {
+		t.Fatalf("repair evidence missing: %s", content)
+	}
+}

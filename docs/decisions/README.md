@@ -55,7 +55,7 @@ An accepted decision is not a claim that its implementation has shipped; follow 
 | [0046: Classify telemetry failures without error prose](0046-classify-telemetry-failures-without-error-prose.md) | Accepted | 2026-10-28 |
 | [0047: Verify CI read provenance independently of review authority](0047-verify-ci-read-provenance.md) | Accepted | 2026-10-27 |
 | [0048: Retain Participant-local Human Handoff provenance](0048-retain-participant-handoff-provenance.md) | Accepted | 2026-10-27 |
-| [0049: Gate Reviewer admission on CI completion](0049-gate-reviewer-admission-on-ci-completion.md) | Accepted | 2026-10-27 |
+| [0049: Gate Reviewer admission on CI completion](0049-gate-reviewer-admission-on-ci-completion.md) | Superseded by [0068](0068-qualify-review-admission-and-bound-ci-repair.md) | 2026-10-27 |
 | [0050: Deliver default-branch snapshots as additive Git data](0050-deliver-default-branch-snapshots-as-additive-git-data.md) | Accepted | 2026-10-27 |
 | [0051: Exclude execution cleanup without locking Turn leases](0051-exclude-execution-cleanup-without-locking-turn-leases.md) | Accepted | 2026-10-28 |
 | [0052: Carry current Human Handoff publication across tracking revisions](0052-carry-current-handoff-publication-across-tracking-revisions.md) | Accepted | 2026-10-28 |
@@ -108,3 +108,5 @@ Do not copy an existing ADR into a second record.
 - [ADR 0012: Load repository skills from the current checkout](../adr/0012-load-repository-skills-from-the-current-checkout.md)
 
 - [0067: Admit exact-plan implementation at the first Developer Turn](0067-admit-exact-plan-implementation-at-the-first-developer-turn.md) - Accepted, 2026-11-14.
+
+- [0068: Qualify Reviewer admission and bound CI repair](0068-qualify-review-admission-and-bound-ci-repair.md) - Accepted, 2026-11-15.

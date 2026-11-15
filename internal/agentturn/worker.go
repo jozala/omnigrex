@@ -142,6 +142,9 @@ func (worker *Worker) ProcessNext(ctx context.Context) (processed bool, err erro
 				attribute.String("role", string(result.Commit.Participant.Role)), attribute.String("stage", string(result.Commit.Turn.Stage)))
 			return nil
 		}
+		if errors.Is(err, store.ErrReviewAdmissionRouted) {
+			return nil
+		}
 		if errors.Is(err, store.ErrReviewAdmissionPending) {
 			gateStore, ok := worker.store.(interface {
 				DeferReviewAdmission(context.Context, store.JobLease, time.Duration) error
