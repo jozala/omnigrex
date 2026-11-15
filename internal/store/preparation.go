@@ -1170,7 +1170,7 @@ func (store *Store) validAgentTurnPreparationPayload(payload agentTurnPreparatio
 		return false
 	}
 	switch payload.Purpose {
-	case workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
+	case workflow.TurnPurposeCIRepair, workflow.TurnPurposeInitialPlanning, workflow.TurnPurposeInitialDevelopment, workflow.TurnPurposeReview,
 		workflow.TurnPurposeRequestedChanges, workflow.TurnPurposeRetry,
 		workflow.TurnPurposeSynchronization, workflow.TurnPurposeReactivation:
 	default:

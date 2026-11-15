@@ -516,6 +516,13 @@ func TestCIRepairRoutingCommitsOneSuccessorAndCharge(t *testing.T) {
 			if usage != wantUsage || successors != wantSuccessors || status != wantState || decisions != 1 || reviewers != 0 || active != 0 || cycles != 2 {
 				t.Fatalf("usage=%d successors=%d state=%s decisions=%d reviewers=%d active=%d cycles=%d", usage, successors, status, decisions, reviewers, active, cycles)
 			}
+			if used < 3 {
+				successor := claimPreparationJob(t, database, ctx)
+				bindings, err := database.GetAgentTurnPreparationRuntimeBindings(ctx, successor)
+				if err != nil || bindings.Role != workflow.RoleDeveloper || bindings.Stage != workflow.StageImplementation {
+					t.Fatalf("repair purpose rejected at preparation boundary: %+v %v", bindings, err)
+				}
+			}
 		})
 	}
 }
