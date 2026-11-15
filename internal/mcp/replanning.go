@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 
 	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/store"
@@ -50,7 +49,7 @@ func (r *ProductionReconciler) reconcileReplanningRequest(ctx context.Context, s
 		return unresolvedReconciliation(), nil
 	}
 	var concern collaboration.ReplanningConcern
-	if json.Unmarshal(mutation.Request, &concern) != nil || c.Scope.OperationID != mutation.ID || c.Scope.TurnID != mutation.AgentTurnID || c.Scope.ExecutionEpoch != uint64(mutation.ExecutionEpoch) || c.Scope.DeveloperParticipantID != scope.Turn.AgentParticipantID || !reflect.DeepEqual(concern, c.Concern) {
+	if json.Unmarshal(mutation.Request, &concern) != nil || c.Scope.OperationID != mutation.ID || c.Scope.TurnID != mutation.AgentTurnID || c.Scope.ExecutionEpoch != uint64(mutation.ExecutionEpoch) || c.Scope.DeveloperParticipantID != scope.Turn.AgentParticipantID || !concern.Equal(c.Concern) {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	raw, err := replanningRequestResult(c)

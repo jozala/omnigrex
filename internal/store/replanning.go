@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jozala/omnigrex/internal/collaboration"
@@ -43,7 +42,7 @@ func (s *Store) RequestReplanning(ctx context.Context, lease AgentTurnLease, ope
 		var identity struct {
 			OperationID string `json:"operation_id"`
 		}
-		if json.Unmarshal(reserved, &bound) != nil || json.Unmarshal(reserved, &identity) != nil || identity.OperationID != caller || !reflect.DeepEqual(bound, concern) {
+		if json.Unmarshal(reserved, &bound) != nil || json.Unmarshal(reserved, &identity) != nil || identity.OperationID != caller || !bound.Equal(concern) {
 			return collaboration.ErrInvalid
 		}
 		state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
@@ -131,7 +130,7 @@ func validateReplanningReceiptTx(ctx context.Context, tx pgx.Tx, workflowID, ope
 	}
 	if state.Replanning != nil {
 		for _, c := range state.Replanning.Cycles {
-			if c.Scope.OperationID == operation && reflect.DeepEqual(c.Concern, concern) {
+			if c.Scope.OperationID == operation && c.Concern.Equal(concern) {
 				return nil
 			}
 		}

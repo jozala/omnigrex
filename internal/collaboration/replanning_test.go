@@ -214,3 +214,42 @@ func TestReplanningAlreadyConsideredHumanEvidenceCannotManufactureFreeReturn(t *
 		})
 	}
 }
+
+func TestReplanningEmptyOptionalHumanEvidenceSurvivesJSONReplay(t *testing.T) {
+	s := replanningFixture()
+	concern := concernFixture()
+	concern.HumanInputIDs = []string{}
+	original, err := s.RequestReplanning(requestFixture(), concern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored State
+	if err = json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restored.RequestReplanning(requestFixture(), concern)
+	if err != nil || replay.Scope != original.Scope || len(restored.Replanning.Cycles) != 1 || replay.Origin != ReplanningAutonomous {
+		t.Fatal("empty list changed receipt identity or origin", replay, err)
+	}
+	for _, change := range []func(*ReplanningConcern){
+		func(c *ReplanningConcern) { c.AcceptedRevisionID = "other" },
+		func(c *ReplanningConcern) { c.Commitment += "different" },
+		func(c *ReplanningConcern) { c.Evidence = []string{"different"} },
+		func(c *ReplanningConcern) { c.Consequences += "different" },
+		func(c *ReplanningConcern) { c.Alternative += "different" },
+		func(c *ReplanningConcern) { c.HumanInputIDs = []string{"different"} },
+	} {
+		different := concern
+		change(&different)
+		if concern.Equal(different) {
+			t.Fatal("substantive evidence changed without changing identity", different)
+		}
+		if _, err = restored.RequestReplanning(requestFixture(), different); err == nil {
+			t.Fatal("changed concern reused original operation", different)
+		}
+	}
+}

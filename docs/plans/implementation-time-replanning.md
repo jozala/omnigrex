@@ -49,7 +49,7 @@ Unchanged commitments use still-valid authority; actual withdrawal requires fres
 
 - Domain/reducer tests cover scoped eligibility and provenance, independent human origin, duplicate requests, three dispatches/fourth Human Handoff, immutable transferred input and historical correction fences.
 - Resumption tests cover material revision, confirmation-only waiting, withdrawal, fresh same-pair consent, source ordering and historical reassessment without revoking newer consent or restoring old authority.
-- PostgreSQL tests cover unchanged settlement/admission with retained Participants/Sessions and existing budgets, fourth-return explicit recovery, pre-admission Human Handoff withdrawal, operation-content mismatch and contradictory post-request mutations.
+- PostgreSQL tests cover unchanged settlement/admission with retained Participants/Sessions and existing budgets, fourth-return explicit recovery, pre-admission Human Handoff withdrawal, operation-content mismatch, optional-empty-list receipt identity across JSON persistence, and contradictory post-request mutations.
 - Lost-response recovery covers both request and resolution effects committed without acknowledgments: mutation reconciliation alone cannot transfer responsibility, and stopped-Turn corroboration settles each original effect once.
 - Revision-aware review tests reject historical same-head approvals for a new pair and preserve the remaining Review Cycle limit.
 - The forward migration backfills only established initial bindings, preserves direct-development null bindings, history, readiness, stopped state and existing usage, and creates no cycles or grants.

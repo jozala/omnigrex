@@ -290,11 +290,12 @@ func TestReplanningLostResponseRecoversOriginalRequestOnlyAfterStop(t *testing.T
 		t.Fatal(err)
 	}
 	lease := runPreparedReplanningTurn(t, db, pool, ctx, prepared)
-	concern := collaboration.ReplanningConcern{AcceptedRevisionID: "pair", Commitment: "Compatibility", Evidence: []string{"An isolated legacy consumer fails."}, Consequences: "The accepted compatibility commitment is doubtful."}
+	concern := collaboration.ReplanningConcern{AcceptedRevisionID: "pair", Commitment: "Compatibility", Evidence: []string{"An isolated legacy consumer fails."}, Consequences: "The accepted compatibility commitment is doubtful.", HumanInputIDs: []string{}}
 	raw, _ := json.Marshal(concern)
 	var args map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &args)
 	args["operation_id"] = json.RawMessage(`"lost-request"`)
+	args["human_input_ids"] = json.RawMessage(`[]`)
 	raw, _ = json.Marshal(args)
 	m, err := db.ReserveMutation(ctx, lease, store.MutationSpec{OperationID: "lost-request", ToolName: "request_replanning", Request: raw, ExternalService: "omnigrex", ExternalResourceID: fixture.workflowID})
 	if err != nil {

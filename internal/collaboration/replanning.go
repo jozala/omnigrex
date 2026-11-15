@@ -2,7 +2,6 @@ package collaboration
 
 import (
 	"encoding/json"
-	"reflect"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -17,6 +16,12 @@ type ReplanningConcern struct {
 	Consequences       string   `json:"consequences"`
 	Alternative        string   `json:"alternative,omitempty"`
 	HumanInputIDs      []string `json:"human_input_ids,omitempty"`
+}
+
+// Equal preserves exact concern content across JSON persistence. An omitted
+// optional list and an explicitly empty list both mean no human-origin evidence.
+func (c ReplanningConcern) Equal(other ReplanningConcern) bool {
+	return c.AcceptedRevisionID == other.AcceptedRevisionID && c.Commitment == other.Commitment && slices.Equal(c.Evidence, other.Evidence) && c.Consequences == other.Consequences && c.Alternative == other.Alternative && slices.Equal(c.HumanInputIDs, other.HumanInputIDs)
 }
 
 type ReplanningOrigin string
@@ -97,7 +102,7 @@ func (s *State) RequestReplanning(scope ReplanningRequestScope, concern Replanni
 	if s.Replanning != nil {
 		for _, c := range s.Replanning.Cycles {
 			if c.Scope.OperationID == scope.OperationID {
-				if c.Scope == scope && reflect.DeepEqual(c.Concern, concern) {
+				if c.Scope == scope && c.Concern.Equal(concern) {
 					return cloneReplanningCycle(c), nil
 				}
 				return ReplanningCycle{}, ErrInvalid
