@@ -466,6 +466,9 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 			return collaboration.ErrInvalid
 		}
 		if !state.ResumptionReady() {
+			if err = state.ReconsiderReplanning(); err != nil {
+				return err
+			}
 			event.Outcome = workflow.TurnOutcomeClarificationWait
 			state.Waiting = true
 			return saveCollaborationTx(ctx, tx, workflowID, state)
@@ -504,6 +507,14 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}
 	if event.Outcome == workflow.TurnOutcomeClarificationWait {
+		// A recorded resolution is provisional until settlement. Reopen its same
+		// cycle when yielding, including when the agent explicitly requested a wait
+		// after completion. Keep operation receipts and dispatch provenance intact.
+		if c := state.ActiveReplanning(); c != nil && c.Phase == collaboration.ReplanningQueued && c.Scope.PlannerParticipantID == participant {
+			if err = state.ReconsiderReplanning(); err != nil {
+				return err
+			}
+		}
 		state.Waiting = true
 		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}

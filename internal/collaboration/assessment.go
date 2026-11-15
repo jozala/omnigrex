@@ -114,6 +114,18 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 	return nil
 }
 
+// AssessmentIncomplete distinguishes missing delivery/interpretation from an
+// explicitly recorded uncertainty. Evidence transfer may carry uncertainty to
+// the Planner; implementation and resumption must still use AssessmentBlocked.
+func (s *State) AssessmentIncomplete(participant string) bool {
+	for _, in := range s.Inputs {
+		if s.InputInScope(in, participant) && (!s.InputDeliveredInScope(in, participant) || s.latestAssessment(in.ID) == nil) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *State) AssessmentBlocked(participant string) bool {
 	for _, in := range s.Inputs {
 		if !s.InputInScope(in, participant) {

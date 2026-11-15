@@ -41,6 +41,8 @@ Independent human-origin classification requires delivered, assessed steering/am
 Planner access to Developer-owned evidence is explicit cycle scope, not reparenting.
 Frozen bounded records provide complete governing documents and concern/resolution evidence; the accepted pair embeds the original request and does not require duplicate delivery of that body.
 Historical correction fences remain in force across transfer.
+Transfer requires complete delivery and explicit assessment, but can carry recorded uncertainty and unresolved questions to the Planner without authorizing continued implementation.
+Late input or unused-authority withdrawal between resolution and settlement reopens the same cycle and clears provisional readiness, retaining resolution receipts and the dispatch charge.
 Initial first-Developer admission remains immutable, with append-only binding history for resumption and no budget initialization on resumed work.
 Material revisions require fresh exact consent and revision-bound native review, including at an unchanged code SHA.
 Unchanged commitments use still-valid authority; actual withdrawal requires fresh validated consent to the same pair, not invented replacement documents or restoration of the old grant.
@@ -50,6 +52,7 @@ Unchanged commitments use still-valid authority; actual withdrawal requires fres
 - Domain/reducer tests cover scoped eligibility and provenance, independent human origin, duplicate requests, three dispatches/fourth Human Handoff, immutable transferred input and historical correction fences.
 - Resumption tests cover material revision, confirmation-only waiting, withdrawal, fresh same-pair consent, source ordering and historical reassessment without revoking newer consent or restoring old authority.
 - PostgreSQL tests cover unchanged settlement/admission with retained Participants/Sessions and existing budgets, fourth-return explicit recovery, pre-admission Human Handoff withdrawal, operation-content mismatch, optional-empty-list receipt identity across JSON persistence, and contradictory post-request mutations.
+- Review regressions cover unresolved evidence transfer with delivery/assessment safeguards, late input after both material and fresh-consent unchanged resolution (including explicit waiting and withdrawal), replacement-pair publication after reassessment, and production recovery of exact cross-Participant assessment/clarification effects without reparenting or duplicate application.
 - Lost-response recovery covers both request and resolution effects committed without acknowledgments: mutation reconciliation alone cannot transfer responsibility, and stopped-Turn corroboration settles each original effect once.
 - Revision-aware review tests reject historical same-head approvals for a new pair and preserve the remaining Review Cycle limit.
 - The forward migration backfills only established initial bindings, preserves direct-development null bindings, history, readiness, stopped state and existing usage, and creates no cycles or grants.

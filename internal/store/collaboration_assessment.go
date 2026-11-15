@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 
 	"github.com/jackc/pgx/v5"
@@ -39,22 +40,17 @@ func (s *Store) AssessHumanInput(ctx context.Context, lease AgentTurnLease, oper
 }
 
 func (s *Store) HasHumanInputAssessmentEffect(ctx context.Context, workflowID, operation, participant string, assessments []collaboration.Assessment) (bool, error) {
-	var raw []byte
-	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw); err != nil {
-		return false, err
+	state, err := s.collaborationMutationEffectState(ctx, workflowID, operation, participant, "assess_human_input")
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
 	}
-	var state collaboration.State
-	if err := json.Unmarshal(raw, &state); err != nil {
+	if err != nil {
 		return false, err
 	}
 	for _, a := range assessments {
-		found := false
-		for _, in := range state.Inputs {
-			if in.ID == a.InputID && in.ParticipantID == participant {
-				found = true
-			}
-		}
-		if !found {
+		if !slices.ContainsFunc(state.Inputs, func(in collaboration.Input) bool {
+			return in.ID == a.InputID && state.InputDeliveredInScope(in, participant)
+		}) {
 			return false, nil
 		}
 	}

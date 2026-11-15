@@ -52,6 +52,8 @@ When an accepted material commitment becomes doubtful, use `request_replanning` 
 Do not require proof that every workaround is impossible; routine reversible helper/file/implementation choices consistent with accepted commitments remain your responsibility.
 This route requires an already-authorized plan and retained Planner; direct development continues to use clarification or Human Handoff.
 Independent human steering/amendments can supply the concern: deliver and explicitly assess the original input, then cite its IDs rather than inventing a human command or origin flag.
+Explicitly record uncertainty rather than pretending to resolve a material product/design question before transfer.
+The transfer may carry unresolved questions to the Planner; implementation and resumption remain fenced until they are resolved.
 Replies inside an autonomous cycle do not erase its charge.
 
 Where practical, commit/publish safe useful unfinished work through existing tools before the request, clearly marking it unfinished and not ready for review.

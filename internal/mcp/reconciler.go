@@ -888,14 +888,25 @@ func (reconciler *ProductionReconciler) reconcileClarificationResolution(ctx con
 			return foundReconciliation(raw), nil
 		}
 	}
-	round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, request.RoundID)
-	if err != nil || round.ID != request.RoundID || round.ParticipantID != scope.Turn.AgentParticipantID {
-		return unresolvedReconciliation(), nil
-	}
-	// Legacy unattributed or content-identical historical entries cannot prove
-	// this reservation's effect, including after cancellation before application.
-	if !round.HasResolutionEffect(mutation.ID, request.Resolutions) {
-		return unresolvedReconciliation(), nil
+	// The Store validates the same explicit cycle scope as application and the
+	// exact originating operation/Participant. Never reparent the original round.
+	if ledger, ok := reconciler.clarifications.(interface {
+		HasClarificationResolutionEffect(context.Context, string, string, string, string, []collaboration.Resolution) (bool, error)
+	}); ok {
+		found, err := ledger.HasClarificationResolutionEffect(ctx, scope.WorkflowID, mutation.ID, scope.Turn.AgentParticipantID, request.RoundID, request.Resolutions)
+		if err != nil || !found {
+			return unresolvedReconciliation(), err
+		}
+	} else {
+		round, err := reconciler.clarifications.GetClarificationRound(ctx, scope.WorkflowID, request.RoundID)
+		if err != nil || round.ID != request.RoundID || round.ParticipantID != scope.Turn.AgentParticipantID {
+			return unresolvedReconciliation(), nil
+		}
+		// Legacy unattributed or content-identical historical entries cannot prove
+		// this reservation's effect, including after cancellation before application.
+		if !round.HasResolutionEffect(mutation.ID, request.Resolutions) {
+			return unresolvedReconciliation(), nil
+		}
 	}
 	raw, _ := json.Marshal(map[string]any{"round_id": request.RoundID, "recorded": true})
 	return foundReconciliation(raw), nil

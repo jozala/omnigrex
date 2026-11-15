@@ -1219,7 +1219,14 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			if err != nil {
 				return err
 			}
-			if !read || state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
+			// A replanning request transfers evidence, not implementation authority.
+			// Require delivery and explicit interpretation, but allow the material
+			// uncertainty/unresolved question that the Planner is being asked to settle.
+			blocked := state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID)
+			if spec.ToolName == "request_replanning" {
+				blocked = state.AssessmentIncomplete(turn.AgentParticipantID)
+			}
+			if !read || blocked {
 				return &MutationReservationRejection{Cause: ErrUnresolvedClarification}
 			}
 		}
