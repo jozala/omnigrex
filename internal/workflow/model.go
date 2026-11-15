@@ -273,6 +273,8 @@ type PendingEventsObservation struct {
 
 // TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
 type TurnSettledEvent struct {
+	// ImplementationAuthorized is derived under the Work Item lock from validated collaboration, never agent prose.
+	ImplementationAuthorized bool
 	// PublicationAssociation is store-derived bookkeeping, not readiness evidence.
 	PublicationAssociation *ChangeProposal
 	EventMetadata

@@ -234,3 +234,15 @@ For fresh Participants, build and qualify a self-contained image against the sel
 No network installation or automatic Pi defaults repair an incompatible image.
 For a retained Participant, the error's bound image and inventory are its original expectation, even if production selection has changed.
 Restore availability of that exact historical image and canonical ledger contract using the [restore procedure](restore.md); do not delete state, reconstruct a missing inventory from current defaults, or rebind/replace a protected Participant to silence qualification.
+
+## Planning implementation milestones
+
+Implementation authority is recorded in the Work Item collaboration aggregate, not inferred from Issue labels or comments.
+`implement` receipt, Planner validation/queued development and first Developer admission are separate milestones.
+The independent `collaboration-status` outbox publishes concise milestone receipts with bounded infrastructure retries; it does not repeat the documents or post per-retry comments.
+A lost response retains the exact reserved artifact and only reconciles it; absence after an uncertain POST is not permission to repost.
+Investigate `PUBLISH_COLLABORATION_STATUS` failures and the safe `collaboration milestone publication not confirmed` diagnostic through existing logs and operator diagnostics.
+Do not edit ledger state, manufacture another event, or manually retry an uncertain POST to force visible convergence.
+Missing status comments or a label failure do not grant, revoke, reopen or repeat implementation.
+Use the existing Human Handoff recovery procedure for actual Workflow failures; recovering a completed plan's projection does not itself reopen discussion or allocate development.
+A separately requested human revision uses explicit steering/amendment and exact-pair authorization as described in the [planning guide](../users/planning.md).

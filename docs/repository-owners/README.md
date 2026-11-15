@@ -23,3 +23,11 @@ The current Workflow requires one Developer and one Reviewer Profile.
 Creating another Profile does not add a new Workflow Role or alter the code-defined Workflow.
 
 [Documentation hub](../README.md)
+
+## Planning and implementation consent
+
+[Planning and exact-pair authorization](../users/planning.md) are optional; direct `omnigrex:run` development remains available without a Planner Profile.
+For planning Work Items, repository write-or-higher permission and an explicit `/omnigrex implement P2` command for the actual current pair are required before implementation.
+Repository instructions may distinguish material design commitments from reversible implementation suggestions, but cannot bypass explicit consent, publication confirmation, pending-input fences or current repository-relevance validation.
+Unrelated default-branch changes do not automatically invalidate acceptance; the Planner records relevance evidence and material changes require a revised pair and renewed consent.
+Configure normal Developer/Reviewer Profiles and CI policy for the downstream handoff; label projection does not grant implementation authority.

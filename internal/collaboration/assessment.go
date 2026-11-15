@@ -78,7 +78,7 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 				return ErrInvalid
 			}
 		}
-		if a.Disposition == "confirmed" && !slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == a.InputID && in.Kind == "confirm-plan" }) {
+		if a.Disposition == "confirmed" && !slices.ContainsFunc(s.Inputs, func(in Input) bool { return in.ID == a.InputID && exactConfirmation(in.Kind) }) {
 			return ErrInvalid
 		}
 	}
@@ -91,15 +91,18 @@ func (s *State) Assess(operation, participant, turn string, batch []Assessment) 
 		// it resurrect the authority of an already invalidated confirmation.
 		invalidate := a.InvalidateConfirmation
 		for _, in := range s.Inputs {
-			if in.ID == a.InputID && in.Kind == "confirm-plan" && a.Disposition != "confirmed" {
+			if in.ID == a.InputID && exactConfirmation(in.Kind) && a.Disposition != "confirmed" {
 				invalidate = true
 			}
 		}
-		if invalidate && s.Planning != nil && s.Planning.ReadyRevision == "" {
+		if invalidate && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID == "" {
 			for _, in := range s.Inputs {
 				// Admission order bounds affected authority, not semantic precedence.
 				// A later exact confirmation still needs its own explicit assessment.
-				if in.Kind == "confirm-plan" && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) {
+				if in.Kind == "implement" && !slices.Contains(s.Planning.Implementation.Invalidated, in.ID) {
+					s.Planning.Implementation.Invalidated = append(s.Planning.Implementation.Invalidated, in.ID)
+				}
+				if exactConfirmation(in.Kind) && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) {
 					s.Planning.InvalidatedConfirmations = append(s.Planning.InvalidatedConfirmations, in.ID)
 				}
 				if in.ID == a.InputID {

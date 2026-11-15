@@ -13,6 +13,7 @@ import (
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	runtimeprofile "github.com/jozala/omnigrex/internal/runtime/profile"
@@ -775,4 +776,69 @@ func clonePreparationSpec(spec store.AgentTurnPreparationSpec) store.AgentTurnPr
 	}
 	spec.Stages = stages
 	return spec
+}
+
+type authorizedPreparationStore struct {
+	*preparationStore
+	request *store.ImplementationAdmissionRequest
+}
+
+func (s *authorizedPreparationStore) GetImplementationAdmissionRequest(context.Context, string) (*store.ImplementationAdmissionRequest, error) {
+	return s.request, nil
+}
+
+type implementationVerifier struct {
+	verificationGitHub
+	allowed                     bool
+	issue                       githubapi.Issue
+	permissionReads, issueReads int
+}
+
+func (v *implementationVerifier) CanDecideWorkItem(_ context.Context, credential, owner, repo, login string, id int64) (bool, error) {
+	v.permissionReads++
+	if credential != "installation-secret" || owner != "acme" || repo != "widgets" || login != "maintainer" || id != 42 {
+		return false, errors.New("unexpected permission identity")
+	}
+	return v.allowed, nil
+}
+func (v *implementationVerifier) GetIssue(_ context.Context, credential, owner, repo string, number int) (githubapi.Issue, error) {
+	v.issueReads++
+	if credential != "installation-secret" || owner != "acme" || repo != "widgets" || number != 17 {
+		return githubapi.Issue{}, errors.New("unexpected Work Item identity")
+	}
+	return v.issue, nil
+}
+func TestImplementationPreparationRechecksActorAndOpenWorkItem(t *testing.T) {
+	for _, mode := range []string{"valid", "revoked", "closed", "unrelated", "missing-verifier"} {
+		t.Run(mode, func(t *testing.T) {
+			database := &authorizedPreparationStore{preparationStore: &preparationStore{}, request: &store.ImplementationAdmissionRequest{AuthorizationID: "exact-grant", Actor: collaboration.Actor{ID: "42", Name: "maintainer"}, WorkItem: workflow.WorkItem{RepositoryID: 41, IssueID: 71, IssueNumber: 17}}}
+			verifier := &implementationVerifier{allowed: true, issue: githubapi.Issue{ID: 71, Number: 17, State: "open"}}
+			if mode == "revoked" {
+				verifier.allowed = false
+			}
+			if mode == "closed" {
+				verifier.issue.State = "closed"
+			}
+			if mode == "unrelated" {
+				verifier.issue.ID = 72
+			}
+			registry, err := runtimeprofile.NewRegistry(runtimeProfile(t, testImage))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var api agentturn.ChangeProposalVerifier = verifier
+			if mode == "missing-verifier" {
+				api = &verificationGitHub{}
+			}
+			p := agentturn.NewPreparerWithChangeProposalVerifier(agentprofile.NewLoader(validProfileSource(), role.BuiltinPolicyCatalog()), agentprofile.SingletonSelector{}, registry, database, api)
+			_, err = p.Prepare(context.Background(), validRequest())
+			if mode == "valid" {
+				if err != nil || len(database.calls) != 1 || database.calls[0].VerifiedImplementationAuthorization != "exact-grant" || verifier.issueReads != 1 || verifier.permissionReads != 1 {
+					t.Fatal(database.calls, err)
+				}
+			} else if err == nil || len(database.calls) != 0 {
+				t.Fatal("failed external verification admitted preparation", database.calls, err)
+			}
+		})
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	piresources "github.com/jozala/omnigrex/agent/pi"
@@ -207,6 +208,42 @@ func (preparer *Preparer) Prepare(ctx context.Context, request Request) (result 
 	}
 	preparation.TurnConfiguration = encoded
 	spec := store.AgentTurnPreparationSpec{Stages: map[workflow.StageID]store.ParticipantPreparation{bindings.Stage: preparation}}
+	if bindings.Role == workflow.RoleDeveloper {
+		if source, ok := preparer.store.(interface {
+			GetImplementationAdmissionRequest(context.Context, string) (*store.ImplementationAdmissionRequest, error)
+		}); ok {
+			authorization, err := source.GetImplementationAdmissionRequest(ctx, request.Lease.WorkflowID)
+			if err != nil {
+				return Result{}, err
+			}
+			if authorization != nil {
+				verifier, ok := preparer.verifier.(interface {
+					GetIssue(context.Context, string, string, string, int) (githubapi.Issue, error)
+					CanDecideWorkItem(context.Context, string, string, string, string, int64) (bool, error)
+				})
+				if !ok {
+					return Result{}, store.ErrImplementationVerificationRequired
+				}
+				actorID, err := strconv.ParseInt(authorization.Actor.ID, 10, 64)
+				if err != nil {
+					return Result{}, store.ErrImplementationVerificationRequired
+				}
+				allowed, err := verifier.CanDecideWorkItem(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName, authorization.Actor.Name, actorID)
+				if err != nil {
+					return Result{}, err
+				}
+				issue, err := verifier.GetIssue(ctx, request.InstallationCredential, request.RepositoryOwner, request.RepositoryName, int(authorization.WorkItem.IssueNumber))
+				if err != nil {
+					return Result{}, err
+				}
+				if !allowed || issue.ID != authorization.WorkItem.IssueID || int64(issue.Number) != authorization.WorkItem.IssueNumber || issue.State != "open" {
+					return Result{}, fmt.Errorf("%w: implementation actor permission or open Work Item changed; resolve Human Handoff before retrying", ErrChangeProposalVerificationFailed)
+				}
+				spec.VerifiedImplementationAuthorization = authorization.AuthorizationID
+			}
+		}
+	}
+
 	if head, prID, prNumber, verifyErr := preparer.verifyChangeProposal(ctx, request); verifyErr != nil {
 		return Result{}, verifyErr
 	} else if head != "" {

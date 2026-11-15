@@ -149,12 +149,13 @@ func (s *Store) GetClarificationRound(ctx context.Context, workflowID, roundID s
 // The adapter verifies actor permission before calling; state and routing are
 // always validated again under the same Workflow lock as Stage settlement.
 type HumanInputSubmission struct {
-	WorkflowID string
-	Command    collaboration.Command
-	Actor      collaboration.Actor
-	Source     collaboration.Source
-	Authorized bool
-	At         time.Time
+	SourceSequence uint64
+	WorkflowID     string
+	Command        collaboration.Command
+	Actor          collaboration.Actor
+	Source         collaboration.Source
+	Authorized     bool
+	At             time.Time
 }
 
 func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission) (collaboration.Receipt, error) {
@@ -171,10 +172,25 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 	if err != nil {
 		return collaboration.Receipt{}, err
 	}
-	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing)
+	beforeStart := preImplementation(state)
+	active := snapshot.CurrentAttempt != nil && (snapshot.State == workflow.StatePlanning || snapshot.State == workflow.StateDeveloping || snapshot.State == workflow.StateReviewing || beforeStart && snapshot.State == workflow.StatePlanReady)
+	limitedWithdrawal := beforeStart && snapshot.CurrentAttempt != nil && snapshot.State == workflow.StateNeedsHuman && snapshot.ActiveTurn == nil && snapshot.ChangeProposal == nil && snapshot.Closure == nil && input.Command.Kind == "withdraw-implementation"
+	stage := workflow.StageID("")
+	if snapshot.CurrentAttempt != nil {
+		stage = snapshot.CurrentAttempt.CurrentStage
+	}
+	if beforeStart {
+		stage = workflow.StagePlanning
+	}
 	participant := ""
-	if active {
-		err = tx.QueryRow(ctx, `SELECT assignment.agent_participant_id::text FROM stage_assignments assignment JOIN agent_participants participant ON participant.id=assignment.agent_participant_id WHERE assignment.workflow_id=$1 AND assignment.stage_id=$2 AND participant.status='ACTIVE' ORDER BY assignment.assignment_generation DESC LIMIT 1`, input.WorkflowID, snapshot.CurrentAttempt.CurrentStage).Scan(&participant)
+	if limitedWithdrawal {
+		// Revocation belongs to the published pair, not an active Session. A
+		// preparation failure may already have fenced its Planner Participant.
+		if pair := state.CurrentCheckpoint(); pair != nil {
+			participant = pair.ParticipantID
+		}
+	} else if active {
+		err = tx.QueryRow(ctx, `SELECT assignment.agent_participant_id::text FROM stage_assignments assignment JOIN agent_participants participant ON participant.id=assignment.agent_participant_id WHERE assignment.workflow_id=$1 AND assignment.stage_id=$2 AND participant.status='ACTIVE' ORDER BY assignment.assignment_generation DESC LIMIT 1`, input.WorkflowID, stage).Scan(&participant)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return collaboration.Receipt{}, err
 		}
@@ -184,7 +200,30 @@ func (s *Store) AdmitHumanInput(ctx context.Context, input HumanInputSubmission)
 		return collaboration.Receipt{}, err
 	}
 	prior := len(state.Inputs)
-	receipt := state.Accept("A"+id, input.Command, collaboration.Admission{Active: active, Authorized: input.Authorized, ParticipantID: participant, Route: collaborationRoute(snapshot), Actor: input.Actor, Source: input.Source, At: input.At})
+	actionCount := 0
+	if state.Planning != nil {
+		actionCount = len(state.Planning.Implementation.Actions)
+	}
+	receipt := state.Accept("A"+id, input.Command, collaboration.Admission{AllowUnusedWithdrawal: limitedWithdrawal, SourceSequence: input.SourceSequence, Active: active, Authorized: input.Authorized, ParticipantID: participant, Route: collaborationRoute(snapshot), Actor: input.Actor, Source: input.Source, At: input.At})
+	if beforeStart && len(state.Inputs) > prior {
+		snapshot, err = s.reopenPlanningTx(ctx, tx, input.WorkflowID, snapshot, &state, receipt.ResponseID)
+		if err != nil {
+			return collaboration.Receipt{}, err
+		}
+	}
+	if beforeStart && len(state.Planning.Implementation.Actions) > actionCount && input.Command.Kind == "withdraw-implementation" && snapshot.State == workflow.StateDeveloping && snapshot.ActiveTurn == nil {
+		decision := s.reducer.WithdrawQueuedImplementation(snapshot)
+		if err = validateWorkflowDecision(snapshot, decision); err != nil {
+			return collaboration.Receipt{}, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE jobs SET status='CANCELLED',lease_owner=NULL,lease_token=NULL,leased_at=NULL,lease_expires_at=NULL,heartbeat_at=NULL,completed_at=clock_timestamp() WHERE workflow_id=$1 AND kind='PREPARE_AGENT_TURN' AND status IN ('AVAILABLE','LEASED')`, input.WorkflowID); err != nil {
+			return collaboration.Receipt{}, err
+		}
+		if err = persistAppliedDecision(ctx, tx, "", input.WorkflowID, snapshot, decision, "withdraw:"+receipt.ResponseID); err != nil {
+			return collaboration.Receipt{}, err
+		}
+		snapshot = decision.Snapshot
+	}
 	if len(state.Inputs) > prior && snapshot.ActiveTurn == nil {
 		if err = s.ensureHumanInputTurnTx(ctx, tx, input.WorkflowID, snapshot, receipt.ResponseID); err != nil {
 			return collaboration.Receipt{}, err
@@ -242,6 +281,9 @@ func prepareCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID, particip
 	var object map[string]json.RawMessage
 	if err = json.Unmarshal(configuration, &object); err != nil || object == nil {
 		return nil, fmt.Errorf("invalid Turn configuration")
+	}
+	if orientation := acceptedPlanOrientation(state); len(orientation) > 0 {
+		object["implementation_handoff"] = orientation
 	}
 	for name, raw := range state.Project(participant, turn) {
 		object[name] = raw
@@ -363,7 +405,11 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		return err
 	}
 	event.HumanInputPending = state.Pending(participant)
-	blocked := state.AssessmentBlocked(participant) || state.Unresolved(participant)
+	read, err := acceptedPlanDeliveredTx(ctx, tx, event.Turn.TurnID)
+	if err != nil {
+		return err
+	}
+	blocked := state.AssessmentBlocked(participant) || state.Unresolved(participant) || !read
 	if (event.HumanInputPending || blocked) && (event.Outcome == workflow.TurnOutcomePlanningReady || event.Outcome == workflow.TurnOutcomeChangeProposalReady || event.Outcome == workflow.TurnOutcomeApproved || event.Outcome == workflow.TurnOutcomeChangesRequested) {
 		event.Outcome = workflow.TurnOutcomeClarificationWait
 		event.Review = nil
@@ -378,11 +424,22 @@ func fenceCollaborationSettlementTx(ctx context.Context, tx pgx.Tx, workflowID, 
 		for _, v := range state.Planning.Revalidations {
 			if v.TurnID == event.Turn.TurnID && v.RevisionID == state.Planning.CurrentRevision && state.PlanningValidationCurrent(v) {
 				state.Planning.ReadyRevision = v.RevisionID
+				event.ImplementationAuthorized = state.ImplementationValidated()
 				found = true
 			}
 		}
 		if !found {
 			return collaboration.ErrInvalid
+		}
+		r := state.CurrentCheckpoint()
+		feedback := "Confirmed pair " + r.Reference + " is planning-ready. To authorize development, submit `/omnigrex implement " + r.Reference + "` alone. Confirmation alone never starts implementation."
+		key := "ready:" + r.ID
+		if event.ImplementationAuthorized {
+			feedback = "Pair " + r.Reference + " passed Planner validity and repository-relevance checks. Development is queued for admission; this milestone does not itself mean implementation started. Withdrawal or new steering before first Developer admission still fences it."
+			key = "queued:" + state.ImplementationGrant().ID
+		}
+		if err = enqueueCollaborationStatusTx(ctx, tx, workflowID, key, feedback, &state); err != nil {
+			return err
 		}
 		return saveCollaborationTx(ctx, tx, workflowID, state)
 	}
@@ -457,9 +514,11 @@ func getCollaborationRecordTx(ctx context.Context, tx pgx.Tx, workflowID, partic
 	case "human_input", "human_input_history":
 		err = tx.QueryRow(ctx, `SELECT item - 'delivery_pending' FROM work_item_collaboration collaboration,
    LATERAL jsonb_array_elements(collaboration.state->'inputs') WITH ORDINALITY AS records(item,position)
-   WHERE collaboration.workflow_id=$1 AND item->>'participant_id'=$2 AND COALESCE(item->>'delivered_to','')<>''
+   WHERE collaboration.workflow_id=$1 AND (item->>'participant_id'=$2 OR ($3='human_input_history' AND COALESCE(collaboration.state->'planning'->'implementation'->>'first_developer_turn_id','')<>'')) AND COALESCE(item->>'delivered_to','')<>''
    AND (($3='human_input' AND item->>'delivered_to'=$4) OR ($3='human_input_history' AND item->>'delivered_to'<>$4))
    ORDER BY position OFFSET $5 LIMIT 1`, workflowID, participant, collection, turn, index).Scan(&raw)
+	case "accepted_plan":
+		err = tx.QueryRow(ctx, `SELECT r FROM work_item_collaboration c,LATERAL jsonb_array_elements(c.state->'planning'->'revisions') r WHERE workflow_id=$1 AND r->>'id'=c.state->'planning'->'implementation'->>'accepted_revision_id'`, workflowID).Scan(&raw)
 	case "planning_request":
 		err = tx.QueryRow(ctx, `SELECT state->'planning'->'original_request' FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw)
 	case "planning_history":
@@ -490,7 +549,7 @@ func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTu
 	if err := json.Unmarshal(request, &args); err != nil {
 		return err
 	}
-	if args.Collection != "human_input" {
+	if args.Collection != "human_input" && args.Collection != "accepted_plan" {
 		return nil
 	}
 	raw, total, err := getCollaborationRecordTx(ctx, tx, workflowID, turn.AgentParticipantID, turn.ID, args.Collection, args.Index)
@@ -513,6 +572,9 @@ func recordCollaborationDeliveryTx(ctx context.Context, tx pgx.Tx, turn lockedTu
 	}
 	if !reflect.DeepEqual(expected, actual) {
 		return collaboration.ErrInvalid
+	}
+	if args.Collection == "accepted_plan" {
+		return nil
 	}
 	var chunks int
 	length := utf8.RuneCount(raw)

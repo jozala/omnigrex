@@ -27,6 +27,10 @@ try {
       if (process.env[name] !== path || !(await stat(path)).isDirectory()) throw new Error('admitted disk-backed path was not preserved');
     }
     const role = envelope.triggering_event.role;
+    if(envelope.implementation_handoff){
+      const accepted=envelope.accepted_plan?.[0];
+      if(!accepted?.published || accepted.id!==envelope.implementation_handoff.revision_id || !accepted.content?.requirements_brief || !accepted.content?.technical_plan || !accepted.original_request?.body || !accepted.decisions?.length)throw new Error('missing exact accepted pair or original source handoff');
+    }
     if (['restart-during-prompt', 'lost-transport', 'lease-expiry', 'cleanup-failure'].includes(fault)) return;
     if (fault === 'runtime-exit-137') { process.exit(137); }
     if (fault === 'resource-exhaustion') {
@@ -55,14 +59,14 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
-    } else if (fault === 'planning') {
+    } else if (fault === 'planning' && role === 'PLANNER') {
       if(role!=='PLANNER'||names.some(n=>['omnigrex_publish_changes','omnigrex_open_pr','omnigrex_submit_review','omnigrex_request_review'].includes(n)))throw new Error('planning authority escaped');
       const system=data.messages.filter(m=>m.role==='system').map(m=>text(m.content)).join('\n');
       if(!system.includes('omnigrex-discovery/v2'))throw new Error('discovery missing on continuation');
       const rounds=(envelope.clarification_history??[]).filter(r=>r.participant_id===envelope.agent_participant_id);
       const input=envelope.human_input??[];
-      const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>i.kind!=='confirm-plan');
-      const confirmation=input.find(i=>i.kind==='confirm-plan');
+      const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>!['confirm-plan','implement'].includes(i.kind));
+      const confirmation=input.find(i=>['confirm-plan','implement'].includes(i.kind));
       const amended=input.some(i=>i.kind==='amend');
       const calls=[];
       const add=(name,args)=>calls.push(()=>({name,args:typeof args==='function'?args():args}));
@@ -72,7 +76,7 @@ try {
         if(a.publication!=='not_applied'||a.reason!==reason||a.revision_id||a.source||!isDeepStrictEqual(a,b))throw new Error('non-publication lost through Pi or replay');
         return a;
       };
-      if(input.length)add('omnigrex_assess_human_input',{operation_id:`assess-planning-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:i.kind==='answer'&&rounds.length===2?[decisions[0].id,i.id]:[i.id],...(i.kind==='answer'&&rounds.length===2?{corrects:[decisions[0].id]}:{}),disposition:i.kind==='confirm-plan'?'confirmed':'changed',explanation:i.kind==='confirm-plan'?'Exact published pair accepted without changes.':'Explicit fixture direction considered; retention changes, audience and selection remain unchanged unless amended.'}))});
+      if(input.length)add('omnigrex_assess_human_input',{operation_id:`assess-planning-input-${envelope.agent_turn_id}`,assessments:input.map(i=>({input_id:i.id,evidence_ids:i.kind==='answer'&&rounds.length===2?[decisions[0].id,i.id]:[i.id],...(i.kind==='answer'&&rounds.length===2?{corrects:[decisions[0].id]}:{}),disposition:['confirm-plan','implement'].includes(i.kind)?'confirmed':'changed',explanation:['confirm-plan','implement'].includes(i.kind)?'Exact published pair accepted without changes.':'Explicit fixture direction considered; retention changes, audience and selection remain unchanged unless amended.'}))});
       const resolve=(operation,round,resolutions)=>add('omnigrex_resolve_clarification',{operation_id:operation,round_id:round.id,resolutions});
       const resolution=(question,ids,explanation)=>({question_id:question,response_ids:ids,explanation});
       if(confirmation){

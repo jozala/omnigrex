@@ -82,6 +82,7 @@ func (s *State) CheckpointInputReason(participant string) string {
 }
 
 type PlanningState struct {
+	Implementation           ImplementationState    `json:"implementation"`
 	InvalidatedConfirmations []string               `json:"invalidated_confirmations,omitempty"`
 	NonPublications          []CheckpointNotApplied `json:"non_publications,omitempty"`
 	OriginalRequest          OriginalRequest        `json:"original_request"`
@@ -187,7 +188,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		}
 		seen[response] = true
 		i := slices.IndexFunc(s.Inputs, func(in Input) bool {
-			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && (!in.DeliveryPending || in.DeliveredTo == turn) && in.Kind != "confirm-plan"
+			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && (!in.DeliveryPending || in.DeliveredTo == turn) && !exactConfirmation(in.Kind)
 		})
 		if i < 0 {
 			return PlanningRevision{}, ErrInvalid
@@ -290,7 +291,7 @@ func (s *State) ValidatePlanning(operation, revision, participant, turn, commit,
 			continue
 		}
 		v.ConsideredInputIDs = append(v.ConsideredInputIDs, in.ID)
-		if in.Kind == "confirm-plan" && in.Target == revision && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) && s.latestAssessment(in.ID) != nil && s.latestAssessment(in.ID).Disposition == "confirmed" {
+		if exactConfirmation(in.Kind) && in.Target == revision && !slices.Contains(s.Planning.InvalidatedConfirmations, in.ID) && s.latestAssessment(in.ID) != nil && s.latestAssessment(in.ID).Disposition == "confirmed" {
 			v.ConfirmationInputID = in.ID
 		}
 	}

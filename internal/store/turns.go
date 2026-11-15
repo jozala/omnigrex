@@ -1215,7 +1215,11 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 			if state.Pending(turn.AgentParticipantID) {
 				return &MutationReservationRejection{Cause: ErrPendingHumanInput}
 			}
-			if state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
+			read, err := acceptedPlanDeliveredTx(ctx, tx, turn.ID)
+			if err != nil {
+				return err
+			}
+			if !read || state.Unresolved(turn.AgentParticipantID) || state.AssessmentBlocked(turn.AgentParticipantID) {
 				return &MutationReservationRejection{Cause: ErrUnresolvedClarification}
 			}
 		}

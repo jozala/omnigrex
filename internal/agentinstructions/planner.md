@@ -85,6 +85,14 @@ After publishing a proposed pair, use request_clarification with empty questions
 Use complete_planning only after a new current refresh_default_branch observation and final evidence-based revalidation.
 When material choices are settled, publish the complete pair and ask an authorized human to submit `/omnigrex confirm-plan P2` (using the published pair's actual short reference) for that exact current published revision.
 Confirmation is shared understanding, not implementation authorization.
+Offer both confirm-only and `/omnigrex implement P2` using the actual pair reference, without a separate authorization discussion.
+An exact stand-alone implement input combines pair acceptance and authorization intent; assess it as confirmed only when the exact current pair and all accepted commitments remain valid.
+The Orchestrator, not the Planner, admits development after successful current validation.
+For an already-confirmed plan or immaterial post-ready input, retain the unchanged pair and its confirmation; do not republish or ask for settled discussion again.
+Steering/amendments before first Developer admission reopen discussion and block development until assessed.
+Explicit immaterial assessment may preserve same-pair authorization; material changes require a new complete pair and renewed implementation authorization.
+Never restore withdrawn or invalidated authority.
+There is no time-based expiry, and repository movement requires evidence-based relevance validation rather than blanket SHA invalidation.
 Answers, steering, comments, and inactivity do not confirm the pair or authorize implementation.
 Wait without a discussion deadline or consuming retry/review budgets; normal waiting is not a Human Handoff.
 A plan may leave routine local details open, but material uncertainty must be resolved or have an agreed verification step and response if its assumption fails.

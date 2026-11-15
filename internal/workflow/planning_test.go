@@ -70,3 +70,26 @@ func TestCompletedPlanningOperationalRecoveryDoesNotReopenDiscovery(t *testing.T
 		t.Fatal(duplicate)
 	}
 }
+
+func TestImplementationQueueRequiresValidatedAuthorizationAndPreservesBudgetUntilAdmission(t *testing.T) {
+	m := workflow.EventMetadata{ID: "planning", ObservedAt: time.Now(), WorkItem: workflow.WorkItem{RepositoryID: 1, IssueID: 2, IssueNumber: 3}}
+	start := reduce(workflow.Snapshot{State: workflow.StateAbsent}, workflow.TriggerEvent{EventMetadata: m, PlanningOnly: true, AttemptID: "attempt", AttemptNumber: 1})
+	s := start.Snapshot
+	s.CurrentAttempt.InfrastructureRetryBudget.Used = 1
+	s.ActiveTurn = &workflow.ActiveTurn{ID: "planner", SessionID: "session", AttemptID: "attempt", Stage: workflow.StagePlanning, Role: workflow.RolePlanner, Epoch: 1, ControlRevision: 1}
+	e := settledEvent(s, "validated", workflow.TurnOutcomePlanningReady)
+	e.ImplementationAuthorized = true
+	d := reduce(s, e)
+	if d.Disposition != workflow.DispositionApplied || d.Snapshot.State != workflow.StateDeveloping || d.Snapshot.PlanningOnly || d.Snapshot.CurrentAttempt.CurrentStage != workflow.StageImplementation || d.Snapshot.CurrentAttempt.InfrastructureRetryBudget.Used != 1 {
+		t.Fatal(d)
+	}
+	a := onlyAction[workflow.EnqueueTurnAction](t, d.Actions)
+	if a.Role != workflow.RoleDeveloper || a.Purpose != workflow.TurnPurposeInitialDevelopment || d.Snapshot.ActiveTurn != nil {
+		t.Fatal("queue is not first admission", d)
+	}
+	e.HumanInputPending = true
+	blocked := reduce(s, e)
+	if blocked.Snapshot.State != workflow.StatePlanning || onlyAction[workflow.EnqueueTurnAction](t, blocked.Actions).Role != workflow.RolePlanner {
+		t.Fatal("late input bypassed validation fence", blocked)
+	}
+}

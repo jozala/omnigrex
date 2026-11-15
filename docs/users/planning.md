@@ -1,4 +1,4 @@
-# Explore an idea without starting implementation
+# Plan an idea and explicitly authorize implementation
 
 [User guide](README.md) · [Clarification and steering](clarification.md)
 
@@ -56,14 +56,14 @@ Structural checks alone do not establish semantic completeness or design correct
 Normal waiting releases execution resources while preserving the Agent Session, Workflow Attempt and retry/review budgets.
 There is no discussion deadline or inactivity-based acceptance.
 Close the Issue to stop unwanted work using the existing [Workflow lifecycle](workflow-and-labels.md).
-This increment does not introduce dedicated defer, reject or completed-plan reopening commands.
+Use explicitly addressed steering/amendments to reopen discussion before implementation starts; label changes alone do not revise a plan.
 If final label publication fails after planning has completed, resolve the operational problem and use the normal `omnigrex:run` Human Handoff recovery.
 The orchestrator restores the already-completed `omnigrex:plan-ready` result and retries label reconciliation without a new Planner Turn, new confirmation, or changes to the immutable pair.
 This is operational recovery, not reopening planning or authorizing implementation.
 
 **Confirmation is shared understanding, not implementation authorization.**
 Planning does not allocate Developer/Reviewer implementation work, publish code through MCP, create PRs or child Work Items, submit native reviews, or merge.
-`omnigrex:run` cannot convert planning into development, including after planning-ready; that transition belongs to follow-up #165.
+`omnigrex:run` cannot convert planning into development, including after planning-ready; use exact-pair implementation authorization below.
 The Planner can perform bounded local investigations and experiments in the existing disposable Execution Environment with existing tool permissions.
 This is the Developer/Reviewer trusted-repository baseline, not new shell/network confinement or provider-credential isolation.
 
@@ -84,4 +84,55 @@ Both complete documents remain one immutable pair in one comment; oversize conte
 Confirmation with a requested change is a change request, not approval of an unpublished modified plan.
 A withdrawal or material objection invalidates earlier confirmation during active planning.
 After reconciliation, confirm the exact pair again even if its documents remain unchanged; changed documents require a new pair and its own confirmation.
-Answers and steering never substitute for exact-pair confirmation or implementation authorization, and none of these commands reopens completed planning.
+Answers and steering never substitute for exact-pair confirmation or implementation authorization, and steering/amendments before the first Developer admission reopen discussion without changing the earlier immutable pair.
+
+## Authorize an exact pair
+
+Review both complete documents, then submit a new Issue comment containing only:
+
+```text
+/omnigrex implement P7
+```
+
+Use the actual current proposed pair reference, not this illustrative `P7`.
+This accepts that exact pair and requests implementation; a prior separate `confirm-plan` is not required.
+It also works for an open eligible Work Item confirmed before this feature was installed, without repeating settled discussion or republishing unchanged documents.
+Upgrading alone never authorizes development.
+Repository write, maintain or admin permission is required and rechecked before first Developer admission.
+
+No additional non-whitespace prose is allowed with the implementation command, including text on the same line or following lines.
+For example, adding “but use PostgreSQL” rejects authorization rather than guessing whether consent is conditional.
+Submit changes through `/omnigrex steer` or `/omnigrex amend A7` first, then authorize the resulting exact pair.
+Answers, ordinary comments, reactions, Planner assertions, `confirm-plan` and `omnigrex:run` cannot substitute for this action.
+
+A receipt means the request was recorded, not that validation passed or work started.
+The Planner assesses all known input and current repository evidence before development is queued.
+If the repository moved, the Planner checks whether those changes affect accepted behavior or material commitments; unrelated changes do not automatically invalidate the pair.
+A current exact-pair authorization can survive immaterial input and repository movement without another approval click, but materially changed commitments require a revised complete pair and renewed authorization.
+Authorization has no inactivity-based expiry; normal bounded infrastructure recovery still applies.
+
+Concise milestone comments distinguish receipt/validation, queued development and started implementation.
+Implementation starts when the first Developer Agent Turn is durably admitted, including while its Execution Environment is launching.
+Queued preparation is not started work.
+Duplicate commands, concurrent events and restarts cannot admit a second initial Developer Turn or reset budgets again.
+After successful handoff, implementation has its normal infrastructure retry and review allowance, independent of planning's earlier retries.
+Developer and Reviewer receive the exact accepted documents, original request, relevant decisions, constraints and evidence, not only a summary.
+They may adjust reversible implementation suggestions, but material contradictions preventing safe implementation require Human Handoff rather than silently rewriting accepted intent.
+
+## Withdraw unused implementation authorization
+
+Before the first Developer admission, submit a new comment containing only:
+
+```text
+/omnigrex withdraw-implementation P7
+```
+
+This prevents unused authorization from starting development, without closing the Work Item or withdrawing pair confirmation.
+This limited revocation also works during a preparation-failure Human Handoff before the first Developer admission; it leaves that Human Handoff and its budgets unchanged and schedules no work.
+An earlier event or replay cannot restore it.
+For commands with comparable immutable source order, a delayed older withdrawal likewise cannot revoke newer consent; webhook receipt time is not the human decision order.
+A fresh explicit `implement` command may authorize the still-current valid pair again.
+Steering/amendments accepted before admission also block development and return discussion to the Planner; assessment cannot silently resurrect withdrawn or invalidated authority.
+Concurrent withdrawal, steering, closure and admission are serialized: feedback reflects which operation crossed the durable start boundary first.
+After admission, limited withdrawal is rejected and does not claim to stop work.
+Close the original Work Item Issue to use the existing stopping mechanism; removing state labels is not cancellation.

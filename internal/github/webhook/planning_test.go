@@ -62,7 +62,7 @@ func TestPlanningRunRejectionReconcilesLostReceipt(t *testing.T) {
 			t.Fatal(allowed, err)
 		}
 		allowed, err := a.AuthorizePlanningActivation(context.Background(), claim, event)
-		if allowed || err != nil || len(f.comments) != 1 || !strings.Contains(f.comments[0].Body, "#165") {
+		if allowed || err != nil || len(f.comments) != 1 || !strings.Contains(f.comments[0].Body, "/omnigrex implement P2") {
 			t.Fatal(allowed, err, f.comments)
 		}
 	}

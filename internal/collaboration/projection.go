@@ -23,7 +23,8 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 	switch collection {
 	case "human_input", "human_input_history":
 		for _, in := range s.Inputs {
-			if in.ParticipantID != participant || in.DeliveredTo == "" {
+			acceptedSource := collection == "human_input_history" && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != ""
+			if (!acceptedSource && in.ParticipantID != participant) || in.DeliveredTo == "" {
 				continue
 			}
 			if collection == "human_input" && in.DeliveredTo != turn {
@@ -38,6 +39,15 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 			in.DeliveryPending = false
 			raw, _ := json.Marshal(in)
 			records = append(records, raw)
+		}
+	case "accepted_plan":
+		if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+			for _, r := range s.Planning.Revisions {
+				if r.ID == s.Planning.Implementation.AcceptedRevisionID {
+					raw, _ := json.Marshal(r)
+					records = append(records, raw)
+				}
+			}
 		}
 	case "planning_request":
 		if s.Planning != nil {
@@ -70,10 +80,19 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 	object := map[string]json.RawMessage{}
 	projection := Projection{Counts: map[string]int{}}
-	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history", "assessment_history"} {
+	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+		projection.Instruction = "Read the exact accepted_plan and original request before dependent work. Supporting discussion histories are omitted for focus but remain available through their frozen counts and bounded retrieval as needed; omission is not absence. If accepted_plan is omitted, retrieve every chunk before dependent work and terminal handoff."
+	}
+	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history", "assessment_history", "accepted_plan"} {
 		records := s.Records(participant, turn, name)
 		projection.Counts[name] = len(records)
 		if records == nil {
+			records = []json.RawMessage{}
+		}
+		// Implementation gets the exact accepted pair and focused orientation,
+		// not every historical discussion. Counts preserve lossless optional reads.
+		supporting := name == "human_input_history" || name == "clarification_history" || name == "planning_history" || name == "assessment_history"
+		if supporting && s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
 			records = []json.RawMessage{}
 		}
 		object[name], _ = json.Marshal(records)
