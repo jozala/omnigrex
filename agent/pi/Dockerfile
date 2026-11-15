@@ -37,7 +37,8 @@ WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/omnigrex-environment", "run", "/usr/local/bin/node", "/opt/omnigrex/pi/runner.mjs"]
 
 FROM golden AS workflow-fixture
-COPY agent/pi/qualification/turn.mjs agent/pi/qualification/replanning.mjs /opt/omnigrex/pi/qualification/
+COPY agent/pi/qualification/turn.mjs agent/pi/qualification/replanning.mjs agent/pi/qualification/replanning.test.mjs /opt/omnigrex/pi/qualification/
+RUN node --test /opt/omnigrex/pi/qualification/replanning.test.mjs
 
 FROM golden AS upgrade-source
 USER 0:0
@@ -49,4 +50,5 @@ WORKDIR /workspace
 
 # Product Workflow qualification uses the selected bundle, not checkout resources.
 FROM ${OMNIGREX_SELECTED_PI} AS selected-workflow-fixture
-COPY agent/pi/qualification/turn.mjs agent/pi/qualification/replanning.mjs /opt/omnigrex/pi/qualification/
+COPY agent/pi/qualification/turn.mjs agent/pi/qualification/replanning.mjs agent/pi/qualification/replanning.test.mjs /opt/omnigrex/pi/qualification/
+RUN node --test /opt/omnigrex/pi/qualification/replanning.test.mjs

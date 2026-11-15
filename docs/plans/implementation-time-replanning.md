@@ -61,13 +61,16 @@ The material scenario uses five human commands, including the product decision, 
 The unchanged scenario uses the original two planning/authorization commands and needs no additional approval or duplicate pair.
 Each scenario dispatches one autonomous return, retains the same Change Proposal and published partial history, continues compatible retained Role Sessions, and reaches fresh native review.
 Avoidable rework is confined to the disposable restart model rather than a production implementation.
+The executable model uses separate Node processes to test restart, reset and identifier exclusion.
+The original transient implementation is a failing control for the persistent requirement; the revised implementation must satisfy it.
+Reviewer qualification also checks that the partial published head remains an ancestor, and failed executable checks prevent scripted publication or approval.
 The assertions verify explicit decision fidelity, exact governing revision, authority, preserved history/budgets and final review.
 They do not measure real-model reasoning quality or establish deployment qualification.
 
 ## Verification status
 
 Focused race-enabled domain, reducer, Store lost-response/unchanged/admission and forward-migration tests have passed during implementation.
-Both controlled replanning Pi scenarios passed before the final additional safety regressions.
+Both controlled replanning Pi scenarios passed with the strengthened executable restart/reset model, partial-head ancestry and failed-check guards.
 An intermediate serialized `mise run check` passed.
 Completion requires the final relevant-source check, complete Docker integration, full controlled Workflow, recovery, upgrade and protocol qualification; the Change Proposal handoff records their final results and any remaining limits.
 Exact-head CI, including Linux/KVM qualification, must be inspected separately and is not inferred from local Docker success.

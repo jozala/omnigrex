@@ -216,6 +216,8 @@ These fixtures do not deploy the feature, exercise a historical production plan 
 They preserve unfinished published commits and one Change Proposal, exercise safe Planner transfer, and return through native Reviewer evaluation.
 The revised scenario includes a human decision, complete superseding pair, confirmation-only waiting and exact resumption authorization; the false alarm adds neither consent nor documents.
 These deterministic controlled-provider scenarios measure command effort, bounded loop behavior, decision fidelity and isolated rework, not real-model reasoning quality.
+The disposable executable checklist model tests actual restarts in separate Node processes, reset deletion and identifier exclusion; failed checks prevent scripted publication or native approval.
+The workflow-fixture image build runs the model and negative-result guards with `node --test`, and Reviewer execution additionally proves partial-head ancestry.
 Run them with `OMNIGREX_PI_WORKFLOW_TEST_PATTERN='^TestPiControlledWorkflow/replanning' mise run test-pi-workflow`; use the normal Linux/KVM gate for Microsandbox qualification.
 The schema/reducer tests separately cover same-head old-plan review invalidation and per-Attempt budget preservation.
 Do not substitute production Sessions or live-provider costs for these fixtures.

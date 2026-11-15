@@ -93,7 +93,7 @@ func testPiReplanningWorkflow(t *testing.T, unchanged bool) {
 			if !unchanged && (len(s.Planning.Revisions) != 2 || accepted == original || humanEffort != 5) {
 				t.Fatal("material return missed human decision or exact consent", humanEffort, s)
 			}
-			t.Logf("controlled evaluation: human commands=%d; autonomous returns=1; same Change Proposal; partial history preserved; avoidable rework limited to isolated restart model; exact decision fidelity and final native review verified; not a real-model semantic-quality evaluation", humanEffort)
+			t.Logf("controlled evaluation: human commands=%d; autonomous returns=1; same Change Proposal; partial history preserved; avoidable rework limited to isolated restart model; executable restart/reset and identifier-exclusion checks, preserved-head ancestry, exact decision fidelity and final native review verified; not a real-model semantic-quality evaluation", humanEffort)
 			return
 		}
 		if f.github.openCalls > 0 && proposalID == 0 {
