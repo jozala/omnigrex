@@ -149,10 +149,7 @@ func Bootstrap(ctx context.Context, directory, data, mise string, inherited []st
 	for _, name := range []string{"MISE_DATA_DIR", "MISE_CACHE_DIR", "MISE_CONFIG_DIR", "MISE_STATE_DIR", "MISE_GLOBAL_CONFIG_FILE", "MISE_SYSTEM_CONFIG_FILE"} {
 		runtime[name] = setup[name]
 	}
-	runtime["MISE_IGNORED_CONFIG_PATHS"] = directory
 	runtime["MISE_LEGACY_VERSION_FILE"] = "false"
-	runtime["MISE_OVERRIDE_CONFIG_FILENAMES"] = "none"
-	runtime["MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES"] = "none"
 	return entries(runtime), nil
 }
 

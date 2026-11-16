@@ -27,6 +27,10 @@ The build first creates the current checkout's Linux/amd64 `omnigrex/development
 Release CI and production-derived image qualification use the exact digest in `agent/pi/selected-bundle.json`, which can originate from an older source commit.
 The local source-built path above is explicitly candidate testing, not production adoption.
 Publishing candidates never edits that selection or a repository pin.
+The image embeds `omnigrex-environment`: bootstrap changes require rebuilding and qualifying the agent image, not only restarting or rebuilding the orchestrator.
+An already retained Participant continues using its immutable image; it does not acquire new bootstrap behavior through rollout.
+For bootstrap fixes, explicitly build and qualify a new Pi candidate through the [bundle selection procedure](runtime-qualification.md), then select its qualified digest before building the production-derived development image.
+The older selected base does not acquire bootstrap changes from the current checkout; ordinary Mise qualification will expose that mismatch rather than bypass it.
 For an externally qualified base, build with `--platform linux/amd64 --target development --file agent/environments/omnigrex/Dockerfile --build-arg OMNIGREX_GOLDEN_IMAGE=<exact-golden-reference>`.
 The base must provide supported `pi-rpc/v2` storage under `/home/omnigrex/.local/share/mise` and `/home/omnigrex/.local/share/omnigrex-tool-data`.
 Pre-baseline golden images are unsupported.

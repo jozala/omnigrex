@@ -81,7 +81,9 @@ Source-to-candidate qualification on copied state does not authorize Session reb
 Tool installation uses the real Developer/Reviewer working revision, including Change Proposal mise hooks and scripts.
 It runs non-root with disk-backed installation scratch removed before protocol startup and separate tool-data attachments for requested caches.
 Repository activation cannot replace protected runtime/provider/loader settings, and the agent executable uses its absolute qualified path.
-Approved control-plane paths such as `GOCACHE` and `GOPATH` override conflicting mise activation.
+Approved control-plane paths such as `GOCACHE` and `GOPATH` override conflicting mise activation during bootstrap.
+Later ordinary `mise exec` and `mise run` commands discover project configuration, including nested tasks, without per-command discovery workarounds.
+Repository environment overrides can change these child processes’ paths; bootstrap precedence is not a promise about every task.
 The trusted-repository credential model applies to all those scripts and images.
 
 See [repository environment evidence](../plans/2026-10-08-repository-environments.md) and [tool paths](tool-paths-and-caches.md).
