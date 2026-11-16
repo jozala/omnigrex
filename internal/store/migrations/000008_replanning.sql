@@ -7,7 +7,7 @@ ALTER TABLE agent_turn_settlements ADD CONSTRAINT agent_turn_settlements_workflo
  (workflow_outcome IN ('CHANGE_PROPOSAL_READY','CHANGES_REQUESTED','APPROVED','BLOCKED','INFRASTRUCTURE_FAILED','PREREQUISITE_FAILED','CLARIFICATION_WAIT','PLANNING_READY','REPLANNING_REQUESTED','REPLANNING_RESOLVED'));
 ALTER TABLE agent_turns DROP CONSTRAINT agent_turns_purpose_check;
 ALTER TABLE agent_turns ADD CONSTRAINT agent_turns_purpose_check CHECK
- (purpose IN ('INITIAL_DEVELOPMENT','INITIAL_PLANNING','REVIEW','REQUESTED_CHANGES','RETRY','SYNCHRONIZATION','REACTIVATION','REPLANNING','RESUMED_DEVELOPMENT'));
+ (purpose IN ('INITIAL_DEVELOPMENT','INITIAL_PLANNING','REVIEW','REQUESTED_CHANGES','RETRY','SYNCHRONIZATION','REACTIVATION','REPLANNING','RESUMED_DEVELOPMENT','CI_REPAIR'));
 ALTER TABLE review_admission_requests ADD COLUMN accepted_plan_revision_id TEXT;
 -- Prior records have only their initial accepted binding: no earlier feature
 -- could revise implementation-time commitments. Do not invent an unused grant.

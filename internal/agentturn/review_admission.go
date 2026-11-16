@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentprofile"
@@ -34,6 +35,9 @@ type ReviewGate struct {
 	Now      func() time.Time
 }
 type reviewStartContext struct {
+	Disposition     store.ReviewDisposition       `json:"disposition"`
+	AllSuccessful   bool                          `json:"all_successful"`
+	SemanticVersion int                           `json:"semantic_version"`
 	RequestID       string                        `json:"request_id"`
 	Generation      int64                         `json:"target_generation"`
 	ReviewedHead    string                        `json:"reviewed_head"`
@@ -114,7 +118,9 @@ func (g *ReviewGate) Check(ctx context.Context, request Request, r store.ReviewA
 	}
 	deadline := r.Deadline
 	if len(r.Policy) == 0 {
-		deadline = r.CreatedAt.Add(policy.Timeout)
+		if proposed := r.CreatedAt.Add(policy.Timeout); proposed.Before(deadline) {
+			deadline = proposed
+		}
 	}
 	mapping := githubapi.CITargetMapping{RepositoryID: durable.RepositoryID, PullRequestID: durable.PullRequestID, PullRequestNumber: int(durable.PullRequestNumber), ReviewedHead: head, BaseSHA: pr.Base.SHA, BaseRef: pr.Base.Ref, ObservedAt: now, State: "not_observed_immediate"}
 	var observations []githubapi.CIObservation
@@ -142,10 +148,10 @@ func (g *ReviewGate) Check(ctx context.Context, request Request, r store.ReviewA
 	raw, _ := json.Marshal(compactReviewContext(evidence))
 	normalized, _ := json.Marshal(policy)
 	var frozen json.RawMessage
-	if inventory.Availability == githubapi.CIAvailable && len(inventory.Failures) == 0 {
+	if inventory.Availability == githubapi.CIAvailable && len(inventory.Failures) == 0 && len(inventory.Unresolved) == 0 {
 		frozen, _ = json.Marshal(inventory)
 	}
-	return g.Store.RecordReviewAdmission(ctx, request.Lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: head, BaseSHA: mapping.BaseSHA, TestMergeSHA: mapping.TestMergeSHA, PolicySourceSHA: sourceSHA, Policy: normalized, Inventory: frozen, Evidence: raw, Release: evidence.Reason != "waiting"})
+	return g.Store.RecordReviewAdmission(ctx, request.Lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: head, BaseSHA: mapping.BaseSHA, TestMergeSHA: mapping.TestMergeSHA, PolicySourceSHA: sourceSHA, Policy: normalized, Inventory: frozen, Evidence: raw, Release: evidence.Disposition == store.ReviewAdmit, Disposition: evidence.Disposition})
 }
 func (g *ReviewGate) loadPolicy(ctx context.Context, r Request, frozenSHA string) (string, reviewpolicy.Policy, error) {
 	sha := frozenSHA
@@ -160,21 +166,23 @@ func (g *ReviewGate) loadPolicy(ctx context.Context, r Request, frozenSHA string
 	return sha, policy, err
 }
 func (g *ReviewGate) unavailable(ctx context.Context, request Request, r store.ReviewAdmission, now time.Time, operation string) (store.ReviewAdmission, error) {
-	evidence := reviewStartContext{RequestID: r.ID, Generation: r.Generation, ReviewedHead: r.HeadSHA, ObservedAt: now, Deadline: r.Deadline, Reason: "waiting", Failures: []githubapi.CIEvidenceFailure{{Operation: operation, Code: "unavailable"}}}
+	evidence := reviewStartContext{RequestID: r.ID, Generation: r.Generation, ReviewedHead: r.HeadSHA, ObservedAt: now, Deadline: r.Deadline, Reason: "waiting", Disposition: store.ReviewWait, SemanticVersion: 2, Failures: []githubapi.CIEvidenceFailure{{Operation: operation, Code: "unavailable"}}}
 	if !now.Before(r.Deadline) {
 		evidence.Reason = "timeout_incomplete"
+		evidence.Disposition = store.ReviewEscalate
 	}
 	raw, _ := json.Marshal(compactReviewContext(evidence))
-	return g.Store.RecordReviewAdmission(ctx, request.Lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, TestMergeSHA: r.TestMergeSHA, PolicySourceSHA: r.PolicySourceSHA, Evidence: raw, Release: evidence.Reason != "waiting"})
+	return g.Store.RecordReviewAdmission(ctx, request.Lease, r.ID, store.ReviewAdmissionObservation{Generation: r.Generation, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, TestMergeSHA: r.TestMergeSHA, PolicySourceSHA: r.PolicySourceSHA, Evidence: raw, Release: evidence.Disposition == store.ReviewAdmit, Disposition: evidence.Disposition})
 }
 
 // evaluateReviewCI distinguishes terminal completion from success and availability.
 // A missing item on one authorized commit does not erase observed evidence on
 // another, while any newer pending producer result on either keeps the wait.
 func evaluateReviewCI(p reviewpolicy.Policy, inventory githubapi.CIInventory, mapping githubapi.CITargetMapping, observations []githubapi.CIObservation, r store.ReviewAdmission, now, deadline time.Time) reviewStartContext {
-	e := reviewStartContext{RequestID: r.ID, Generation: r.Generation, ReviewedHead: mapping.ReviewedHead, Mapping: mapping, Inventory: inventory, Reason: "waiting", ObservedAt: now, Deadline: deadline, Failures: append([]githubapi.CIEvidenceFailure(nil), mapping.Failures...)}
+	e := reviewStartContext{RequestID: r.ID, Generation: r.Generation, ReviewedHead: mapping.ReviewedHead, Mapping: mapping, Inventory: inventory, Reason: "waiting", Disposition: store.ReviewWait, SemanticVersion: 2, ObservedAt: now, Deadline: deadline, Failures: append([]githubapi.CIEvidenceFailure(nil), mapping.Failures...)}
 	if p.Start == "immediate" {
 		e.Reason = "immediate"
+		e.Disposition = store.ReviewAdmit
 		return e
 	}
 	available := len(mapping.Failures) == 0 && inventory.Availability == githubapi.CIAvailable && len(inventory.Failures) == 0 && len(inventory.Unresolved) == 0 && (mapping.State == "verified" || mapping.State == "head_only")
@@ -235,6 +243,8 @@ func evaluateReviewCI(p reviewpolicy.Policy, inventory githubapi.CIInventory, ma
 		}
 		e.Targets = append(e.Targets, target)
 	}
+	allSuccessful := len(inventory.Requirements) > 0
+	failed := false
 	for _, required := range inventory.Requirements {
 		found := false
 		for _, t := range e.Targets {
@@ -242,30 +252,84 @@ func evaluateReviewCI(p reviewpolicy.Policy, inventory githubapi.CIInventory, ma
 				if result.Requirement != required {
 					continue
 				}
-				switch result.State {
-				case githubapi.CITerminalSuccess, githubapi.CITerminalNonSuccess:
-					found = true
-				case githubapi.CIMissing:
-				default:
+				// A newer pending rerun for this producer supersedes old terminal
+				// data even when GitHub reports it on the other authorized commit.
+				superseded := false
+				for _, other := range e.Targets {
+					for _, newer := range other.Results {
+						if newer.Requirement == required && newer.Source == result.Source && newer.ProducerAppID == result.ProducerAppID && newer.State == githubapi.CIPending && newer.ResultID > result.ResultID {
+							superseded = true
+						}
+					}
+				}
+				if superseded {
 					allComplete = false
+					allSuccessful = false
+					continue
+				}
+				eligible, failure := reviewResultDisposition(result)
+				if eligible {
+					found = true
+				} else if result.State != githubapi.CIMissing {
+					allComplete = false
+				}
+				// A positively identified selector remains actionable when another
+				// discovery source is incomplete. Unknown/empty discovery is
+				// never converted into an observed-CI fallback.
+				selectorKnown := available || required.Source != "" && required.Source != "all_observed"
+				mappingKnown := len(mapping.Failures) == 0 && (mapping.State == "verified" || mapping.State == "head_only")
+				if failure && selectorKnown && mappingKnown {
+					failed = true
+				}
+				if result.State != githubapi.CIMissing && result.State != githubapi.CITerminalSuccess {
+					allSuccessful = false
 				}
 			}
 		}
 		if !found {
 			allComplete = false
+			allSuccessful = false
 		}
+	}
+	if failed {
+		e.Reason = "failed_ci"
+		e.Disposition = store.ReviewRepair
+		return e
 	}
 	graceDone := !now.Before(r.GraceAnchor.Add(p.RegistrationGrace))
 	if allComplete && (!fallback || graceDone) {
 		e.Reason = "completed_ci"
+		e.Disposition = store.ReviewAdmit
+		e.AllSuccessful = allSuccessful
 		if fallback && len(inventory.Requirements) == 0 {
 			e.Reason = "no_ci_after_grace"
 		}
 	}
 	if e.Reason == "waiting" && !now.Before(deadline) {
 		e.Reason = "timeout_incomplete"
+		e.Disposition = store.ReviewEscalate
 	}
 	return e
+}
+
+// Eligibility never rewrites the shared literal result state.
+func reviewResultDisposition(r githubapi.CIRequirementResult) (eligible, failed bool) {
+	if r.State == githubapi.CITerminalSuccess {
+		return true, false
+	}
+	if r.State != githubapi.CITerminalNonSuccess {
+		return false, false
+	}
+	if r.Source == "status" {
+		return false, r.Conclusion == "failure" || r.Conclusion == "error"
+	}
+	switch r.Conclusion {
+	case "neutral", "skipped":
+		return true, false
+	case "failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure":
+		return false, true
+	}
+	return false, false
 }
 
 func (g *ReviewGate) validate() error {
@@ -295,6 +359,12 @@ func compactReviewContext(e reviewStartContext) reviewStartContext {
 	}
 	for i := range e.Targets {
 		e.Targets[i].Results = append([]githubapi.CIRequirementResult(nil), e.Targets[i].Results...)
+		// Preserve actionable failures first if a bounded projection is needed.
+		sort.SliceStable(e.Targets[i].Results, func(a, b int) bool {
+			_, af := reviewResultDisposition(e.Targets[i].Results[a])
+			_, bf := reviewResultDisposition(e.Targets[i].Results[b])
+			return af && !bf
+		})
 		if len(e.Targets[i].Results) > limit {
 			e.Targets[i].Results = e.Targets[i].Results[:limit]
 			truncated = true

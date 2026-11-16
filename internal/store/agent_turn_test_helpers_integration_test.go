@@ -210,7 +210,7 @@ func prepareWithFixtureAdmission(t *testing.T, database *store.Store, ctx contex
 			t.Logf("fixture admission not applicable: %v", err)
 		}
 		if err == nil {
-			request, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: payload.Head, Policy: json.RawMessage(`{"start":"immediate","selection":"github_required","timeout":1800000000000,"registration_grace":60000000000}`), Inventory: json.RawMessage(`{"availability":"available"}`), Evidence: json.RawMessage(`{"release_reason":"immediate","fixture":true}`), Release: true})
+			request, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: payload.Head, Policy: json.RawMessage(`{"start":"immediate","selection":"github_required","timeout":1800000000000,"registration_grace":60000000000}`), Inventory: json.RawMessage(`{"availability":"available"}`), Evidence: json.RawMessage(`{"release_reason":"immediate","semantic_version":2,"disposition":"admit","fixture":true}`), Release: true})
 			if err != nil {
 				return store.AgentTurnPreparationCommit{}, err
 			}

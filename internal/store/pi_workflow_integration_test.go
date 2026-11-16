@@ -42,6 +42,46 @@ import (
 
 func TestPiControlledWorkflow(t *testing.T) {
 	t.Run("planning", testPiPlanningWorkflow)
+
+	t.Run("ci-repair", func(t *testing.T) {
+		f := newPiWorkflowFixture(t, "")
+		first := f.prepare(t)
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatal(processed, err)
+		}
+		f.assertState(t, workflow.StateReviewing)
+		f.github.mutex.Lock()
+		f.github.ciFailure = true
+		f.github.mutex.Unlock()
+		lease := claimPreparationJob(t, f.database, f.ctx)
+		if _, err := f.preparer.Prepare(f.ctx, agentturn.Request{Lease: lease, InstallationCredential: "developer-token", RepositoryOwner: "owner", RepositoryName: "repo"}); !errors.Is(err, store.ErrReviewAdmissionRouted) {
+			t.Fatalf("route: %v", err)
+		}
+		f.assertState(t, workflow.StateDeveloping)
+		var reviewers, active, usage int
+		if err := f.pool(t).QueryRow(f.ctx, `SELECT (SELECT count(*) FROM agent_participants WHERE workflow_id=$1 AND role='REVIEWER'),(SELECT count(*) FROM agent_turns WHERE workflow_id=$1 AND active),ci_repair_usage FROM workflow_attempts WHERE workflow_id=$1 AND active`, f.workflowID).Scan(&reviewers, &active, &usage); err != nil || reviewers != 0 || active != 0 || usage != 1 {
+			t.Fatal(reviewers, active, usage, err)
+		}
+		repair := f.prepare(t)
+		if repair.Commit.Participant.ID != first.Commit.Participant.ID || repair.Commit.Session.ID != first.Commit.Session.ID || repair.Commit.Turn.Purpose != workflow.TurnPurposeCIRepair {
+			t.Fatal("repair replaced Participant/Session or purpose")
+		}
+		f.github.mutex.Lock()
+		f.github.ciFailure = false
+		f.github.mutex.Unlock()
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatal(processed, err)
+		}
+		f.assertState(t, workflow.StateReviewing)
+		f.prepare(t)
+		if err := f.pool(t).QueryRow(f.ctx, `SELECT ci_repair_usage FROM workflow_attempts WHERE workflow_id=$1 AND active`, f.workflowID).Scan(&usage); err != nil || usage != 0 {
+			t.Fatal("success did not reset", usage, err)
+		}
+		if processed, err := f.worker.ProcessNext(f.ctx); err != nil || !processed {
+			t.Fatal(processed, err)
+		}
+		f.assertState(t, workflow.StatePRReady)
+	})
 	t.Run("replanning-revised", func(t *testing.T) { testPiReplanningWorkflow(t, false) })
 	t.Run("replanning-unchanged", func(t *testing.T) { testPiReplanningWorkflow(t, true) })
 	t.Run("no-pr-target", func(t *testing.T) {
@@ -320,8 +360,8 @@ func TestPiControlledWorkflow(t *testing.T) {
 			}
 		}
 		if participant.Role == workflow.RoleReviewer {
-			if !strings.Contains(string(bytes), "review_start") || !strings.Contains(string(bytes), "completed_ci") || !strings.Contains(string(bytes), "terminal_non_success") {
-				t.Fatal("Reviewer prompt did not receive the actual non-success admission context")
+			if !strings.Contains(string(bytes), "review_start") || !strings.Contains(string(bytes), "completed_ci") || !strings.Contains(string(bytes), "terminal_success") {
+				t.Fatal("Reviewer prompt did not receive the actual successful admission context")
 			}
 
 			paths, _ := workspaces.Paths(participant.ID)
@@ -743,6 +783,7 @@ type workflowQualificationGitHub struct {
 	reviewCalls         int
 	ciReads             int
 	ciPending           bool
+	ciFailure           bool
 	loseReviewResponse  bool
 	advanceDefault      bool
 	refreshObservations int
@@ -870,7 +911,10 @@ func (g *workflowQualificationGitHub) ObserveCI(_ context.Context, token, _, _, 
 		return githubapi.CIObservation{Availability: githubapi.CIUnavailable}
 	}
 	g.ciReads++
-	state := "failure"
+	state := "success"
+	if g.ciFailure {
+		state = "failure"
+	}
 	if g.ciPending {
 		state = "pending"
 	}

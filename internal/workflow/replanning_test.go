@@ -21,6 +21,7 @@ func TestReplanningDispatchBudgetAndResolutionPreserveAttempt(t *testing.T) {
 	s := replanningSnapshot(t)
 	for cycle := uint8(0); cycle < 4; cycle++ {
 		s.CurrentAttempt.AutonomousReplanningReturns = cycle
+		s.CurrentAttempt.CIRepairUsage = 2
 		s.CurrentAttempt.ReviewUsage[workflow.StageReview] = 2
 		e := settledEvent(s, "request", workflow.TurnOutcomeReplanningRequested)
 		e.ReplanningCycleID = "cycle"
@@ -56,7 +57,7 @@ func TestReplanningDispatchBudgetAndResolutionPreserveAttempt(t *testing.T) {
 		done.ImplementationAuthorized = true
 		done.ResolvedPlanRevisionID = "P1"
 		resumed := reduce(p, done)
-		if resumed.Disposition != workflow.DispositionApplied || resumed.Snapshot.State != workflow.StateDeveloping || resumed.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || resumed.Snapshot.CurrentAttempt.AutonomousReplanningReturns != cycle+1 || resumed.Snapshot.CurrentAttempt.ID != "attempt" {
+		if resumed.Disposition != workflow.DispositionApplied || resumed.Snapshot.State != workflow.StateDeveloping || resumed.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 || resumed.Snapshot.CurrentAttempt.AutonomousReplanningReturns != cycle+1 || resumed.Snapshot.CurrentAttempt.ID != "attempt" || resumed.Snapshot.CurrentAttempt.CIRepairUsage != 2 {
 			t.Fatal(resumed)
 		}
 		if onlyAction[workflow.EnqueueTurnAction](t, resumed.Actions).Purpose != workflow.TurnPurposeResumedDevelopment {

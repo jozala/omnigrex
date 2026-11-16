@@ -1453,3 +1453,34 @@ func TestChangedReviewHeadDuringClarificationPreservesAttemptAndBudgets(t *testi
 	assertActionCount[workflow.EnqueueTurnAction](t, decision.Actions, 0)
 	assertActionCount[workflow.MarkHumanHandoffAction](t, decision.Actions, 0)
 }
+
+func TestCIAdmissionRepairBudgetIsSeparateFromReviewCycles(t *testing.T) {
+	for used := uint8(0); used <= 3; used++ {
+		snapshot := reviewingSnapshot(2, "head-1")
+		snapshot.ActiveTurn = nil
+		snapshot.CurrentAttempt.CIRepairUsage = used
+		event := workflow.CIAdmissionEvent{EventMetadata: workflow.EventMetadata{ID: "ci", ObservedAt: time.Now(), WorkItem: snapshot.WorkItem, ExpectedRevision: snapshot.Revision}, AttemptID: snapshot.CurrentAttempt.ID, ChangeProposalID: 64, HeadSHA: "head-1", Repair: true, Diagnostic: "build failure"}
+		decision := reduce(snapshot, event)
+		if decision.Disposition != workflow.DispositionApplied {
+			t.Fatalf("used %d: %+v", used, decision)
+		}
+		if decision.Snapshot.CurrentAttempt.ReviewUsage[workflow.StageReview] != 2 {
+			t.Fatal("CI consumed review cycle")
+		}
+		if used < 3 {
+			if decision.Snapshot.State != workflow.StateDeveloping || decision.Snapshot.CurrentAttempt.CIRepairUsage != used+1 {
+				t.Fatalf("repair: %+v", decision)
+			}
+			action := onlyAction[workflow.EnqueueTurnAction](t, decision.Actions)
+			if action.Purpose != workflow.TurnPurposeCIRepair {
+				t.Fatal(action)
+			}
+		} else if decision.Snapshot.State != workflow.StateNeedsHuman || decision.Snapshot.CurrentAttempt.CIRepairUsage != 3 {
+			t.Fatal("fourth repair dispatched")
+		}
+		replay := reduce(decision.Snapshot, event)
+		if replay.Disposition != workflow.DispositionStale {
+			t.Fatal("old observation replayed")
+		}
+	}
+}

@@ -101,14 +101,21 @@ review:
   start: after_ci
   ci:
     selection: github_required
-    timeout: 30m
+    timeout: 2h
     registration-grace: 60s
 ```
 
 `start: immediate` is the explicit bypass: it skips CI observations, registration grace, and CI waiting.
-`after_ci` waits for completion, not success.
-Terminal failure, cancellation, timeout, skipped, and neutral results release review without establishing passing qualification.
-At the absolute deadline, review is admitted with explicit incomplete evidence rather than exhausting infrastructure retries.
+`after_ci` admits selected check conclusions `success`, `neutral`, and `skipped`, or legacy status `success`, preserving their literal conclusions.
+A current selected `failure`, `cancelled`, `timed_out`, `action_required`, `stale`, `startup_failure`, or legacy failure/error routes to the Developer without a Reviewer verdict.
+A definitive matched failure can route before unrelated checks finish; newer pending reruns supersede older results from that producer.
+Unknown conclusions, missing results, pending checks, and unavailable evidence wait without an Agent.
+At the absolute deadline, incomplete evidence creates Human Handoff, not Reviewer admission or a claim of code failure.
+
+Each Workflow Attempt permits three automatic CI-repair dispatches since its last fully successful admission; a fourth needed repair hands off to a human.
+Only complete nonempty selected evidence whose results are all literally successful resets usage, atomically with Reviewer allocation.
+Neutral/skipped admission, no CI, bypass, and head changes do not reset usage.
+CI repairs are independent of actual Review Cycles and infrastructure retries; successful resets can allow more than three total repairs in one Attempt.
 
 `selection: github_required` freezes the first complete discovery of current effective classic protection and active/inherited branch rules, retaining source and App constraints.
 Unavailable or incomplete discovery is retried under the original deadline; it cannot establish a frozen empty inventory.

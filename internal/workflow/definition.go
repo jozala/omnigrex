@@ -286,7 +286,7 @@ func validStageID(id StageID) bool {
 
 func validTurnPurpose(purpose TurnPurpose) bool {
 	switch purpose {
-	case TurnPurposeReplanning, TurnPurposeResumedDevelopment, TurnPurposeInitialPlanning, TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
+	case TurnPurposeCIRepair, TurnPurposeReplanning, TurnPurposeResumedDevelopment, TurnPurposeInitialPlanning, TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
 		TurnPurposeRetry, TurnPurposeSynchronization, TurnPurposeReactivation:
 		return true
 	default:

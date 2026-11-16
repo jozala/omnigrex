@@ -220,6 +220,12 @@ try {
         if (step === 1) { name = 'bash'; args = { command: `test "$(git rev-parse HEAD)" = "${envelope.current_head_sha}" && ${check(0)} && test -z "$(git status --porcelain)" && printf SNAPSHOT_VERIFIED` }; }
         if (step === 2) { if (!text(results[1].content).includes('SNAPSHOT_VERIFIED')) throw new Error('Reviewer local verification failed'); name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'Current default snapshot verified locally.', comments: [] }; }
       }
+    } else if (role === 'DEVELOPER' && envelope.triggering_event.turn_purpose === 'CI_REPAIR') {
+      if (!envelope.ci_repair || envelope.ci_repair.repair_usage !== 1 || envelope.ci_repair.evidence.release_reason !== 'failed_ci' || envelope.pull_request_context?.status !== 'available') throw new Error('missing scoped repair context');
+      if (step === 0) { name = 'omnigrex_get_check_runs'; args = {}; }
+      if (step === 1) { name = 'bash'; args = { command: "printf 'repaired\\n' >> feature.txt; git add feature.txt; git commit -m 'Repair controlled CI failure'" }; }
+      if (step === 2) { name = 'omnigrex_publish_changes'; args = { operation_id: 'repair-publish' }; }
+      if (step === 3) { name = 'omnigrex_request_review'; args = { operation_id: 'repair-handoff', summary: 'Repaired selected CI failure with earlier context retained.' }; }
     } else if (role === 'DEVELOPER') {
       if (step === 0) { name = 'bash'; args = { command: "printf 'one\\n' > feature.txt; git add feature.txt; git commit -m 'Add first change'; printf 'two\\n' >> feature.txt; git add feature.txt; git commit -m 'Complete change'" }; }
       if (step === 1) { name = 'omnigrex_publish_changes'; args = { operation_id: 'controlled-publish' }; }
@@ -229,7 +235,7 @@ try {
       if (step === 0) { name = 'omnigrex_get_check_runs'; args = {}; }
       if (step === 1) {
         const evidence = result(0);
-        if (evidence.required_policy?.availability !== 'available' || evidence.targets?.[0]?.observation?.statuses?.[0]?.state !== 'failure' || evidence.head_sha !== envelope.current_head_sha) throw new Error('missing scoped required-CI evidence');
+        if (evidence.required_policy?.availability !== 'available' || evidence.targets?.[0]?.observation?.statuses?.[0]?.state !== 'success' || evidence.head_sha !== envelope.current_head_sha) throw new Error('missing scoped required-CI evidence');
         name = 'omnigrex_get_pull_request'; args = {};
       }
       if (step === 2) { name = 'omnigrex_submit_review'; args = { operation_id: 'controlled-review', event: 'APPROVE', body: 'The controlled changes are correct.', comments: [] }; }

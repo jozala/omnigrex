@@ -2,6 +2,8 @@ package workflow
 
 func eventDetails(event Event) (EventMetadata, EventKind, bool) {
 	switch event := event.(type) {
+	case CIAdmissionEvent:
+		return event.EventMetadata, EventKindCIAdmission, true
 	case TriggerEvent:
 		return event.EventMetadata, EventKindTrigger, true
 	case TurnSettledEvent:
@@ -48,6 +50,8 @@ func validEvent(definition Definition, event Event, metadata EventMetadata) bool
 		return false
 	}
 	switch event := event.(type) {
+	case CIAdmissionEvent:
+		return event.AttemptID != "" && event.ChangeProposalID > 0 && event.HeadSHA != "" && event.Diagnostic != ""
 	case TriggerEvent:
 		return event.AttemptID != "" && event.AttemptNumber > 0 &&
 			(!event.PriorTerminalControlBlocked || event.PriorTerminalTurnID != "") &&
@@ -191,7 +195,7 @@ func validAttempt(definition Definition, infrastructureRetryLimit uint8, snapsho
 	attempt := snapshot.CurrentAttempt
 	stage, stageExists := definition.Stage(attempt.CurrentStage)
 	if attempt.ID == "" || attempt.Number == 0 || attempt.StartedAt.IsZero() || attempt.Lifecycle != AttemptActive || !stageExists ||
-		attempt.AutonomousReplanningReturns > 3 || attempt.InfrastructureRetryBudget.Limit != infrastructureRetryLimit || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
+		attempt.AutonomousReplanningReturns > 3 || attempt.CIRepairUsage > 3 || attempt.InfrastructureRetryBudget.Limit != infrastructureRetryLimit || attempt.InfrastructureRetryBudget.Used > attempt.InfrastructureRetryBudget.Limit {
 		return false
 	}
 	for stageID, used := range attempt.ReviewUsage {

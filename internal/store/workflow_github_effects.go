@@ -250,6 +250,9 @@ SELECT EXISTS (
 	}
 	admission, admissionErr := scanAdmission(tx.QueryRow(ctx, admissionSelect+` WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, job.WorkflowID))
 	if admissionErr == nil {
+		if err := tx.QueryRow(ctx, `SELECT ci_repair_usage,EXISTS(SELECT 1 FROM agent_turns WHERE workflow_attempt_id=workflow_attempts.id AND active AND stage_id='implementation' AND turn_configuration ? 'ci_repair') FROM workflow_attempts WHERE id=(SELECT workflow_attempt_id FROM review_admission_requests WHERE id=$1)`, admission.ID).Scan(&admission.RepairUsage, &admission.RepairTurnAllocated); err != nil {
+			return effect, err
+		}
 		effect.ReviewAdmission = &admission
 	} else if !errors.Is(admissionErr, pgx.ErrNoRows) {
 		return effect, admissionErr

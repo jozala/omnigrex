@@ -58,6 +58,7 @@ type eventEnvelope struct {
 	HumanInputHistory        json.RawMessage                `json:"human_input_history,omitempty"`
 	HumanInput               json.RawMessage                `json:"human_input,omitempty"`
 	ClarificationHistory     json.RawMessage                `json:"clarification_history,omitempty"`
+	CIRepair                 json.RawMessage                `json:"ci_repair,omitempty"`
 	ReviewStart              json.RawMessage                `json:"review_start,omitempty"`
 	SchemaVersion            int                            `json:"schema_version"`
 	WorkflowID               string                         `json:"workflow_id"`
@@ -128,14 +129,16 @@ func BuildEventEnvelope(execution store.AgentTurnExecutionContext, currentHeadSH
 		envelope.HumanInputHistory = configuration.HumanInputHistory
 		envelope.ClarificationHistory = configuration.History
 	}
-	if len(execution.Turn.TurnConfiguration) > 0 && execution.Participant.Role == workflow.RoleReviewer {
+	if len(execution.Turn.TurnConfiguration) > 0 {
 		var configuration struct {
 			ReviewStart json.RawMessage `json:"review_start"`
+			CIRepair    json.RawMessage `json:"ci_repair"`
 		}
 		if err := json.Unmarshal(execution.Turn.TurnConfiguration, &configuration); err != nil {
 			return "", ErrInvalidEventEnvelope
 		}
 		envelope.ReviewStart = configuration.ReviewStart
+		envelope.CIRepair = configuration.CIRepair
 	}
 	if execution.ChangeProposal != nil {
 		number := execution.ChangeProposal.PullRequestNumber
@@ -199,7 +202,7 @@ func validateEventEnvelopeContext(execution store.AgentTurnExecutionContext, cur
 	}
 	if execution.ChangeProposal == nil {
 		if turn.ChangeProposalID != "" || turn.ExpectedHeadSHA != "" || policy.RequiresChangeProposal ||
-			turn.Purpose == workflow.TurnPurposeRequestedChanges {
+			(turn.Purpose == workflow.TurnPurposeRequestedChanges || turn.Purpose == workflow.TurnPurposeCIRepair) {
 			return ErrInvalidEventEnvelope
 		}
 		if publication := execution.Publication; publication != nil &&
