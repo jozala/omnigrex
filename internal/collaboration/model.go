@@ -192,7 +192,7 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 		}
 	}
 	for _, previous := range s.Rounds {
-		if previous.ID == s.CurrentRound && previous.ParticipantID == participant {
+		if previous.ID == s.CurrentRound && s.RoundInScope(previous, participant) {
 			for _, old := range previous.Questions {
 				resolution := latestResolution(previous, old.ID)
 				resolved := resolution != nil && s.resolutionCurrent(*resolution)
@@ -210,10 +210,10 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 		}
 	}
 	r := Round{SupersedesReference: supersedesReference, Reference: s.reference("R", id), ID: id, Supersedes: s.CurrentRound, Purpose: Clarification, ParticipantID: participant, TurnID: turn, HeadSHA: head, Questions: slices.Clone(questions)}
-	// Carry only unchanged decisions owned by this Participant; changed question
+	// Carry only unchanged decisions in this Participant's scope; changed question
 	// identities require new evidence. The source round retains its full history.
 	for _, previous := range s.Rounds {
-		if previous.ID != s.CurrentRound || previous.ParticipantID != participant {
+		if previous.ID != s.CurrentRound || !s.RoundInScope(previous, participant) {
 			continue
 		}
 		for _, q := range questions {
@@ -345,7 +345,7 @@ func (s *State) Accept(id string, c Command, a Admission) Receipt {
 		if found.SupersededBy != "" || found.Published && s.CurrentRound != found.ID {
 			return reject("That round has been replaced. Please use the short reference in the latest questions.")
 		}
-		if found.ParticipantID != a.ParticipantID {
+		if !s.RoundInScope(*found, a.ParticipantID) {
 			return reject("Rejected: the addressed round belongs to an obsolete Stage; use /omnigrex steer for current work.")
 		}
 		roundID = found.ID
@@ -470,7 +470,7 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			// cannot bypass a renewed current decision's amendment requirement.
 			if r.SupersededBy != "" {
 				for _, current := range s.Rounds {
-					if current.ID == s.CurrentRound && current.ParticipantID == r.ParticipantID && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) && !s.canRevise(latestResolution(current, resolution.QuestionID), resolution) {
+					if current.ID == s.CurrentRound && s.RoundInScope(current, participant) && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) && !s.canRevise(latestResolution(current, resolution.QuestionID), resolution) {
 						return &ResolutionValidationError{Code: "current_change_requires_correction", ResolutionIndex: resolutionIndex + 1}
 					}
 				}
@@ -511,11 +511,11 @@ func (s *State) Resolve(roundID, turn string, resolutions []Resolution) error {
 			resolution.ConsideredResponseIDs = slices.Clone(resolution.ConsideredResponseIDs)
 			r.Resolutions = append(r.Resolutions, resolution)
 			// A correction to historical evidence also updates the current
-			// unchanged question, if it is still carried by the same owner.
+			// unchanged question, if both rounds remain in the resolving Participant's scope.
 			if r.SupersededBy != "" {
 				for j := range s.Rounds {
 					current := &s.Rounds[j]
-					if current.ID == s.CurrentRound && current.ParticipantID == r.ParticipantID && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) {
+					if current.ID == s.CurrentRound && s.RoundInScope(*current, participant) && slices.ContainsFunc(current.Questions, func(q Question) bool { return q.ID == resolution.QuestionID }) {
 						current.Resolutions = append(current.Resolutions, resolution)
 					}
 				}
