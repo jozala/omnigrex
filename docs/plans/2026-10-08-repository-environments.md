@@ -56,11 +56,14 @@ Installation output cannot contaminate protocol stdout or become unbounded crede
 Failures and cancellation are explicit; subprocess output waits are bounded.
 
 The bootstrap filters image environment entries against the control plane's admitted variable names, clears loader injection settings, and rejects repository activation that changes protected runtime variables.
-Admitted control-plane values, including all approved cache and scratch path bindings, remain authoritative over mise activation.
-Repository activation can populate safe variables only where the control plane has not assigned them; it cannot redirect `GOCACHE`, `GOPATH`, or another allocated directory to a different lifecycle or location.
+Admitted control-plane values, including all approved cache and scratch path bindings, remain authoritative over initial bootstrap mise activation.
+Repository activation can populate safe variables only where the control plane has not assigned them; initial bootstrap activation cannot redirect `GOCACHE`, `GOPATH`, or another allocated directory to a different lifecycle or location.
 Tool activation cannot replace `PI_*`, `OMNIGREX_*`, `OPENCODE_*`, loader settings, or protected home/configuration variables.
 The absolute agent executable cannot be shadowed through tool `PATH` activation.
-Runtime automatic mise discovery is disabled after activation.
+The original implementation disabled runtime automatic mise discovery after activation to prevent incidental reactivation.
+[Work Item 221](https://github.com/jozala/omnigrex/issues/221) removes that restriction so explicit `mise exec`, `mise run`, and nested tasks use ordinary project discovery.
+The restrictions prevented incidental configuration reactivation, not deliberate capability use: a Bash-enabled agent could already unset them or run repository scripts.
+Bootstrap validation and allocated-path precedence still apply at agent launch; later Mise child processes can deliberately apply repository environment overrides without changing their parent process.
 Installation subprocesses receive an isolated tool environment without provider or MCP configuration entries.
 The existing trusted-repository model still applies: repository code runs in an environment that receives real provider credentials, and clearing subprocess environment entries is not credential mediation.
 

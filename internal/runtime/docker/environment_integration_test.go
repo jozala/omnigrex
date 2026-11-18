@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,25 @@ mkdir -p /workspace/assignment-` + fixture.key.AssignmentID + `/workspace
 cd /workspace/assignment-` + fixture.key.AssignmentID + `/workspace
 printf '[env]\nREVISION_TOOLS = "working-revision"\n[hooks]\npostinstall = "sh ./install.sh"\n' > mise.toml
 printf 'set -eu\ntest "$(id -u)" = 10001\ntest ! -S /var/run/docker.sock\ntest ! -e /run/pi-agent/auth.json\ntest "$(repository-tool)" = repository-tool-v1\nprintf installed-in-environment > installation-proof\n' > install.sh
+cat >> mise.toml <<'CONFIG'
+[tasks.probe]
+run = "sh probe.sh /workspace/allocated"
+[tasks.nested]
+run = "mise run probe"
+CONFIG
+cat > probe.sh <<'PROBE'
+set -eu
+for name in GOCACHE GOPATH TMPDIR GOTMPDIR; do
+  eval 'value="$'"$name"'"'
+  test "$value" = "$1/$name"
+  test -d "$value"
+  touch "$value/proof"
+done
+PROBE
+mkdir -p allocated overridden
+for name in GOCACHE GOPATH TMPDIR GOTMPDIR; do
+  mkdir -p "allocated/$name" "overridden/$name"
+done
 `
 			if output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--user", "10001:10001", "--mount", "type=volume,src="+fixture.volume+",dst=/workspace", "--entrypoint", "/bin/sh", tag, "-ec", seed).CombinedOutput(); err != nil {
 				t.Fatalf("seed working tools: %v\n%s", err, output)
@@ -94,7 +114,27 @@ printf 'set -eu\ntest "$(id -u)" = 10001\ntest ! -S /var/run/docker.sock\ntest !
 				t.Fatal(err)
 			}
 			request.Image = fields[0]
-			request.Command = []string{environment.Executable, "run", "/bin/sh", "-ec", `test "$(cat /workspace/installation-proof)" = installed-in-environment; test "$REVISION_TOOLS" = working-revision; test ! -S /var/run/docker.sock; printf 'working-revision-ready\n'; exec sleep 300`}
+			request.Command = []string{environment.Executable, "run", "/bin/sh", "-ec", `set -eu
+test "$(cat /workspace/installation-proof)" = installed-in-environment
+test "$REVISION_TOOLS" = working-revision
+test ! -S /var/run/docker.sock
+# The qualified image contains the checksum-pinned real Mise, not a stub.
+mise exec -- sh probe.sh /workspace/allocated
+mise run probe
+mise run nested
+# A deliberate project override affects later Mise children, not their parent.
+sed -i '/^\[env\]/a GOCACHE = "/workspace/overridden/GOCACHE"\nGOPATH = "/workspace/overridden/GOPATH"\nTMPDIR = "/workspace/overridden/TMPDIR"\nGOTMPDIR = "/workspace/overridden/GOTMPDIR"' mise.toml
+mise exec -- sh probe.sh /workspace/overridden
+sed -i 's|sh probe.sh /workspace/allocated|sh probe.sh /workspace/overridden|' mise.toml
+mise run probe
+mise run nested
+sh probe.sh /workspace/allocated
+printf 'working-revision-ready\n'
+exec sleep 300`}
+			for _, name := range []string{"GOCACHE", "GOPATH", "TMPDIR", "GOTMPDIR"} {
+				request.Environment = slices.DeleteFunc(request.Environment, func(entry string) bool { return strings.HasPrefix(entry, name+"=") })
+				request.Environment = append(request.Environment, name+"=/workspace/allocated/"+name)
+			}
 			request.Environment = environment.BindEnvironment(request.Environment)
 			request.GoldenResources = true
 			request.Requirements = []execution.Requirement{execution.ToolInstallation}

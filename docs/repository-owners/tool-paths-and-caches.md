@@ -41,7 +41,10 @@ See the [configuration reference](../reference/repository-configuration.md#tool-
 Requested directories are isolated on disk-backed tool storage outside the workspace and Change Proposal tree.
 Turn scratch is removed after the Runtime Process stops.
 The `assignment` lifecycle keeps Participant-local caches across Turns and removes them during Assignment collection.
-Approved directory bindings take precedence over conflicting mise activation.
+Approved directory bindings take precedence over conflicting mise activation during bootstrap.
+Ordinary `mise exec` and `mise run` commands, including nested tasks, subsequently discover working-checkout configuration normally.
+A non-conflicting configuration preserves the allocated paths; deliberate repository environment overrides apply to Mise child processes, not their parent agent environment.
+Task scripts may also intentionally choose command-local paths, such as the development image’s Go test scratch override.
 
 These paths have no per-Participant disk quota.
 The operator should monitor storage and [cache warnings](../operators/retention.md#tool-cache-monitoring).
