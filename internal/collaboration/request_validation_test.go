@@ -3,6 +3,7 @@ package collaboration
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -41,15 +42,19 @@ func TestRequestValidationPreservesImmutableRound(t *testing.T) {
 
 func TestRequestRejectionRecognitionIsStrict(t *testing.T) {
 	for _, code := range []string{"question_identity_content_changed", "duplicate_question", "unresolved_question_dropped", "question_limit_exceeded", "empty_questions_without_wait", "earlier_publication_unsettled"} {
-		raw, err := RequestRejectionResult(&RequestValidationError{Code: code, QuestionIndex: 1})
+		index := 0
+		if code == "question_identity_content_changed" || code == "duplicate_question" {
+			index = 1
+		}
+		raw, err := RequestRejectionResult(&RequestValidationError{Code: code, QuestionIndex: index})
 		if err != nil || !IsRequestRejection(raw) {
 			t.Fatal(string(raw), err)
 		}
 		for _, bad := range []string{
-			strings.Replace(string(raw), `"question_index":1`, `"question_index":null`, 1),
-			strings.Replace(string(raw), `"question_index":1`, `"question_index":51`, 1),
-			strings.Replace(string(raw), `"question_index":1`, `"question_index":-1`, 1),
-			strings.Replace(string(raw), `"question_index":1,`, "", 1),
+			strings.Replace(string(raw), fmt.Sprintf(`"question_index":%d`, index), `"question_index":null`, 1),
+			strings.Replace(string(raw), fmt.Sprintf(`"question_index":%d`, index), `"question_index":51`, 1),
+			strings.Replace(string(raw), fmt.Sprintf(`"question_index":%d`, index), `"question_index":-1`, 1),
+			strings.Replace(string(raw), fmt.Sprintf(`"question_index":%d,`, index), "", 1),
 			strings.Replace(string(raw), code, "dependency-secret", 1),
 			string(raw[:len(raw)-1]) + `,"round_id":"R1"}`,
 			string(raw[:len(raw)-1]) + `,"outcome":"CLARIFICATION_WAIT"}`,

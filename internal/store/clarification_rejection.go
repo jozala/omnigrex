@@ -11,7 +11,10 @@ func clarificationRejectionSQL(column string) string {
         'reason',RESULT->>'reason','question_index',RESULT->'question_index',
         'next_action',RESULT->>'next_action')
     AND jsonb_typeof(RESULT->'question_index') = 'number'
-    AND RESULT->>'question_index' ~ '^(0|[1-9]|[1-4][0-9]|50)$'
+    AND ((RESULT->>'reason' IN ('question_identity_content_changed','duplicate_question')
+          AND RESULT->>'question_index' ~ '^([1-9]|[1-4][0-9]|50)$')
+       OR (RESULT->>'reason' NOT IN ('question_identity_content_changed','duplicate_question')
+          AND RESULT->>'question_index' = '0'))
     AND ((RESULT->>'reason' IN ('question_identity_content_changed','duplicate_question',
         'unresolved_question_dropped','question_limit_exceeded','empty_questions_without_wait')
         AND RESULT->>'next_action' = 'correct_arguments_new_operation')

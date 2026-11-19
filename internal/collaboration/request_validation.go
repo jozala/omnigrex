@@ -45,7 +45,9 @@ func requestRejectionAction(code string) string {
 }
 func (r RequestRejectedResult) valid() bool {
 	action := requestRejectionAction(r.Reason)
-	return action != "" && r.Status == "rejected" && r.Publication == "not_applied" && r.NextAction == action && r.QuestionIndex >= 0 && r.QuestionIndex <= 50
+	positioned := r.Reason == "question_identity_content_changed" || r.Reason == "duplicate_question"
+	validIndex := positioned && r.QuestionIndex >= 1 && r.QuestionIndex <= 50 || !positioned && r.QuestionIndex == 0
+	return action != "" && validIndex && r.Status == "rejected" && r.Publication == "not_applied" && r.NextAction == action
 }
 func RequestRejectionResult(e *RequestValidationError) (json.RawMessage, error) {
 	r := RequestRejectedResult{Status: "rejected", Publication: "not_applied", Reason: e.Code, QuestionIndex: e.QuestionIndex, NextAction: requestRejectionAction(e.Code)}
