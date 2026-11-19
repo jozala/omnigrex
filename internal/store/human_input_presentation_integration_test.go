@@ -90,11 +90,13 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					}
 				}
 				api := &inputOverlayAPI{}
+				var expiredLease *store.JobLease
 				if mode == "expired" {
 					old, err := database.ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "old-worker", time.Minute)
 					if err != nil || old == nil || old.ID != labelJob {
 						t.Fatal(old, err)
 					}
+					expiredLease = old
 					observed, err := database.GetWorkflowGitHubEffectContext(ctx, *old)
 					if err != nil || !observed.HumanInputWaiting {
 						t.Fatal(observed, err)
@@ -197,6 +199,19 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 				}
 				if visible || version != 2 || stateRevision != int64(settled.Revision) || prepares != 1 || turns != 1 || failures != 0 || reviews != 0 || len(state.Inputs) != 1 || state.Inputs[0].ParticipantID != fixture.assignmentID || state.Inputs[0].DeliveredTo != "" {
 					t.Fatalf("continuity changed: wait=%t v=%d state=%d jobs=%d turns=%d retries=%d reviews=%d inputs=%+v", visible, version, stateRevision, prepares, turns, failures, reviews, state.Inputs)
+				}
+
+				if expiredLease != nil {
+					closeWorkflowForLiveness(t, database, ctx, fixture, 1200+10*n+m)
+					// Replay is still the same correction after lifecycle revision
+					// movement; its payload never freezes a desired add boolean.
+					if err = databases[1].EnsureWorkflowGitHubLabelCorrection(ctx, *expiredLease); err != nil {
+						t.Fatal(err)
+					}
+					var retained int
+					if err = pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id=$1 AND idempotency_key LIKE 'human-input-lost-lease:%'`, fixture.workflowID).Scan(&retained); err != nil || retained != 1 {
+						t.Fatal(retained, err)
+					}
 				}
 
 				if role == workflow.RoleDeveloper && mode == "success" {
