@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
@@ -1641,6 +1642,21 @@ func TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	fixture, original, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 978, workflow.RoleDeveloper, "")
+	qs := []collaboration.Question{{ID: "duplicate", Body: "First?"}, {ID: "duplicate", Body: "Second?"}}
+	rejected := startQuestionRequest(t, database, ctx, original, "rejected-question", qs)
+	_, rejectionErr := database.RequestClarification(ctx, original, rejected.ID, qs)
+	var validation *collaboration.RequestValidationError
+	if !errors.As(rejectionErr, &validation) {
+		t.Fatal(rejectionErr)
+	}
+	rawRejection, rejectionErr := collaboration.RequestRejectionResult(validation)
+	if rejectionErr != nil {
+		t.Fatal(rejectionErr)
+	}
+	if rejectionErr = database.CompleteMutation(ctx, original, rejected.ID, rawRejection); rejectionErr != nil {
+		t.Fatal(rejectionErr)
+	}
+
 	mutation, err := database.ReserveMutation(ctx, original, store.MutationSpec{
 		OperationID: "prior-ready", ToolName: "request_review",
 		Request:         json.RawMessage(`{"operation_id":"prior-ready","summary":"Ready"}`),

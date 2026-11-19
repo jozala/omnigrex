@@ -420,3 +420,43 @@ func TestResolutionRecoveryUsesExactDurableRejectionNotHistoryAbsence(t *testing
 		t.Fatal("absence converted to rejection", result, err)
 	}
 }
+
+type rejectingRequestLedger struct {
+	clarificationLedger
+	err error
+}
+
+func (f *rejectingRequestLedger) RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question) (collaboration.Round, error) {
+	return collaboration.Round{}, f.err
+}
+
+func TestRequestGatewayKeepsUnknownErrorsMasked(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	ledger := &rejectingRequestLedger{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fakeStore{}
+	gateway := newTestGateway(t, now, durable, backend)
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	for i, cause := range []error{errors.New("dependency credential-secret"), mcp.OutcomeUnknown(&collaboration.RequestValidationError{Code: "duplicate_question", QuestionIndex: 2})} {
+		ledger.err = cause
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, fmt.Sprintf(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"request_clarification","arguments":{"operation_id":"unknown-%d","questions":[{"id":"Q1","body":"Private body?"}]}}}`, i)))
+		body := response.Body.String()
+		if !strings.Contains(body, `"isError":true`) || strings.Contains(body, "credential-secret") || strings.Contains(body, "not_applied") {
+			t.Fatal(body)
+		}
+	}
+	_, _, completed, failed, unknown := durable.mutationCounts()
+	if completed != 0 || failed != 0 || unknown != 2 {
+		t.Fatal(completed, failed, unknown)
+	}
+}

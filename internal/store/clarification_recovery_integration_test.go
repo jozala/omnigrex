@@ -5,6 +5,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -42,6 +43,20 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 						if err != nil || receipt.ResponseID == "" {
 							t.Fatal(receipt, err)
 						}
+					}
+					badQuestions := []collaboration.Question{{ID: "duplicate", Body: "One?"}, {ID: "duplicate", Body: "Two?"}}
+					bad := startQuestionRequest(t, database, ctx, lease, "rejected-first", badQuestions)
+					_, err := database.RequestClarification(ctx, lease, bad.ID, badQuestions)
+					var validation *collaboration.RequestValidationError
+					if !errors.As(err, &validation) {
+						t.Fatal(err)
+					}
+					rejectedResult, err := collaboration.RequestRejectionResult(validation)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = database.CompleteMutation(ctx, lease, bad.ID, rejectedResult); err != nil {
+						t.Fatal(err)
 					}
 					questions := []collaboration.Question{{ID: "Q1", Body: "Compatibility policy?"}}
 					if inputTiming == "empty-yield" {
