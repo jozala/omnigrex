@@ -22,6 +22,10 @@ Refresh at collaboration saves, persisted lifecycle decisions and final Turn set
 Workers recompute current state rather than consuming a payload boolean, and acknowledgement fences include the presentation revision.
 Superseded effects retain durable corrective work even when the remote response reported failure.
 If an external request returns after its lease is lost, historical attempt provenance supports one idempotent label-only correction after that request, even if a newer worker already finished.
+Commit a durable recovery obligation before each label operation; refuse remote writes when that registration fails.
+Discharge it only with that request's durable acknowledgement or an atomic return-path correction enqueue.
+If the process dies or that transaction fails, ordinary label claims recover expired obligations in bounded batches and schedule current-state probes at most once per minute per obligation.
+A successful probe cannot prove an older request stopped writing, so probes continue while uncertainty remains; failed probes retain the existing three-attempt failure/escalation policy instead of receiving new retry budgets.
 Migration seeds the ordinary serialized label worker for existing collaboration records, including terminal cleanup, without allocating Agent Turns.
 Label-only jobs bypass Stage effects; ordinary jobs reconcile the overlay before preparation deferral or PR-ready validation.
 
@@ -37,6 +41,8 @@ Reusing existing leased effects preserves bounded retries and failure policy.
 Accuracy is eventual after external effects settle, not a distributed GitHub/PostgreSQL transaction.
 Publication or retry failures remain subject to existing operational recovery rather than spending agent or review budgets merely to refresh labels.
 New collaboration and lifecycle persistence paths must preserve the presentation refresh boundary.
+An orphaned request can leave an ongoing label-only probe obligation, including after closure, until its return is durably recorded or ordinary history retention removes its source records.
+This conservative observation work never restarts an agent or reactivates a Workflow.
 
 ## Links
 

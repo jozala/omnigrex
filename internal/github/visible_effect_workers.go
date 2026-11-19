@@ -26,6 +26,7 @@ var (
 
 // VisibleEffectWorkerStore is the durable boundary used by GitHub visible-effect workers.
 type VisibleEffectWorkerStore interface {
+	BeginWorkflowGitHubLabelWrite(context.Context, store.JobLease) error
 	EnsureWorkflowGitHubLabelCorrection(context.Context, store.JobLease) error
 	ClaimWorkflowGitHubEffectJob(context.Context, string, string, time.Duration) (*store.JobLease, error)
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
@@ -210,6 +211,11 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 			acknowledged = true
 			return nil
 		}
+		if kind == store.ReconcileGitHubLabelsJobKind {
+			if err := worker.store.BeginWorkflowGitHubLabelWrite(workCtx, *lease); err != nil {
+				return fmt.Errorf("retain label-write recovery obligation: %w", err)
+			}
+		}
 		externalOperationStarted = true
 		result, effectErr := operation(workCtx, credential, effect, *lease)
 		if effectErr != nil {
@@ -252,6 +258,7 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 	// A cancelled HTTP call may already have mutated GitHub. The old owner can
 	// finish after a newer owner has removed the overlay, so lease reclamation
 	// alone is not enough: retain a correction after this request has returned.
+	// If this transaction fails, the pre-write obligation remains recoverable.
 	if kind == store.ReconcileGitHubLabelsJobKind && externalOperationStarted && !acknowledged &&
 		(heartbeatErr != nil || workCtx.Err() != nil || errors.Is(operationErr, store.ErrWorkflowGitHubEffectFenceLost)) {
 		repairCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)

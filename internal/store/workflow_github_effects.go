@@ -98,6 +98,11 @@ func (store *Store) ClaimWorkflowGitHubEffectJob(ctx context.Context, kind, owne
 		return nil, fmt.Errorf("begin Workflow GitHub effect job claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if kind == ReconcileGitHubLabelsJobKind {
+		if err := recoverGitHubLabelWritesTx(ctx, tx); err != nil {
+			return nil, fmt.Errorf("recover uncertain label writes: %w", err)
+		}
+	}
 	if _, err := reclaimExpiredJobsTx(ctx, tx, jobClaimReclaimLimit, WorkflowActionQueue, kind); err != nil {
 		return nil, fmt.Errorf("reclaim before Workflow GitHub effect job claim: %w", err)
 	}
@@ -433,6 +438,11 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 			return WorkflowGitHubEffectAcknowledgement{}, err
 		}
 	}
+	if expectedKind == ReconcileGitHubLabelsJobKind {
+		if _, err := tx.Exec(ctx, `DELETE FROM workflow_github_label_writes WHERE lease_token=$1`, lease.LeaseToken); err != nil {
+			return WorkflowGitHubEffectAcknowledgement{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return WorkflowGitHubEffectAcknowledgement{}, fmt.Errorf("commit Workflow GitHub effect acknowledgement: %w", err)
 	}
@@ -565,6 +575,9 @@ WHERE j.id=$1 AND j.kind=$2 AND j.queue=$3 AND a.attempt_number=$4
 		return err
 	}
 	if err = enqueueHumanInputPresentationTx(ctx, tx, workflowID, "human-input-lost-lease:"+lease.ID+":"+lease.LeaseToken, revision); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM workflow_github_label_writes WHERE lease_token=$1`, lease.LeaseToken); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

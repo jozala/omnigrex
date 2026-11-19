@@ -22,14 +22,14 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	for n, role := range []workflow.Role{workflow.RolePlanner, workflow.RoleDeveloper, workflow.RoleReviewer} {
-		for m, mode := range []string{"success", "unknown-outcome", "expired", "late-expired"} {
+		for m, mode := range []string{"success", "unknown-outcome", "expired", "late-expired", "late-expired-enqueue-failure"} {
 			t.Run(fmt.Sprintf("%s/%s", role, mode), func(t *testing.T) {
 				database := databases[0]
 				head := "current-head"
 				if role == workflow.RolePlanner {
 					head = ""
 				}
-				fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1200+10*n+m, role, head)
+				fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 1200+20*n+m, role, head)
 				request := json.RawMessage(`{"operation_id":"question","questions":[{"id":"Q1","body":"Compatibility?"},{"id":"Q2","body":"Retention?"}]}`)
 				mutation, err := database.ReserveMutation(ctx, lease, store.MutationSpec{ToolName: "request_clarification", OperationID: "question", Request: request, ExternalService: "github", ExternalResourceID: "fixture"})
 				if err != nil {
@@ -97,6 +97,12 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 						t.Fatal(old, err)
 					}
 					expiredLease = old
+					for repeat := 0; repeat < 2; repeat++ {
+						if err = database.BeginWorkflowGitHubLabelWrite(ctx, *old); err != nil {
+							t.Fatal(err)
+						}
+					}
+
 					observed, err := database.GetWorkflowGitHubEffectContext(ctx, *old)
 					if err != nil || !observed.HumanInputWaiting {
 						t.Fatal(observed, err)
@@ -109,6 +115,9 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					}
 					if _, err = database.AcknowledgeWorkflowGitHubEffect(ctx, *old, observed, json.RawMessage(`{}`)); !errors.Is(err, store.ErrWorkflowGitHubEffectFenceLost) {
 						t.Fatal(err)
+					}
+					if err = database.BeginWorkflowGitHubLabelWrite(ctx, *old); !errors.Is(err, store.ErrWorkflowGitHubEffectFenceLost) {
+						t.Fatal("expired write admitted", err)
 					}
 					forged := *old
 					forged.LeaseToken = "00000000-0000-4000-8000-000000000001"
@@ -128,16 +137,20 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 				} else {
 					// Deterministic barrier: admission occurs inside the remote add, after
 					// the worker's durable observation and before acknowledgement.
-					if mode != "late-expired" {
+					if !strings.HasPrefix(mode, "late-expired") {
 						api.onAdd = admit
 					}
 					api.unknown = mode == "unknown-outcome"
 				}
-				worker, err := githubapi.NewLabelWorker(databases[1], handoffFixtureCredential{}, api, githubapi.VisibleEffectWorkerConfig{ClaimOwner: "new-worker", LeaseDuration: time.Minute, IdlePollInterval: time.Millisecond, HeartbeatInterval: time.Second, RetryDelay: time.Millisecond})
+				var workerStore githubapi.VisibleEffectWorkerStore = databases[1]
+				if mode == "late-expired-enqueue-failure" {
+					workerStore = &failedLabelCorrectionStore{Store: databases[1]}
+				}
+				worker, err := githubapi.NewLabelWorker(workerStore, handoffFixtureCredential{}, api, githubapi.VisibleEffectWorkerConfig{ClaimOwner: "new-worker", LeaseDuration: time.Minute, IdlePollInterval: time.Millisecond, HeartbeatInterval: time.Second, RetryDelay: time.Millisecond})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if mode == "late-expired" {
+				if strings.HasPrefix(mode, "late-expired") {
 					api.beforeAdd = func() {
 						admit()
 						if _, err = pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, labelJob); err != nil {
@@ -158,7 +171,7 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					}
 				}
 				processed, processErr := worker.ProcessNext(ctx)
-				if !processed || (mode != "late-expired" && processErr != nil) || (mode == "late-expired" && processErr == nil) {
+				if !processed || (!strings.HasPrefix(mode, "late-expired") && processErr != nil) || (strings.HasPrefix(mode, "late-expired") && processErr == nil) {
 					t.Fatal(processed, processErr)
 				}
 				api.beforeAdd = nil
@@ -167,6 +180,21 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					if err = pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE workflow_id=$1 AND idempotency_key LIKE 'human-input-lost-lease:%' AND status='AVAILABLE'`, fixture.workflowID).Scan(&corrections); err != nil || corrections != 1 {
 						t.Fatal(corrections, err)
 					}
+				}
+				if mode == "late-expired-enqueue-failure" {
+					var obligations int
+					if err = pool.QueryRow(ctx, `SELECT count(*) FROM workflow_github_label_writes WHERE workflow_id=$1`, fixture.workflowID).Scan(&obligations); err != nil || obligations != 1 {
+						t.Fatal("missing durable uncertainty", obligations, err)
+					}
+					// Advance the durable probe deadline, without a timing-based sleep.
+					if _, err = pool.Exec(ctx, `UPDATE workflow_github_label_writes SET next_probe_at=clock_timestamp() WHERE workflow_id=$1`, fixture.workflowID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// Start a healthy replacement, with no old in-memory retry state.
+				worker, err = githubapi.NewLabelWorker(databases[0], handoffFixtureCredential{}, api, githubapi.VisibleEffectWorkerConfig{ClaimOwner: "restarted-worker", LeaseDuration: time.Minute, IdlePollInterval: time.Millisecond, HeartbeatInterval: time.Second, RetryDelay: time.Millisecond})
+				if err != nil {
+					t.Fatal(err)
 				}
 				api.onAdd = nil
 				api.unknown = false
@@ -186,6 +214,14 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 				if api.present {
 					t.Fatal("obsolete waiting label survived")
 				}
+				var outstanding int
+				wantOutstanding := 0
+				if mode == "late-expired-enqueue-failure" {
+					wantOutstanding = 1
+				}
+				if err = pool.QueryRow(ctx, `SELECT count(*) FROM workflow_github_label_writes WHERE workflow_id=$1`, fixture.workflowID).Scan(&outstanding); err != nil || outstanding != wantOutstanding {
+					t.Fatal("incorrect obligation discharge", outstanding, err)
+				}
 				admit() // source replay must not queue another continuation
 				var version, stateRevision int64
 				var prepares, turns, failures, reviews int
@@ -201,8 +237,55 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					t.Fatalf("continuity changed: wait=%t v=%d state=%d jobs=%d turns=%d retries=%d reviews=%d inputs=%+v", visible, version, stateRevision, prepares, turns, failures, reviews, state.Inputs)
 				}
 
+				if mode == "late-expired-enqueue-failure" {
+					// The old process never recorded its return. A successful
+					// probe must not erase that uncertainty: a still-late write
+					// after the first repair must be repaired on the next tick.
+					api.present = true
+					if _, err = pool.Exec(ctx, `UPDATE workflow_github_label_writes SET next_probe_at=clock_timestamp() WHERE workflow_id=$1`, fixture.workflowID); err != nil {
+						t.Fatal(err)
+					}
+					if done, err := worker.ProcessNext(ctx); err != nil || !done || api.present {
+						t.Fatal("lost recurring recovery", done, err, api.present)
+					}
+					if done, err := worker.ProcessNext(ctx); err != nil || done {
+						t.Fatal("probe was not throttled", done, err)
+					}
+
+					// Exhaust an ordinary probe's three attempts. Recurrence
+					// cannot create a fresh generation to bypass that policy.
+					if _, err = pool.Exec(ctx, `UPDATE workflow_github_label_writes SET next_probe_at=clock_timestamp() WHERE workflow_id=$1`, fixture.workflowID); err != nil {
+						t.Fatal(err)
+					}
+					for attempt := 1; attempt <= 3; attempt++ {
+						probe, err := database.ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "failing-probe", time.Minute)
+						if err != nil || probe == nil || probe.Attempt != attempt {
+							t.Fatal(probe, err)
+						}
+						observed, err := database.GetWorkflowGitHubEffectContext(ctx, *probe)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err = database.BeginWorkflowGitHubLabelWrite(ctx, *probe); err != nil {
+							t.Fatal(err)
+						}
+						ack, err := database.AcknowledgeWorkflowGitHubEffectFailure(ctx, *probe, observed, errors.New("probe API unavailable"), true, 0)
+						if err != nil || ack.RetryScheduled != (attempt < 3) {
+							t.Fatal(ack, err)
+						}
+					}
+					for tick := 0; tick < 2; tick++ {
+						if _, err = pool.Exec(ctx, `UPDATE workflow_github_label_writes SET next_probe_at=clock_timestamp() WHERE workflow_id=$1`, fixture.workflowID); err != nil {
+							t.Fatal(err)
+						}
+						if next, err := database.ClaimWorkflowGitHubEffectJob(ctx, store.ReconcileGitHubLabelsJobKind, "healthy-after-exhaustion", time.Minute); err != nil || next != nil {
+							t.Fatal("reset exhausted correction budget", next, err)
+						}
+					}
+				}
+
 				if expiredLease != nil {
-					closeWorkflowForLiveness(t, database, ctx, fixture, 1200+10*n+m)
+					closeWorkflowForLiveness(t, database, ctx, fixture, 1200+20*n+m)
 					// Replay is still the same correction after lifecycle revision
 					// movement; its payload never freezes a desired add boolean.
 					if err = databases[1].EnsureWorkflowGitHubLabelCorrection(ctx, *expiredLease); err != nil {
@@ -264,7 +347,7 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					if err = pool.QueryRow(ctx, `SELECT human_input_waiting,human_input_presentation_revision FROM workflows WHERE id=$1`, fixture.workflowID).Scan(&visible, &version); err != nil || !visible || version != 3 {
 						t.Fatal(visible, version, err)
 					}
-					closeWorkflowForLiveness(t, database, ctx, fixture, 1200+10*n+m)
+					closeWorkflowForLiveness(t, database, ctx, fixture, 1200+20*n+m)
 					if err = pool.QueryRow(ctx, `SELECT human_input_waiting,human_input_presentation_revision FROM workflows WHERE id=$1`, fixture.workflowID).Scan(&visible, &version); err != nil || visible || version != 4 {
 						t.Fatal(visible, version, err)
 					}
@@ -390,4 +473,11 @@ func TestHumanInputUpgradeReconciliationUsesCurrentRecords(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A failed return-path enqueue must not be the only recovery mechanism.
+type failedLabelCorrectionStore struct{ *store.Store }
+
+func (s *failedLabelCorrectionStore) EnsureWorkflowGitHubLabelCorrection(context.Context, store.JobLease) error {
+	return errors.New("injected correction persistence failure")
 }
