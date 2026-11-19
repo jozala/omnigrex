@@ -646,3 +646,86 @@ func TestCIRepairCannotReactivateStoppedWork(t *testing.T) {
 		})
 	}
 }
+
+// Verify the observed B0 PR metadata / B1 target tip combination using the real
+// shared observer and durable admission gate, with selected checks on the head.
+func TestReviewGateLaggingPRBaseWithSuccessfulHeadChecks(t *testing.T) {
+	for _, scenario := range []string{"success", "missing", "newer pending", "invalid parents"} {
+		t.Run(scenario, func(t *testing.T) {
+			database, _, ctx, lease := reviewAdmissionFixture(t)
+			head, base, tip, merge := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("d", 40), strings.Repeat("c", 40)
+			provider := &admissionProvider{head: head, base: base, merge: merge}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				root := "/repos/owner/repo"
+				switch r.URL.Path {
+				case root + "/branches/main":
+					fmt.Fprintf(w, `{"name":"main","protected":true,"commit":{"sha":%q}}`, tip)
+				case root + "/git/commits/" + merge:
+					parent := tip
+					if scenario == "invalid parents" {
+						parent = base
+					}
+					fmt.Fprintf(w, `{"sha":%q,"parents":[{"sha":%q},{"sha":%q}]}`, merge, parent, head)
+				case root + "/branches/main/protection":
+					fmt.Fprint(w, `{"required_status_checks":{"contexts":[],"checks":[{"context":"build","app_id":7}]}}`)
+				case root + "/commits/" + head + "/check-runs":
+					checks := []githubapi.CheckRun{}
+					if scenario != "missing" {
+						checks = append(checks, githubapi.CheckRun{ID: 1, Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "success"})
+					}
+					if scenario == "newer pending" {
+						checks = append(checks, githubapi.CheckRun{ID: 2, Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "queued"})
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(checks), "check_runs": checks})
+				case root + "/commits/" + merge + "/statuses":
+					fmt.Fprint(w, `[]`)
+				default:
+					provider.ServeHTTP(w, r)
+				}
+			}))
+			defer server.Close()
+			client, err := githubapi.NewAPIClient(server.Client(), server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := database.BeginReviewAdmission(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := request.CreatedAt.Add(2 * time.Minute)
+			gate := agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: tip}, Observer: client, Now: func() time.Time { return now }}
+			deadline := request.Deadline
+			for n := 0; n < 2; n++ {
+				request, err = gate.Check(ctx, agentturn.Request{Lease: lease, InstallationCredential: "fixture", RepositoryOwner: "owner", RepositoryName: "repo"}, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !request.Deadline.Equal(deadline) {
+				t.Fatal("verification changed deadline")
+			}
+			var evidence struct {
+				Reason      string                    `json:"release_reason"`
+				Disposition store.ReviewDisposition   `json:"disposition"`
+				Mapping     githubapi.CITargetMapping `json:"target_mapping"`
+			}
+			if err := json.Unmarshal(request.Observation, &evidence); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "success" {
+				if request.Status != "WAITING" || evidence.Disposition != store.ReviewWait {
+					t.Fatalf("unsafe admission: %+v evidence=%+v", request, evidence)
+				}
+				return
+			}
+			if request.Status != "RELEASED" || evidence.Reason != "completed_ci" || evidence.Disposition != store.ReviewAdmit || evidence.Mapping.State != "verified" || evidence.Mapping.BaseSHA != tip || evidence.Mapping.TestMergeSHA != merge {
+				t.Fatalf("head success not admitted: %+v evidence=%+v", request, evidence)
+			}
+			spec := preparationSpec("profile", "provider/model")
+			spec.ReviewAdmission = &request
+			if _, err := database.PrepareAgentTurn(ctx, lease, spec); err != nil {
+				t.Fatalf("Reviewer allocation: %v", err)
+			}
+		})
+	}
+}
