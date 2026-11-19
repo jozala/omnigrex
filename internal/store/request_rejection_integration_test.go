@@ -117,6 +117,7 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 						if err = pool.QueryRow(ctx, `SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$1 AND operation_id='count'`, lease.ID).Scan(&allocated); err != nil || allocated != 0 {
 							t.Fatal(allocated, err)
 						}
+						callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, request("count", []collaboration.Question{original[0]}), true)
 					}
 				}
 				if err = pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
@@ -125,7 +126,7 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 				if err = json.Unmarshal(raw, &state); err != nil {
 					t.Fatal(err)
 				}
-				if len(state.Rounds) != 1 || len(state.References) != 2 || len(state.Assessments) != 1 || len(state.Rounds[0].Resolutions) != 1 || len(state.RequestRejections) != 4 || api.posts != 0 || state.Waiting || state.Rounds[0].Artifact != nil || state.Rounds[0].Questions[0] != original[0] {
+				if len(state.Rounds) != 1 || len(state.References) != 2 || len(state.Assessments) != 1 || len(state.Rounds[0].Resolutions) != 1 || len(state.RequestRejections) != 4 || len(state.RequestAdmissionRejections) != 1 || api.posts != 0 || state.Waiting || state.Rounds[0].Artifact != nil || state.Rounds[0].Questions[0] != original[0] {
 					t.Fatal("rejection changed conversation", state, api.posts)
 				}
 				corrected := []collaboration.Question{original[0]}
@@ -137,6 +138,10 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 					t.Fatal(good, api.posts)
 				}
 				call(mcp.ToolRequestClarification, request("corrected", corrected))
+				countReplay := call(mcp.ToolRequestClarification, request("count", many))
+				if !strings.Contains(countReplay, "question_limit_exceeded") {
+					t.Fatal(countReplay)
+				}
 				if replay := call(mcp.ToolRequestClarification, bad); !reflect.DeepEqual(requestResult(t, replay), requestResult(t, first)) || api.posts != 1 {
 					t.Fatal("old rejection changed after publication", replay, api.posts)
 				}

@@ -127,18 +127,19 @@ type Preparation struct {
 }
 
 type State struct {
-	RequestRejections      []RequestRejection    `json:"request_rejections,omitempty"`
-	ResolutionRejections   []ResolutionRejection `json:"resolution_rejections,omitempty"`
-	InterpretationSequence uint64                `json:"interpretation_sequence,omitempty"`
-	Assessments            []Assessment          `json:"assessments,omitempty"`
-	References             []Reference           `json:"references,omitempty"`
-	Planning               *PlanningState        `json:"planning,omitempty"`
-	Preparations           []Preparation         `json:"preparations,omitempty"`
-	Rounds                 []Round               `json:"rounds"`
-	Inputs                 []Input               `json:"inputs"`
-	Receipts               []Receipt             `json:"receipts"`
-	CurrentRound           string                `json:"current_round,omitempty"`
-	Waiting                bool                  `json:"waiting"`
+	RequestAdmissionRejections []RequestAdmissionRejection `json:"request_admission_rejections,omitempty"`
+	RequestRejections          []RequestRejection          `json:"request_rejections,omitempty"`
+	ResolutionRejections       []ResolutionRejection       `json:"resolution_rejections,omitempty"`
+	InterpretationSequence     uint64                      `json:"interpretation_sequence,omitempty"`
+	Assessments                []Assessment                `json:"assessments,omitempty"`
+	References                 []Reference                 `json:"references,omitempty"`
+	Planning                   *PlanningState              `json:"planning,omitempty"`
+	Preparations               []Preparation               `json:"preparations,omitempty"`
+	Rounds                     []Round                     `json:"rounds"`
+	Inputs                     []Input                     `json:"inputs"`
+	Receipts                   []Receipt                   `json:"receipts"`
+	CurrentRound               string                      `json:"current_round,omitempty"`
+	Waiting                    bool                        `json:"waiting"`
 }
 type Command struct {
 	Kind   string

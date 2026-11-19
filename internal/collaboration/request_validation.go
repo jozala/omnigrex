@@ -24,6 +24,17 @@ type RequestRejection struct {
 	Validation     RequestValidationError `json:"validation"`
 }
 
+// RequestAdmissionRejection binds a proven pre-reservation count rejection to
+// the caller identity without allocating a tool invocation or domain round.
+// The fingerprint excludes only the server-owned signature, like reservations.
+type RequestAdmissionRejection struct {
+	OperationID        string                 `json:"operation_id"`
+	OperationLineageID string                 `json:"operation_lineage_id"`
+	ParticipantID      string                 `json:"participant_id"`
+	RequestSHA256      string                 `json:"request_sha256"`
+	Validation         RequestValidationError `json:"validation"`
+}
+
 // RequestRejectedResult is definite non-publication, not terminal intent.
 // Its exact shape is shared by settlement and recovery ledger consumers.
 type RequestRejectedResult struct {
