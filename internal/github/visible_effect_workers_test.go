@@ -949,3 +949,7 @@ func TestReviewProgressRecoversLostCreateResponse(t *testing.T) {
 		t.Fatalf("lost response duplicated progress comment: %d", api.issueCreates)
 	}
 }
+
+func (fake *fakeVisibleEffectStore) EnsureWorkflowGitHubLabelCorrection(context.Context, store.JobLease) error {
+	return nil
+}

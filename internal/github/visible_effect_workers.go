@@ -26,6 +26,7 @@ var (
 
 // VisibleEffectWorkerStore is the durable boundary used by GitHub visible-effect workers.
 type VisibleEffectWorkerStore interface {
+	EnsureWorkflowGitHubLabelCorrection(context.Context, store.JobLease) error
 	ClaimWorkflowGitHubEffectJob(context.Context, string, string, time.Duration) (*store.JobLease, error)
 	HeartbeatJob(context.Context, store.JobLease, time.Duration) error
 	GetWorkflowGitHubEffectContext(context.Context, store.JobLease) (store.WorkflowGitHubEffectContext, error)
@@ -164,6 +165,7 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 
 	var credential string
 	acknowledged := false
+	externalOperationStarted := false
 	operationErr := func() error {
 		effect, err := worker.store.GetWorkflowGitHubEffectContext(workCtx, *lease)
 		if err != nil {
@@ -208,20 +210,7 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 			acknowledged = true
 			return nil
 		}
-		if kind == store.ReconcileGitHubLabelsJobKind && effect.VerificationPending && effect.ReviewAdmission == nil {
-			// Authoritative verification has not succeeded for the current
-			// attempt yet: applying current active-state labels now would
-			// advertise Developer/Reviewer activity prematurely. Complete this
-			// job without GitHub calls; the successful preparation enqueues
-			// fresh labels, and handoff decisions converge theirs.
-			acknowledgement, err := worker.store.AcknowledgeWorkflowGitHubEffect(workCtx, *lease, effect, json.RawMessage(`{"deferred_pending_verification":true}`))
-			if err != nil {
-				return fmt.Errorf("defer %s pending verification: %w", kind, err)
-			}
-			_ = acknowledgement
-			acknowledged = true
-			return nil
-		}
+		externalOperationStarted = true
 		result, effectErr := operation(workCtx, credential, effect, *lease)
 		if effectErr != nil {
 			if workCtx.Err() != nil {
@@ -260,6 +249,16 @@ func (worker *visibleEffectWorker) processNext(ctx context.Context, kind string,
 
 	stopHeartbeat()
 	heartbeatErr := <-heartbeatDone
+	// A cancelled HTTP call may already have mutated GitHub. The old owner can
+	// finish after a newer owner has removed the overlay, so lease reclamation
+	// alone is not enough: retain a correction after this request has returned.
+	if kind == store.ReconcileGitHubLabelsJobKind && externalOperationStarted && !acknowledged &&
+		(heartbeatErr != nil || workCtx.Err() != nil || errors.Is(operationErr, store.ErrWorkflowGitHubEffectFenceLost)) {
+		repairCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		repairErr := worker.store.EnsureWorkflowGitHubLabelCorrection(repairCtx, *lease)
+		stop()
+		operationErr = errors.Join(operationErr, repairErr)
+	}
 	cancelWork()
 	operationErr = redactVisibleEffectError(operationErr, credential)
 	if operationErr == nil {
@@ -352,6 +351,15 @@ func (worker *visibleEffectWorker) run(ctx context.Context, process func(context
 }
 
 func (worker *LabelWorker) reconcile(ctx context.Context, credential string, effect store.WorkflowGitHubEffectContext, _ store.JobLease) (json.RawMessage, error) {
+	if err := worker.reconcileHumanInput(ctx, credential, effect); err != nil {
+		return nil, err
+	}
+	if effect.HumanInputOnly {
+		return json.RawMessage(`{"human_input_only":true}`), nil
+	}
+	if effect.VerificationPending && effect.ReviewAdmission == nil {
+		return json.RawMessage(`{"deferred_pending_verification":true}`), nil
+	}
 	desired, err := managedLabelState(effect.State)
 	if err != nil {
 		return nil, err

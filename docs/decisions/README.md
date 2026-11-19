@@ -110,3 +110,5 @@ Do not copy an existing ADR into a second record.
 - [0067: Admit exact-plan implementation at the first Developer Turn](0067-admit-exact-plan-implementation-at-the-first-developer-turn.md) - Accepted, 2026-11-14.
 
 - [0068: Qualify Reviewer admission and bound CI repair](0068-qualify-review-admission-and-bound-ci-repair.md) - Accepted, 2026-11-15.
+
+- [0069: Project human-input waiting independently of Stage](0069-project-human-input-waiting-independently.md) - Accepted, 2026-11-19.

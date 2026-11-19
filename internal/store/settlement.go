@@ -1012,7 +1012,7 @@ DELETE FROM agent_turn_slots WHERE agent_turn_id = $1 AND agent_session_id = $2
 	if slotDelete.RowsAffected() != 1 {
 		return ErrAgentTurnFenceLost
 	}
-	return nil
+	return refreshHumanInputPresentationTx(ctx, tx, job.WorkflowID)
 }
 
 func readPersistedAgentTurnSettlement(ctx context.Context, tx pgx.Tx, turnID string, epoch int64) (persistedAgentTurnSettlement, error) {
