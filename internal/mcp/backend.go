@@ -1308,12 +1308,17 @@ func (backend *ProductionBackend) validateMutationReplay(invocation Invocation, 
 		source.ExternalResourceID != expected.ExternalResourceID {
 		return ToolDefinition{}, ErrToolPrecondition
 	}
+	// A definite request rejection is historical request evidence, not an
+	// effect bound to the retry checkout. All source/request/resource checks
+	// above still apply; restoring it grants no publication progress or head
+	// freshness (RestoreMutationReplay returns before publication restoration).
+	requestRejection := invocation.Name == ToolRequestClarification && collaboration.IsRequestRejection(source.Result)
 	publicationMutation := invocation.Name == ToolPublishChanges || invocation.Name == ToolOpenPR || invocation.Name == ToolRequestReview
 	if publicationMutation {
 		if !validRevision(source.ExpectedSHA) {
 			return ToolDefinition{}, ErrToolPrecondition
 		}
-	} else if source.ExpectedSHA != expected.ExpectedSHA {
+	} else if !requestRejection && source.ExpectedSHA != expected.ExpectedSHA {
 		return ToolDefinition{}, ErrToolPrecondition
 	}
 	return tool, nil

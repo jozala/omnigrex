@@ -338,3 +338,83 @@ func TestRequestRejectionAloneCannotEstablishWaiting(t *testing.T) {
 		t.Fatal(waiting, rounds, err)
 	}
 }
+
+// The checkout head can change between stopped-Turn retries. A definite
+// rejection is historical request evidence, not a publication to restore.
+func TestRequestRejectionGatewayAncestorReplayAcrossCheckoutHeads(t *testing.T) {
+	for i, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed_head=%t", changed), func(t *testing.T) {
+			databases, pool := openPhaseFiveStores(t, 1)
+			database := databases[0]
+			ctx := t.Context()
+			fixture := seedAgentSession(t, pool, 9985+i)
+			oldHead, newHead := strings.Repeat("a", 40), strings.Repeat("a", 40)
+			if changed {
+				newHead = strings.Repeat("b", 40)
+			}
+			api := &requestRejectionGitHub{}
+			publisher := &replayGatewayPublisher{}
+			newBackend := func() *mcp.ProductionBackend {
+				backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: database})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return backend
+			}
+			root, lease, execution := acquireReplayGatewayTurn(t, database, pool, fixture, store.AgentTurn{}, "rejection-root")
+			gateway, registration := openReplayGateway(t, database, newBackend(), replayGatewayScope(lease, execution, oldHead))
+			args := map[string]any{"operation_id": "rejected-question", "questions": []collaboration.Question{{ID: "Q1", Body: "One?"}, {ID: "Q1", Body: "Two?"}}}
+			original := callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, args, false)
+			if !strings.Contains(original, "duplicate_question") {
+				t.Fatal(original)
+			}
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.FinalizeAgentTurn(ctx, lease, store.AgentTurnCompletion{Status: store.AgentTurnFailed, LastError: "Agent prompt failed"}); err != nil {
+				t.Fatal(err)
+			}
+			_, retryLease, retryExecution := acquireReplayGatewayTurn(t, database, pool, fixture, root, "rejection-retry")
+			retryGateway, retryRegistration := openReplayGateway(t, database, newBackend(), replayGatewayScope(retryLease, retryExecution, newHead))
+			replay := callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestClarification, args, false)
+			if !reflect.DeepEqual(requestResult(t, replay), requestResult(t, original)) {
+				t.Fatal("historical rejection changed", replay, original)
+			}
+			// The replay must not publish or allocate a round, or become waiting.
+			var state collaboration.State
+			var raw []byte
+			var waiting bool
+			if err := pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT clarification_waiting FROM workflows WHERE id=$1`, fixture.workflowID).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Rounds) != 0 || api.posts != 0 || waiting || publisher.callCount() != 0 {
+				t.Fatal(state.Rounds, api.posts, waiting, publisher.callCount())
+			}
+			// Changed arguments cannot use the historical identity, including on the
+			// retry. A fresh correction must retain the new checkout's head binding.
+			corrected := map[string]any{"operation_id": "rejected-question", "questions": []collaboration.Question{{ID: "Q1", Body: "One?"}}}
+			callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestClarification, corrected, true)
+			corrected["operation_id"] = "corrected-question"
+			result := callReplayGatewayTool(t, retryGateway, retryRegistration, mcp.ToolRequestClarification, corrected, false)
+			if !strings.Contains(result, "CLARIFICATION_WAIT") || api.posts != 1 {
+				t.Fatal(result, api.posts)
+			}
+			var correctedHead string
+			if err := pool.QueryRow(ctx, `SELECT expected_sha FROM tool_invocations WHERE agent_turn_id=$1 AND operation_id='corrected-question'`, retryLease.ID).Scan(&correctedHead); err != nil || correctedHead != newHead {
+				t.Fatal(correctedHead, err)
+			}
+			if err := retryGateway.CloseAndDrain(ctx, retryRegistration); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

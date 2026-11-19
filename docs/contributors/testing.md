@@ -218,6 +218,8 @@ These fixtures do not deploy the feature, exercise a historical production plan 
 It assesses the delivered answer, resolves Q2, rejects a changed Q1 body without publication, replays the rejection, and exercises both unchanged-body/introduction and explicit-replacement corrections.
 It also covers duplicate IDs, omitted unresolved questions, applicable count limits and unjustified empty-question waiting at the actual admission boundaries.
 `TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication` reads the committed receipt through another Store, distinguishes earlier uncertain publication from correctable arguments, and retains stopped-and-fenced recovery without inventing a rejection from absence.
+`TestRequestRejectionGatewayAncestorReplayAcrossCheckoutHeads` fails the original Turn and retries identical arguments through a restarted production backend at the same or a changed checkout head, then publishes a fresh correction against the retry head.
+Backend replay controls retain exact-request/resource/authority checks, reject genuine waiting and malformed evidence across changed heads, and verify rejection replay restores no publication state.
 `TestClarificationRecordedPromptRecovery` includes a handled rejection before each genuine clarification outcome across Roles and stopped/normal corroboration paths.
 `TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent` includes a rejected request before the genuine review handoff to exercise ancestor counting, prior-intent discovery and confirmation.
 Strict-result and outcome-selection unit tests keep malformed successful evidence fail-closed and unknown dependency errors masked.

@@ -35,6 +35,7 @@ A shared strict contract makes the distinction explicit at each ledger consumer.
 ## Consequences
 
 Agents may correct internal arguments using existing conversation evidence without repeated human answers or per-attempt GitHub comments.
-Identical replay remains rejected after state changes; corrections require a fresh identity only after definite rejection.
+Identical replay remains rejected after state changes, including a retry checkout head change; it restores no publication progress or current-head freshness.
+Corrections require a fresh identity only after definite rejection.
 This adds no retry budget, authority, successor allocation, deployment action or historical production recovery.
 Go recognition and SQL selectors must remain aligned and covered by settlement and recovery tests.
