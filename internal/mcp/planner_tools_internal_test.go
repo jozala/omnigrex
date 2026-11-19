@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"fmt"
 	"github.com/jozala/omnigrex/internal/role"
+	"strings"
 	"testing"
 )
 
@@ -32,8 +34,8 @@ func TestPlannerToolDiscoveryPreservesOtherRoleSchemas(t *testing.T) {
 			if roleID == role.Planner {
 				want = 5
 			}
-			if questions["maxItems"] != want {
-				t.Fatalf("%s question cap = %v, want %d", roleID, questions["maxItems"], want)
+			if questions["maxItems"] != nil || !strings.Contains(tool.Description, fmt.Sprintf("at most %d questions", want)) {
+				t.Fatalf("%s count limit must reach authoritative admission through Pi: schema=%v description=%s", roleID, questions, tool.Description)
 			}
 		}
 		if !found {

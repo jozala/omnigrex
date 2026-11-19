@@ -218,14 +218,22 @@ func toolsForScope(policies role.PolicyCatalog, scope TokenScope) ([]ToolDefinit
 	result := make([]ToolDefinition, 0, len(requestedSet))
 	for _, tool := range toolCatalog {
 		if _, ok := requestedSet[tool.Name]; ok {
-			if scope.Role == role.Planner && tool.Name == ToolRequestClarification {
-				// Keep the shared catalog immutable: other Roles retain their existing limit.
+			if tool.Name == ToolRequestClarification {
+				// Pi validates discovered schemas before execute. A hard count
+				// bound here would mask server-owned actionable admission feedback
+				// in retained bridges. Keep item validation; advertise the actual
+				// Role limit in prose and enforce it under the store fence.
 				tool.InputSchema = maps.Clone(tool.InputSchema)
 				properties := maps.Clone(tool.InputSchema["properties"].(map[string]any))
 				questions := maps.Clone(properties["questions"].(map[string]any))
-				questions["maxItems"] = 5
+				delete(questions, "maxItems")
 				properties["questions"] = questions
 				tool.InputSchema["properties"] = properties
+				limit := 50
+				if scope.Role == role.Planner {
+					limit = 5
+				}
+				tool.Description += fmt.Sprintf(" This Role may submit at most %d questions; count mistakes return actionable admission rejection.", limit)
 			}
 			result = append(result, tool)
 		}
@@ -251,8 +259,8 @@ func validatePolicyTools(policies role.PolicyCatalog) error {
 	return nil
 }
 
-// Count mistakes use the authoritative durable rejection path, not an opaque
-// schema error. Keep advertised limits, item validation and byte bounds intact.
+// Count mistakes use authoritative admission, not an opaque schema error.
+// Keep item validation and byte bounds intact; describe limits to the model.
 func validateToolArguments(raw json.RawMessage, tool ToolDefinition) error {
 	schema := tool.InputSchema
 	if tool.Name == ToolRequestClarification {

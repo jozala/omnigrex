@@ -17,7 +17,8 @@ Return a bounded canonical `status: rejected`, `publication: not_applied` result
 Do not allocate a round, reference or artifact for rejected requests.
 For count-only mistakes proven before reservation, commit a fingerprint-bound admission receipt and return the same structural feedback without fabricating a mutation reservation.
 A committed receipt preserves exact replay and rejects corrected content under the old caller identity; an ambiguous receipt commit is not non-admission proof.
-Retain advertised schema limits, item validation and gateway request-byte bounds; direct backend count validation still records receipts for already reserved operations.
+Advertise Role count limits in the tool description rather than `maxItems` in the discovered schema: Pi validates that schema before calling the server, which would otherwise mask actionable feedback in retained bridges.
+Keep item validation and gateway request-byte bounds; direct backend count validation still records receipts for already reserved operations.
 A request blocked by an earlier unsettled publication directs exact-operation reconciliation, not a fresh-operation bypass.
 A receipt for the new request does not settle the earlier publication.
 
