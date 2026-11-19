@@ -2,7 +2,9 @@ package github_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -11,9 +13,12 @@ import (
 )
 
 func TestCITargetIndependentBranchTip(t *testing.T) {
-	for _, scenario := range []string{"stable", "branch moved", "base moved", "head moved", "head ref moved", "base ref moved", "repo moved", "repo name moved", "PR moved", "merge moved", "closed", "merged", "unmergeable", "unknown mergeability", "reversed parents", "wrong base", "wrong head", "one parent", "three parents", "wrong commit", "invalid branch", "wrong branch", "PR unavailable", "branch unavailable", "commit unavailable", "fresh PR unavailable", "fresh branch unavailable"} {
+	for _, scenario := range []string{"stable", "stable current base", "branch moved", "base moved", "head moved", "head ref moved", "base ref moved", "repo moved", "repo name moved", "PR moved", "merge moved", "closed", "merged", "unmergeable", "unknown mergeability", "reversed parents", "wrong base", "wrong head", "one parent", "three parents", "wrong commit", "invalid branch", "wrong branch", "PR unavailable", "branch unavailable", "commit unavailable", "fresh PR unavailable", "fresh branch unavailable"} {
 		t.Run(scenario, func(t *testing.T) {
 			head, base, tip, merge := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40), strings.Repeat("d", 40)
+			if scenario == "stable current base" {
+				base = tip
+			}
 			prReads, branchReads := 0, 0
 			client, done := ciClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var response any
@@ -28,7 +33,8 @@ func TestCITargetIndependentBranchTip(t *testing.T) {
 					// Decode the fixture to avoid coupling to nested API field type names.
 					raw := `{"head":{"ref":"feature","sha":"` + head + `"},"base":{"ref":"main","sha":"` + base + `","repo":{"id":9123,"full_name":"acme/widgets"}},"mergeable":true,"merge_commit_sha":"` + merge + `"}`
 					if err := json.Unmarshal([]byte(raw), &pr); err != nil {
-						t.Fatal(err)
+						t.Error(err)
+						return
 					}
 					if prReads == 2 {
 						switch scenario {
@@ -113,12 +119,27 @@ func TestCITargetIndependentBranchTip(t *testing.T) {
 			}))
 			defer done()
 			mapping := client.VerifyCITarget(context.Background(), "token", "acme", "widgets", 9123, 17, 17, head, "feature", "main")
-			if scenario == "stable" {
+			if scenario == "stable" || scenario == "stable current base" {
 				if mapping.State != "verified" || mapping.BaseSHA != tip || mapping.TestMergeSHA != merge || prReads != 2 || branchReads != 2 {
 					t.Fatalf("mapping=%+v reads=%d/%d", mapping, prReads, branchReads)
 				}
 			} else if mapping.State == "verified" || mapping.TestMergeSHA != "" {
 				t.Fatalf("unsafe mapping: %+v", mapping)
+			}
+			// A continuation from an earlier authorized merge read is not
+			// permission to read that commit after a failed re-verification.
+			cursor := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"v":1,"kind":"ci_runs","repo":9123,"head":%q,"id":0,"offset":1}`, merge)))
+			got, err := githubapi.CICursorReadHead(cursor, mapping)
+			if mapping.State == "verified" {
+				if err != nil || got != merge {
+					t.Fatalf("verified continuation: %q %v", got, err)
+				}
+				mapping.TestMergeSHA = base
+				if _, err := githubapi.CICursorReadHead(cursor, mapping); err == nil {
+					t.Fatal("obsolete merge continuation authorized after replacement")
+				}
+			} else if err == nil {
+				t.Fatal("failed verification authorized merge continuation")
 			}
 		})
 	}

@@ -671,10 +671,10 @@ func TestReviewGateLaggingPRBaseWithSuccessfulHeadChecks(t *testing.T) {
 				case root + "/commits/" + head + "/check-runs":
 					checks := []githubapi.CheckRun{}
 					if scenario != "missing" {
-						checks = append(checks, githubapi.CheckRun{ID: 1, Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "success"})
+						checks = append(checks, githubapi.CheckRun{ID: 1, NodeID: "CR_1", HTMLURL: "https://github.test/check/1", Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "success"})
 					}
 					if scenario == "newer pending" {
-						checks = append(checks, githubapi.CheckRun{ID: 2, Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "queued"})
+						checks = append(checks, githubapi.CheckRun{ID: 2, NodeID: "CR_2", HTMLURL: "https://github.test/check/2", Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "queued"})
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(checks), "check_runs": checks})
 				case root + "/commits/" + merge + "/statuses":
