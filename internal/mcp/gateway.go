@@ -768,7 +768,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
 	}
-	if validateArguments(params.Arguments, tool.InputSchema) != nil {
+	if validateToolArguments(params.Arguments, tool) != nil {
 		gateway.logRequestRejected(request, tool.Name, "argument_validation", "invalid_arguments")
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return

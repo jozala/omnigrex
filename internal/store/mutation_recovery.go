@@ -257,9 +257,9 @@ SELECT COALESCE(prompt_stop_reason, ''), COALESCE(prompt_error_class, ''),
 	return skipSucceeded, nil
 }
 
-const recoveryCandidatePredicate = `WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
+var recoveryCandidatePredicate = `WHERE agent_turn_id = $1 AND execution_epoch = $2 AND kind = 'MUTATION'
   AND (state IN ('UNKNOWN', 'RECONCILING')
-       OR (state = 'SUCCEEDED' AND (NOT $3 OR tool_name NOT IN
+       OR (state = 'SUCCEEDED' AND NOT (tool_name='request_clarification' AND ` + clarificationRejectionSQL("result") + `) AND (NOT $3 OR tool_name NOT IN
            ('publish_changes', 'open_pr', 'publish_plan_checkpoint', 'complete_planning', 'request_clarification', 'request_review', 'submit_review', 'confirm_prior_terminal_intent'))))
 `
 

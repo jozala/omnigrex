@@ -25,11 +25,15 @@ func (f *clarificationLedger) HasPendingHumanInput(context.Context, string, stri
 type clarificationLedger struct {
 	resolutionOperation string
 	round               collaboration.Round
+	limit               int
 	published           bool
 	source              collaboration.Source
 }
 
 func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
+	if f.limit > 0 && len(questions) > f.limit {
+		return collaboration.Round{}, &collaboration.RequestValidationError{Code: "question_limit_exceeded"}
+	}
 	f.round = collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
 	return f.round, nil
 }
@@ -291,7 +295,7 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 	}
 	for _, count := range []int{1, 5, 6} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			ledger := &clarificationLedger{}
+			ledger := &clarificationLedger{limit: 5}
 			api := &backendGitHub{}
 			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger, Policies: policies})
 			if err != nil {
@@ -305,9 +309,9 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 			scope := productionToolScope(role.Planner)
 			scope.PullRequest = nil
 			scope.AgentProfileName, scope.RoleDisplayName = "planner", "Planner"
-			_, err = backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
+			result, err := backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
 			if count > 5 {
-				if !errors.Is(err, mcp.ErrInvalidInvocation) || ledger.round.ID != "" || ledger.published {
+				if err != nil || !collaboration.IsRequestRejection(result) || ledger.round.ID != "" || ledger.published {
 					t.Fatalf("oversized round admitted: %+v %v", ledger, err)
 				}
 			} else if err != nil || !ledger.published {

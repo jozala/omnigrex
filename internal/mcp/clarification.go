@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	"github.com/jozala/omnigrex/internal/collaboration"
-	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
 )
 
@@ -27,7 +26,7 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		Questions    []collaboration.Question `json:"questions"`
 		Signature    string                   `json:"signature"`
 	}
-	if json.Unmarshal(invocation.Arguments, &request) != nil || invocation.Scope.Role == role.Planner && len(request.Questions) > 5 {
+	if json.Unmarshal(invocation.Arguments, &request) != nil {
 		return nil, ErrInvalidInvocation
 	}
 	publisher := backend.clarificationDelivery(invocation)
@@ -37,13 +36,23 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		}
 		return nil
 	}}
-	round, err := operation.Publish(ctx, func(ctx context.Context) (collaboration.Round, error) {
-		round, err := backend.clarifications.RequestClarification(ctx, invocation.lease, invocation.OperationID, request.Questions)
-		if err != nil && !errors.Is(err, collaboration.ErrInvalid) {
-			err = OutcomeUnknown(err)
+	// Validate under the authoritative store fence before renderer preflight;
+	// count mistakes must not be masked by an oversized provisional payload.
+	reserved, err := backend.clarifications.RequestClarification(ctx, invocation.lease, invocation.OperationID, request.Questions)
+	if err != nil {
+		if IsOutcomeUnknown(err) {
+			return nil, err
 		}
-		return round, err
-	}, collaboration.Round{ID: "R" + invocation.OperationID, Supersedes: "R00000000-0000-4000-8000-000000000000", Questions: request.Questions, Introduction: request.Introduction}, request.Signature)
+		var rejection *collaboration.RequestValidationError
+		if errors.As(err, &rejection) {
+			return collaboration.RequestRejectionResult(rejection)
+		}
+		if errors.Is(err, collaboration.ErrInvalid) {
+			return nil, ErrInvalidInvocation
+		}
+		return nil, OutcomeUnknown(err)
+	}
+	round, err := operation.Publish(ctx, func(context.Context) (collaboration.Round, error) { return reserved, nil }, collaboration.Round{Questions: request.Questions}, request.Signature)
 	if err != nil {
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation

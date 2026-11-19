@@ -1399,7 +1399,7 @@ func (backend *ProductionBackend) validateInvocation(invocation Invocation) (Too
 	// reservation after validating agent input, so it is kept out of the
 	// public tool schema and stripped before input validation. Publication
 	// below uses the reservation value verbatim.
-	if validateArguments(stripReservedSignatureArgument(invocation), tool.InputSchema) != nil || !validToolScope(policy, invocation.Scope) {
+	if validateToolArguments(stripReservedSignatureArgument(invocation), tool) != nil || !validToolScope(policy, invocation.Scope) {
 		return ToolDefinition{}, ErrInvalidInvocation
 	}
 	if !scopeAllowsBackendTool(invocation.Scope, invocation.Name) {

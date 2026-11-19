@@ -251,6 +251,21 @@ func validatePolicyTools(policies role.PolicyCatalog) error {
 	return nil
 }
 
+// Count mistakes use the authoritative durable rejection path, not an opaque
+// schema error. Keep advertised limits, item validation and byte bounds intact.
+func validateToolArguments(raw json.RawMessage, tool ToolDefinition) error {
+	schema := tool.InputSchema
+	if tool.Name == ToolRequestClarification {
+		schema = maps.Clone(schema)
+		properties := maps.Clone(schema["properties"].(map[string]any))
+		questions := maps.Clone(properties["questions"].(map[string]any))
+		delete(questions, "maxItems")
+		properties["questions"] = questions
+		schema["properties"] = properties
+	}
+	return validateArguments(raw, schema)
+}
+
 func validateArguments(raw json.RawMessage, schema map[string]any) error {
 	if len(raw) == 0 {
 		return errInvalidArguments
