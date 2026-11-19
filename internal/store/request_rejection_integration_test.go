@@ -281,3 +281,55 @@ func TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication(t *tes
 		t.Fatal(recovered, err)
 	}
 }
+
+func TestRequestRejectionAloneCannotEstablishWaiting(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx := t.Context()
+	fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 9981, workflow.RoleDeveloper, strings.Repeat("a", 40))
+	qs := []collaboration.Question{{ID: "duplicate", Body: "First?"}, {ID: "duplicate", Body: "Second?"}}
+	bad := startQuestionRequest(t, database, ctx, lease, "only-rejection", qs)
+	_, err := database.RequestClarification(ctx, lease, bad.ID, qs)
+	var validation *collaboration.RequestValidationError
+	if !errors.As(err, &validation) {
+		t.Fatal(err)
+	}
+	result, err := collaboration.RequestRejectionResult(validation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = database.CompleteMutation(ctx, lease, bad.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.BeginTerminalCorroboration(ctx, lease, bad.ID, json.RawMessage(`{"admitted":true,"status":"completed"}`), "", "transient_transport"); !errors.Is(err, store.ErrTerminalCorroborationConflict) {
+		t.Fatal("rejection consumed terminal source", err)
+	}
+	expireAgentTurnExecution(t, pool, ctx, lease.JobLease.ID, lease.ID)
+	if _, err = database.RecoverExpiredAgentTurn(ctx, lease.ID, lease.ExecutionEpoch); err != nil {
+		t.Fatal(err)
+	}
+	stop := claimRecoveryJob(t, database, ctx, store.StopStaleRuntimeJobKind, "only-rejection-stop")
+	if _, err = database.AcknowledgeRecoveredRuntimeStopped(ctx, stop); err != nil {
+		t.Fatal(err)
+	}
+	mutations := claimRecoveryJob(t, database, ctx, store.ReconcileAgentTurnMutationsJobKind, "only-rejection-reconcile")
+	candidates, err := database.ListAgentTurnMutationsForReconciliation(ctx, mutations)
+	if err != nil || len(candidates) != 0 {
+		t.Fatal("rejection treated as publication effect", candidates, err)
+	}
+	if _, err = database.CompleteAgentTurnMutationReconciliation(ctx, mutations); err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := database.CompleteAgentTurnRecovery(ctx, lease.ID, lease.ExecutionEpoch)
+	if err != nil || recovery.Status == store.AgentTurnCorroborating {
+		t.Fatal(recovery, err)
+	}
+	var waiting bool
+	var rounds int
+	if err = pool.QueryRow(ctx, `SELECT clarification_waiting,(SELECT count(*) FROM agent_turn_corroborations WHERE workflow_id=$1) FROM workflows WHERE id=$1`, fixture.workflowID).Scan(&waiting, &rounds); err != nil || waiting || rounds != 0 {
+		t.Fatal(waiting, rounds, err)
+	}
+}
