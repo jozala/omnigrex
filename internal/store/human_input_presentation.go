@@ -80,7 +80,7 @@ WHERE id=$1 RETURNING human_input_presentation_revision, state_revision`, workfl
 
 func enqueueHumanInputPresentationTx(ctx context.Context, tx pgx.Tx, workflowID, key string, revision int64) error {
 	payload, _ := json.Marshal(map[string]any{"revision": revision, "human_input_only": true})
-	_, err := insertJobTx(ctx, tx, jobInsert{
+	_, err := insertIdempotentJobTx(ctx, tx, jobInsert{
 		queue: WorkflowActionQueue, kind: ReconcileGitHubLabelsJobKind, payload: payload,
 		maxAttempts: 3, idempotencyKey: key, scope: jobInsertScope{workflowID: workflowID},
 	})

@@ -553,13 +553,15 @@ func (store *Store) EnsureWorkflowGitHubLabelCorrection(ctx context.Context, lea
 	}
 	defer tx.Rollback(ctx)
 	var workflowID string
-	if err = tx.QueryRow(ctx, `SELECT j.workflow_id::text FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+	var revision int64
+	if err = tx.QueryRow(ctx, `SELECT j.workflow_id::text, (j.payload->>'revision')::bigint FROM jobs j JOIN job_attempts a ON a.job_id=j.id
 WHERE j.id=$1 AND j.kind=$2 AND j.queue=$3 AND a.attempt_number=$4
- AND a.lease_token=$5 AND a.lease_owner=$6 AND j.workflow_id=$7`, lease.ID, ReconcileGitHubLabelsJobKind, WorkflowActionQueue, lease.Attempt, lease.LeaseToken, lease.LeaseOwner, lease.WorkflowID).Scan(&workflowID); err != nil {
+ AND a.lease_token=$5 AND a.lease_owner=$6 AND j.workflow_id=$7`, lease.ID, ReconcileGitHubLabelsJobKind, WorkflowActionQueue, lease.Attempt, lease.LeaseToken, lease.LeaseOwner, lease.WorkflowID).Scan(&workflowID, &revision); err != nil {
 		return ErrWorkflowGitHubEffectFenceLost
 	}
-	var revision int64
-	if err = tx.QueryRow(ctx, `SELECT state_revision FROM workflows WHERE id=$1 FOR UPDATE`, workflowID).Scan(&revision); err != nil {
+	// Keep the original payload revision stable across replay. Workers still read
+	// current desired state; this revision is not an assertion of freshness.
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id=$1 FOR UPDATE`, workflowID).Scan(&workflowID); err != nil {
 		return err
 	}
 	if err = enqueueHumanInputPresentationTx(ctx, tx, workflowID, "human-input-lost-lease:"+lease.ID+":"+lease.LeaseToken, revision); err != nil {
