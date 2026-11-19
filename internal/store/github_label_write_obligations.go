@@ -8,6 +8,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// These immutable store-owned key namespaces identify corrective work, including
+// jobs written before this policy was added. Do not reinterpret normal Stage or
+// presentation-change jobs as repairs, or rewrite historical job payloads.
+var labelRecoveryKeyPatterns = []string{
+	"human-input-uncertain:%", "human-input-lost-lease:%", "human-input-correction:%",
+}
+
 // BeginWorkflowGitHubLabelWrite commits a recovery obligation before any remote
 // label operation. Only the same request's durable return can discharge it;
 // replacement workers cannot prove that an expired request has stopped writing.
@@ -42,9 +49,12 @@ func recoverGitHubLabelWritesTx(ctx context.Context, tx pgx.Tx) error {
  LEFT JOIN jobs probe ON probe.id=pending.probe_job_id
  WHERE pending.next_probe_at<=clock_timestamp()
  AND (attempt.status<>'LEASED' OR attempt.lease_expires_at<=clock_timestamp())
+ -- A crashed corrective attempt retains uncertainty, not a new budget.
+ -- Its own job must succeed before that attempt may spawn descendant repairs.
+ AND (NOT COALESCE(source.idempotency_key LIKE ANY($1::text[]),false) OR source.status='SUCCEEDED')
  AND (probe.id IS NULL OR probe.status='SUCCEEDED')
  ORDER BY pending.next_probe_at,pending.lease_token
- LIMIT 16 FOR UPDATE OF workflow,pending SKIP LOCKED`)
+ LIMIT 16 FOR UPDATE OF workflow,pending SKIP LOCKED`, labelRecoveryKeyPatterns)
 	if err != nil {
 		return err
 	}

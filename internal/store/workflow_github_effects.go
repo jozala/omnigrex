@@ -553,6 +553,7 @@ func validateWorkflowGitHubEffectContext(effect WorkflowGitHubEffectContext) err
 // its lease while an external label request is in flight. It cannot acknowledge
 // the old projection or revive execution. A completed/expired historical attempt
 // proves provenance; the key permits at most one correction per lost lease.
+// Corrective jobs may spawn further repairs only after durable source success.
 func (store *Store) EnsureWorkflowGitHubLabelCorrection(ctx context.Context, lease JobLease) error {
 	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 {
 		return ErrWorkflowGitHubEffectFenceLost
@@ -564,10 +565,21 @@ func (store *Store) EnsureWorkflowGitHubLabelCorrection(ctx context.Context, lea
 	defer tx.Rollback(ctx)
 	var workflowID string
 	var revision int64
-	if err = tx.QueryRow(ctx, `SELECT j.workflow_id::text, (j.payload->>'revision')::bigint FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+	var recovery, sourceSucceeded bool
+	if err = tx.QueryRow(ctx, `SELECT j.workflow_id::text, (j.payload->>'revision')::bigint,
+ COALESCE(j.idempotency_key LIKE ANY($8::text[]),false), j.status='SUCCEEDED'
+ FROM jobs j JOIN job_attempts a ON a.job_id=j.id
 WHERE j.id=$1 AND j.kind=$2 AND j.queue=$3 AND a.attempt_number=$4
- AND a.lease_token=$5 AND a.lease_owner=$6 AND j.workflow_id=$7`, lease.ID, ReconcileGitHubLabelsJobKind, WorkflowActionQueue, lease.Attempt, lease.LeaseToken, lease.LeaseOwner, lease.WorkflowID).Scan(&workflowID, &revision); err != nil {
+ AND a.lease_token=$5 AND a.lease_owner=$6 AND j.workflow_id=$7`, lease.ID, ReconcileGitHubLabelsJobKind, WorkflowActionQueue, lease.Attempt, lease.LeaseToken, lease.LeaseOwner, lease.WorkflowID, labelRecoveryKeyPatterns).Scan(&workflowID, &revision, &recovery, &sourceSucceeded); err != nil {
 		return ErrWorkflowGitHubEffectFenceLost
+	}
+	// An unfinished or exhausted corrective job must use its own remaining
+	// attempts. Retain the uncertainty: a replacement's remote call may have
+	// finished before this old write, but its acknowledgement may not yet be
+	// committed. A later successful source can then permit a fenced repair;
+	// a failed source cannot generate a fresh budget through this return path.
+	if recovery && !sourceSucceeded {
+		return tx.Commit(ctx)
 	}
 	// Keep the original payload revision stable across replay. Workers still read
 	// current desired state; this revision is not an assertion of freshness.

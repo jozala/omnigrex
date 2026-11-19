@@ -26,6 +26,7 @@ Commit a durable recovery obligation before each label operation; refuse remote 
 Discharge it only with that request's durable acknowledgement or an atomic return-path correction enqueue.
 If the process dies or that transaction fails, ordinary label claims recover expired obligations in bounded batches and schedule current-state probes at most once per minute per obligation.
 A successful probe cannot prove an older request stopped writing, so probes continue while uncertainty remains; failed probes retain the existing three-attempt failure/escalation policy instead of receiving new retry budgets.
+Obligations from expired corrective attempts remain durable but cannot spawn descendant repairs until their source corrective job succeeds; the late-return enqueue uses the same gate, including after process-death exhaustion.
 Migration seeds the ordinary serialized label worker for existing collaboration records, including terminal cleanup, without allocating Agent Turns.
 Label-only jobs bypass Stage effects; ordinary jobs reconcile the overlay before preparation deferral or PR-ready validation.
 
