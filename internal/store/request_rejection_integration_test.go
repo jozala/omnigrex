@@ -108,6 +108,16 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 					if !strings.Contains(result, tc.reason) || strings.Contains(result, "CLARIFICATION_WAIT") || strings.Contains(result, "Private source body") {
 						t.Fatal(result)
 					}
+					if tc.op == "count" {
+						replay := call(mcp.ToolRequestClarification, request(tc.op, tc.qs))
+						if !reflect.DeepEqual(requestResult(t, result), requestResult(t, replay)) {
+							t.Fatal(result, replay)
+						}
+						var allocated int
+						if err = pool.QueryRow(ctx, `SELECT count(*) FROM tool_invocations WHERE agent_turn_id=$1 AND operation_id='count'`, lease.ID).Scan(&allocated); err != nil || allocated != 0 {
+							t.Fatal(allocated, err)
+						}
+					}
 				}
 				if err = pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, fixture.workflowID).Scan(&raw); err != nil {
 					t.Fatal(err)
@@ -115,7 +125,7 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 				if err = json.Unmarshal(raw, &state); err != nil {
 					t.Fatal(err)
 				}
-				if len(state.Rounds) != 1 || len(state.References) != 2 || len(state.Assessments) != 1 || len(state.Rounds[0].Resolutions) != 1 || len(state.RequestRejections) != 5 || api.posts != 0 || state.Waiting || state.Rounds[0].Artifact != nil || state.Rounds[0].Questions[0] != original[0] {
+				if len(state.Rounds) != 1 || len(state.References) != 2 || len(state.Assessments) != 1 || len(state.Rounds[0].Resolutions) != 1 || len(state.RequestRejections) != 4 || api.posts != 0 || state.Waiting || state.Rounds[0].Artifact != nil || state.Rounds[0].Questions[0] != original[0] {
 					t.Fatal("rejection changed conversation", state, api.posts)
 				}
 				corrected := []collaboration.Question{original[0]}
@@ -137,7 +147,7 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 				if err = database.CloseMutationAdmissionWithPromptEvidence(ctx, lease, "completed", ""); err != nil {
 					t.Fatal(err)
 				}
-				// Five successful handled rejections do not compete for the terminal source.
+				// Four successful handled rejections do not compete for the terminal source.
 				var source string
 				if err = pool.QueryRow(ctx, `SELECT id::text FROM tool_invocations WHERE agent_turn_id=$1 AND operation_id='corrected'`, lease.ID).Scan(&source); err != nil {
 					t.Fatal(err)

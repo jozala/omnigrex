@@ -1209,6 +1209,23 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return &MutationReservationRejection{Cause: ErrMutationAdmissionClosed}
 		}
+		// Count-only mistakes have no possible effect before reservation. Prove
+		// this under admission authority rather than allocating a fake mutation.
+		if spec.ToolName == "request_clarification" {
+			var args struct {
+				Questions []collaboration.Question `json:"questions"`
+			}
+			if err := json.Unmarshal(request, &args); err != nil {
+				return &MutationReservationRejection{Cause: err}
+			}
+			var participantRole workflow.Role
+			if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id=$1`, turn.AgentParticipantID).Scan(&participantRole); err != nil {
+				return err
+			}
+			if len(args.Questions) > 50 || participantRole == workflow.RolePlanner && len(args.Questions) > 5 {
+				return &MutationReservationRejection{Cause: &collaboration.RequestValidationError{Code: "question_limit_exceeded"}}
+			}
+		}
 		if spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
 			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
 			if err != nil {

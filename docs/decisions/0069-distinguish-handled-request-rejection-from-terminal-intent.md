@@ -15,7 +15,8 @@ Decisions [0059](0059-return-durable-checkpoint-nonpublication.md) and [0066](00
 
 Return a bounded canonical `status: rejected`, `publication: not_applied` result only after the authoritative request-validation transaction commits its operation-bound receipt.
 Do not allocate a round, reference or artifact for rejected requests.
-Route question-count mistakes through that same boundary while retaining advertised schema limits, item validation and gateway request-byte bounds.
+For count-only mistakes proven before reservation, return the same structural feedback from authoritative admission without fabricating a mutation reservation.
+Retain advertised schema limits, item validation and gateway request-byte bounds; direct backend count validation still records receipts for already reserved operations.
 A request blocked by an earlier unsettled publication directs exact-operation reconciliation, not a fresh-operation bypass.
 A receipt for the new request does not settle the earlier publication.
 
