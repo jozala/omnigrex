@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -65,7 +66,9 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 		if err = json.Unmarshal(request, &intent); err != nil {
 			return err
 		}
-		if !reflect.DeepEqual(intent.Questions, questions) {
+		// Nil and empty Go slices represent the same empty request; compare
+		// exact entries, not slice allocation. Bodies and order remain exact.
+		if !slices.Equal(intent.Questions, questions) {
 			return ErrMutationOperationConflict
 		}
 		for _, prior := range state.RequestRejections {
