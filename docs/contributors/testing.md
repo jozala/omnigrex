@@ -211,3 +211,16 @@ PostgreSQL `TestImplementationAdmissionSerializesWithdrawalSteeringAndRestart` a
 The direct-development controlled path remains independently exercised.
 Run the normal local, Docker integration, controlled Workflow/recovery and exact-head Linux/KVM gates before claiming backend qualification.
 These fixtures do not deploy the feature, exercise a historical production plan or establish real-model semantic reasoning quality.
+
+## Clarification request rejection
+
+`TestRequestRejectionGatewayConversationAndCorrection` runs the two-question received-input-index conversation through the production gateway/backend and PostgreSQL store for all Roles.
+It assesses the delivered answer, resolves Q2, rejects a changed Q1 body without publication, replays the rejection, and exercises both unchanged-body/introduction and explicit-replacement corrections.
+It also covers duplicate IDs, omitted unresolved questions, applicable count limits and unjustified empty-question waiting at the actual admission boundaries.
+`TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication` reads the committed receipt through another Store, distinguishes earlier uncertain publication from correctable arguments, and retains stopped-and-fenced recovery without inventing a rejection from absence.
+`TestClarificationRecordedPromptRecovery` includes a handled rejection before each genuine clarification outcome across Roles and stopped/normal corroboration paths.
+`TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent` includes a rejected request before the genuine review handoff to exercise ancestor counting, prior-intent discovery and confirmation.
+Strict-result and outcome-selection unit tests keep malformed successful evidence fail-closed and unknown dependency errors masked.
+`TestPiControlledWorkflow/planning` passes request rejection and exact replay through the selected pinned Pi bridge, then publishes one corrected replacement round without another human answer or implementation allocation.
+Run `mise run check`, `mise run test-integration`, `mise run test-pi-workflow` and `mise run test-pi-recovery`; inspect same-head Microsandbox Workflow/recovery CI before claiming both-backend qualification.
+These deterministic fixtures establish mechanisms, not real-model reasoning quality or deployment of a historical recovery.

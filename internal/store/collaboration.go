@@ -153,6 +153,9 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 func (s *Store) GetRequestRejection(ctx context.Context, workflowID, participant, turn string, epoch int64, operation string) (*collaboration.RequestValidationError, error) {
 	var raw []byte
 	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var state collaboration.State

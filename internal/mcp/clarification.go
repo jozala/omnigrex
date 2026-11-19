@@ -52,7 +52,7 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		}
 		return nil, OutcomeUnknown(err)
 	}
-	round, err := operation.Publish(ctx, func(context.Context) (collaboration.Round, error) { return reserved, nil }, collaboration.Round{Questions: request.Questions}, request.Signature)
+	round, err := operation.Publish(ctx, func(context.Context) (collaboration.Round, error) { return reserved, nil }, reserved, request.Signature)
 	if err != nil {
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
