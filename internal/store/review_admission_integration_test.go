@@ -669,9 +669,10 @@ func TestReviewGateLaggingPRBaseWithSuccessfulHeadChecks(t *testing.T) {
 				case root + "/branches/main/protection":
 					fmt.Fprint(w, `{"required_status_checks":{"contexts":[],"checks":[{"context":"build","app_id":7}]}}`)
 				case root + "/commits/" + head + "/check-runs":
+					completed := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 					checks := []githubapi.CheckRun{}
 					if scenario != "missing" {
-						checks = append(checks, githubapi.CheckRun{ID: 1, NodeID: "CR_1", HTMLURL: "https://github.test/check/1", Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "success"})
+						checks = append(checks, githubapi.CheckRun{ID: 1, NodeID: "CR_1", HTMLURL: "https://github.test/check/1", Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "completed", Conclusion: "success", CompletedAt: &completed})
 					}
 					if scenario == "newer pending" {
 						checks = append(checks, githubapi.CheckRun{ID: 2, NodeID: "CR_2", HTMLURL: "https://github.test/check/2", Name: "build", HeadSHA: head, App: &githubapi.CheckApp{ID: 7}, Status: "queued"})
