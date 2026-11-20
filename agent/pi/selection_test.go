@@ -2,6 +2,7 @@ package piresources
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,7 +35,18 @@ func TestSelectionIsDefensiveAndStrict(t *testing.T) {
 			t.Fatal("unsupported production platform selected")
 		}
 	}
-	script, err := QualificationScript("amd64", again.Resources)
+	// A synthetic retained inventory must remain independent of the current
+	// selection, which may now contain every checkout resource.
+	var retained ResourceContract
+	if err := json.Unmarshal(again.Resources, &retained); err != nil {
+		t.Fatal(err)
+	}
+	retained.Files = slices.DeleteFunc(retained.Files, func(file ResourceFile) bool { return file.Name == "temporary-filesystems.mjs" })
+	retainedResources, err := json.Marshal(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := QualificationScript("amd64", retainedResources)
 	if err != nil || !strings.Contains(script, "runner.mjs") || strings.Contains(script, "temporary-filesystems.mjs") {
 		t.Fatal("implicit qualification uses checkout candidate")
 	}
