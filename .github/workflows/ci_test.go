@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -202,13 +203,19 @@ func TestCIDevelopmentQualificationUsesSelectedGoldenAndPropagatesFailures(t *te
 			if err := os.WriteFile(filepath.Join(dir, "agent/pi/selected-bundle.json"), selection, 0600); err != nil {
 				t.Fatal(err)
 			}
+			var selected struct {
+				Image string `json:"image"`
+			}
+			if err := json.Unmarshal(selection, &selected); err != nil || selected.Image == "" {
+				t.Fatalf("selected image: %q, %v", selected.Image, err)
+			}
 			// An empty runner must pull the selected immutable baseline, not build checkout Pi.
 			stub := `#!/bin/sh
 set -eu
 case "$*" in
-  'pull ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5')
+  'pull __SELECTED_GOLDEN__')
     stage=golden ;;
-  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5 --tag omnigrex/development:dev .')
+  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=__SELECTED_GOLDEN__ --tag omnigrex/development:dev .')
     test -f golden
     stage=development ;;
   *) echo "unexpected Docker command: $*" >&2; exit 2 ;;
@@ -217,6 +224,7 @@ echo "$stage" >> events
 test "$FAIL" != "$stage"
 touch "$stage"
 `
+			stub = strings.ReplaceAll(stub, "__SELECTED_GOLDEN__", selected.Image)
 			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o700); err != nil {
 				t.Fatal(err)
 			}
